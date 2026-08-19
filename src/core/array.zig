@@ -3,6 +3,7 @@ const JSValue = @import("value.zig").JSValue;
 const Object = @import("object.zig").Object;
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const runtime = @import("runtime.zig");
+const value_semantics = @import("value_semantics.zig");
 const Descriptor = @import("descriptor.zig").Descriptor;
 const shape_mod = @import("shape.zig");
 
@@ -52,17 +53,8 @@ pub fn canonicalNumericIndex(bytes: []const u8) ?f64 {
     return null;
 }
 
-fn objectFromValue(value: JSValue) ?*Object {
-    const header = value.refHeader() orelse return null;
-    if (!value.isObject()) return null;
-    return @fieldParentPtr("header", header);
-}
-
-fn expectObject(value: JSValue) !*Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    return @fieldParentPtr("header", header);
-}
+const objectFromValue = value_semantics.objectFromValue;
+const expectObject = value_semantics.expectObject;
 
 /// Proxy-aware `Array.isArray` predicate. Pure: walks the proxy target chain
 /// via the object's `is_proxy`/`is_array` flags with no VM state. Relocated to

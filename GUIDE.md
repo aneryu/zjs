@@ -88,6 +88,27 @@ Goals:
 
 - Functions `camelCase`, types `TitleCase`, variables `snake_case`.
   4-space indent. Always `zig fmt .`.
+- Documented exemptions from the naming rule (mirror names beat local style):
+  - Opcode dispatch handlers named `op_<opcode>` mirror the `bytecode.op`
+    table, which itself mirrors upstream QuickJS `OP_*`; keep the literal
+    spelling so all three stay grep-linked.
+  - Ported C code (`src/libs/number_format.zig` dtoa/libbf) and `export fn`
+    C-ABI symbols keep their upstream names.
+  - Constants that mirror JavaScript identifiers (the predefined atom table,
+    enum tags like `Atomics.compareExchange`) keep the JavaScript spelling.
+  - Struct fields that store function pointers follow the function rule
+    (`camelCase`), so a vtable field and its wrapper function share one name
+    (e.g. `HostEventLoop.VTable.traceRoots`).
+- Ownership suffixes (`*Owned` / `*Borrowed`) are annotations for
+  counter-intuitive cases only; most functions follow the A.2 ownership
+  rules without a suffix, so the **absence** of a suffix carries no
+  ownership information.
+- No unmarked helper duplication. When a helper must be re-implemented in
+  another layer (e.g. layering forbids the import), the copy carries a
+  `// mirror of <owner>, keep in sync` comment; otherwise reuse or forward
+  to the single owner. An unmarked copy is a defect: the 2026-08-19 audit
+  found 17 `objectFromValue` copies silently relying on an inlined-elsewhere
+  safety argument.
 - Small modules; ABI and business logic do not share a large file.
   Lifetime clarity beats short code.
 - Discard unused values with `_ = ...`. Never silently discard errors or
@@ -288,7 +309,7 @@ git diff --check
 
 Also run the focused Zig test filter, JS fixture, or `run-test262 -d` / `-f`
 slice that directly reproduces the changed behavior. The explicit `test-core`,
-`test-parser`, `test-bytecode`, `test-compiler-v2`, `test-exec`, `test-builtins`,
+`test-parser`, `test-bytecode`, `test-compiler`, `test-exec`, `test-builtins`,
 `test-runtime`, and `test-runner` targets apply compile-time namespace filters
 and fail if the selection becomes empty.
 

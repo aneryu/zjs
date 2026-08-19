@@ -11,7 +11,7 @@ pub const bytecode = internal.bytecode;
 pub const exec = internal.exec;
 pub const libs = internal.libs;
 pub const runtime = internal.runtime;
-pub const compiler_v2 = internal.compiler_v2;
+pub const compiler = internal.compiler;
 pub const config_signature = internal.config_signature;
 pub const printSmallInlineProbe = internal.printSmallInlineProbe;
 

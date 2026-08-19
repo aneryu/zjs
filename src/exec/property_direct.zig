@@ -3,11 +3,7 @@ const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const value_ops = @import("value_ops.zig");
 
-inline fn objectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
-}
+const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
 
 const FastOwnDataResult = union(enum) {
     value: core.JSValue,
@@ -162,28 +158,6 @@ test "function-like class predicate recognizes every bytecode function class" {
         try std.testing.expect(isFunctionLikeClassId(class_id));
     }
     try std.testing.expect(!isFunctionLikeClassId(core.class.ids.object));
-}
-
-/// Formerly an IC-hit-only put for the lean `op_put_field` fast handler. With the
-/// inline cache removed (qjs has none), there is no cached slot to write, so this
-/// always returns false and the lean handler defers to the cold handler's full
-/// `setObjectDataPropertyForPutFieldFastPath` (simple-put + slow path). The
-/// signature is retained for ABI stability with callers.
-pub inline fn cachedSetObjectDataPropertyForPutFastPath(
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    rt: *core.JSRuntime,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
-    value: core.JSValue,
-) bool {
-    _ = function;
-    _ = site_pc;
-    _ = rt;
-    _ = receiver;
-    _ = atom_id;
-    _ = value;
-    return false;
 }
 
 inline fn cacheableNamedDataObject(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {

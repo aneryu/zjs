@@ -844,11 +844,7 @@ fn arrayObject(value: core.JSValue) ?*core.Object {
     return object;
 }
 
-fn objectFromValue(value: core.JSValue) ?*core.Object {
-    const header = value.refHeader() orelse return null;
-    if (header.meta().flags.kind != .object) return null;
-    return @fieldParentPtr("header", header);
-}
+const objectFromValue = core.value_semantics.objectFromValue;
 
 pub fn enqueueReaction(ctx: *core.JSContext, job: jobs.Func, args: []const core.JSValue) !void {
     try ctx.runtime.job_queue.enqueueFunc(ctx, job, args);

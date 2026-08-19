@@ -161,16 +161,16 @@ function violationReason(source, target) {
     return targetStarts(target, disallowed) ? 'binding must not depend on CLI' : null;
   }
 
-  if (source.startsWith('src/compiler_v2/')) {
+  if (source.startsWith('src/compiler/')) {
     // Observed production import face: core, bytecode, parser, plus
-    // intra-package files. compiler_v2/tests.zig is the in-tree oracle and
+    // intra-package files. compiler/tests.zig is the in-tree oracle and
     // additionally imports exec to run compiled bytecode; it still may not
     // reach cli/runtime/binding.
-    const disallowed = source === 'src/compiler_v2/tests.zig'
+    const disallowed = source === 'src/compiler/tests.zig'
       ? ['src/cli/', 'src/runtime/', 'src/binding/']
       : ['src/cli/', 'src/runtime/', 'src/exec/', 'src/binding/'];
     return targetStarts(target, disallowed)
-      ? 'compiler_v2 production files may import core/bytecode/parser/libs only; cli/runtime/exec/binding are forbidden (tests.zig may import exec)'
+      ? 'compiler production files may import core/bytecode/parser/libs only; cli/runtime/exec/binding are forbidden (tests.zig may import exec)'
       : null;
   }
 
@@ -219,7 +219,7 @@ const TEST_ROOTS = [
   'src/bytecode_tests.zig',
   'src/runner_tests.zig',
   'src/embedding_tests.zig',
-  'src/compiler_v2_tests.zig',
+  'src/compiler_tests.zig',
   'src/runtime_tests.zig',
   'src/tests/oom.zig',
   'src/tests/smoke_test.zig',

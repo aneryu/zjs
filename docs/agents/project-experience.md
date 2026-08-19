@@ -9,6 +9,18 @@ Use this guide to avoid repeating expensive mistakes. Keep new task-specific
 evidence with the code change, issue, PR, or report that owns it; do not turn
 this file into a running ledger.
 
+## 0. Where the domain context lives
+
+This repository uses a single domain-documentation context:
+[architecture.md](../architecture.md) is the current source tour and layer
+map; this file records the working methods. There is no root `CONTEXT.md` and
+no `docs/adr/` tree. Use the terms already established in
+`docs/architecture.md`, `AGENTS.md`, and `GUIDE.md` in issue titles, tests,
+implementation notes, and refactoring proposals; if a needed concept is
+absent, first check whether the repository already uses a different term.
+Surface any conflict with an existing architecture or process decision
+explicitly instead of silently overriding it.
+
 ## 1. Evidence before narrative
 
 Use this order of authority:
@@ -106,7 +118,7 @@ any one campaign:
   they are not a generic descriptor-registry layer.
 - VM values are governed by explicit refcount/cycle-GC ownership. Values that
   outlive a call cross the public handle boundary.
-- `compiler_v2` is the only compiler and `layout=short` is production. Treat
+- `src/compiler/` (the v2 compiler) is the only compiler and `layout=short` is production. Treat
   `plain` as a diagnostic configuration, not a second product.
 - A large file that mirrors a QuickJS monolith is not by itself an architecture
   defect. Find an ownership, dependency, testability, or change-coupling
@@ -328,5 +340,5 @@ partial evidence is more useful than a polished but unsupported success claim.
 - Current public Zoo snapshot: [Zoo status](../perf/zoo-status.md)
 - Historical subsystem baseline and evidence vocabulary:
   [QuickJS subsystem baseline](../qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)
-- Local issue/PRD workflow: [issue tracker](issue-tracker.md)
-- Domain vocabulary and ADR routing: [domain docs](domain.md)
+- Local issue/PRD workflow and triage labels: [issue tracker](issue-tracker.md)
+- Domain vocabulary and context routing: §0 above

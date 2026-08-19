@@ -1,6 +1,6 @@
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
-const function_bytecode = @import("../bytecode.zig");
+const bytecode = @import("../bytecode.zig");
 const closure_mod = @import("closure.zig");
 const construct_mod = @import("construct.zig");
 const frame_mod = @import("frame.zig");
@@ -13,7 +13,7 @@ const array_ops = @import("array_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const math_ops = @import("math_ops.zig");
 const object_ops = @import("object_ops.zig");
 const reflect_ops = @import("reflect_ops.zig");
@@ -780,16 +780,9 @@ pub fn activeGlobalObject(rt: *core.JSRuntime, global: ?*core.Object, globals: [
     return thisObject(global_value);
 }
 
-pub fn functionPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
-    _ = rt;
-    const global_object = global orelse return null;
-    const ctor_object = global_object.getOwnDataObjectBorrowed(core.atom.ids.Function) orelse return null;
-    return ctor_object.getOwnDataObjectBorrowed(core.atom.ids.prototype);
-}
-
 fn createPromiseBuiltinFunction(rt: *core.JSRuntime, global: ?*core.Object, name: []const u8, length: i32) !core.JSValue {
     const global_object = global orelse return error.InvalidBuiltinRegistry;
-    const function_proto = functionPrototypeFromGlobal(rt, global_object) orelse return error.InvalidBuiltinRegistry;
+    const function_proto = object_ops.functionPrototypeFromGlobal(rt, global_object) orelse return error.InvalidBuiltinRegistry;
     return core.function.nativeDataFunctionWithPrototype(rt, function_proto, name, length);
 }
 
@@ -931,7 +924,7 @@ test "createPromiseCapability roots builtin promise capability under GC" {
     _ = rt.runObjectCycleRemoval();
 }
 
-pub fn getValueProperty(
+pub fn getValuePropertyViaGlobalSlots(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
@@ -973,7 +966,7 @@ fn getValuePropertyProxyAware(
     if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
         return object_ops.getValueProperty(ctx, output, global_object, receiver, key, null, null);
     }
-    return getValueProperty(ctx, output, global, globals, receiver, key);
+    return getValuePropertyViaGlobalSlots(ctx, output, global, globals, receiver, key);
 }
 
 fn hasOwnPropertyProxyAware(
@@ -1007,7 +1000,7 @@ fn getPromiseIterator(
         errdefer iterator.free(ctx.runtime);
         const next_key = try ctx.runtime.internAtom("next");
         defer ctx.runtime.atoms.free(next_key);
-        const next_method = try getValueProperty(ctx, output, global, globals, iterator, next_key);
+        const next_method = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, iterator, next_key);
         errdefer next_method.free(ctx.runtime);
         if (!isCallableObjectValue(next_method)) return error.TypeError;
         return .{ .iterator = iterator, .next_method = next_method };
@@ -1018,7 +1011,7 @@ fn getPromiseIterator(
             errdefer iterator.free(ctx.runtime);
             const next_key = try ctx.runtime.internAtom("next");
             defer ctx.runtime.atoms.free(next_key);
-            const next_method = try getValueProperty(ctx, output, global, globals, iterator, next_key);
+            const next_method = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, iterator, next_key);
             errdefer next_method.free(ctx.runtime);
             if (!isCallableObjectValue(next_method)) return error.TypeError;
             return .{ .iterator = iterator, .next_method = next_method };
@@ -1026,7 +1019,7 @@ fn getPromiseIterator(
     }
 
     const iterator_key = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
-    const iterator_method = try getValueProperty(ctx, output, global, globals, iterable, iterator_key);
+    const iterator_method = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, iterable, iterator_key);
     defer iterator_method.free(ctx.runtime);
     if (!isCallableObjectValue(iterator_method)) return error.TypeError;
     const iterator = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, iterable, iterator_method, &.{});
@@ -1034,7 +1027,7 @@ fn getPromiseIterator(
     _ = try expectObjectArg(iterator);
     const next_key = try ctx.runtime.internAtom("next");
     defer ctx.runtime.atoms.free(next_key);
-    const next_method = try getValueProperty(ctx, output, global, globals, iterator, next_key);
+    const next_method = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, iterator, next_key);
     errdefer next_method.free(ctx.runtime);
     if (!isCallableObjectValue(next_method)) return error.TypeError;
     return .{ .iterator = iterator, .next_method = next_method };
@@ -1057,7 +1050,7 @@ fn promiseIteratorStepValue(
         return error.TypeError;
     };
     const done_key = core.atom.predefinedId("done", .string) orelse return error.TypeError;
-    const done_value = getValueProperty(ctx, output, global, globals, next_result, done_key) catch |err| {
+    const done_value = getValuePropertyViaGlobalSlots(ctx, output, global, globals, next_result, done_key) catch |err| {
         iterator.done = true;
         return err;
     };
@@ -1069,7 +1062,7 @@ fn promiseIteratorStepValue(
     }
     _ = next_object;
     const value_key = core.atom.predefinedId("value", .string) orelse return error.TypeError;
-    const value = getValueProperty(ctx, output, global, globals, next_result, value_key) catch |err| {
+    const value = getValuePropertyViaGlobalSlots(ctx, output, global, globals, next_result, value_key) catch |err| {
         iterator.done = true;
         return err;
     };
@@ -1086,7 +1079,7 @@ fn promiseIteratorClose(
 ) !void {
     const return_key = try ctx.runtime.internAtom("return");
     defer ctx.runtime.atoms.free(return_key);
-    const return_method = try getValueProperty(ctx, output, global, globals, iterator, return_key);
+    const return_method = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, iterator, return_key);
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableObjectValue(return_method)) return error.TypeError;
@@ -1258,7 +1251,7 @@ test "createPromiseCombinatorState roots direct function bytecode resolve while 
     const values = try core.Object.create(rt, core.class.ids.array, null);
     defer values.value().free(rt);
 
-    const fb = try function_bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-combinator-state-resolve-bytecode-symbol");
@@ -1324,7 +1317,7 @@ fn promiseCombinatorCall(
     const active_global = try activeGlobalObject(ctx.runtime, global, globals);
     const resolve_key = try ctx.runtime.internAtom("resolve");
     defer ctx.runtime.atoms.free(resolve_key);
-    const promise_resolve = try getValueProperty(ctx, output, global, globals, constructor_value, resolve_key);
+    const promise_resolve = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, constructor_value, resolve_key);
     defer promise_resolve.free(ctx.runtime);
     if (!isCallableObjectValue(promise_resolve)) {
         const reason = try promiseErrorValue(ctx, active_global, error.TypeError);
@@ -1380,7 +1373,7 @@ fn promiseCombinatorCall(
 
         const then_key = try ctx.runtime.internAtom("then");
         defer ctx.runtime.atoms.free(then_key);
-        const then_value = getValueProperty(ctx, output, global, globals, next_promise, then_key) catch |err| {
+        const then_value = getValuePropertyViaGlobalSlots(ctx, output, global, globals, next_promise, then_key) catch |err| {
             if (!iterator.done) {
                 promiseIteratorClose(ctx, output, global, globals, iterator.iterator) catch {};
             }
@@ -1477,7 +1470,7 @@ pub fn callNativeFunctionRecord(
     this_value: core.JSValue,
     function_object: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const function_bytecode.FunctionBytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
     if (function_object.nativeRecord()) |record| {
@@ -1539,7 +1532,7 @@ pub fn callHostGlobalNativeFunctionRecord(
         @intFromEnum(core.function.HostGlobalMethod.callsite_is_native),
         => {
             const receiver = thisObject(this_value) orelse return error.TypeError;
-            return exception_ops.qjsCallSiteMethodById(ctx.runtime, receiver, @enumFromInt(id)) orelse error.TypeError;
+            return exception_ops.callSiteMethodById(ctx.runtime, receiver, @enumFromInt(id)) orelse error.TypeError;
         },
         else => error.TypeError,
     };
@@ -1550,7 +1543,7 @@ pub fn callHostGlobalNativeFunctionRecord(
 /// in-file tests); the `.function` domain record handler delegates here. The
 /// VM's own bind fast path (call_runtime.callNativeBuiltinRecordForVm) also
 /// routes back through this via callNativeFunctionRecord (BOTH).
-pub fn qjsFunctionBindCall(
+pub fn functionBindCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
@@ -1600,9 +1593,9 @@ const ValueSliceRoot = array_ops.ValueSliceRoot;
 /// Bare-runtime (no realm global) `Object.*` static fallback. Reached via the
 /// `.object` native-record handler in `exec/object_builtin_ops.zig` when the
 /// host record path supplies no realm global; the realm path takes the
-/// qjsObject* implementations in the same owner file. Stays in call.zig because
+/// realm-path Object.* implementations in the same owner file. Stays in call.zig because
 /// it leans on the shared call.zig property/descriptor helper web
-/// (`expectObjectArg`, `descriptorFromObject`, `objectStaticToObjectValue`, ...)
+/// (`expectObjectArg`, `descriptorFromObjectBare`, `objectStaticToObjectValue`, ...)
 /// that the rest of this file owns — the BOTH split keeps the core here and the
 /// thin dispatch entry in the Object native-record owner.
 pub fn callObjectStatic(
@@ -1815,7 +1808,7 @@ pub fn callObjectStatic(
         const key = try atomFromPropertyKey(rt, args[1]);
         defer rt.atoms.free(key);
         const desc_object = try expectObjectArg(args[2]);
-        const desc = try descriptorFromObject(rt, desc_object);
+        const desc = try descriptorFromObjectBare(rt, desc_object);
         defer desc.destroy(rt);
         object.defineOwnProperty(rt, key, desc) catch |err| switch (err) {
             error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
@@ -2563,8 +2556,8 @@ pub fn nativeFunctionNameForVmEquals(
 
 pub fn functionToStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isFunctionBytecode()) {
-        const bytecode = functionBytecodeFromValue(value) orelse return error.TypeError;
-        return functionBytecodeToStringValue(rt, bytecode, null);
+        const function_bytecode = functionBytecodeFromValue(value) orelse return error.TypeError;
+        return functionBytecodeToStringValue(rt, function_bytecode, null);
     }
 
     const object = thisObject(value) orelse return error.TypeError;
@@ -2576,8 +2569,8 @@ pub fn functionToStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSV
     }
     if (core.class.isBytecodeFunctionClass(object.class_id)) {
         const stored = object.functionBytecode() orelse return nativeFunctionSourceValue(rt, object);
-        const bytecode = functionBytecodeFromValue(stored) orelse return nativeFunctionSourceValue(rt, object);
-        return functionBytecodeToStringValue(rt, bytecode, object);
+        const function_bytecode = functionBytecodeFromValue(stored) orelse return nativeFunctionSourceValue(rt, object);
+        return functionBytecodeToStringValue(rt, function_bytecode, object);
     }
     if (object.class_id == core.class.ids.bound_function) {
         return nativeFunctionSourceValue(rt, null);
@@ -2662,10 +2655,10 @@ const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
 
 fn functionBytecodeToStringValue(
     rt: *core.JSRuntime,
-    bytecode: *const function_bytecode.FunctionBytecode,
+    function_bytecode: *const bytecode.FunctionBytecode,
     object: ?*core.Object,
 ) !core.JSValue {
-    if (bytecode.sourceText()) |source| return value_ops.createStringValue(rt, source);
+    if (function_bytecode.sourceText()) |source| return value_ops.createStringValue(rt, source);
     if (object) |function_object| {
         if (function_object.functionSource()) |source| return source.dup();
         return nativeFunctionSourceValue(rt, function_object);
@@ -2971,7 +2964,7 @@ pub fn materializeMappedArgumentsDescriptorValueForVm(
     materializeMappedArgumentsDescriptorValue(rt, object, key, desc);
 }
 
-pub fn descriptorFromObject(rt: *core.JSRuntime, object: *core.Object) !core.Descriptor {
+pub fn descriptorFromObjectBare(rt: *core.JSRuntime, object: *core.Object) !core.Descriptor {
     const has_get = try expectedHas(rt, object, "get");
     const has_set = try expectedHas(rt, object, "set");
     const has_value = try expectedHas(rt, object, "value");
@@ -3103,7 +3096,7 @@ fn definePropertiesFromObject(rt: *core.JSRuntime, object: *core.Object, propert
         defer desc_value.free(rt);
         if (desc_value.isUndefined()) continue;
         const desc_object = try expectObjectArg(desc_value);
-        const desc = try descriptorFromObject(rt, desc_object);
+        const desc = try descriptorFromObjectBare(rt, desc_object);
         defer desc.destroy(rt);
         object.defineOwnProperty(rt, key, desc) catch |err| switch (err) {
             error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
@@ -3125,11 +3118,7 @@ fn defineBoolProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u
     try defineObjectProperty(rt, object, name, core.JSValue.boolean(value));
 }
 
-pub fn expectObjectArg(value: core.JSValue) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    return @fieldParentPtr("header", header);
-}
+pub const expectObjectArg = core.value_semantics.expectObject;
 
 pub fn errorNameMatchesConstructorForVm(err: anytype, constructor_name: []const u8) bool {
     return errorNameMatchesConstructor(err, constructor_name);
@@ -3247,7 +3236,7 @@ fn printNativeFunction(rt: *core.JSRuntime, writer: *std.Io.Writer, object: *cor
     try writer.print("() {{\n    [native code]\n}}", .{});
 }
 
-pub fn qjsEvalGlobalScriptSource(
+pub fn evalGlobalScriptSource(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3270,7 +3259,7 @@ pub fn qjsEvalGlobalScriptSource(
     const saved_lexicals = ctx.lexicals;
     if (use_global_lexicals) ctx.lexicals = global.globalLexicals(ctx.runtime);
 
-    const EvalResult = @typeInfo(@TypeOf(qjsEvalGlobalScriptSource)).@"fn".return_type.?;
+    const EvalResult = @typeInfo(@TypeOf(evalGlobalScriptSource)).@"fn".return_type.?;
     const result: EvalResult = blk: {
         const compile_realm = ctx.runtime.contextForGlobalIncludingConstructing(global) orelse break :blk error.InvalidBuiltinRegistry;
         var compiled = parser.compile(.{ .realm = compile_realm }, source, .{ .mode = .script, .filename = filename, .strict = false, .return_completion = true }) catch |err| break :blk err;

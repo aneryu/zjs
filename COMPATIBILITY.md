@@ -16,7 +16,7 @@ Active configuration:
 Run the gate through Zig:
 
 ```sh
-zig build test262-gate --summary all
+zig build test262-check --summary all
 ```
 
 Or invoke the runner directly:
@@ -30,7 +30,7 @@ The checked 2026-08-05 report has 44,581 passes, 0 checked-in known failures,
 0 unexpected failures, and 5,194 feature skips, out of 49,775 prepared cases.
 It was recorded under the production default
 (`zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off`);
-compiler-v2 is the only compiler. `zig build test262-gate` writes local
+the v2 compiler (`src/compiler/`) is the only compiler. `zig build test262-check` writes local
 bucket, per-directory, feature-skip, and failure reports under
 `reports/test262-latest/` (gitignored).
 
@@ -38,7 +38,8 @@ bucket, per-directory, feature-skip, and failure reports under
 set, so the gate has no tolerated-failure surface at all and any non-zero error
 count is a regression. The historical 25-file known-failure set and its
 zjs-to-pinned-QuickJS classification are recorded in the
-[subsystem difference baseline](docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md).
+[subsystem difference baseline](docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)
+(a frozen 2026-07-27 snapshot; see its errata header).
 
 ## Configured Skips and Excludes
 
@@ -136,7 +137,7 @@ repository validation profile. Required gates from a clean checkout:
 ```sh
 zig build test --summary all
 zig build test -Doptimize=ReleaseSafe --summary all
-zig build test262-gate --summary all
+zig build test262-check --summary all
 zig build engine-production-gate --summary all
 git diff --check
 ```

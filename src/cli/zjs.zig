@@ -792,16 +792,16 @@ fn writeHostDispatchStatsAtExit() callconv(.c) void {
 }
 
 fn setupV2OracleReportExitDump(environ_map: *std.process.Environ.Map) void {
-    if (comptime !engine.compiler_v2.oracle_report_enabled) return;
+    if (comptime !engine.compiler.oracle_report_enabled) return;
     const flag = environ_map.get("ZJS_V2_ORACLE_REPORT") orelse return;
     if (flag.len == 0 or std.mem.eql(u8, flag, "0")) return;
     _ = atexit(writeV2OracleReportAtExit);
 }
 
 fn writeV2OracleReportAtExit() callconv(.c) void {
-    if (comptime !engine.compiler_v2.oracle_report_enabled) return;
+    if (comptime !engine.compiler.oracle_report_enabled) return;
     var buffer: [1024]u8 = undefined;
-    const text = engine.compiler_v2.formatOracleReport(&buffer);
+    const text = engine.compiler.formatOracleReport(&buffer);
     if (text.len == 0) return;
     std.debug.print("{s}\n", .{text});
 }

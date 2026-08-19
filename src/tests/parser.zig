@@ -15,7 +15,7 @@ const parser_core = zjs.parser.Parser;
 const atom = zjs.core.atom;
 const function_def_mod = zjs.bytecode.function_def;
 const ParseState = engine.parser.Parser.ParseState;
-const test_entry = zjs.compiler_v2.test_entry;
+const test_entry = zjs.compiler.test_entry;
 
 // ================== LEXER TESTS ==================
 
@@ -890,7 +890,7 @@ fn parseTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
-    try state.beginV2ProgramEmission();
+    try state.beginProgramEmission();
     try parser_core.parseDirectives(&state);
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try state.emitReturnUndefined();
@@ -945,7 +945,7 @@ fn parseModuleRefStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Byte
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureModuleRoot(&state);
-    try state.beginV2ProgramEmission();
+    try state.beginProgramEmission();
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
@@ -2655,7 +2655,7 @@ test "M3.1 F4: the program root's scope marker and source authority are stream e
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    try state.beginV2ProgramEmission();
+    try state.beginProgramEmission();
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
@@ -4427,7 +4427,7 @@ test "F5: sloppy var initializer captures dynamic reference before RHS" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try state.beginV2ProgramEmission();
+    try state.beginProgramEmission();
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     const code = fdPhase1Code(&state.function_def);
@@ -4484,7 +4484,7 @@ test "F5: destructuring dynamic reference publishes an exact long-tail label" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try state.beginV2ProgramEmission();
+    try state.beginProgramEmission();
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     const code = fdPhase1Code(&state.function_def);
@@ -6528,7 +6528,7 @@ fn parseRawStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    try state.beginV2ProgramEmission();
+    try state.beginProgramEmission();
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try publishPhase1Stream(&function, &state);
     return function;
@@ -6868,7 +6868,7 @@ fn expectContinueTargetFollowsBodyLeave(
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    try state.beginV2ProgramEmission();
+    try state.beginProgramEmission();
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     const code = fdPhase1Code(&state.function_def);
@@ -12500,18 +12500,18 @@ test "QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit rele
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try state.beginV2EmissionForTest();
+    try state.beginBuilderEmissionForTest();
     try std.testing.expect(state.function_def.v2_builder != null);
 
-    const b = state.v2Builder();
-    const label = try state.v2NewLabel();
-    try state.v2EmitJump(qop.goto, label); // marker + 5-byte jump
-    try state.v2EmitOp(qop.add); // marker + 1-byte op
+    const b = state.activeBuilder();
+    const label = try state.builderNewLabel();
+    try state.builderEmitJump(qop.goto, label); // marker + 5-byte jump
+    try state.builderEmitOp(qop.add); // marker + 1-byte op
     const atom_id = try env.rt.internAtom("s2p_probe");
-    try state.v2EmitAtomOpOwned(qop.get_var, env.rt.atoms.dup(atom_id));
+    try state.builderEmitAtomOpOwned(qop.get_var, env.rt.atoms.dup(atom_id));
     env.rt.atoms.free(atom_id);
-    try state.v2BindLabel(label);
-    try state.v2AddSourceMarker(3, 7);
+    try state.builderBindLabel(label);
+    try state.builderAddSourceMarker(3, 7);
 
     try std.testing.expectEqual(@as(u32, 11), b.code_len); // 5 + 1 + 5
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);

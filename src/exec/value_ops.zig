@@ -534,11 +534,7 @@ pub fn createBigIntValue(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValu
     return big.valueRef();
 }
 
-pub fn numberValue(value: core.JSValue) ?f64 {
-    if (value.isInt()) return @floatFromInt(value.asInt32().?);
-    if (value.isFloat64()) return value.asFloat64().?;
-    return null;
-}
+pub const numberValue = core.number.numberValue;
 
 pub fn bigIntToNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     var bigint = try cloneBigIntValue(rt, value);

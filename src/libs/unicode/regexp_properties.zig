@@ -207,7 +207,7 @@ fn isSupportedProperty(prop: data.Prop) bool {
     return properties.isSupported(prop);
 }
 
-fn unicode_script(code_point: u21, script_idx: data.Script, is_ext: bool) bool {
+fn unicodeScript(code_point: u21, script_idx: data.Script, is_ext: bool) bool {
     const script_idx_value = @intFromEnum(script_idx);
     const is_common = script_idx == data.Script.Common or script_idx == data.Script.Inherited;
     var p: []const u8 = &data.unicode_script_table;
@@ -323,7 +323,7 @@ pub fn isSupportedUnicodePropertyExpression(name: []const u8) bool {
 
 pub fn isUnicodePropertyMatches(code_point: u21, name: []const u8) bool {
     return switch (names.parsePropertyExpression(name) orelse return false) {
-        .script => |script| unicode_script(code_point, script.idx, script.is_ext),
+        .script => |script| unicodeScript(code_point, script.idx, script.is_ext),
         .gc_mask => |mask| unicodeGeneralCategory1(code_point, mask),
         .prop_idx => |prop_idx| isSupportedProperty(prop_idx) and unicodeProp(code_point, prop_idx),
     };

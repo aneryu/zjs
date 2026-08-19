@@ -1,12 +1,12 @@
 const core = @import("../core/root.zig");
 const core_array = @import("../core/array.zig");
 const unicode = @import("../libs/unicode.zig");
-const buffer_builtin = @import("buffer_ops.zig");
+const buffer_ops = @import("buffer_ops.zig");
 const bignum = @import("../libs/bigint.zig");
 const std = @import("std");
 const builtin_glue = @import("builtin_glue.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 
 const HostError = @import("exceptions.zig").HostError;
 
@@ -106,27 +106,27 @@ pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
 }
 
 /// Most Array records use `arrayCall`, which switches on the per-record `magic`
-/// (== domain-local id) and forwards to `builtin_glue.qjsArrayNativeRecord`.
+/// (== domain-local id) and forwards to `builtin_glue.arrayNativeRecord`.
 /// Array.push and Array.pop instead use per-method functions matching their qjs
 /// function-list entries. The shared glue resolves `Array.from`/`Array.of`/
 /// `Array.isArray` and the remaining Array.prototype record hub against the
 /// realm-aware exec ops. Those ops stay in exec (`exec/array_ops.zig`): the hub
-/// (`qjsArrayPrototypeNativeRecord`) and its leaf method bodies are BOTH —
+/// (`arrayPrototypeNativeRecord`) and its leaf method bodies are BOTH —
 /// reached through this record table AND directly by the VM's residual
-/// fast-array fast-call (`qjsArrayMethodFastCall`) and the realm-fallback name
+/// fast-array fast-call (`arrayMethodFastCall`) and the realm-fallback name
 /// cascade (`call_runtime.callValueOrBytecodeDispatch`) — so per the
 /// client model the implementation core and its record entry both stay in exec.
 /// (Phase 6b-relocate inventory: unlike String — whose six
 /// movable bodies were reachable only through `stringCall` — almost every
 /// Array.prototype / Array static body here is reached by the opcode-bound
 /// fast-array fast-call, so it is BOTH and stays. The only bodies reachable
-/// solely through native-dispatch surfaces are `qjsArrayJoinCall` and the
+/// solely through native-dispatch surfaces are `arrayJoinCall` and the
 /// `Array.from`/`Array.of` statics; those still stay in exec because their
 /// other live caller is the realm name cascade in `call_runtime.zig` (outside
 /// this relocation's file scope) and because `from`/`of` are construction
 /// orchestrators wired into the array-iterator-protocol and TypedArray-from
 /// machinery that the client model deliberately keeps in exec. The lone
-/// record-only function `qjsArrayIteratorMethodRecord` is the
+/// record-only function `arrayIteratorMethodRecord` is the
 /// array-iterator-protocol core and likewise stays.) The
 /// fast-array `[[Get]]/[[Set]]` element semantics, the array iterator protocol
 /// core, the `new_array` / `array_join` construction opcodes, and the VM
@@ -357,7 +357,7 @@ fn arrayCall(
         };
     }
     const global = call_global orelse return error.TypeError;
-    if (try builtin_glue.qjsArrayNativeRecord(
+    if (try builtin_glue.arrayNativeRecord(
         host_call.ctx,
         host_call.output,
         global,
@@ -384,7 +384,7 @@ fn arrayPushCall(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == host_call.ctx);
-    return (try builtin_glue.qjsArrayPushNativeRecord(
+    return (try builtin_glue.arrayPushNativeRecord(
         host_call.ctx,
         host_call.output,
         realm.global,
@@ -406,7 +406,7 @@ fn arrayPushDirect(
 ) builtin_dispatch.NativeBits {
     // Hot arm returns NativeBits (x0+x1) like qjs JS_NewInt32. Miss/OOM
     // falls through to the existing impl (ToObject + generic Set).
-    if (builtin_glue.qjsTryFastArrayPush(ctx.runtime, this_value, args)) |maybe_len| {
+    if (builtin_glue.tryFastArrayPush(ctx.runtime, this_value, args)) |maybe_len| {
         if (maybe_len) |new_len| return builtin_dispatch.nativeToBits(core.JSValue.int32(new_len));
     } else |err| {
         return builtin_dispatch.nativeFromHostError(ctx, global, err);
@@ -431,7 +431,7 @@ fn arrayPushDirectHost(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) HostError!core.JSValue {
-    return (try builtin_glue.qjsArrayPushNativeRecord(
+    return (try builtin_glue.arrayPushNativeRecord(
         ctx,
         output,
         global,
@@ -451,7 +451,7 @@ fn arraySpliceCall(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == host_call.ctx);
-    return (try builtin_glue.qjsArraySpliceNativeRecord(
+    return (try builtin_glue.arraySpliceNativeRecord(
         host_call.ctx,
         host_call.output,
         realm.global,
@@ -487,7 +487,7 @@ fn arraySpliceDirectHost(
     this_value: core.JSValue,
     args: []const core.JSValue,
 ) HostError!core.JSValue {
-    return (try builtin_glue.qjsArraySpliceNativeRecord(
+    return (try builtin_glue.arraySpliceNativeRecord(
         ctx,
         output,
         global,
@@ -509,7 +509,7 @@ fn arrayPopCall(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == host_call.ctx);
-    return (try builtin_glue.qjsArrayPopNativeRecord(
+    return (try builtin_glue.arrayPopNativeRecord(
         host_call.ctx,
         host_call.output,
         realm.global,
@@ -773,11 +773,11 @@ fn arrayIteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue 
 fn arrayIteratorValue(rt: *core.JSRuntime, target: *core.Object, index: u32, kind: ArrayIteratorKind) !core.JSValue {
     return switch (kind) {
         .key => core.JSValue.int32(@intCast(index)),
-        .value => if (buffer_builtin.isTypedArrayObject(target)) try buffer_builtin.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.atom.atomFromUInt32(index)),
+        .value => if (buffer_ops.isTypedArrayObject(target)) try buffer_ops.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.atom.atomFromUInt32(index)),
         .key_value => blk: {
             const pair = try core.Object.createArray(rt, null);
             errdefer core.Object.destroyFromHeader(rt, &pair.header);
-            const value = if (buffer_builtin.isTypedArrayObject(target)) try buffer_builtin.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.atom.atomFromUInt32(index));
+            const value = if (buffer_ops.isTypedArrayObject(target)) try buffer_ops.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.atom.atomFromUInt32(index));
             defer value.free(rt);
             try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
             try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(value, true, true, true));
@@ -1378,17 +1378,8 @@ fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value:
     next_index.* += 1;
 }
 
-fn expectObject(value: core.JSValue) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    return @fieldParentPtr("header", header);
-}
-
-fn objectFromValue(value: core.JSValue) ?*core.Object {
-    const header = value.refHeader() orelse return null;
-    if (!value.isObject()) return null;
-    return @fieldParentPtr("header", header);
-}
+const expectObject = core.value_semantics.expectObject;
+const objectFromValue = core.value_semantics.objectFromValue;
 
 // `expectArray` relocated to engine core (`core/array.zig`) in Phase 6b-3
 // STEP 2; re-exported here unchanged.
@@ -1396,13 +1387,13 @@ pub const expectArray = core_array.expectArray;
 
 fn expectArrayIteratorTarget(value: core.JSValue) !*core.Object {
     const object = try expectObject(value);
-    if (object.isArray() or object.class_id == core.class.ids.arguments or object.class_id == core.class.ids.mapped_arguments or buffer_builtin.isTypedArrayObject(object)) return object;
+    if (object.isArray() or object.class_id == core.class.ids.arguments or object.class_id == core.class.ids.mapped_arguments or buffer_ops.isTypedArrayObject(object)) return object;
     return error.TypeError;
 }
 
 fn arrayIteratorTargetLength(rt: *core.JSRuntime, object: *core.Object) !u32 {
     if (object.isArray()) return object.arrayLength();
-    if (buffer_builtin.isTypedArrayObject(object)) return buffer_builtin.typedArrayLength(rt, object) catch 0;
+    if (buffer_ops.isTypedArrayObject(object)) return buffer_ops.typedArrayLength(rt, object) catch 0;
     const length = try object.getProperty(core.atom.ids.length);
     defer length.free(rt);
     return @intCast(length.asInt32() orelse 0);

@@ -8,7 +8,7 @@ const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const string_ops = @import("string_ops.zig");
 const coercion_ops = @import("coercion_ops.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 const construct_mod = @import("construct.zig");
@@ -34,9 +34,9 @@ const createDataPropertyOrThrow = object_ops.createDataPropertyOrThrow;
 const descriptorObjectFromDescriptor = object_ops.descriptorObjectFromDescriptor;
 const objectPrototypeFromGlobal = object_ops.objectPrototypeFromGlobal;
 const functionPrototypeFromGlobal = object_ops.functionPrototypeFromGlobal;
-const qjsObjectGetPrototypeOfStep = object_ops.qjsObjectGetPrototypeOfStep;
-const qjsObjectGetPrototypeOfValue = object_ops.qjsObjectGetPrototypeOfValue;
-const qjsDefinePropertiesOnTarget = call_runtime.qjsDefinePropertiesOnTarget;
+const objectGetPrototypeOfStep = object_ops.objectGetPrototypeOfStep;
+const objectGetPrototypeOfValue = object_ops.objectGetPrototypeOfValue;
+const definePropertiesOnTarget = call_runtime.definePropertiesOnTarget;
 const isCallableValue = call_runtime.isCallableValue;
 const iteratorForValue = call_runtime.iteratorForValue;
 const closeIteratorForFromEntriesAbrupt = call_runtime.closeIteratorForFromEntriesAbrupt;
@@ -207,7 +207,7 @@ fn constructorEntry() core.host_function.InternalEntry {
 
 /// Declaration table for the `.object` domain: the Object call entry plus one
 /// entry per `Object.*` static and `Object.prototype.*` method. Static/prototype
-/// `id`/`magic` values are consumed by `qjsObjectCallForNativeRecord` and the
+/// `id`/`magic` values are consumed by `objectCallForNativeRecord` and the
 /// bare-runtime fallback, kept in lockstep with the visible install order in
 /// `standard_globals`.
 pub const internal_entries = [_]core.host_function.InternalEntry{
@@ -321,43 +321,43 @@ fn objectCallForNativeRecord(
     caller_frame: ?*builtin_dispatch.Frame,
 ) HostError!core.JSValue {
     return switch (id) {
-        @intFromEnum(StaticMethod.assign) => (try qjsObjectAssignCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.create) => (try qjsObjectCreateCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.define_property) => (try object_ops.qjsDefinePropertyWithKind(ctx, output, global, args, 1, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.define_properties) => (try call_runtime.qjsDefinePropertiesCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.get_own_property_descriptor) => (try qjsGetOwnPropertyDescriptorCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.get_own_property_descriptors) => (try qjsGetOwnPropertyDescriptorsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.get_own_property_names) => (try qjsObjectOwnPropertyKeysCall(ctx, output, global, args, .string, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.get_own_property_symbols) => (try qjsObjectOwnPropertyKeysCall(ctx, output, global, args, .symbol, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.get_prototype_of) => (try qjsObjectGetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.has_own) => (try qjsObjectHasOwnCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.is_extensible) => (try object_ops.qjsObjectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.keys) => (try object_ops.qjsObjectEnumerableOwnPropertiesCall(ctx, output, global, args, .keys, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.prevent_extensions) => (try qjsObjectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.seal) => (try qjsObjectSetIntegrityCall(ctx, output, global, args, .sealed, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.is_sealed) => (try qjsObjectTestIntegrityCall(ctx, output, global, args, .sealed)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.is_frozen) => (try qjsObjectTestIntegrityCall(ctx, output, global, args, .frozen)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.set_prototype_of) => (try object_ops.qjsObjectSetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.values) => (try object_ops.qjsObjectEnumerableOwnPropertiesCall(ctx, output, global, args, .values, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.entries) => (try object_ops.qjsObjectEnumerableOwnPropertiesCall(ctx, output, global, args, .entries, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.assign) => (try objectAssignCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.create) => (try objectCreateCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.define_property) => (try object_ops.definePropertyWithKind(ctx, output, global, args, 1, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.define_properties) => (try call_runtime.definePropertiesCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.get_own_property_descriptor) => (try getOwnPropertyDescriptorCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.get_own_property_descriptors) => (try getOwnPropertyDescriptorsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.get_own_property_names) => (try objectOwnPropertyKeysCall(ctx, output, global, args, .string, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.get_own_property_symbols) => (try objectOwnPropertyKeysCall(ctx, output, global, args, .symbol, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.get_prototype_of) => (try objectGetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.has_own) => (try objectHasOwnCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.is_extensible) => (try object_ops.objectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.keys) => (try object_ops.objectEnumerableOwnPropertiesCall(ctx, output, global, args, .keys, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.prevent_extensions) => (try objectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.seal) => (try objectSetIntegrityCall(ctx, output, global, args, .sealed, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.is_sealed) => (try objectTestIntegrityCall(ctx, output, global, args, .sealed)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.is_frozen) => (try objectTestIntegrityCall(ctx, output, global, args, .frozen)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.set_prototype_of) => (try object_ops.objectSetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.values) => (try object_ops.objectEnumerableOwnPropertiesCall(ctx, output, global, args, .values, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.entries) => (try object_ops.objectEnumerableOwnPropertiesCall(ctx, output, global, args, .entries, caller_function, caller_frame)) orelse error.TypeError,
         @intFromEnum(StaticMethod.is) => {
             const lhs = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             const rhs = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
             return core.JSValue.boolean(lhs.sameValue(rhs));
         },
-        @intFromEnum(StaticMethod.freeze) => (try qjsObjectSetIntegrityCall(ctx, output, global, args, .frozen, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.from_entries) => (try qjsObjectFromEntriesCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.group_by) => (try qjsObjectGroupByCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(PrototypeMethod.to_string) => try string_ops.qjsObjectToStringCall(ctx, output, global, this_value, caller_function, caller_frame),
-        @intFromEnum(PrototypeMethod.to_locale_string) => try string_ops.qjsObjectToLocaleStringCall(ctx, output, global, this_value, caller_function, caller_frame),
-        @intFromEnum(PrototypeMethod.value_of) => try qjsObjectValueOfCall(ctx.runtime, global, this_value),
-        @intFromEnum(PrototypeMethod.has_own_property) => (try qjsObjectPrototypeOwnPropertyCall(ctx, output, global, this_value, id, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(PrototypeMethod.is_prototype_of) => try qjsObjectIsPrototypeOf(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(PrototypeMethod.property_is_enumerable) => (try qjsObjectPrototypeOwnPropertyCall(ctx, output, global, this_value, id, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(PrototypeMethod.define_getter) => (try qjsObjectPrototypeDefineAccessorCall(ctx, output, global, this_value, args, true, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(PrototypeMethod.define_setter) => (try qjsObjectPrototypeDefineAccessorCall(ctx, output, global, this_value, args, false, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(PrototypeMethod.lookup_getter) => (try qjsObjectPrototypeLookupAccessorCall(ctx, output, global, this_value, args, true, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(PrototypeMethod.lookup_setter) => (try qjsObjectPrototypeLookupAccessorCall(ctx, output, global, this_value, args, false, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.freeze) => (try objectSetIntegrityCall(ctx, output, global, args, .frozen, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.from_entries) => (try objectFromEntriesCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.group_by) => (try objectGroupByCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(PrototypeMethod.to_string) => try string_ops.objectToStringCall(ctx, output, global, this_value, caller_function, caller_frame),
+        @intFromEnum(PrototypeMethod.to_locale_string) => try string_ops.objectToLocaleStringCall(ctx, output, global, this_value, caller_function, caller_frame),
+        @intFromEnum(PrototypeMethod.value_of) => try objectValueOfCall(ctx.runtime, global, this_value),
+        @intFromEnum(PrototypeMethod.has_own_property) => (try objectPrototypeOwnPropertyCall(ctx, output, global, this_value, id, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(PrototypeMethod.is_prototype_of) => try objectIsPrototypeOf(ctx, output, global, this_value, args, caller_function, caller_frame),
+        @intFromEnum(PrototypeMethod.property_is_enumerable) => (try objectPrototypeOwnPropertyCall(ctx, output, global, this_value, id, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(PrototypeMethod.define_getter) => (try objectPrototypeDefineAccessorCall(ctx, output, global, this_value, args, true, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(PrototypeMethod.define_setter) => (try objectPrototypeDefineAccessorCall(ctx, output, global, this_value, args, false, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(PrototypeMethod.lookup_getter) => (try objectPrototypeLookupAccessorCall(ctx, output, global, this_value, args, true, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(PrototypeMethod.lookup_setter) => (try objectPrototypeLookupAccessorCall(ctx, output, global, this_value, args, false, caller_function, caller_frame)) orelse error.TypeError,
         else => error.TypeError,
     };
 }
@@ -450,11 +450,7 @@ test "object literal roots direct function bytecode values while creating object
 // the subjects of the GC-rooting unit test that follows.)
 pub const ownEntriesArray = core.object.ownEntriesArray;
 
-fn expectObject(value: core.JSValue) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    return @fieldParentPtr("header", header);
-}
+const expectObject = core.value_semantics.expectObject;
 
 fn entryArrayValue(rt: *core.JSRuntime, key: core.Atom, value: core.JSValue) !core.JSValue {
     var rooted_value = value;
@@ -541,7 +537,7 @@ fn atomToStringValue(rt: *core.JSRuntime, atom_id: core.Atom) !core.JSValue {
 // aliases declared near the top of this file.
 // ==========================================================================
 
-pub fn qjsObjectIsPrototypeOf(
+pub fn objectIsPrototypeOf(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -553,20 +549,20 @@ pub fn qjsObjectIsPrototypeOf(
     if (args.len == 0) return core.JSValue.boolean(false);
     var current = objectFromValue(args[0]) orelse return core.JSValue.boolean(false);
     const this_object = objectFromValue(this_value) orelse return error.TypeError;
-    while (try qjsObjectGetPrototypeOfStep(ctx, output, global, current, caller_function, caller_frame)) |prototype| {
+    while (try objectGetPrototypeOfStep(ctx, output, global, current, caller_function, caller_frame)) |prototype| {
         if (prototype == this_object) return core.JSValue.boolean(true);
         current = prototype;
     }
     return core.JSValue.boolean(false);
 }
 
-pub fn qjsObjectValueOfCall(rt: *core.JSRuntime, global: *core.Object, this_value: core.JSValue) !core.JSValue {
+pub fn objectValueOfCall(rt: *core.JSRuntime, global: *core.Object, this_value: core.JSValue) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
     if (this_value.isObject()) return this_value.dup();
     return primitiveObjectForAccess(rt, global, this_value);
 }
 
-pub fn qjsObjectCreateCall(
+pub fn objectCreateCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -582,12 +578,12 @@ pub fn qjsObjectCreateCall(
     const object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
     if (args.len >= 2 and !args[1].isUndefined()) {
-        try qjsDefinePropertiesOnTarget(ctx, output, global, object, args[1], caller_function, caller_frame);
+        try definePropertiesOnTarget(ctx, output, global, object, args[1], caller_function, caller_frame);
     }
     return object.value();
 }
 
-pub fn qjsObjectAssignCall(
+pub fn objectAssignCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -616,14 +612,14 @@ pub fn qjsObjectAssignCall(
             // descriptor is materialized (the ~ENUM_ONLY descriptor branch
             // at quickjs.c:16942 runs only for the exotic fallback). Mirror
             // that single enumerable-only spec-ordered pass here.
-            try qjsObjectAssignEnumOnly(ctx, output, global, target_value, source_value, source, own_keys, caller_function, caller_frame);
+            try objectAssignEnumOnly(ctx, output, global, target_value, source_value, source, own_keys, caller_function, caller_frame);
         } else {
             // Proxy / exotic source: qjs clears JS_GPN_ENUM_ONLY
             // (quickjs.c:16924) and builds a per-key descriptor in the loop
             // so the ownKeys + getOwnPropertyDescriptor traps fire in order.
             // Keep the descriptor-driven single pass that preserves the trap
             // sequence (symbol_pass = null = no extra traversal).
-            try qjsObjectAssignKeys(ctx, output, global, target_value, source_value, source, own_keys, null, caller_function, caller_frame);
+            try objectAssignKeys(ctx, output, global, target_value, source_value, source, own_keys, null, caller_function, caller_frame);
         }
     }
 
@@ -660,7 +656,7 @@ fn assignSourceIsOrdinary(source: *core.Object) bool {
 /// deliberate difference from Object.keys/values/entries, which re-check
 /// enumerability per key after getters (quickjs.c:40400) and which zjs
 /// keeps on its own descriptor path.
-fn qjsObjectAssignEnumOnly(
+fn objectAssignEnumOnly(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -688,7 +684,7 @@ fn qjsObjectAssignEnumOnly(
     }
 }
 
-pub fn qjsObjectAssignKeys(
+pub fn objectAssignKeys(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -714,7 +710,7 @@ pub fn qjsObjectAssignKeys(
     }
 }
 
-pub fn qjsObjectHasOwnCall(
+pub fn objectHasOwnCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -738,7 +734,7 @@ pub fn qjsObjectHasOwnCall(
     return core.JSValue.boolean(present);
 }
 
-pub fn qjsObjectPrototypeOwnPropertyCall(
+pub fn objectPrototypeOwnPropertyCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -772,7 +768,7 @@ pub fn qjsObjectPrototypeOwnPropertyCall(
     return core.JSValue.boolean(desc.enumerable orelse false);
 }
 
-pub fn qjsObjectPrototypeDefineAccessorCall(
+pub fn objectPrototypeDefineAccessorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -824,7 +820,7 @@ pub fn qjsObjectPrototypeDefineAccessorCall(
     return core.JSValue.undefinedValue();
 }
 
-pub fn qjsObjectPrototypeLookupAccessorCall(
+pub fn objectPrototypeLookupAccessorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -850,11 +846,11 @@ pub fn qjsObjectPrototypeLookupAccessorCall(
             if (getter) return if (item.getter_present) item.getter.dup() else core.JSValue.undefinedValue();
             return if (item.setter_present) item.setter.dup() else core.JSValue.undefinedValue();
         }
-        object = (try qjsObjectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame)) orelse return core.JSValue.undefinedValue();
+        object = (try objectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame)) orelse return core.JSValue.undefinedValue();
     }
 }
 
-pub fn qjsObjectFromEntriesCall(
+pub fn objectFromEntriesCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -901,7 +897,7 @@ pub fn qjsObjectFromEntriesCall(
     }
 }
 
-pub fn qjsObjectGroupByCall(
+pub fn objectGroupByCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -994,7 +990,7 @@ fn objectAddEntriesStepValue(
     return .{ .value = value, .done = false };
 }
 
-pub fn qjsObjectSetIntegrityCall(
+pub fn objectSetIntegrityCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1006,7 +1002,7 @@ pub fn qjsObjectSetIntegrityCall(
     const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const object = objectFromValue(target_value) orelse return target_value.dup();
     if (level == .frozen and core.object.typedArrayBackedByResizableBuffer(object)) return error.TypeError;
-    if (try qjsObjectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame)) |prevented| {
+    if (try objectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame)) |prevented| {
         prevented.free(ctx.runtime);
     } else return error.TypeError;
 
@@ -1048,7 +1044,7 @@ pub fn qjsObjectSetIntegrityCall(
     return target_value.dup();
 }
 
-pub fn qjsObjectTestIntegrityCall(
+pub fn objectTestIntegrityCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1142,7 +1138,7 @@ test "Object.groupBy new group define failure releases group once" {
     try std.testing.expectEqual(@as(usize, 4), rt.gc.liveCount());
 }
 
-pub fn qjsObjectPreventExtensionsCall(
+pub fn objectPreventExtensionsCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1160,7 +1156,7 @@ pub fn qjsObjectPreventExtensionsCall(
     return target_value.dup();
 }
 
-pub fn qjsGetOwnPropertyDescriptorCall(
+pub fn getOwnPropertyDescriptorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1183,7 +1179,7 @@ pub fn qjsGetOwnPropertyDescriptorCall(
     return desc_value;
 }
 
-pub fn qjsObjectGetPrototypeOfCall(
+pub fn objectGetPrototypeOfCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1196,11 +1192,11 @@ pub fn qjsObjectGetPrototypeOfCall(
     const object_value = if (objectFromValue(args[0])) |_| args[0].dup() else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     defer object_value.free(ctx.runtime);
     const object = objectFromValue(object_value) orelse return error.TypeError;
-    if (try qjsObjectPrototypeMethodFunctionPrototype(ctx, global, object)) |prototype| return prototype.value().dup();
-    return try qjsObjectGetPrototypeOfValue(ctx, output, global, object, caller_function, caller_frame);
+    if (try objectPrototypeMethodFunctionPrototype(ctx, global, object)) |prototype| return prototype.value().dup();
+    return try objectGetPrototypeOfValue(ctx, output, global, object, caller_function, caller_frame);
 }
 
-pub fn qjsObjectPrototypeMethodFunctionPrototype(
+pub fn objectPrototypeMethodFunctionPrototype(
     ctx: *core.JSContext,
     global: *core.Object,
     object: *core.Object,
@@ -1215,7 +1211,7 @@ pub fn isObjectPrototypeNativeRecord(object: *core.Object, id: u32) bool {
     return native_ref.domain == .object and native_ref.id == id;
 }
 
-pub fn qjsGetOwnPropertyDescriptorsCall(
+pub fn getOwnPropertyDescriptorsCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1249,7 +1245,7 @@ pub const OwnPropertyKeyFilter = enum {
     symbol,
 };
 
-pub fn qjsObjectOwnPropertyKeysCall(
+pub fn objectOwnPropertyKeysCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,

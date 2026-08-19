@@ -76,21 +76,26 @@ There is currently no inline cache:
 - `FunctionBytecode` has no site/slot table;
 - `zjs_enable_ic` does not exist.
 
-`src/exec/property_ic.zig` is a historical filename; it now holds
-non-cached direct shape/property/global fast paths. Every access checks
-the current object/shape/property state; the two retained `cached*`
-adapters always miss.
+`src/exec/property_direct.zig` (renamed from the historical
+`property_ic.zig` on 2026-08-19) holds non-cached direct
+shape/property/global fast paths. Every access checks the current
+object/shape/property state; the retained `dataPropertyValueForFastPath`
+adapter always misses, and the always-false `cachedSet*` zombie was
+deleted.
 
 ## 5. Tail Calls
 
-The VM can execute `tail_call` / `tail_call_method` and can replace an
-inline frame with `Machine.tailCallReuse`. That is a bytecode ABI /
-internal capability.
+The VM executes `tail_call` / `tail_call_method` and replaces an inline
+frame with `Machine.tailCallReuse`.
 
-The default source compiler and the pinned QuickJS parser both emit
-ordinary call+return; they do not automatically lower source into proper
-tail calls. `test262.conf` skips `tail-call-optimization`. Documents and
-release notes must not claim product-level PTC is enabled.
+Since 0.2.0-dev, strict-mode plain-call tails (`return f(...)`, including
+conditional-expression arms and unconditional-jump joins) are folded to
+`tail_call` at compile time — ES2015 proper tail calls, a documented
+divergence from the pinned QuickJS, which grows a frame for every call.
+Sloppy code, method tails, `try`-protected calls, and eval-tails keep
+QuickJS-aligned frame growth. `test262.conf` still skips
+`tail-call-optimization` because method-position tails are out of scope.
+Scope and overflow behavior: [LIMITATIONS.md](../LIMITATIONS.md).
 
 ## 6. zjs-Specific Call Machinery
 

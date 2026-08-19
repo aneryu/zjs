@@ -1456,7 +1456,7 @@ fn expectRelocChain(
     try std.testing.expectEqual(labels.no_reloc, reloc_index);
 }
 
-test "compiler_v2.builder: jump emission, bind, reloc chains" {
+test "compiler.builder: jump emission, bind, reloc chains" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();
@@ -1492,7 +1492,7 @@ test "compiler_v2.builder: jump emission, bind, reloc chains" {
     try std.testing.expectError(error.InvalidBytecode, b.emitJump(0x21, @enumFromInt(99)));
 }
 
-test "compiler_v2.builder: retargetLabelRefs merges a pending identity into a bound one" {
+test "compiler.builder: retargetLabelRefs merges a pending identity into a bound one" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();
@@ -1554,7 +1554,7 @@ test "compiler_v2.builder: retargetLabelRefs merges a pending identity into a bo
     );
 }
 
-test "compiler_v2.builder: s2g4 scope ref owns atom and chains aux relocation" {
+test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();
@@ -1620,7 +1620,7 @@ test "compiler_v2.builder: s2g4 scope ref owns atom and chains aux relocation" {
     try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 }
 
-test "compiler_v2.builder: compact immediate emission and rollback" {
+test "compiler.builder: compact immediate emission and rollback" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();
@@ -1655,7 +1655,7 @@ test "compiler_v2.builder: compact immediate emission and rollback" {
     try std.testing.expectEqual(empty.last_opcode_pos, b.last_opcode_pos);
 }
 
-test "compiler_v2.builder: s2g4 compact atom immediates own refs" {
+test "compiler.builder: s2g4 compact atom immediates own refs" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();
@@ -1702,7 +1702,7 @@ test "compiler_v2.builder: s2g4 compact atom immediates own refs" {
     try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 }
 
-test "compiler_v2.builder: s2g4 take atom and truncate speculative tail" {
+test "compiler.builder: s2g4 take atom and truncate speculative tail" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();
@@ -1746,7 +1746,7 @@ test "compiler_v2.builder: s2g4 take atom and truncate speculative tail" {
     try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 }
 
-test "compiler_v2.builder: lvalue atom take and opcode rewind are one transaction" {
+test "compiler.builder: lvalue atom take and opcode rewind are one transaction" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();
@@ -1783,7 +1783,7 @@ test "compiler_v2.builder: lvalue atom take and opcode rewind are one transactio
     try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 }
 
-test "compiler_v2.builder: marked opcode rewind preserves older same-offset source" {
+test "compiler.builder: marked opcode rewind preserves older same-offset source" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();
@@ -1805,7 +1805,7 @@ test "compiler_v2.builder: marked opcode rewind preserves older same-offset sour
     try std.testing.expectEqual(@as(i32, 10), b.source_slots[0].col);
 }
 
-test "compiler_v2.builder: s2g4 detach and splice preserves global labels" {
+test "compiler.builder: s2g4 detach and splice preserves global labels" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();
@@ -1933,7 +1933,7 @@ test "compiler_v2.builder: s2g4 detach and splice preserves global labels" {
     try std.testing.expectEqual(scope_atom_base, table.refCount(scope_atom).?);
 }
 
-test "compiler_v2.builder: s2g4 empty segment splice invalidates last opcode" {
+test "compiler.builder: s2g4 empty segment splice invalidates last opcode" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();
@@ -2037,12 +2037,12 @@ fn s2g4OomScript(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 }
 
-test "compiler_v2.builder: s2g4 allocation failure sweep balances detached atoms" {
+test "compiler.builder: s2g4 allocation failure sweep balances detached atoms" {
     try s2g4OomScript(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, s2g4OomScript, .{});
 }
 
-test "compiler_v2.builder: snapshot rollback restores chains, atoms, markers" {
+test "compiler.builder: snapshot rollback restores chains, atoms, markers" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();
@@ -2087,7 +2087,7 @@ test "compiler_v2.builder: snapshot rollback restores chains, atoms, markers" {
     b.deinit();
 }
 
-test "compiler_v2.builder: inferred-name patches keep code and atom ownership in lockstep" {
+test "compiler.builder: inferred-name patches keep code and atom ownership in lockstep" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();

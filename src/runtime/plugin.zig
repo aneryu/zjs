@@ -853,12 +853,7 @@ fn installDescriptorForTesting(ctx: *zjs.JSContext, target_value: core.JSValue, 
     try installSource(ctx.core, target_value, "<test-plugin>", .{ .descriptor = descriptor }, options);
 }
 
-fn objectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    if (header.meta().flags.kind != .object) return null;
-    return @fieldParentPtr("header", header);
-}
+const objectFromValue = core.value_semantics.objectFromValue;
 
 fn objectProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !core.JSValue {
     const key = try rt.internAtom(name);

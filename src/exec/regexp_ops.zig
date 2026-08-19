@@ -11,7 +11,7 @@ const frame_mod = @import("frame.zig");
 const object_ops = @import("object_ops.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const array_ops = @import("array_ops.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 
 const HostError = exceptions.HostError;
 
@@ -265,7 +265,7 @@ fn regexpCall(
         // path with `is_constructor` set and the resolved instance prototype
         // in `new_target`. The construct branch reads only `args`/`new_target`,
         // so it runs before the `func_obj` requirement below: the VM construct
-        // fast path (`regexp_fastpath.qjsRegExpConstructCall`) routes its
+        // fast path (`regexp_fastpath.regExpConstructCall`) routes its
         // coerced terminal here without a materialized constructor object.
         // `RegExp(...)` called as a function routes through the fast-path call
         // op (which itself handles the "return the argument unchanged when it is
@@ -282,30 +282,30 @@ fn regexpCall(
             return constructWithPrototypeInRealm(rt, active_global, pattern, flags, host_call.new_target);
         }
         const active_global = callable_global orelse return error.TypeError;
-        return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, active_global, host_call.func_obj, args, caller_function, caller_frame);
+        return regexp_fastpath.regExpFunctionCall(ctx, output, active_global, host_call.func_obj, args, caller_function, caller_frame);
     }
 
     const function_object = host_call.func_obj orelse return error.TypeError;
     if (id == @intFromEnum(StaticMethod.escape)) return escape(ctx.runtime, args);
     if (legacyAccessorMethodFromId(id)) |method| {
         const active_global = callable_global orelse return error.TypeError;
-        return regexp_fastpath.qjsRegExpLegacyAccessor(ctx, output, active_global, this_value, function_object, method, args, caller_function, caller_frame);
+        return regexp_fastpath.regExpLegacyAccessor(ctx, output, active_global, this_value, function_object, method, args, caller_function, caller_frame);
     }
     const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
     if (method_id == 9) {
         const active_global = callable_global orelse return error.TypeError;
-        return (try regexp_fastpath.qjsRegExpCompile(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError;
+        return (try regexp_fastpath.regExpCompile(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError;
     }
     const active_global = callable_global orelse return error.TypeError;
     return switch (method_id) {
-        1 => string_ops.qjsRegExpToString(ctx, output, active_global, this_value, caller_function, caller_frame),
-        2 => (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
-        3 => try regexp_fastpath.qjsRegExpExecMethod(ctx, output, active_global, this_value, args, caller_function, caller_frame),
-        4 => (try string_ops.qjsRegExpSymbolSearch(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
-        5 => (try string_ops.qjsRegExpSymbolMatch(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
-        6 => (try string_ops.qjsRegExpSymbolMatchAll(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
-        7 => (try string_ops.qjsRegExpSymbolReplace(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
-        8 => (try string_ops.qjsRegExpSymbolSplit(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        1 => string_ops.regExpToString(ctx, output, active_global, this_value, caller_function, caller_frame),
+        2 => (try regexp_fastpath.regExpTestMethod(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        3 => try regexp_fastpath.regExpExecMethod(ctx, output, active_global, this_value, args, caller_function, caller_frame),
+        4 => (try string_ops.regExpSymbolSearch(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        5 => (try string_ops.regExpSymbolMatch(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        6 => (try string_ops.regExpSymbolMatchAll(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        7 => (try string_ops.regExpSymbolReplace(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        8 => (try string_ops.regExpSymbolSplit(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
         else => error.TypeError,
     };
 }
@@ -420,7 +420,7 @@ fn regexpExecCall(
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == native_ctx);
     const active_global = realm.global;
-    return try regexp_fastpath.qjsRegExpExecMethod(
+    return try regexp_fastpath.regExpExecMethod(
         native_ctx,
         host_call.output,
         active_global,
@@ -440,7 +440,7 @@ fn regexpSymbolMatchCall(
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == native_ctx);
     const active_global = realm.global;
-    return (try string_ops.qjsRegExpSymbolMatch(
+    return (try string_ops.regExpSymbolMatch(
         native_ctx,
         host_call.output,
         active_global,
@@ -460,7 +460,7 @@ fn regexpSymbolSplitCall(
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == native_ctx);
     const active_global = realm.global;
-    return (try string_ops.qjsRegExpSymbolSplit(
+    return (try string_ops.regExpSymbolSplit(
         native_ctx,
         host_call.output,
         active_global,

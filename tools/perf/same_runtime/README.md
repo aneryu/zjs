@@ -144,8 +144,9 @@ default behavior; the wall-time primary metric remains valid. Collector exit
 status is based on validity,
 completeness, and comparability. `aggregate.exit_line.geomean_pass` and
 `per_case_pass` are recorded results only: either may be false while a complete,
-valid run exits zero. Enforcing performance targets belongs to an opt-in
-verifier, not this collector.
+valid run exits zero. Enforcing performance targets belongs to the opt-in
+verifier (`tools/perf/verify_same_runtime`, documented in
+[VERIFIER.md](VERIFIER.md)), not this collector.
 
 Artifacts declare only `policy_id` and `policy_version`, alongside the cases
 actually requested/run and the computed results. They do not copy the policy

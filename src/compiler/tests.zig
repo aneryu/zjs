@@ -38,7 +38,7 @@ const V2Parse = struct {
         // scope group; the S2-G1 harness parses without phase-1 temp scope
         // markers so statement snippets stay inside the migrated surface.
         h.state.emit_phase1_temp = false;
-        try h.state.beginV2EmissionForTest();
+        try h.state.beginBuilderEmissionForTest();
     }
 
     fn builder(h: *V2Parse) *builder_mod.Builder {
@@ -77,7 +77,7 @@ const V2Exec = struct {
         standard_globals.configureRuntime(h.rt);
         h.ctx = try core.JSContext.create(h.rt);
         errdefer h.ctx.destroy();
-        h.name_atom = try h.rt.atoms.internString("compiler_v2-s4-exec");
+        h.name_atom = try h.rt.atoms.internString("compiler-s4-exec");
         errdefer h.rt.atoms.free(h.name_atom);
         h.function = bytecode_mod.Bytecode.init(&h.rt.memory, &h.rt.atoms, h.name_atom);
         errdefer h.function.deinit(h.rt);
@@ -86,7 +86,7 @@ const V2Exec = struct {
         h.state = try P.ParseState.initCanonicalRootWithRuntime(h.rt, &h.lex, &h.function);
         h.state.function_def.is_global_var = true;
         h.state.top_level_functions_as_children = true;
-        try h.state.beginV2ProgramEmission();
+        try h.state.beginProgramEmission();
         h.installed_short_opcode = false;
     }
 
@@ -195,7 +195,7 @@ fn installedFunctionHasShortOpcode(fb: *const bytecode_mod.FunctionBytecode) !bo
 /// Parse as a completion-returning script, translate the whole FunctionDef
 /// tree to v2, finalize through the production packed-FB pipeline, and execute
 /// it on the VM. The returned completion value is owned by the caller.
-fn v2CompileAndRun(h: *V2Exec) !core.JSValue {
+fn compileAndRun(h: *V2Exec) !core.JSValue {
     try h.state.enableReturnCompletion();
     try P.parseProgramStatements(
         &h.state,
@@ -396,7 +396,7 @@ fn expectSourceOffsets(b: *const builder_mod.Builder, expected: []const u32) !vo
     }
 }
 
-test "compiler_v2.tests: forward jump binds and relocates" {
+test "compiler.tests: forward jump binds and relocates" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -425,7 +425,7 @@ test "compiler_v2.tests: forward jump binds and relocates" {
     try std.testing.expectEqual(@as(u32, 1), entry_count);
 }
 
-test "compiler_v2.tests: backward jump marks target and relocates" {
+test "compiler.tests: backward jump marks target and relocates" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -453,7 +453,7 @@ test "compiler_v2.tests: backward jump marks target and relocates" {
     try std.testing.expectEqual(@as(u32, 1), entry_count);
 }
 
-test "compiler_v2.tests: many jumps share a head-first reloc chain" {
+test "compiler.tests: many jumps share a head-first reloc chain" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -491,7 +491,7 @@ test "compiler_v2.tests: many jumps share a head-first reloc chain" {
     try std.testing.expectEqual(@as(u32, 3), entry_count);
 }
 
-test "compiler_v2.tests: first unbound label and binds fail closed" {
+test "compiler.tests: first unbound label and binds fail closed" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -561,12 +561,12 @@ fn oomScript(allocator: std.mem.Allocator) !void {
     try b.addSourceMarker(17, 18);
 }
 
-test "compiler_v2.tests: allocation failure sweep preserves cleanup" {
+test "compiler.tests: allocation failure sweep preserves cleanup" {
     try oomScript(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, oomScript, .{});
 }
 
-test "compiler_v2.tests: source slots roll back to snapshot" {
+test "compiler.tests: source slots roll back to snapshot" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -600,11 +600,11 @@ test "compiler_v2.tests: source slots roll back to snapshot" {
     }
 }
 
-test "compiler_v2.tests: atom ownership balances across rollback and deinit" {
+test "compiler.tests: atom ownership balances across rollback and deinit" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const atom = try rt.atoms.internString("compiler_v2_atom_ownership");
+    const atom = try rt.atoms.internString("compiler_atom_ownership");
     defer rt.atoms.free(atom);
     const base = rt.atoms.refCount(atom).?;
 
@@ -627,7 +627,7 @@ test "compiler_v2.tests: atom ownership balances across rollback and deinit" {
     try std.testing.expectEqual(base, rt.atoms.refCount(atom).?);
 }
 
-test "compiler_v2.tests: rollback restores a shared label reloc chain" {
+test "compiler.tests: rollback restores a shared label reloc chain" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -662,7 +662,7 @@ test "compiler_v2.tests: rollback restores a shared label reloc chain" {
     try std.testing.expectEqual(slot.ref_count, entry_count);
 }
 
-test "compiler_v2.s2g1: conditional expression" {
+test "compiler.s2g1: conditional expression" {
     var h: V2Parse = undefined;
     try h.init("true ? false : null");
     defer h.deinit();
@@ -688,7 +688,7 @@ test "compiler_v2.s2g1: conditional expression" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g1: logical or" {
+test "compiler.s2g1: logical or" {
     var h: V2Parse = undefined;
     try h.init("false || true");
     defer h.deinit();
@@ -713,7 +713,7 @@ test "compiler_v2.s2g1: logical or" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g1: logical and chain" {
+test "compiler.s2g1: logical and chain" {
     var h: V2Parse = undefined;
     try h.init("true && false && null");
     defer h.deinit();
@@ -745,7 +745,7 @@ test "compiler_v2.s2g1: logical and chain" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g1: coalesce" {
+test "compiler.s2g1: coalesce" {
     var h: V2Parse = undefined;
     try h.init("null ?? true");
     defer h.deinit();
@@ -771,7 +771,7 @@ test "compiler_v2.s2g1: coalesce" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g1: coalesce chain" {
+test "compiler.s2g1: coalesce chain" {
     var h: V2Parse = undefined;
     try h.init("null ?? null ?? true");
     defer h.deinit();
@@ -805,7 +805,7 @@ test "compiler_v2.s2g1: coalesce chain" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g1: optional chain field" {
+test "compiler.s2g1: optional chain field" {
     var h: V2Parse = undefined;
     try h.init("true?.b");
     defer h.deinit();
@@ -840,7 +840,7 @@ test "compiler_v2.s2g1: optional chain field" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g1: optional chain element" {
+test "compiler.s2g1: optional chain element" {
     var h: V2Parse = undefined;
     try h.init("true?.[false]");
     defer h.deinit();
@@ -871,7 +871,7 @@ test "compiler_v2.s2g1: optional chain element" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g1: if else empty" {
+test "compiler.s2g1: if else empty" {
     var h: V2Parse = undefined;
     try h.init("if (true) ; else ;");
     defer h.deinit();
@@ -895,7 +895,7 @@ test "compiler_v2.s2g1: if else empty" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g1: if else expression bodies" {
+test "compiler.s2g1: if else expression bodies" {
     var h: V2Parse = undefined;
     try h.init("if (true) false; else null;");
     defer h.deinit();
@@ -923,7 +923,7 @@ test "compiler_v2.s2g1: if else expression bodies" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g1: if without else" {
+test "compiler.s2g1: if without else" {
     var h: V2Parse = undefined;
     try h.init("if (true) ;");
     defer h.deinit();
@@ -945,7 +945,7 @@ test "compiler_v2.s2g1: if without else" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g1: labeled break" {
+test "compiler.s2g1: labeled break" {
     var h: V2Parse = undefined;
     try h.init("L: if (true) break L;");
     defer h.deinit();
@@ -969,7 +969,7 @@ test "compiler_v2.s2g1: labeled break" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g1: labeled statement without break" {
+test "compiler.s2g1: labeled statement without break" {
     var h: V2Parse = undefined;
     try h.init("L: ;");
     defer h.deinit();
@@ -989,7 +989,7 @@ test "compiler_v2.s2g1: labeled statement without break" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g1: optional chain atom ownership" {
+test "compiler.s2g1: optional chain atom ownership" {
     var h: V2Parse = undefined;
     try h.init("true?.b");
     defer h.deinit();
@@ -1008,7 +1008,7 @@ test "compiler_v2.s2g1: optional chain atom ownership" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: while" {
+test "compiler.s2g2: while" {
     var h: V2Parse = undefined;
     try h.init("while (true) ;");
     defer h.deinit();
@@ -1035,7 +1035,7 @@ test "compiler_v2.s2g2: while" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: while continue" {
+test "compiler.s2g2: while continue" {
     var h: V2Parse = undefined;
     try h.init("while (true) continue;");
     defer h.deinit();
@@ -1063,7 +1063,7 @@ test "compiler_v2.s2g2: while continue" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: labeled while continue" {
+test "compiler.s2g2: labeled while continue" {
     var h: V2Parse = undefined;
     try h.init("L: while (true) continue L;");
     defer h.deinit();
@@ -1093,7 +1093,7 @@ test "compiler_v2.s2g2: labeled while continue" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: do while" {
+test "compiler.s2g2: do while" {
     var h: V2Parse = undefined;
     try h.init("do ; while (false);");
     defer h.deinit();
@@ -1118,7 +1118,7 @@ test "compiler_v2.s2g2: do while" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: classic for empty head" {
+test "compiler.s2g2: classic for empty head" {
     var h: V2Parse = undefined;
     try h.init("for (;;) ;");
     defer h.deinit();
@@ -1148,7 +1148,7 @@ test "compiler_v2.s2g2: classic for empty head" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: classic for test break" {
+test "compiler.s2g2: classic for test break" {
     var h: V2Parse = undefined;
     try h.init("for (; false; ) break;");
     defer h.deinit();
@@ -1176,7 +1176,7 @@ test "compiler_v2.s2g2: classic for test break" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: for in" {
+test "compiler.s2g2: for in" {
     var h: V2Parse = undefined;
     try h.init("for (var x in null) ;");
     defer h.deinit();
@@ -1213,7 +1213,7 @@ test "compiler_v2.s2g2: for in" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: for in break cleanup" {
+test "compiler.s2g2: for in break cleanup" {
     var h: V2Parse = undefined;
     try h.init("for (var x in null) break;");
     defer h.deinit();
@@ -1252,7 +1252,7 @@ test "compiler_v2.s2g2: for in break cleanup" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: for of" {
+test "compiler.s2g2: for of" {
     var h: V2Parse = undefined;
     try h.init("for (var x of null) ;");
     defer h.deinit();
@@ -1290,7 +1290,7 @@ test "compiler_v2.s2g2: for of" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: for of break cleanup" {
+test "compiler.s2g2: for of break cleanup" {
     var h: V2Parse = undefined;
     try h.init("for (var x of null) break;");
     defer h.deinit();
@@ -1330,7 +1330,7 @@ test "compiler_v2.s2g2: for of break cleanup" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: switch single case" {
+test "compiler.s2g2: switch single case" {
     var h: V2Parse = undefined;
     try h.init("switch (true) { case false: null; }");
     defer h.deinit();
@@ -1359,7 +1359,7 @@ test "compiler_v2.s2g2: switch single case" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: switch break default" {
+test "compiler.s2g2: switch break default" {
     var h: V2Parse = undefined;
     try h.init("switch (true) { case false: break; default: null; }");
     defer h.deinit();
@@ -1395,7 +1395,7 @@ test "compiler_v2.s2g2: switch break default" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: switch case fallthrough" {
+test "compiler.s2g2: switch case fallthrough" {
     var h: V2Parse = undefined;
     try h.init("switch (true) { case false: null; case null: false; }");
     defer h.deinit();
@@ -1433,7 +1433,7 @@ test "compiler_v2.s2g2: switch case fallthrough" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: switch default only" {
+test "compiler.s2g2: switch default only" {
     var h: V2Parse = undefined;
     try h.init("switch (true) { default: null; }");
     defer h.deinit();
@@ -1464,7 +1464,7 @@ test "compiler_v2.s2g2: switch default only" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g2: switch break suppresses fallthrough" {
+test "compiler.s2g2: switch break suppresses fallthrough" {
     var h: V2Parse = undefined;
     try h.init("switch (true) { case false: break; case null: ; }");
     defer h.deinit();
@@ -1497,7 +1497,7 @@ test "compiler_v2.s2g2: switch break suppresses fallthrough" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g3: try finally live tail" {
+test "compiler.s2g3: try finally live tail" {
     var h: V2Parse = undefined;
     try h.init("try { null; } finally { false; }");
     defer h.deinit();
@@ -1532,7 +1532,7 @@ test "compiler_v2.s2g3: try finally live tail" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g3: try catch optional binding live tails" {
+test "compiler.s2g3: try catch optional binding live tails" {
     var h: V2Parse = undefined;
     try h.init("try { null; } catch { false; }");
     defer h.deinit();
@@ -1575,7 +1575,7 @@ test "compiler_v2.s2g3: try catch optional binding live tails" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g3: try catch binding after throw" {
+test "compiler.s2g3: try catch binding after throw" {
     var h: V2Parse = undefined;
     try h.init("try { throw true; } catch (e) { }");
     defer h.deinit();
@@ -1612,7 +1612,7 @@ test "compiler_v2.s2g3: try catch binding after throw" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g3: return through finally" {
+test "compiler.s2g3: return through finally" {
     var h: V2Parse = undefined;
     try h.init("try { return; } finally { null; }");
     // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
@@ -1646,7 +1646,7 @@ test "compiler_v2.s2g3: return through finally" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g3: break through finally inside loop" {
+test "compiler.s2g3: break through finally inside loop" {
     var h: V2Parse = undefined;
     try h.init("while (true) { try { break; } finally { null; } }");
     defer h.deinit();
@@ -1687,14 +1687,14 @@ test "compiler_v2.s2g3: break through finally inside loop" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g3: epilogue after plain statement" {
+test "compiler.s2g3: epilogue after plain statement" {
     var h: V2Parse = undefined;
     try h.init("null;");
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
-    try P.v2EmitPlainTailForTest(&h.state);
+    try P.emitPlainTailForTest(&h.state);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1710,14 +1710,14 @@ test "compiler_v2.s2g3: epilogue after plain statement" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g3: epilogue after terminal" {
+test "compiler.s2g3: epilogue after terminal" {
     var h: V2Parse = undefined;
     try h.init("throw null;");
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
-    try P.v2EmitPlainTailForTest(&h.state);
+    try P.emitPlainTailForTest(&h.state);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1732,14 +1732,14 @@ test "compiler_v2.s2g3: epilogue after terminal" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g3: epilogue after loop merge" {
+test "compiler.s2g3: epilogue after loop merge" {
     var h: V2Parse = undefined;
     try h.init("while (true) ;");
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
-    try P.v2EmitPlainTailForTest(&h.state);
+    try P.emitPlainTailForTest(&h.state);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1761,7 +1761,7 @@ test "compiler_v2.s2g3: epilogue after loop merge" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g3: plain return dead epilogue" {
+test "compiler.s2g3: plain return dead epilogue" {
     var h: V2Parse = undefined;
     try h.init("return;");
     // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
@@ -1773,7 +1773,7 @@ test "compiler_v2.s2g3: plain return dead epilogue" {
 
     const b = h.builder();
     try std.testing.expectEqual(@as(u32, 1), b.code_len);
-    try P.v2EmitPlainTailForTest(&h.state);
+    try P.emitPlainTailForTest(&h.state);
 
     try expectV2Stream(b, &.{
         .{ .op = qop.return_undef, .size = 1 },
@@ -1786,7 +1786,7 @@ test "compiler_v2.s2g3: plain return dead epilogue" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g3: return with value" {
+test "compiler.s2g3: return with value" {
     var h: V2Parse = undefined;
     try h.init("return null;");
     // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
@@ -1809,7 +1809,7 @@ test "compiler_v2.s2g3: return with value" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g4: classic for splices update after body" {
+test "compiler.s2g4: classic for splices update after body" {
     var h: V2Parse = undefined;
     try h.init("for (; false; null) ;");
     defer h.deinit();
@@ -1842,7 +1842,7 @@ test "compiler_v2.s2g4: classic for splices update after body" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g4: classic for shifts detached conditional labels" {
+test "compiler.s2g4: classic for shifts detached conditional labels" {
     var h: V2Parse = undefined;
     try h.init("for (; false; true ? null : false) ;");
     defer h.deinit();
@@ -1883,7 +1883,7 @@ test "compiler_v2.s2g4: classic for shifts detached conditional labels" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g4: classic for splices update after break" {
+test "compiler.s2g4: classic for splices update after break" {
     var h: V2Parse = undefined;
     try h.init("for (; false; null) break;");
     defer h.deinit();
@@ -1915,7 +1915,7 @@ test "compiler_v2.s2g4: classic for splices update after break" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g4: plain field assignment rewinds getter" {
+test "compiler.s2g4: plain field assignment rewinds getter" {
     var h: V2Parse = undefined;
     try h.init("true.b = null;");
     defer h.deinit();
@@ -1929,7 +1929,7 @@ test "compiler_v2.s2g4: plain field assignment rewinds getter" {
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.push_true, .size = 1 },
-        // v2GetLValue removes get_field before the RHS is emitted.
+        // getLValue removes get_field before the RHS is emitted.
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.insert2, .size = 1 },
         .{ .op = qop.put_field, .size = 5, .atom = field_atom },
@@ -1947,7 +1947,7 @@ test "compiler_v2.s2g4: plain field assignment rewinds getter" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g4: compound field assignment reemits getter" {
+test "compiler.s2g4: compound field assignment reemits getter" {
     var h: V2Parse = undefined;
     try h.init("true.b += null;");
     defer h.deinit();
@@ -1981,7 +1981,7 @@ test "compiler_v2.s2g4: compound field assignment reemits getter" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g4: plain array element assignment rewinds getter" {
+test "compiler.s2g4: plain array element assignment rewinds getter" {
     var h: V2Parse = undefined;
     try h.init("true[false] = null;");
     defer h.deinit();
@@ -1993,7 +1993,7 @@ test "compiler_v2.s2g4: plain array element assignment rewinds getter" {
     try expectV2Stream(b, &.{
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.push_false, .size = 1 },
-        // v2GetLValue removes get_array_el and leaves base/key on the stack.
+        // getLValue removes get_array_el and leaves base/key on the stack.
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.insert3, .size = 1 },
         .{ .op = qop.put_array_el, .size = 1 },
@@ -2009,7 +2009,7 @@ test "compiler_v2.s2g4: plain array element assignment rewinds getter" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g4: postfix field update preserves old value" {
+test "compiler.s2g4: postfix field update preserves old value" {
     var h: V2Parse = undefined;
     try h.init("true.b++;");
     defer h.deinit();
@@ -2041,7 +2041,7 @@ test "compiler_v2.s2g4: postfix field update preserves old value" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g4: prefix array element update preserves new value" {
+test "compiler.s2g4: prefix array element update preserves new value" {
     var h: V2Parse = undefined;
     try h.init("++true[false];");
     defer h.deinit();
@@ -2069,7 +2069,7 @@ test "compiler_v2.s2g4: prefix array element update preserves new value" {
     try expectSourceOrder(b);
 }
 
-test "compiler_v2.s2g4: minimal class expression and default constructor" {
+test "compiler.s2g4: minimal class expression and default constructor" {
     var h: V2Parse = undefined;
     try h.init("(class {});");
     defer h.deinit();
@@ -2136,7 +2136,7 @@ test "compiler_v2.s2g4: minimal class expression and default constructor" {
     try expectSourceOrder(ctor);
 }
 
-test "compiler_v2.s2g4: class declaration stores local binding" {
+test "compiler.s2g4: class declaration stores local binding" {
     var h: V2Parse = undefined;
     try h.init("class C {}");
     defer h.deinit();
@@ -2204,7 +2204,7 @@ test "compiler_v2.s2g4: class declaration stores local binding" {
     try expectSourceOrder(ctor);
 }
 
-test "compiler_v2.s2g4: named class method splices runtime definition" {
+test "compiler.s2g4: named class method splices runtime definition" {
     var h: V2Parse = undefined;
     try h.init("(class { m() { null; } });");
     defer h.deinit();
@@ -2290,7 +2290,7 @@ test "compiler_v2.s2g4: named class method splices runtime definition" {
     try expectSourceOrder(ctor);
 }
 
-test "compiler_v2.s2g4: explicit constructor rolls back parent closure" {
+test "compiler.s2g4: explicit constructor rolls back parent closure" {
     var h: V2Parse = undefined;
     try h.init("(class { constructor() { null; } });");
     defer h.deinit();
@@ -2353,7 +2353,7 @@ test "compiler_v2.s2g4: explicit constructor rolls back parent closure" {
     try expectSourceOrder(ctor);
 }
 
-test "compiler_v2.s2g4: derived default constructor returns checked this" {
+test "compiler.s2g4: derived default constructor returns checked this" {
     var h: V2Parse = undefined;
     try h.init("(class extends null {});");
     defer h.deinit();
@@ -2418,7 +2418,7 @@ test "compiler_v2.s2g4: derived default constructor returns checked this" {
     try expectSourceOrder(ctor);
 }
 
-test "compiler_v2.s2g4: instance field uses dormant brand prologue" {
+test "compiler.s2g4: instance field uses dormant brand prologue" {
     var h: V2Parse = undefined;
     try h.init("(class { x = null; });");
     defer h.deinit();
@@ -2490,7 +2490,7 @@ test "compiler_v2.s2g4: instance field uses dormant brand prologue" {
     try expectSourceOrder(fields);
 }
 
-test "compiler_v2.s2g4: private method patches instance brand prologue" {
+test "compiler.s2g4: private method patches instance brand prologue" {
     var h: V2Parse = undefined;
     try h.init("(class { #m() {} });");
     defer h.deinit();
@@ -2583,7 +2583,7 @@ test "compiler_v2.s2g4: private method patches instance brand prologue" {
     try expectSourceOrder(fields);
 }
 
-test "compiler_v2.s2g4: static block nests closure in static initializer" {
+test "compiler.s2g4: static block nests closure in static initializer" {
     var h: V2Parse = undefined;
     try h.init("(class { static { null; } });");
     defer h.deinit();
@@ -2667,7 +2667,7 @@ test "compiler_v2.s2g4: static block nests closure in static initializer" {
     try expectSourceOrder(block);
 }
 
-test "compiler_v2.s2g4: static field emits through static initializer" {
+test "compiler.s2g4: static field emits through static initializer" {
     var h: V2Parse = undefined;
     try h.init("(class { static x = null; });");
     defer h.deinit();
@@ -2734,7 +2734,7 @@ test "compiler_v2.s2g4: static field emits through static initializer" {
     try expectSourceOrder(static_init);
 }
 
-test "compiler_v2.s2g4: computed method splices key and closure" {
+test "compiler.s2g4: computed method splices key and closure" {
     var h: V2Parse = undefined;
     try h.init("(class { [true]() {} });");
     defer h.deinit();
@@ -2791,7 +2791,7 @@ test "compiler_v2.s2g4: computed method splices key and closure" {
     try expectSourceOrder(method);
 }
 
-test "compiler_v2.s2g4: getter child keeps return terminal" {
+test "compiler.s2g4: getter child keeps return terminal" {
     var h: V2Parse = undefined;
     try h.init("(class { get g() { return null; } });");
     defer h.deinit();
@@ -2851,7 +2851,7 @@ test "compiler_v2.s2g4: getter child keeps return terminal" {
     try expectSourceOrder(getter);
 }
 
-test "compiler_v2.s3: parsed dead code after break is dropped" {
+test "compiler.s3: parsed dead code after break is dropped" {
     var h: V2Parse = undefined;
     // Numeric literal emission is outside the migrated v2 parser surface;
     // null keeps the same dead expression-statement shape through v2.
@@ -2892,7 +2892,7 @@ test "compiler_v2.s3: parsed dead code after break is dropped" {
     try std.testing.expectEqual(@as(u32, 2), product.jump_size);
 }
 
-test "compiler_v2.s3: parsed dead-only loop labels stay dead" {
+test "compiler.s3: parsed dead-only loop labels stay dead" {
     var h: V2Parse = undefined;
     try h.init("for (;;) { break; continue; }");
     defer h.deinit();
@@ -2932,7 +2932,7 @@ test "compiler_v2.s3: parsed dead-only loop labels stay dead" {
     try std.testing.expectEqual(@as(u32, 2), product.jump_size);
 }
 
-test "compiler_v2.s3: parsed return through finally keeps live gosub" {
+test "compiler.s3: parsed return through finally keeps live gosub" {
     var h: V2Parse = undefined;
     try h.init("try { return; } finally { null; }");
     h.state.return_depth = 1;
@@ -2971,7 +2971,7 @@ test "compiler_v2.s3: parsed return through finally keeps live gosub" {
     try std.testing.expectEqual(@as(u32, 3), product.jump_size);
 }
 
-test "compiler_v2.s3: parsed empty finally removes gosub" {
+test "compiler.s3: parsed empty finally removes gosub" {
     var h: V2Parse = undefined;
     try h.init("try { return; } finally { }");
     h.state.return_depth = 1;
@@ -3013,7 +3013,7 @@ test "compiler_v2.s3: parsed empty finally removes gosub" {
     try std.testing.expectEqual(@as(u32, 3), product.jump_size);
 }
 
-test "compiler_v2.fuse: legacy opcode sizes stay put" {
+test "compiler.fuse: legacy opcode sizes stay put" {
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.get_loc0));
     try std.testing.expectEqual(@as(u8, 5), opcode.sizeOf(qop.get_field));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.lt));
@@ -3038,7 +3038,7 @@ fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
     var h: V2Exec = undefined;
     try h.init(src);
     defer h.deinit();
-    const result = try v2CompileAndRun(&h);
+    const result = try compileAndRun(&h);
     defer result.free(h.rt);
     try std.testing.expectEqual(expected, result.asInt32().?);
 }
@@ -3063,7 +3063,7 @@ fn countInstalledOpcode(fb: *const bytecode_mod.FunctionBytecode, want: u8) !usi
     return n;
 }
 
-fn v2CompileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void {
+fn compileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void {
     var h: V2Exec = undefined;
     try h.init(src);
     defer h.deinit();
@@ -3121,24 +3121,24 @@ fn v2CompileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void 
     try std.testing.expectEqual(expected, result.asInt32().?);
 }
 
-test "compiler_v2.fuse: get_loc0_field is emitted and executes" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: get_loc0_field is emitted and executes" {
+    try compileRunAndCount(
         "(function () { var o = { x: 7 }; var t = 1; return o.x + t; })();",
         8,
         &.{ qop.get_loc0_field, qop.get_field },
     );
 }
 
-test "compiler_v2.fuse: cmp_if_false8 emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: cmp_if_false8 emit and execute" {
+    try compileRunAndCount(
         "(function () { var n = 0; for (var i = 0; i < 4; i++) n = n + 1; return n; })();",
         4,
         &.{ qop.cmp_if_false8, qop.if_false8 },
     );
 }
 
-test "compiler_v2.fuse: push_this_put_loc0 and put_loc0_get_loc0 emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: push_this_put_loc0 and put_loc0_get_loc0 emit and execute" {
+    try compileRunAndCount(
         \\(function () {
         \\    function C() { this.x = 1; }
         \\    C.prototype.m = function () {
@@ -3153,80 +3153,80 @@ test "compiler_v2.fuse: push_this_put_loc0 and put_loc0_get_loc0 emit and execut
     );
 }
 
-test "compiler_v2.fuse: get_field2_call_method emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: get_field2_call_method emit and execute" {
+    try compileRunAndCount(
         "(function () { var o = { m: function () { return 7; } }; var r = o.m(); return r; })();",
         7,
         &.{ qop.get_field2_call_method, qop.call_method },
     );
 }
 
-test "compiler_v2.fuse: get_loc2_field emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: get_loc2_field emit and execute" {
+    try compileRunAndCount(
         "(function () { var a = 1, b = 2, o = { x: 6 }; var t = a + b; return o.x + t; })();",
         9,
         &.{ qop.get_loc2_field, qop.get_field },
     );
 }
 
-test "compiler_v2.fuse: get_field_field2 emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: get_field_field2 emit and execute" {
+    try compileRunAndCount(
         "(function () { var o = { a: { m: function () { return 3; } } }; return o.a.m(); })();",
         3,
         &.{qop.get_field_field2},
     );
 }
 
-test "compiler_v2.fuse: get_var_field emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: get_var_field emit and execute" {
+    try compileRunAndCount(
         "(function () { return Object.prototype ? 1 : 0; })();",
         1,
         &.{qop.get_var_field},
     );
 }
 
-test "compiler_v2.fuse: get_loc2_field2 emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: get_loc2_field2 emit and execute" {
+    try compileRunAndCount(
         "(function () { var a = 1, b = 2, o = { m: function () { return 8; } }; var t = a + b; return o.m() + t; })();",
         11,
         &.{qop.get_loc2_field2},
     );
 }
 
-test "compiler_v2.fuse: push_0_or emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: push_0_or emit and execute" {
+    try compileRunAndCount(
         "(function () { return (1 | 0) + (2 | 0); })();",
         3,
         &.{qop.push_0_or},
     );
 }
 
-test "compiler_v2.fuse: sar_get_array_el emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: sar_get_array_el emit and execute" {
+    try compileRunAndCount(
         "(function () { var a = [9, 8, 7]; return a[4 >> 1]; })();",
         7,
         &.{qop.sar_get_array_el},
     );
 }
 
-test "compiler_v2.fuse: push_2_sar emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: push_2_sar emit and execute" {
+    try compileRunAndCount(
         "(function () { return 8 >> 2; })();",
         2,
         &.{qop.push_2_sar},
     );
 }
 
-test "compiler_v2.fuse: push_0_shr emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: push_0_shr emit and execute" {
+    try compileRunAndCount(
         "(function () { return (8 >>> 0) + (4 >>> 0); })();",
         12,
         &.{qop.push_0_shr},
     );
 }
 
-test "compiler_v2.fuse: get_loc8_push_1 emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: get_loc8_push_1 emit and execute" {
+    try compileRunAndCount(
         \\(function () {
         \\    var a=0,b=0,c=0,d=0,e=8;
         \\    var keep = a + b + c + d;
@@ -3238,8 +3238,8 @@ test "compiler_v2.fuse: get_loc8_push_1 emit and execute" {
     );
 }
 
-test "compiler_v2.fuse: get_var_ref0_get_loc8 emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: get_var_ref0_get_loc8 emit and execute" {
+    try compileRunAndCount(
         \\(function () {
         \\    var captured = 7;
         \\    return (function () {
@@ -3254,16 +3254,16 @@ test "compiler_v2.fuse: get_var_ref0_get_loc8 emit and execute" {
     );
 }
 
-test "compiler_v2.fuse: push_i8_add emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: push_i8_add emit and execute" {
+    try compileRunAndCount(
         "(function () { return 10 + 20; })();",
         30,
         &.{qop.push_i8_add},
     );
 }
 
-test "compiler_v2.fuse: get_loc8_push_i8 emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: get_loc8_push_i8 emit and execute" {
+    try compileRunAndCount(
         \\(function () {
         \\    var a=0,b=0,c=0,d=0,e=5;
         \\    var keep = a + b + c + d;
@@ -3275,8 +3275,8 @@ test "compiler_v2.fuse: get_loc8_push_i8 emit and execute" {
     );
 }
 
-test "compiler_v2.fuse: get_loc8_push_2 emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: get_loc8_push_2 emit and execute" {
+    try compileRunAndCount(
         \\(function () {
         \\    var a=0,b=0,c=0,d=0,e=8;
         \\    var keep = a + b + c + d;
@@ -3288,8 +3288,8 @@ test "compiler_v2.fuse: get_loc8_push_2 emit and execute" {
     );
 }
 
-test "compiler_v2.fuse: get_loc8 leftover push_0_shr emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: get_loc8 leftover push_0_shr emit and execute" {
+    try compileRunAndCount(
         \\(function () {
         \\    var a=0,b=0,c=0,d=0,e=8;
         \\    var keep = a + b + c + d;
@@ -3301,16 +3301,16 @@ test "compiler_v2.fuse: get_loc8 leftover push_0_shr emit and execute" {
     );
 }
 
-test "compiler_v2.fuse: eq_if_false8 emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: eq_if_false8 emit and execute" {
+    try compileRunAndCount(
         "(function () { var x = 1; if (x == 1) return 4; return 0; })();",
         4,
         &.{ qop.eq_if_false8, qop.if_false8 },
     );
 }
 
-test "compiler_v2.fuse: put_loc8_get_loc8 emit and execute" {
-    try v2CompileRunAndCount(
+test "compiler.fuse: put_loc8_get_loc8 emit and execute" {
+    try compileRunAndCount(
         \\(function (x) {
         \\    var a = 0, b = 0, c = 0, d = 0, e = 0, f = 0;
         \\    e = x;
@@ -3322,60 +3322,60 @@ test "compiler_v2.fuse: put_loc8_get_loc8 emit and execute" {
     );
 }
 
-test "compiler_v2.s4: arithmetic executes installed FunctionBytecode" {
+test "compiler.s4: arithmetic executes installed FunctionBytecode" {
     try expectV2ExecutionCompletion("6 * 7;", 42);
 }
 
-test "compiler_v2.s4: if else true arm executes" {
+test "compiler.s4: if else true arm executes" {
     try expectV2ExecutionCompletion(
         "let r; if (true) { r = 1; } else { r = 2; } r;",
         1,
     );
 }
 
-test "compiler_v2.s4: if else false arm executes" {
+test "compiler.s4: if else false arm executes" {
     try expectV2ExecutionCompletion(
         "let r; if (false) { r = 1; } else { r = 2; } r;",
         2,
     );
 }
 
-test "compiler_v2.s4: while break executes" {
+test "compiler.s4: while break executes" {
     try expectV2ExecutionCompletion(
         "let i = 0; while (true) { i = i + 1; if (i == 3) break; } i;",
         3,
     );
 }
 
-test "compiler_v2.s4: for accumulate executes" {
+test "compiler.s4: for accumulate executes" {
     try expectV2ExecutionCompletion(
         "let s = 0; for (let k = 0; k < 5; k = k + 1) { s = s + k; } s;",
         10,
     );
 }
 
-test "compiler_v2.s4: switch fallthrough executes" {
+test "compiler.s4: switch fallthrough executes" {
     try expectV2ExecutionCompletion(
         "let x = 0; switch (2) { case 1: x = x + 1; case 2: x = x + 10; case 3: x = x + 100; break; default: x = x + 1000; } x;",
         110,
     );
 }
 
-test "compiler_v2.s4: try finally value executes" {
+test "compiler.s4: try finally value executes" {
     try expectV2ExecutionCompletion(
         "let t = 0; try { t = 1; } finally { t = t + 10; } t;",
         11,
     );
 }
 
-test "compiler_v2.s4: try catch throw executes" {
+test "compiler.s4: try catch throw executes" {
     try expectV2ExecutionCompletion(
         "let c = 0; try { throw 5; } catch (e) { c = e + 2; } c;",
         7,
     );
 }
 
-test "compiler_v2.s4: nested closure capture executes" {
+test "compiler.s4: nested closure capture executes" {
     // S3 deliberately leaves function-body hoist instantiation to a later
     // finalization owner (resolve_variables.zig enter_scope arm). Use an
     // explicit function-expression assignment until that documented stub is
@@ -3387,26 +3387,26 @@ test "compiler_v2.s4: nested closure capture executes" {
     );
 }
 
-test "compiler_v2.s4: labeled break executes" {
+test "compiler.s4: labeled break executes" {
     try expectV2ExecutionCompletion(
         "let n = 0; L: { n = 1; break L; n = 2; } n;",
         1,
     );
 }
 
-test "compiler_v2.s4: global var machinery executes" {
+test "compiler.s4: global var machinery executes" {
     try expectV2ExecutionCompletion("var g = 4; g + 1;", 5);
 }
 
-test "compiler_v2.s4: installed for loop matches the configured default layout" {
+test "compiler.s4: installed for loop matches the configured default layout" {
     var h: V2Exec = undefined;
     try h.init("let s = 0; for (let k = 0; k < 5; k = k + 1) { s = s + k; } s;");
     defer h.deinit();
-    const result = try v2CompileAndRun(&h);
+    const result = try compileAndRun(&h);
     defer result.free(h.rt);
     try std.testing.expectEqual(@as(i32, 10), result.asInt32().?);
     // The production path lowers with `resolve_labels.default_layout`
-    // (`-Dzjs_v2_layout`), so assert against that declaration rather than
+    // (`-Dzjs_compiler_layout`), so assert against that declaration rather than
     // against a hardcoded mode. This test previously pinned `.plain` and was
     // the one place in the suite that silently depended on the old default:
     // it is the same defect class as a gate reporting green about a
@@ -3429,18 +3429,18 @@ test "compiler_v2.s4: installed for loop matches the configured default layout" 
     // taken with it. So close the whole chain here, from the option string to
     // the emitted bytes to the string every gate compares:
     //
-    //   -Dzjs_v2_layout  ->  resolve_labels.default_layout  ->  emitted
+    //   -Dzjs_compiler_layout  ->  resolve_labels.default_layout  ->  emitted
     //   bytecode  ->  config_signature.layout
     //
     // Note the direction: the option string is checked AGAINST the observed
     // emission, not the other way round. A test that asserted `.plain` because
     // `.plain` was the input parameter would pass on a build where the
     // resolver ignores the option entirely.
-    try std.testing.expectEqualStrings(build_options.zjs_v2_layout, observed_layout);
+    try std.testing.expectEqualStrings(build_options.zjs_compiler_layout, observed_layout);
     try std.testing.expectEqualStrings(observed_layout, config_signature.layout);
 }
 
-test "compiler_v2.p5: FunctionDef owners are inert after the FunctionBytecode escape" {
+test "compiler.p5: FunctionDef owners are inert after the FunctionBytecode escape" {
     var h: V2Exec = undefined;
     try h.init(
         \\var escapeAuditOuter = 1;
@@ -3481,7 +3481,7 @@ test "compiler_v2.p5: FunctionDef owners are inert after the FunctionBytecode es
     try std.testing.expect(owners.child_functions >= 1);
 }
 
-test "compiler_v2.p5: escaped atoms outlive compiler teardown" {
+test "compiler.p5: escaped atoms outlive compiler teardown" {
     const source =
         \\var o = {};
         \\o.escapeAuditProbeName = 7;
@@ -3491,13 +3491,13 @@ test "compiler_v2.p5: escaped atoms outlive compiler teardown" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     standard_globals.configureRuntime(rt);
     const ctx = try core.JSContext.create(rt);
-    const name_atom = try rt.atoms.internString("compiler_v2-p5-atom-escape");
+    const name_atom = try rt.atoms.internString("compiler-p5-atom-escape");
     var function = bytecode_mod.Bytecode.init(&rt.memory, &rt.atoms, name_atom);
     var lex = parser_mod.Lexer.init(std.testing.allocator, &rt.atoms, source);
     var state = try P.ParseState.initCanonicalRootWithRuntime(rt, &lex, &function);
     state.function_def.is_global_var = true;
     state.top_level_functions_as_children = true;
-    try state.beginV2ProgramEmission();
+    try state.beginProgramEmission();
 
     {
         const probe = try rt.atoms.internString("escapeAuditProbeName");
@@ -3585,7 +3585,7 @@ fn expectCoverageSkipSetMatches(
         if (was_skipped and !case.expect_skip) {
             mismatched = true;
             if (verbose) std.debug.print(
-                "compiler_v2.coverage: snippet[{d}] SKIPPED but is not allowlisted\n" ++
+                "compiler.coverage: snippet[{d}] SKIPPED but is not allowlisted\n" ++
                     "  {s}\n" ++
                     "  every corpus snippet must compile; either fix it, or add\n" ++
                     "  .expect_skip = true with a .skip_reason explaining why it never can\n",
@@ -3595,7 +3595,7 @@ fn expectCoverageSkipSetMatches(
         if (!was_skipped and case.expect_skip) {
             mismatched = true;
             if (verbose) std.debug.print(
-                "compiler_v2.coverage: snippet[{d}] is allowlisted to skip but COMPILED\n" ++
+                "compiler.coverage: snippet[{d}] is allowlisted to skip but COMPILED\n" ++
                     "  {s}\n  allowlist reason (now stale): {s}\n" ++
                     "  remove .expect_skip: a stale allowlist hides real coverage\n",
                 .{ index, case.source, case.skip_reason },
@@ -3605,7 +3605,7 @@ fn expectCoverageSkipSetMatches(
     if (mismatched) return error.CoverageSkipSetMismatch;
 }
 
-test "compiler_v2.coverage: every production construct compiles through the one compiler" {
+test "compiler.coverage: every production construct compiles through the one compiler" {
     const Case = CoverageCase;
     const cases = [_]Case{
         .{ .source = "let value = 1 + 2; value *= 3; value;" },
@@ -3680,7 +3680,7 @@ test "compiler_v2.coverage: every production construct compiles through the one 
         ) catch |err| {
             skipped[index] = true;
             std.debug.print(
-                "compiler_v2.coverage snippet[{d}] ({s}) did not compile: {s}\n  {s}\n" ++
+                "compiler.coverage snippet[{d}] ({s}) did not compile: {s}\n  {s}\n" ++
                     "  allowlisted={}  reason={s}\n",
                 .{
                     index,
@@ -3703,12 +3703,12 @@ test "compiler_v2.coverage: every production construct compiles through the one 
         for (cases) |case| {
             if (case.expect_skip) expected_skips += 1;
             if (case.expect_skip and case.skip_reason.len == 0) {
-                @compileError("compiler_v2.coverage: an allowlisted skip must carry a .skip_reason");
+                @compileError("compiler.coverage: an allowlisted skip must carry a .skip_reason");
             }
         }
     }
     std.debug.print(
-        "compiler_v2.coverage corpus compiled={d}/{d} allowlisted_skips={d}\n",
+        "compiler.coverage corpus compiled={d}/{d} allowlisted_skips={d}\n",
         .{ compiled, cases.len, expected_skips },
     );
     // A new skip fails; an allowlist entry that started compiling fails.

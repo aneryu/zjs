@@ -204,6 +204,8 @@ pub fn JSBytes(comptime Value: type) type {
             };
         }
 
+        // mirror of value_semantics.objectFromValue, keep in sync — kept
+        // local: generic `Value` parameter context.
         fn objectFromValue(value: Value) ?*@import("object.zig").Object {
             if (!value.isObject()) return null;
             const header = value.refHeader() orelse return null;

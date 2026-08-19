@@ -214,8 +214,9 @@ node tools/perf/write_env.js \
   --notes "ZJS self-baseline report; qjs is intentionally not configured for this gate. This 64-bit build uses the default 16-byte JSValue representation."
 ```
 
-Runtime-profile artifacts are checked under `reports/perf/current/runtime/`,
-with their source scripts in `reports/perf/current/scripts/`.
+Runtime-profile source scripts live in `reports/perf/current/scripts/`;
+profile JSON is written locally under `.zig-cache/perf/` and is not checked
+in.
 
 ## Self-Baseline Diffs
 
@@ -255,17 +256,18 @@ zig-out/bin/zjs --perf-json -e "for(var i=0; i<100000; i++) {}" 2> .zig-cache/pe
 The JSON is written to stderr so script stdout remains comparable. Its stage
 timings and memory counters remain usable.
 
-Per-opcode profiling is temporarily unavailable. The build option
-`-Dzjs_enable_opcode_profile=true`, CLI `--profile-opcodes`,
-`tools/perf/run_runtime_profile.js`, and the `perf-*-profile` build shortcuts
-still exist, but the dispatcher no longer imports the profiling scope. A real
-script therefore reports zero executed opcodes. Do not refresh checked runtime
-profile artifacts or use opcode rows for attribution until the scope is
-restored and an end-to-end non-zero-count test is part of the gate.
+Per-opcode profiling requires the dedicated profiling build:
 
-Existing files under `reports/perf/current/runtime/` are historical evidence
-from builds where opcode instrumentation was connected. They are not a
-description of the current binary.
+```sh
+zig build zjs-profile --summary all
+./zig-out/bin/zjs-profile --profile-opcodes -e "for(var i=0; i<100000; i++) {}"
+```
+
+The profiling build (`-Dzjs_enable_opcode_profile=true`) counts and
+delta-times every hot-table dispatch through `vm_profile.noteDispatch`. The
+default `zjs` binary does not collect opcode counts and fails closed on
+`--profile-opcodes` (exit 2). The `perf-runtime-profiles` gate requires a
+minimum count, so an all-zero profile cannot pass.
 
 Compare two runtime-profile artifacts:
 
@@ -276,10 +278,11 @@ node tools/perf/diff_runtime_profile.js \
   NEW-runtime-profile.json
 ```
 
-`diff_runtime_profile.js` can still compare non-opcode fields in existing
-artifacts. Its opcode-specific gates are historical-only until profiling is
-restored. Use `--warn-regressions` for noisy exploratory runs and keep strict
-thresholds for evidence attached to a performance-sensitive change.
+`diff_runtime_profile.js` compares stage timings, memory counters, and — for
+artifacts recorded by a profiling build — opcode-specific gates such as
+`opcode_count:get_var_ref0`. Use `--warn-regressions` for noisy exploratory
+runs and keep strict thresholds for evidence attached to a
+performance-sensitive change.
 
 ### Linux sampling and PMU counters
 

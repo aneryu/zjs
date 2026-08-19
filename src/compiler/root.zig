@@ -11,7 +11,7 @@
 //!   + resolve_labels_v2 + single layout-selectable final emission (jump
 //!     threading, pc2line generated directly at output positions)
 //!
-//! Final layout: -Dzjs_v2_layout=short (default) |plain (A/B diagnostic
+//! Final layout: -Dzjs_compiler_layout=short (default) |plain (A/B diagnostic
 //! instrument). It is named in the build's configuration signature; see
 //! src/config_signature.zig and `zig build config-signature-check`.
 //!

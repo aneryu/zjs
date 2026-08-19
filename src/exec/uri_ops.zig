@@ -4,7 +4,7 @@ const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const exceptions = @import("exceptions.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const string_ops = @import("string_ops.zig");
 
 const HostError = exceptions.HostError;

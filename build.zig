@@ -28,13 +28,15 @@ pub fn build(b: *std.Build) void {
     // signature so an artifact still NAMES the compiler it was built from and
     // the negative drift gate still has a component to falsify.
     const compiler_name = "v2";
-    // QCP-1: compiler-v2 final bytecode layout. `short` is part of the release
+    // QCP-1: compiler final bytecode layout. `short` is part of the release
     // configuration, not an optimization knob: the switch measurements were
     // taken against it. `plain` stays reachable as the A/B diagnostic
     // instrument (it is how C2-B artifact residency was localised).
-    const zjs_v2_layout = b.option([]const u8, "zjs_v2_layout", "compiler-v2 final layout: short (default) or plain (diagnostic)") orelse "short";
-    if (!std.mem.eql(u8, zjs_v2_layout, "plain") and !std.mem.eql(u8, zjs_v2_layout, "short")) {
-        std.debug.print("error: invalid -Dzjs_v2_layout value '{s}': expected plain or short\n", .{zjs_v2_layout});
+    // `-Dzjs_v2_layout` is a deprecated alias (removed next release).
+    const zjs_compiler_layout = b.option([]const u8, "zjs_compiler_layout", "compiler final layout: short (default) or plain (diagnostic)") orelse
+        b.option([]const u8, "zjs_v2_layout", "DEPRECATED alias of zjs_compiler_layout (removed next release)") orelse "short";
+    if (!std.mem.eql(u8, zjs_compiler_layout, "plain") and !std.mem.eql(u8, zjs_compiler_layout, "short")) {
+        std.debug.print("error: invalid -Dzjs_compiler_layout value '{s}': expected plain or short\n", .{zjs_compiler_layout});
         std.process.exit(1);
     }
     // OOM-injection coverage instrumentation (v1): records deduplicated
@@ -74,7 +76,7 @@ pub fn build(b: *std.Build) void {
     // shipped binary.
     const config_settings: config.ConfigSettings = .{
         .compiler = compiler_name,
-        .layout = zjs_v2_layout,
+        .layout = zjs_compiler_layout,
         .nan_boxing = zjs_nan_boxing,
         .optimize = optimize,
         .force_gc = zjs_force_gc,
@@ -136,7 +138,7 @@ pub fn build(b: *std.Build) void {
     const engine_option_inputs: config.EngineOptionInputs = .{
         .enable_opcode_profile = zjs_enable_opcode_profile,
         .nan_boxing = zjs_nan_boxing,
-        .v2_layout = zjs_v2_layout,
+        .compiler_layout = zjs_compiler_layout,
         .expect_config = expect_config,
         .oom_coverage = zjs_oom_coverage,
         .force_gc = zjs_force_gc,
@@ -149,7 +151,6 @@ pub fn build(b: *std.Build) void {
     const engine_options_fast = config.addEngineOptions(b, engine_option_inputs.withExpect(expect_config_fast));
     // Pinned Debug: internal_dev_mod (zjs-dev, run-test262-dev).
     const engine_options_dev = config.addEngineOptions(b, engine_option_inputs.withExpect(expect_config_debug));
-
 
     const ctx = config.Ctx{
         .b = b,

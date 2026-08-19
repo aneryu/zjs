@@ -3,7 +3,7 @@
 const std = @import("std");
 
 const core = @import("../core/root.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -17,14 +17,14 @@ const string_ops = @import("string_ops.zig");
 const buildCallSiteArray = array_ops.buildCallSiteArray;
 const buildErrorStackStringValue = string_ops.buildErrorStackStringValue;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
-const defineDataProperty = object_ops.defineDataProperty;
+const defineDataPropertyByName = object_ops.defineDataPropertyByName;
 const formatCapturedErrorStackStringValue = string_ops.formatCapturedErrorStackStringValue;
 const isCallableValue = call_runtime.isCallableValue;
 
 pub fn defineErrorStack(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, instance: *core.Object) !void {
     const stack_value = try buildErrorStackValue(ctx, output, global, instance.value(), null);
     defer stack_value.free(ctx.runtime);
-    try defineDataProperty(ctx.runtime, instance, "stack", stack_value, true, false, true);
+    try defineDataPropertyByName(ctx.runtime, instance, "stack", stack_value, true, false, true);
 }
 
 pub fn captureErrorStack(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, instance: *core.Object) !void {
@@ -36,7 +36,7 @@ pub fn captureErrorStack(ctx: *core.JSContext, output: ?*std.Io.Writer, global: 
 
 /// Value-level stack capture: attach the current VM backtrace as call sites
 /// to `value` when it is an object; non-object values are ignored. This is
-/// the seam used by the `vm_exception_ops` construction primitives, which
+/// the seam used by the `exception_ops` construction primitives, which
 /// capture the stack at error construction time (QuickJS `build_backtrace`
 /// inside `JS_ThrowError2`).
 pub fn attachStackToErrorValue(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !void {
@@ -140,9 +140,9 @@ fn defineParseErrorSurface(
     const instance = property_ops.expectObject(error_value) catch return;
     const filename_value = try value_ops.createStringValue(rt, filename);
     defer filename_value.free(rt);
-    try defineDataProperty(rt, instance, "fileName", filename_value, true, false, true);
-    try defineDataProperty(rt, instance, "lineNumber", core.JSValue.int32(line_num), true, false, true);
-    try defineDataProperty(rt, instance, "columnNumber", core.JSValue.int32(col_num), true, false, true);
+    try defineDataPropertyByName(rt, instance, "fileName", filename_value, true, false, true);
+    try defineDataPropertyByName(rt, instance, "lineNumber", core.JSValue.int32(line_num), true, false, true);
+    try defineDataPropertyByName(rt, instance, "columnNumber", core.JSValue.int32(col_num), true, false, true);
 
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(rt.memory.allocator);

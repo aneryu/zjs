@@ -7,7 +7,7 @@ const method_ids = core.host_function.builtin_method_ids;
 const dtoa = @import("../libs/number_format.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const frame_mod = @import("frame.zig");
-const property_ic = @import("property_ic.zig");
+const property_direct = @import("property_direct.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
@@ -16,7 +16,7 @@ const call_runtime = @import("call_runtime.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const call_mod = @import("call.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
@@ -25,67 +25,67 @@ const readInt = call_runtime.readInt;
 const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 // Helpers that remain in vm_property.zig (shared with the leftover handlers).
-const property_vm = @import("vm_property.zig");
+const vm_property = @import("vm_property.zig");
 const vm_property_locals = @import("vm_property_locals.zig");
-const CollectionHostOutputKey = property_vm.CollectionHostOutputKey;
-const CollectionHostOutputKeyOperand = property_vm.CollectionHostOutputKeyOperand;
-const DecodedImmediateInt32 = property_vm.DecodedImmediateInt32;
-const FastGlobalReadValue = property_vm.FastGlobalReadValue;
-const LocalPut = property_vm.LocalPut;
-const NumberStaticLiteralResult = property_vm.NumberStaticLiteralResult;
-const Step = property_vm.Step;
-const StoredGlobalDataValue = property_vm.StoredGlobalDataValue;
-const StringNumberConstArg = property_vm.StringNumberConstArg;
-const StringNumberConstCall = property_vm.StringNumberConstCall;
-const TypedArrayLengthPrintGet = property_vm.TypedArrayLengthPrintGet;
-const TypedArrayLengthPrintStore = property_vm.TypedArrayLengthPrintStore;
+const CollectionHostOutputKey = vm_property.CollectionHostOutputKey;
+const CollectionHostOutputKeyOperand = vm_property.CollectionHostOutputKeyOperand;
+const DecodedImmediateInt32 = vm_property.DecodedImmediateInt32;
+const FastGlobalReadValue = vm_property.FastGlobalReadValue;
+const LocalPut = vm_property.LocalPut;
+const NumberStaticLiteralResult = vm_property.NumberStaticLiteralResult;
+const Step = vm_property.Step;
+const StoredGlobalDataValue = vm_property.StoredGlobalDataValue;
+const StringNumberConstArg = vm_property.StringNumberConstArg;
+const StringNumberConstCall = vm_property.StringNumberConstCall;
+const TypedArrayLengthPrintGet = vm_property.TypedArrayLengthPrintGet;
+const TypedArrayLengthPrintStore = vm_property.TypedArrayLengthPrintStore;
 const arg = vm_property_locals.arg;
-const atomAsciiText = property_vm.atomAsciiText;
-const atomStringValueForFastPath = property_vm.atomStringValueForFastPath;
-const backwardGotoTarget = property_vm.backwardGotoTarget;
-const canFinishWithUndefinedAt = property_vm.canFinishWithUndefinedAt;
-const canFuseGlobalDataWrite = property_vm.canFuseGlobalDataWrite;
-const canUseFastGlobalVarLookup = property_vm.canUseFastGlobalVarLookup;
-const canUseInstalledGlobalDataIc = property_vm.canUseInstalledGlobalDataIc;
-const decodeFalseBranch = property_vm.decodeFalseBranch;
-const decodeFieldAtom = property_vm.decodeFieldAtom;
-const decodeGlobalDataGet = property_vm.decodeGlobalDataGet;
-const decodeGlobalPut = property_vm.decodeGlobalPut;
-const decodeLocalGet = property_vm.decodeLocalGet;
-const decodeOptionalLocalCompletionTail = property_vm.decodeOptionalLocalCompletionTail;
-const fastArrayPrototypeMethodIsDefault = property_vm.fastArrayPrototypeMethodIsDefault;
-const fastCollectionPrototypeMethodIsDefault = property_vm.fastCollectionPrototypeMethodIsDefault;
-const fastDenseArrayElementValue = property_vm.fastDenseArrayElementValue;
-const fastGlobalDataValueForAtomAtPc = property_vm.fastGlobalDataValueForAtomAtPc;
-const fastInstalledGlobalDataValueForAtomAtPc = property_vm.fastInstalledGlobalDataValueForAtomAtPc;
-const fastInt32Add = property_vm.fastInt32Add;
-const fastInt32Mul = property_vm.fastInt32Mul;
-const fastInt32Sub = property_vm.fastInt32Sub;
-const fastStringPrototypeMethodIsDefault = property_vm.fastStringPrototypeMethodIsDefault;
-const finishUndefinedCallResult = property_vm.finishUndefinedCallResult;
-const frameHasVarRefBinding = property_vm.frameHasVarRefBinding;
-const functionFrameBindingShadowsGlobal = property_vm.functionFrameBindingShadowsGlobal;
-const globalVarAtom = property_vm.globalVarAtom;
-const hasObjectBinding = property_vm.hasObjectBinding;
-const immediateInt32Operand = property_vm.immediateInt32Operand;
-const isHostOutputFunctionValue = property_vm.isHostOutputFunctionValue;
-const localReadableBorrowed = property_vm.localReadableBorrowed;
-const slotValueBorrowed = property_vm.slotValueBorrowed;
-const storeLocalCompletionBorrowedValue = property_vm.storeLocalCompletionBorrowedValue;
-const stringFromValue = property_vm.stringFromValue;
-const varRefReadableBorrowed = property_vm.varRefReadableBorrowed;
-const varRefReadableBorrowedForFastPath = property_vm.varRefReadableBorrowedForFastPath;
+const atomAsciiText = vm_property.atomAsciiText;
+const atomStringValueForFastPath = vm_property.atomStringValueForFastPath;
+const backwardGotoTarget = vm_property.backwardGotoTarget;
+const canFinishWithUndefinedAt = vm_property.canFinishWithUndefinedAt;
+const canFuseGlobalDataWrite = vm_property.canFuseGlobalDataWrite;
+const canUseFastGlobalVarLookup = vm_property.canUseFastGlobalVarLookup;
+const canUseInstalledGlobalDataIc = vm_property.canUseInstalledGlobalDataIc;
+const decodeFalseBranch = vm_property.decodeFalseBranch;
+const decodeFieldAtom = vm_property.decodeFieldAtom;
+const decodeGlobalDataGet = vm_property.decodeGlobalDataGet;
+const decodeGlobalPut = vm_property.decodeGlobalPut;
+const decodeLocalGet = vm_property.decodeLocalGet;
+const decodeOptionalLocalCompletionTail = vm_property.decodeOptionalLocalCompletionTail;
+const fastArrayPrototypeMethodIsDefault = vm_property.fastArrayPrototypeMethodIsDefault;
+const fastCollectionPrototypeMethodIsDefault = vm_property.fastCollectionPrototypeMethodIsDefault;
+const fastDenseArrayElementValue = vm_property.fastDenseArrayElementValue;
+const fastGlobalDataValueForAtomAtPc = vm_property.fastGlobalDataValueForAtomAtPc;
+const fastInstalledGlobalDataValueForAtomAtPc = vm_property.fastInstalledGlobalDataValueForAtomAtPc;
+const checkedInt32Add = vm_property.checkedInt32Add;
+const checkedInt32Mul = vm_property.checkedInt32Mul;
+const checkedInt32Sub = vm_property.checkedInt32Sub;
+const fastStringPrototypeMethodIsDefault = vm_property.fastStringPrototypeMethodIsDefault;
+const finishUndefinedCallResult = vm_property.finishUndefinedCallResult;
+const frameHasVarRefBinding = vm_property.frameHasVarRefBinding;
+const functionFrameBindingShadowsGlobal = vm_property.functionFrameBindingShadowsGlobal;
+const globalVarAtom = vm_property.globalVarAtom;
+const hasObjectBinding = vm_property.hasObjectBinding;
+const immediateInt32Operand = vm_property.immediateInt32Operand;
+const isHostOutputFunctionValue = vm_property.isHostOutputFunctionValue;
+const localReadableBorrowed = vm_property.localReadableBorrowed;
+const slotValueBorrowed = vm_property.slotValueBorrowed;
+const storeLocalCompletionBorrowedValue = vm_property.storeLocalCompletionBorrowedValue;
+const stringFromValue = vm_property.stringFromValue;
+const varRefReadableBorrowed = vm_property.varRefReadableBorrowed;
+const varRefReadableBorrowedForFastPath = vm_property.varRefReadableBorrowedForFastPath;
 
-const functionOwnNativeBuiltinRefForFastPath = property_ic.functionOwnNativeBuiltinRefForFastPath;
-const globalDataPropertyValueForFastPath = property_ic.globalDataPropertyValueForFastPath;
-const globalDataPropertyValueForFastPathNoProfile = property_ic.globalDataPropertyValueForFastPathNoProfile;
-const globalWritableDataStoreAvailableForFastPath = property_ic.globalWritableDataStoreAvailableForFastPath;
-const globalWritableDataStoreInt32ForFastPath = property_ic.globalWritableDataStoreInt32ForFastPath;
-const ordinaryDataPropertyBorrowedValueForFastPath = property_ic.ordinaryDataPropertyBorrowedValueForFastPath;
-const ordinaryDataPropertyIsUndefinedForFastPath = property_ic.ordinaryDataPropertyIsUndefinedForFastPath;
-const ordinaryDataPropertyValueOrUndefinedForFastPath = property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath;
-const setGlobalDataPropertyForFastPath = property_ic.setGlobalDataPropertyForFastPath;
-const setGlobalWritableDataStoreForFastPathOwned = property_ic.setGlobalWritableDataStoreForFastPathOwned;
+const functionOwnNativeBuiltinRefForFastPath = property_direct.functionOwnNativeBuiltinRefForFastPath;
+const globalDataPropertyValueForFastPath = property_direct.globalDataPropertyValueForFastPath;
+const globalDataPropertyValueForFastPathNoProfile = property_direct.globalDataPropertyValueForFastPathNoProfile;
+const globalWritableDataStoreAvailableForFastPath = property_direct.globalWritableDataStoreAvailableForFastPath;
+const globalWritableDataStoreInt32ForFastPath = property_direct.globalWritableDataStoreInt32ForFastPath;
+const ordinaryDataPropertyBorrowedValueForFastPath = property_direct.ordinaryDataPropertyBorrowedValueForFastPath;
+const ordinaryDataPropertyIsUndefinedForFastPath = property_direct.ordinaryDataPropertyIsUndefinedForFastPath;
+const ordinaryDataPropertyValueOrUndefinedForFastPath = property_direct.ordinaryDataPropertyValueOrUndefinedForFastPath;
+const setGlobalDataPropertyForFastPath = property_direct.setGlobalDataPropertyForFastPath;
+const setGlobalWritableDataStoreForFastPathOwned = property_direct.setGlobalWritableDataStoreForFastPathOwned;
 
 const op = bytecode.opcode.op;
 const atom_date = core.atom.predefinedId("Date", .string).?;
@@ -98,7 +98,7 @@ inline fn closureVarAt(function: *const bytecode.FunctionBytecode, idx: u16) ?by
     return function.closureVar()[idx];
 }
 
-fn throwGlobalTdz(
+fn throwGlobalTdzReferenceError(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -106,7 +106,7 @@ fn throwGlobalTdz(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
-    const err = exception_ops.throwTdzReference(ctx);
+    const err = exception_ops.throwTdzReferenceError(ctx);
     if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
     return err;
 }
@@ -197,13 +197,13 @@ pub noinline fn getVar(
                 // never the lexical env.
                 const cv_is_lexical = if (closureVarAt(function, ref_idx)) |cv| cv.isLexical() else false;
                 if (cv_is_lexical and !cell.varRefIsDeletableSlot().*) {
-                    return try throwGlobalTdz(ctx, output, global, stack, frame, catch_target);
+                    return try throwGlobalTdzReferenceError(ctx, output, global, stack, frame, catch_target);
                 }
                 return try getVarFromGlobalObject(ctx, output, global, stack, function, frame, catch_target, opc, atom_id);
             }
         }
     } else if (closureVarAt(function, ref_idx)) |cv| {
-        if (cv.isLexical()) return try throwGlobalTdz(ctx, output, global, stack, frame, catch_target);
+        if (cv.isLexical()) return try throwGlobalTdzReferenceError(ctx, output, global, stack, frame, catch_target);
     }
     const opcode_profile = ctx.runtime.opcode_profile;
     if (opcode_profile != null) {
@@ -545,9 +545,9 @@ fn expectImmediateInt32(code: []const u8, pc: usize, expected: i32) ?usize {
 
 fn fastInt32ImmediateBinary(opcode_id: u8, lhs: i32, rhs: i32) ?core.JSValue {
     return switch (opcode_id) {
-        op.add => fastInt32Add(lhs, rhs),
-        op.sub => fastInt32Sub(lhs, rhs),
-        op.mul => fastInt32Mul(lhs, rhs),
+        op.add => checkedInt32Add(lhs, rhs),
+        op.sub => checkedInt32Sub(lhs, rhs),
+        op.mul => checkedInt32Mul(lhs, rhs),
         op.sar => core.JSValue.int32(lhs >> @intCast(rhs & 31)),
         op.@"and" => core.JSValue.int32(lhs & rhs),
         op.@"or" => core.JSValue.int32(lhs | rhs),
@@ -591,7 +591,7 @@ pub noinline fn putVar(
                 if (cell.is_lexical and core.VarRef.fromValue(current) == null) {
                     value.free(ctx.runtime);
                     if (current.isUninitialized()) {
-                        return try throwGlobalTdz(ctx, output, global, stack, frame, catch_target);
+                        return try throwGlobalTdzReferenceError(ctx, output, global, stack, frame, catch_target);
                     }
                     // qjs JS_ThrowTypeErrorReadOnly (18507); zjs reports
                     // the const violation through the same catchable
@@ -611,7 +611,7 @@ pub noinline fn putVar(
     } else if (closureVarAt(function, ref_idx)) |cv| {
         if (cv.isLexical()) {
             value.free(ctx.runtime);
-            return try throwGlobalTdz(ctx, output, global, stack, frame, catch_target);
+            return try throwGlobalTdzReferenceError(ctx, output, global, stack, frame, catch_target);
         }
     }
     const opcode_profile = ctx.runtime.opcode_profile;

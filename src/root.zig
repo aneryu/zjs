@@ -165,7 +165,7 @@ pub const host = struct {
         source: []const u8,
         filename: []const u8,
     ) !value.Value {
-        return zjs_exec.call.qjsEvalGlobalScriptSource(ctx.core, output, global, source, filename);
+        return zjs_exec.call.evalGlobalScriptSource(ctx.core, output, global, source, filename);
     }
 
     fn evalGlobalScriptValueCore(

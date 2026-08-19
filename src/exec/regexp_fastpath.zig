@@ -12,7 +12,7 @@ const value_ops = @import("value_ops.zig");
 
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const array_ops = @import("array_ops.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const object_ops = @import("object_ops.zig");
@@ -70,14 +70,14 @@ const latin1StringSlice = string_ops.latin1StringSlice;
 const objectFromValue = object_ops.objectFromValue;
 const objectHasRegExpInternalSlots = object_ops.objectHasRegExpInternalSlots;
 const objectRealmGlobal = object_ops.objectRealmGlobal;
-const qjsRegExpPrototypeMethodIsDefault = object_ops.qjsRegExpPrototypeMethodIsDefault;
-const qjsRegExpSymbolMatch = string_ops.qjsRegExpSymbolMatch;
-const qjsRegExpSymbolMatchAll = string_ops.qjsRegExpSymbolMatchAll;
-const qjsRegExpSymbolReplace = string_ops.qjsRegExpSymbolReplace;
-const qjsRegExpSymbolSearch = string_ops.qjsRegExpSymbolSearch;
-const qjsRegExpSymbolSplit = string_ops.qjsRegExpSymbolSplit;
-const qjsRegExpToString = string_ops.qjsRegExpToString;
-const qjsStringValueContainsByte = string_ops.qjsStringValueContainsByte;
+const regExpPrototypeMethodIsDefault = object_ops.regExpPrototypeMethodIsDefault;
+const regExpSymbolMatch = string_ops.regExpSymbolMatch;
+const regExpSymbolMatchAll = string_ops.regExpSymbolMatchAll;
+const regExpSymbolReplace = string_ops.regExpSymbolReplace;
+const regExpSymbolSearch = string_ops.regExpSymbolSearch;
+const regExpSymbolSplit = string_ops.regExpSymbolSplit;
+const regExpToString = string_ops.regExpToString;
+const stringValueContainsByte = string_ops.stringValueContainsByte;
 const reflectConstructPrototypeVm = object_ops.reflectConstructPrototypeVm;
 const regExpLegacyNoCaptureSliceValue = array_ops.regExpLegacyNoCaptureSliceValue;
 const regExpPrototypeFromGlobal = object_ops.regExpPrototypeFromGlobal;
@@ -95,7 +95,7 @@ const toLengthIndexSlow = coercion_ops.toLengthIndexSlow;
 const toStringForAnnexB = string_ops.toStringForAnnexB;
 const valueTruthy = coercion_ops.valueTruthy;
 
-pub fn qjsRegExpFunctionCall(
+pub fn regExpFunctionCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -178,7 +178,7 @@ pub fn qjsRegExpFunctionCall(
     return constructRegExpRecordInNativeScope(ctx, output, global, constructor, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"), pattern, flags, caller_function, caller_frame);
 }
 
-pub fn qjsRegExpConstructCall(
+pub fn regExpConstructCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -193,13 +193,13 @@ pub fn qjsRegExpConstructCall(
     native_scope.push();
     defer native_scope.deinit();
 
-    return qjsRegExpConstructCallInNativeScope(ctx, output, global, constructor, new_target, args, caller_function, caller_frame) catch |err| {
+    return regExpConstructCallInNativeScope(ctx, output, global, constructor, new_target, args, caller_function, caller_frame) catch |err| {
         try builtin_dispatch.materializeRuntimeError(ctx, global, err);
         return err;
     };
 }
 
-fn qjsRegExpConstructCallInNativeScope(
+fn regExpConstructCallInNativeScope(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -299,7 +299,7 @@ fn qjsRegExpConstructCallInNativeScope(
     return constructRegExpRecordInNativeScope(ctx, output, global, constructor, prototype.object(), pattern, flags, caller_function, caller_frame);
 }
 
-pub fn qjsRegExpExecMethod(
+pub fn regExpExecMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -322,10 +322,10 @@ pub fn qjsRegExpExecMethod(
         owned_string = value;
         break :blk value;
     };
-    return (try qjsRegExpExecResult(ctx, output, global, this_value, regexp_object, string_value, true, caller_function, caller_frame)) orelse error.TypeError;
+    return (try regExpExecResult(ctx, output, global, this_value, regexp_object, string_value, true, caller_function, caller_frame)) orelse error.TypeError;
 }
 
-pub fn qjsRegExpTestMethod(
+pub fn regExpTestMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -346,21 +346,21 @@ pub fn qjsRegExpTestMethod(
         break :blk value;
     };
     const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return error.TypeError;
-    if (qjsRegExpPrototypeMethodIsDefault(ctx.runtime, receiver_object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) {
-        if (try qjsRegExpTestFastNoResult(ctx, receiver_object, string_value)) |matched| {
+    if (regExpPrototypeMethodIsDefault(ctx.runtime, receiver_object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) {
+        if (try regExpTestFastNoResult(ctx, receiver_object, string_value)) |matched| {
             return core.JSValue.boolean(matched);
         }
-        const result = try qjsRegExpExecResult(ctx, output, global, this_value, receiver_object, string_value, true, caller_function, caller_frame) orelse return core.JSValue.boolean(false);
+        const result = try regExpExecResult(ctx, output, global, this_value, receiver_object, string_value, true, caller_function, caller_frame) orelse return core.JSValue.boolean(false);
         defer result.free(ctx.runtime);
         return core.JSValue.boolean(!result.isNull());
     }
 
-    const result = try qjsRegExpExecGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
+    const result = try regExpExecGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     return core.JSValue.boolean(!result.isNull());
 }
 
-pub fn qjsRegExpTestFastNoResult(
+pub fn regExpTestFastNoResult(
     ctx: *core.JSContext,
     regexp_object: *core.Object,
     string_value: core.JSValue,
@@ -387,7 +387,7 @@ pub fn regExpLastIndexCanSkipCoercion(object: *core.Object) bool {
     return true;
 }
 
-pub fn qjsRegExpCompile(
+pub fn regExpCompile(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -471,7 +471,7 @@ pub fn qjsRegExpCompile(
     return this_value.dup();
 }
 
-pub fn qjsRegExpSpeciesConstructor(
+pub fn regExpSpeciesConstructor(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -520,8 +520,8 @@ pub fn isDefaultRegExpConstructor(rt: *core.JSRuntime, global: *core.Object, val
 }
 
 pub fn regExpFlagsAreFullUnicode(rt: *core.JSRuntime, flags_string: core.JSValue) !bool {
-    return try qjsStringValueContainsByte(rt, flags_string, 'u') or
-        try qjsStringValueContainsByte(rt, flags_string, 'v');
+    return try stringValueContainsByte(rt, flags_string, 'u') or
+        try stringValueContainsByte(rt, flags_string, 'v');
 }
 
 pub fn regexpInternalFlagsContain(regexp_object: *core.Object, needle: u8) bool {
@@ -578,7 +578,7 @@ pub fn appendNamedCaptureSubstitution(
     return true;
 }
 
-pub fn qjsRegExpExecGeneric(
+pub fn regExpExecGeneric(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -616,10 +616,10 @@ pub fn qjsRegExpExecGeneric(
         const rx_object = objectFromValue(rx) orelse return error.TypeError;
         if (rx_object.class_id != core.class.ids.regexp) return error.TypeError;
     }
-    return try qjsRegExpExecMethod(ctx, output, global, rx, &.{string_value}, caller_function, caller_frame);
+    return try regExpExecMethod(ctx, output, global, rx, &.{string_value}, caller_function, caller_frame);
 }
 
-pub fn qjsRegExpAccessor(
+pub fn regExpAccessor(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -658,7 +658,7 @@ pub fn qjsRegExpAccessor(
     return null;
 }
 
-pub fn qjsRegExpLegacyAccessor(
+pub fn regExpLegacyAccessor(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -817,7 +817,7 @@ pub fn setRegExpLastIndexStrict(
     try setValuePropertyStrict(ctx, output, global, regexp_value, core.atom.ids.lastIndex, value, caller_function, caller_frame);
 }
 
-pub fn qjsRegExpExecResult(
+pub fn regExpExecResult(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -850,13 +850,13 @@ pub fn qjsRegExpExecResult(
             }
             return core.JSValue.nullValue();
         }
-        return try qjsRegExpExecCompiledResult(ctx, output, global, regexp_value, regexp_object, string_value, string_data, compiled, use_last_index, is_global, is_sticky, has_indices, start_index, caller_function, caller_frame);
+        return try regExpExecCompiledResult(ctx, output, global, regexp_value, regexp_object, string_value, string_data, compiled, use_last_index, is_global, is_sticky, has_indices, start_index, caller_function, caller_frame);
     }
 
     return null;
 }
 
-pub fn qjsRegExpExecCompiledResult(
+pub fn regExpExecCompiledResult(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,

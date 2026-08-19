@@ -76,7 +76,7 @@ fn atomicsCall(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == host_call.ctx);
-    return call_runtime.qjsAtomicsCallForNativeRecord(
+    return call_runtime.atomicsCallForNativeRecord(
         host_call.ctx,
         host_call.output,
         realm.global,

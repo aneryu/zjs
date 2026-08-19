@@ -7,14 +7,14 @@ const exceptions = @import("exceptions.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
-const property_ic = @import("property_ic.zig");
+const property_direct = @import("property_direct.zig");
 const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
@@ -699,7 +699,7 @@ inline fn iteratorResultProperty(
             return object_ops.getValueProperty(ctx, output, global, receiver, atom_id, function, frame);
         }
     }
-    if (property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, receiver, atom_id)) |borrowed| {
+    if (property_direct.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, receiver, atom_id)) |borrowed| {
         return borrowed.dup();
     }
     return object_ops.getValueProperty(ctx, output, global, receiver, atom_id, function, frame);
@@ -825,9 +825,9 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
 /// Result-object-free for-of step for a pristine sync generator (qjs JS_IteratorNext2
 /// built-in fast path, quickjs.c:16548): when the iterator is a sync generator whose
 /// `next` is the un-overridden %GeneratorPrototype%.next, resume one step via
-/// `qjsSyncGeneratorStep` (returns the raw value+done) and push value + done straight onto
+/// `syncGeneratorStep` (returns the raw value+done) and push value + done straight onto
 /// the operand stack, skipping the per-step `{value, done}` iterator-result object the
-/// generic protocol (qjsGeneratorNext -> createIteratorResult) allocates. All `return false`
+/// generic protocol (generatorNext -> createIteratorResult) allocates. All `return false`
 /// bails are BEFORE the resume (the generator has not advanced), so falling through to the
 /// generic path never double-advances.
 fn fastGeneratorForOfNext(
@@ -848,7 +848,7 @@ fn fastGeneratorForOfNext(
     // null is returned only for non-sync-generator receivers, checked BEFORE
     // the resume runs any user code, so falling back to the generic path never
     // double-advances.
-    const step = (try call_runtime.qjsSyncGeneratorStep(ctx, output, global, receiver, &.{})) orelse return false;
+    const step = (try call_runtime.syncGeneratorStep(ctx, output, global, receiver, &.{})) orelse return false;
     const value = step.value;
     errdefer value.free(ctx.runtime);
     const done = step.done;
@@ -951,7 +951,7 @@ pub noinline fn forInNext(
                 forof_ops.forInInProtoChainSlot(iterator).* = 1;
             }
             // it->obj = JS_GetPrototypeFree(ctx, it->obj) (quickjs.c:16438).
-            const proto_value = try object_ops.qjsObjectGetPrototypeOfValue(ctx, output, global, obj, null, null);
+            const proto_value = try object_ops.objectGetPrototypeOfValue(ctx, output, global, obj, null, null);
             if (proto_value.isNull()) {
                 iterator.clearOptionalValueSlot(rt, iterator.iteratorTargetSlot());
                 return pushForInDone(stack); // no more prototype (quickjs.c:16441)
@@ -1025,7 +1025,7 @@ fn forInPrepareProtoChainEnum(
 
     // "check if there are enumerable properties in the prototype chain (fast
     // path)" (quickjs.c:16353-16377): walk the chain with the ENUM_ONLY probe.
-    var obj1_val = try object_ops.qjsObjectGetPrototypeOfValue(ctx, output, global, root, null, null);
+    var obj1_val = try object_ops.objectGetPrototypeOfValue(ctx, output, global, root, null, null);
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &obj1_val },
     };
@@ -1050,7 +1050,7 @@ fn forInPrepareProtoChainEnum(
             has_enumerable = true;
             break; // goto slow_path (quickjs.c:16367-16368)
         }
-        const next_val = try object_ops.qjsObjectGetPrototypeOfValue(ctx, output, global, obj1, null, null);
+        const next_val = try object_ops.objectGetPrototypeOfValue(ctx, output, global, obj1, null, null);
         obj1_val.free(rt);
         obj1_val = next_val;
     }
@@ -1148,7 +1148,7 @@ pub fn arrayIteratorPrototypeFromContext(
         if (stored.isObject()) return property_ops.expectObject(stored) catch return error.TypeError;
     }
 
-    const object = try qjsIteratorPrototype(ctx.runtime, global, "Array Iterator");
+    const object = try iteratorPrototype(ctx.runtime, global, "Array Iterator");
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
     try builtin_glue.defineNativeDataMethodWithNativeId(
         ctx.runtime,
@@ -1369,18 +1369,18 @@ pub fn iteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*
     return iterator.getOwnDataObjectBorrowed(core.atom.ids.prototype);
 }
 
-pub fn qjsDefineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
+pub fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
     const tag = try value_ops.createStringValue(rt, tag_name);
     defer tag.free(rt);
     try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, false, false, true));
 }
 
-pub fn qjsIteratorPrototype(rt: *core.JSRuntime, global: *core.Object, tag_name: []const u8) !*core.Object {
+pub fn iteratorPrototype(rt: *core.JSRuntime, global: *core.Object, tag_name: []const u8) !*core.Object {
     var fallback_base = if (iteratorPrototypeFromGlobal(rt, global) == null) blk: {
         const base = try core.Object.create(rt, core.class.ids.object, null);
         errdefer core.Object.destroyFromHeader(rt, &base.header);
-        try qjsDefineToStringTag(rt, base, "Iterator");
+        try defineToStringTag(rt, base, "Iterator");
         break :blk base;
     } else null;
     errdefer if (fallback_base) |base| base.value().free(rt);
@@ -1391,11 +1391,11 @@ pub fn qjsIteratorPrototype(rt: *core.JSRuntime, global: *core.Object, tag_name:
         fallback_base = null;
         owned_base.value().free(rt);
     }
-    try qjsDefineToStringTag(rt, specific, tag_name);
+    try defineToStringTag(rt, specific, tag_name);
     return specific;
 }
 
-pub fn qjsIteratorPrototypeAccessor(
+pub fn iteratorPrototypeAccessor(
     ctx: *core.JSContext,
     global: *core.Object,
     receiver: core.JSValue,
@@ -1412,10 +1412,10 @@ pub fn qjsIteratorPrototypeAccessor(
                 const iterator_key = core.atom.predefinedId("Iterator", .string) orelse return error.TypeError;
                 return try global.getProperty(iterator_key);
             }
-            return try qjsIteratorPrototypeAccessorSet(ctx, global, receiver, core.atom.ids.constructor, args[0]);
+            return try iteratorPrototypeAccessorSet(ctx, global, receiver, core.atom.ids.constructor, args[0]);
         },
         @intFromEnum(method_ids.iterator.AccessorMethod.to_string_tag_getter) => return try value_ops.createStringValue(ctx.runtime, "Iterator"),
-        @intFromEnum(method_ids.iterator.AccessorMethod.to_string_tag_setter) => return try qjsIteratorPrototypeAccessorSet(
+        @intFromEnum(method_ids.iterator.AccessorMethod.to_string_tag_setter) => return try iteratorPrototypeAccessorSet(
             ctx,
             global,
             receiver,
@@ -1426,7 +1426,7 @@ pub fn qjsIteratorPrototypeAccessor(
     }
 }
 
-pub fn qjsIteratorPrototypeAccessorSet(
+pub fn iteratorPrototypeAccessorSet(
     ctx: *core.JSContext,
     global: *core.Object,
     receiver: core.JSValue,
@@ -1457,7 +1457,7 @@ pub fn qjsIteratorPrototypeAccessorSet(
     return core.JSValue.undefinedValue();
 }
 
-pub fn qjsIteratorFromCall(
+pub fn iteratorFromCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1490,7 +1490,7 @@ pub const IteratorFromResult = struct {
     }
 };
 
-pub fn qjsInstallIteratorHelperMethod(
+pub fn installIteratorHelperMethod(
     rt: *core.JSRuntime,
     global: *core.Object,
     helper: *core.Object,
@@ -1507,7 +1507,7 @@ pub fn qjsInstallIteratorHelperMethod(
     try helper.defineOwnProperty(rt, key, core.Descriptor.data(method, true, false, true));
 }
 
-fn qjsIteratorMethodsPrototype(
+fn iteratorMethodsPrototype(
     rt: *core.JSRuntime,
     global: *core.Object,
     slot: core.object.RealmValueSlot,
@@ -1515,11 +1515,11 @@ fn qjsIteratorMethodsPrototype(
 ) !*core.Object {
     if (global.cachedRealmValue(rt, slot)) |stored| return property_ops.expectObject(stored);
 
-    const proto = try qjsIteratorPrototype(rt, global, tag_name);
+    const proto = try iteratorPrototype(rt, global, tag_name);
     var proto_raw_owned = true;
     errdefer if (proto_raw_owned) core.Object.destroyFromHeader(rt, &proto.header);
-    try qjsInstallIteratorHelperMethod(rt, global, proto, "next", 1);
-    try qjsInstallIteratorHelperMethod(rt, global, proto, "return", 2);
+    try installIteratorHelperMethod(rt, global, proto, "next", 1);
+    try installIteratorHelperMethod(rt, global, proto, "return", 2);
     const value = proto.value();
     proto_raw_owned = false;
     defer value.free(rt);
@@ -1528,21 +1528,21 @@ fn qjsIteratorMethodsPrototype(
     return proto;
 }
 
-pub fn qjsIteratorHelperPrototype(
+pub fn iteratorHelperPrototype(
     rt: *core.JSRuntime,
     global: *core.Object,
 ) !*core.Object {
-    return qjsIteratorMethodsPrototype(rt, global, .iterator_helper_prototype, "Iterator Helper");
+    return iteratorMethodsPrototype(rt, global, .iterator_helper_prototype, "Iterator Helper");
 }
 
-pub fn qjsIteratorConcatPrototype(
+pub fn iteratorConcatPrototype(
     rt: *core.JSRuntime,
     global: *core.Object,
 ) !*core.Object {
-    return qjsIteratorMethodsPrototype(rt, global, .iterator_concat_prototype, "Iterator Concat");
+    return iteratorMethodsPrototype(rt, global, .iterator_concat_prototype, "Iterator Concat");
 }
 
-pub fn qjsIteratorConcatCall(
+pub fn iteratorConcatCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1601,7 +1601,7 @@ pub fn qjsIteratorConcatCall(
         try records.setProperty(ctx.runtime, core.atom.atomFromUInt32(@intCast(index * 2 + 1)), rooted_iterator_method);
     }
 
-    const prototype = try qjsIteratorConcatPrototype(ctx.runtime, global);
+    const prototype = try iteratorConcatPrototype(ctx.runtime, global);
     const helper = try core.Object.create(ctx.runtime, core.class.ids.iterator_helper, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &helper.header);
     try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorTargetSlot(), rooted_records);
@@ -1632,7 +1632,7 @@ fn testIteratorConcatGetIteratorMethod(
     return test_iterator_concat_method.dup();
 }
 
-test "qjsIteratorConcatCall roots direct function bytecode iterator method while creating helper" {
+test "iteratorConcatCall roots direct function bytecode iterator method while creating helper" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1672,7 +1672,7 @@ test "qjsIteratorConcatCall roots direct function bytecode iterator method while
     const old_threshold = rt.gcThreshold();
     defer rt.setGCThreshold(old_threshold);
 
-    const helper_value = try qjsIteratorConcatCall(
+    const helper_value = try iteratorConcatCall(
         ctx,
         null,
         global,
@@ -1757,11 +1757,9 @@ const IteratorZipHelperKind = enum(u8) {
     zip_keyed = 8,
 };
 
-fn objectFromValue(value: core.JSValue) ?*core.Object {
-    return property_ops.expectObject(value) catch null;
-}
+const objectFromValue = core.value_semantics.objectFromValue;
 
-pub fn qjsIteratorZipCall(
+pub fn iteratorZipCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1810,7 +1808,7 @@ pub fn qjsIteratorZipCall(
     const iterables_object = objectFromValue(iterables) orelse return error.TypeError;
 
     const options = if (rooted_args.len >= 2) rooted_args[1] else core.JSValue.undefinedValue();
-    const mode = try qjsIteratorZipModeFromOptions(ctx, output, global, options, caller_function, caller_frame);
+    const mode = try iteratorZipModeFromOptions(ctx, output, global, options, caller_function, caller_frame);
     if (mode == .longest and rooted_args.len >= 2 and !options.isUndefined()) {
         const padding_key = try rt.internAtom("padding");
         defer rt.atoms.free(padding_key);
@@ -1849,10 +1847,10 @@ pub fn qjsIteratorZipCall(
     const count = if (!keyed) blk: {
         var iterables_iterator = call_runtime.iteratorForValue(ctx, output, global, iterables, caller_function, caller_frame) catch |err| return err;
         defer if (!iterables_iterator.isUndefined()) iterables_iterator.free(rt);
-        const iterables_next = try qjsIteratorZipNextMethod(ctx, output, global, iterables_iterator, caller_function, caller_frame);
+        const iterables_next = try iteratorZipNextMethod(ctx, output, global, iterables_iterator, caller_function, caller_frame);
         defer iterables_next.free(rt);
 
-        break :blk try qjsIteratorZipCollectIndexed(
+        break :blk try iteratorZipCollectIndexed(
             ctx,
             output,
             global,
@@ -1866,7 +1864,7 @@ pub fn qjsIteratorZipCall(
             caller_function,
             caller_frame,
         );
-    } else try qjsIteratorZipCollectKeyed(
+    } else try iteratorZipCollectKeyed(
         ctx,
         output,
         global,
@@ -1882,10 +1880,10 @@ pub fn qjsIteratorZipCall(
     );
 
     if (count > std.math.maxInt(i32)) return error.RangeError;
-    return try qjsIteratorZipCreateHelper(rt, global, iters, nexts, pads, keys, count, mode, keyed);
+    return try iteratorZipCreateHelper(rt, global, iters, nexts, pads, keys, count, mode, keyed);
 }
 
-pub fn qjsIteratorZipModeFromOptions(
+pub fn iteratorZipModeFromOptions(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1906,7 +1904,7 @@ pub fn qjsIteratorZipModeFromOptions(
     return error.TypeError;
 }
 
-pub fn qjsIteratorZipCollectIndexed(
+pub fn iteratorZipCollectIndexed(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1924,39 +1922,39 @@ pub fn qjsIteratorZipCollectIndexed(
 
     while (true) {
         const item_result = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, iterables_iterator, iterables_next, &.{}, caller_function, caller_frame) catch |err| {
-            return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
         };
         defer item_result.free(ctx.runtime);
         const item_object = objectFromValue(item_result) orelse {
-            return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, error.TypeError, null, caller_function, caller_frame);
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, error.TypeError, null, caller_function, caller_frame);
         };
         const done_value = object_ops.getValueProperty(ctx, output, global, item_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame) catch |err| {
-            return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
         };
         defer done_value.free(ctx.runtime);
         if (coercion_ops.valueTruthy(done_value)) break;
         const item = object_ops.getValueProperty(ctx, output, global, item_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
-            return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
         };
         defer item.free(ctx.runtime);
-        const record = qjsIteratorZipFlattenableRecord(ctx, output, global, item, caller_function, caller_frame) catch |err| {
-            return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, iterables_iterator, caller_function, caller_frame);
+        const record = iteratorZipFlattenableRecord(ctx, output, global, item, caller_function, caller_frame) catch |err| {
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, iterables_iterator, caller_function, caller_frame);
         };
         defer record.iterator.free(ctx.runtime);
         defer record.next.free(ctx.runtime);
-        try qjsIteratorZipStoreIndex(ctx.runtime, iters, count, record.iterator);
-        try qjsIteratorZipStoreIndex(ctx.runtime, nexts, count, record.next);
+        try iteratorZipStoreIndex(ctx.runtime, iters, count, record.iterator);
+        try iteratorZipStoreIndex(ctx.runtime, nexts, count, record.next);
         count += 1;
     }
 
     if (mode == .longest) {
         if (!padding.isUndefined() and !padding.isNull()) {
             var padding_iterator = call_runtime.iteratorForValue(ctx, output, global, padding, caller_function, caller_frame) catch |err| {
-                return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
             };
             defer if (!padding_iterator.isUndefined()) padding_iterator.free(ctx.runtime);
-            const padding_next = qjsIteratorZipNextMethod(ctx, output, global, padding_iterator, caller_function, caller_frame) catch |err| {
-                return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+            const padding_next = iteratorZipNextMethod(ctx, output, global, padding_iterator, caller_function, caller_frame) catch |err| {
+                return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
             };
             defer padding_next.free(ctx.runtime);
 
@@ -1966,44 +1964,44 @@ pub fn qjsIteratorZipCollectIndexed(
                 const pad_step = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, padding_iterator, padding_next, &.{}, caller_function, caller_frame) catch |err| {
                     padding_iterator.free(ctx.runtime);
                     padding_iterator = core.JSValue.undefinedValue();
-                    return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
                 };
                 defer pad_step.free(ctx.runtime);
                 const pad_object = objectFromValue(pad_step) orelse {
                     padding_iterator.free(ctx.runtime);
                     padding_iterator = core.JSValue.undefinedValue();
-                    return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, error.TypeError, null, caller_function, caller_frame);
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, error.TypeError, null, caller_function, caller_frame);
                 };
                 const done_value = object_ops.getValueProperty(ctx, output, global, pad_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame) catch |err| {
                     padding_iterator.free(ctx.runtime);
                     padding_iterator = core.JSValue.undefinedValue();
-                    return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
                 };
                 defer done_value.free(ctx.runtime);
                 done = coercion_ops.valueTruthy(done_value);
                 const value = object_ops.getValueProperty(ctx, output, global, pad_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
                     padding_iterator.free(ctx.runtime);
                     padding_iterator = core.JSValue.undefinedValue();
-                    return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
                 };
                 defer value.free(ctx.runtime);
                 if (done) break;
-                try qjsIteratorZipStoreIndex(ctx.runtime, pads, index, value);
+                try iteratorZipStoreIndex(ctx.runtime, pads, index, value);
             }
             if (!done) {
-                qjsIteratorZipClose(ctx, output, global, padding_iterator, caller_function, caller_frame) catch |err| {
+                iteratorZipClose(ctx, output, global, padding_iterator, caller_function, caller_frame) catch |err| {
                     padding_iterator.free(ctx.runtime);
                     padding_iterator = core.JSValue.undefinedValue();
-                    return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
                 };
             }
             while (index < count) : (index += 1) {
-                try qjsIteratorZipStoreIndex(ctx.runtime, pads, index, core.JSValue.undefinedValue());
+                try iteratorZipStoreIndex(ctx.runtime, pads, index, core.JSValue.undefinedValue());
             }
         } else {
             var index: usize = 0;
             while (index < count) : (index += 1) {
-                try qjsIteratorZipStoreIndex(ctx.runtime, pads, index, core.JSValue.undefinedValue());
+                try iteratorZipStoreIndex(ctx.runtime, pads, index, core.JSValue.undefinedValue());
             }
         }
     }
@@ -2011,7 +2009,7 @@ pub fn qjsIteratorZipCollectIndexed(
     return count;
 }
 
-pub fn qjsIteratorZipCollectKeyed(
+pub fn iteratorZipCollectKeyed(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2031,30 +2029,30 @@ pub fn qjsIteratorZipCollectKeyed(
     var count: usize = 0;
     for (own_keys) |key| {
         const desc = object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global, iterables, key, caller_function, caller_frame) catch |err| {
-            return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
         } orelse continue;
         defer desc.destroy(ctx.runtime);
         if (desc.enumerable != true) continue;
 
         const iter = object_ops.getValueProperty(ctx, output, global, iterables.value(), key, caller_function, caller_frame) catch |err| {
-            return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
         };
         defer iter.free(ctx.runtime);
         if (iter.isUndefined()) continue;
 
-        const record = qjsIteratorZipFlattenableRecord(ctx, output, global, iter, caller_function, caller_frame) catch |err| {
-            return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+        const record = iteratorZipFlattenableRecord(ctx, output, global, iter, caller_function, caller_frame) catch |err| {
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
         };
         defer record.iterator.free(ctx.runtime);
         defer record.next.free(ctx.runtime);
         const key_value = object_ops.proxyTrapKeyValue(ctx.runtime, key) catch |err| {
-            return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
         };
         defer key_value.free(ctx.runtime);
 
-        try qjsIteratorZipStoreIndex(ctx.runtime, iters, count, record.iterator);
-        try qjsIteratorZipStoreIndex(ctx.runtime, nexts, count, record.next);
-        try qjsIteratorZipStoreIndex(ctx.runtime, keys, count, key_value);
+        try iteratorZipStoreIndex(ctx.runtime, iters, count, record.iterator);
+        try iteratorZipStoreIndex(ctx.runtime, nexts, count, record.next);
+        try iteratorZipStoreIndex(ctx.runtime, keys, count, key_value);
         count += 1;
     }
 
@@ -2062,19 +2060,19 @@ pub fn qjsIteratorZipCollectKeyed(
         var index: usize = 0;
         while (index < count) : (index += 1) {
             if (!padding.isUndefined() and !padding.isNull()) {
-                const key_value = qjsIteratorZipGetIndex(keys, index);
+                const key_value = iteratorZipGetIndex(keys, index);
                 defer key_value.free(ctx.runtime);
                 const key = property_ops.propertyKeyAtom(ctx.runtime, key_value) catch |err| {
-                    return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
                 };
                 defer ctx.runtime.atoms.free(key);
                 const pad_value = object_ops.getValueProperty(ctx, output, global, padding, key, caller_function, caller_frame) catch |err| {
-                    return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
                 };
                 defer pad_value.free(ctx.runtime);
-                try qjsIteratorZipStoreIndex(ctx.runtime, pads, index, pad_value);
+                try iteratorZipStoreIndex(ctx.runtime, pads, index, pad_value);
             } else {
-                try qjsIteratorZipStoreIndex(ctx.runtime, pads, index, core.JSValue.undefinedValue());
+                try iteratorZipStoreIndex(ctx.runtime, pads, index, core.JSValue.undefinedValue());
             }
         }
     }
@@ -2082,7 +2080,7 @@ pub fn qjsIteratorZipCollectKeyed(
     return count;
 }
 
-pub fn qjsIteratorZipFlattenableRecord(
+pub fn iteratorZipFlattenableRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2103,12 +2101,12 @@ pub fn qjsIteratorZipFlattenableRecord(
     } else value.dup();
     errdefer iterator_value.free(ctx.runtime);
 
-    const next_value = try qjsIteratorZipNextMethod(ctx, output, global, iterator_value, caller_function, caller_frame);
+    const next_value = try iteratorZipNextMethod(ctx, output, global, iterator_value, caller_function, caller_frame);
     errdefer next_value.free(ctx.runtime);
     return .{ .iterator = iterator_value, .next = next_value };
 }
 
-pub fn qjsIteratorZipNextMethod(
+pub fn iteratorZipNextMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2125,7 +2123,7 @@ pub fn qjsIteratorZipNextMethod(
     return next_value;
 }
 
-pub fn qjsIteratorZipCreateHelper(
+pub fn iteratorZipCreateHelper(
     rt: *core.JSRuntime,
     global: *core.Object,
     iters: *core.Object,
@@ -2161,7 +2159,7 @@ pub fn qjsIteratorZipCreateHelper(
         }
     }
 
-    const prototype = try qjsIteratorHelperPrototype(rt, global);
+    const prototype = try iteratorHelperPrototype(rt, global);
     const helper = try core.Object.create(rt, core.class.ids.iterator_helper, prototype);
     errdefer core.Object.destroyFromHeader(rt, &helper.header);
     helper_value = helper.value();
@@ -2170,8 +2168,8 @@ pub fn qjsIteratorZipCreateHelper(
     helper.iteratorZipModeSlot().* = @intFromEnum(mode);
     helper.iteratorZipStateSlot().* = 0;
     helper.iteratorZipAliveSlot().* = count;
-    try qjsInstallIteratorHelperMethod(rt, global, helper, "next", 1);
-    try qjsInstallIteratorHelperMethod(rt, global, helper, "return", 2);
+    try installIteratorHelperMethod(rt, global, helper, "next", 1);
+    try installIteratorHelperMethod(rt, global, helper, "return", 2);
     try helper.setOptionalValueSlot(rt, helper.iteratorTargetSlot(), iters_value);
     iters_value = core.JSValue.undefinedValue();
     try helper.setOptionalValueSlot(rt, helper.iteratorZipNextsSlot(), nexts_value);
@@ -2185,7 +2183,7 @@ pub fn qjsIteratorZipCreateHelper(
     return helper_value;
 }
 
-pub fn qjsIteratorZipStoreIndex(rt: *core.JSRuntime, object: *core.Object, index: usize, value: core.JSValue) !void {
+pub fn iteratorZipStoreIndex(rt: *core.JSRuntime, object: *core.Object, index: usize, value: core.JSValue) !void {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -2206,7 +2204,7 @@ pub fn qjsIteratorZipStoreIndex(rt: *core.JSRuntime, object: *core.Object, index
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(index)), core.Descriptor.data(rooted_value, true, true, true));
 }
 
-test "qjsIteratorZipStoreIndex roots direct function bytecode value while defining property" {
+test "iteratorZipStoreIndex roots direct function bytecode value while defining property" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2232,11 +2230,11 @@ test "qjsIteratorZipStoreIndex roots direct function bytecode value while defini
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    try qjsIteratorZipStoreIndex(rt, object, 0, stored_value);
+    try iteratorZipStoreIndex(rt, object, 0, stored_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = qjsIteratorZipGetIndex(object, 0);
+        const stored = iteratorZipGetIndex(object, 0);
         defer stored.free(rt);
         try std.testing.expect(stored.same(stored_value));
     }
@@ -2248,7 +2246,7 @@ test "qjsIteratorZipStoreIndex roots direct function bytecode value while defini
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-test "qjsIteratorZipStoreIndex roots direct symbol value while defining property" {
+test "iteratorZipStoreIndex roots direct symbol value while defining property" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2261,12 +2259,12 @@ test "qjsIteratorZipStoreIndex roots direct symbol value while defining property
     defer rt.setGCThreshold(old_threshold);
 
     const symbol_value = try rt.symbolValue(symbol_atom);
-    try qjsIteratorZipStoreIndex(rt, object, 0, symbol_value);
+    try iteratorZipStoreIndex(rt, object, 0, symbol_value);
     symbol_value.free(rt);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = qjsIteratorZipGetIndex(object, 0);
+        const stored = iteratorZipGetIndex(object, 0);
         defer stored.free(rt);
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
@@ -2276,11 +2274,11 @@ test "qjsIteratorZipStoreIndex roots direct symbol value while defining property
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-pub fn qjsIteratorZipGetIndex(object: *core.Object, index: usize) core.JSValue {
+pub fn iteratorZipGetIndex(object: *core.Object, index: usize) core.JSValue {
     return object.getOwnDataPropertyValue(core.atom.atomFromUInt32(@intCast(index))) orelse core.JSValue.undefinedValue();
 }
 
-pub fn qjsIteratorZipSetIndex(rt: *core.JSRuntime, object: *core.Object, index: usize, value: core.JSValue) !void {
+pub fn iteratorZipSetIndex(rt: *core.JSRuntime, object: *core.Object, index: usize, value: core.JSValue) !void {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -2301,7 +2299,7 @@ pub fn qjsIteratorZipSetIndex(rt: *core.JSRuntime, object: *core.Object, index: 
     try object.setProperty(rt, core.atom.atomFromUInt32(@intCast(index)), rooted_value);
 }
 
-pub fn qjsIteratorZipCloseWithCompletion(
+pub fn iteratorZipCloseWithCompletion(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2310,7 +2308,7 @@ pub fn qjsIteratorZipCloseWithCompletion(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) void {
-    qjsIteratorZipClose(ctx, output, global, iterator_value, caller_function, caller_frame) catch |err| {
+    iteratorZipClose(ctx, output, global, iterator_value, caller_function, caller_frame) catch |err| {
         if (completion.err == null) {
             completion.capture(ctx, err);
         } else if (ctx.hasException()) {
@@ -2320,7 +2318,7 @@ pub fn qjsIteratorZipCloseWithCompletion(
     };
 }
 
-pub fn qjsIteratorZipCloseAllWithCompletion(
+pub fn iteratorZipCloseAllWithCompletion(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2333,15 +2331,15 @@ pub fn qjsIteratorZipCloseAllWithCompletion(
     var index = count;
     while (index > 0) {
         index -= 1;
-        const iterator_value = qjsIteratorZipGetIndex(iters, index);
+        const iterator_value = iteratorZipGetIndex(iters, index);
         defer iterator_value.free(ctx.runtime);
-        try qjsIteratorZipSetIndex(ctx.runtime, iters, index, core.JSValue.undefinedValue());
+        try iteratorZipSetIndex(ctx.runtime, iters, index, core.JSValue.undefinedValue());
         if (iterator_value.isUndefined() or iterator_value.isNull()) continue;
-        qjsIteratorZipCloseWithCompletion(ctx, output, global, completion, iterator_value, caller_function, caller_frame);
+        iteratorZipCloseWithCompletion(ctx, output, global, completion, iterator_value, caller_function, caller_frame);
     }
 }
 
-pub fn qjsIteratorZipClose(
+pub fn iteratorZipClose(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2368,7 +2366,7 @@ pub fn qjsIteratorZipClose(
     result.free(ctx.runtime);
 }
 
-pub fn qjsIteratorZipCloseAllAndPropagate(
+pub fn iteratorZipCloseAllAndPropagate(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2381,12 +2379,12 @@ pub fn qjsIteratorZipCloseAllAndPropagate(
 ) IteratorZipError {
     var completion = IteratorZipCompletion.initThrow(ctx, err);
     defer completion.deinit(ctx.runtime);
-    qjsIteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, count, caller_function, caller_frame) catch |close_err| {
+    iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, count, caller_function, caller_frame) catch |close_err| {
         completion.restore(ctx);
         return close_err;
     };
     if (extra_iterator) |iterator_value| {
-        qjsIteratorZipCloseWithCompletion(ctx, output, global, &completion, iterator_value, caller_function, caller_frame);
+        iteratorZipCloseWithCompletion(ctx, output, global, &completion, iterator_value, caller_function, caller_frame);
     }
     completion.restore(ctx);
     return completion.err orelse err;
@@ -2426,7 +2424,7 @@ fn iteratorCloseWithCompletionAndPropagate(
 ) IteratorZipError {
     var completion = IteratorZipCompletion.initThrow(ctx, err);
     defer completion.deinit(ctx.runtime);
-    qjsIteratorZipCloseWithCompletion(ctx, output, global, &completion, iterator_value, caller_function, caller_frame);
+    iteratorZipCloseWithCompletion(ctx, output, global, &completion, iterator_value, caller_function, caller_frame);
     completion.restore(ctx);
     return completion.err orelse err;
 }
@@ -2442,7 +2440,7 @@ fn iteratorHelperCloseWithCompletionAndPropagate(
 ) IteratorZipError {
     var completion = IteratorZipCompletion.initThrow(ctx, err);
     defer completion.deinit(ctx.runtime);
-    qjsIteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame) catch |close_err| {
+    iteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame) catch |close_err| {
         if (ctx.hasException()) ctx.clearException();
         completion.restore(ctx);
         return close_err;
@@ -2451,7 +2449,7 @@ fn iteratorHelperCloseWithCompletionAndPropagate(
     return completion.err orelse err;
 }
 
-pub fn qjsIteratorPrototypeMethodCall(
+pub fn iteratorPrototypeMethodCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2462,23 +2460,23 @@ pub fn qjsIteratorPrototypeMethodCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     return switch (method_id) {
-        @intFromEnum(method_ids.iterator.PrototypeMethod.to_array) => try qjsIteratorToArrayCall(ctx, output, global, receiver, caller_function, caller_frame),
-        @intFromEnum(method_ids.iterator.PrototypeMethod.every) => try qjsIteratorPredicateCall(ctx, output, global, receiver, args, .every, caller_function, caller_frame),
-        @intFromEnum(method_ids.iterator.PrototypeMethod.find) => try qjsIteratorPredicateCall(ctx, output, global, receiver, args, .find, caller_function, caller_frame),
-        @intFromEnum(method_ids.iterator.PrototypeMethod.for_each) => try qjsIteratorPredicateCall(ctx, output, global, receiver, args, .for_each, caller_function, caller_frame),
-        @intFromEnum(method_ids.iterator.PrototypeMethod.reduce) => try qjsIteratorReduceCall(ctx, output, global, receiver, args, caller_function, caller_frame),
-        @intFromEnum(method_ids.iterator.PrototypeMethod.some) => try qjsIteratorPredicateCall(ctx, output, global, receiver, args, .some, caller_function, caller_frame),
-        @intFromEnum(method_ids.iterator.PrototypeMethod.map) => try qjsIteratorCreateCallbackHelper(ctx, output, global, receiver, args, .map, caller_function, caller_frame),
-        @intFromEnum(method_ids.iterator.PrototypeMethod.filter) => try qjsIteratorCreateCallbackHelper(ctx, output, global, receiver, args, .filter, caller_function, caller_frame),
-        @intFromEnum(method_ids.iterator.PrototypeMethod.take) => try qjsIteratorCreateLimitHelper(ctx, output, global, receiver, args, .take, caller_function, caller_frame),
-        @intFromEnum(method_ids.iterator.PrototypeMethod.drop) => try qjsIteratorCreateLimitHelper(ctx, output, global, receiver, args, .drop, caller_function, caller_frame),
-        @intFromEnum(method_ids.iterator.PrototypeMethod.flat_map) => try qjsIteratorCreateCallbackHelper(ctx, output, global, receiver, args, .flatMap, caller_function, caller_frame),
-        @intFromEnum(method_ids.iterator.PrototypeMethod.dispose) => try qjsIteratorDisposeCall(ctx, output, global, receiver, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.to_array) => try iteratorToArrayCall(ctx, output, global, receiver, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.every) => try iteratorPredicateCall(ctx, output, global, receiver, args, .every, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.find) => try iteratorPredicateCall(ctx, output, global, receiver, args, .find, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.for_each) => try iteratorPredicateCall(ctx, output, global, receiver, args, .for_each, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.reduce) => try iteratorReduceCall(ctx, output, global, receiver, args, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.some) => try iteratorPredicateCall(ctx, output, global, receiver, args, .some, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.map) => try iteratorCreateCallbackHelper(ctx, output, global, receiver, args, .map, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.filter) => try iteratorCreateCallbackHelper(ctx, output, global, receiver, args, .filter, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.take) => try iteratorCreateLimitHelper(ctx, output, global, receiver, args, .take, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.drop) => try iteratorCreateLimitHelper(ctx, output, global, receiver, args, .drop, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.flat_map) => try iteratorCreateCallbackHelper(ctx, output, global, receiver, args, .flatMap, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.dispose) => try iteratorDisposeCall(ctx, output, global, receiver, caller_function, caller_frame),
         else => null,
     };
 }
 
-fn qjsIteratorDisposeCall(
+fn iteratorDisposeCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2497,7 +2495,7 @@ fn qjsIteratorDisposeCall(
     return core.JSValue.undefinedValue();
 }
 
-fn qjsIteratorToArrayCall(
+fn iteratorToArrayCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2535,7 +2533,7 @@ fn qjsIteratorToArrayCall(
     }
 }
 
-fn qjsIteratorPredicateCall(
+fn iteratorPredicateCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2592,15 +2590,15 @@ fn qjsIteratorPredicateCall(
         const truthy = coercion_ops.valueTruthy(result);
         switch (kind) {
             .every => if (!truthy) {
-                try qjsIteratorZipClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+                try iteratorZipClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
                 return core.JSValue.boolean(false);
             },
             .some => if (truthy) {
-                try qjsIteratorZipClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+                try iteratorZipClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
                 return core.JSValue.boolean(true);
             },
             .find => if (truthy) {
-                try qjsIteratorZipClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+                try iteratorZipClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
                 return step.value.dup();
             },
             .for_each => {},
@@ -2608,7 +2606,7 @@ fn qjsIteratorPredicateCall(
     }
 }
 
-fn qjsIteratorReduceCall(
+fn iteratorReduceCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2726,7 +2724,7 @@ fn iteratorStepWithSyncValues(
     return iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
 }
 
-fn qjsIteratorCreateCallbackHelper(
+fn iteratorCreateCallbackHelper(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2740,10 +2738,10 @@ fn qjsIteratorCreateCallbackHelper(
     if (args.len < 1 or !call_runtime.isCallableValue(args[0])) {
         return iteratorCloseWithCompletionAndPropagate(ctx, output, global, receiver, error.TypeError, caller_function, caller_frame);
     }
-    return try qjsIteratorCreateHelper(ctx, output, global, receiver, kind, args[0], null, caller_function, caller_frame, object_ops.getValueProperty);
+    return try iteratorCreateHelper(ctx, output, global, receiver, kind, args[0], null, caller_function, caller_frame, object_ops.getValueProperty);
 }
 
-fn qjsIteratorCreateLimitHelper(
+fn iteratorCreateLimitHelper(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2754,13 +2752,13 @@ fn qjsIteratorCreateLimitHelper(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = objectFromValue(receiver) orelse return error.TypeError;
-    const limit = qjsIteratorLimitArgument(ctx, output, global, receiver, args) catch |err| {
+    const limit = iteratorLimitArgument(ctx, output, global, receiver, args) catch |err| {
         return iteratorCloseWithCompletionAndPropagate(ctx, output, global, receiver, err, caller_function, caller_frame);
     };
-    return try qjsIteratorCreateHelper(ctx, output, global, receiver, kind, core.JSValue.undefinedValue(), limit, caller_function, caller_frame, object_ops.getValueProperty);
+    return try iteratorCreateHelper(ctx, output, global, receiver, kind, core.JSValue.undefinedValue(), limit, caller_function, caller_frame, object_ops.getValueProperty);
 }
 
-fn qjsIteratorLimitArgument(
+fn iteratorLimitArgument(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2784,7 +2782,7 @@ fn qjsIteratorLimitArgument(
     return @as(usize, @intFromFloat(integer));
 }
 
-fn qjsIteratorCreateHelper(
+fn iteratorCreateHelper(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2825,7 +2823,7 @@ fn qjsIteratorCreateHelper(
     owns_next_method = true;
     defer if (owns_next_method) rooted_next_method.free(ctx.runtime);
 
-    const prototype = try qjsIteratorHelperPrototype(ctx.runtime, global);
+    const prototype = try iteratorHelperPrototype(ctx.runtime, global);
     const helper = try core.Object.create(ctx.runtime, core.class.ids.iterator_helper, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &helper.header);
     try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorTargetSlot(), rooted_receiver.dup());
@@ -2836,7 +2834,7 @@ fn qjsIteratorCreateHelper(
     return helper.value();
 }
 
-test "qjsIteratorCreateHelper roots direct function bytecode callback while creating helper" {
+test "iteratorCreateHelper roots direct function bytecode callback while creating helper" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2879,7 +2877,7 @@ test "qjsIteratorCreateHelper roots direct function bytecode callback while crea
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const helper_value = try qjsIteratorCreateHelper(
+    const helper_value = try iteratorCreateHelper(
         ctx,
         null,
         global,
@@ -2907,7 +2905,7 @@ test "qjsIteratorCreateHelper roots direct function bytecode callback while crea
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn qjsIteratorZipPutResult(
+fn iteratorZipPutResult(
     rt: *core.JSRuntime,
     results: *core.Object,
     keys: ?*core.Object,
@@ -2915,7 +2913,7 @@ fn qjsIteratorZipPutResult(
     value: core.JSValue,
 ) !void {
     if (keys) |key_store| {
-        const key_value = qjsIteratorZipGetIndex(key_store, index);
+        const key_value = iteratorZipGetIndex(key_store, index);
         defer key_value.free(rt);
         const atom_id = try property_ops.propertyKeyAtom(rt, key_value);
         defer rt.atoms.free(atom_id);
@@ -2925,7 +2923,7 @@ fn qjsIteratorZipPutResult(
     try results.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(index)), core.Descriptor.data(value, true, true, true));
 }
 
-fn qjsIteratorZipCompleteAbrupt(
+fn iteratorZipCompleteAbrupt(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2941,19 +2939,19 @@ fn qjsIteratorZipCompleteAbrupt(
     defer completion.deinit(ctx.runtime);
     helper.iteratorZipAliveSlot().* = 0;
     if (current_index) |index| {
-        try qjsIteratorZipSetIndex(ctx.runtime, iters, index, core.JSValue.undefinedValue());
+        try iteratorZipSetIndex(ctx.runtime, iters, index, core.JSValue.undefinedValue());
     }
-    qjsIteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, count, caller_function, caller_frame) catch |close_err| {
+    iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, count, caller_function, caller_frame) catch |close_err| {
         completion.restore(ctx);
         return close_err;
     };
-    try qjsIteratorHelperClear(ctx.runtime, helper);
+    try iteratorHelperClear(ctx.runtime, helper);
     helper.iteratorZipStateSlot().* = 3;
     completion.restore(ctx);
     return completion.err orelse err;
 }
 
-fn qjsIteratorZipHelperNext(
+fn iteratorZipHelperNext(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2996,53 +2994,53 @@ fn qjsIteratorZipHelperNext(
     var values: usize = 0;
     var index: usize = 0;
     while (index < count) : (index += 1) {
-        const iter = qjsIteratorZipGetIndex(iters, index);
+        const iter = iteratorZipGetIndex(iters, index);
         defer iter.free(ctx.runtime);
         if (iter.isUndefined() or iter.isNull()) {
             if (mode != .longest) return error.TypeError;
-            const pad = qjsIteratorZipGetIndex(pads, index);
+            const pad = iteratorZipGetIndex(pads, index);
             defer pad.free(ctx.runtime);
-            try qjsIteratorZipPutResult(ctx.runtime, results, keys, index, pad);
+            try iteratorZipPutResult(ctx.runtime, results, keys, index, pad);
             continue;
         }
 
-        const next_method = qjsIteratorZipGetIndex(nexts, index);
+        const next_method = iteratorZipGetIndex(nexts, index);
         defer next_method.free(ctx.runtime);
         const step_result = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, iter, next_method, &.{}, caller_function, caller_frame) catch |err| {
-            return qjsIteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, err, caller_function, caller_frame);
+            return iteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, err, caller_function, caller_frame);
         };
         defer step_result.free(ctx.runtime);
         const step_object = objectFromValue(step_result) orelse {
-            return qjsIteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, error.TypeError, caller_function, caller_frame);
+            return iteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, error.TypeError, caller_function, caller_frame);
         };
         const done_value = object_ops.getValueProperty(ctx, output, global, step_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame) catch |err| {
-            return qjsIteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, err, caller_function, caller_frame);
+            return iteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, err, caller_function, caller_frame);
         };
         defer done_value.free(ctx.runtime);
         if (!coercion_ops.valueTruthy(done_value)) {
             if (mode == .strict and dones > 0) {
-                return qjsIteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, null, error.TypeError, caller_function, caller_frame);
+                return iteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, null, error.TypeError, caller_function, caller_frame);
             }
             const value = object_ops.getValueProperty(ctx, output, global, step_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
-                return qjsIteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, err, caller_function, caller_frame);
+                return iteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, err, caller_function, caller_frame);
             };
             defer value.free(ctx.runtime);
-            try qjsIteratorZipPutResult(ctx.runtime, results, keys, index, value);
+            try iteratorZipPutResult(ctx.runtime, results, keys, index, value);
             values += 1;
             continue;
         }
 
         if (alive > 0) alive -= 1;
         dones += 1;
-        try qjsIteratorZipSetIndex(ctx.runtime, iters, index, core.JSValue.undefinedValue());
+        try iteratorZipSetIndex(ctx.runtime, iters, index, core.JSValue.undefinedValue());
         helper.iteratorZipAliveSlot().* = alive;
 
         switch (mode) {
             .shortest => {
                 var completion = IteratorZipCompletion.initNormal();
                 defer completion.deinit(ctx.runtime);
-                try qjsIteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, count, caller_function, caller_frame);
-                try qjsIteratorHelperClear(ctx.runtime, helper);
+                try iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, count, caller_function, caller_frame);
+                try iteratorHelperClear(ctx.runtime, helper);
                 helper.iteratorZipStateSlot().* = 3;
                 if (completion.err) |err| {
                     completion.restore(ctx);
@@ -3052,24 +3050,24 @@ fn qjsIteratorZipHelperNext(
             },
             .longest => {
                 if (alive < 1) {
-                    try qjsIteratorHelperClear(ctx.runtime, helper);
+                    try iteratorHelperClear(ctx.runtime, helper);
                     helper.iteratorZipStateSlot().* = 3;
                     return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
-                const pad = qjsIteratorZipGetIndex(pads, index);
+                const pad = iteratorZipGetIndex(pads, index);
                 defer pad.free(ctx.runtime);
-                try qjsIteratorZipPutResult(ctx.runtime, results, keys, index, pad);
+                try iteratorZipPutResult(ctx.runtime, results, keys, index, pad);
             },
             .strict => {
                 if (values > 0) {
-                    return qjsIteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, null, error.TypeError, caller_function, caller_frame);
+                    return iteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, null, error.TypeError, caller_function, caller_frame);
                 }
             },
         }
     }
 
     if (values == 0) {
-        try qjsIteratorHelperClear(ctx.runtime, helper);
+        try iteratorHelperClear(ctx.runtime, helper);
         helper.iteratorZipStateSlot().* = 3;
         return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
@@ -3079,7 +3077,7 @@ fn qjsIteratorZipHelperNext(
     return try call_runtime.createIteratorResult(ctx.runtime, global, results_value, false);
 }
 
-fn qjsIteratorZipHelperReturn(
+fn iteratorZipHelperReturn(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3100,8 +3098,8 @@ fn qjsIteratorZipHelperReturn(
         const iters = objectFromValue(iterator_value) orelse return error.TypeError;
         var completion = IteratorZipCompletion.initNormal();
         defer completion.deinit(ctx.runtime);
-        try qjsIteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, (helper.iteratorIndexSlot().*), caller_function, caller_frame);
-        try qjsIteratorHelperClear(ctx.runtime, helper);
+        try iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, (helper.iteratorIndexSlot().*), caller_function, caller_frame);
+        try iteratorHelperClear(ctx.runtime, helper);
         helper.iteratorZipStateSlot().* = 3;
         if (completion.err) |err| {
             completion.restore(ctx);
@@ -3109,12 +3107,12 @@ fn qjsIteratorZipHelperReturn(
         }
         return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
-    try qjsIteratorHelperClear(ctx.runtime, helper);
+    try iteratorHelperClear(ctx.runtime, helper);
     helper.iteratorZipStateSlot().* = 3;
     return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
 }
 
-pub fn qjsIteratorHelperNext(
+pub fn iteratorHelperNext(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3133,7 +3131,7 @@ pub fn qjsIteratorHelperNext(
     const kind: IteratorHelperKind = @enumFromInt((helper.iteratorKindSlot().*));
 
     switch (kind) {
-        .zip, .zip_keyed => return try qjsIteratorZipHelperNext(ctx, output, global, helper, caller_function, caller_frame),
+        .zip, .zip_keyed => return try iteratorZipHelperNext(ctx, output, global, helper, caller_function, caller_frame),
         .concat => {
             while (true) {
                 if (helper.iteratorData()) |inner_iterator| {
@@ -3141,12 +3139,12 @@ pub fn qjsIteratorHelperNext(
                     const inner_step = try iteratorStepWithSyncValues(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame);
                     defer inner_step.value.free(ctx.runtime);
                     if (!inner_step.done) return try call_runtime.createIteratorResult(ctx.runtime, global, inner_step.value, false);
-                    try qjsIteratorHelperClearInner(ctx.runtime, helper);
+                    try iteratorHelperClearInner(ctx.runtime, helper);
                 }
 
                 const records = objectFromValue(iterator) orelse return error.TypeError;
                 if ((helper.iteratorIndexSlot().*) >= records.arrayLength() / 2) {
-                    try qjsIteratorHelperClear(ctx.runtime, helper);
+                    try iteratorHelperClear(ctx.runtime, helper);
                     return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
                 const item_index: u32 = @intCast((helper.iteratorIndexSlot().*) * 2);
@@ -3157,21 +3155,21 @@ pub fn qjsIteratorHelperNext(
                 defer method.free(ctx.runtime);
                 const inner_iterator = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, item, method, &.{}, caller_function, caller_frame);
                 defer inner_iterator.free(ctx.runtime);
-                try qjsIteratorHelperSetInnerFromIterator(ctx, output, global, helper, inner_iterator, caller_function, caller_frame);
+                try iteratorHelperSetInnerFromIterator(ctx, output, global, helper, inner_iterator, caller_function, caller_frame);
             }
         },
         .take => {
             const next_method = helper.iteratorNext() orelse return error.TypeError;
             var next_call = SyncInternalCallSite.init(ctx, output, global, iterator, next_method, caller_function, caller_frame);
             if ((helper.iteratorIndexSlot().*) == 0) {
-                try qjsIteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame);
+                try iteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame);
                 return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             }
             helper.iteratorIndexSlot().* -= 1;
             const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
             defer step.value.free(ctx.runtime);
             if (step.done) {
-                try qjsIteratorHelperClear(ctx.runtime, helper);
+                try iteratorHelperClear(ctx.runtime, helper);
                 return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             }
             return try call_runtime.createIteratorResult(ctx.runtime, global, step.value, false);
@@ -3183,14 +3181,14 @@ pub fn qjsIteratorHelperNext(
                 const skipped = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
                 defer skipped.value.free(ctx.runtime);
                 if (skipped.done) {
-                    try qjsIteratorHelperClear(ctx.runtime, helper);
+                    try iteratorHelperClear(ctx.runtime, helper);
                     return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
             }
             const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
             defer step.value.free(ctx.runtime);
             if (step.done) {
-                try qjsIteratorHelperClear(ctx.runtime, helper);
+                try iteratorHelperClear(ctx.runtime, helper);
                 return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             }
             return try call_runtime.createIteratorResult(ctx.runtime, global, step.value, false);
@@ -3215,13 +3213,13 @@ pub fn qjsIteratorHelperNext(
                         const inner_step = try iteratorStepWithSyncValues(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame);
                         defer inner_step.value.free(ctx.runtime);
                         if (!inner_step.done) return try call_runtime.createIteratorResult(ctx.runtime, global, inner_step.value, false);
-                        try qjsIteratorHelperClearInner(ctx.runtime, helper);
+                        try iteratorHelperClearInner(ctx.runtime, helper);
                     }
                 }
                 const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
                 defer step.value.free(ctx.runtime);
                 if (step.done) {
-                    try qjsIteratorHelperClear(ctx.runtime, helper);
+                    try iteratorHelperClear(ctx.runtime, helper);
                     return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
                 const index = (helper.iteratorIndexSlot().*);
@@ -3232,7 +3230,7 @@ pub fn qjsIteratorHelperNext(
                 defer mapped.free(ctx.runtime);
                 if (kind == .map) return try call_runtime.createIteratorResult(ctx.runtime, global, mapped, false);
                 if (kind == .flatMap) {
-                    try qjsIteratorHelperSetInner(ctx, output, global, helper, mapped, caller_function, caller_frame);
+                    try iteratorHelperSetInner(ctx, output, global, helper, mapped, caller_function, caller_frame);
                     continue;
                 }
                 if (coercion_ops.valueTruthy(mapped)) return try call_runtime.createIteratorResult(ctx.runtime, global, step.value, false);
@@ -3241,7 +3239,7 @@ pub fn qjsIteratorHelperNext(
     }
 }
 
-fn qjsIteratorHelperSetInner(
+fn iteratorHelperSetInner(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3264,10 +3262,10 @@ fn qjsIteratorHelperSetInner(
         break :blk value;
     };
     defer inner_iterator.free(ctx.runtime);
-    try qjsIteratorHelperSetInnerFromIterator(ctx, output, global, helper, inner_iterator, caller_function, caller_frame);
+    try iteratorHelperSetInnerFromIterator(ctx, output, global, helper, inner_iterator, caller_function, caller_frame);
 }
 
-fn qjsIteratorHelperSetInnerFromIterator(
+fn iteratorHelperSetInnerFromIterator(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3295,7 +3293,7 @@ fn qjsIteratorHelperSetInnerFromIterator(
     if (old_inner_next) |stored| stored.free(ctx.runtime);
 }
 
-pub fn qjsIteratorHelperReturn(
+pub fn iteratorHelperReturn(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3310,16 +3308,16 @@ pub fn qjsIteratorHelperReturn(
     if ((helper.iteratorKindSlot().*) == @intFromEnum(IteratorHelperKind.zip) or
         (helper.iteratorKindSlot().*) == @intFromEnum(IteratorHelperKind.zip_keyed))
     {
-        return try qjsIteratorZipHelperReturn(ctx, output, global, helper, caller_function, caller_frame);
+        return try iteratorZipHelperReturn(ctx, output, global, helper, caller_function, caller_frame);
     }
     if (helper.generatorExecuting()) return error.TypeError;
     helper.generatorExecutingSlot().* = true;
     defer helper.generatorExecutingSlot().* = false;
-    try qjsIteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame);
+    try iteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame);
     return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
 }
 
-fn qjsIteratorHelperClose(
+fn iteratorHelperClose(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3327,21 +3325,21 @@ fn qjsIteratorHelperClose(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    try qjsIteratorHelperCloseInner(ctx, output, global, helper, caller_function, caller_frame);
+    try iteratorHelperCloseInner(ctx, output, global, helper, caller_function, caller_frame);
     if ((helper.iteratorKindSlot().*) == @intFromEnum(IteratorHelperKind.concat)) {
-        try qjsIteratorHelperClear(ctx.runtime, helper);
+        try iteratorHelperClear(ctx.runtime, helper);
         return;
     }
     const iterator = (helper.iteratorTargetSlot().*) orelse return;
-    call_runtime.qjsIteratorClose(ctx, output, global, iterator, caller_function, caller_frame) catch |err| {
-        try qjsIteratorHelperClear(ctx.runtime, helper);
+    call_runtime.iteratorCloseValue(ctx, output, global, iterator, caller_function, caller_frame) catch |err| {
+        try iteratorHelperClear(ctx.runtime, helper);
         return err;
     };
-    try qjsIteratorHelperClear(ctx.runtime, helper);
+    try iteratorHelperClear(ctx.runtime, helper);
 }
 
-fn qjsIteratorHelperClear(rt: *core.JSRuntime, helper: *core.Object) !void {
-    try qjsIteratorHelperClearInner(rt, helper);
+fn iteratorHelperClear(rt: *core.JSRuntime, helper: *core.Object) !void {
+    try iteratorHelperClearInner(rt, helper);
     helper.clearOptionalValueSlot(rt, helper.iteratorTargetSlot());
     helper.clearOptionalValueSlot(rt, helper.iteratorNextSlot());
     helper.clearOptionalValueSlot(rt, helper.iteratorCallbackSlot());
@@ -3350,7 +3348,7 @@ fn qjsIteratorHelperClear(rt: *core.JSRuntime, helper: *core.Object) !void {
     helper.clearOptionalValueSlot(rt, helper.iteratorZipKeysSlot());
 }
 
-fn qjsIteratorHelperCloseInner(
+fn iteratorHelperCloseInner(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3359,14 +3357,14 @@ fn qjsIteratorHelperCloseInner(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const inner_iterator = helper.iteratorData() orelse return;
-    call_runtime.qjsIteratorClose(ctx, output, global, inner_iterator, caller_function, caller_frame) catch |err| {
-        try qjsIteratorHelperClearInner(ctx.runtime, helper);
+    call_runtime.iteratorCloseValue(ctx, output, global, inner_iterator, caller_function, caller_frame) catch |err| {
+        try iteratorHelperClearInner(ctx.runtime, helper);
         return err;
     };
-    try qjsIteratorHelperClearInner(ctx.runtime, helper);
+    try iteratorHelperClearInner(ctx.runtime, helper);
 }
 
-fn qjsIteratorHelperClearInner(rt: *core.JSRuntime, helper: *core.Object) !void {
+fn iteratorHelperClearInner(rt: *core.JSRuntime, helper: *core.Object) !void {
     helper.clearOptionalValueSlot(rt, helper.iteratorDataSlot());
     helper.clearOptionalValueSlot(rt, helper.iteratorInnerNextSlot());
 }

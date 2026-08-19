@@ -13,7 +13,7 @@ reference shapes, matching QuickJS’s own monoliths.
 ```
 embedder  →  src/root.zig  →  src/binding/  →  src/core/
 CLI/tests →  src/internal_root.zig
-compile   →  src/parser.zig  →  src/compiler_v2/  →  src/bytecode.zig
+compile   →  src/parser.zig  →  src/compiler/  →  src/bytecode.zig
 execute   →  src/exec/  (VM, builtins, modules, promises)
 host      →  src/runtime/  (event loop, plugins)
 ```
@@ -81,14 +81,14 @@ QuickJS-aligned parser/emitter live in this one file because QuickJS’s
 erasure, not a typechecker. `simple_token.zig` holds the token subset used
 by that lookahead path.
 
-## Compiler — `src/compiler_v2/`
+## Compiler — `src/compiler/`
 
-This is the only compiler. The "v2" in `compiler_v2` is a historical name —
-the legacy compiler has been deleted; the name is kept because it is already
-in the published configuration-signature string. Temporary bytecode uses
-`LabelId` / `LabelSlot` / `RelocEntry` until final layout.
+This is the only compiler (renamed from `compiler_v2` on 2026-08-19 by owner
+ruling). The published configuration-signature string keeps `compiler=v2` —
+"v2" is the compiler's attested identity, not the directory name. Temporary
+bytecode uses `LabelId` / `LabelSlot` / `RelocEntry` until final layout.
 `resolve_variables` and `resolve_labels` are separate stages. Production
-layout is `-Dzjs_v2_layout=short`; `plain` is an A/B diagnostic.
+layout is `-Dzjs_compiler_layout=short`; `plain` is an A/B diagnostic.
 
 | File | Role |
 | --- | --- |
@@ -98,7 +98,7 @@ layout is `-Dzjs_v2_layout=short`; `plain` is an A/B diagnostic.
 | `resolve_labels.zig` | final layout and jump threading |
 | `cfg.zig` | Debug/ReleaseSafe CFG oracles |
 
-Normative contract: [compiler_v2_contract.md](compiler_v2_contract.md).
+Normative contract: [compiler-contract.md](compiler-contract.md).
 
 ## Bytecode carrier — `src/bytecode.zig`
 
@@ -116,6 +116,33 @@ hand-installed in `standard_globals.zig`; native records live beside
 `*_ops.zig` and dispatch through `builtin_dispatch.zig`. There is no
 `src/builtins/` layer.
 
+File and function naming conventions in `exec/`:
+
+- `vm_X.zig` holds stack-VM opcode handlers and their helpers (they take
+  the operand stack / frame); `X_ops.zig` holds value-level runtime and
+  builtin implementations (they take runtime + values); `X_builtin_ops.zig`
+  holds native-record tables. Import aliases must equal the file name minus
+  `.zig` (one documented exception: `internal_builtins.zig` aliases each
+  record file by its `NativeBuiltinDomain` name, because that file is the
+  domain table).
+- A `Vm` function suffix (`binaryVm`, `execVm`, …) marks the stack-VM entry
+  variant of a value-level operation of the same name.
+- The historical `qjs*` function prefix was removed on 2026-08-19 (owner
+  ruling: mirroring quickjs.c is a transitional state, not the project's
+  identity — names describe function, not provenance). Alignment evidence
+  lives in `// quickjs.c:N` comments and commit messages, never in names.
+- Throw helpers: `throw<Kind>Message` is the generic kind-plus-message
+  entry; `throw<Reason><Kind>` (e.g. `throwTdzReferenceError`) is a
+  scenario-specific helper. Mechanism-level throws (`throwValue`,
+  `throwTop`, `throwStackOverflow`) carry no error-kind segment.
+- Fast-path names: `*ForFastPath` is an ingredient or precondition check
+  **used by** a fast path; `*Fast` / `fast*` is the fast **variant of** the
+  operation itself.
+- `X_builtin_ops.zig` exists only where `X_ops.zig` also exists (the
+  native-record table split out of the value-level runtime file);
+  single-file domains keep their records inside `X_ops.zig`, and
+  `builtin_glue.zig` holds the deliberate cross-domain leftovers.
+
 | Enter here | Owns |
 | --- | --- |
 | `zjs_vm.zig` | interpreter loop |
@@ -128,8 +155,12 @@ hand-installed in `standard_globals.zig`; native records live beside
 Promise object state is `src/core/promise.zig`. Job-queue primitives are
 `src/core/jobs.zig`. There is no `src/exec/eval.zig` and no `src/exec/promise.zig`.
 
-The default compiler emits ordinary `call + return`. `test262.conf` skips
-`tail-call-optimization`. Per-opcode profiling is a working profiler on the
+Strict-mode plain-call tails (`return f(...)`) fold to `tail_call` and reuse
+the caller frame — ES2015 proper tail calls, a documented divergence from the
+pinned QuickJS (see [LIMITATIONS.md](../LIMITATIONS.md)). All other calls emit
+ordinary `call + return`; `test262.conf` still skips `tail-call-optimization`
+because method-position tails are out of scope. Per-opcode profiling is a
+working profiler on the
 `zjs-profile` artifact: profiling builds call `noteDispatch` from `cont` /
 `next` (`src/exec/vm_profile.zig`), `build.zig` ships `zjs-profile` plus
 nine `perf-*-profile` steps with exact opcode pins, and

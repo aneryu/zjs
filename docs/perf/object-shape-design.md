@@ -5,7 +5,7 @@ This note describes the current object/shape contract. The source of truth is:
 - `src/core/object.zig`
 - `src/core/shape.zig`
 - `src/core/property.zig`
-- `src/exec/property_ic.zig`
+- `src/exec/property_direct.zig`
 - `src/exec/vm_property*.zig`
 
 The dated
@@ -92,7 +92,9 @@ The former shape-keyed per-bytecode-site inline cache has been removed:
 - no FunctionBytecode IC slots;
 - no `zjs_enable_ic` build option.
 
-The historical filename `src/exec/property_ic.zig` now owns non-cached helpers:
+`src/exec/property_direct.zig` (renamed from the historical
+`property_ic.zig` on 2026-08-19; the always-false `cachedSet*` zombie was
+deleted at the same time) owns the non-cached helpers:
 
 - direct ordinary own-data lookup;
 - immediate prototype-data lookup;
@@ -100,9 +102,9 @@ The historical filename `src/exec/property_ic.zig` now owns non-cached helpers:
 - simple ordinary put;
 - computed-property action resolution.
 
-The retained `dataPropertyValueForFastPath` and
-`cachedSetObjectDataPropertyForPutFastPath` signatures always miss and route to
-the authoritative current-state lookup. They do not retain shapes or versions.
+The retained `dataPropertyValueForFastPath` signature always misses and
+routes to the authoritative current-state lookup. It does not retain shapes
+or versions.
 
 Performance work must therefore describe a property result as a direct
 shape/hash fast-path hit or a slow/exotic path, never as an IC hit.
@@ -114,7 +116,7 @@ Start with the narrowest changed-area target:
 ```sh
 zig build test-core --summary all
 zig build test-exec --summary all
-mise run quick-check
+mise run quick-gate
 git diff --check
 ```
 

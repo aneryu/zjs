@@ -1,6 +1,6 @@
 const core = @import("../core/root.zig");
 const function_builtin = core.function;
-const symbol_builtin = @import("primitive_ops.zig");
+const primitive_ops = @import("primitive_ops.zig");
 const globals_mod = core.global_slots;
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
@@ -11,7 +11,7 @@ const exceptions = @import("exceptions.zig");
 const object_ops = @import("object_ops.zig");
 const array_ops = @import("array_ops.zig");
 const coercion_ops = @import("coercion_ops.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
@@ -248,7 +248,7 @@ fn collectionCall(
         return methodCallWithCallbackHost(ctx.runtime, this_value, id, args, collection_adapter.host(globals));
     };
     const active_global = callable_global orelse return error.InvalidBuiltinRegistry;
-    if (try qjsCollectionNativeRecord(ctx, output, active_global, this_value, function_object, id, args, caller_function, caller_frame)) |value| return value;
+    if (try collectionNativeRecord(ctx, output, active_global, this_value, function_object, id, args, caller_function, caller_frame)) |value| return value;
     return error.TypeError;
 }
 
@@ -267,7 +267,7 @@ fn collectionGroupByRecord(
     // js_map_constructor with a JS_UNDEFINED this (the intrinsic Map
     // prototype), so a detached `const g = Map.groupBy; g(items, fn)` works.
     if (global) |active_global| {
-        if (try qjsMapGroupByCall(ctx, output, active_global, args, caller_function, caller_frame)) |value| return value;
+        if (try mapGroupByCall(ctx, output, active_global, args, caller_function, caller_frame)) |value| return value;
         return error.TypeError;
     }
     // Bare-runtime path (no realm intrinsics): keep deriving the result
@@ -773,6 +773,8 @@ fn globalObjectFromGlobals(rt: *core.JSRuntime, globals: []const globals_mod.Slo
     return expectObject(global_value) catch null;
 }
 
+// mirror of iterator_ops.defineToStringTag, keep in sync (kept local: this
+// file does not otherwise import iterator_ops).
 fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
     const tag_value = try core.string.String.createUtf8(rt, tag_name);
@@ -1665,11 +1667,7 @@ fn defineNativeMethods(realm: *core.RealmContext, object: *core.Object, class_id
     }
 }
 
-fn expectObject(value: core.JSValue) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    return @fieldParentPtr("header", header);
-}
+const expectObject = core.value_semantics.expectObject;
 
 fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
     const key = try rt.internAtom(name);
@@ -1752,7 +1750,7 @@ const ValueListRoot = struct {
     }
 };
 
-pub fn qjsCollectionIteratorMethodCall(
+pub fn collectionIteratorMethodCall(
     ctx: *core.JSContext,
     global: *core.Object,
     this_value: core.JSValue,
@@ -1776,7 +1774,7 @@ pub fn qjsCollectionIteratorMethodCall(
     return try methodCallWithGlobal(ctx, global, this_value, method_id, &.{}, &.{});
 }
 
-pub fn qjsCollectionForEachCall(
+pub fn collectionForEachCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1825,7 +1823,7 @@ pub fn qjsCollectionForEachCall(
     return core.JSValue.undefinedValue();
 }
 
-pub fn qjsSetMethodCall(
+pub fn setMethodCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1838,11 +1836,11 @@ pub fn qjsSetMethodCall(
 ) !?core.JSValue {
     const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
     if (owner_class != core.class.ids.set) return null;
-    const mode = qjsSetMethodMode(name) orelse return null;
+    const mode = setMethodMode(name) orelse return null;
     const receiver = object_ops.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
     if (receiver.class_id != core.class.ids.set) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
     const other_value = if (args.len >= 1) args[0] else return error.TypeError;
-    var other_record = try qjsGetSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
+    var other_record = try getSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
     defer other_record.deinit(ctx.runtime);
     // The receiver's entry array is walked by index across the set-like
     // `has`/`keys` user calls; park a cursor so the slots cannot shift (same
@@ -1850,17 +1848,17 @@ pub fn qjsSetMethodCall(
     receiver.retainCollectionCursor();
     defer receiver.releaseCollectionCursor();
     return switch (mode) {
-        .difference => try qjsSetDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .intersection => try qjsSetIntersection(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_disjoint_from => try qjsSetIsDisjointFrom(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_subset_of => try qjsSetIsSubsetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_superset_of => try qjsSetIsSupersetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .symmetric_difference => try qjsSetSymmetricDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .union_ => try qjsSetUnion(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .difference => try setDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .intersection => try setIntersection(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .is_disjoint_from => try setIsDisjointFrom(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .is_subset_of => try setIsSubsetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .is_superset_of => try setIsSupersetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .symmetric_difference => try setSymmetricDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .union_ => try setUnion(ctx, output, global, receiver, other_record, caller_function, caller_frame),
     };
 }
 
-pub fn qjsCollectionNativeRecord(
+pub fn collectionNativeRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1930,8 +1928,8 @@ pub fn qjsCollectionNativeRecord(
             error.TypeError => return @as(?core.JSValue, try throwCollectionMethodTypeError(ctx, global, receiver, method, args)),
             else => err,
         },
-        .for_each => try qjsCollectionForEachRecord(ctx, output, global, this_value, receiver, args, caller_function, caller_frame),
-        .get_or_insert_computed => try qjsMapGetOrInsertComputed(ctx, output, global, this_value, function_object, args, caller_function, caller_frame),
+        .for_each => try collectionForEachRecord(ctx, output, global, this_value, receiver, args, caller_function, caller_frame),
+        .get_or_insert_computed => try mapGetOrInsertComputedCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame),
         .difference,
         .intersection,
         .is_disjoint_from,
@@ -1939,7 +1937,7 @@ pub fn qjsCollectionNativeRecord(
         .is_superset_of,
         .symmetric_difference,
         .union_,
-        => try qjsSetMethodRecord(ctx, output, global, receiver, method, args, caller_function, caller_frame),
+        => try setMethodRecord(ctx, output, global, receiver, method, args, caller_function, caller_frame),
         .iterator_next => {
             if (receiver.class_id != core.class.ids.map_iterator and receiver.class_id != core.class.ids.set_iterator) return error.TypeError;
             return methodCall(ctx.runtime, this_value, id, args) catch |err| switch (err) {
@@ -1954,7 +1952,7 @@ fn collectionCallResultIsDropped(caller_function: ?*const builtin_dispatch.Bytec
     return builtin_dispatch.callerResultIsDropped(caller_function, caller_frame);
 }
 
-fn qjsCollectionForEachRecord(
+fn collectionForEachRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1996,7 +1994,7 @@ fn qjsCollectionForEachRecord(
     return core.JSValue.undefinedValue();
 }
 
-fn qjsSetMethodRecord(
+fn setMethodRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2008,24 +2006,24 @@ fn qjsSetMethodRecord(
 ) !core.JSValue {
     if (receiver.class_id != core.class.ids.set) return throwCollectionReceiverTypeError(ctx, global, core.class.ids.set);
     const other_value = if (args.len >= 1) args[0] else return error.TypeError;
-    var other_record = try qjsGetSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
+    var other_record = try getSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
     defer other_record.deinit(ctx.runtime);
-    const mode = qjsSetMethodModeFromRecord(method) orelse return error.TypeError;
-    // Same entry-array lock as `qjsSetMethodCall`.
+    const mode = setMethodModeFromRecord(method) orelse return error.TypeError;
+    // Same entry-array lock as `setMethodCall`.
     receiver.retainCollectionCursor();
     defer receiver.releaseCollectionCursor();
     return switch (mode) {
-        .difference => try qjsSetDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .intersection => try qjsSetIntersection(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_disjoint_from => try qjsSetIsDisjointFrom(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_subset_of => try qjsSetIsSubsetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_superset_of => try qjsSetIsSupersetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .symmetric_difference => try qjsSetSymmetricDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .union_ => try qjsSetUnion(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .difference => try setDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .intersection => try setIntersection(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .is_disjoint_from => try setIsDisjointFrom(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .is_subset_of => try setIsSubsetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .is_superset_of => try setIsSupersetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .symmetric_difference => try setSymmetricDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .union_ => try setUnion(ctx, output, global, receiver, other_record, caller_function, caller_frame),
     };
 }
 
-fn qjsSetMethodMode(name: []const u8) ?SetMethodMode {
+fn setMethodMode(name: []const u8) ?SetMethodMode {
     if (std.mem.eql(u8, name, "difference")) return .difference;
     if (std.mem.eql(u8, name, "intersection")) return .intersection;
     if (std.mem.eql(u8, name, "isDisjointFrom")) return .is_disjoint_from;
@@ -2036,7 +2034,7 @@ fn qjsSetMethodMode(name: []const u8) ?SetMethodMode {
     return null;
 }
 
-fn qjsSetMethodModeFromRecord(method: PrototypeMethod) ?SetMethodMode {
+fn setMethodModeFromRecord(method: PrototypeMethod) ?SetMethodMode {
     return switch (method) {
         .difference => .difference,
         .intersection => .intersection,
@@ -2049,7 +2047,7 @@ fn qjsSetMethodModeFromRecord(method: PrototypeMethod) ?SetMethodMode {
     };
 }
 
-fn qjsGetSetRecord(
+fn getSetRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2065,7 +2063,7 @@ fn qjsGetSetRecord(
     // native Set/Map arguments, so instance-level overrides stay observable.
     var size: i64 = undefined;
     if (object.class_id == core.class.ids.set) {
-        size = @intCast(qjsSetStrongSize(object));
+        size = @intCast(setStrongSize(object));
     } else {
         const raw_size = try object_ops.getValueProperty(ctx, output, global, other_value, core.atom.predefinedId("size", .string).?, caller_function, caller_frame);
         defer raw_size.free(ctx.runtime);
@@ -2129,7 +2127,7 @@ fn qjsGetSetRecord(
     };
 }
 
-fn qjsSetStrongSize(object: *core.Object) usize {
+fn setStrongSize(object: *core.Object) usize {
     var count: usize = 0;
     for (object.collectionEntriesSlot().*) |entry| {
         if (entry.active) count += 1;
@@ -2137,28 +2135,28 @@ fn qjsSetStrongSize(object: *core.Object) usize {
     return count;
 }
 
-fn qjsConstructPlainSet(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
+fn constructPlainSet(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
     const set_proto = object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "Set") orelse return error.TypeError;
     return constructWithPrototype(ctx.runtime, 2, set_proto);
 }
 
-fn qjsSetAddValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !void {
+fn setAddValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !void {
     const out = try methodCall(rt, set_value, 6, &.{key});
     out.free(rt);
 }
 
-fn qjsSetDeleteValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !void {
+fn setDeleteValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !void {
     const out = try methodCall(rt, set_value, 4, &.{key});
     out.free(rt);
 }
 
-fn qjsSetHasValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !bool {
+fn setHasValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !bool {
     const out = try methodCall(rt, set_value, 3, &.{key});
     defer out.free(rt);
     return coercion_ops.valueTruthy(out);
 }
 
-fn qjsSetLikeHas(
+fn setLikeHasCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2184,7 +2182,7 @@ fn qjsSetLikeHas(
     return coercion_ops.valueTruthy(out);
 }
 
-fn qjsSetLikeKeysIterator(
+fn setLikeKeysIterator(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2216,20 +2214,20 @@ fn qjsSetLikeKeysIterator(
     return source;
 }
 
-fn qjsSetCloneReceiver(ctx: *core.JSContext, global: *core.Object, receiver: *core.Object) !core.JSValue {
-    const result_value = try qjsConstructPlainSet(ctx, global);
+fn setCloneReceiver(ctx: *core.JSContext, global: *core.Object, receiver: *core.Object) !core.JSValue {
+    const result_value = try constructPlainSet(ctx, global);
     errdefer result_value.free(ctx.runtime);
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
         const entry = receiver.collectionEntriesSlot().*[index];
         if (!entry.active) continue;
-        try qjsSetAddValue(ctx.runtime, result_value, entry.key);
+        try setAddValue(ctx.runtime, result_value, entry.key);
     }
     return result_value;
 }
 
-fn qjsSetSnapshotKeys(rt: *core.JSRuntime, receiver: *core.Object) ![]core.JSValue {
-    const count = qjsSetStrongSize(receiver);
+fn setSnapshotKeys(rt: *core.JSRuntime, receiver: *core.Object) ![]core.JSValue {
+    const count = setStrongSize(receiver);
     if (count == 0) return &.{};
     const keys = try rt.memory.alloc(core.JSValue, count);
     errdefer rt.memory.free(core.JSValue, keys);
@@ -2245,11 +2243,6 @@ fn qjsSetSnapshotKeys(rt: *core.JSRuntime, receiver: *core.Object) ![]core.JSVal
     return keys;
 }
 
-fn qjsFreeValueList(rt: *core.JSRuntime, values: []core.JSValue) void {
-    for (values) |value| value.free(rt);
-    if (values.len != 0) rt.memory.free(core.JSValue, values);
-}
-
 test "set difference snapshot key root exposes dynamic key slice" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2257,7 +2250,7 @@ test "set difference snapshot key root exposes dynamic key slice" {
     var keys = try rt.memory.alloc(core.JSValue, 1);
     const first_atom = try rt.atoms.newValueSymbol("gc-set-difference-snapshot-key");
     keys[0] = try rt.symbolValue(first_atom);
-    defer qjsFreeValueList(rt, keys);
+    defer freeValueList(rt, keys);
 
     var keys_root = ValueListRoot{};
     keys_root.init(rt, &keys);
@@ -2267,7 +2260,7 @@ test "set difference snapshot key root exposes dynamic key slice" {
     try std.testing.expect(rt.atoms.name(first_atom) != null);
 }
 
-fn qjsSetDifference(
+fn setDifference(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2276,16 +2269,16 @@ fn qjsSetDifference(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    const result_value = try qjsConstructPlainSet(ctx, global);
+    const result_value = try constructPlainSet(ctx, global);
     errdefer result_value.free(ctx.runtime);
-    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) > other_record.size) {
+    if (@as(i64, @intCast(setStrongSize(receiver))) > other_record.size) {
         var copy_index: usize = 0;
         while (copy_index < receiver.collectionEntriesSlot().*.len) : (copy_index += 1) {
             const entry = receiver.collectionEntriesSlot().*[copy_index];
             if (!entry.active) continue;
-            try qjsSetAddValue(ctx.runtime, result_value, entry.key);
+            try setAddValue(ctx.runtime, result_value, entry.key);
         }
-        var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
+        var iterator_value = try setLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
         defer iterator_value.free(ctx.runtime);
         var iterator_done = false;
         while (true) {
@@ -2298,24 +2291,24 @@ fn qjsSetDifference(
                 iterator_done = true;
                 break;
             }
-            try qjsSetDeleteValue(ctx.runtime, result_value, step.value);
+            try setDeleteValue(ctx.runtime, result_value, step.value);
         }
     } else {
-        var keys = try qjsSetSnapshotKeys(ctx.runtime, receiver);
-        defer qjsFreeValueList(ctx.runtime, keys);
+        var keys = try setSnapshotKeys(ctx.runtime, receiver);
+        defer freeValueList(ctx.runtime, keys);
         var keys_root = ValueListRoot{};
         keys_root.init(ctx.runtime, &keys);
         defer keys_root.deinit();
         for (keys) |key| {
-            if (!try qjsSetLikeHas(ctx, output, global, other_record, key, caller_function, caller_frame)) {
-                try qjsSetAddValue(ctx.runtime, result_value, key);
+            if (!try setLikeHasCall(ctx, output, global, other_record, key, caller_function, caller_frame)) {
+                try setAddValue(ctx.runtime, result_value, key);
             }
         }
     }
     return result_value;
 }
 
-fn qjsSetIntersection(
+fn setIntersection(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2324,19 +2317,19 @@ fn qjsSetIntersection(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    const result_value = try qjsConstructPlainSet(ctx, global);
+    const result_value = try constructPlainSet(ctx, global);
     errdefer result_value.free(ctx.runtime);
-    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) <= other_record.size) {
+    if (@as(i64, @intCast(setStrongSize(receiver))) <= other_record.size) {
         var index: usize = 0;
         while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
             const entry = receiver.collectionEntriesSlot().*[index];
             if (!entry.active) continue;
-            if (try qjsSetLikeHas(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
-                try qjsSetAddValue(ctx.runtime, result_value, entry.key);
+            if (try setLikeHasCall(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
+                try setAddValue(ctx.runtime, result_value, entry.key);
             }
         }
     } else {
-        var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
+        var iterator_value = try setLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
         defer iterator_value.free(ctx.runtime);
         var iterator_done = false;
         while (true) {
@@ -2349,15 +2342,15 @@ fn qjsSetIntersection(
                 iterator_done = true;
                 break;
             }
-            if (try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
-                try qjsSetAddValue(ctx.runtime, result_value, step.value);
+            if (try setHasValue(ctx.runtime, receiver.value(), step.value)) {
+                try setAddValue(ctx.runtime, result_value, step.value);
             }
         }
     }
     return result_value;
 }
 
-fn qjsSetUnion(
+fn setUnion(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2366,9 +2359,9 @@ fn qjsSetUnion(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
+    var iterator_value = try setLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
-    const result_value = try qjsSetCloneReceiver(ctx, global, receiver);
+    const result_value = try setCloneReceiver(ctx, global, receiver);
     errdefer result_value.free(ctx.runtime);
     var iterator_done = false;
     while (true) {
@@ -2381,12 +2374,12 @@ fn qjsSetUnion(
             iterator_done = true;
             break;
         }
-        try qjsSetAddValue(ctx.runtime, result_value, step.value);
+        try setAddValue(ctx.runtime, result_value, step.value);
     }
     return result_value;
 }
 
-fn qjsSetSymmetricDifference(
+fn setSymmetricDifference(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2395,9 +2388,9 @@ fn qjsSetSymmetricDifference(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
+    var iterator_value = try setLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
-    const result_value = try qjsSetCloneReceiver(ctx, global, receiver);
+    const result_value = try setCloneReceiver(ctx, global, receiver);
     errdefer result_value.free(ctx.runtime);
     var iterator_done = false;
     while (true) {
@@ -2410,16 +2403,16 @@ fn qjsSetSymmetricDifference(
             iterator_done = true;
             break;
         }
-        if (try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
-            try qjsSetDeleteValue(ctx.runtime, result_value, step.value);
-        } else if (!try qjsSetHasValue(ctx.runtime, result_value, step.value)) {
-            try qjsSetAddValue(ctx.runtime, result_value, step.value);
+        if (try setHasValue(ctx.runtime, receiver.value(), step.value)) {
+            try setDeleteValue(ctx.runtime, result_value, step.value);
+        } else if (!try setHasValue(ctx.runtime, result_value, step.value)) {
+            try setAddValue(ctx.runtime, result_value, step.value);
         }
     }
     return result_value;
 }
 
-fn qjsSetIsDisjointFrom(
+fn setIsDisjointFrom(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2428,19 +2421,19 @@ fn qjsSetIsDisjointFrom(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) <= other_record.size) {
+    if (@as(i64, @intCast(setStrongSize(receiver))) <= other_record.size) {
         var index: usize = 0;
         while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
             const entry = receiver.collectionEntriesSlot().*[index];
             if (!entry.active) continue;
-            if (try qjsSetLikeHas(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
+            if (try setLikeHasCall(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
                 return core.JSValue.boolean(false);
             }
         }
         return core.JSValue.boolean(true);
     }
 
-    var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
+    var iterator_value = try setLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
     var iterator_done = false;
     while (true) {
@@ -2453,7 +2446,7 @@ fn qjsSetIsDisjointFrom(
             iterator_done = true;
             return core.JSValue.boolean(true);
         }
-        if (try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
+        if (try setHasValue(ctx.runtime, receiver.value(), step.value)) {
             forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             iterator_done = true;
             return core.JSValue.boolean(false);
@@ -2461,7 +2454,7 @@ fn qjsSetIsDisjointFrom(
     }
 }
 
-fn qjsSetIsSubsetOf(
+fn setIsSubsetOf(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2470,19 +2463,19 @@ fn qjsSetIsSubsetOf(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) > other_record.size) return core.JSValue.boolean(false);
+    if (@as(i64, @intCast(setStrongSize(receiver))) > other_record.size) return core.JSValue.boolean(false);
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
         const entry = receiver.collectionEntriesSlot().*[index];
         if (!entry.active) continue;
-        if (!try qjsSetLikeHas(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
+        if (!try setLikeHasCall(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
             return core.JSValue.boolean(false);
         }
     }
     return core.JSValue.boolean(true);
 }
 
-fn qjsSetIsSupersetOf(
+fn setIsSupersetOf(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2491,8 +2484,8 @@ fn qjsSetIsSupersetOf(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) < other_record.size) return core.JSValue.boolean(false);
-    var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
+    if (@as(i64, @intCast(setStrongSize(receiver))) < other_record.size) return core.JSValue.boolean(false);
+    var iterator_value = try setLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
     var iterator_done = false;
     while (true) {
@@ -2505,7 +2498,7 @@ fn qjsSetIsSupersetOf(
             iterator_done = true;
             return core.JSValue.boolean(true);
         }
-        if (!try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
+        if (!try setHasValue(ctx.runtime, receiver.value(), step.value)) {
             forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             iterator_done = true;
             return core.JSValue.boolean(false);
@@ -2513,7 +2506,7 @@ fn qjsSetIsSupersetOf(
     }
 }
 
-pub fn qjsMapGroupByCall(
+pub fn mapGroupByCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2522,10 +2515,10 @@ pub fn qjsMapGroupByCall(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
     const map_proto = object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "Map") orelse return error.TypeError;
-    return qjsMapGroupByRecord(ctx, output, global, args, map_proto, caller_function, caller_frame);
+    return mapGroupByRecord(ctx, output, global, args, map_proto, caller_function, caller_frame);
 }
 
-pub fn qjsMapGroupByRecord(
+pub fn mapGroupByRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2571,7 +2564,7 @@ pub fn qjsMapGroupByRecord(
         };
         defer key.free(ctx.runtime);
 
-        qjsMapAppendGroupByValue(ctx, global, map_value, key, step.value) catch |err| {
+        mapAppendGroupByValue(ctx, global, map_value, key, step.value) catch |err| {
             try call_runtime.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return err;
         };
@@ -2579,7 +2572,7 @@ pub fn qjsMapGroupByRecord(
     }
 }
 
-pub fn qjsMapGetOrInsertComputed(
+pub fn mapGetOrInsertComputedCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2602,7 +2595,7 @@ pub fn qjsMapGetOrInsertComputed(
     else
         args[0].dup();
     defer key.free(ctx.runtime);
-    if (receiver.class_id == core.class.ids.weakmap and !symbol_builtin.canBeHeldWeakly(ctx.runtime, key)) {
+    if (receiver.class_id == core.class.ids.weakmap and !primitive_ops.canBeHeldWeakly(ctx.runtime, key)) {
         return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key"));
     }
 
@@ -2660,13 +2653,13 @@ fn throwCollectionMethodTypeError(
 ) !core.JSValue {
     if (receiver.class_id == core.class.ids.weakmap and
         (method == .set or method == .get_or_insert or method == .get_or_insert_computed) and
-        args.len >= 1 and !symbol_builtin.canBeHeldWeakly(ctx.runtime, args[0]))
+        args.len >= 1 and !primitive_ops.canBeHeldWeakly(ctx.runtime, args[0]))
     {
         return exception_ops.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key");
     }
     if (receiver.class_id == core.class.ids.weakset and
         method == .add and
-        args.len >= 1 and !symbol_builtin.canBeHeldWeakly(ctx.runtime, args[0]))
+        args.len >= 1 and !primitive_ops.canBeHeldWeakly(ctx.runtime, args[0]))
     {
         return exception_ops.throwTypeErrorMessage(ctx, global, "invalid value used in weak set");
     }
@@ -2683,7 +2676,7 @@ fn collectionReceiverMessage(owner_class: core.ClassId) []const u8 {
     return "not an object";
 }
 
-fn qjsMapAppendGroupByValue(
+fn mapAppendGroupByValue(
     ctx: *core.JSContext,
     global: *core.Object,
     map_value: core.JSValue,

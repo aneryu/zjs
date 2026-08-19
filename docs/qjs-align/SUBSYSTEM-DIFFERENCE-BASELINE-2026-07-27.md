@@ -4,6 +4,28 @@
 作为后续语义对齐、表示收敛和性能归因的基线。它不是“完成度百分比”，也不把
 目录名相似、单个绿色门禁或历史性能结果当成实现等价。
 
+> **Errata（2026-08-19）——本文是 2026-07-27 的冻结快照，按 §1.1 的规则
+> 不改写正文；以下事实已被后续工作取代，引用前先核对：**
+>
+> - §2.1/§19.1/§19.2：known-failure 集已清零。现状 = 44,581 pass /
+>   0 known / 5,194 feature skips，`test262_errors.txt` 为空；§19.2 的
+>   25 项分类已无对象（见 `COMPATIBILITY.md`）。
+> - §19.3：`host-gc-required` 已在 zjs profile 启用，15 个选定 staging
+>   case 全过。
+> - §12.1：strict-mode proper tail calls 已落地（0.2.0-dev，
+>   commit `3c73511e`）；「默认编译器只产生普通 call+return」的表述已过时。
+>   `test262.conf` 仍 skip `tail-call-optimization`（method-position tail
+>   不在范围内），见 `LIMITATIONS.md`。
+> - §13.2/§21 P0-2：simple-field constructor bypass 与 `simple_ctor_memo`
+>   已按「qjs 没有的 fast path 必须删」裁决删除。
+> - §8.4：`cachedDataPropertyValueForFastPath` 已不存在；「无 IC」主结论
+>   仍成立（见 `docs/perf/object-shape-design.md`）。
+> - §17.2/§22.4：`tools/regexp-direct-demo/` 已删除，相关复核命令不可执行。
+> - §20：全部性能数字已被后续战役取代；当前口径见
+>   `docs/perf/zoo-status.md`。
+> - §1.1 的 zjs 基线 SHA `32e881db` 因 2026-08-18 的历史重写不在 main
+>   谱系上，仅存于侧分支/tag。
+
 ## 1. 基线、范围与证据规则
 
 ### 1.1 冻结版本

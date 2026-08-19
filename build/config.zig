@@ -102,7 +102,7 @@ pub fn pinnedExpectedConfig(
 pub const EngineOptionInputs = struct {
     enable_opcode_profile: bool,
     nan_boxing: bool,
-    v2_layout: []const u8,
+    compiler_layout: []const u8,
     expect_config: []const u8,
     oom_coverage: bool,
     force_gc: bool,
@@ -120,7 +120,7 @@ pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.O
     const options = b.addOptions();
     options.addOption(bool, "zjs_enable_opcode_profile", in.enable_opcode_profile);
     options.addOption(bool, "zjs_nan_boxing", in.nan_boxing);
-    options.addOption([]const u8, "zjs_v2_layout", in.v2_layout);
+    options.addOption([]const u8, "zjs_compiler_layout", in.compiler_layout);
     options.addOption([]const u8, "zjs_expect_config", in.expect_config);
     options.addOption(bool, "zjs_oom_coverage", in.oom_coverage);
     options.addOption(bool, "zjs_force_gc", in.force_gc);

@@ -6,19 +6,19 @@ const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const call_mod = @import("call.zig");
 const construct_mod = @import("construct.zig");
-const date_vm = @import("date_ops.zig");
+const date_ops = @import("date_ops.zig");
 const frame_mod = @import("frame.zig");
-const iter_vm = @import("iterator_ops.zig");
+const iterator_ops = @import("iterator_ops.zig");
 const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
 const value_ops = @import("value_ops.zig");
-const value_vm = @import("vm_value.zig");
+const vm_value = @import("vm_value.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
 const stack_mod = @import("stack.zig");
 const HostError = exceptions.HostError;
 const op = bytecode.opcode.op;
 const exceptions = @import("exceptions.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
@@ -26,7 +26,7 @@ const module_mod = @import("module.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
 const promise_ops = @import("promise_ops.zig");
-const property_ic = @import("property_ic.zig");
+const property_direct = @import("property_direct.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const slot_ops = @import("slot_ops.zig");
@@ -89,13 +89,13 @@ const isFunctionLikeClass = call_runtime.isFunctionLikeClass;
 const lengthIndexValue = array_ops.lengthIndexValue;
 const mappedArgumentsValue = call_runtime.mappedArgumentsValue;
 const ordinarySetWithReceiver = call_runtime.ordinarySetWithReceiver;
-const qjsBigIntPrototypeToString = string_ops.qjsBigIntPrototypeToString;
-const qjsCreateArrayDataOrTypedArrayElement = array_ops.qjsCreateArrayDataOrTypedArrayElement;
-const qjsDefineToStringTag = string_ops.qjsDefineToStringTag;
-const qjsIteratorClose = call_runtime.qjsIteratorClose;
-const qjsObjectEntryArrayValue = array_ops.qjsObjectEntryArrayValue;
-const qjsRegExpAutoInitBuiltinMatches = string_ops.qjsRegExpAutoInitBuiltinMatches;
-const qjsRegExpNativeBuiltinMatches = string_ops.qjsRegExpNativeBuiltinMatches;
+const bigIntPrototypeToString = string_ops.bigIntPrototypeToString;
+const createArrayDataOrTypedArrayElement = array_ops.createArrayDataOrTypedArrayElement;
+const defineToStringTag = iterator_ops.defineToStringTag;
+const iteratorCloseValue = call_runtime.iteratorCloseValue;
+const objectEntryArrayValue = array_ops.objectEntryArrayValue;
+const regExpAutoInitBuiltinMatches = string_ops.regExpAutoInitBuiltinMatches;
+const regExpNativeBuiltinMatches = string_ops.regExpNativeBuiltinMatches;
 const readUtf16CodePoint = string_ops.readUtf16CodePoint;
 const regExpConstructorFromGlobal = regexp_fastpath.regExpConstructorFromGlobal;
 const regExpFlagsContain = regexp_fastpath.regExpFlagsContain;
@@ -280,7 +280,7 @@ pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.O
     const generator_prototype = try generatorPrototypeFromGlobal(rt, global);
     try object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(generator_prototype.value(), false, false, true));
     try generator_prototype.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(object_value, false, false, true));
-    try qjsDefineToStringTag(rt, object, "GeneratorFunction");
+    try defineToStringTag(rt, object, "GeneratorFunction");
     try storeRealmValue(rt, global, .generator_function_prototype, object_value);
     object_value_owned = false;
     object_value.free(rt);
@@ -734,7 +734,7 @@ test "constructPrimitiveWrapperWithPrototype roots direct symbol while creating 
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-pub fn qjsAggregateErrorConstructWithPrototype(
+pub fn aggregateErrorConstructWithPrototype(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -780,7 +780,7 @@ pub fn qjsAggregateErrorConstructWithPrototype(
     if (rooted_args.len >= 2 and !rooted_args[1].isUndefined()) {
         const message = try toStringForAnnexB(ctx, output, global, rooted_args[1], caller_function, caller_frame);
         defer message.free(rt);
-        try defineDataProperty(rt, instance, "message", message, true, false, true);
+        try defineDataPropertyByName(rt, instance, "message", message, true, false, true);
     }
 
     if (rooted_args.len >= 3 and rooted_args[2].isObject()) {
@@ -789,7 +789,7 @@ pub fn qjsAggregateErrorConstructWithPrototype(
         const options = try property_ops.expectObject(rooted_args[2]);
         if (try hasValueProperty(ctx, output, global, rooted_args[2], options, cause_key, caller_function, caller_frame)) {
             cause_val = try getValueProperty(ctx, output, global, rooted_args[2], cause_key, caller_function, caller_frame);
-            try defineDataProperty(rt, instance, "cause", cause_val, true, false, true);
+            try defineDataPropertyByName(rt, instance, "cause", cause_val, true, false, true);
             cause_val.free(rt);
             cause_val = core.JSValue.undefinedValue();
         }
@@ -799,14 +799,14 @@ pub fn qjsAggregateErrorConstructWithPrototype(
     const errors_array = try aggregateErrorsIterableToArray(ctx, output, global, errors_value, caller_function, caller_frame);
     const errors_array_value = errors_array.value();
     defer errors_array_value.free(rt);
-    try defineDataProperty(rt, instance, "errors", errors_array_value, true, false, true);
+    try defineDataPropertyByName(rt, instance, "errors", errors_array_value, true, false, true);
 
     try captureErrorStack(ctx, output, global, instance);
 
     return instance_value;
 }
 
-test "qjsAggregateErrorConstructWithPrototype preserves direct symbol errors and cause" {
+test "aggregateErrorConstructWithPrototype preserves direct symbol errors and cause" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -827,7 +827,7 @@ test "qjsAggregateErrorConstructWithPrototype preserves direct symbol errors and
     try errors_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(error_value, true, true, true));
     errors_source.setArrayLength(1);
     try errors_source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(1), true, false, false));
-    try defineDataProperty(rt, options, "cause", cause_value, true, false, true);
+    try defineDataPropertyByName(rt, options, "cause", cause_value, true, false, true);
 
     const args = [_]core.JSValue{
         errors_source.value(),
@@ -840,7 +840,7 @@ test "qjsAggregateErrorConstructWithPrototype preserves direct symbol errors and
     ctx.runtime.formatting_error_stack = true;
     defer ctx.runtime.formatting_error_stack = false;
 
-    const aggregate_value = try qjsAggregateErrorConstructWithPrototype(ctx, null, global, null, &args, null, null);
+    const aggregate_value = try aggregateErrorConstructWithPrototype(ctx, null, global, null, &args, null, null);
     var aggregate_alive = true;
     defer if (aggregate_alive) aggregate_value.free(rt);
     const aggregate = objectFromValue(aggregate_value) orelse return error.TypeError;
@@ -877,7 +877,7 @@ test "qjsAggregateErrorConstructWithPrototype preserves direct symbol errors and
     try std.testing.expect(rt.atoms.name(cause_atom) == null);
 }
 
-pub fn qjsSuppressedErrorConstructWithPrototype(
+pub fn suppressedErrorConstructWithPrototype(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -913,21 +913,21 @@ pub fn qjsSuppressedErrorConstructWithPrototype(
     if (rooted_args.len >= 3 and !rooted_args[2].isUndefined()) {
         const message = try toStringForAnnexB(ctx, output, global, rooted_args[2], caller_function, caller_frame);
         defer message.free(rt);
-        try defineDataProperty(rt, instance, "message", message, true, false, true);
+        try defineDataPropertyByName(rt, instance, "message", message, true, false, true);
     }
 
     const error_value = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.undefinedValue();
-    try defineDataProperty(rt, instance, "error", error_value, true, false, true);
+    try defineDataPropertyByName(rt, instance, "error", error_value, true, false, true);
 
     const suppressed_value = if (rooted_args.len >= 2) rooted_args[1] else core.JSValue.undefinedValue();
-    try defineDataProperty(rt, instance, "suppressed", suppressed_value, true, false, true);
+    try defineDataPropertyByName(rt, instance, "suppressed", suppressed_value, true, false, true);
 
     try captureErrorStack(ctx, output, global, instance);
 
     return instance_value;
 }
 
-test "qjsSuppressedErrorConstructWithPrototype roots direct symbol args while creating error" {
+test "suppressedErrorConstructWithPrototype roots direct symbol args while creating error" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -948,7 +948,7 @@ test "qjsSuppressedErrorConstructWithPrototype roots direct symbol args while cr
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const error_value = try qjsSuppressedErrorConstructWithPrototype(ctx, null, global, null, &args, null, null);
+    const error_value = try suppressedErrorConstructWithPrototype(ctx, null, global, null, &args, null, null);
     var error_alive = true;
     defer if (error_alive) error_value.free(rt);
     const object = objectFromValue(error_value) orelse return error.TypeError;
@@ -977,7 +977,7 @@ test "qjsSuppressedErrorConstructWithPrototype roots direct symbol args while cr
     try std.testing.expect(rt.atoms.name(suppressed_atom) == null);
 }
 
-pub fn qjsDisposableStackConstructWithPrototype(
+pub fn disposableStackConstructWithPrototype(
     ctx: *core.JSContext,
     global: *core.Object,
     prototype: ?*core.Object,
@@ -987,7 +987,7 @@ pub fn qjsDisposableStackConstructWithPrototype(
     errdefer core.Object.destroyFromHeader(ctx.runtime, &stack.header);
     return stack.value();
 }
-pub fn qjsErrorConstructWithPrototype(
+pub fn errorConstructWithPrototype(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1037,7 +1037,7 @@ pub fn qjsErrorConstructWithPrototype(
     if (rooted_args.len >= 1 and !rooted_args[0].isUndefined()) {
         const message = try toStringForAnnexB(ctx, output, global, rooted_args[0], caller_function, caller_frame);
         defer message.free(rt);
-        try defineDataProperty(rt, instance, "message", message, true, false, true);
+        try defineDataPropertyByName(rt, instance, "message", message, true, false, true);
     }
 
     if (rooted_args.len >= 2 and rooted_args[1].isObject()) {
@@ -1046,7 +1046,7 @@ pub fn qjsErrorConstructWithPrototype(
         const options = try property_ops.expectObject(rooted_args[1]);
         if (try hasValueProperty(ctx, output, global, rooted_args[1], options, cause_key, caller_function, caller_frame)) {
             cause_val = try getValueProperty(ctx, output, global, rooted_args[1], cause_key, caller_function, caller_frame);
-            try defineDataProperty(rt, instance, "cause", cause_val, true, false, true);
+            try defineDataPropertyByName(rt, instance, "cause", cause_val, true, false, true);
             cause_val.free(rt);
             cause_val = core.JSValue.undefinedValue();
         }
@@ -1057,7 +1057,7 @@ pub fn qjsErrorConstructWithPrototype(
     return instance_value;
 }
 
-test "qjsErrorConstructWithPrototype preserves direct symbol cause" {
+test "errorConstructWithPrototype preserves direct symbol cause" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -1070,7 +1070,7 @@ test "qjsErrorConstructWithPrototype preserves direct symbol cause" {
 
     const cause_atom = try rt.atoms.newValueSymbol("gc-error-cause-symbol");
     const cause_value = try rt.symbolValue(cause_atom);
-    try defineDataProperty(rt, options, "cause", cause_value, true, false, true);
+    try defineDataPropertyByName(rt, options, "cause", cause_value, true, false, true);
     const args = [_]core.JSValue{
         core.JSValue.undefinedValue(),
         options.value(),
@@ -1081,7 +1081,7 @@ test "qjsErrorConstructWithPrototype preserves direct symbol cause" {
     ctx.runtime.formatting_error_stack = true;
     defer ctx.runtime.formatting_error_stack = false;
 
-    const error_value = try qjsErrorConstructWithPrototype(ctx, null, global, "Error", null, &args, null, null);
+    const error_value = try errorConstructWithPrototype(ctx, null, global, "Error", null, &args, null, null);
     var error_alive = true;
     defer if (error_alive) error_value.free(rt);
     const object = objectFromValue(error_value) orelse return error.TypeError;
@@ -1144,7 +1144,7 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
     for (methods) |method| {
         try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, prototype, method.name, 0, core.function.nativeBuiltinId(.host, @intFromEnum(method.id)));
     }
-    try qjsDefineToStringTag(rt, prototype, "CallSite");
+    try defineToStringTag(rt, prototype, "CallSite");
 
     const prototype_value = prototype.value();
     prototype_raw_owned = false;
@@ -1153,7 +1153,7 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
     return prototype;
 }
 
-pub fn defineDataProperty(
+pub fn defineDataPropertyByName(
     rt: *core.JSRuntime,
     object: *core.Object,
     name: []const u8,
@@ -1167,7 +1167,7 @@ pub fn defineDataProperty(
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, writable, enumerable, configurable));
 }
 
-pub fn qjsRegExpPrototypeMethodIsDefault(_: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
+pub fn regExpPrototypeMethodIsDefault(_: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
     if (object.class_id != core.class.ids.regexp) return false;
     if (object.hasOwnProperty(atom_id)) return false;
     const proto = object.getPrototype() orelse return false;
@@ -1179,20 +1179,20 @@ pub fn qjsRegExpPrototypeMethodIsDefault(_: *core.JSRuntime, object: *core.Objec
     if (prop_flags.isAccessor()) return false;
     const entry = proto.prop_values[property_index];
     return switch (proto.propKindAt(property_index)) {
-        .data => qjsRegExpNativeBuiltinMatches(entry.slot.data, expected_id),
-        .auto_init => qjsRegExpAutoInitBuiltinMatches(core.property.autoInit(entry.slot.auto_init).*, expected_id),
+        .data => regExpNativeBuiltinMatches(entry.slot.data, expected_id),
+        .auto_init => regExpAutoInitBuiltinMatches(core.property.autoInit(entry.slot.auto_init).*, expected_id),
         .var_ref, .accessor => false,
     };
 }
 
 /// Side-effect-free check that a RegExp flag getter (`flags`/`global`/`unicode`/
 /// `sticky`) resolves to the default native accessor -- the accessor analog of
-/// `qjsRegExpPrototypeMethodIsDefault`, used to gate the standard-regexp fast
+/// `regExpPrototypeMethodIsDefault`, used to gate the standard-regexp fast
 /// paths exactly like QuickJS `check_regexp_getter`. Crucially this NEVER
 /// invokes the getter, so probing it has no observable effect (the failing
 /// `Symbol.replace/get-*-err` tests require the generic path to observe an
 /// overridden getter in spec order instead).
-pub fn qjsRegExpPrototypeGetterIsDefault(_: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
+pub fn regExpPrototypeGetterIsDefault(_: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
     if (object.class_id != core.class.ids.regexp) return false;
     if (object.hasOwnProperty(atom_id)) return false;
     const proto = object.getPrototype() orelse return false;
@@ -1202,7 +1202,7 @@ pub fn qjsRegExpPrototypeGetterIsDefault(_: *core.JSRuntime, object: *core.Objec
     const property_index = proto.findProperty(atom_id) orelse return false;
     const entry = proto.prop_values[property_index];
     return switch (proto.propKindAt(property_index)) {
-        .accessor => qjsRegExpNativeBuiltinMatches(entry.slot.accessor.getterValue(), expected_id),
+        .accessor => regExpNativeBuiltinMatches(entry.slot.accessor.getterValue(), expected_id),
         .auto_init, .data, .var_ref => false,
     };
 }
@@ -1221,13 +1221,13 @@ pub fn regExpIsStandard(rt: *core.JSRuntime, object: *core.Object) bool {
         if (!last_index.isNumber()) return false;
     } else return false;
     const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return false;
-    if (!qjsRegExpPrototypeMethodIsDefault(rt, object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) return false;
+    if (!regExpPrototypeMethodIsDefault(rt, object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) return false;
     const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return false;
-    if (!qjsRegExpPrototypeGetterIsDefault(rt, object, flags_atom, @intFromEnum(method_ids.regexp.AccessorMethod.flags))) return false;
+    if (!regExpPrototypeGetterIsDefault(rt, object, flags_atom, @intFromEnum(method_ids.regexp.AccessorMethod.flags))) return false;
     const global_atom = (comptime core.atom.predefinedId("global", .string)) orelse return false;
-    if (!qjsRegExpPrototypeGetterIsDefault(rt, object, global_atom, @intFromEnum(method_ids.regexp.AccessorMethod.global))) return false;
+    if (!regExpPrototypeGetterIsDefault(rt, object, global_atom, @intFromEnum(method_ids.regexp.AccessorMethod.global))) return false;
     const unicode_atom = (comptime core.atom.predefinedId("unicode", .string)) orelse return false;
-    if (!qjsRegExpPrototypeGetterIsDefault(rt, object, unicode_atom, @intFromEnum(method_ids.regexp.AccessorMethod.unicode))) return false;
+    if (!regExpPrototypeGetterIsDefault(rt, object, unicode_atom, @intFromEnum(method_ids.regexp.AccessorMethod.unicode))) return false;
     return true;
 }
 
@@ -1367,7 +1367,7 @@ pub fn readUnicodePropertyClassEscape(body: []const u8, index: *usize) ?Property
     return propertyEscapePattern(body[start..index.*]);
 }
 
-pub fn qjsDatePrototypeMethod(
+pub fn datePrototypeMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1378,15 +1378,15 @@ pub fn qjsDatePrototypeMethod(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (method_id == 11) {
-        if (try date_vm.qjsDateToJsonCall(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+        if (try date_ops.dateToJsonCall(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
     }
     if (method_id == 23) {
-        if (try date_vm.qjsDateSetYear(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+        if (try date_ops.dateSetYear(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
     }
     if (method_id == 24) {
-        if (try date_vm.qjsDateSetTime(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+        if (try date_ops.dateSetTime(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
     }
-    if (try date_vm.qjsDateCapturedSetterCall(ctx, output, global, this_value, method_id, args, caller_function, caller_frame)) |value| return value;
+    if (try date_ops.dateCapturedSetterCall(ctx, output, global, this_value, method_id, args, caller_function, caller_frame)) |value| return value;
     // Remaining (non-special-cased) prototype ids run the plain `methodCallArgs`
     // body, which lives in `exec/date_ops.zig`. Route it through the record
     // table's func-object-free arm (re-encoding the decoded id to its
@@ -1567,7 +1567,7 @@ pub noinline fn populateRegExpGroupsFromCaptureValues(
     }
 }
 
-pub fn qjsPrimitivePrototypeMethod(
+pub fn primitivePrototypeMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1589,7 +1589,7 @@ pub fn qjsPrimitivePrototypeMethod(
     switch (method_tag) {
         3 => switch (class_tag) {
             2 => return core.JSValue.boolean(args.len >= 1 and value_ops.isTruthy(args[0])),
-            4 => return qjsSymbolConstructorCall(ctx, output, global, args),
+            4 => return symbolConstructorCall(ctx, output, global, args),
             else => return error.TypeError,
         },
         4 => {
@@ -1619,7 +1619,7 @@ pub fn qjsPrimitivePrototypeMethod(
             const native_ref = core.function.NativeBuiltinRef{ .domain = .number, .id = @intFromEnum(method_ids.number.PrototypeMethod.to_string) };
             break :blk (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, primitive, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
         } else if (class_tag == 3)
-            qjsBigIntPrototypeToString(ctx, output, global, primitive, args, caller_function, caller_frame)
+            bigIntPrototypeToString(ctx, output, global, primitive, args, caller_function, caller_frame)
         else
             value_ops.toStringValue(rt, primitive),
         2 => primitive.dup(),
@@ -1631,7 +1631,7 @@ pub fn qjsPrimitivePrototypeMethod(
 /// retired string-name dispatch branch in `call.zig`: coerce the optional
 /// description through the user-visible ToString path, then mint a fresh
 /// value symbol.
-fn qjsSymbolConstructorCall(
+fn symbolConstructorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1714,7 +1714,7 @@ pub fn getNumberPrototypeMethodId(rt: *core.JSRuntime, function_object: *core.Ob
     };
 }
 
-pub fn qjsNumberPrototypeMethod(
+pub fn numberPrototypeMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1787,7 +1787,7 @@ pub fn defineErrorStackDataProperty(
     };
 }
 
-pub fn qjsDataViewConstructWithPrototype(
+pub fn dataViewConstructWithPrototype(
     rt: *core.JSRuntime,
     buffer: core.JSValue,
     coerced: DataViewConstructorArgs,
@@ -1820,11 +1820,11 @@ pub fn defineClassFieldDataProperty(rt: *core.JSRuntime, object: *core.Object, a
     };
 }
 
-pub fn qjsConstructWeakRefWithPrototype(rt: *core.JSRuntime, target: core.JSValue, prototype: ?*core.Object) !core.JSValue {
+pub fn constructWeakRefWithPrototype(rt: *core.JSRuntime, target: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     return construct_mod.weakRefWithPrototype(rt, target, prototype);
 }
 
-pub fn qjsConstructFinalizationRegistryWithPrototype(
+pub fn constructFinalizationRegistryWithPrototype(
     ctx: *core.JSContext,
     cleanup_callback: core.JSValue,
     prototype: ?*core.Object,
@@ -2055,10 +2055,10 @@ pub fn createDataPropertyOrThrow(
         try proxyCreateDataPropertyOrThrow(ctx, output, global, receiver_value, object, atom_id, value, caller_function, caller_frame);
         return;
     }
-    try qjsCreateArrayDataOrTypedArrayElement(ctx.runtime, object, atom_id, value);
+    try createArrayDataOrTypedArrayElement(ctx.runtime, object, atom_id, value);
 }
 
-pub fn qjsObjectGetPrototypeOfStep(
+pub fn objectGetPrototypeOfStep(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2081,18 +2081,18 @@ pub fn qjsObjectGetPrototypeOfStep(
     defer ctx.runtime.atoms.free(trap_key);
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, caller_function, caller_frame);
     defer trap.free(ctx.runtime);
-    if (trap.isUndefined() or trap.isNull()) return qjsObjectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
+    if (trap.isUndefined() or trap.isNull()) return objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     const result_proto = if (result.isNull()) null else objectFromValue(result) orelse return error.TypeError;
     if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
-        const target_proto = try qjsObjectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
+        const target_proto = try objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
         if (target_proto != result_proto) return error.TypeError;
     }
     return result_proto;
 }
 
-pub fn qjsObjectGetPrototypeOfValue(
+pub fn objectGetPrototypeOfValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2117,12 +2117,12 @@ pub fn qjsObjectGetPrototypeOfValue(
     defer ctx.runtime.atoms.free(trap_key);
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, caller_function, caller_frame);
     defer trap.free(ctx.runtime);
-    if (trap.isUndefined() or trap.isNull()) return qjsObjectGetPrototypeOfValue(ctx, output, global, target, caller_function, caller_frame);
+    if (trap.isUndefined() or trap.isNull()) return objectGetPrototypeOfValue(ctx, output, global, target, caller_function, caller_frame);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
     errdefer result.free(ctx.runtime);
     if (!result.isNull() and objectFromValue(result) == null) return error.TypeError;
     if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
-        const target_proto = try qjsObjectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
+        const target_proto = try objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
         const same = if (result.isNull())
             target_proto == null
         else if (objectFromValue(result)) |result_object|
@@ -2134,7 +2134,7 @@ pub fn qjsObjectGetPrototypeOfValue(
     return result;
 }
 
-pub fn qjsDestructuringObjectRest(
+pub fn destructuringObjectRest(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2189,7 +2189,7 @@ pub fn qjsDestructuringObjectRest(
     return out_value;
 }
 
-test "qjsDestructuringObjectRest roots direct symbol values while creating rest object" {
+test "destructuringObjectRest roots direct symbol values while creating rest object" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -2211,7 +2211,7 @@ test "qjsDestructuringObjectRest roots direct symbol values while creating rest 
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const rest_value = try qjsDestructuringObjectRest(ctx, null, global, &args);
+    const rest_value = try destructuringObjectRest(ctx, null, global, &args);
     var rest_alive = true;
     defer if (rest_alive) rest_value.free(rt);
     const rest = try property_ops.expectObject(rest_value);
@@ -2483,7 +2483,7 @@ pub fn generatorObjectPrototype(rt: *core.JSRuntime, global: *core.Object, funct
     return OwnedPrototype.fromObject(fallback);
 }
 
-pub fn qjsIteratorPrototypeAccessor(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, args: []const core.JSValue, id: u32) !core.JSValue {
+pub fn iteratorPrototypeAccessor(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, args: []const core.JSValue, id: u32) !core.JSValue {
     if (id == @intFromEnum(method_ids.iterator.AccessorMethod.constructor_setter)) {
         if (args.len > 0) {
             if (!args[0].isObject()) return throwTypeErrorMessage(ctx, global, "not an object");
@@ -2495,10 +2495,10 @@ pub fn qjsIteratorPrototypeAccessor(ctx: *core.JSContext, global: *core.Object, 
             if (receiver_object == home) return throwTypeErrorMessage(ctx, global, "Cannot assign to read only property");
         }
     }
-    return iter_vm.qjsIteratorPrototypeAccessor(ctx, global, receiver, args, id);
+    return iterator_ops.iteratorPrototypeAccessor(ctx, global, receiver, args, id);
 }
 
-pub fn qjsIteratorPrototypeAccessorSet(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) !core.JSValue {
+pub fn iteratorPrototypeAccessorSet(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) !core.JSValue {
     if (atom_id == core.atom.ids.constructor) {
         if (!value.isObject()) return throwTypeErrorMessage(ctx, global, "not an object");
         if (!receiver.isObject()) return throwTypeErrorMessage(ctx, global, "not an object");
@@ -2508,10 +2508,10 @@ pub fn qjsIteratorPrototypeAccessorSet(ctx: *core.JSContext, global: *core.Objec
             if (receiver_object == home) return throwTypeErrorMessage(ctx, global, "Cannot assign to read only property");
         }
     }
-    return iter_vm.qjsIteratorPrototypeAccessorSet(ctx, global, receiver, atom_id, value);
+    return iterator_ops.iteratorPrototypeAccessorSet(ctx, global, receiver, atom_id, value);
 }
 
-pub fn qjsIteratorPrototypeMethodCall(
+pub fn iteratorPrototypeMethodCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2521,7 +2521,7 @@ pub fn qjsIteratorPrototypeMethodCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    return iter_vm.qjsIteratorPrototypeMethodCall(
+    return iterator_ops.iteratorPrototypeMethodCall(
         ctx,
         output,
         global,
@@ -2574,11 +2574,11 @@ pub fn tagIteratorWrapPrototypeMethod(rt: *core.JSRuntime, global: *core.Object,
 }
 
 pub fn iteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
-    return iter_vm.iteratorPrototypeFromGlobal(rt, global);
+    return iterator_ops.iteratorPrototypeFromGlobal(rt, global);
 }
 
-pub fn qjsIteratorPrototype(rt: *core.JSRuntime, global: *core.Object, tag_name: []const u8) !*core.Object {
-    return iter_vm.qjsIteratorPrototype(rt, global, tag_name);
+pub fn iteratorPrototype(rt: *core.JSRuntime, global: *core.Object, tag_name: []const u8) !*core.Object {
+    return iterator_ops.iteratorPrototype(rt, global, tag_name);
 }
 
 fn argumentsPropertyTemplate(rt: *core.JSRuntime, global: *core.Object, comptime mapped: bool) !*core.Shape {
@@ -2754,35 +2754,12 @@ pub inline fn plainBytecodeFunctionObjectFromValue(value: core.JSValue) ?*core.O
     return object;
 }
 
-pub fn objectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    if (header.meta().flags.kind != .object) return null;
-    return @fieldParentPtr("header", header);
-}
-
-/// Expression-receiver classification for the resident field ops — qjs
-/// JS_VALUE_GET_OBJ: tag test then raw pointer cast, no second header-kind
-/// probe (GET_FIELD_INLINE, quickjs.c:19123-19125; OP_put_field, 19190-19192).
-/// The generic objectFromValue re-checks `meta().kind == .object` because zjs
-/// wraps VarRef cells in the SAME object tag (VarRef.valueRef) for the
-/// JSValue-typed cell domains (eval name tables, property cells, make_ref
-/// pairs) — a discrimination qjs never needs since its JSVarRef* stays typed.
-/// A field-op RECEIVER, however, is always an evaluated expression value: the
-/// only handler that pushes a cell wrapper onto the operand stack is
-/// h_make_slot_ref (make_loc_ref/make_arg_ref/make_var_ref_ref), and the
-/// parser consumes that ref pair exclusively through get_ref_value /
-/// put_ref_value, which unwrap the cell before any value flows on (the same
-/// trusted-compiler stack discipline that lets get_loc skip bounds checks).
-/// So the kind re-load is dead on this path; Debug keeps it as an assert.
-pub inline fn objectFromValueTrustedExpression(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeaderAssumeObject();
-    if (comptime builtin.mode == .Debug) {
-        std.debug.assert(header.meta().flags.kind == .object);
-    }
-    return @fieldParentPtr("header", header);
-}
+// Authoritative implementations live in core.value_semantics (the Object
+// type's own layer); the safety contract and the TrustedExpression
+// precondition are documented there. These re-exports keep the established
+// exec spellings working.
+pub const objectFromValue = core.value_semantics.objectFromValue;
+pub const objectFromValueTrustedExpression = core.value_semantics.objectFromValueTrustedExpression;
 
 pub fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
     const object = objectFromValue(value) orelse return null;
@@ -3465,7 +3442,7 @@ pub fn bytecodeFunctionObjectTag(object: *core.Object) []const u8 {
     return "Function";
 }
 
-pub fn qjsDefinePropertyWithKind(
+pub fn definePropertyWithKind(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3481,7 +3458,7 @@ pub fn qjsDefinePropertyWithKind(
     defer ctx.runtime.atoms.free(atom_id);
     if (args.len < 3) return error.TypeError;
     const desc_object = property_ops.expectObject(args[2]) catch return error.TypeError;
-    const desc = try qjsDescriptorFromObject(ctx, output, global, args[2], desc_object, object, atom_id, caller_function, caller_frame);
+    const desc = try descriptorFromObject(ctx, output, global, args[2], desc_object, object, atom_id, caller_function, caller_frame);
     defer desc.destroy(ctx.runtime);
     const defined = if (object.proxyTarget() != null)
         proxyDefineOwnProperty(ctx, output, global, object, atom_id, desc, caller_function, caller_frame) catch |err| switch (err) {
@@ -3525,7 +3502,7 @@ pub const PendingPropertyDescriptor = struct {
     }
 };
 
-pub fn qjsObjectEnumerableOwnPropertiesCall(
+pub fn objectEnumerableOwnPropertiesCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3577,7 +3554,7 @@ pub fn qjsObjectEnumerableOwnPropertiesCall(
         element = switch (mode) {
             .keys => try ctx.runtime.atoms.toStringValue(ctx.runtime, key),
             .values => try getValueProperty(ctx, output, global, object_value, key, caller_function, caller_frame),
-            .entries => try qjsObjectEntryArrayValue(ctx, output, global, object_value, key, caller_function, caller_frame),
+            .entries => try objectEntryArrayValue(ctx, output, global, object_value, key, caller_function, caller_frame),
         };
         errdefer {
             element.free(ctx.runtime);
@@ -3590,7 +3567,7 @@ pub fn qjsObjectEnumerableOwnPropertiesCall(
     return out_value;
 }
 
-pub fn qjsObjectProtoGetterCall(
+pub fn objectProtoGetterCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3602,10 +3579,10 @@ pub fn qjsObjectProtoGetterCall(
     const object_value = if (objectFromValue(this_value)) |_| this_value.dup() else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     defer object_value.free(ctx.runtime);
     const object = objectFromValue(object_value) orelse return error.TypeError;
-    return qjsObjectGetPrototypeOfValue(ctx, output, global, object, caller_function, caller_frame);
+    return objectGetPrototypeOfValue(ctx, output, global, object, caller_function, caller_frame);
 }
 
-pub fn qjsObjectProtoSetterCall(
+pub fn objectProtoSetterCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3618,14 +3595,14 @@ pub fn qjsObjectProtoSetterCall(
     if (!prototype_value.isNull() and objectFromValue(prototype_value) == null) return core.JSValue.undefinedValue();
     if (objectFromValue(this_value) == null) return core.JSValue.undefinedValue();
     var args = [_]core.JSValue{ this_value, prototype_value };
-    if (try qjsObjectSetPrototypeOfCall(ctx, output, global, &args, caller_function, caller_frame)) |value| {
+    if (try objectSetPrototypeOfCall(ctx, output, global, &args, caller_function, caller_frame)) |value| {
         value.free(ctx.runtime);
         return core.JSValue.undefinedValue();
     }
     return core.JSValue.undefinedValue();
 }
 
-pub fn qjsObjectIsExtensibleCall(
+pub fn objectIsExtensibleCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3652,7 +3629,7 @@ pub fn qjsObjectIsExtensibleCall(
     return core.JSValue.boolean(extensible);
 }
 
-pub fn qjsObjectSetPrototypeOfCall(
+pub fn objectSetPrototypeOfCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3684,7 +3661,7 @@ pub fn qjsObjectSetPrototypeOfCall(
     return args[0].dup();
 }
 
-pub fn qjsReflectSetPrototypeOfCall(
+pub fn reflectSetPrototypeOfCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3739,7 +3716,7 @@ pub fn objectHasImmutablePrototype(rt: *core.JSRuntime, object: *core.Object) bo
     return object.hasImmutablePrototype();
 }
 
-pub fn qjsReflectDeletePropertyCall(
+pub fn reflectDeletePropertyCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3754,7 +3731,7 @@ pub fn qjsReflectDeletePropertyCall(
     return core.JSValue.boolean(try deleteValueProperty(ctx, output, global, args[0], object, atom_id, caller_function, caller_frame));
 }
 
-pub fn qjsReflectGetOwnPropertyDescriptorCall(
+pub fn reflectGetOwnPropertyDescriptorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3772,7 +3749,7 @@ pub fn qjsReflectGetOwnPropertyDescriptorCall(
     return try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
 }
 
-pub fn qjsReflectGetPrototypeOfCall(
+pub fn reflectGetPrototypeOfCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3782,7 +3759,7 @@ pub fn qjsReflectGetPrototypeOfCall(
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
     const object = objectFromValue(args[0]) orelse return error.TypeError;
-    return try qjsObjectGetPrototypeOfValue(ctx, output, global, object, caller_function, caller_frame);
+    return try objectGetPrototypeOfValue(ctx, output, global, object, caller_function, caller_frame);
 }
 
 pub fn descriptorObjectFromDescriptor(rt: *core.JSRuntime, global: *core.Object, desc: core.Descriptor) !core.JSValue {
@@ -3870,7 +3847,7 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-pub fn qjsDescriptorFromObject(
+pub fn descriptorFromObject(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3894,8 +3871,8 @@ pub fn qjsDescriptorFromObject(
     const configurable_key = try ctx.runtime.internAtom("configurable");
     defer ctx.runtime.atoms.free(configurable_key);
 
-    const enumerable = try qjsOptionalBoolDescriptorProperty(ctx, output, global, desc_value, desc_object, enumerable_key, caller_function, caller_frame);
-    const configurable = try qjsOptionalBoolDescriptorProperty(ctx, output, global, desc_value, desc_object, configurable_key, caller_function, caller_frame);
+    const enumerable = try optionalBoolDescriptorProperty(ctx, output, global, desc_value, desc_object, enumerable_key, caller_function, caller_frame);
+    const configurable = try optionalBoolDescriptorProperty(ctx, output, global, desc_value, desc_object, configurable_key, caller_function, caller_frame);
 
     const has_value = try hasValueProperty(ctx, output, global, desc_value, desc_object, value_key, null, null);
     var data_value: ?core.JSValue = null;
@@ -3970,7 +3947,7 @@ pub fn qjsDescriptorFromObject(
     return core.Descriptor.generic(enumerable, configurable);
 }
 
-pub fn qjsOptionalBoolDescriptorProperty(
+pub fn optionalBoolDescriptorProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -5162,7 +5139,7 @@ pub fn proxyAwareOwnPropertyDescriptor(
         return null;
     }
     const desc_object = property_ops.expectObject(desc_value) catch return error.TypeError;
-    var result_desc = try qjsDescriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
+    var result_desc = try descriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
     errdefer result_desc.destroy(ctx.runtime);
     var complete_desc = try completeProxyDescriptor(ctx.runtime, result_desc);
     errdefer complete_desc.destroy(ctx.runtime);
@@ -5289,7 +5266,7 @@ pub fn proxyAwareSetPrototypeOf(
     defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return false;
     if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
-        const target_proto = try qjsObjectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
+        const target_proto = try objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
         if (target_proto != prototype) return error.TypeError;
     }
     return true;
@@ -5428,14 +5405,14 @@ pub fn getProxyProperty(
     defer target_value.free(ctx.runtime);
     const handler_value = (proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy")).dup();
     defer handler_value.free(ctx.runtime);
-    const trap = if (property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, handler_value, core.atom.ids.get)) |borrowed|
+    const trap = if (property_direct.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, handler_value, core.atom.ids.get)) |borrowed|
         if (borrowed.requiresRefCount()) borrowed.dup() else borrowed
     else
         try getValueProperty(ctx, output, global, handler_value, core.atom.ids.get, caller_function, caller_frame);
     defer trap.free(ctx.runtime);
     const target = try property_ops.expectObject(target_value);
     if (trap.isUndefined() or trap.isNull()) {
-        if (property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, target_value, atom_id)) |borrowed| {
+        if (property_direct.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, target_value, atom_id)) |borrowed| {
             return if (borrowed.requiresRefCount()) borrowed.dup() else borrowed;
         }
         return getValuePropertyWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, caller_function, caller_frame);

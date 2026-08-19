@@ -5,10 +5,9 @@ const unicode_lib = @import("../libs/unicode.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const call_mod = @import("call.zig");
-// const collection_vm = merged
 const construct_mod = @import("construct.zig");
 const frame_mod = @import("frame.zig");
-const iter_vm = @import("iterator_ops.zig");
+const iterator_ops = @import("iterator_ops.zig");
 const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
 const stack_mod = @import("stack.zig");
@@ -17,7 +16,7 @@ const op = bytecode.opcode.op;
 const atom_buffer = core.atom.predefinedId("buffer", .string).?;
 const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
 const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 
 const call_runtime = @import("call_runtime.zig");
 const builtin_glue = @import("builtin_glue.zig");
@@ -30,7 +29,7 @@ const regexp_fastpath = @import("regexp_fastpath.zig");
 const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
 const ActiveRootValueProbe = call_runtime.ActiveRootValueProbe;
-const IteratorZipRecord = iter_vm.IteratorZipRecord;
+const IteratorZipRecord = iterator_ops.IteratorZipRecord;
 const RegExpMatch = string_ops.RegExpMatch;
 const appendAtom = core.atom.appendAtom;
 const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
@@ -78,15 +77,15 @@ const printHostOutputArgs = builtin_glue.printHostOutputArgs;
 const propertyAtomFromLengthIndex = object_ops.propertyAtomFromLengthIndex;
 const propertyIndexFromLengthKey = object_ops.propertyIndexFromLengthKey;
 const proxyDefineValueForReflectSet = object_ops.proxyDefineValueForReflectSet;
-const qjsArrayConcatCall = string_ops.qjsArrayConcatCall;
-const qjsArraySearchCall = string_ops.qjsArraySearchCall;
-const qjsArrayToLocaleStringCall = string_ops.qjsArrayToLocaleStringCall;
-const qjsArrayToStringCall = string_ops.qjsArrayToStringCall;
-const qjsCollectIteratorValues = call_runtime.qjsCollectIteratorValues;
-const qjsIteratorCallForNativeRecord = call_runtime.qjsIteratorCallForNativeRecord;
-const qjsIteratorClose = call_runtime.qjsIteratorClose;
-const qjsIteratorPrototype = object_ops.qjsIteratorPrototype;
-const qjsObjectEnumerableOwnPropertiesCall = object_ops.qjsObjectEnumerableOwnPropertiesCall;
+const arrayConcatCall = string_ops.arrayConcatCall;
+const arraySearchCall = string_ops.arraySearchCall;
+const arrayToLocaleStringCall = string_ops.arrayToLocaleStringCall;
+const arrayToStringCall = string_ops.arrayToStringCall;
+const collectIteratorValues = call_runtime.collectIteratorValues;
+const iteratorCallForNativeRecord = call_runtime.iteratorCallForNativeRecord;
+const iteratorCloseValue = call_runtime.iteratorCloseValue;
+const iteratorPrototype = object_ops.iteratorPrototype;
+const objectEnumerableOwnPropertiesCall = object_ops.objectEnumerableOwnPropertiesCall;
 const readInt = call_runtime.readInt;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setValueProperty = object_ops.setValueProperty;
@@ -149,7 +148,7 @@ pub fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*cor
 }
 
 pub fn arrayIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Object) !*core.Object {
-    return iter_vm.arrayIteratorPrototypeFromContext(ctx, global);
+    return iterator_ops.arrayIteratorPrototypeFromContext(ctx, global);
 }
 
 pub fn isArrayMethodReceiver(value: core.JSValue) bool {
@@ -176,7 +175,7 @@ pub fn pushFunctionClosure(
     try stack.push(object_value);
 }
 
-pub fn qjsArrayMethodFastCall(
+pub fn arrayMethodFastCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -203,29 +202,29 @@ pub fn qjsArrayMethodFastCall(
     const native_callable = callableObjectFromValue(func) orelse return null;
     if (core.function.decodeNativeBuiltinId(native_callable.nativeFunctionId())) |native_ref| {
         if (native_ref.domain == .iterator) {
-            if (try qjsIteratorCallForNativeRecord(ctx, output, global, receiver, native_ref.id, args, caller_function, caller_frame)) |value| return value;
+            if (try iteratorCallForNativeRecord(ctx, output, global, receiver, native_ref.id, args, caller_function, caller_frame)) |value| return value;
         }
     }
-    if (try qjsArrayIterationCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
-    if (try qjsArrayAtCall(ctx, output, global, receiver, func, args)) |value| return value;
-    if (try qjsArrayReduceCall(ctx, output, global, receiver, func, args, false)) |value| return value;
-    if (try qjsArrayReduceCall(ctx, output, global, receiver, func, args, true)) |value| return value;
-    if (try qjsArraySearchCall(ctx, output, global, receiver, func, args)) |value| return value;
-    if (try qjsArrayCopyWithinCall(ctx, output, global, receiver, func, args)) |value| return value;
-    if (try qjsArrayFillCall(ctx, output, global, receiver, func, args)) |value| return value;
-    if (try qjsArrayPushCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
-    if (try qjsArrayPopCall(ctx, output, global, receiver, func, caller_function, caller_frame)) |value| return value;
-    if (try qjsArrayShiftCall(ctx, output, global, receiver, func)) |value| return value;
-    if (try qjsArrayUnshiftCall(ctx, output, global, receiver, func, args)) |value| return value;
-    if (try qjsArrayReverseCall(ctx, output, global, receiver, func, caller_function, caller_frame)) |value| return value;
-    if (try qjsArraySpliceCall(ctx, output, global, receiver, func, args)) |value| return value;
-    if (try qjsTypedArraySliceSubarrayCall(ctx, output, global, receiver, func, args)) |value| return value;
-    if (try qjsArraySliceCall(ctx, output, global, receiver, func, args)) |value| return value;
-    if (try qjsArrayMapCall(ctx, output, global, receiver, func, args)) |value| return value;
-    if (try qjsArrayFlatCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
-    if (try qjsArraySortCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
-    if (try qjsArrayByCopyCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
-    if (try qjsArrayConcatCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
+    if (try arrayIterationCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
+    if (try arrayAtCall(ctx, output, global, receiver, func, args)) |value| return value;
+    if (try arrayReduceCall(ctx, output, global, receiver, func, args, false)) |value| return value;
+    if (try arrayReduceCall(ctx, output, global, receiver, func, args, true)) |value| return value;
+    if (try arraySearchCall(ctx, output, global, receiver, func, args)) |value| return value;
+    if (try arrayCopyWithinCall(ctx, output, global, receiver, func, args)) |value| return value;
+    if (try arrayFillCall(ctx, output, global, receiver, func, args)) |value| return value;
+    if (try arrayPushCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
+    if (try arrayPopCall(ctx, output, global, receiver, func, caller_function, caller_frame)) |value| return value;
+    if (try arrayShiftCall(ctx, output, global, receiver, func)) |value| return value;
+    if (try arrayUnshiftCall(ctx, output, global, receiver, func, args)) |value| return value;
+    if (try arrayReverseCall(ctx, output, global, receiver, func, caller_function, caller_frame)) |value| return value;
+    if (try arraySpliceCall(ctx, output, global, receiver, func, args)) |value| return value;
+    if (try typedArraySliceSubarrayCall(ctx, output, global, receiver, func, args)) |value| return value;
+    if (try arraySliceCall(ctx, output, global, receiver, func, args)) |value| return value;
+    if (try arrayMapCall(ctx, output, global, receiver, func, args)) |value| return value;
+    if (try arrayFlatCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
+    if (try arraySortCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
+    if (try arrayByCopyCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
+    if (try arrayConcatCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
     return null;
 }
 
@@ -233,7 +232,7 @@ pub fn qjsArrayMethodFastCall(
 /// remaining id needs the materialized function object for TypedArray-vs-Array
 /// disambiguation, species, or callbacks; null therefore signals a corrupt
 /// dispatch and surfaces TypeError.
-pub fn qjsArrayPrototypeNativeRecord(
+pub fn arrayPrototypeNativeRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -248,44 +247,44 @@ pub fn qjsArrayPrototypeNativeRecord(
     const function_object_nonnull = function_object orelse return error.TypeError;
     if (arrayIterationModeFromRecordId(id)) |mode| {
         return if (arrayIterationModeIsFind(mode))
-            qjsArrayIterationModeCall(true, ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame, mode)
+            arrayIterationModeCall(true, ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame, mode)
         else
-            qjsArrayIterationModeCall(false, ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame, mode);
+            arrayIterationModeCall(false, ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame, mode);
     }
     return switch (id) {
-        @intFromEnum(array_mod.PrototypeMethod.to_string) => qjsArrayToStringCall(ctx, output, global, receiver, function_object_nonnull, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.to_locale_string) => qjsArrayToLocaleStringCall(ctx, output, global, receiver, function_object_nonnull, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.reduce) => qjsArrayReduceCall(ctx, output, global, receiver, function_object_nonnull.value(), args, false),
-        @intFromEnum(array_mod.PrototypeMethod.reduce_right) => qjsArrayReduceCall(ctx, output, global, receiver, function_object_nonnull.value(), args, true),
-        @intFromEnum(array_mod.PrototypeMethod.at) => qjsArrayAtCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.to_string) => arrayToStringCall(ctx, output, global, receiver, function_object_nonnull, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.to_locale_string) => arrayToLocaleStringCall(ctx, output, global, receiver, function_object_nonnull, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.reduce) => arrayReduceCall(ctx, output, global, receiver, function_object_nonnull.value(), args, false),
+        @intFromEnum(array_mod.PrototypeMethod.reduce_right) => arrayReduceCall(ctx, output, global, receiver, function_object_nonnull.value(), args, true),
+        @intFromEnum(array_mod.PrototypeMethod.at) => arrayAtCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
         @intFromEnum(array_mod.PrototypeMethod.includes),
         @intFromEnum(array_mod.PrototypeMethod.index_of),
         @intFromEnum(array_mod.PrototypeMethod.last_index_of),
-        => qjsArraySearchCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.copy_within) => qjsArrayCopyWithinCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.fill) => qjsArrayFillCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.push) => qjsArrayPushCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.pop) => qjsArrayPopCall(ctx, output, global, receiver, function_object_nonnull.value(), caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.shift) => qjsArrayShiftCall(ctx, output, global, receiver, function_object_nonnull.value()),
-        @intFromEnum(array_mod.PrototypeMethod.unshift) => qjsArrayUnshiftCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.reverse) => qjsArrayReverseCall(ctx, output, global, receiver, function_object_nonnull.value(), caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.splice) => qjsArraySpliceCallImpl(ctx, output, global, receiver, args),
-        @intFromEnum(array_mod.PrototypeMethod.slice) => qjsArraySliceCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.join) => qjsArrayJoinCall(ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.concat) => qjsArrayConcatCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.sort) => qjsArraySortCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
+        => arraySearchCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.copy_within) => arrayCopyWithinCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.fill) => arrayFillCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.push) => arrayPushCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.pop) => arrayPopCall(ctx, output, global, receiver, function_object_nonnull.value(), caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.shift) => arrayShiftCall(ctx, output, global, receiver, function_object_nonnull.value()),
+        @intFromEnum(array_mod.PrototypeMethod.unshift) => arrayUnshiftCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.reverse) => arrayReverseCall(ctx, output, global, receiver, function_object_nonnull.value(), caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.splice) => arraySpliceCallImpl(ctx, output, global, receiver, args),
+        @intFromEnum(array_mod.PrototypeMethod.slice) => arraySliceCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.join) => arrayJoinCall(ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.concat) => arrayConcatCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.sort) => arraySortCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.flat),
         @intFromEnum(array_mod.PrototypeMethod.flat_map),
-        => qjsArrayFlatCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
+        => arrayFlatCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.to_reversed),
         @intFromEnum(array_mod.PrototypeMethod.to_sorted),
         @intFromEnum(array_mod.PrototypeMethod.to_spliced),
         @intFromEnum(array_mod.PrototypeMethod.with_),
-        => qjsArrayByCopyCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
+        => arrayByCopyCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.keys),
         @intFromEnum(array_mod.PrototypeMethod.values),
         @intFromEnum(array_mod.PrototypeMethod.entries),
-        => qjsArrayIteratorMethodRecord(ctx, global, receiver, function_object_nonnull, id),
+        => arrayIteratorMethodRecord(ctx, global, receiver, function_object_nonnull, id),
         else => null,
     };
 }
@@ -495,7 +494,7 @@ pub fn constructArrayBufferNativeRecord(
             }
         }
     }
-    return try qjsArrayBufferConstructWithPrototype(ctx, output, global, args, prototype.object(), shared);
+    return try arrayBufferConstructWithPrototype(ctx, output, global, args, prototype.object(), shared);
 }
 
 pub const TypedArrayLengthPrintStore = struct {
@@ -546,7 +545,7 @@ pub fn decodeTypedArrayLengthPrintLocalGet(code: []const u8, pc: usize) ?TypedAr
     };
 }
 
-pub fn qjsTypedArrayConstructVm(
+pub fn typedArrayConstructVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -566,38 +565,38 @@ pub fn qjsTypedArrayConstructVm(
     const array_buffer_prototype = target_realm.classPrototypeObject(core.class.ids.array_buffer) orelse return error.InvalidBuiltinRegistry;
 
     if (args.len < 1) {
-        var prototype = try qjsTypedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
+        var prototype = try typedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
         defer prototype.deinit(ctx.runtime);
-        return try qjsTypedArrayConstructLengthVm(ctx.runtime, array_buffer_prototype, prototype.object(), element, 0);
+        return try typedArrayConstructLengthVm(ctx.runtime, array_buffer_prototype, prototype.object(), element, 0);
     }
 
     const first = args[0];
     if (!first.isObject()) {
-        const length = try qjsTypedArrayConstructToIndex(ctx, output, global, first);
-        var prototype = try qjsTypedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
+        const length = try typedArrayConstructToIndex(ctx, output, global, first);
+        var prototype = try typedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
         defer prototype.deinit(ctx.runtime);
-        return try qjsTypedArrayConstructLengthVm(ctx.runtime, array_buffer_prototype, prototype.object(), element, length);
+        return try typedArrayConstructLengthVm(ctx.runtime, array_buffer_prototype, prototype.object(), element, length);
     }
 
     const source_object = objectFromValue(first) orelse return error.TypeError;
     if (core.object.isTypedArrayObject(source_object)) return null;
     if (source_object.class_id == core.class.ids.array_buffer or source_object.class_id == core.class.ids.shared_array_buffer) {
-        var prototype = try qjsTypedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
+        var prototype = try typedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
         defer prototype.deinit(ctx.runtime);
         if (args.len == 1) {
             return try core.typed_array.typedArrayConstructWithOptions(ctx.runtime, element.size, element.kind, first, args, prototype.object());
         }
-        return try qjsTypedArrayConstructBufferVm(ctx, output, global, prototype.object(), element, args);
+        return try typedArrayConstructBufferVm(ctx, output, global, prototype.object(), element, args);
     }
-    if (try qjsTypedArrayConstructFromIterable(ctx, output, global, constructor, args, caller_function, caller_frame)) |value| {
+    if (try typedArrayConstructFromIterable(ctx, output, global, constructor, args, caller_function, caller_frame)) |value| {
         return value;
     }
-    var prototype = try qjsTypedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
+    var prototype = try typedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
     defer prototype.deinit(ctx.runtime);
-    return try qjsTypedArrayConstructArrayLikeVm(ctx, output, global, array_buffer_prototype, prototype.object(), element, first, caller_function, caller_frame);
+    return try typedArrayConstructArrayLikeVm(ctx, output, global, array_buffer_prototype, prototype.object(), element, first, caller_function, caller_frame);
 }
 
-pub fn qjsTypedArrayConstructLengthVm(
+pub fn typedArrayConstructLengthVm(
     rt: *core.JSRuntime,
     array_buffer_prototype: *core.Object,
     prototype: ?*core.Object,
@@ -614,7 +613,7 @@ pub fn qjsTypedArrayConstructLengthVm(
     return core.typed_array.typedArrayConstructFullBufferOwned(rt, element.size, element.kind, backing_buffer, backing_buffer_object, prototype);
 }
 
-pub fn qjsTypedArrayConstructBufferVm(
+pub fn typedArrayConstructBufferVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -623,12 +622,12 @@ pub fn qjsTypedArrayConstructBufferVm(
     args: []const core.JSValue,
 ) !core.JSValue {
     const byte_offset = if (args.len >= 2 and !args[1].isUndefined())
-        try qjsTypedArrayConstructToIndex(ctx, output, global, args[1])
+        try typedArrayConstructToIndex(ctx, output, global, args[1])
     else
         @as(usize, 0);
     const has_length = args.len >= 3 and !args[2].isUndefined();
     const requested_length = if (has_length)
-        try qjsTypedArrayConstructToIndex(ctx, output, global, args[2])
+        try typedArrayConstructToIndex(ctx, output, global, args[2])
     else
         @as(usize, 0);
 
@@ -644,7 +643,7 @@ pub fn qjsTypedArrayConstructBufferVm(
     return core.typed_array.typedArrayConstructWithOptions(ctx.runtime, element.size, element.kind, args[0], used_args, prototype);
 }
 
-pub fn qjsTypedArrayConstructArrayLikeVm(
+pub fn typedArrayConstructArrayLikeVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -684,10 +683,10 @@ pub fn qjsTypedArrayConstructArrayLikeVm(
     defer length_value.free(ctx.runtime);
     const length = try toLengthIndex(ctx, output, global, length_value);
 
-    result_value = try qjsTypedArrayConstructLengthVm(ctx.runtime, array_buffer_prototype, prototype, element, length);
+    result_value = try typedArrayConstructLengthVm(ctx.runtime, array_buffer_prototype, prototype, element, length);
     const result_object = objectFromValue(result_value) orelse return error.TypeError;
     if (objectFromValue(source_value)) |source_object| {
-        if (try qjsTypedArrayConstructArrayLikeOwnDataFast(ctx, output, global, result_object, source_object, length)) {
+        if (try typedArrayConstructArrayLikeOwnDataFast(ctx, output, global, result_object, source_object, length)) {
             return result_value.dup();
         }
     }
@@ -701,7 +700,7 @@ pub fn qjsTypedArrayConstructArrayLikeVm(
         item = try getValueProperty(ctx, output, global, source_value, key.atom, caller_function, caller_frame);
 
         coerced.free(ctx.runtime);
-        coerced = try qjsTypedArrayByCopyCoerceValue(ctx, output, global, result_object, item);
+        coerced = try typedArrayByCopyCoerceValue(ctx, output, global, result_object, item);
 
         _ = try core.typed_array.typedArraySetIndex(ctx.runtime, result_object, @intCast(index), coerced);
 
@@ -713,7 +712,7 @@ pub fn qjsTypedArrayConstructArrayLikeVm(
     return result_value.dup();
 }
 
-pub fn qjsTypedArrayConstructArrayLikeOwnDataFast(
+pub fn typedArrayConstructArrayLikeOwnDataFast(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -764,7 +763,7 @@ pub fn qjsTypedArrayConstructArrayLikeOwnDataFast(
         item = source_object.getOwnDataPropertyValueAt(first_property + index, atom_id) orelse return false;
 
         coerced.free(ctx.runtime);
-        coerced = try qjsTypedArrayByCopyCoerceValue(ctx, output, global, result_object, item);
+        coerced = try typedArrayByCopyCoerceValue(ctx, output, global, result_object, item);
         _ = try core.typed_array.typedArraySetIndex(ctx.runtime, result_object, @intCast(index), coerced);
 
         coerced.free(ctx.runtime);
@@ -789,7 +788,7 @@ pub fn typedArrayArrayLikeOwnDataFastPathUsable(source_object: *core.Object, fir
     return true;
 }
 
-pub fn qjsTypedArrayConstructorPrototypeVm(
+pub fn typedArrayConstructorPrototypeVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -806,7 +805,7 @@ pub fn qjsTypedArrayConstructorPrototypeVm(
     return object_ops.OwnedPrototype.fromObject(constructorPrototypeFromGlobal(ctx.runtime, constructor_global, constructor_name));
 }
 
-pub fn qjsTypedArrayConstructToIndex(
+pub fn typedArrayConstructToIndex(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -827,7 +826,7 @@ pub fn qjsTypedArrayConstructToIndex(
     return @intFromFloat(truncated);
 }
 
-pub fn qjsArrayBufferConstructWithPrototype(
+pub fn arrayBufferConstructWithPrototype(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -836,15 +835,15 @@ pub fn qjsArrayBufferConstructWithPrototype(
     shared: bool,
 ) !core.JSValue {
     const byte_length = if (args.len >= 1)
-        try qjsTypedArrayConstructToIndex(ctx, output, global, args[0])
+        try typedArrayConstructToIndex(ctx, output, global, args[0])
     else
         @as(usize, 0);
-    const max_byte_length = try qjsArrayBufferMaxByteLengthOption(ctx, output, global, args, byte_length);
+    const max_byte_length = try arrayBufferMaxByteLengthOption(ctx, output, global, args, byte_length);
     if (shared) return core.typed_array.sharedArrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
     return core.typed_array.arrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
 }
 
-pub fn qjsArrayBufferMaxByteLengthOption(
+pub fn arrayBufferMaxByteLengthOption(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -857,12 +856,12 @@ pub fn qjsArrayBufferMaxByteLengthOption(
     const max_value = try getValueProperty(ctx, output, global, args[1], max_key, null, null);
     defer max_value.free(ctx.runtime);
     if (max_value.isUndefined()) return null;
-    const max_byte_length = try qjsTypedArrayConstructToIndex(ctx, output, global, max_value);
+    const max_byte_length = try typedArrayConstructToIndex(ctx, output, global, max_value);
     if (max_byte_length < byte_length) return error.RangeError;
     return max_byte_length;
 }
 
-pub fn qjsTypedArrayConstructFromIterable(
+pub fn typedArrayConstructFromIterable(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -931,18 +930,18 @@ pub fn qjsTypedArrayConstructFromIterable(
         next.free(ctx.runtime);
         next = core.JSValue.undefinedValue();
         next = callValueOrBytecodeRoot(ctx, output, global, iterator_object.value(), next_method, &.{}, caller_function, caller_frame) catch |err| {
-            try qjsIteratorClose(ctx, output, global, iterator_object.value(), caller_function, caller_frame);
+            try iteratorCloseValue(ctx, output, global, iterator_object.value(), caller_function, caller_frame);
             return err;
         };
         const next_object = objectFromValue(next) orelse {
-            try qjsIteratorClose(ctx, output, global, iterator_object.value(), caller_function, caller_frame);
+            try iteratorCloseValue(ctx, output, global, iterator_object.value(), caller_function, caller_frame);
             return error.TypeError;
         };
 
         done.free(ctx.runtime);
         done = core.JSValue.undefinedValue();
         done = getValueProperty(ctx, output, global, next_object.value(), done_key, caller_function, caller_frame) catch |err| {
-            try qjsIteratorClose(ctx, output, global, iterator_object.value(), caller_function, caller_frame);
+            try iteratorCloseValue(ctx, output, global, iterator_object.value(), caller_function, caller_frame);
             return err;
         };
         if (valueTruthy(done)) break;
@@ -950,7 +949,7 @@ pub fn qjsTypedArrayConstructFromIterable(
         item.free(ctx.runtime);
         item = core.JSValue.undefinedValue();
         item = getValueProperty(ctx, output, global, next_object.value(), value_key, caller_function, caller_frame) catch |err| {
-            try qjsIteratorClose(ctx, output, global, iterator_object.value(), caller_function, caller_frame);
+            try iteratorCloseValue(ctx, output, global, iterator_object.value(), caller_function, caller_frame);
             return err;
         };
         try values.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(index), core.Descriptor.data(item, true, true, true));
@@ -963,11 +962,11 @@ pub fn qjsTypedArrayConstructFromIterable(
                 .size = function_object.typedArrayElementSize(),
                 .kind = kind,
             };
-            var prototype = try qjsTypedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
+            var prototype = try typedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
             defer prototype.deinit(ctx.runtime);
             const target_realm = function_object.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry;
             const array_buffer_prototype = target_realm.classPrototypeObject(core.class.ids.array_buffer) orelse return error.InvalidBuiltinRegistry;
-            return try qjsTypedArrayConstructArrayLikeVm(
+            return try typedArrayConstructArrayLikeVm(
                 ctx,
                 output,
                 global,
@@ -983,11 +982,11 @@ pub fn qjsTypedArrayConstructFromIterable(
     return try construct_mod.constructValue(ctx, constructor, &.{values_value}, &.{});
 }
 
-pub fn qjsTypedArrayConstructorName(name: []const u8) bool {
+pub fn typedArrayConstructorName(name: []const u8) bool {
     return core.typed_array_names.isConcrete(name);
 }
 
-pub fn qjsArrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
+pub fn arrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.array_buffer) return error.TypeError;
     if (std.mem.eql(u8, accessor, "byteLength")) {
@@ -1009,7 +1008,7 @@ pub fn qjsArrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue, acce
     return error.TypeError;
 }
 
-pub fn qjsSharedArrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
+pub fn sharedArrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.shared_array_buffer) return error.TypeError;
     if (std.mem.eql(u8, accessor, "byteLength")) {
@@ -1025,13 +1024,13 @@ pub fn qjsSharedArrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue
     return error.TypeError;
 }
 
-pub fn qjsArrayBufferIsView(args: []const core.JSValue) core.JSValue {
+pub fn arrayBufferIsView(args: []const core.JSValue) core.JSValue {
     if (args.len < 1) return core.JSValue.boolean(false);
     const object = objectFromValue(args[0]) orelse return core.JSValue.boolean(false);
     return core.JSValue.boolean(core.object.isTypedArrayObject(object) or object.class_id == core.class.ids.dataview);
 }
 
-pub fn qjsArrayBufferPrototypeNativeRecord(ctx: *core.JSContext, receiver: core.JSValue, id: u32, args: []const core.JSValue) !?core.JSValue {
+pub fn arrayBufferPrototypeNativeRecord(ctx: *core.JSContext, receiver: core.JSValue, id: u32, args: []const core.JSValue) !?core.JSValue {
     const object = objectFromValue(receiver) orelse return null;
     if (object.class_id == core.class.ids.shared_array_buffer) {
         return switch (id) {
@@ -1045,11 +1044,11 @@ pub fn qjsArrayBufferPrototypeNativeRecord(ctx: *core.JSContext, receiver: core.
             @intFromEnum(method_ids.buffer.SharedArrayBufferPrototypeMethod.slice) => {
                 const start = if (args.len >= 1) args[0] else core.JSValue.int32(0);
                 const end = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-                return try qjsArrayBufferSlice(ctx, receiver, object, start, end, true);
+                return try arrayBufferSliceCall(ctx, receiver, object, start, end, true);
             },
             @intFromEnum(method_ids.buffer.SharedArrayBufferPrototypeMethod.grow) => {
                 const new_length = if (args.len >= 1) args[0] else core.JSValue.int32(0);
-                return try qjsSharedArrayBufferGrow(ctx, receiver, new_length);
+                return try sharedArrayBufferGrowCall(ctx, receiver, new_length);
             },
             else => null,
         };
@@ -1062,34 +1061,34 @@ pub fn qjsArrayBufferPrototypeNativeRecord(ctx: *core.JSContext, receiver: core.
         @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.slice) => {
             const start = if (args.len >= 1) args[0] else core.JSValue.int32(0);
             const end = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-            return try qjsArrayBufferSlice(ctx, receiver, object, start, end, false);
+            return try arrayBufferSliceCall(ctx, receiver, object, start, end, false);
         },
         @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.slice_to_immutable) => {
             const start = if (args.len >= 1) args[0] else core.JSValue.int32(0);
             const end = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-            return try qjsArrayBufferSliceToImmutable(ctx, receiver, object, start, end);
+            return try arrayBufferSliceToImmutableCall(ctx, receiver, object, start, end);
         },
         @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.resize) => {
             const new_length = if (args.len >= 1) args[0] else core.JSValue.int32(0);
-            return try qjsArrayBufferResize(ctx, receiver, new_length);
+            return try arrayBufferResizeCall(ctx, receiver, new_length);
         },
         @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.transfer) => {
             const new_length = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return try qjsArrayBufferTransfer(ctx, receiver, new_length, false);
+            return try arrayBufferTransferCall(ctx, receiver, new_length, false);
         },
         @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.transfer_to_fixed_length) => {
             const new_length = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return try qjsArrayBufferTransfer(ctx, receiver, new_length, true);
+            return try arrayBufferTransferCall(ctx, receiver, new_length, true);
         },
         @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.transfer_to_immutable) => {
             const new_length = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return try qjsArrayBufferTransferToImmutable(ctx, receiver, new_length);
+            return try arrayBufferTransferToImmutableCall(ctx, receiver, new_length);
         },
         else => null,
     };
 }
 
-pub fn qjsArrayBufferSlice(
+pub fn arrayBufferSliceCall(
     ctx: *core.JSContext,
     receiver: core.JSValue,
     object: *core.Object,
@@ -1104,10 +1103,10 @@ pub fn qjsArrayBufferSlice(
     if (object.arrayBufferDetached()) return error.TypeError;
     if (!shared and core.object.arrayBufferIsImmutable(ctx.runtime, object)) return error.TypeError;
     const source_length = object.byteStorage().len;
-    const start = try qjsRelativeSliceIndex(ctx, null, global, start_value, source_length, false);
-    const end = try qjsRelativeSliceIndex(ctx, null, global, end_value, source_length, true);
+    const start = try relativeSliceIndex(ctx, null, global, start_value, source_length, false);
+    const end = try relativeSliceIndex(ctx, null, global, end_value, source_length, true);
     const length = if (end > start) end - start else 0;
-    const constructor = try qjsArrayBufferSpeciesConstructor(ctx, null, global, receiver, shared);
+    const constructor = try arrayBufferSpeciesConstructor(ctx, null, global, receiver, shared);
     defer constructor.free(ctx.runtime);
     const out_value = try constructValueOrBytecode(ctx, null, global, constructor, &.{lengthIndexValue(length)}, null, null);
     errdefer out_value.free(ctx.runtime);
@@ -1126,7 +1125,7 @@ pub fn qjsArrayBufferSlice(
     return out_value;
 }
 
-pub fn qjsArrayBufferSpeciesConstructor(
+pub fn arrayBufferSpeciesConstructor(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1162,7 +1161,7 @@ pub fn qjsArrayBufferSpeciesConstructor(
     return species_value;
 }
 
-pub fn qjsArrayBufferSliceToImmutable(
+pub fn arrayBufferSliceToImmutableCall(
     ctx: *core.JSContext,
     receiver: core.JSValue,
     object: *core.Object,
@@ -1173,12 +1172,12 @@ pub fn qjsArrayBufferSliceToImmutable(
     if (object.arrayBufferDetached()) return error.TypeError;
     if (core.object.arrayBufferIsImmutable(ctx.runtime, object)) return error.TypeError;
     const source_length = object.byteStorage().len;
-    const start = try qjsRelativeSliceIndex(ctx, null, global, start_value, source_length, false);
-    const end = try qjsRelativeSliceIndex(ctx, null, global, end_value, source_length, true);
+    const start = try relativeSliceIndex(ctx, null, global, start_value, source_length, false);
+    const end = try relativeSliceIndex(ctx, null, global, end_value, source_length, true);
     return core.typed_array.arrayBufferSliceToImmutableRange(ctx.runtime, receiver, start, end);
 }
 
-pub fn qjsArrayBufferResize(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
+pub fn arrayBufferResizeCall(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
     // Mirrors js_array_buffer_resize (quickjs.c:57216-57237): class check,
     // then the length coercion (user side effects run first, like JS_ToInt64),
     // then detached TypeError, then not-resizable TypeError, and only then the
@@ -1188,20 +1187,20 @@ pub fn qjsArrayBufferResize(ctx: *core.JSContext, receiver: core.JSValue, new_le
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.array_buffer) return error.TypeError;
     if (core.object.arrayBufferIsImmutable(ctx.runtime, object)) return error.TypeError;
-    const number = try qjsArrayBufferLengthNumber(ctx, new_length_value);
+    const number = try arrayBufferLengthNumber(ctx, new_length_value);
     if (object.arrayBufferDetached()) return error.TypeError;
     const max = object.arrayBufferMaxByteLength() orelse return error.TypeError;
     if (number < 0 or number > @as(f64, @floatFromInt(max))) return error.RangeError;
     return core.typed_array.arrayBufferResizeLength(ctx.runtime, receiver, @intFromFloat(number));
 }
 
-pub fn qjsSharedArrayBufferGrow(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
+pub fn sharedArrayBufferGrowCall(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
     // Mirrors js_array_buffer_resize invoked with the SHARED_ARRAY_BUFFER
     // magic (quickjs.c:57216 via quickjs.c:57354): class check precedes the
     // coercion, and the not-growable TypeError precedes the range RangeError.
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.shared_array_buffer) return error.TypeError;
-    const number = try qjsArrayBufferLengthNumber(ctx, new_length_value);
+    const number = try arrayBufferLengthNumber(ctx, new_length_value);
     const max = object.arrayBufferMaxByteLength() orelse return error.TypeError;
     if (number < 0 or number > @as(f64, @floatFromInt(max))) return error.RangeError;
     return core.typed_array.sharedArrayBufferGrowLength(ctx.runtime, receiver, @intFromFloat(number));
@@ -1212,7 +1211,7 @@ pub fn qjsSharedArrayBufferGrow(ctx: *core.JSContext, receiver: core.JSValue, ne
 /// return the truncated integer as f64 (ToIntegerOrInfinity), leaving the
 /// range validation to the caller so it can sit AFTER the detached /
 /// not-resizable TypeErrors exactly like quickjs.c:57229-57238.
-fn qjsArrayBufferLengthNumber(ctx: *core.JSContext, value: core.JSValue) !f64 {
+fn arrayBufferLengthNumber(ctx: *core.JSContext, value: core.JSValue) !f64 {
     if (value.isUndefined()) return 0;
     const global = ctx.global orelse {
         // Non-VM contexts only see primitives; keep the narrow coercion.
@@ -1228,27 +1227,27 @@ fn qjsArrayBufferLengthNumber(ctx: *core.JSContext, value: core.JSValue) !f64 {
     return @trunc(number);
 }
 
-pub fn qjsArrayBufferTransfer(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue, fixed_length: bool) !core.JSValue {
+pub fn arrayBufferTransferCall(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue, fixed_length: bool) !core.JSValue {
     const object = objectFromValue(receiver) orelse return error.TypeError;
     const fallback = if (object.class_id == core.class.ids.array_buffer) object.byteStorage().len else @as(usize, 0);
-    const new_length = try qjsArrayBufferLengthArgument(ctx, new_length_value, fallback);
+    const new_length = try arrayBufferLengthArgument(ctx, new_length_value, fallback);
     return core.typed_array.arrayBufferTransferLength(ctx.runtime, receiver, new_length, fixed_length);
 }
 
-pub fn qjsArrayBufferTransferToImmutable(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
+pub fn arrayBufferTransferToImmutableCall(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.array_buffer) return error.TypeError;
-    const new_length = try qjsArrayBufferLengthArgument(ctx, new_length_value, object.byteStorage().len);
+    const new_length = try arrayBufferLengthArgument(ctx, new_length_value, object.byteStorage().len);
     return core.typed_array.arrayBufferTransferToImmutableLength(ctx.runtime, receiver, new_length);
 }
 
-pub fn qjsArrayBufferLengthArgument(ctx: *core.JSContext, value: core.JSValue, undefined_length: ?usize) !usize {
+pub fn arrayBufferLengthArgument(ctx: *core.JSContext, value: core.JSValue, undefined_length: ?usize) !usize {
     if (value.isUndefined()) return undefined_length orelse 0;
     const global = ctx.global orelse return value_ops.toIndexUsize(ctx.runtime, value);
-    return qjsTypedArrayConstructToIndex(ctx, null, global, value);
+    return typedArrayConstructToIndex(ctx, null, global, value);
 }
 
-pub fn qjsRelativeSliceIndex(
+pub fn relativeSliceIndex(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1283,7 +1282,7 @@ pub fn qjsRelativeSliceIndex(
     return @intFromFloat(truncated);
 }
 
-pub fn qjsTypedArrayAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
+pub fn typedArrayAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
     if (std.mem.eql(u8, accessor, "[Symbol.toStringTag]")) {
         const object = objectFromValue(receiver) orelse return core.JSValue.undefinedValue();
         if (!core.object.isTypedArrayObject(object)) return core.JSValue.undefinedValue();
@@ -1312,7 +1311,7 @@ pub fn typedArrayNameFromKind(kind: u8) ?[]const u8 {
     return core.typed_array_names.nameFromKind(kind);
 }
 
-pub fn qjsTypedArraySetCall(
+pub fn typedArraySetCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1414,12 +1413,12 @@ pub fn qjsTypedArraySetCall(
         defer key.deinit(ctx.runtime);
         const value = try getValueProperty(ctx, output, global, source_object_value, key.atom, caller_function, caller_frame);
         defer value.free(ctx.runtime);
-        try qjsTypedArraySetElementValue(ctx, output, global, target, offset + index, value);
+        try typedArraySetElementValue(ctx, output, global, target, offset + index, value);
     }
     return core.JSValue.undefinedValue();
 }
 
-test "qjsTypedArraySetCall roots typed array snapshot while reading source" {
+test "typedArraySetCall roots typed array snapshot while reading source" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -1467,7 +1466,7 @@ test "qjsTypedArraySetCall roots typed array snapshot while reading source" {
         rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     }
 
-    const result = (try qjsTypedArraySetCall(ctx, null, global, target_value, function_object, &args, null, null)) orelse return error.TypeError;
+    const result = (try typedArraySetCall(ctx, null, global, target_value, function_object, &args, null, null)) orelse return error.TypeError;
     defer result.free(rt);
 
     // The probe forced a cycle-removal pass during the typed-array set; the
@@ -1478,7 +1477,7 @@ test "qjsTypedArraySetCall roots typed array snapshot while reading source" {
     try std.testing.expect(copied.isBigInt());
 }
 
-pub fn qjsTypedArraySetElementValue(
+pub fn typedArraySetElementValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1520,7 +1519,7 @@ pub fn addCollectionEntriesFromArray(
     }
 }
 
-pub fn qjsArrayForEachCall(
+pub fn arrayForEachCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1548,7 +1547,7 @@ pub fn qjsArrayForEachCall(
     return core.JSValue.undefinedValue();
 }
 
-pub fn qjsArrayAtCall(
+pub fn arrayAtCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1645,7 +1644,7 @@ inline fn arrayIterationModeIsFind(mode: ArrayIterationMode) bool {
     };
 }
 
-pub fn qjsArrayIterationCall(
+pub fn arrayIterationCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1689,12 +1688,12 @@ pub fn qjsArrayIterationCall(
     };
 
     return if (arrayIterationModeIsFind(mode))
-        qjsArrayIterationModeCall(true, ctx, output, global, receiver, function_object, args, caller_function, caller_frame, mode)
+        arrayIterationModeCall(true, ctx, output, global, receiver, function_object, args, caller_function, caller_frame, mode)
     else
-        qjsArrayIterationModeCall(false, ctx, output, global, receiver, function_object, args, caller_function, caller_frame, mode);
+        arrayIterationModeCall(false, ctx, output, global, receiver, function_object, args, caller_function, caller_frame, mode);
 }
 
-fn qjsArrayIterationModeCall(
+fn arrayIterationModeCall(
     comptime find_family: bool,
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1750,7 +1749,7 @@ fn qjsArrayIterationModeCall(
     );
     if (mode == .map and length > std.math.maxInt(u32)) return error.RangeError;
     if (is_typed_method and (mode == .map or mode == .filter)) {
-        return try qjsTypedArrayMapFilter(ctx, output, global, receiver_object_value, object, length, mode, &callback_call, caller_function, caller_frame);
+        return try typedArrayMapFilter(ctx, output, global, receiver_object_value, object, length, mode, &callback_call, caller_function, caller_frame);
     }
 
     var out_value: core.JSValue = core.JSValue.undefinedValue();
@@ -1855,7 +1854,7 @@ fn qjsArrayIterationModeCall(
     };
 }
 
-pub fn qjsTypedArrayMapFilter(
+pub fn typedArrayMapFilter(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1870,7 +1869,7 @@ pub fn qjsTypedArrayMapFilter(
     if (mode == .map) {
         const constructor_value = try typedArraySpeciesConstructorForObject(ctx, output, global, receiver_value, object, caller_function, caller_frame);
         defer constructor_value.free(ctx.runtime);
-        const out_value = try qjsTypedArrayCreateWithLength(ctx, output, global, constructor_value, length, caller_function, caller_frame);
+        const out_value = try typedArrayCreateWithLength(ctx, output, global, constructor_value, length, caller_function, caller_frame);
         errdefer out_value.free(ctx.runtime);
         const out = objectFromValue(out_value) orelse return error.TypeError;
         var index: usize = 0;
@@ -1928,7 +1927,7 @@ pub fn qjsTypedArrayMapFilter(
 
     const constructor_value = try typedArraySpeciesConstructorForObject(ctx, output, global, receiver_value, object, caller_function, caller_frame);
     defer constructor_value.free(ctx.runtime);
-    const out_value = try qjsTypedArrayCreateWithLength(ctx, output, global, constructor_value, kept_count, caller_function, caller_frame);
+    const out_value = try typedArrayCreateWithLength(ctx, output, global, constructor_value, kept_count, caller_function, caller_frame);
     errdefer out_value.free(ctx.runtime);
     const out = objectFromValue(out_value) orelse return error.TypeError;
     index = 0;
@@ -1942,7 +1941,7 @@ pub fn qjsTypedArrayMapFilter(
     return out_value;
 }
 
-pub fn qjsTypedArrayCreateWithLength(
+pub fn typedArrayCreateWithLength(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1960,7 +1959,7 @@ pub fn qjsTypedArrayCreateWithLength(
     return out_value;
 }
 
-pub fn qjsArrayReduceCall(
+pub fn arrayReduceCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2016,7 +2015,7 @@ pub fn qjsArrayReduceCall(
     errdefer if (accumulator_set) accumulator.free(ctx.runtime);
     if (from_right and length > std.math.maxInt(u32)) {
         accumulator_set = false;
-        return try qjsArrayReduceRightSparseLarge(ctx, object, receiver_object_value, &callback_call, args.len >= 2, accumulator, length);
+        return try arrayReduceRightSparseLarge(ctx, object, receiver_object_value, &callback_call, args.len >= 2, accumulator, length);
     }
 
     if (from_right) {
@@ -2073,7 +2072,7 @@ pub fn qjsArrayReduceCall(
     return accumulator;
 }
 
-pub fn qjsArrayReduceRightSparseLarge(
+pub fn arrayReduceRightSparseLarge(
     ctx: *core.JSContext,
     object: *core.Object,
     receiver: core.JSValue,
@@ -2138,10 +2137,10 @@ pub const TypedSearchMode = enum { index_of, last_index_of, includes };
 /// `start` is the already-fromIndex-coerced cursor as the existing zjs Array
 /// search produces it: for forward modes the inclusive first index `k`; for
 /// lastIndexOf the EXCLUSIVE upper bound (`k + 1`, matching the `cursor`/while
-/// loop in qjsArraySearchCall). `original_length` is the length read before the
+/// loop in arraySearchCall). `original_length` is the length read before the
 /// fromIndex coercion ran (which may resize a RAB via valueOf), used only for
 /// the qjs includes-undefined-out-of-bounds special case.
-pub fn qjsTypedArraySearchScan(
+pub fn typedArraySearchScan(
     rt: *core.JSRuntime,
     object: *core.Object,
     mode: TypedSearchMode,
@@ -2399,7 +2398,7 @@ fn scanFloatPredicate(comptime T: type, bytes: []const u8, k: usize, stop: usize
     return null;
 }
 
-pub fn qjsArrayLastIndexSparseLarge(
+pub fn arrayLastIndexSparseLarge(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2471,7 +2470,7 @@ pub fn arrayLastIndexStart(
     return @as(usize, @intFromFloat(offset)) + 1;
 }
 
-pub fn qjsArraySliceCall(
+pub fn arraySliceCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2535,7 +2534,7 @@ pub fn qjsArraySliceCall(
             errdefer out_value.free(ctx.runtime);
 
             // memory.alloc can GC; root the fresh array across the allocation
-            // (mirror the entries-pair precedent at qjsObjectEntryArrayValue).
+            // (mirror the entries-pair precedent at objectEntryArrayValue).
             var root_values = [_]core.runtime.ValueRootValue{
                 .{ .value = &out_value },
             };
@@ -2588,7 +2587,7 @@ pub fn qjsArraySliceCall(
     return out_value;
 }
 
-pub fn qjsTypedArraySliceSubarrayCall(
+pub fn typedArraySliceSubarrayCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2636,7 +2635,7 @@ pub fn qjsTypedArraySliceSubarrayCall(
             break :blk try constructValueOrBytecode(ctx, output, global, constructor_value, &.{ buffer_value, lengthIndexValue(begin_byte_offset) }, null, null);
         }
         break :blk try constructValueOrBytecode(ctx, output, global, constructor_value, &.{ buffer_value, lengthIndexValue(begin_byte_offset), lengthIndexValue(count) }, null, null);
-    } else try qjsTypedArrayCreateWithLength(ctx, output, global, constructor_value, count, null, null);
+    } else try typedArrayCreateWithLength(ctx, output, global, constructor_value, count, null, null);
     errdefer result.free(ctx.runtime);
     const result_object = objectFromValue(result) orelse return error.TypeError;
     if (!core.object.isTypedArrayObject(result_object)) return error.TypeError;
@@ -2655,7 +2654,7 @@ pub fn qjsTypedArraySliceSubarrayCall(
         // handles every case this does not cover (differing class). Both arrays
         // were just re-validated as non-detached / in-bounds, and the result
         // was length-checked to hold >= count >= copy_count elements
-        // (qjsTypedArrayCreateWithLength:1905), so the byte ranges are valid.
+        // (typedArrayCreateWithLength:1905), so the byte ranges are valid.
         if (copy_count > 0 and object.typedArrayKind() == result_object.typedArrayKind()) {
             const element_size = object.typedArrayElementSize();
             const src_buffer = objectFromValue(object.typedArrayBuffer() orelse return error.TypeError) orelse return error.TypeError;
@@ -2739,7 +2738,7 @@ pub fn typedArraySpeciesConstructorForObject(
 /// coercion has already run in the caller, so the dense extent is re-read here:
 /// a user `valueOf` may have mutated the receiver meanwhile, which is exactly
 /// why qjs re-reads p->u.array.count at its own gate (quickjs.c:43033).
-fn qjsFastDenseArraySplice(
+fn fastDenseArraySplice(
     ctx: *core.JSContext,
     global: *core.Object,
     receiver: core.JSValue,
@@ -2841,7 +2840,7 @@ fn qjsFastDenseArraySplice(
         // reason at quickjs.c:43069). Count and length must move together to
         // preserve the `length >= count` invariant that arrayElementsMut
         // asserts; the array was fully dense on entry, so the new dense extent
-        // IS the new logical length. This is the idiom qjsFastDenseArrayUnshift
+        // IS the new logical length. This is the idiom fastDenseArrayUnshift
         // already relies on.
         object.setFastArrayCountAssumeCapacity(new_count_u32);
         object.setArrayLength(new_count_u32);
@@ -2879,7 +2878,7 @@ fn qjsFastDenseArraySplice(
     return removed_value;
 }
 
-pub fn qjsArraySpliceCall(
+pub fn arraySpliceCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2891,10 +2890,10 @@ pub fn qjsArraySpliceCall(
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.splice))) {
         if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "splice")) return null;
     }
-    return qjsArraySpliceCallImpl(ctx, output, global, receiver, args);
+    return arraySpliceCallImpl(ctx, output, global, receiver, args);
 }
 
-pub fn qjsArraySpliceCallImpl(
+pub fn arraySpliceCallImpl(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2947,7 +2946,7 @@ pub fn qjsArraySpliceCallImpl(
     // (quickjs.c:43040). Placing the arm at the same point keeps the observable
     // order identical: a user `valueOf` in the arguments still runs first, and
     // the arm re-validates the receiver against the post-coercion state.
-    if (try qjsFastDenseArraySplice(
+    if (try fastDenseArraySplice(
         ctx,
         global,
         receiver,
@@ -3039,7 +3038,7 @@ pub fn qjsArraySpliceCallImpl(
     return removed_value;
 }
 
-pub fn qjsArrayCopyWithinCall(
+pub fn arrayCopyWithinCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3159,7 +3158,7 @@ pub fn qjsArrayCopyWithinCall(
     return receiver_object_value.dup();
 }
 
-pub fn qjsArrayFillCall(
+pub fn arrayFillCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3186,7 +3185,7 @@ pub fn qjsArrayFillCall(
 
         const initial_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         const raw_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-        const value = try qjsTypedArrayByCopyCoerceValue(ctx, output, global, object, raw_value);
+        const value = try typedArrayByCopyCoerceValue(ctx, output, global, object, raw_value);
         defer value.free(ctx.runtime);
 
         const start = try arrayRelativeIndex(ctx, output, global, args, 1, initial_length, 0);
@@ -3277,7 +3276,7 @@ pub fn arrayPrototypeChainHasNoIndexedProperties(object: *core.Object) bool {
     return true;
 }
 
-pub fn qjsArrayPushCall(
+pub fn arrayPushCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3292,14 +3291,14 @@ pub fn qjsArrayPushCall(
         if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "push")) return null;
     }
 
-    return qjsArrayPushCallImpl(ctx, output, global, receiver, args, caller_function, caller_frame);
+    return arrayPushCallImpl(ctx, output, global, receiver, args, caller_function, caller_frame);
 }
 
 /// qjs `js_array_push` fast case (quickjs.c:42768-42788): one admission
 /// (`ARRAY && fast_array && can_extend && length==count && writable` and
 /// `new_len <= INT32_MAX`), then expand + Dup + write. Returns the new
 /// length, or null so the caller can take the generic ToObject/Set path.
-pub inline fn qjsTryFastArrayPush(
+pub inline fn tryFastArrayPush(
     rt: *core.JSRuntime,
     receiver: core.JSValue,
     args: []const core.JSValue,
@@ -3318,7 +3317,7 @@ pub inline fn qjsTryFastArrayPush(
     return @intCast(new_len);
 }
 
-pub fn qjsArrayPushCallImpl(
+pub fn arrayPushCallImpl(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3334,7 +3333,7 @@ pub fn qjsArrayPushCallImpl(
     // qjs `js_array_push` checks the direct Array receiver before JS_ToObject
     // and returns from its fast case without a receiver dup/free. Keep the
     // borrowed receiver rooted by the active call frame and do the same here.
-    if (try qjsTryFastArrayPush(ctx.runtime, receiver, args)) |new_len| {
+    if (try tryFastArrayPush(ctx.runtime, receiver, args)) |new_len| {
         return core.JSValue.int32(new_len);
     }
 
@@ -3363,7 +3362,7 @@ pub fn qjsArrayPushCallImpl(
     return lengthIndexValue(index);
 }
 
-pub fn qjsArrayPopCall(
+pub fn arrayPopCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3377,10 +3376,10 @@ pub fn qjsArrayPopCall(
         if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "pop")) return null;
     }
 
-    return qjsArrayPopCallImpl(ctx, output, global, receiver, caller_function, caller_frame);
+    return arrayPopCallImpl(ctx, output, global, receiver, caller_function, caller_frame);
 }
 
-pub fn qjsArrayPopCallImpl(
+pub fn arrayPopCallImpl(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3392,8 +3391,8 @@ pub fn qjsArrayPopCallImpl(
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
-    if (qjsFastDenseArrayPop(object)) |value| return value;
-    if (try qjsFastEmptyArrayPop(ctx, global, object)) |value| return value;
+    if (fastDenseArrayPop(object)) |value| return value;
+    if (try fastEmptyArrayPop(ctx, global, object)) |value| return value;
     const length: usize = if (object.isArray())
         @intCast(object.arrayLength())
     else blk: {
@@ -3432,7 +3431,7 @@ pub fn qjsArrayPopCallImpl(
     return value;
 }
 
-fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
+fn fastDenseArrayPop(object: *core.Object) ?core.JSValue {
     if (!object.isArray() or !object.flags.length_writable) return null;
     if (!object.isFastArray()) return null;
     // Only on a fully-dense array (count == length): pop removes a[length-1],
@@ -3445,7 +3444,7 @@ fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
 /// own Array length slot, and the final `JS_SetProperty(..., length, 0)` writes
 /// that same slot or throws when it is non-writable. A Proxy/ordinary array-like
 /// is not `flags.is_array` and must keep the observable generic Get/Set path.
-fn qjsFastEmptyArrayPop(ctx: *core.JSContext, global: *core.Object, object: *core.Object) !?core.JSValue {
+fn fastEmptyArrayPop(ctx: *core.JSContext, global: *core.Object, object: *core.Object) !?core.JSValue {
     if (!object.isArray() or object.arrayLength() != 0) return null;
     if (!object.flags.length_writable) {
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "'length' is read-only"));
@@ -3454,16 +3453,16 @@ fn qjsFastEmptyArrayPop(ctx: *core.JSContext, global: *core.Object, object: *cor
     return core.JSValue.undefinedValue();
 }
 
-pub fn qjsFastDensePrimitiveArrayPop(object: *core.Object) ?core.JSValue {
+pub fn fastDensePrimitiveArrayPop(object: *core.Object) ?core.JSValue {
     if (!object.isArray() or !object.flags.length_writable) return null;
     if (object.fastArrayCount() != object.arrayLength()) return null;
     const slot = object.borrowLastFastArrayElement() orelse return null;
     const value = slot.*;
-    if (!qjsCanFastJoinPrimitive(value)) return null;
+    if (!canFastJoinPrimitive(value)) return null;
     return object.takeLastFullyDenseFastArrayElement();
 }
 
-pub fn qjsArrayShiftCall(
+pub fn arrayShiftCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3479,7 +3478,7 @@ pub fn qjsArrayShiftCall(
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
-    if (qjsFastDenseArrayShift(object)) |value| return value;
+    if (fastDenseArrayShift(object)) |value| return value;
     const length = if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
@@ -3520,7 +3519,7 @@ pub fn qjsArrayShiftCall(
     return first;
 }
 
-fn qjsFastDenseArrayShift(object: *core.Object) ?core.JSValue {
+fn fastDenseArrayShift(object: *core.Object) ?core.JSValue {
     if (!object.isArray() or !object.flags.length_writable) return null;
     if (!object.isFastArray()) return null;
     // Shift moves the whole [1, length) range down and lowers .length. Only run
@@ -3548,7 +3547,7 @@ fn qjsFastDenseArrayShift(object: *core.Object) ?core.JSValue {
 /// move after growing capacity. Returns the new length on success, or null to
 /// fall through to the generic per-element unshiftMoveIndex path for anything
 /// not provably an ordinary dense array with no prototype index interactions.
-fn qjsFastDenseArrayUnshift(
+fn fastDenseArrayUnshift(
     rt: *core.JSRuntime,
     receiver: core.JSValue,
     object: *core.Object,
@@ -3584,7 +3583,7 @@ fn qjsFastDenseArrayUnshift(
     const values = object.fastArrayValuesMut();
     // Move the existing [0, length) elements up by insert_count. This is a raw
     // bit move (no dup/free); ownership of each original reference travels with
-    // it to its new slot, exactly like qjsFastDenseArrayShift's downward move.
+    // it to its new slot, exactly like fastDenseArrayShift's downward move.
     if (length != 0) {
         std.mem.copyBackwards(core.JSValue, values[insert_count..new_length], values[0..length]);
     }
@@ -3598,7 +3597,7 @@ fn qjsFastDenseArrayUnshift(
     return new_length;
 }
 
-pub fn qjsArrayUnshiftCall(
+pub fn arrayUnshiftCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3616,7 +3615,7 @@ pub fn qjsArrayUnshiftCall(
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
 
-    if (try qjsFastDenseArrayUnshift(ctx.runtime, receiver, object, args)) |new_length_fast| {
+    if (try fastDenseArrayUnshift(ctx.runtime, receiver, object, args)) |new_length_fast| {
         return lengthIndexValue(new_length_fast);
     }
 
@@ -3640,7 +3639,7 @@ pub fn qjsArrayUnshiftCall(
                 try unshiftMoveIndex(ctx, output, global, receiver_object_value, object, k, insert_count);
             }
         } else {
-            try qjsArrayUnshiftSparseLarge(ctx, output, global, receiver_object_value, object, length, insert_count);
+            try arrayUnshiftSparseLarge(ctx, output, global, receiver_object_value, object, length, insert_count);
         }
 
         for (args, 0..) |item, index| {
@@ -3656,7 +3655,7 @@ pub fn qjsArrayUnshiftCall(
     return lengthIndexValue(new_length);
 }
 
-pub fn qjsArrayReverseCall(
+pub fn arrayReverseCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3767,7 +3766,7 @@ pub fn qjsArrayReverseCall(
     return receiver_object_value;
 }
 
-pub fn qjsArrayUnshiftSparseLarge(
+pub fn arrayUnshiftSparseLarge(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4039,7 +4038,7 @@ fn arraySpeciesConstructorIsRealmIntrinsicArray(realm: *core.JSContext, construc
     return (constructor_object.nativeFunctionRealm() orelse return false) == realm;
 }
 
-pub fn qjsArrayFromCall(
+pub fn arrayFromCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4052,7 +4051,7 @@ pub fn qjsArrayFromCall(
     const function_object = callableObjectFromValue(func) orelse return null;
     if (typedArrayStaticMethodId(ctx.runtime, function_object)) |method_id| {
         if (method_id != 1) return null;
-        return try qjsTypedArrayFromStaticCall(ctx, output, global, constructor_value, args, caller_function, caller_frame);
+        return try typedArrayFromStaticCall(ctx, output, global, constructor_value, args, caller_function, caller_frame);
     }
     if (!isArrayStaticRecord(function_object, @intFromEnum(method_ids.array.StaticMethod.from))) {
         if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "from")) return null;
@@ -4068,7 +4067,7 @@ pub fn qjsArrayFromCall(
     if (typedArrayConstructorObject(constructor_value) != null) {
         if (objectFromValue(source)) |source_object| {
             if (source_object.isArray()) {
-                return try qjsArrayFromArrayLike(ctx, output, global, constructor_value, source_object.value(), source_object.arrayLength(), map_fn, this_arg, caller_function, caller_frame);
+                return try arrayFromArrayLike(ctx, output, global, constructor_value, source_object.value(), source_object.arrayLength(), map_fn, this_arg, caller_function, caller_frame);
             }
         }
     }
@@ -4078,15 +4077,15 @@ pub fn qjsArrayFromCall(
         if (!isCallableValue(iterator_method)) return error.TypeError;
         const iterator = try callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
         defer iterator.free(ctx.runtime);
-        return try qjsArrayFromIteratorLike(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
+        return try arrayFromIteratorLike(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
     }
 
     if (objectFromValue(source)) |source_object| {
         if (source_object.class_id == core.class.ids.generator or source_object.class_id == core.class.ids.async_generator) {
-            return try qjsArrayFromIteratorLike(ctx, output, global, constructor_value, source, map_fn, this_arg, caller_function, caller_frame);
+            return try arrayFromIteratorLike(ctx, output, global, constructor_value, source, map_fn, this_arg, caller_function, caller_frame);
         }
         if (source_object.isArray()) {
-            return try qjsArrayFromArrayLike(ctx, output, global, constructor_value, source_object.value(), null, map_fn, this_arg, caller_function, caller_frame);
+            return try arrayFromArrayLike(ctx, output, global, constructor_value, source_object.value(), null, map_fn, this_arg, caller_function, caller_frame);
         }
         if (source_object.class_id == core.class.ids.set or source_object.class_id == core.class.ids.map) {
             // Drain the Map/Set through its values/entries iterator. Route the
@@ -4098,10 +4097,10 @@ pub fn qjsArrayFromCall(
             const collection_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = if (source_object.class_id == core.class.ids.set) 8 else 9 };
             const iterator = (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, source_object.value(), collection_ref, &.{}, null, null)) orelse return error.TypeError;
             defer iterator.free(ctx.runtime);
-            return try qjsArrayFromIteratorLike(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
+            return try arrayFromIteratorLike(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
         }
         if (source_object.class_id == core.class.ids.map_iterator or source_object.class_id == core.class.ids.set_iterator) {
-            return try qjsArrayFromIteratorLike(ctx, output, global, constructor_value, source, map_fn, this_arg, caller_function, caller_frame);
+            return try arrayFromIteratorLike(ctx, output, global, constructor_value, source, map_fn, this_arg, caller_function, caller_frame);
         }
     }
 
@@ -4135,7 +4134,7 @@ pub fn qjsArrayFromCall(
             item.free(ctx.runtime);
             item = mapped;
         }
-        try qjsCreateArrayDataOrTypedArrayElement(ctx.runtime, out, key, item);
+        try createArrayDataOrTypedArrayElement(ctx.runtime, out, key, item);
     }
     if (!core.object.isTypedArrayObject(out)) {
         const set_result = try setValueProperty(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(length)), caller_function, caller_frame);
@@ -4207,12 +4206,12 @@ fn fromAsyncGetMethod(
 }
 
 /// `Array.fromAsync(asyncItems [, mapfn [, thisArg]])` entry. Gated like
-/// `qjsArrayFromCall`: record id when installed with one, name fallback for
+/// `arrayFromCall`: record id when installed with one, name fallback for
 /// the lazily materialized static. Returns the result promise; only
 /// NewPromiseCapability failures surface synchronously — every abrupt
 /// completion of the closure body rejects the promise (spec step 3/steps e-k
 /// run inside the async closure).
-pub fn qjsArrayFromAsyncCall(
+pub fn arrayFromAsyncCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4226,10 +4225,10 @@ pub fn qjsArrayFromAsyncCall(
     if (!isArrayStaticRecord(function_object, @intFromEnum(method_ids.array.StaticMethod.from_async))) {
         if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "fromAsync")) return null;
     }
-    var capability = try promise_ops.qjsDefaultPromiseCapability(ctx, output, global, caller_function, caller_frame);
+    var capability = try promise_ops.defaultPromiseCapability(ctx, output, global, caller_function, caller_frame);
     errdefer capability.deinit(ctx.runtime);
     fromAsyncStart(ctx, output, global, constructor_value, args, capability.resolve, capability.reject, caller_function, caller_frame) catch |err| {
-        try promise_ops.qjsPromiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
+        try promise_ops.promiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
     };
     return capability.releaseCallbacks(ctx.runtime);
 }
@@ -4312,7 +4311,7 @@ fn fromAsyncStart(
             if (used_async) {
                 try fromAsyncStateSet(rt, state, "iter", iterator);
             } else {
-                const wrapper = try iter_vm.createAsyncFromSyncIterator(ctx, output, global, iterator, caller_function, caller_frame, object_ops.getValueProperty, call_runtime.isCallableValue);
+                const wrapper = try iterator_ops.createAsyncFromSyncIterator(ctx, output, global, iterator, caller_function, caller_frame, object_ops.getValueProperty, call_runtime.isCallableValue);
                 defer wrapper.free(rt);
                 try fromAsyncStateSet(rt, state, "iter", wrapper);
             }
@@ -4387,19 +4386,19 @@ fn fromAsyncAwait(
 ) !void {
     const rt = ctx.runtime;
     try fromAsyncStateSet(rt, state, "phase", core.JSValue.int32(phase));
-    const promise_constructor = try promise_ops.qjsPromiseDefaultConstructor(ctx, global);
+    const promise_constructor = try promise_ops.promiseDefaultConstructor(ctx, global);
     defer promise_constructor.free(rt);
-    const awaited = try promise_ops.qjsPromiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, null, null);
+    const awaited = try promise_ops.promiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, null, null);
     defer awaited.free(rt);
     const on_fulfilled = try fromAsyncContinuation(rt, global, state, false);
     defer on_fulfilled.free(rt);
     const on_rejected = try fromAsyncContinuation(rt, global, state, true);
     defer on_rejected.free(rt);
-    try promise_ops.qjsPerformPromiseThen(ctx, output, global, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+    try promise_ops.performPromiseThen(ctx, output, global, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
 
 fn fromAsyncContinuation(rt: *core.JSRuntime, global: *core.Object, state: *core.Object, rejected: bool) !core.JSValue {
-    const callback = try builtin_glue.qjsCreateDataFunction(rt, global, "", 1);
+    const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .array_from_async_continuation);
@@ -4412,7 +4411,7 @@ fn fromAsyncContinuation(rt: *core.JSRuntime, global: *core.Object, state: *core
 /// `call_runtime.callInternalCallableByTag`). Any error escaping the resume
 /// body rejects the result promise; the settled promise's own
 /// already-resolved latch makes late double-settles no-ops.
-pub fn qjsArrayFromAsyncContinuationCall(
+pub fn arrayFromAsyncContinuationCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4447,7 +4446,7 @@ pub fn qjsArrayFromAsyncContinuationCall(
     fromAsyncResume(ctx, output, global, state, rejected, settled, caller_function, caller_frame) catch |err| {
         const reject = fromAsyncStateGet(rt, state, "reject");
         defer reject.free(rt);
-        try promise_ops.qjsPromiseRejectCapabilityForError(ctx, output, global, reject, err, caller_function, caller_frame);
+        try promise_ops.promiseRejectCapabilityForError(ctx, output, global, reject, err, caller_function, caller_frame);
     };
     return core.JSValue.undefinedValue();
 }
@@ -4678,7 +4677,7 @@ fn fromAsyncFinish(
     try setValuePropertyOrThrow(ctx, output, global, target, core.atom.ids.length, core.JSValue.number(length), caller_function, caller_frame);
     const resolve = fromAsyncStateGet(rt, state, "resolve");
     defer resolve.free(rt);
-    try promise_ops.qjsPromiseResolveCapability(ctx, output, global, resolve, target, caller_function, caller_frame);
+    try promise_ops.promiseResolveCapability(ctx, output, global, resolve, target, caller_function, caller_frame);
 }
 
 fn fromAsyncReject(
@@ -4692,7 +4691,7 @@ fn fromAsyncReject(
 ) !void {
     const reject = fromAsyncStateGet(ctx.runtime, state, "reject");
     defer reject.free(ctx.runtime);
-    try promise_ops.qjsPromiseRejectCapability(ctx, output, global, reject, reason, caller_function, caller_frame);
+    try promise_ops.promiseRejectCapability(ctx, output, global, reject, reason, caller_function, caller_frame);
 }
 
 /// Materialize the pending Zig error (or its thrown JS value) and run
@@ -4706,7 +4705,7 @@ fn fromAsyncCloseWithError(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const reason = try exception_ops.qjsPromiseErrorValue(ctx, global, err);
+    const reason = try exception_ops.promiseErrorValue(ctx, global, err);
     defer reason.free(ctx.runtime);
     try fromAsyncCloseWithValue(ctx, output, global, state, reason, caller_function, caller_frame);
 }
@@ -4746,7 +4745,7 @@ fn fromAsyncCloseWithValue(
     try fromAsyncAwait(ctx, output, global, state, inner, from_async_phase_closing);
 }
 
-pub fn qjsTypedArrayFromStaticCall(
+pub fn typedArrayFromStaticCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4770,31 +4769,31 @@ pub fn qjsTypedArrayFromStaticCall(
         if (!isCallableValue(iterator_method)) return error.TypeError;
         const iterator = try callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
         defer iterator.free(ctx.runtime);
-        return try qjsTypedArrayFromIteratorValue(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
+        return try typedArrayFromIteratorValue(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
     }
 
     if (objectFromValue(source)) |source_object| {
         if (source_object.class_id == core.class.ids.generator or source_object.class_id == core.class.ids.async_generator) {
-            return try qjsTypedArrayFromIteratorValue(ctx, output, global, constructor_value, source, map_fn, this_arg, caller_function, caller_frame);
+            return try typedArrayFromIteratorValue(ctx, output, global, constructor_value, source, map_fn, this_arg, caller_function, caller_frame);
         }
         if (source_object.class_id == core.class.ids.set or source_object.class_id == core.class.ids.map) {
-            // Same Map/Set drain as `qjsArrayFrom`, but feeding the typed-array
+            // Same Map/Set drain as `arrayFromCall`, but feeding the typed-array
             // factory: route through the record table with no function object
             // and `global == null` to keep the bare primitive iterator.
             const collection_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = if (source_object.class_id == core.class.ids.set) 8 else 9 };
             const iterator = (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, source_object.value(), collection_ref, &.{}, null, null)) orelse return error.TypeError;
             defer iterator.free(ctx.runtime);
-            return try qjsTypedArrayFromIteratorValue(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
+            return try typedArrayFromIteratorValue(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
         }
         if (source_object.class_id == core.class.ids.map_iterator or source_object.class_id == core.class.ids.set_iterator) {
-            return try qjsTypedArrayFromIteratorValue(ctx, output, global, constructor_value, source, map_fn, this_arg, caller_function, caller_frame);
+            return try typedArrayFromIteratorValue(ctx, output, global, constructor_value, source, map_fn, this_arg, caller_function, caller_frame);
         }
     }
 
-    return try qjsTypedArrayFromArrayLikeSource(ctx, output, global, constructor_value, source, null, map_fn, this_arg, caller_function, caller_frame);
+    return try typedArrayFromArrayLikeSource(ctx, output, global, constructor_value, source, null, map_fn, this_arg, caller_function, caller_frame);
 }
 
-pub fn qjsTypedArrayFromIteratorValue(
+pub fn typedArrayFromIteratorValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4805,10 +4804,10 @@ pub fn qjsTypedArrayFromIteratorValue(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const values_value = try qjsCollectIteratorValues(ctx, output, global, iterator_value, caller_function, caller_frame);
+    const values_value = try collectIteratorValues(ctx, output, global, iterator_value, caller_function, caller_frame);
     defer values_value.free(ctx.runtime);
     const values = objectFromValue(values_value) orelse return error.TypeError;
-    return try qjsTypedArrayFromArrayLikeSource(
+    return try typedArrayFromArrayLikeSource(
         ctx,
         output,
         global,
@@ -4822,7 +4821,7 @@ pub fn qjsTypedArrayFromIteratorValue(
     );
 }
 
-pub fn qjsTypedArrayFromArrayLikeSource(
+pub fn typedArrayFromArrayLikeSource(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4843,7 +4842,7 @@ pub fn qjsTypedArrayFromArrayLikeSource(
     };
     if (length > std.math.maxInt(u32)) return error.RangeError;
 
-    const out_value = try qjsTypedArrayCreateWithLength(ctx, output, global, constructor_value, length, caller_function, caller_frame);
+    const out_value = try typedArrayCreateWithLength(ctx, output, global, constructor_value, length, caller_function, caller_frame);
     errdefer out_value.free(ctx.runtime);
     const out = objectFromValue(out_value) orelse return error.TypeError;
     var mapper_call: ?SyncInternalCallSite = if (map_fn) |mapper|
@@ -4861,12 +4860,12 @@ pub fn qjsTypedArrayFromArrayLikeSource(
             item.free(ctx.runtime);
             item = mapped;
         }
-        try qjsTypedArraySetElementValue(ctx, output, global, out, index, item);
+        try typedArraySetElementValue(ctx, output, global, out, index, item);
     }
     return out_value;
 }
 
-pub fn qjsArrayFromArrayLike(
+pub fn arrayFromArrayLike(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4913,7 +4912,7 @@ pub fn qjsArrayFromArrayLike(
             item.free(ctx.runtime);
             item = mapped;
         }
-        try qjsCreateArrayDataOrTypedArrayElement(ctx.runtime, out, key, item);
+        try createArrayDataOrTypedArrayElement(ctx.runtime, out, key, item);
     }
     if (index > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
     if (!core.object.isTypedArrayObject(out)) {
@@ -4923,7 +4922,7 @@ pub fn qjsArrayFromArrayLike(
     return out_value;
 }
 
-pub fn qjsArrayFromIteratorLike(
+pub fn arrayFromIteratorLike(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4954,35 +4953,35 @@ pub fn qjsArrayFromIteratorLike(
     var index: u32 = 0;
     while (true) : (index += 1) {
         const next = callValueOrBytecodeRoot(ctx, output, global, iterator.value(), next_method, &.{}, caller_function, caller_frame) catch |err| {
-            try qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+            try iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
         defer next.free(ctx.runtime);
         const next_object = objectFromValue(next) orelse {
-            try qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+            try iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return error.TypeError;
         };
         const done = getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame) catch |err| {
-            try qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+            try iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
         defer done.free(ctx.runtime);
         if (done.asBool() == true) break;
         var item = getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
-            try qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+            try iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
         defer item.free(ctx.runtime);
         if (mapper_call) |*call_site| {
             const mapped = call_site.call(&.{ item, core.JSValue.int32(@intCast(index)) }) catch |err| {
-                try qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+                try iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
                 return err;
             };
             item.free(ctx.runtime);
             item = mapped;
         }
-        qjsCreateArrayDataOrTypedArrayElement(ctx.runtime, out, core.atom.atomFromUInt32(index), item) catch |err| {
-            try qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+        createArrayDataOrTypedArrayElement(ctx.runtime, out, core.atom.atomFromUInt32(index), item) catch |err| {
+            try iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
     }
@@ -4993,7 +4992,7 @@ pub fn qjsArrayFromIteratorLike(
     return out_value;
 }
 
-pub fn qjsArrayOfCall(
+pub fn arrayOfCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -5006,7 +5005,7 @@ pub fn qjsArrayOfCall(
     const function_object = callableObjectFromValue(func) orelse return null;
     if (typedArrayStaticMethodId(ctx.runtime, function_object)) |method_id| {
         if (method_id != 2) return null;
-        return try qjsTypedArrayOfStaticCall(ctx, output, global, constructor_value, args, caller_function, caller_frame);
+        return try typedArrayOfStaticCall(ctx, output, global, constructor_value, args, caller_function, caller_frame);
     }
     if (!isArrayStaticRecord(function_object, @intFromEnum(method_ids.array.StaticMethod.of))) {
         if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "of")) return null;
@@ -5075,7 +5074,7 @@ pub fn isArrayPrototypeRecord(function_object: *core.Object, method_id: u32) boo
     return arrayPrototypeRecordId(function_object) == method_id;
 }
 
-pub fn qjsTypedArrayOfStaticCall(
+pub fn typedArrayOfStaticCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -5087,16 +5086,16 @@ pub fn qjsTypedArrayOfStaticCall(
     if (!try isConstructorForArrayOf(ctx.runtime, constructor_value)) return error.TypeError;
     if (args.len > std.math.maxInt(u32)) return error.RangeError;
 
-    const out_value = try qjsTypedArrayCreateWithLength(ctx, output, global, constructor_value, args.len, caller_function, caller_frame);
+    const out_value = try typedArrayCreateWithLength(ctx, output, global, constructor_value, args.len, caller_function, caller_frame);
     errdefer out_value.free(ctx.runtime);
     const out = objectFromValue(out_value) orelse return error.TypeError;
     for (args, 0..) |arg, index| {
-        try qjsTypedArraySetElementValue(ctx, output, global, out, index, arg);
+        try typedArraySetElementValue(ctx, output, global, out, index, arg);
     }
     return out_value;
 }
 
-pub fn qjsCreateArrayDataOrTypedArrayElement(
+pub fn createArrayDataOrTypedArrayElement(
     rt: *core.JSRuntime,
     object: *core.Object,
     atom_id: core.Atom,
@@ -5150,7 +5149,7 @@ pub fn isConstructorForArrayOf(rt: *core.JSRuntime, value: core.JSValue) !bool {
     return object.class_id == core.class.ids.c_closure;
 }
 
-pub fn qjsArrayMapCall(
+pub fn arrayMapCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -5195,7 +5194,7 @@ pub const ArraySortEntry = struct {
     }
 };
 
-pub fn qjsArraySortCall(
+pub fn arraySortCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -5377,7 +5376,7 @@ pub fn stableArraySortEntries(
     }
 }
 
-pub fn qjsArrayByCopyCall(
+pub fn arrayByCopyCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -5429,7 +5428,7 @@ pub fn qjsArrayByCopyCall(
             .to_spliced => "toSpliced",
             .with_ => "with",
         };
-        if (try qjsTypedArrayByCopyCall(ctx, output, global, object, name, args, caller_function, caller_frame)) |value| return value;
+        if (try typedArrayByCopyCall(ctx, output, global, object, name, args, caller_function, caller_frame)) |value| return value;
     }
 
     const length = if (object.isArray())
@@ -5563,7 +5562,7 @@ pub fn qjsArrayByCopyCall(
     return out.value();
 }
 
-pub fn qjsTypedArrayByCopyCall(
+pub fn typedArrayByCopyCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -5580,7 +5579,7 @@ pub fn qjsTypedArrayByCopyCall(
     const length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
 
     if (std.mem.eql(u8, name, "toReversed")) {
-        const out_value = try qjsTypedArrayCreateSameType(ctx, output, global, object, length, caller_function, caller_frame);
+        const out_value = try typedArrayCreateSameType(ctx, output, global, object, length, caller_function, caller_frame);
         errdefer out_value.free(ctx.runtime);
         const out = objectFromValue(out_value) orelse return error.TypeError;
         var index: usize = 0;
@@ -5610,7 +5609,7 @@ pub fn qjsTypedArrayByCopyCall(
         }
         try stableArraySortEntries(ctx, output, global, true, comparator, entries.items, caller_function, caller_frame);
 
-        const out_value = try qjsTypedArrayCreateSameType(ctx, output, global, object, length, caller_function, caller_frame);
+        const out_value = try typedArrayCreateSameType(ctx, output, global, object, length, caller_function, caller_frame);
         errdefer out_value.free(ctx.runtime);
         const out = objectFromValue(out_value) orelse return error.TypeError;
         for (entries.items, 0..) |entry, sorted_index| {
@@ -5622,14 +5621,14 @@ pub fn qjsTypedArrayByCopyCall(
     if (std.mem.eql(u8, name, "with")) {
         const relative_index = try toIntegerOrInfinityForArrayByCopy(ctx, output, global, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
         const actual_index = if (relative_index < 0) @as(f64, @floatFromInt(length)) + relative_index else relative_index;
-        const replacement = try qjsTypedArrayByCopyCoerceValue(ctx, output, global, object, if (args.len >= 2) args[1] else core.JSValue.undefinedValue());
+        const replacement = try typedArrayByCopyCoerceValue(ctx, output, global, object, if (args.len >= 2) args[1] else core.JSValue.undefinedValue());
         defer replacement.free(ctx.runtime);
 
         const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         if (actual_index < 0 or actual_index >= @as(f64, @floatFromInt(current_length)) or !std.math.isFinite(actual_index)) return error.RangeError;
         const replace_index: usize = @intFromFloat(actual_index);
 
-        const out_value = try qjsTypedArrayCreateSameType(ctx, output, global, object, length, caller_function, caller_frame);
+        const out_value = try typedArrayCreateSameType(ctx, output, global, object, length, caller_function, caller_frame);
         errdefer out_value.free(ctx.runtime);
         const out = objectFromValue(out_value) orelse return error.TypeError;
         var index: usize = 0;
@@ -5647,7 +5646,7 @@ pub fn qjsTypedArrayByCopyCall(
     return null;
 }
 
-pub fn qjsArrayFlatCall(
+pub fn arrayFlatCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -5778,7 +5777,7 @@ pub fn createArrayByCopyOutput(rt: *core.JSRuntime, global: *core.Object, length
     return out;
 }
 
-pub fn qjsTypedArrayCreateSameType(
+pub fn typedArrayCreateSameType(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -5792,7 +5791,7 @@ pub fn qjsTypedArrayCreateSameType(
     return constructValueOrBytecode(ctx, output, global, constructor_value, &.{lengthIndexValue(length)}, caller_function, caller_frame);
 }
 
-pub fn qjsTypedArrayByCopyCoerceValue(
+pub fn typedArrayByCopyCoerceValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -5989,7 +5988,7 @@ pub fn atomicsTypedArrayIsBigInt(object: *core.Object) bool {
     return object.typedArrayKind() == 11 or object.typedArrayKind() == 12;
 }
 
-pub fn qjsUint8ArrayCodecCall(
+pub fn uint8ArrayCodecCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -6609,11 +6608,7 @@ fn materializeArgsFromArrayLike(
     };
 }
 
-pub fn qjsArrayIteratorMethod(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, function_object: *core.Object) !?core.JSValue {
-    return iter_vm.arrayIteratorMethod(ctx, global, receiver, function_object);
-}
-
-pub fn qjsArrayIteratorMethodRecord(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, function_object: *core.Object, method_id: u32) !?core.JSValue {
+pub fn arrayIteratorMethodRecord(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, function_object: *core.Object, method_id: u32) !?core.JSValue {
     const kind: u8 = switch (method_id) {
         @intFromEnum(method_ids.array.PrototypeMethod.keys) => 1,
         @intFromEnum(method_ids.array.PrototypeMethod.values) => 2,
@@ -6643,7 +6638,7 @@ pub fn qjsArrayIteratorMethodRecord(ctx: *core.JSContext, global: *core.Object, 
     return iterator.value();
 }
 
-pub fn qjsIteratorZipFlattenableRecord(
+pub fn iteratorZipFlattenableRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -6651,7 +6646,7 @@ pub fn qjsIteratorZipFlattenableRecord(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorZipRecord {
-    return iter_vm.qjsIteratorZipFlattenableRecord(
+    return iterator_ops.iteratorZipFlattenableRecord(
         ctx,
         output,
         global,
@@ -6699,13 +6694,9 @@ pub fn iteratorFlattenableForIteratorFrom(
     return iterator_object.value().dup();
 }
 
-pub fn qjsArrayIteratorNext(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, receiver: core.JSValue, function_object: *core.Object) !?core.JSValue {
+pub fn arrayIteratorNextFast(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, receiver: core.JSValue, function_object: *core.Object) !?core.JSValue {
     if (!function_object.isArrayIteratorNextFunction()) return null;
-    return iter_vm.arrayIteratorNext(ctx, output, global, receiver);
-}
-
-pub fn qjsArrayIteratorValue(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, target: *core.Object, index: u32, kind: u8) !core.JSValue {
-    return iter_vm.arrayIteratorValue(ctx, output, global, target, index, kind, getValueProperty);
+    return iterator_ops.arrayIteratorNext(ctx, output, global, receiver);
 }
 
 pub fn arrayPrototypeValuesFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?core.JSValue {
@@ -6917,7 +6908,7 @@ pub fn typedArrayPrototypeSet(
     return null;
 }
 
-pub fn qjsArrayJoinCall(
+pub fn arrayJoinCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -6941,7 +6932,7 @@ pub fn qjsArrayJoinCall(
     const is_typed_array = core.object.isTypedArrayObject(object);
     if (is_typed_method and !is_typed_array) return error.TypeError;
     if (!is_typed_method and !is_typed_array) {
-        if (try qjsFastDensePrimitiveArrayJoin(ctx.runtime, object, args)) |joined| return joined;
+        if (try fastDensePrimitiveArrayJoin(ctx.runtime, object, args)) |joined| return joined;
     }
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
@@ -6983,7 +6974,7 @@ pub fn qjsArrayJoinCall(
     return try value_ops.createStringValue(ctx.runtime, bytes.items);
 }
 
-pub fn qjsFastDensePrimitiveArrayJoin(
+pub fn fastDensePrimitiveArrayJoin(
     rt: *core.JSRuntime,
     object: *core.Object,
     args: []const core.JSValue,
@@ -7010,14 +7001,14 @@ pub fn qjsFastDensePrimitiveArrayJoin(
     var index: usize = 0;
     while (index < length) : (index += 1) {
         const item = elements[index];
-        if (!qjsCanFastJoinPrimitive(item)) return null;
+        if (!canFastJoinPrimitive(item)) return null;
         if (index != 0) try bytes.appendSlice(rt.memory.allocator, separator.items);
         if (!item.isUndefined() and !item.isNull()) try value_ops.appendValueString(rt, &bytes, item);
     }
     return try value_ops.createStringValue(rt, bytes.items);
 }
 
-pub fn qjsCanFastJoinPrimitive(value: core.JSValue) bool {
+pub fn canFastJoinPrimitive(value: core.JSValue) bool {
     return value.isUndefined() or
         value.isNull() or
         value.isString() or
@@ -7026,7 +7017,7 @@ pub fn qjsCanFastJoinPrimitive(value: core.JSValue) bool {
         value.isBigInt();
 }
 
-pub fn qjsObjectEntryArrayValue(
+pub fn objectEntryArrayValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -7079,7 +7070,7 @@ pub fn qjsObjectEntryArrayValue(
     return entry_value;
 }
 
-test "qjsObjectEntryArrayValue roots direct symbol value while creating entry array" {
+test "objectEntryArrayValue roots direct symbol value while creating entry array" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -7100,7 +7091,7 @@ test "qjsObjectEntryArrayValue roots direct symbol value while creating entry ar
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const entry_value = try qjsObjectEntryArrayValue(ctx, null, global, source.value(), key, null, null);
+    const entry_value = try objectEntryArrayValue(ctx, null, global, source.value(), key, null, null);
     var entry_alive = true;
     defer if (entry_alive) entry_value.free(rt);
     const entry = try property_ops.expectObject(entry_value);
@@ -7120,7 +7111,7 @@ test "qjsObjectEntryArrayValue roots direct symbol value while creating entry ar
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-test "qjsObjectEnumerableOwnPropertiesCall roots direct symbol values while creating output array" {
+test "objectEnumerableOwnPropertiesCall roots direct symbol values while creating output array" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -7142,7 +7133,7 @@ test "qjsObjectEnumerableOwnPropertiesCall roots direct symbol values while crea
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const out_value = (try qjsObjectEnumerableOwnPropertiesCall(ctx, null, global, &args, .values, null, null)) orelse return error.TypeError;
+    const out_value = (try objectEnumerableOwnPropertiesCall(ctx, null, global, &args, .values, null, null)) orelse return error.TypeError;
     var out_alive = true;
     defer if (out_alive) out_value.free(rt);
     const out = try property_ops.expectObject(out_value);
@@ -7162,7 +7153,7 @@ test "qjsObjectEnumerableOwnPropertiesCall roots direct symbol values while crea
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-pub fn qjsTypedArrayValidateConstructArgsPreAllocate(
+pub fn typedArrayValidateConstructArgsPreAllocate(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -7171,16 +7162,16 @@ pub fn qjsTypedArrayValidateConstructArgsPreAllocate(
     if (args.len < 1) return;
     const first = args[0];
     if (!first.isObject()) {
-        _ = try qjsTypedArrayConstructToIndex(ctx, output, global, first);
+        _ = try typedArrayConstructToIndex(ctx, output, global, first);
         return;
     }
     const source_object = objectFromValue(first) orelse return error.TypeError;
     if (source_object.class_id != core.class.ids.array_buffer and source_object.class_id != core.class.ids.shared_array_buffer) return;
     if (args.len >= 2 and !args[1].isUndefined()) {
-        _ = try qjsTypedArrayConstructToIndex(ctx, output, global, args[1]);
+        _ = try typedArrayConstructToIndex(ctx, output, global, args[1]);
     }
     if (args.len >= 3 and !args[2].isUndefined()) {
-        _ = try qjsTypedArrayConstructToIndex(ctx, output, global, args[2]);
+        _ = try typedArrayConstructToIndex(ctx, output, global, args[2]);
     }
 }
 

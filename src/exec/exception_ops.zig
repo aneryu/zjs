@@ -214,7 +214,7 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
 
 /// Throw the canonical `ReferenceError` for a TDZ violation.
 /// Returns `error.ReferenceError` to align with the VM sentinel convention.
-pub fn throwTdzReference(ctx: *core.JSContext) error{ReferenceError} {
+pub fn throwTdzReferenceError(ctx: *core.JSContext) error{ReferenceError} {
     const global = ctx.global orelse {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
@@ -275,7 +275,7 @@ pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.JSContext, global: *core.Ob
 /// own `message`/`name`. qjs does not run build_backtrace here either; zjs
 /// still snapshots the call sites because its lazy `stack` accessor would
 /// otherwise rebuild a backtrace from whichever context first reads it.
-pub fn qjsPromiseAggregateError(ctx: *core.JSContext, global: *core.Object, errors: *core.Object) !core.JSValue {
+pub fn promiseAggregateError(ctx: *core.JSContext, global: *core.Object, errors: *core.Object) !core.JSValue {
     const rt = ctx.runtime;
     const ctor_key = try rt.internAtom("AggregateError");
     defer rt.atoms.free(ctor_key);
@@ -301,7 +301,7 @@ pub fn qjsPromiseAggregateError(ctx: *core.JSContext, global: *core.Object, erro
     return aggregate_error;
 }
 
-pub fn qjsPromiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: anytype) exceptions.HostError!core.JSValue {
+pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: anytype) exceptions.HostError!core.JSValue {
     // QuickJS's async boundary takes the already-thrown interrupt value and
     // rejects with it. Keep this transfer local to Promise conversion:
     // admitting Interrupted to the generic pending-error matcher would let
@@ -432,7 +432,7 @@ pub fn isCallSiteObject(rt: *core.JSRuntime, object: *core.Object) bool {
 
 /// CallSite prototype methods dispatched by `.host` native-record id; the
 /// receiver must be a CallSite object (the metadata lives in internal slots).
-pub fn qjsCallSiteMethodById(rt: *core.JSRuntime, object: *core.Object, id: core.function.HostGlobalMethod) ?core.JSValue {
+pub fn callSiteMethodById(rt: *core.JSRuntime, object: *core.Object, id: core.function.HostGlobalMethod) ?core.JSValue {
     if (!isCallSiteObject(rt, object)) return null;
     return switch (id) {
         .callsite_get_function => core.JSValue.nullValue(),
@@ -661,11 +661,7 @@ fn sourceLocationFromPc2Line(function: *const bytecode.FunctionBytecode, target_
     return .{ .line_num = location.line_num, .col_num = location.col_num };
 }
 
-fn objectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
-}
+const objectFromValue = core.value_semantics.objectFromValue;
 
 fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     const key = try rt.internAtom(name);

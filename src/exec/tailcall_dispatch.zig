@@ -10,7 +10,7 @@
 //! former switch-dispatcher frame collapsed from `sum(per-arm spills)` (3504B, additive
 //! non-coalescing, proven by comptime-delete bisection) to `max single handler`
 //! (~80-150B) + the driver. `zjs_vm.zig` only prepares the frame, then
-//! `return tailcall_dispatch.run(&vm)`.
+//! `return tailcall_dispatch.runDispatchLoop(&vm)`.
 //!
 //! CRITICAL INVARIANT — a handler makes ZERO non-tail calls *on its own frame*. The
 //! op's real work is an OUTLINED helper (vm_*.zig, unchanged) invoked as the action
@@ -37,26 +37,25 @@ const small_inline = @import("small_inline.zig");
 const call_runtime = @import("call_runtime.zig");
 const function_ops = @import("function_ops.zig");
 const object_ops = @import("object_ops.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const HostError = @import("exceptions.zig").HostError;
 
 // Op-helper modules (same aliases the VM used when dispatch lived in zjs_vm.zig).
-const value_vm = @import("vm_value.zig");
-const arith_vm = @import("vm_arith.zig");
-const control_vm = @import("vm_control.zig");
-const call_vm = @import("vm_call.zig");
-const class_vm = @import("object_ops.zig");
-const literal_vm = @import("vm_literal.zig");
-const iter_vm = @import("iterator_ops.zig");
-const regexp_vm = @import("vm_regexp.zig");
-const eval_module_vm = @import("vm_eval_module.zig");
-const gen_async_vm = @import("vm_gen_async.zig");
+const vm_value = @import("vm_value.zig");
+const vm_arith = @import("vm_arith.zig");
+const vm_control = @import("vm_control.zig");
+const vm_call = @import("vm_call.zig");
+const vm_literal = @import("vm_literal.zig");
+const iterator_ops = @import("iterator_ops.zig");
+const vm_regexp = @import("vm_regexp.zig");
+const vm_eval_module = @import("vm_eval_module.zig");
+const vm_gen_async = @import("vm_gen_async.zig");
 const value_slot = @import("value_slot.zig");
 const vm_property_ref = @import("vm_property_ref.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
-const property_vm = @import("vm_property.zig");
+const vm_property = @import("vm_property.zig");
 const vm_property_field = @import("vm_property_field.zig");
-const property_ic = @import("property_ic.zig");
+const property_direct = @import("property_direct.zig");
 const vm_property_private = @import("vm_property_private.zig");
 const string_ops = @import("string_ops.zig");
 const array_ops = @import("array_ops.zig");
@@ -333,7 +332,7 @@ fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16)
 inline fn maybeStop(vm: *Vm, out: *Outcome) bool {
     if (vm.machine.depth == 0) {
         const stop_before_pc = vm.machine.l0.stop_before_pc orelse return false;
-        const r = gen_async_vm.stopBeforePc(vm.ctx, vm.stack, vm.frame, vm.machine.l0.generator_state, vm.catch_target.*, stop_before_pc) catch |e| {
+        const r = vm_gen_async.stopBeforePc(vm.ctx, vm.stack, vm.frame, vm.machine.l0.generator_state, vm.catch_target.*, stop_before_pc) catch |e| {
             out.* = vm.fail(e);
             return true;
         };
@@ -670,7 +669,7 @@ fn applyForwardCallMethod(
     vm.stack.setTopPtr(region_start);
     const receiver = region_start[0];
     const method = region_start[1];
-    const method_obj = class_vm.objectFromValue(method) orelse return .threw;
+    const method_obj = object_ops.objectFromValue(method) orelse return .threw;
     const resolved = inline_calls.resolveInlineFunctionFromObject(vm.global, method_obj) orelse return .threw;
     const target = resolved.bind(receiver, method);
     return switch (pushApplyForwardEntry(vm, &target, region_start, argc)) {
@@ -907,7 +906,7 @@ inline fn pushBorrowedIteratorAndEnter(
 }
 
 inline fn isForwardingCallRecord(ctx: *core.JSContext, method: JSValue) bool {
-    const function_object = class_vm.callableObjectFromValue(method) orelse return false;
+    const function_object = object_ops.callableObjectFromValue(method) orelse return false;
     if (function_object.flags.class_payload_kind != core.class.PayloadKind.function) return false;
     const record = function_object.nativeRecord() orelse blk: {
         const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return false;
@@ -1005,8 +1004,8 @@ fn completeProxyGetContinuation(vm: *Vm, result: JSValue, atom_id: core.Atom) Ho
     const target_value = stack.values[region_base];
     const key = stack.values[region_base + 1];
 
-    const target = class_vm.objectFromValue(target_value) orelse unreachable;
-    class_vm.validateProxyGetResult(
+    const target = object_ops.objectFromValue(target_value) orelse unreachable;
+    object_ops.validateProxyGetResult(
         vm.ctx,
         vm.output,
         vm.global,
@@ -1082,7 +1081,7 @@ fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
                 // maybeStop; keep them on the publishing path (op_drop_fast
                 // precedent).
                 if (vm.local_fast_blocked) break :fast;
-                const next_object = class_vm.objectFromValue(result) orelse break :fast;
+                const next_object = object_ops.objectFromValue(result) orelse break :fast;
                 if (next_object.proxyTarget() != null or next_object.hasExoticMethods()) break :fast;
                 const stack = vm.stack;
                 std.debug.assert(sp == stack.topPtr());
@@ -1128,7 +1127,7 @@ fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
 }
 
 fn completeForOfNextContinuation(vm: *Vm, result: JSValue, depth: u8) HostError!void {
-    iter_vm.finishForOfNextResult(
+    iterator_ops.finishForOfNextResult(
         vm.ctx,
         vm.output,
         vm.global,
@@ -1448,7 +1447,7 @@ fn op_return_cold(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
     _ = vb;
     vm.publish(pc, sp);
     const depth0 = vm.machine.depth == 0;
-    const value = control_vm.returnTop(vm.ctx, vm.stack, vm.frame, if (depth0) vm.machine.l0.generator_state else null) catch |e| return vm.fail(e);
+    const value = vm_control.returnTop(vm.ctx, vm.stack, vm.frame, if (depth0) vm.machine.l0.generator_state else null) catch |e| return vm.fail(e);
     if (depth0) {
         vm.return_value = value;
         return .returned; // L0 exit stays on the driver
@@ -1469,7 +1468,7 @@ fn op_return_undef_cold(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm
     _ = vb;
     vm.publish(pc, sp);
     const depth0 = vm.machine.depth == 0;
-    const value = control_vm.returnUndefined(vm.ctx, vm.frame, if (depth0) vm.machine.l0.generator_state else null) catch |e| return vm.fail(e);
+    const value = vm_control.returnUndefined(vm.ctx, vm.frame, if (depth0) vm.machine.l0.generator_state else null) catch |e| return vm.fail(e);
     if (depth0) {
         vm.return_value = value;
         return .returned;
@@ -1637,7 +1636,7 @@ const op_call3 = opCall(.three);
 
 fn op_apply(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    switch (call_vm.apply(
+    switch (vm_call.apply(
         vm.ctx,
         vm.output,
         vm.global,
@@ -1726,7 +1725,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
         // bytecode inline path gets the same object it would have unpacked inside
         // resolveInlineFunction; the extracted resolveInlineFunctionFromObject
         // skips the re-unpack.
-        if (class_vm.objectFromValue(method)) |method_obj| {
+        if (object_ops.objectFromValue(method)) |method_obj| {
             if (method_obj.class_id == core.class.ids.bytecode_function) {
                 if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_obj)) |resolved| {
                     vm.frame.pc += 2;
@@ -1792,10 +1791,10 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                 // never enters NMFD (no tbnz on the hot native path). Do not keep
                 // `rec` live across the NMFD bl — that grew this handler 0x3f0→0x400
                 // and slid the island tails. NMFD re-resolves with the assume helper.
-                if (call_vm.resolvedNativeMethodRecordAssumeCFunction(vm.ctx, method_obj)) |rec| {
+                if (vm_call.resolvedNativeMethodRecordAssumeCFunction(vm.ctx, method_obj)) |rec| {
                     if (!rec.forwards_call) {
                         vm.stack.setTopPtr(sp);
-                        switch (call_vm.nativeMethodFastDispatch(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, method_obj, argc) catch |e| return vm.fail(e)) {
+                        switch (vm_call.nativeMethodFastDispatch(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, method_obj, argc) catch |e| return vm.fail(e)) {
                             .hit, .caught => return coldNext(vb, vm),
                             .miss => {},
                         }
@@ -1803,7 +1802,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                 }
             }
         }
-        if (class_vm.functionObjectFromValue(receiver) != null and isForwardingCallRecord(vm.ctx, method)) {
+        if (object_ops.functionObjectFromValue(receiver) != null and isForwardingCallRecord(vm.ctx, method)) {
             const this_arg = if (argc == 0) JSValue.undefinedValue() else region_start[2];
             if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, this_arg, receiver)) |target| {
                 // This fused frame represents two QuickJS calls: the native
@@ -1844,7 +1843,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
         }
     }
     vm.stack.setTopPtr(sp);
-    switch (call_vm.callMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, false, &vm.tail_request) catch |e| return vm.fail(e)) {
+    switch (vm_call.callMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, false, &vm.tail_request) catch |e| return vm.fail(e)) {
         .done, .continue_loop => return coldNext(vb, vm),
         .inline_call => {
             vm.tail_mode = .push;
@@ -2205,7 +2204,7 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
 
     // Authoritative slow path expects frame.pc at the argc operand and owns
     // its existing pop/catch protocol.
-    _ = call_vm.constructor(
+    _ = vm_call.constructor(
         vm.ctx,
         vm.output,
         vm.global,
@@ -2230,7 +2229,7 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
     // per-frame `vm.code_end` mirror is retired — see the Vm field).
     if (@intFromPtr(pc + 1) < @intFromPtr(vm.function.byteCode().ptr + vm.function.byteCode().len)) {
         const depth = pc[1];
-        if (iter_vm.forOfIteratorIndex(vm.stack, depth)) |iterator_index| {
+        if (iterator_ops.forOfIteratorIndex(vm.stack, depth)) |iterator_index| {
             const iterator_record = vm.stack.values[iterator_index..][0..2];
             // Integer-pair loads (see loadValueAsIntPair): the whole-value
             // aggregate reads let LLVM merge the two adjacent slots into one
@@ -2302,7 +2301,7 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             }
         } else |_| {}
     }
-    _ = iter_vm.forOfNextVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target) catch |err| return vm.fail(err);
+    _ = iterator_ops.forOfNextVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target) catch |err| return vm.fail(err);
     return coldNext(vb, vm);
 }
 // X-89 history, kept because it prices this handler's shape: the source fold
@@ -2349,7 +2348,7 @@ fn op_tail_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(
 const op_tail_call_method = op_call_method;
 fn op_eval(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    switch (eval_module_vm.directEval(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.output, vm.global, directEvalVarsReachGlobal(vm), vm.machine.depth > 0) catch |e| return vm.fail(e)) {
+    switch (vm_eval_module.directEval(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.output, vm.global, directEvalVarsReachGlobal(vm), vm.machine.depth > 0) catch |e| return vm.fail(e)) {
         .done, .continue_loop => return coldNext(vb, vm),
         .tail_inline => |request| {
             vm.tail_request = request;
@@ -2374,7 +2373,7 @@ fn op_eval(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) l
 /// `drop` FREES sp[-1]: if that slot is still inside the traced window when a GC fires
 /// during free() (rc→0 destroy → …, or a later alloc before the next publish), the
 /// collector scans a freed value → use-after-free (nondeterministic in-process crash;
-/// the cold path is safe only because value_vm.drop's `stack.pop()` shrinks
+/// the cold path is safe only because vm_value.drop's `stack.pop()` shrinks
 /// stack.values BEFORE free). So publish the post-drop operand length here first, then
 /// free — the freed slot is then outside `[0..len]`. This is a single store off the
 /// hot dependency chain (no pc write, no coldNext/maybeStop round-trip, no 416B frame).
@@ -2396,7 +2395,7 @@ pub fn op_drop_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     const v = (sp - 1)[0];
     if (v.isCatchOffset()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     // Shrink the GC-traced operand window to exclude the slot we are about to free
-    // (mirrors value_vm.drop's stack.pop()-before-free); the freed slot must not be
+    // (mirrors vm_value.drop's stack.pop()-before-free); the freed slot must not be
     // reachable from stack.values[0..len] if free() triggers a collection.
     const nsp = sp - 1;
     vm.stack.setTopPtr(nsp);
@@ -2405,7 +2404,7 @@ pub fn op_drop_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
 }
 fn op_drop(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    switch (value_vm.drop(vm.ctx.runtime, vm.stack) catch |e| return vm.fail(e)) {
+    switch (vm_value.drop(vm.ctx.runtime, vm.stack) catch |e| return vm.fail(e)) {
         .value => return coldNext(vb, vm),
         .catch_target => |target| {
             vm.catch_target.* = target;
@@ -2415,13 +2414,13 @@ fn op_drop(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) l
 }
 fn op_throw(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    switch (control_vm.throwTop(vm.ctx, vm.output, vm.global, vm.stack, vm.frame, vm.catch_target) catch |e| return vm.fail(e)) {
+    switch (vm_control.throwTop(vm.ctx, vm.output, vm.global, vm.stack, vm.frame, vm.catch_target) catch |e| return vm.fail(e)) {
         .handled => return coldNext(vb, vm),
     }
 }
 fn op_throw_error(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    switch (control_vm.throwErrorVm(vm.ctx, vm.output, vm.stack, vm.function, vm.frame, vm.catch_target, vm.global) catch |e| return vm.fail(e)) {
+    switch (vm_control.throwErrorVm(vm.ctx, vm.output, vm.stack, vm.function, vm.frame, vm.catch_target, vm.global) catch |e| return vm.fail(e)) {
         .handled => return coldNext(vb, vm),
     }
 }
@@ -2429,7 +2428,7 @@ fn op_throw_error(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
 const h_initial_yield = coldGen(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!?JSValue {
         _ = pc;
-        switch (try gen_async_vm.initialYield(vm.ctx, vm.stack, vm.frame, if (vm.machine.depth == 0) vm.machine.l0.generator_state else null, vm.catch_target.*, if (vm.machine.depth == 0) vm.machine.l0.stop_on_yield else false)) {
+        switch (try vm_gen_async.initialYield(vm.ctx, vm.stack, vm.frame, if (vm.machine.depth == 0) vm.machine.l0.generator_state else null, vm.catch_target.*, if (vm.machine.depth == 0) vm.machine.l0.stop_on_yield else false)) {
             .none, .continue_loop => return null,
             .return_value => |v| return v,
         }
@@ -2438,7 +2437,7 @@ const h_initial_yield = coldGen(struct {
 const h_yield = coldGen(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!?JSValue {
         _ = pc;
-        switch (try gen_async_vm.yieldValue(vm.ctx, vm.stack, vm.frame, if (vm.machine.depth == 0) vm.machine.l0.generator_state else null, vm.catch_target.*, if (vm.machine.depth == 0) vm.machine.l0.stop_on_yield else false)) {
+        switch (try vm_gen_async.yieldValue(vm.ctx, vm.stack, vm.frame, if (vm.machine.depth == 0) vm.machine.l0.generator_state else null, vm.catch_target.*, if (vm.machine.depth == 0) vm.machine.l0.stop_on_yield else false)) {
             .none, .continue_loop => return null,
             .return_value => |v| return v,
         }
@@ -2447,7 +2446,7 @@ const h_yield = coldGen(struct {
 const h_yield_star = coldGen(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!?JSValue {
         _ = pc;
-        switch (try gen_async_vm.yieldStar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, if (vm.machine.depth == 0) vm.machine.l0.generator_state else null, if (vm.machine.depth == 0) vm.machine.l0.stop_on_yield else false, vm.catch_target)) {
+        switch (try vm_gen_async.yieldStar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, if (vm.machine.depth == 0) vm.machine.l0.generator_state else null, if (vm.machine.depth == 0) vm.machine.l0.stop_on_yield else false, vm.catch_target)) {
             .none, .continue_loop => return null,
             .return_value => |v| return v,
         }
@@ -2456,7 +2455,7 @@ const h_yield_star = coldGen(struct {
 const h_await = coldGen(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!?JSValue {
         _ = pc;
-        switch (try gen_async_vm.awaitValue(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, if (vm.machine.depth == 0) vm.machine.l0.generator_state else null, if (vm.machine.depth == 0) vm.machine.l0.suspend_on_module_await else false, if (vm.machine.depth == 0) vm.machine.l0.stop_on_yield else false, vm.catch_target)) {
+        switch (try vm_gen_async.awaitValue(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, if (vm.machine.depth == 0) vm.machine.l0.generator_state else null, if (vm.machine.depth == 0) vm.machine.l0.suspend_on_module_await else false, if (vm.machine.depth == 0) vm.machine.l0.stop_on_yield else false, vm.catch_target)) {
             .none, .continue_loop => return null,
             .return_value => |v| return v,
         }
@@ -3027,7 +3026,7 @@ pub fn opFclosure(comptime wide_index: bool) Handler {
             vm.syncPc(pc, advance);
             vm.syncSp(sp);
             const bytecode_value = vm.function.constantAt(index) orelse return vm.fail(error.InvalidBytecode);
-            const closure_value = class_vm.createBytecodeFunctionObject(vm.ctx, vm.frame, vm.global, bytecode_value) catch |err|
+            const closure_value = object_ops.createBytecodeFunctionObject(vm.ctx, vm.frame, vm.global, bytecode_value) catch |err|
                 return vm.fail(err);
             // qjs's `*sp++` is safe because JS_CallInternal's operand stack is
             // alloca'd inside the activation and never moves. zjs's Stack can
@@ -3086,7 +3085,7 @@ fn op_special_arguments(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
     // stack slot and pc/sp continue in registers.
     vm.syncPc(pc, 2);
     vm.syncSp(sp);
-    const arguments = class_vm.frameArgumentsObjectForSpecialObject(vm.ctx, vm.global, vm.frame, subtype) catch |err|
+    const arguments = object_ops.frameArgumentsObjectForSpecialObject(vm.ctx, vm.global, vm.frame, subtype) catch |err|
         return vm.fail(err);
     sp[0] = arguments;
     return cont(pc + 2, sp + 1, var_buf, vm);
@@ -3334,7 +3333,7 @@ pub fn op_get_field2_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
         return @call(.always_tail, propertyTailHandler(vm, .get_field2_primitive), .{ pc, sp, var_buf, vm });
     }
     var absent = false;
-    if (vm_property_field.qjsGetFieldFastSlotOrAbsent(vm.ctx.runtime, receiver, atom_id, &absent)) |slot| {
+    if (vm_property_field.getFieldFastSlotOrAbsent(vm.ctx.runtime, receiver, atom_id, &absent)) |slot| {
         const value = loadValueAsIntPair(slot);
         _ = value.dup();
         storeValueAsIntPair(&sp[0], value);
@@ -3453,7 +3452,7 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     // (quickjs.c:19131).
     const rt = vm.ctx.runtime;
     var absent = false;
-    if (vm_property_field.qjsGetFieldFastSlotOrAbsent(rt, receiver, atom_id, &absent)) |slot| {
+    if (vm_property_field.getFieldFastSlotOrAbsent(rt, receiver, atom_id, &absent)) |slot| {
         const value = loadValueAsIntPair(slot);
         // dup() returns `value` bitwise (it only bumps the refcount when the
         // tag requires one); discarding the result keeps the pushed value a
@@ -3468,7 +3467,7 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         // frame pays no per-op prologue for its inline JS_FreeValue either,
         // quickjs.c:19157).
         if (receiver.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
-            vm.property_holder = class_vm.objectFromValue(receiver) orelse unreachable;
+            vm.property_holder = object_ops.objectFromValue(receiver) orelse unreachable;
             return @call(.always_tail, propertyTailHandler(vm, .get_field_release_receiver), .{ pc, sp, var_buf, vm });
         }
         return cont(pc + 5, sp, var_buf, vm);
@@ -3530,7 +3529,7 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // Integer-pair slot reload + split push for the same forwarding reasons as
     // op_get_field (dup() returns the value bitwise; see that handler's note).
     var absent = false;
-    if (vm_property_field.qjsGetFieldFastSlotOrAbsent(vm.ctx.runtime, receiver, atom_id, &absent)) |slot| {
+    if (vm_property_field.getFieldFastSlotOrAbsent(vm.ctx.runtime, receiver, atom_id, &absent)) |slot| {
         const value = loadValueAsIntPair(slot);
         _ = value.dup();
         storeValueAsIntPair(&sp[0], value);
@@ -3618,7 +3617,7 @@ export var zjs_op_put_array_el_ta: Handler = op_put_array_el_ta;
 pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section) callconv(.c) Outcome {
     const obj = (sp - 3)[0];
     // qjs CASE: class==ARRAY → dense; else TA jumptable. Dense path stays
-    // inside the ARRAY arm so we do not re-enter class_vm.objectFromValue
+    // inside the ARRAY arm so we do not re-enter object_ops.objectFromValue
     // (header-kind `tst #7`) after class_id is already proven.
     if (obj.isObject()) {
         if (object_ops.objectFromValueTrustedExpression(obj)) |object| {
@@ -3730,7 +3729,7 @@ fn op_put_array_el_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
     // call to putDenseArrayElementOverwriteOwnedFast just checks isArray()
     // and returns .miss, costing ~2.27M function calls for zero hits.
     const array_ptr: ?*core.Object = if (obj.isObject()) blk: {
-        const obj_ptr = class_vm.objectFromValue(obj) orelse break :blk null;
+        const obj_ptr = object_ops.objectFromValue(obj) orelse break :blk null;
         break :blk if (obj_ptr.isArray()) obj_ptr else null;
     } else null;
     if (array_ptr) |array_object| {
@@ -3820,7 +3819,7 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     const receiver = (sp - 2)[0];
     const atom_id = readInt(u32, pc + 1);
     const rt = vm.ctx.runtime;
-    if (vm_property_field.qjsPutFieldFastSlot(rt, receiver, atom_id)) |slot| {
+    if (vm_property_field.putFieldFastSlot(rt, receiver, atom_id)) |slot| {
         const old_value = loadValueAsIntPair(slot);
         const value = loadValueAsIntPair(&(sp - 1)[0]);
         storeValueAsIntPair(slot, value); // consumes the stack's ref on value
@@ -3875,7 +3874,7 @@ export const zjs_f_tombstone_put_field: Handler = op_put_field;
 fn op_put_field_add_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     if (comptime builtin.mode == .Debug) std.debug.assert(pc[0] == op.put_field);
     const receiver_value = (sp - 2)[0];
-    const receiver = class_vm.objectFromValueTrustedExpression(receiver_value) orelse
+    const receiver = object_ops.objectFromValueTrustedExpression(receiver_value) orelse
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const atom_id = readInt(u32, pc + 1);
     const value = (sp - 1)[0];
@@ -3999,7 +3998,7 @@ fn op_get_static_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     if (tryInlineProxyTrap(false, var_buf, vm, vm.property_holder, vm.property_atom)) |outcome| return outcome;
     const retained_atom = vm.ctx.runtime.atoms.dup(vm.property_atom);
     defer vm.ctx.runtime.atoms.free(retained_atom);
-    const value = class_vm.getProxyProperty(
+    const value = object_ops.getProxyProperty(
         vm.ctx,
         vm.output,
         vm.global,
@@ -4030,7 +4029,7 @@ fn op_get_static_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
 inline fn tryInlineProxyTrap(comptime computed_key: bool, var_buf: [*]JSValue, vm: *Vm, proxy: *core.Object, atom_id: core.Atom) ?Outcome {
     const target_value = proxy.proxyTarget() orelse return null;
     const handler_value = proxy.proxyHandler() orelse return null;
-    const trap = property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath(vm.ctx.runtime, handler_value, core.atom.ids.get) orelse return null;
+    const trap = property_direct.ordinaryDataPropertyValueOrUndefinedForFastPath(vm.ctx.runtime, handler_value, core.atom.ids.get) orelse return null;
     const stack = vm.stack;
     const operand_len = stack.len();
     const operand_count: usize = if (computed_key) 2 else 1;
@@ -4039,7 +4038,7 @@ inline fn tryInlineProxyTrap(comptime computed_key: bool, var_buf: [*]JSValue, v
     const receiver = stack.values[region_base];
     const computed_key_value: JSValue = if (computed_key) stack.values[region_base + 1] else undefined;
     if (trap.isUndefined() or trap.isNull()) {
-        if (property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath(vm.ctx.runtime, target_value, atom_id)) |borrowed| {
+        if (property_direct.ordinaryDataPropertyValueOrUndefinedForFastPath(vm.ctx.runtime, target_value, atom_id)) |borrowed| {
             const result = if (borrowed.requiresRefCount()) borrowed.dup() else borrowed;
             receiver.free(vm.ctx.runtime);
             if (computed_key) computed_key_value.free(vm.ctx.runtime);
@@ -4054,7 +4053,7 @@ inline fn tryInlineProxyTrap(comptime computed_key: bool, var_buf: [*]JSValue, v
     const key = if (computed_key)
         computed_key_value
     else
-        class_vm.proxyTrapKeyValue(vm.ctx.runtime, atom_id) catch |err| {
+        object_ops.proxyTrapKeyValue(vm.ctx.runtime, atom_id) catch |err| {
             stack.setLen(region_base);
             receiver.free(vm.ctx.runtime);
             const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
@@ -4084,7 +4083,7 @@ fn op_get_array_el_atom_key_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]J
     if (tryInlineProxyTrap(true, var_buf, vm, vm.property_holder, atom_id)) |outcome| return outcome;
     const retained_atom = vm.ctx.runtime.atoms.dup(atom_id);
     defer vm.ctx.runtime.atoms.free(retained_atom);
-    const value = class_vm.getProxyProperty(
+    const value = object_ops.getProxyProperty(
         vm.ctx,
         vm.output,
         vm.global,
@@ -4307,7 +4306,7 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // own/inherited data property) stays in the interpreter loop and duplicates
     // the borrowed slot before releasing the receiver. zjs previously sent every
     // non-string/non-Array object through the published cold resolver.
-    if (vm_property_field.qjsGetLengthFieldFast(vm.ctx.runtime, value)) |borrowed| {
+    if (vm_property_field.getLengthFieldFast(vm.ctx.runtime, value)) |borrowed| {
         const len_val = if (borrowed.requiresRefCount()) borrowed.dup() else borrowed;
         value.freeDuringActiveBytecode(vm.ctx.runtime);
         (sp - 1)[0] = len_val;
@@ -4321,7 +4320,7 @@ fn op_get_length_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVa
     // A data miss can still be an ordinary accessor or meet a Proxy in the
     // prototype walk. Reuse the same resident action classifier and same-Machine
     // continuations as static get_field; only the opcode width differs.
-    const action = vm_property_field.qjsGetLengthActionForFastPath(vm.ctx.runtime, value) orelse
+    const action = vm_property_field.getLengthActionForFastPath(vm.ctx.runtime, value) orelse
         vm_property_field.atomPropertyValueForFastPath(vm.ctx.runtime, vm.global, value, core.atom.ids.length);
     if (action) |result| {
         const len_val = switch (result) {
@@ -4356,7 +4355,7 @@ fn op_get_length_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVa
 // sp from the published stack — no state was mutated here, so the fall-through is
 // clean). No pc/sp publish, no coldNext round-trip.
 pub fn op_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    const value = literal_vm.newPlainObjectValue(vm.ctx, vm.global) catch
+    const value = vm_literal.newPlainObjectValue(vm.ctx, vm.global) catch
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = value; // owned
     return cont(pc + 1, sp + 1, var_buf, vm);
@@ -4379,7 +4378,7 @@ pub fn op_define_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     const value = (sp - 1)[0];
     const obj = (sp - 2)[0];
     const atom_id = readInt(u32, pc + 1);
-    if (literal_vm.defineFieldFast(vm.ctx.runtime, obj, atom_id, value)) {
+    if (vm_literal.defineFieldFast(vm.ctx.runtime, obj, atom_id, value)) {
         // value consumed into the property slot; obj stays on the stack as the
         // literal's running receiver (qjs leaves sp[-2] in place, only sp--).
         return cont(pc + 5, sp - 1, var_buf, vm);
@@ -4749,7 +4748,7 @@ pub fn op_mod_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
         }
     }
     vm.publish(pc, sp);
-    _ = arith_vm.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
+    _ = vm_arith.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
     return coldNext(var_buf, vm);
 }
 
@@ -4772,7 +4771,7 @@ pub fn op_div_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
         }
     }
     vm.publish(pc, sp);
-    _ = arith_vm.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
+    _ = vm_arith.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
     return coldNext(var_buf, vm);
 }
 
@@ -4845,7 +4844,7 @@ pub fn opLogicCold(comptime opc: u8) Handler {
                 }
             }
             vm.publish(pc, sp);
-            _ = arith_vm.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
+            _ = vm_arith.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
             return coldNext(var_buf, vm);
         }
     }.hnd;
@@ -4875,13 +4874,13 @@ pub fn opCompareCold(comptime opc: u8) Handler {
         fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
             if (vm.local_fast_blocked) {
                 vm.publish(pc, sp);
-                _ = arith_vm.compareVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, opc, vm.output, vm.global) catch |e| return vm.fail(e);
+                _ = vm_arith.compareVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, opc, vm.output, vm.global) catch |e| return vm.fail(e);
                 return coldNext(var_buf, vm);
             }
             const lhs = (sp - 2)[0];
             const rhs = (sp - 1)[0];
             vm.syncPc(pc, 1); // qjs sf->cur_pc — backtrace fidelity through ToPrimitive valueOf (compare ops are 1 byte)
-            const result = arith_vm.compareAt(opc, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
+            const result = vm_arith.compareAt(opc, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
                 // Error only: compareAt freed both operands, so publish the doubly-popped sp
                 // (frame.pc → next op) for a consistent catch stack.
                 vm.publish(pc, sp - 2);
@@ -4977,7 +4976,7 @@ noinline fn dispatchInternalNativeMethod(
         return recoverOwnedInternalCallRegion(vm, region_base, err);
     };
     if (record.exec_direct) |direct_ptr| {
-        const native_result = call_vm.callResolvedExecDirect(
+        const native_result = vm_call.callResolvedExecDirect(
             vm.ctx,
             vm.output,
             vm.global,
@@ -5013,7 +5012,7 @@ noinline fn dispatchInternalNativeMethodSlow(
     args: []const JSValue,
 ) InternalMethodDispatch {
     _ = argc;
-    const native_result = call_vm.callResolvedNativeMethod(
+    const native_result = vm_call.callResolvedNativeMethod(
         vm.ctx,
         vm.output,
         vm.global,
@@ -5073,7 +5072,7 @@ fn internalMethodRemainderHandler(
             const receiver = region_start[0];
             const method = region_start[1];
 
-            if (class_vm.objectFromValue(method)) |method_object| {
+            if (object_ops.objectFromValue(method)) |method_object| {
                 if (method_object.class_id == core.class.ids.bytecode_function) {
                     if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_object)) |resolved| {
                         stack.setTopPtr(region_start);
@@ -5188,10 +5187,10 @@ inline fn tryFastDefaultInstanceof(lhs: JSValue, ctor: *core.Object, vm: *Vm) ?b
     };
     if (slow) return null;
 
-    const method_object = class_vm.objectFromValue(loadValueAsIntPair(method_slot)) orelse return null;
+    const method_object = object_ops.objectFromValue(loadValueAsIntPair(method_slot)) orelse return null;
     if (method_object.class_id != core.class.ids.c_function) return null;
     const record = method_object.nativeRecordAssumeCFunction() orelse
-        call_vm.resolvedNativeMethodRecordAssumeCFunction(vm.ctx, method_object) orelse return null;
+        vm_call.resolvedNativeMethodRecordAssumeCFunction(vm.ctx, method_object) orelse return null;
     if (!function_ops.recordIsDefaultHasInstance(record)) return null;
 
     // qjs:8068 `JS_IsFunction` then 8078 `JS_GetProperty(prototype)`.
@@ -5199,9 +5198,9 @@ inline fn tryFastDefaultInstanceof(lhs: JSValue, ctor: *core.Object, vm: *Vm) ?b
     var proto_slow = false;
     const proto_slot = ctor.findOwnDataSlotFast(core.atom.ids.prototype, &proto_slow) orelse return null;
     if (proto_slow) return null;
-    const proto = class_vm.objectFromValue(loadValueAsIntPair(proto_slot)) orelse return null;
+    const proto = object_ops.objectFromValue(loadValueAsIntPair(proto_slot)) orelse return null;
 
-    const start = class_vm.objectFromValue(lhs) orelse return false;
+    const start = object_ops.objectFromValue(lhs) orelse return false;
     if (start.isProxy()) return null;
     var walk = start.getPrototype();
     while (walk) |parent| {
@@ -5226,7 +5225,7 @@ fn op_instanceof_published(
 ) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
     vm.publish(pc, sp);
     const rhs = loadValueAsIntPair(&(sp - 1)[0]);
-    const rhs_object = class_vm.objectFromValue(rhs) orelse {
+    const rhs_object = object_ops.objectFromValue(rhs) orelse {
         switch (completeInstanceofSlow(vm, JSValue.undefinedValue())) {
             .completed => return cont(pc + 1, vm.stack.topPtr(), var_buf, vm),
             .caught => return coldNext(var_buf, vm),
@@ -5234,7 +5233,7 @@ fn op_instanceof_published(
         }
     };
     const has_instance_atom = comptime core.atom.predefinedId("Symbol.hasInstance", .symbol).?;
-    const fast_method = class_vm.probePublicNamedDataPropertyFromObject(rhs_object, has_instance_atom);
+    const fast_method = object_ops.probePublicNamedDataPropertyFromObject(rhs_object, has_instance_atom);
     const has_instance = if (fast_method.slot) |slot|
         loadValueAsIntPair(slot).dup()
     else if (!fast_method.needs_slow)
@@ -5251,8 +5250,8 @@ fn op_instanceof_published(
             .threw => return .threw,
         }
     }
-    if (class_vm.objectFromValue(has_instance)) |method_object| {
-        if (call_vm.resolvedNativeMethodRecord(vm.ctx, method_object)) |record| {
+    if (object_ops.objectFromValue(has_instance)) |method_object| {
+        if (vm_call.resolvedNativeMethodRecord(vm.ctx, method_object)) |record| {
             if (function_ops.isDefaultHasInstanceRecord(vm.ctx.runtime, record)) {
                 switch (completeOrdinaryInstanceof(vm, has_instance)) {
                     .completed => return cont(pc + 1, vm.stack.topPtr(), var_buf, vm),
@@ -5271,8 +5270,8 @@ fn op_instanceof_published(
     region_start[1] = has_instance;
     region_start[2] = lhs;
     vm.stack.setTopPtr(region_start + 3);
-    if (class_vm.objectFromValue(has_instance)) |method_object| {
-        if (call_vm.resolvedNativeMethodRecord(vm.ctx, method_object)) |record| {
+    if (object_ops.objectFromValue(has_instance)) |method_object| {
+        if (vm_call.resolvedNativeMethodRecord(vm.ctx, method_object)) |record| {
             switch (dispatchInternalNativeMethod(.to_boolean, 1, vm, method_object, record, vm.stack.len() - 3)) {
                 .completed => return cont(pc + 1, vm.stack.topPtr(), var_buf, vm),
                 .caught => return coldNext(var_buf, vm),
@@ -5292,7 +5291,7 @@ pub fn op_instanceof(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // so it does not need `sf->cur_pc` publish. Hop to the published remainder
     // only when the path can throw or must Call a non-default method.
     const rhs = loadValueAsIntPair(&(sp - 1)[0]);
-    const rhs_object = class_vm.objectFromValue(rhs) orelse
+    const rhs_object = object_ops.objectFromValue(rhs) orelse
         return @call(.always_tail, op_instanceof_published, .{ pc, sp, var_buf, vm });
     if (tryFastDefaultInstanceof((sp - 2)[0], rhs_object, vm)) |hit| {
         const lhs = (sp - 2)[0];
@@ -5455,7 +5454,7 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) a
 }
 
 /// 16-bit twin of `jump8Target`. Displacement is relative to the operand
-/// byte (`relativePc`), same as `control_vm.jump16` / qjs OP_goto16.
+/// byte (`relativePc`), same as `vm_control.jump16` / qjs OP_goto16.
 inline fn jump16Target(pc: [*]const u8, vm: *Vm) [*]const u8 {
     const operand_pc = @intFromPtr(pc + 1) - @intFromPtr(vm.code_base);
     const diff = readInt(i16, pc + 1);
@@ -5634,13 +5633,13 @@ pub fn op_eq_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 pub fn op_eq_if_false8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     if (vm.local_fast_blocked) {
         vm.publish(pc, sp);
-        _ = arith_vm.compareVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, op.eq, vm.output, vm.global) catch |e| return vm.fail(e);
+        _ = vm_arith.compareVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, op.eq, vm.output, vm.global) catch |e| return vm.fail(e);
         return coldNext(var_buf, vm);
     }
     const lhs = (sp - 2)[0];
     const rhs = (sp - 1)[0];
     vm.syncPc(pc, 1);
-    const result = arith_vm.compareAt(op.eq, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
+    const result = vm_arith.compareAt(op.eq, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
         vm.publish(pc, sp - 2);
         const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
         if (!caught) return vm.fail(err);
@@ -5655,13 +5654,13 @@ pub fn op_eq_if_false8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
 pub fn op_cmp_if_false8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     if (vm.local_fast_blocked) {
         vm.publish(pc, sp);
-        _ = arith_vm.compareVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, op.lt, vm.output, vm.global) catch |e| return vm.fail(e);
+        _ = vm_arith.compareVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, op.lt, vm.output, vm.global) catch |e| return vm.fail(e);
         return coldNext(var_buf, vm);
     }
     const lhs = (sp - 2)[0];
     const rhs = (sp - 1)[0];
     vm.syncPc(pc, 1);
-    const result = arith_vm.compareAt(op.lt, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
+    const result = vm_arith.compareAt(op.lt, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
         vm.publish(pc, sp - 2);
         const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
         if (!caught) return vm.fail(err);
@@ -5676,7 +5675,7 @@ pub fn op_cmp_if_false8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
 // (20648-20650), while every non-null value reaches free_and_set_false, whose
 // inline JS_FreeValue refcount-tag guard releases only owning values before the
 // false overwrite (20651-20654). zjs previously kept this opcode in the all-cold
-// table, so every execution paid coldStd publish -> noinline value_vm.isNull ->
+// table, so every execution paid coldStd publish -> noinline vm_value.isNull ->
 // coldNext even though the operation is stack-neutral and cannot throw.
 //
 // Keep the same three legs resident. Non-owning false values need only the bool
@@ -5854,7 +5853,7 @@ inline fn storeThisInLoc0(var_buf: [*]JSValue, vm: *Vm) bool {
 
 pub fn op_push_this_put_loc0_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    _ = value_vm.pushThisVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global) catch |e| return vm.fail(e);
+    _ = vm_value.pushThisVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global) catch |e| return vm.fail(e);
     return coldNext(var_buf, vm);
 }
 
@@ -5898,12 +5897,12 @@ pub fn op_put_loc0_get_loc0_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
 pub fn op_update_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     if (vm.local_fast_blocked) {
         vm.publish(pc, sp);
-        _ = arith_vm.updateLocalVm(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.catch_target, pc[0], vm.output) catch |e| return vm.fail(e);
+        _ = vm_arith.updateLocalVm(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.catch_target, pc[0], vm.output) catch |e| return vm.fail(e);
         return coldNext(var_buf, vm);
     }
     const idx: u16 = pc[1];
     vm.syncPc(pc, 2); // qjs sf->cur_pc — backtrace fidelity through valueOf (see op_add_loc_cold)
-    arith_vm.updateLocalAt(vm.ctx, vm.global, vm.output, &var_buf[idx], pc[0]) catch |err| {
+    vm_arith.updateLocalAt(vm.ctx, vm.global, vm.output, &var_buf[idx], pc[0]) catch |err| {
         vm.publish(pc + 1, sp);
         const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
         if (!caught) return vm.fail(err);
@@ -5961,7 +5960,7 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
         // it the register-resident body below ends in `cont`, skipping the
         // parameter/body boundary and eagerly entering the generator body.
         vm.publish(pc, sp);
-        _ = arith_vm.addLocalVm(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.catch_target, vm.output) catch |e| return vm.fail(e);
+        _ = vm_arith.addLocalVm(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.catch_target, vm.output) catch |e| return vm.fail(e);
         return coldNext(var_buf, vm);
     }
     const idx: u16 = pc[1];
@@ -5976,7 +5975,7 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     // qjs `sf->cur_pc = pc` (set before js_add_loc_slow): keep frame.pc live so a
     // backtrace captured inside an object operand's valueOf/toString reports this op.
     vm.syncPc(pc, 2);
-    arith_vm.addLocalAt(vm.ctx, vm.global, vm.output, &var_buf[idx], rhs) catch |err| {
+    vm_arith.addLocalAt(vm.ctx, vm.global, vm.output, &var_buf[idx], rhs) catch |err| {
         // Error only: also sync the popped sp so the catch unwinder sees consistent
         // state. addLocalAt already freed rhs, so the published length excludes the
         // dead slot — no double free.
@@ -6291,7 +6290,7 @@ const resident_tail_table = [3]Handler{
 
 // ===========================================================================
 // Driver — the Outcome loop. `zjs_vm.zig` only prepares the frame, then
-// `return tailcall_dispatch.run(&vm)`. Reuses the Machine + the existing
+// `return tailcall_dispatch.runDispatchLoop(&vm)`. Reuses the Machine + the existing
 // per-frame reload (reloadInlineTopFrame's arithmetic, inlined).
 // ===========================================================================
 
@@ -6346,7 +6345,7 @@ inline fn reloadAfterPop(
 }
 
 /// Run the tail-call chain to completion for the current top frame.
-pub fn run(vm: *Vm) HostError!JSValue {
+pub fn runDispatchLoop(vm: *Vm) HostError!JSValue {
     vm.resident_tail_tbl = &resident_tail_table;
     vm.property_tail_tbl = &property_tail_table;
     // qjs prologue hoist (quickjs.c:17844): `var_refs = p->u.func.var_refs`.
@@ -6444,7 +6443,7 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 reloadTop(vm, &pc, &sp, &var_buf);
             },
             .suspended => return vm.return_value,
-            .reenter => unreachable, // cold callees complete inside call_vm.call.
+            .reenter => unreachable, // cold callees complete inside vm_call.call.
             .native_returned => return vm.return_value,
         }
     }
@@ -6499,7 +6498,7 @@ pub fn op_using_typeof_is_function(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]
     // resumes at the following opcode (same as using_ops.execVm).
     vm.publish(pc, sp);
     vm.frame.pc += 1;
-    value_vm.typeOfIsFunction(vm.ctx.runtime, vm.stack) catch |e| return vm.fail(e);
+    vm_value.typeOfIsFunction(vm.ctx.runtime, vm.stack) catch |e| return vm.fail(e);
     return coldNext(var_buf, vm);
 }
 
@@ -6511,12 +6510,12 @@ pub fn op_get_field_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
         return @call(.always_tail, propertyTailHandler(vm, .get_field_primitive), .{ pc, sp, var_buf, vm });
     const rt = vm.ctx.runtime;
     var absent = false;
-    if (vm_property_field.qjsGetFieldFastSlotOrAbsent(rt, receiver, atom_id, &absent)) |slot| {
+    if (vm_property_field.getFieldFastSlotOrAbsent(rt, receiver, atom_id, &absent)) |slot| {
         const value = loadValueAsIntPair(slot);
         _ = value.dup();
         storeValueAsIntPair(&(sp - 1)[0], value);
         if (receiver.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
-            vm.property_holder = class_vm.objectFromValue(receiver) orelse unreachable;
+            vm.property_holder = object_ops.objectFromValue(receiver) orelse unreachable;
             return @call(.always_tail, propertyTailHandler(vm, .get_field_release_receiver), .{ pc, sp, var_buf, vm });
         }
         return @call(.always_tail, op_get_field2, .{ pc + 5, sp, var_buf, vm });
@@ -6591,7 +6590,7 @@ pub fn op_sar_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
 
 pub fn op_sar_get_array_el_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    _ = arith_vm.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, op.sar, vm.output, vm.global) catch |e| return vm.fail(e);
+    _ = vm_arith.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, op.sar, vm.output, vm.global) catch |e| return vm.fail(e);
     return coldNext(var_buf, vm);
 }
 
@@ -6739,6 +6738,6 @@ comptime {
     _ = &coldStd;
     _ = &coldNext;
     _ = &evIsEval;
-    _ = &run;
+    _ = &runDispatchLoop;
     _ = dispatch_table;
 }

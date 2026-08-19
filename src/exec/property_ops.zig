@@ -99,11 +99,10 @@ pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
     return rt.internAtom(bytes.items);
 }
 
-pub fn expectObject(value: core.JSValue) !*core.Object {
-    const header = objectHeader(value) orelse return error.TypeError;
-    return @fieldParentPtr("header", header);
-}
+pub const expectObject = core.value_semantics.expectObject;
 
+// mirror of core.value_semantics.objectFromValue's check sequence, keep in
+// sync — header-level form for the header-consuming helpers above.
 fn objectHeader(value: core.JSValue) ?*core.gc.Header {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;

@@ -4,7 +4,7 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const bytecode = @import("../bytecode.zig");
 const construct_mod = @import("construct.zig");
 const core = @import("../core/root.zig");
-const date_vm = @import("date_ops.zig");
+const date_ops = @import("date_ops.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const std = @import("std");
@@ -22,7 +22,7 @@ const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const coercion_ops = @import("coercion_ops.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
@@ -37,21 +37,21 @@ const isCallableValue = call_runtime.isCallableValue;
 const isErrorConstructorName = exception_ops.isErrorConstructorName;
 const objectFromValue = object_ops.objectFromValue;
 const objectRealmGlobal = object_ops.objectRealmGlobal;
-const qjsAggregateErrorConstructWithPrototype = object_ops.qjsAggregateErrorConstructWithPrototype;
-const qjsArrayBufferMaxByteLengthOption = array_ops.qjsArrayBufferMaxByteLengthOption;
-const qjsAsyncDisposableStackConstructWithPrototype = promise_ops.qjsAsyncDisposableStackConstructWithPrototype;
-const qjsCanBeHeldWeakly = builtin_glue.qjsCanBeHeldWeakly;
-const qjsConstructFinalizationRegistryWithPrototype = object_ops.qjsConstructFinalizationRegistryWithPrototype;
-const qjsConstructWeakRefWithPrototype = object_ops.qjsConstructWeakRefWithPrototype;
-const qjsDataViewConstructWithPrototype = object_ops.qjsDataViewConstructWithPrototype;
-const qjsDataViewConstructorArgs = builtin_glue.qjsDataViewConstructorArgs;
-const qjsDisposableStackConstructWithPrototype = object_ops.qjsDisposableStackConstructWithPrototype;
-const qjsErrorConstructWithPrototype = object_ops.qjsErrorConstructWithPrototype;
-const qjsPromiseConstructWithPrototype = promise_ops.qjsPromiseConstructWithPrototype;
-const qjsRegExpConstructCall = regexp_fastpath.qjsRegExpConstructCall;
-const qjsStringConstructWithPrototype = string_ops.qjsStringConstructWithPrototype;
-const qjsSuppressedErrorConstructWithPrototype = object_ops.qjsSuppressedErrorConstructWithPrototype;
-const qjsTypedArrayConstructToIndex = array_ops.qjsTypedArrayConstructToIndex;
+const aggregateErrorConstructWithPrototype = object_ops.aggregateErrorConstructWithPrototype;
+const arrayBufferMaxByteLengthOption = array_ops.arrayBufferMaxByteLengthOption;
+const asyncDisposableStackConstructWithPrototype = promise_ops.asyncDisposableStackConstructWithPrototype;
+const canBeHeldWeakly = core.symbol.canBeHeldWeakly;
+const constructFinalizationRegistryWithPrototype = object_ops.constructFinalizationRegistryWithPrototype;
+const constructWeakRefWithPrototype = object_ops.constructWeakRefWithPrototype;
+const dataViewConstructWithPrototype = object_ops.dataViewConstructWithPrototype;
+const dataViewConstructorArgs = builtin_glue.dataViewConstructorArgs;
+const disposableStackConstructWithPrototype = object_ops.disposableStackConstructWithPrototype;
+const errorConstructWithPrototype = object_ops.errorConstructWithPrototype;
+const promiseConstructWithPrototype = promise_ops.promiseConstructWithPrototype;
+const regExpConstructCall = regexp_fastpath.regExpConstructCall;
+const stringConstructWithPrototype = string_ops.stringConstructWithPrototype;
+const suppressedErrorConstructWithPrototype = object_ops.suppressedErrorConstructWithPrototype;
+const typedArrayConstructToIndex = array_ops.typedArrayConstructToIndex;
 const reflectConstructPrototypeVm = object_ops.reflectConstructPrototypeVm;
 const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
 const valueTruthy = coercion_ops.valueTruthy;
@@ -84,10 +84,10 @@ pub fn constructBuiltinSuperConstructor(
 
     if (std.mem.eql(u8, name, "ArrayBuffer") or std.mem.eql(u8, name, "SharedArrayBuffer")) {
         const byte_length = if (args.len >= 1)
-            try qjsTypedArrayConstructToIndex(ctx, output, global, args[0])
+            try typedArrayConstructToIndex(ctx, output, global, args[0])
         else
             @as(usize, 0);
-        const max_byte_length = try qjsArrayBufferMaxByteLengthOption(ctx, output, global, args, byte_length);
+        const max_byte_length = try arrayBufferMaxByteLengthOption(ctx, output, global, args, byte_length);
         var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
         defer prototype.deinit(ctx.runtime);
         if (std.mem.eql(u8, name, "SharedArrayBuffer")) {
@@ -97,14 +97,14 @@ pub fn constructBuiltinSuperConstructor(
     }
 
     if (std.mem.eql(u8, name, "DataView")) {
-        const coerced = try qjsDataViewConstructorArgs(ctx, output, global, args);
+        const coerced = try dataViewConstructorArgs(ctx, output, global, args);
         var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
         defer prototype.deinit(ctx.runtime);
-        return try qjsDataViewConstructWithPrototype(ctx.runtime, args[0], coerced, prototype.object());
+        return try dataViewConstructWithPrototype(ctx.runtime, args[0], coerced, prototype.object());
     }
 
     if (std.mem.eql(u8, name, "RegExp")) {
-        return try qjsRegExpConstructCall(ctx, output, global, object_ops.objectFromValue(constructor), new_target, args, caller_function, caller_frame);
+        return try regExpConstructCall(ctx, output, global, object_ops.objectFromValue(constructor), new_target, args, caller_function, caller_frame);
     }
     if (std.mem.eql(u8, name, "Promise")) {
         const function_object = objectFromValue(constructor) orelse return error.InvalidBuiltinRegistry;
@@ -129,7 +129,7 @@ pub fn constructBuiltinSuperConstructor(
             else => return err,
         };
     }
-    if (std.mem.eql(u8, name, "String")) return try qjsStringConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "String")) return try stringConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "Number")) {
         if (args.len >= 1 and args[0].isSymbol()) return error.TypeError;
         // qjs js_number_constructor (quickjs.c:44822) uses JS_ToNumeric
@@ -149,28 +149,28 @@ pub fn constructBuiltinSuperConstructor(
     if (std.mem.eql(u8, name, "Boolean")) {
         return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.boolean, prototype.object(), core.JSValue.boolean(args.len >= 1 and valueTruthy(args[0])));
     }
-    if (std.mem.eql(u8, name, "Date")) return try date_vm.qjsDateConstructWithPrototype(ctx, output, global, prototype.object(), args);
+    if (std.mem.eql(u8, name, "Date")) return try date_ops.dateConstructWithPrototype(ctx, output, global, prototype.object(), args);
     if (std.mem.eql(u8, name, "AggregateError")) {
         const constructor_global = if (objectFromValue(constructor)) |constructor_object|
             objectRealmGlobal(constructor_object) orelse global
         else
             global;
-        return try qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype.object(), args, caller_function, caller_frame);
+        return try aggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype.object(), args, caller_function, caller_frame);
     }
-    if (std.mem.eql(u8, name, "SuppressedError")) return try qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
-    if (isErrorConstructorName(name)) return try qjsErrorConstructWithPrototype(ctx, output, global, name, prototype.object(), args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "SuppressedError")) return try suppressedErrorConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
+    if (isErrorConstructorName(name)) return try errorConstructWithPrototype(ctx, output, global, name, prototype.object(), args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "WeakRef")) {
         const target = if (args.len >= 1) args[0] else return error.TypeError;
-        if (!qjsCanBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
-        return try qjsConstructWeakRefWithPrototype(ctx.runtime, target, prototype.object());
+        if (!canBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
+        return try constructWeakRefWithPrototype(ctx.runtime, target, prototype.object());
     }
     if (std.mem.eql(u8, name, "FinalizationRegistry")) {
         const cleanup_callback = if (args.len >= 1) args[0] else return error.TypeError;
         if (!isCallableValue(cleanup_callback)) return error.TypeError;
-        return try qjsConstructFinalizationRegistryWithPrototype(ctx, cleanup_callback, prototype.object());
+        return try constructFinalizationRegistryWithPrototype(ctx, cleanup_callback, prototype.object());
     }
-    if (std.mem.eql(u8, name, "DisposableStack")) return try qjsDisposableStackConstructWithPrototype(ctx, global, prototype.object());
-    if (std.mem.eql(u8, name, "AsyncDisposableStack")) return try qjsAsyncDisposableStackConstructWithPrototype(ctx, global, prototype.object());
+    if (std.mem.eql(u8, name, "DisposableStack")) return try disposableStackConstructWithPrototype(ctx, global, prototype.object());
+    if (std.mem.eql(u8, name, "AsyncDisposableStack")) return try asyncDisposableStackConstructWithPrototype(ctx, global, prototype.object());
     if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| return try constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype.object());
     if (std.mem.eql(u8, name, "DataView")) return try core.typed_array.dataViewConstruct(ctx.runtime, args, prototype.object());
     if (construct_mod.typedArrayElement(name)) |element| {
@@ -224,5 +224,5 @@ fn constructPromiseBuiltinSuperInScope(
 
     var prototype = try reflectConstructPrototypeVm(ctx, output, global, "Promise", new_target, caller_function, caller_frame);
     defer prototype.deinit(ctx.runtime);
-    return qjsPromiseConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
+    return promiseConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
 }

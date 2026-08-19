@@ -9,7 +9,7 @@ const stack_mod = @import("stack.zig");
 
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const value_slot = @import("value_slot.zig");
 
 // Helpers that remain in call_runtime.zig (generic runtime utilities outside the
@@ -23,7 +23,7 @@ const handleCatchableRuntimeError = call_runtime.handleCatchableRuntimeError;
 const pushAdapterValue = array_ops.pushAdapterValue;
 const setGlobalLexicalValue = call_runtime.setGlobalLexicalValue;
 const setGlobalLexicalValueForGlobal = call_runtime.setGlobalLexicalValueForGlobal;
-const throwTdzReference = exception_ops.throwTdzReference;
+const throwTdzReferenceError = exception_ops.throwTdzReferenceError;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 
 const op = bytecode.opcode.op;
@@ -172,7 +172,7 @@ pub fn execGetVarRefMaybeTdz(
             if (globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
                 if (lexical_value.isUninitialized()) {
                     lexical_value.free(ctx.runtime);
-                    const err = throwTdzReference(ctx);
+                    const err = throwTdzReferenceError(ctx);
                     if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                         return true;
                     }
@@ -210,7 +210,7 @@ pub fn execGetVarRefMaybeTdz(
         const err = if (idx < function.varRefNamesLen() and function.varRefName(idx) == core.atom.ids.this_) blk: {
             _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| break :blk err;
             unreachable;
-        } else throwTdzReference(ctx);
+        } else throwTdzReferenceError(ctx);
         if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
             return true;
         }
@@ -250,7 +250,7 @@ pub fn execPutVarRef(
         const current = cell.varRefValue();
         if (current.isUninitialized()) {
             value.free(ctx.runtime);
-            return throwTdzReference(ctx);
+            return throwTdzReferenceError(ctx);
         }
     }
     const capture_is_function_name = idx < function.closureVar().len and

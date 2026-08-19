@@ -13,6 +13,7 @@ const core = @import("../core/root.zig");
 const array = @import("array_builtin_ops.zig");
 const atomics = @import("atomics_ops.zig");
 const buffer = @import("buffer_ops.zig");
+const builtin_glue = @import("builtin_glue.zig");
 const collection = @import("collection_ops.zig");
 const date = @import("date_ops.zig");
 const error_object = @import("error_ops.zig");
@@ -29,7 +30,6 @@ const reflect_proxy = @import("reflect_proxy_ops.zig");
 const regexp = @import("regexp_ops.zig");
 const string = @import("string_builtin_ops.zig");
 const uri = @import("uri_ops.zig");
-const weak_ref = @import("builtin_glue.zig");
 
 const InternalEntry = core.host_function.InternalEntry;
 const InternalRecord = core.host_function.InternalRecord;
@@ -82,7 +82,7 @@ fn denseRecords(comptime entries: []const InternalEntry) []const InternalRecord 
 
 /// The `.primitive` domain is shared across the five wrapper primitives. Ids are
 /// the `class_tag * 10 + method` encoding from
-/// `exec/object_ops.qjsPrimitivePrototypeMethod` for methods 1-5; methods 6+
+/// `exec/object_ops.primitivePrototypeMethod` for methods 1-5; methods 6+
 /// are the wrapper constructors' static function lists (qjs `js_bigint_funcs`
 /// quickjs.c:56350, `js_symbol_funcs` quickjs.c:51672), which share the domain
 /// but not that handler.
@@ -113,7 +113,7 @@ pub const table: [domain_count][]const InternalRecord = build: {
     domains[@intFromEnum(NativeBuiltinDomain.object)] = denseRecords(&object.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.array)] = denseRecords(&array.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.regexp)] = denseRecords(&regexp.internal_entries);
-    domains[@intFromEnum(NativeBuiltinDomain.weak_ref)] = denseRecords(&weak_ref.internal_entries);
+    domains[@intFromEnum(NativeBuiltinDomain.weak_ref)] = denseRecords(&builtin_glue.internal_entries);
     break :build domains;
 };
 

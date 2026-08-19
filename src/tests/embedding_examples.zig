@@ -307,7 +307,7 @@ test "embedding public NativeBinding failed realm install leaves binding absent"
     };
     const ObjectType = Binding.JSObject(Payload, .{
         .name = "EmbeddingInstallFailurePayload",
-        .storage = Binding.Storage.inlineValue,
+        .storage = .inline_value,
         .properties = Binding.Properties.static(.{
             Binding.method("read", Payload.read),
         }),

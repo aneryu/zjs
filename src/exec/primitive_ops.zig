@@ -16,12 +16,12 @@ pub fn toString(value: bool) []const u8 {
 
 /// `.primitive` native-builtin ids encode `class_tag * 10 + method` (class
 /// tags: 1 number, 2 boolean, 3 bigint, 4 symbol, 5 string; see
-/// `exec/object_ops.qjsPrimitivePrototypeMethod`). Method 1 is toString, 2
+/// `exec/object_ops.primitivePrototypeMethod`). Method 1 is toString, 2
 /// valueOf, 3 the constructor-called-as-function path; the Symbol-only getter
 /// (4 description) and method (5 [Symbol.toPrimitive]) also live here because
 /// they share the same QuickJS primitive wrapper dispatch domain. Methods 6+
 /// are the wrapper *constructor* statics (qjs's separate `js_<class>_funcs`
-/// lists), which do not route through `qjsPrimitivePrototypeMethod`.
+/// lists), which do not route through `primitivePrototypeMethod`.
 const Tag = enum(u32) {
     number = 1,
     boolean = 2,
@@ -112,7 +112,7 @@ fn primitiveEntry(comptime name: []const u8, comptime length: u8, comptime id: u
 }
 
 /// Shared record handler for the `.primitive` domain. It consumes the atomic
-/// final-call realm view and delegates to `qjsPrimitivePrototypeMethod`, which stays in
+/// final-call realm view and delegates to `primitivePrototypeMethod`, which stays in
 /// exec because the VM's prototype-method fast path also calls it.
 pub fn primitiveCall(
     native_ctx: *core.JSContext,
@@ -124,7 +124,7 @@ pub fn primitiveCall(
     const realm = try builtin_dispatch.callableRealm(host_call);
     const ctx = realm.realm;
     const function_object = host_call.func_obj orelse return error.TypeError;
-    return object_ops.qjsPrimitivePrototypeMethod(
+    return object_ops.primitivePrototypeMethod(
         ctx,
         host_call.output,
         realm.global,
@@ -164,7 +164,7 @@ fn primitiveStaticCall(
     const ctx = realm.realm;
     return switch (host_call.magic) {
         // qjs js_bigint_asUintN (quickjs.c:56322) with magic 1 == signed.
-        bigint_asintn_id => builtin_glue.qjsBigIntAsN(
+        bigint_asintn_id => builtin_glue.bigIntAsN(
             ctx,
             host_call.output,
             realm.global,
@@ -174,7 +174,7 @@ fn primitiveStaticCall(
             builtin_dispatch.callerFrame(host_call),
         ),
         // qjs js_bigint_asUintN (quickjs.c:56322) with magic 0 == unsigned.
-        bigint_asuintn_id => builtin_glue.qjsBigIntAsN(
+        bigint_asuintn_id => builtin_glue.bigIntAsN(
             ctx,
             host_call.output,
             realm.global,
@@ -184,7 +184,7 @@ fn primitiveStaticCall(
             builtin_dispatch.callerFrame(host_call),
         ),
         // qjs js_symbol_for (quickjs.c:51648).
-        symbol_for_id => builtin_glue.qjsSymbolFor(
+        symbol_for_id => builtin_glue.symbolFor(
             ctx,
             host_call.output,
             realm.global,
@@ -193,7 +193,7 @@ fn primitiveStaticCall(
             builtin_dispatch.callerFrame(host_call),
         ),
         // qjs js_symbol_keyFor (quickjs.c:51659).
-        symbol_key_for_id => builtin_glue.qjsSymbolKeyFor(ctx.runtime, host_call.args),
+        symbol_key_for_id => builtin_glue.symbolKeyFor(ctx.runtime, host_call.args),
         else => error.TypeError,
     };
 }

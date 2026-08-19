@@ -6,7 +6,7 @@ const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
-const property_ic = @import("property_ic.zig");
+const property_direct = @import("property_direct.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
@@ -24,56 +24,56 @@ const readInt = call_runtime.readInt;
 const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 // Helpers that remain in vm_property.zig (shared with the leftover handlers).
-const property_vm = @import("vm_property.zig");
-const BindingGet = property_vm.BindingGet;
-const BindingPut = property_vm.BindingPut;
-const DecodedFalseBranch = property_vm.DecodedFalseBranch;
-const GlobalBindingGet = property_vm.GlobalBindingGet;
-const GlobalBindingPut = property_vm.GlobalBindingPut;
-const LoopLimitGet = property_vm.LoopLimitGet;
-const Step = property_vm.Step;
-const atomAsciiText = property_vm.atomAsciiText;
-const atomStringValueForFastPath = property_vm.atomStringValueForFastPath;
-const bindingReadableBorrowed = property_vm.bindingReadableBorrowed;
-const bindingStoreWritableForFastPath = property_vm.bindingStoreWritableForFastPath;
-const decodeBindingGet = property_vm.decodeBindingGet;
-const decodeBindingPut = property_vm.decodeBindingPut;
-const decodeFalseBranch = property_vm.decodeFalseBranch;
-const decodeGlobalDataGet = property_vm.decodeGlobalDataGet;
-const decodeGlobalPut = property_vm.decodeGlobalPut;
-const decodeGotoTarget = property_vm.decodeGotoTarget;
-const decodeLocalGet = property_vm.decodeLocalGet;
-const decodeLocalPut = property_vm.decodeLocalPut;
-const decodeLoopLimitGet = property_vm.decodeLoopLimitGet;
-const decodeOptionalLocalCompletionTail = property_vm.decodeOptionalLocalCompletionTail;
-const decodeStringSliceConstLocalStore = property_vm.decodeStringSliceConstLocalStore;
-const fastArrayPrototypeMethodIsDefault = property_vm.fastArrayPrototypeMethodIsDefault;
-pub const fastDenseArrayElementValue = property_vm.fastDenseArrayElementValue;
-pub const fastMappedArgumentsElementValue = property_vm.fastMappedArgumentsElementValue;
-pub const fastArrayOwnIntElementValue = property_vm.fastArrayOwnIntElementValue;
-pub const fastArrayOwnIntElementSet = property_vm.fastArrayOwnIntElementSet;
-const fastRegExpPrototypeMethodIsDefault = property_vm.fastRegExpPrototypeMethodIsDefault;
-const finishUndefinedCallResult = property_vm.finishUndefinedCallResult;
-const frameHasVarRefBinding = property_vm.frameHasVarRefBinding;
-const immediateInt32Operand = property_vm.immediateInt32Operand;
-const isHostOutputFunctionValue = property_vm.isHostOutputFunctionValue;
-const loopLimitReadableInt32 = property_vm.loopLimitReadableInt32;
-const mathMinMaxInductionRangeSum = property_vm.mathMinMaxInductionRangeSum;
-const mathMinMaxPrimitive2 = property_vm.mathMinMaxPrimitive2;
-const sameBinding = property_vm.sameBinding;
-const slotValueBorrowed = property_vm.slotValueBorrowed;
-const storeBindingOwnedValue = property_vm.storeBindingOwnedValue;
-const storeLocalCompletionBorrowedValue = property_vm.storeLocalCompletionBorrowedValue;
-const storeStringSliceConstLocal = property_vm.storeStringSliceConstLocal;
-const stringFromCharCodeInt32Arg = property_vm.stringFromCharCodeInt32Arg;
-const varRefReadableBorrowed = property_vm.varRefReadableBorrowed;
+const vm_property = @import("vm_property.zig");
+const BindingGet = vm_property.BindingGet;
+const BindingPut = vm_property.BindingPut;
+const DecodedFalseBranch = vm_property.DecodedFalseBranch;
+const GlobalBindingGet = vm_property.GlobalBindingGet;
+const GlobalBindingPut = vm_property.GlobalBindingPut;
+const LoopLimitGet = vm_property.LoopLimitGet;
+const Step = vm_property.Step;
+const atomAsciiText = vm_property.atomAsciiText;
+const atomStringValueForFastPath = vm_property.atomStringValueForFastPath;
+const bindingReadableBorrowed = vm_property.bindingReadableBorrowed;
+const bindingStoreWritableForFastPath = vm_property.bindingStoreWritableForFastPath;
+const decodeBindingGet = vm_property.decodeBindingGet;
+const decodeBindingPut = vm_property.decodeBindingPut;
+const decodeFalseBranch = vm_property.decodeFalseBranch;
+const decodeGlobalDataGet = vm_property.decodeGlobalDataGet;
+const decodeGlobalPut = vm_property.decodeGlobalPut;
+const decodeGotoTarget = vm_property.decodeGotoTarget;
+const decodeLocalGet = vm_property.decodeLocalGet;
+const decodeLocalPut = vm_property.decodeLocalPut;
+const decodeLoopLimitGet = vm_property.decodeLoopLimitGet;
+const decodeOptionalLocalCompletionTail = vm_property.decodeOptionalLocalCompletionTail;
+const decodeStringSliceConstLocalStore = vm_property.decodeStringSliceConstLocalStore;
+const fastArrayPrototypeMethodIsDefault = vm_property.fastArrayPrototypeMethodIsDefault;
+pub const fastDenseArrayElementValue = vm_property.fastDenseArrayElementValue;
+pub const fastMappedArgumentsElementValue = vm_property.fastMappedArgumentsElementValue;
+pub const fastArrayOwnIntElementValue = vm_property.fastArrayOwnIntElementValue;
+pub const fastArrayOwnIntElementSet = vm_property.fastArrayOwnIntElementSet;
+const fastRegExpPrototypeMethodIsDefault = vm_property.fastRegExpPrototypeMethodIsDefault;
+const finishUndefinedCallResult = vm_property.finishUndefinedCallResult;
+const frameHasVarRefBinding = vm_property.frameHasVarRefBinding;
+const immediateInt32Operand = vm_property.immediateInt32Operand;
+const isHostOutputFunctionValue = vm_property.isHostOutputFunctionValue;
+const loopLimitReadableInt32 = vm_property.loopLimitReadableInt32;
+const mathMinMaxInductionRangeSum = vm_property.mathMinMaxInductionRangeSum;
+const mathMinMaxPrimitive2 = vm_property.mathMinMaxPrimitive2;
+const sameBinding = vm_property.sameBinding;
+const slotValueBorrowed = vm_property.slotValueBorrowed;
+const storeBindingOwnedValue = vm_property.storeBindingOwnedValue;
+const storeLocalCompletionBorrowedValue = vm_property.storeLocalCompletionBorrowedValue;
+const storeStringSliceConstLocal = vm_property.storeStringSliceConstLocal;
+const stringFromCharCodeInt32Arg = vm_property.stringFromCharCodeInt32Arg;
+const varRefReadableBorrowed = vm_property.varRefReadableBorrowed;
 
-const functionOwnDataPropertyValueForFastPath = property_ic.functionOwnDataPropertyValueForFastPath;
-const functionOwnNativeBuiltinRefForFastPath = property_ic.functionOwnNativeBuiltinRefForFastPath;
-const dataPropertyValueForFastPath = property_ic.dataPropertyValueForFastPath;
-const globalOwnDataPropertyValue = property_ic.globalOwnDataPropertyValue;
-const ordinaryDataPropertyValueOrUndefinedForFastPath = property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath;
-const ownDataPropertyValueMaterializedForFastPath = property_ic.ownDataPropertyValueMaterializedForFastPath;
+const functionOwnDataPropertyValueForFastPath = property_direct.functionOwnDataPropertyValueForFastPath;
+const functionOwnNativeBuiltinRefForFastPath = property_direct.functionOwnNativeBuiltinRefForFastPath;
+const dataPropertyValueForFastPath = property_direct.dataPropertyValueForFastPath;
+const globalOwnDataPropertyValue = property_direct.globalOwnDataPropertyValue;
+const ordinaryDataPropertyValueOrUndefinedForFastPath = property_direct.ordinaryDataPropertyValueOrUndefinedForFastPath;
+const ownDataPropertyValueMaterializedForFastPath = property_direct.ownDataPropertyValueMaterializedForFastPath;
 const op = bytecode.opcode.op;
 const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
 const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
@@ -249,9 +249,9 @@ pub noinline fn field(
                 replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
             }
-            // The `qjsGetFieldFast` shape walk that used to sit here is gone: it
+            // The `getFieldFast` shape walk that used to sit here is gone: it
             // is the SAME walk the resident `op_get_field` already ran
-            // (`qjsGetFieldFastSlotOrAbsent`, tailcall_dispatch.zig) — this
+            // (`getFieldFastSlotOrAbsent`, tailcall_dispatch.zig) — this
             // shell is only ever reached THROUGH that handler's miss (see the
             // `cold_table` note: the all-cold table is the fast handlers' miss
             // target, never a primary dispatch table). The resident probe runs
@@ -336,7 +336,7 @@ pub noinline fn field(
             // (setObjectDataPropertyForPutFieldFastPath's guaranteed-miss
             // re-probe — the `pf_bail_missing == 2 * pf_cold` census
             // signature — then setValueProperty's own pair). The resident
-            // `op_put_field` already ran `qjsPutFieldFastSlot` and tailed
+            // `op_put_field` already ran `putFieldFastSlot` and tailed
             // here on its miss; field operand atoms are proven non-private
             // (debugAssertNonPrivateFieldOperandAtom), so no private probe.
             if (object_ops.objectFromValueTrustedExpression(obj)) |receiver| {
@@ -398,7 +398,7 @@ inline fn debugAssertNonPrivateFieldOperandAtom(rt: *const core.JSRuntime, atom_
     }
 }
 
-inline fn qjsGetFieldFastSlotWithExoticOrder(
+inline fn getFieldFastSlotWithExoticOrder(
     rt: *core.JSRuntime,
     receiver: core.JSValue,
     atom_id: core.Atom,
@@ -444,7 +444,7 @@ inline fn qjsGetFieldFastSlotWithExoticOrder(
     // (quickjs.c:8355-8363). `undefined` is still synthesized only when EVERY
     // link walked was one of the two classes with no exotic miss behaviour —
     // plain `object` and the global object — matching the per-cursor admission
-    // set of the out-of-line `property_ic.ordinaryDataPropertyLookup`. This
+    // set of the out-of-line `property_direct.ordinaryDataPropertyLookup`. This
     // leg is a fusion of that walk into the handler, not a new semantic.
     //
     // Structured as a separate loop rather than a running "still ordinary" latch
@@ -540,13 +540,13 @@ inline fn namedAtomUsesOrdinaryWalkOnIndexExotic(class_id: core.class.ClassId, a
 /// so the resident get_field handlers can re-load it as two 64-bit integer
 /// words (see findOwnDataSlotFast). The pointer is only valid until the next
 /// potentially-shape-mutating operation; both callers consume it immediately.
-pub inline fn qjsGetFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*const core.JSValue {
+pub inline fn getFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*const core.JSValue {
     var absent = false;
     // Named bytecode atom: never a tagged-int / mapped-args binding (F2).
-    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, true, true, false, &absent);
+    return getFieldFastSlotWithExoticOrder(rt, receiver, atom_id, true, true, false, &absent);
 }
 
-/// Tri-state twin of `qjsGetFieldFastSlot` for op_get_field / op_get_field2.
+/// Tri-state twin of `getFieldFastSlot` for op_get_field / op_get_field2.
 /// A null return now carries a discriminator: `absent.*` is set only when the
 /// walk ran off the end of a chain whose every link was absence-authoritative
 /// (see the terminal comment above), i.e. the property is genuinely missing and
@@ -554,20 +554,20 @@ pub inline fn qjsGetFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, a
 /// JS_UNDEFINED; break; }` (quickjs.c:19141-19143). `absent.*` false keeps the
 /// previous meaning: defer to the resolver. The caller must initialize it to
 /// false; the walk only ever writes it on the chain-exhausted leg.
-pub inline fn qjsGetFieldFastSlotOrAbsent(
+pub inline fn getFieldFastSlotOrAbsent(
     rt: *core.JSRuntime,
     receiver: core.JSValue,
     atom_id: core.Atom,
     absent: *bool,
 ) ?*const core.JSValue {
     // Named bytecode atom: skip isTaggedInt / mapped-args (F2). Computed-key
-    // `qjsGetFieldFast` keeps the tagged-int probe.
-    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, true, true, true, absent);
+    // `getFieldFast` keeps the tagged-int probe.
+    return getFieldFastSlotWithExoticOrder(rt, receiver, atom_id, true, true, true, absent);
 }
 
-pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
+pub inline fn getFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     var absent = false;
-    const slot = qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, false, false, &absent) orelse return null;
+    const slot = getFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, false, false, &absent) orelse return null;
     return slot.*;
 }
 
@@ -576,13 +576,13 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
 /// alias zjs's out-of-shape mapped Arguments numeric bindings. It lets ordinary
 /// own `length` data on Arguments and typed arrays hit before their slow class
 /// semantics while misses and accessor entries still defer to the resolver.
-pub inline fn qjsGetLengthFieldFast(rt: *core.JSRuntime, receiver: core.JSValue) ?core.JSValue {
+pub inline fn getLengthFieldFast(rt: *core.JSRuntime, receiver: core.JSValue) ?core.JSValue {
     var absent = false;
-    const slot = qjsGetFieldFastSlotWithExoticOrder(rt, receiver, core.atom.ids.length, true, true, false, &absent) orelse return null;
+    const slot = getFieldFastSlotWithExoticOrder(rt, receiver, core.atom.ids.length, true, true, false, &absent) orelse return null;
     return slot.*;
 }
 
-/// Primitive twin of qjsGetFieldFast. QuickJS selects
+/// Primitive twin of getFieldFast. QuickJS selects
 /// `ctx->class_proto[primitive_tag]` inside JS_GetPropertyInternal and then
 /// performs the same shape walk as an object receiver. Realm prototype slots
 /// are the zjs class_proto equivalent; only ordinary data hits are returned.
@@ -767,7 +767,7 @@ pub inline fn typedArrayPropertyValueForFastPath(
 /// matters for user-defined `length` accessors on typed arrays and mapped
 /// Arguments. Proxies become resident actions; unsupported exotic misses retain
 /// the existing slow machinery.
-pub inline fn qjsGetLengthActionForFastPath(rt: *core.JSRuntime, receiver: core.JSValue) ?PropertyFastValue {
+pub inline fn getLengthActionForFastPath(rt: *core.JSRuntime, receiver: core.JSValue) ?PropertyFastValue {
     const receiver_object = objectFromValue(receiver) orelse return null;
     var object = receiver_object;
     while (true) {
@@ -830,7 +830,7 @@ pub inline fn atomPropertyValueForFastPath(
 ) ?PropertyFastValue {
     if (objectFromValue(receiver)) |object| {
         if (object.class_id == core.class.ids.object or object.isArray() or object.isGlobal()) {
-            return switch (property_ic.ordinaryComputedPropertyLookupForFastPath(rt, receiver, atom_id)) {
+            return switch (property_direct.ordinaryComputedPropertyLookupForFastPath(rt, receiver, atom_id)) {
                 .value => |value| .{ .borrowed = value },
                 .getter => |getter| .{ .getter = getter },
                 .proxy => |proxy| .{ .proxy = proxy },
@@ -838,7 +838,7 @@ pub inline fn atomPropertyValueForFastPath(
                 .slow => null,
             };
         }
-        const value = qjsGetFieldFast(rt, receiver, atom_id) orelse return null;
+        const value = getFieldFast(rt, receiver, atom_id) orelse return null;
         return .{ .borrowed = value };
     }
     return primitivePrototypePropertyForFastPath(rt, global, receiver, atom_id);
@@ -896,13 +896,13 @@ pub inline fn existingPropertyKeyAtomForFastPath(value: core.JSValue) ?core.Atom
 ///   window is own-hit-only and every miss already defers to the cold
 ///   resolver (put_field_slow_path -> JS_SetPropertyInternal), which walks
 ///   prototypes for setters/read-only holders and runs the exotic machinery.
-/// - zjs-only deviation, same as qjsGetFieldFastSlot: a mapped Arguments
+/// - zjs-only deviation, same as getFieldFastSlot: a mapped Arguments
 ///   receiver bails before probing — its numeric bindings live in
 ///   out-of-shape var-ref cells, so a shape data hit could be a stale mirror
 ///   and a direct slot write would desync the aliased parameter.
 /// The pointer is only valid until the next potentially-shape-mutating
 /// operation; both callers consume it immediately.
-pub inline fn qjsPutFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*core.JSValue {
+pub inline fn putFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*core.JSValue {
     // Trusted-expression receiver contract (qjs OP_put_field's raw
     // JS_VALUE_GET_OBJ, quickjs.c:19190-19192): expression receivers are
     // never cells, so the header-kind recheck is a Debug assert only.
@@ -917,8 +917,8 @@ pub inline fn qjsPutFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, a
     return null;
 }
 
-pub inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
-    const slot = qjsPutFieldFastSlot(rt, receiver, atom_id) orelse return false;
+pub inline fn putFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
+    const slot = putFieldFastSlot(rt, receiver, atom_id) orelse return false;
     // Integer-pair slot access (qjs set_value's swap-then-free ldp/stp form,
     // quickjs.c:5091): a 128-bit SIMD store here stalls every 64-bit
     // re-reader of the slot — the get_field hit and the for-of done/value

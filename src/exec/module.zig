@@ -1053,7 +1053,7 @@ fn preloadFileModuleGraphInnerMode(
         );
         defer parsed.deinit();
         if (parsed.syntax_error) |err| {
-            const exception_ops = @import("vm_exception_ops.zig");
+            const exception_ops = @import("exception_ops.zig");
             const global_object = try @import("zjs_vm.zig").contextGlobal(context);
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(runtime.memory.allocator);
@@ -1146,7 +1146,7 @@ fn preloadFileModuleGraphInnerMode(
 /// `ReferenceError: could not load module filename '<name>'` (mirrors
 /// js_module_loader quickjs-libc.c:699).
 pub fn throwCouldNotLoadModule(ctx: *core.JSContext, filename: []const u8) !void {
-    const exception_ops = @import("vm_exception_ops.zig");
+    const exception_ops = @import("exception_ops.zig");
     const global_object = try @import("zjs_vm.zig").contextGlobal(ctx);
     var msg_buf = std.ArrayList(u8).empty;
     defer msg_buf.deinit(ctx.runtime.memory.allocator);

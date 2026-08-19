@@ -23,8 +23,8 @@
 //!     than a choice. It is retained because a build artifact must still state
 //!     which compiler produced it.
 //!   * `layout` is `resolve_labels.default_layout` — the exact comptime
-//!     constant `compiler_v2.compileFunctionV2` hands to `resolve_labels.run`
-//!     (compiler_v2/root.zig).
+//!     constant `compiler.compileFunctionV2` hands to `resolve_labels.run`
+//!     (compiler/root.zig).
 //!   * `repr` is `core.value.nan_boxing`, the constant JSValue is laid out
 //!     from.
 //!   * `optimize` is `builtin.mode` of the module this file was compiled
@@ -61,7 +61,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const resolve_labels = @import("compiler_v2/resolve_labels.zig");
+const resolve_labels = @import("compiler/resolve_labels.zig");
 const core_atom = @import("core/atom.zig");
 const core_memory = @import("core/memory.zig");
 const core_value = @import("core/value.zig");

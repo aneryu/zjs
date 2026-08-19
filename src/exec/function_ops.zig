@@ -73,7 +73,7 @@ fn functionHasInstanceEntry() core.host_function.InternalEntry {
 /// Exec-direct ABI twin of `functionHasInstance` (NB2-B): identical body
 /// routing, but the realm pair, output, and VM caller pair arrive by
 /// parameter, so no NativeCallEnvironment recovery is needed. Declared
-/// separately because `qjsFunctionHasInstanceCall` carries an inferred error
+/// separately because `functionHasInstanceCall` carries an inferred error
 /// set and the direct ABI requires the exact `HostError` surface.
 fn functionHasInstanceDirect(
     ctx: *core.JSContext,
@@ -87,7 +87,7 @@ fn functionHasInstanceDirect(
     return builtin_dispatch.nativeFromHostResult(
         ctx,
         global,
-        call_runtime.qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame),
+        call_runtime.functionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame),
     );
 }
 
@@ -103,7 +103,7 @@ fn functionCallDirect(
     return builtin_dispatch.nativeFromHostResult(
         ctx,
         global,
-        call_runtime.qjsFunctionCallCall(ctx, output, global, this_value, args, caller_function, caller_frame),
+        call_runtime.functionCallCall(ctx, output, global, this_value, args, caller_function, caller_frame),
     );
 }
 
@@ -119,7 +119,7 @@ fn functionApplyDirect(
     return builtin_dispatch.nativeFromHostResult(
         ctx,
         global,
-        call_runtime.qjsFunctionApplyCall(ctx, output, global, this_value, args, caller_function, caller_frame),
+        call_runtime.functionApplyCall(ctx, output, global, this_value, args, caller_function, caller_frame),
     );
 }
 
@@ -134,7 +134,7 @@ fn functionHasInstance(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == host_call.ctx);
-    return call_runtime.qjsFunctionHasInstanceCall(
+    return call_runtime.functionHasInstanceCall(
         host_call.ctx,
         host_call.output,
         realm.global,
@@ -268,7 +268,7 @@ fn functionCall(
         @intFromEnum(PrototypeMethod.bind) => {
             const realm = try builtin_dispatch.callableRealm(host_call);
             std.debug.assert(realm.realm == ctx);
-            return call.qjsFunctionBindCall(ctx, host_call.output, realm.global, &.{}, host_call.this_value, host_call.args);
+            return call.functionBindCall(ctx, host_call.output, realm.global, &.{}, host_call.this_value, host_call.args);
         },
         else => error.TypeError,
     };
@@ -286,7 +286,7 @@ fn functionApplyRecord(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == host_call.ctx);
-    return call_runtime.qjsFunctionApplyCall(
+    return call_runtime.functionApplyCall(
         host_call.ctx,
         host_call.output,
         realm.global,
@@ -306,7 +306,7 @@ fn functionCallRecord(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == host_call.ctx);
-    return call_runtime.qjsFunctionCallCall(
+    return call_runtime.functionCallCall(
         host_call.ctx,
         host_call.output,
         realm.global,

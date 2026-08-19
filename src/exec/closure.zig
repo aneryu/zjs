@@ -1090,11 +1090,7 @@ fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const 
     try object.defineOwnProperty(rt, key, core.Descriptor.data(rooted_value, true, true, true));
 }
 
-fn expectObject(value: core.JSValue) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    return @fieldParentPtr("header", header);
-}
+const expectObject = core.value_semantics.expectObject;
 
 fn stringFromValue(value: core.JSValue) ?*core.string.String {
     return value.asStringBody();

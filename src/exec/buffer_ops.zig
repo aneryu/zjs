@@ -86,7 +86,7 @@ pub fn dataViewPrototypeMethodId(name: []const u8) ?u32 {
 /// (QuickJS js_array_buffer_funcs / js_shared_array_buffer_funcs /
 /// js_dataview_funcs / typed-array accessor analogues). One shared handler
 /// `bufferCall` switches on the per-record `magic` (== domain-local id) by
-/// forwarding to `builtin_glue.qjsBufferNativeRecord`, the exec VM-op dispatch
+/// forwarding to `builtin_glue.bufferNativeRecord`, the exec VM-op dispatch
 /// glue that resolves the ArrayBuffer/SharedArrayBuffer prototype methods,
 /// `ArrayBuffer.isView`, the DataView get/set methods, and the ArrayBuffer /
 /// SharedArrayBuffer / DataView / TypedArray byte-length accessors against the
@@ -178,7 +178,7 @@ pub const internal_entries = bufferEntries: {
         // intercepted upstream by `array_ops.constructArrayBufferNativeRecord`
         // (call_runtime.zig:2476), which reads the raw id. What lands here is
         // the *plain call* `ArrayBuffer(8)`, which must throw -- and does,
-        // because `qjsBufferNativeRecord` has no arm for these ids and
+        // because `bufferNativeRecord` has no arm for these ids and
         // `bufferCall` turns that miss into a TypeError. Hence `generic_magic`
         // rather than a constructor cproto: a constructor cproto would also
         // make `callConstructRecordImpl` claim the construct path and route it
@@ -211,7 +211,7 @@ fn bufferCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    if (try builtin_glue.qjsBufferNativeRecord(host_call.ctx, host_call.this_value, host_call.magic, host_call.args)) |value| return value;
+    if (try builtin_glue.bufferNativeRecord(host_call.ctx, host_call.this_value, host_call.magic, host_call.args)) |value| return value;
     return error.TypeError;
 }
 
@@ -230,7 +230,7 @@ fn codecEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) 
 /// `.buffer` domain these need the writer/caller-frame context, because
 /// `check_options_object` (quickjs.c:59376) and the `alphabet` /
 /// `lastChunkHandling` / `omitPadding` reads run user getters. The magic only
-/// picks which constant name `qjsUint8ArrayCodecCall` branches on, so each
+/// picks which constant name `uint8ArrayCodecCall` branches on, so each
 /// body -- and with it the qjs-ordered receiver check / string check /
 /// GetOptionsObject / option Get sequence -- is reached unchanged.
 fn uint8ArrayCodecCall(
@@ -250,7 +250,7 @@ fn uint8ArrayCodecCall(
         @intFromEnum(Uint8ArrayPrototypeMethod.set_from_hex) => "setFromHex",
         else => return error.TypeError,
     };
-    const result = try array_ops.qjsUint8ArrayCodecCall(
+    const result = try array_ops.uint8ArrayCodecCall(
         realm.realm,
         host_call.output,
         realm.global,

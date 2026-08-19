@@ -18,7 +18,7 @@ const builtin = @import("builtin");
 const bytecode = @import("../bytecode.zig");
 const op = bytecode.opcode.op;
 const core = @import("../core/root.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const frame_mod = @import("frame.zig");
 const object_ops = @import("object_ops.zig");
 const call_runtime = @import("call_runtime.zig");
@@ -1380,7 +1380,7 @@ pub const Machine = struct {
         // Keep the release token independent of target/source ownership:
         // setup failure may destroy the callable (and its FunctionBytecode)
         // before this function's accounting errdefer runs.
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(
             target.fb,
             source.argCount(),
             copy_argv,
@@ -2004,7 +2004,7 @@ pub const Machine = struct {
         const function = target.fb;
         const argc = source.argCount();
         // qjs:17832-17836 alloca_size. Exact calls do not pad argv
-        // (`arg_buf = argv`, qjs:17841), matching `qjsBytecodeFrameAllocaSize`
+        // (`arg_buf = argv`, qjs:17841), matching `bytecodeFrameAllocaSize`
         // with copy_argv=false and argc >= arg_count.
         const planned_stack_bytes = @as(usize, function.var_count) * @sizeOf(core.JSValue) +
             @as(usize, function.stack_size) * @sizeOf(core.JSValue) +
@@ -2183,7 +2183,7 @@ pub const Machine = struct {
         } else {
             std.debug.assert(isSimpleInlineFrame(target, source));
         }
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(
             target.fb,
             source.argCount(),
             false,
@@ -2244,7 +2244,7 @@ pub const Machine = struct {
             freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, 0, false);
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(function, 0, false);
         try vm_call.enterInlineCallDepthBytes(ctx, global, planned_stack_bytes);
         errdefer vm_call.leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
         const entry = try self.acquireSlot(global);
@@ -2306,7 +2306,7 @@ pub const Machine = struct {
             freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, argc, false);
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(function, argc, false);
         try vm_call.enterInlineCallDepthBytes(ctx, global, planned_stack_bytes);
         errdefer vm_call.leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
         const entry = try self.acquireSlot(global);
@@ -2363,7 +2363,7 @@ pub const Machine = struct {
             freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, 0, false);
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(function, 0, false);
         try vm_call.enterInlineCallDepthBytes(ctx, global, planned_stack_bytes);
         errdefer vm_call.leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
         const entry = try self.acquireSlot(global);
@@ -2471,7 +2471,7 @@ pub const Machine = struct {
         // function-header scalars here (LLVM cannot CSE the reload across the
         // intervening entry stores; qjs prices alloca_size exactly once,
         // quickjs.c:17828-17836).
-        std.debug.assert(planned_stack_bytes == vm_call.qjsBytecodeLeafFrameAllocaSize(function));
+        std.debug.assert(planned_stack_bytes == vm_call.bytecodeLeafFrameAllocaSize(function));
         // No failable operation follows the ownership transfer.
         entry.frame = .{
             .function = function,
@@ -2537,7 +2537,7 @@ pub const Machine = struct {
         // K1 single pricing, extended through publication (see
         // finishEmptyLeafFrame): exact-args commits price the empty
         // padded-argv prefix, so the constructor figure IS the leaf figure.
-        std.debug.assert(planned_stack_bytes == vm_call.qjsBytecodeLeafFrameAllocaSize(function));
+        std.debug.assert(planned_stack_bytes == vm_call.bytecodeLeafFrameAllocaSize(function));
         // No failable operation follows the ownership transfer. `var_refs`
         // borrows the closure's cell array (qjs `var_refs =
         // p->u.func.var_refs`, quickjs.c:17844), rooted by the owned
@@ -2614,7 +2614,7 @@ pub const Machine = struct {
         const callable_slot = &region_start[@intFromBool(method_receiver)];
         // K1 single pricing, extended through publication (see
         // finishEmptyLeafFrame).
-        std.debug.assert(planned_stack_bytes == vm_call.qjsBytecodeLeafFrameAllocaSize(function));
+        std.debug.assert(planned_stack_bytes == vm_call.bytecodeLeafFrameAllocaSize(function));
         // No failable operation follows the ownership transfer.
         entry.frame = .{
             .function = function,
@@ -2684,7 +2684,7 @@ pub const Machine = struct {
         // K1 single pricing: one geometry derivation feeds admission, commit,
         // and the persisted Entry charge (M1 dossier: the triple recompute was
         // the top opCall residual).
-        const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
+        const planned_stack_bytes = vm_call.bytecodeLeafFrameAllocaSize(function);
         // K2 admission-commit fusion: one rt load carries the budget check,
         // the commit RMW, the carve, and the profile guard (qjs
         // check-then-alloca: the check is the commitment, quickjs.c:17837/
@@ -2741,7 +2741,7 @@ pub const Machine = struct {
         // Vm-resident rt (see tryPushEmptyLeafCallFast).
         std.debug.assert(rt == self.ctx.runtime);
         // K1 single pricing (argc == arg_count: padded-argv prefix empty).
-        const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
+        const planned_stack_bytes = vm_call.bytecodeLeafFrameAllocaSize(function);
         // K2 admission-commit fusion (see `tryPushEmptyLeafCallFast`): the
         // rare chunk/carve misses retreat the committed charge cold.
         if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
@@ -2797,7 +2797,7 @@ pub const Machine = struct {
         // K1 single pricing: one geometry derivation feeds admission, commit,
         // and the persisted Entry charge (M1 dossier: the triple recompute was
         // the top opCall residual).
-        const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
+        const planned_stack_bytes = vm_call.bytecodeLeafFrameAllocaSize(function);
         // K2 admission-commit fusion (see `tryPushEmptyLeafCallFast`): the
         // rare chunk/carve misses retreat the committed charge cold.
         if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
@@ -3324,7 +3324,7 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         std.debug.assert(target.this_value.isObject());
         const source = ArgsSource.initStack(region_start, argc, true);
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(
             target.fb,
             argc,
             false,
@@ -3420,7 +3420,7 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         std.debug.assert(target.this_value.isUninitialized());
         const source = ArgsSource.initStack(region_start, argc, true);
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(
             target.fb,
             argc,
             false,
@@ -3574,7 +3574,7 @@ pub const Machine = struct {
         const execution = target.call_facts.execution;
         std.debug.assert(execution.simple_inline_empty_leaf or
             execution.raw_this_inline_empty_leaf);
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(
             function,
             actual_arg_count,
             true,
@@ -3647,7 +3647,7 @@ pub const Machine = struct {
         const function = target.fb;
         std.debug.assert(target.call_facts.execution.exact_args_leaf_kind != .none);
         if (move_args) std.debug.assert(args.ptr == moved_args.ptr and args.len == moved_args.len) else std.debug.assert(moved_args.len == 0);
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(
             function,
             args.len,
             true,
@@ -3748,7 +3748,7 @@ pub const Machine = struct {
             actual_arg_count,
             frame_mod.argumentsNeedsOriginalSnapshot(function),
         ) != 0) return null;
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(
             function,
             actual_arg_count,
             true,
@@ -3863,7 +3863,7 @@ pub const Machine = struct {
             );
         }
 
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(
             target.fb,
             args.len,
             true,
@@ -3909,7 +3909,7 @@ pub const Machine = struct {
     ) HostError!*Entry {
         const function = target.fb;
         std.debug.assert(target.call_facts.execution.exact_args_leaf_kind != .none);
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(
             function,
             args.len,
             true,
@@ -4006,7 +4006,7 @@ pub const Machine = struct {
         const execution = target.call_facts.execution;
         std.debug.assert(execution.simple_inline_empty_leaf or
             execution.raw_this_inline_empty_leaf);
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(
             function,
             actual_arg_count,
             true,
@@ -4306,7 +4306,7 @@ pub const Machine = struct {
         // and the persisted Entry charge — the exact figure the generic path
         // prices for its argc==0 borrowed source, so the teardown release
         // stays in lockstep.
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, 0, false);
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(function, 0, false);
         if (!vm_call.canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) return null;
 
         const index = self.depth;
@@ -4380,7 +4380,7 @@ pub const Machine = struct {
         frame.this_value = readValueAsIntPair(&iterator_record[0]);
         frame.current_function = readValueAsIntPair(&iterator_record[1]);
         frame.actual_arg_count = 0;
-        frame.planned_stack_bytes = @intCast(vm_call.qjsBytecodeFrameAllocaSize(function, 0, false));
+        frame.planned_stack_bytes = @intCast(vm_call.bytecodeFrameAllocaSize(function, 0, false));
         frame.locals = locals;
         frame.args = args;
         if (frame.var_refs.ptr != captures.ptr or frame.var_refs.len != captures.len) {
@@ -4436,7 +4436,7 @@ pub const Machine = struct {
             .current_function = takeSourceSlot(&region_start[0]),
             // Forwarded leaves commit with copy_argv pricing, but the body is
             // zero-arg, so the figure equals the leaf form either way.
-            .planned_stack_bytes = @intCast(vm_call.qjsBytecodeLeafFrameAllocaSize(function)),
+            .planned_stack_bytes = @intCast(vm_call.bytecodeLeafFrameAllocaSize(function)),
             .storage_values = &.{},
             .ownership = .{
                 .this_value = .borrowed,
@@ -4482,7 +4482,7 @@ pub const Machine = struct {
         // K1 single pricing: one geometry derivation feeds admission, commit,
         // and the persisted Entry charge (M1 dossier: the triple recompute was
         // the top opCall residual).
-        const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
+        const planned_stack_bytes = vm_call.bytecodeLeafFrameAllocaSize(function);
         // K2 admission-commit fusion (see `tryPushEmptyLeafCallFast`): the
         // rare chunk/carve misses retreat the committed charge cold.
         const rt = ctx.runtime;
@@ -4566,7 +4566,7 @@ pub const Machine = struct {
         // Check before moving operands or retiring the caller so overflow is
         // delivered at the intact tail-call site, like QuickJS's callee-entry
         // stack guard.
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(target.fb, argc, false);
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(target.fb, argc, false);
         try vm_call.checkTailCallChainStackBudget(self.ctx, global, planned_stack_bytes);
         const has_receiver = layout == .method;
         const rt = self.ctx.runtime;
@@ -4597,7 +4597,7 @@ pub const Machine = struct {
         // Committed charge persisted at construction; the recompute is the
         // Debug lockstep guard against any constructor missing the store.
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
-        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+        std.debug.assert(dying_stack_bytes == vm_call.bytecodeFrameAllocaSize(
             dying.frame.function,
             dying.frame.actual_arg_count,
             dying.teardown.copy_argv,
@@ -4667,7 +4667,7 @@ pub const Machine = struct {
         // Committed charge persisted at construction; the recompute is the
         // Debug lockstep guard against any constructor missing the store.
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
-        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+        std.debug.assert(dying_stack_bytes == vm_call.bytecodeFrameAllocaSize(
             dying.frame.function,
             dying.frame.actual_arg_count,
             dying.teardown.copy_argv,
@@ -4698,7 +4698,7 @@ pub const Machine = struct {
         // its own unit and every retired tail caller it represents.
         const chain_budget: Entry.TailChainBudget = dying.tailChainBudgetSlot().*;
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
-        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+        std.debug.assert(dying_stack_bytes == vm_call.bytecodeFrameAllocaSize(
             dying.frame.function,
             dying.frame.actual_arg_count,
             dying.teardown.copy_argv,
@@ -4733,7 +4733,7 @@ pub const Machine = struct {
         // Committed charge persisted at construction; the recompute is the
         // Debug lockstep guard against any constructor missing the store.
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
-        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+        std.debug.assert(dying_stack_bytes == vm_call.bytecodeFrameAllocaSize(
             dying.frame.function,
             dying.frame.actual_arg_count,
             dying.teardown.copy_argv,
@@ -4775,7 +4775,7 @@ pub const Machine = struct {
         else
             .{ .extra_depth = 0, .planned_stack_bytes = 0 };
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
-        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+        std.debug.assert(dying_stack_bytes == vm_call.bytecodeFrameAllocaSize(
             dying.frame.function,
             dying.frame.actual_arg_count,
             dying.teardown.copy_argv,
@@ -4813,7 +4813,7 @@ pub const Machine = struct {
         std.debug.assert(!dying.teardown.copy_argv);
         std.debug.assert(dying.frame.function.arg_count == 0);
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
-        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeLeafFrameAllocaSize(dying.frame.function));
+        std.debug.assert(dying_stack_bytes == vm_call.bytecodeLeafFrameAllocaSize(dying.frame.function));
         // Inline epilogue: the hot leg is an rc decrement plus the arena
         // watermark restore; keeping it in the return handler removes the
         // only bl/ret on the empty-leaf return path (destroyZeroRef stays
@@ -4842,7 +4842,7 @@ pub const Machine = struct {
         // false here (neither the exact nor the capture finisher sets it).
         std.debug.assert(!dying.teardown.copy_argv);
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
-        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+        std.debug.assert(dying_stack_bytes == vm_call.bytecodeFrameAllocaSize(
             dying.frame.function,
             dying.frame.actual_arg_count,
             false,
@@ -4871,7 +4871,7 @@ pub const Machine = struct {
         // the leaf figure releases the exact bytes charged.
         std.debug.assert(dying.frame.function.arg_count == 0);
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
-        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeLeafFrameAllocaSize(dying.frame.function));
+        std.debug.assert(dying_stack_bytes == vm_call.bytecodeLeafFrameAllocaSize(dying.frame.function));
         dying.deinitForwardedLeafInline(rt);
         vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
         self.depth -= 1;
@@ -4946,7 +4946,7 @@ pub const Machine = struct {
         // Committed charge persisted at construction; the recompute is the
         // Debug lockstep guard against any constructor missing the store.
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
-        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+        std.debug.assert(dying_stack_bytes == vm_call.bytecodeFrameAllocaSize(
             dying.frame.function,
             dying.frame.actual_arg_count,
             dying.teardown.copy_argv,

@@ -9,7 +9,7 @@ const value_ops = @import("value_ops.zig");
 
 const call_runtime = @import("call_runtime.zig");
 const object_ops = @import("object_ops.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 
 // Helpers that remain in call_runtime.zig (generic utilities outside the coercion
 // cluster).

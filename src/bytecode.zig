@@ -2941,7 +2941,7 @@ pub const function_def = struct {
     const function_bytecode_mod = function_bytecode;
     const memory = @import("core/memory.zig");
     const JSValue = @import("core/value.zig").JSValue;
-    const compiler_v2 = @import("compiler_v2/root.zig");
+    const compiler = @import("compiler/root.zig");
 
     fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
         _ = atoms;
@@ -3245,7 +3245,7 @@ pub const function_def = struct {
         /// (stage 5 wires production; for now only the parser test hook does);
         /// released in `deinit`. One optional pointer keeps @sizeOf impact
         /// minimal.
-        v2_builder: ?*compiler_v2.Builder = null,
+        v2_builder: ?*compiler.Builder = null,
         /// See `FlowTailSummary`. Born valid-empty; the class machinery's
         /// direct byte injections invalidate at their sites and the next
         /// query rebuilds from whatever is present.
@@ -3931,7 +3931,7 @@ pub const function_def = struct {
             if (self.v2_builder) |v2b| {
                 self.v2_builder = null;
                 v2b.deinit();
-                self.memory.destroy(compiler_v2.Builder, v2b);
+                self.memory.destroy(compiler.Builder, v2b);
             }
 
             freeGrowableNamedSlice(VarDef, self.atoms, self.memory, &self.vars, &self.vars_capacity);
@@ -4544,7 +4544,7 @@ pub const binding_rules = struct {
     //! closure-source threading, dynamic-environment probe planning, private
     //! brand resolution, and the exact byte forms each decision writes.
     //!
-    //! This is a rule library, not a pass. `compiler_v2/resolve_variables.zig`
+    //! This is a rule library, not a pass. `compiler/resolve_variables.zig`
     //! owns the pass structure (block CFG, LabelId operands, transactional
     //! output) and calls in here for every binding decision, so there is one
     //! definition of QuickJS binding semantics in the tree.
@@ -7560,7 +7560,7 @@ pub const binding_rules = struct {
         return true;
     }
 
-    /// The decision/writer surface `compiler_v2/resolve_variables.zig`
+    /// The decision/writer surface `compiler/resolve_variables.zig`
     /// consumes. Everything the compiler is allowed to reach is named once
     /// here; nothing else in this namespace is exported.
     pub const surface = struct {
@@ -8448,7 +8448,7 @@ pub const pipeline_finalize = struct {
     const pc2line = pipeline_pc2line;
     const stack_size = pipeline_stack_size;
     const JSValue = @import("core/value.zig").JSValue;
-    const compiler_v2 = @import("compiler_v2/root.zig");
+    const compiler = @import("compiler/root.zig");
 
     pub const FinalizeError = error{
         OutOfMemory,
@@ -8892,7 +8892,7 @@ pub const pipeline_finalize = struct {
         // point and transfers final buffers to `lowered`. There is no second
         // backend: an absent Builder is a compile error, not a fallback.
         if (fd.finalization_state != .prepared) return error.InvalidBytecode;
-        compiler_v2.compileFunctionV2ForPackedFinalize(&lowered, fd) catch |err| switch (err) {
+        compiler.compileFunctionV2ForPackedFinalize(&lowered, fd) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidBytecode, error.NoFunctionDef, error.NoParentScope => return error.InvalidBytecode,
             error.BytecodeOverflow => return error.BytecodeOverflow,
@@ -9047,7 +9047,7 @@ pub const pipeline_finalize = struct {
     ///
     /// This path is used by callers that execute a `Bytecode` object directly
     /// instead of first materialising a GC-owned `FunctionBytecode` artifact.
-    /// There is exactly one backend: `compiler_v2`. A `FunctionDef` without an
+    /// There is exactly one backend: `compiler`. A `FunctionDef` without an
     /// attached `Builder` has no compiler input and fails closed.
     ///
     /// `createFunctionBytecode` is the QuickJS-style storage path. It lowers a
@@ -9098,7 +9098,7 @@ pub const pipeline_finalize = struct {
         def: *function_def_mod.FunctionDef,
     ) !void {
         if (def.finalization_state != .prepared) return error.InvalidBytecode;
-        try compiler_v2.compileFunctionV2(function, def);
+        try compiler.compileFunctionV2(function, def);
         std.debug.assert(def.v2_builder == null);
         def.consumeGlobalVars();
         def.finalization_state = .resolved;

@@ -64,8 +64,6 @@ pub const Storage = union(enum) {
     inline_value,
     external_ptr: ExternalPtr,
 
-    pub const inlineValue: Storage = .inline_value;
-
     pub fn externalPtr(options: ExternalPtr) Storage {
         return .{ .external_ptr = options };
     }
@@ -816,12 +814,7 @@ fn typeIsGcVisible(comptime T: type) bool {
         T == core.WeakPersistentValue;
 }
 
-fn objectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    if (header.meta().flags.kind != .object) return null;
-    return @fieldParentPtr("header", header);
-}
+const objectFromValue = core.value_semantics.objectFromValue;
 
 test "JSObject detects payloads that require explicit tracing" {
     const HoldsValue = struct {
@@ -983,11 +976,11 @@ test "JSObject class identity is independent from class name" {
     };
     const ObjectA = JSObject(PayloadA, .{
         .name = "KernelBindingDuplicateName",
-        .storage = Storage.inlineValue,
+        .storage = .inline_value,
     });
     const ObjectB = JSObject(PayloadB, .{
         .name = "KernelBindingDuplicateName",
-        .storage = Storage.inlineValue,
+        .storage = .inline_value,
     });
 
     const rt = try createTestRuntime();
@@ -1018,7 +1011,7 @@ test "JSObject binding is realm-local even when runtime class is installed" {
     };
     const ObjectType = JSObject(Payload, .{
         .name = "KernelBindingRealmLocalPayload",
-        .storage = Storage.inlineValue,
+        .storage = .inline_value,
     });
 
     const rt = try createTestRuntime();
@@ -1058,7 +1051,7 @@ test "JSObject owned binding explicitly retains its realm" {
     };
     const ObjectType = JSObject(Payload, .{
         .name = "KernelBindingOwnedRealmPayload",
-        .storage = Storage.inlineValue,
+        .storage = .inline_value,
     });
 
     const rt = try createTestRuntime();
@@ -1089,7 +1082,7 @@ test "JSObject prototype methods enforce realm-local binding" {
     };
     const ObjectType = JSObject(Payload, .{
         .name = "KernelBindingRealmLocalMethodPayload",
-        .storage = Storage.inlineValue,
+        .storage = .inline_value,
         .properties = Properties.static(.{
             method("touch", Payload.touch),
         }),
@@ -1137,7 +1130,7 @@ test "JSObject method records do not retain a second prototype root" {
     };
     const ObjectType = JSObject(Payload, .{
         .name = "KernelBindingMethodPrototypeRoot",
-        .storage = Storage.inlineValue,
+        .storage = .inline_value,
         .properties = Properties.static(.{
             method("touch", Payload.touch),
         }),
@@ -1164,7 +1157,7 @@ test "JSObject install does not export constructors to the global object" {
     };
     const ObjectType = JSObject(Payload, .{
         .name = "KernelBindingNoGlobalConstructor",
-        .storage = Storage.inlineValue,
+        .storage = .inline_value,
     });
 
     const rt = try createTestRuntime();

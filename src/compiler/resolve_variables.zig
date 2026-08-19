@@ -2749,7 +2749,7 @@ fn expectOwnedAtomRelease(
     );
 }
 
-test "compiler_v2.resolve_variables: copy-through and source carry" {
+test "compiler.resolve_variables: copy-through and source carry" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -2779,7 +2779,7 @@ test "compiler_v2.resolve_variables: copy-through and source carry" {
     try std.testing.expectEqual(@as(i32, 3), product.source_slots[2].col);
 }
 
-test "compiler_v2.resolve_variables: last source transition wins at one input offset" {
+test "compiler.resolve_variables: last source transition wins at one input offset" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -2800,7 +2800,7 @@ test "compiler_v2.resolve_variables: last source transition wins at one input of
     try std.testing.expectEqual(@as(i32, 4), product.source_slots[0].col);
 }
 
-test "compiler_v2.resolve_variables: outlined source transitions keep distinct input offsets" {
+test "compiler.resolve_variables: outlined source transitions keep distinct input offsets" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -2824,7 +2824,7 @@ test "compiler_v2.resolve_variables: outlined source transitions keep distinct i
     try std.testing.expectEqual(@as(i32, 3), product.source_slots[1].col);
 }
 
-test "compiler_v2.resolve_variables: dead code resumes at a live label" {
+test "compiler.resolve_variables: dead code resumes at a live label" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -2849,7 +2849,7 @@ test "compiler_v2.resolve_variables: dead code resumes at a live label" {
     try std.testing.expectEqual(@as(u32, 1), product.jump_size);
 }
 
-test "compiler_v2.resolve_variables: label referenced only by dead code stays dead" {
+test "compiler.resolve_variables: label referenced only by dead code stays dead" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -2876,7 +2876,7 @@ test "compiler_v2.resolve_variables: label referenced only by dead code stays de
     try std.testing.expectEqual(@as(u32, 1), product.jump_size);
 }
 
-test "compiler_v2.resolve_variables: dead self-loop is skipped through to live merge" {
+test "compiler.resolve_variables: dead self-loop is skipped through to live merge" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -2905,7 +2905,7 @@ test "compiler_v2.resolve_variables: dead self-loop is skipped through to live m
     try std.testing.expectEqual(@as(u32, 1), product.jump_size);
 }
 
-test "compiler_v2.resolve_variables: dead forward jump cannot retain another dead block" {
+test "compiler.resolve_variables: dead forward jump cannot retain another dead block" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -2938,7 +2938,7 @@ test "compiler_v2.resolve_variables: dead forward jump cannot retain another dea
     try std.testing.expectEqual(@as(u32, 1), product.jump_size);
 }
 
-test "compiler_v2.resolve_variables: scope_make_ref after terminal owns nothing" {
+test "compiler.resolve_variables: scope_make_ref after terminal owns nothing" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -2979,7 +2979,7 @@ test "compiler_v2.resolve_variables: scope_make_ref after terminal owns nothing"
     try std.testing.expectEqual(base_refs, harness.rt.atoms.refCount(local).?);
 }
 
-test "compiler_v2.resolve_variables: empty gosub finalizer removal and non-empty retention" {
+test "compiler.resolve_variables: empty gosub finalizer removal and non-empty retention" {
     {
         var harness: ResolveTestHarness = undefined;
         try harness.init(std.testing.allocator);
@@ -3023,7 +3023,7 @@ test "compiler_v2.resolve_variables: empty gosub finalizer removal and non-empty
     }
 }
 
-test "compiler_v2.resolve_variables: set_name null drops and named atom copies" {
+test "compiler.resolve_variables: set_name null drops and named atom copies" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3052,7 +3052,7 @@ test "compiler_v2.resolve_variables: set_name null drops and named atom copies" 
     try std.testing.expectEqual(base_refs, harness.rt.atoms.refCount(named).?);
 }
 
-test "compiler_v2.resolve_variables: erased temp ops and optional-chain rewrites" {
+test "compiler.resolve_variables: erased temp ops and optional-chain rewrites" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3082,7 +3082,7 @@ test "compiler_v2.resolve_variables: erased temp ops and optional-chain rewrites
     try std.testing.expectEqual(base_refs, harness.rt.atoms.refCount(field).?);
 }
 
-test "compiler_v2.resolve_variables: match-barrier nop preserves legacy tail shape" {
+test "compiler.resolve_variables: match-barrier nop preserves legacy tail shape" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3100,7 +3100,7 @@ test "compiler_v2.resolve_variables: match-barrier nop preserves legacy tail sha
     try std.testing.expect(product.label_slots[boundary.index()].flags.match_barrier);
 }
 
-test "compiler_v2.resolve_variables: insert3 fold recognizes both put variants" {
+test "compiler.resolve_variables: insert3 fold recognizes both put variants" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3124,7 +3124,7 @@ test "compiler_v2.resolve_variables: insert3 fold recognizes both put variants" 
     );
 }
 
-test "compiler_v2.resolve_variables: source transitions bound insert3 fold" {
+test "compiler.resolve_variables: source transitions bound insert3 fold" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3163,7 +3163,7 @@ test "compiler_v2.resolve_variables: source transitions bound insert3 fold" {
     );
 }
 
-test "compiler_v2.resolve_variables: dup branch fold preserves precomputed live block" {
+test "compiler.resolve_variables: dup branch fold preserves precomputed live block" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3201,7 +3201,7 @@ test "compiler_v2.resolve_variables: dup branch fold preserves precomputed live 
     try std.testing.expectEqual(@as(u32, 2), product.jump_size);
 }
 
-test "compiler_v2.resolve_variables: scope_get_var global reuses legacy topology" {
+test "compiler.resolve_variables: scope_get_var global reuses legacy topology" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3238,7 +3238,7 @@ test "compiler_v2.resolve_variables: scope_get_var global reuses legacy topology
     try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(scoped_name).?);
 }
 
-test "compiler_v2.resolve_variables: local scope_get_var matches the pinned QuickJS form" {
+test "compiler.resolve_variables: local scope_get_var matches the pinned QuickJS form" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3261,7 +3261,7 @@ test "compiler_v2.resolve_variables: local scope_get_var matches the pinned Quic
     try expectOwnedAtomRelease(&harness, &product, x);
 }
 
-test "compiler_v2.resolve_variables: argument scope_get_var matches the pinned QuickJS form" {
+test "compiler.resolve_variables: argument scope_get_var matches the pinned QuickJS form" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3288,7 +3288,7 @@ test "compiler_v2.resolve_variables: argument scope_get_var matches the pinned Q
     try expectOwnedAtomRelease(&harness, &product, argument);
 }
 
-test "compiler_v2.resolve_variables: lexical TDZ get and put match the pinned QuickJS form" {
+test "compiler.resolve_variables: lexical TDZ get and put match the pinned QuickJS form" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3325,7 +3325,7 @@ test "compiler_v2.resolve_variables: lexical TDZ get and put match the pinned Qu
     try expectOwnedAtomRelease(&harness, &product, lexical);
 }
 
-test "compiler_v2.resolve_variables: const scope_put_var throw matches the pinned QuickJS form" {
+test "compiler.resolve_variables: const scope_put_var throw matches the pinned QuickJS form" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3360,7 +3360,7 @@ test "compiler_v2.resolve_variables: const scope_put_var throw matches the pinne
     try expectOwnedAtomRelease(&harness, &product, constant);
 }
 
-test "compiler_v2.resolve_variables: lexical scope_put_var_init matches the pinned QuickJS form" {
+test "compiler.resolve_variables: lexical scope_put_var_init matches the pinned QuickJS form" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3387,7 +3387,7 @@ test "compiler_v2.resolve_variables: lexical scope_put_var_init matches the pinn
     try expectOwnedAtomRelease(&harness, &product, lexical);
 }
 
-test "compiler_v2.resolve_variables: enter and leave scope match the pinned QuickJS form" {
+test "compiler.resolve_variables: enter and leave scope match the pinned QuickJS form" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3416,7 +3416,7 @@ test "compiler_v2.resolve_variables: enter and leave scope match the pinned Quic
     try expectOwnedAtomRelease(&harness, &product, captured);
 }
 
-test "compiler_v2.resolve_variables: apply_eval scope head matches the pinned QuickJS form" {
+test "compiler.resolve_variables: apply_eval scope head matches the pinned QuickJS form" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3444,7 +3444,7 @@ test "compiler_v2.resolve_variables: apply_eval scope head matches the pinned Qu
     try expectOwnedAtomRelease(&harness, &product, captured);
 }
 
-test "compiler_v2.resolve_variables: later apply_eval capture closes an earlier scope exit" {
+test "compiler.resolve_variables: later apply_eval capture closes an earlier scope exit" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3475,7 +3475,7 @@ test "compiler_v2.resolve_variables: later apply_eval capture closes an earlier 
     try expectOwnedAtomRelease(&harness, &product, captured);
 }
 
-test "compiler_v2.resolve_variables: local scope_make_ref fold matches the pinned QuickJS form" {
+test "compiler.resolve_variables: local scope_make_ref fold matches the pinned QuickJS form" {
 
     // The corpus never reaches the make_ref fold (a `with` lvalue always needs
     // the var-object probe), so this is the only place the deferred
@@ -3532,7 +3532,7 @@ test "compiler_v2.resolve_variables: local scope_make_ref fold matches the pinne
     }
 }
 
-test "compiler_v2.resolve_variables: local scope_make_ref non-fold matches the pinned QuickJS form" {
+test "compiler.resolve_variables: local scope_make_ref non-fold matches the pinned QuickJS form" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3567,7 +3567,7 @@ test "compiler_v2.resolve_variables: local scope_make_ref non-fold matches the p
     try expectOwnedAtomRelease(&harness, &product, local);
 }
 
-test "compiler_v2.resolve_variables: dynamic environment probe uses product label" {
+test "compiler.resolve_variables: dynamic environment probe uses product label" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3612,7 +3612,7 @@ test "compiler_v2.resolve_variables: dynamic environment probe uses product labe
     try expectOwnedAtomRelease(&harness, &product, dynamic_name);
 }
 
-test "compiler_v2.resolve_variables: scope delete and get_ref match the pinned QuickJS form" {
+test "compiler.resolve_variables: scope delete and get_ref match the pinned QuickJS form" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3654,7 +3654,7 @@ test "compiler_v2.resolve_variables: scope delete and get_ref match the pinned Q
     try expectOwnedAtomRelease(&harness, &product, global);
 }
 
-test "compiler_v2.resolve_variables: private field resolution matches the pinned QuickJS form" {
+test "compiler.resolve_variables: private field resolution matches the pinned QuickJS form" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3682,7 +3682,7 @@ test "compiler_v2.resolve_variables: private field resolution matches the pinned
     try expectOwnedAtomRelease(&harness, &product, private_name);
 }
 
-test "compiler_v2.resolve_variables: direct eval redeclaration prefix matches the pinned QuickJS form" {
+test "compiler.resolve_variables: direct eval redeclaration prefix matches the pinned QuickJS form" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3722,7 +3722,7 @@ test "compiler_v2.resolve_variables: direct eval redeclaration prefix matches th
     try expectOwnedAtomRelease(&harness, &product, redeclared);
 }
 
-test "compiler_v2.resolve_variables: eval function declaration hoist enters v2 product" {
+test "compiler.resolve_variables: eval function declaration hoist enters v2 product" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3762,7 +3762,7 @@ test "compiler_v2.resolve_variables: eval function declaration hoist enters v2 p
     try snapshot.expectUnchanged(harness.input());
 }
 
-test "compiler_v2.resolve_variables: deep logical chain falls back without error" {
+test "compiler.resolve_variables: deep logical chain falls back without error" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3882,7 +3882,7 @@ fn resolveVariablesOomScript(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(dead_atom_base_refs, harness.rt.atoms.refCount(dead_atom).?);
 }
 
-test "compiler_v2.resolve_variables: allocation failure sweep is transactional" {
+test "compiler.resolve_variables: allocation failure sweep is transactional" {
     try resolveVariablesOomScript(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,

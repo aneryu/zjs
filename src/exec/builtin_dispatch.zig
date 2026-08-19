@@ -11,7 +11,7 @@ const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode.zig");
 const exceptions = @import("exceptions.zig");
 const frame_mod = @import("frame.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const value_ops = @import("value_ops.zig");
 
 const HostError = exceptions.HostError;
@@ -737,7 +737,7 @@ noinline fn callInternalRecordFallback(
 /// `func_obj` is optional: the migrated construct branches (Date/RegExp/String)
 /// read only `args`/`new_target`, so VM construct fast paths that already hold
 /// the coerced args and resolved prototype but no materialized constructor
-/// object (e.g. `regexp_fastpath.qjsRegExpConstructCall`'s terminal) can route
+/// object (e.g. `regexp_fastpath.regExpConstructCall`'s terminal) can route
 /// their result through the table with `func_obj == null`.
 pub fn callConstructRecord(
     ctx: *core.JSContext,

@@ -8,17 +8,16 @@ const frame_mod = @import("frame.zig");
 const value_ops = @import("value_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const coercion_ops = @import("coercion_ops.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const exceptions = @import("exceptions.zig");
 const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
 
 const HostError = exceptions.HostError;
-const vm_exception_ops = exception_ops;
 
 // The Date constructor body runs through the record table keyed on this ref
 // (matching the RegExp/String construct unification in Phase 6b-3d/e): the
-// VM-context argument coercion stays here in `qjsDateConstructWithPrototype`
+// VM-context argument coercion stays here in `dateConstructWithPrototype`
 // and the coerced primitives + resolved instance prototype are threaded to the
 // record, whose construct branch (`exec/date_ops.zig` `dateCall`) runs
 // `constructWithPrototype`. The Date construct record reads only
@@ -118,7 +117,7 @@ const DateToPrimitiveHint = enum {
     number,
 };
 
-pub fn qjsDateSetYear(
+pub fn dateSetYear(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -137,7 +136,7 @@ pub fn qjsDateSetYear(
     return try callDateSetYearWithCapturedMs(ctx, this_value, captured_ms, year_number);
 }
 
-pub fn qjsDateSetTime(
+pub fn dateSetTime(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -154,7 +153,7 @@ pub fn qjsDateSetTime(
     return try callDateBody(ctx, this_value, 24, &.{time_value});
 }
 
-pub fn qjsDateStaticCall(
+pub fn dateStaticCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -177,7 +176,7 @@ pub fn qjsDateStaticCall(
     return try callDateStaticBody(ctx, method_id, coerced_args[0..coerced_len]);
 }
 
-pub fn qjsDateCapturedSetterCall(
+pub fn dateCapturedSetterCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -218,7 +217,7 @@ pub fn qjsDateCapturedSetterCall(
     return try callDateSetPartsWithCapturedMs(ctx, this_value, method_id, captured_ms, coerced_args[0..coerced_len]);
 }
 
-pub fn qjsDateToJsonCall(
+pub fn dateToJsonCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -245,7 +244,7 @@ pub fn qjsDateToJsonCall(
     return try call_runtime.callValueOrBytecodeRoot(ctx, output, global, this_value, method, &.{}, caller_function, caller_frame);
 }
 
-pub fn qjsDateConstructWithPrototype(
+pub fn dateConstructWithPrototype(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -291,7 +290,7 @@ pub fn qjsDateConstructWithPrototype(
     return constructDateRecord(ctx, prototype, coerced_args[0..coerced_len]);
 }
 
-pub fn qjsDateToPrimitiveCall(
+pub fn dateToPrimitiveCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -303,15 +302,15 @@ pub fn qjsDateToPrimitiveCall(
     if (!this_value.isObject()) return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
 
     const hint_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const hint = qjsDateToPrimitiveHint(hint_value) orelse
+    const hint = dateToPrimitiveHint(hint_value) orelse
         return exception_ops.throwTypeErrorMessage(ctx, global, "invalid hint");
     return switch (hint) {
-        .string => try qjsDateOrdinaryToPrimitive(ctx, output, global, this_value, true, caller_function, caller_frame),
-        .number => try qjsDateOrdinaryToPrimitive(ctx, output, global, this_value, false, caller_function, caller_frame),
+        .string => try dateOrdinaryToPrimitive(ctx, output, global, this_value, true, caller_function, caller_frame),
+        .number => try dateOrdinaryToPrimitive(ctx, output, global, this_value, false, caller_function, caller_frame),
     };
 }
 
-fn qjsDateToPrimitiveHint(value: core.JSValue) ?DateToPrimitiveHint {
+fn dateToPrimitiveHint(value: core.JSValue) ?DateToPrimitiveHint {
     if (!value.isString()) return null;
     if (string_ops.stringValueUnitsEqualBytes(value, "string") or string_ops.stringValueUnitsEqualBytes(value, "default")) return .string;
     // qjs js_date_Symbol_toPrimitive (quickjs.c:55964) maps JS_ATOM_integer to
@@ -321,7 +320,7 @@ fn qjsDateToPrimitiveHint(value: core.JSValue) ?DateToPrimitiveHint {
     return null;
 }
 
-fn qjsDateOrdinaryToPrimitive(
+fn dateOrdinaryToPrimitive(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -519,7 +518,7 @@ fn dateCall(
     // the realm `global` and raw args, so they must instead fall through to the
     // coercing dispatcher below. This
     // deliberately bypasses the prototype dispatcher
-    // (`object_ops.qjsDatePrototypeMethod`) — routing back through it would
+    // (`object_ops.datePrototypeMethod`) — routing back through it would
     // re-enter this record (the dispatcher's own body call is one of the
     // converted sites) and recurse, and the glue already performed the
     // dispatcher's coercion/capture work.
@@ -529,7 +528,7 @@ fn dateCall(
 
     if (id == @intFromEnum(PrototypeMethod.to_primitive)) {
         const active_global = callable_global orelse return error.TypeError;
-        return qjsDateToPrimitiveCall(ctx, output, active_global, host_call.this_value, args, caller_function, caller_frame);
+        return dateToPrimitiveCall(ctx, output, active_global, host_call.this_value, args, caller_function, caller_frame);
     }
     if (id == @intFromEnum(StaticMethod.utc)) {
         const active_global = callable_global orelse return error.TypeError;
@@ -562,7 +561,7 @@ fn dateCall(
     }
     if (decodePrototypeMethodId(id)) |method_id| {
         const active_global = callable_global orelse return error.TypeError;
-        return object_ops.qjsDatePrototypeMethod(ctx, output, active_global, host_call.this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
+        return object_ops.datePrototypeMethod(ctx, output, active_global, host_call.this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
             error.TypeError => error.TypeError,
             else => err,
         };
@@ -622,9 +621,9 @@ fn dateExtendedPrototypeCall(
     const rt = ctx.runtime;
     if (setterSpan(method_id)) |span| {
         const object = expectDateObject(this_value) catch
-            return vm_exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object");
+            return exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object");
         const captured_ms = dateValue(object) catch
-            return vm_exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object");
+            return exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object");
         var coerced_args: [4]core.JSValue = undefined;
         var coerced_len: usize = 0;
         defer {
@@ -637,7 +636,7 @@ fn dateExtendedPrototypeCall(
         return setDateFieldBody(rt, object, captured_ms, coerced_args[0..coerced_len], args.len, span);
     }
     return methodCallArgs(rt, this_value, method_id, args) catch |err| switch (err) {
-        error.TypeError => return vm_exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object"),
+        error.TypeError => return exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object"),
         else => err,
     };
 }
@@ -1472,7 +1471,7 @@ fn stringGetTzOffset(sp: [:0]const u8, pp: *usize, tzp: *i32, strict: bool) bool
 }
 
 /// string_match (quickjs.c:55622): case-insensitive keyword match.
-fn stringMatch(sp: [:0]const u8, pp: *usize, s: []const u8) bool {
+fn matchLiteral(sp: [:0]const u8, pp: *usize, s: []const u8) bool {
     var p = pp.*;
     for (s) |ch| {
         if (upperAscii(sp[p]) != upperAscii(ch)) return false;
@@ -1583,7 +1582,7 @@ const js_tzabbr = [_]TzAbbr{
 /// string_get_tzabbr (quickjs.c:55747).
 fn stringGetTzAbbr(sp: [:0]const u8, pp: *usize, offset: *i32) bool {
     for (js_tzabbr) |abbr| {
-        if (stringMatch(sp, pp, abbr.name)) {
+        if (matchLiteral(sp, pp, abbr.name)) {
             offset.* = abbr.offset;
             return true;
         }
@@ -1662,10 +1661,10 @@ fn jsDateParseOtherstring(sp: [:0]const u8, fields: *[9]i32, is_local: *bool) bo
         } else if (stringGetMonth(sp, &p, &fields[1])) {
             has_mon = true;
             _ = stringSkipUntil(sp, &p, "0123456789 -/(");
-        } else if (has_time and stringMatch(sp, &p, "PM")) {
+        } else if (has_time and matchLiteral(sp, &p, "PM")) {
             if (fields[3] < 12) fields[3] += 12;
             continue;
-        } else if (has_time and stringMatch(sp, &p, "AM")) {
+        } else if (has_time and matchLiteral(sp, &p, "AM")) {
             if (fields[3] == 12) fields[3] -= 12;
             continue;
         } else if (stringGetTzAbbr(sp, &p, &fields[8])) {

@@ -9,7 +9,7 @@ const bignum = @import("../libs/bigint.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
 const coercion_ops = @import("coercion_ops.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const exceptions = @import("exceptions.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -123,7 +123,7 @@ fn mathUnaryNative(comptime id: u32) core.host_function.NativeF64Fn {
                 1 => @abs(value),
                 2 => @floor(value),
                 3 => @ceil(value),
-                4 => qjsMathRound(value),
+                4 => mathRound(value),
                 5 => @sqrt(value),
                 10 => exp(value),
                 11 => @sin(value),
@@ -145,7 +145,7 @@ fn mathUnaryNative(comptime id: u32) core.host_function.NativeF64Fn {
                 31 => std.math.log1p(value),
                 32 => log2(value),
                 33 => @log10(value),
-                34 => qjsMathSign(value),
+                34 => mathSign(value),
                 35 => std.math.sinh(value),
                 36 => std.math.tanh(value),
                 else => @compileError("unsupported unary Math cproto id"),
@@ -158,7 +158,7 @@ fn mathBinaryNative(comptime id: u32) core.host_function.NativeF64F64Fn {
     return &struct {
         fn invoke(lhs: f64, rhs: f64) f64 {
             return switch (id) {
-                6 => qjsMathPow(lhs, rhs),
+                6 => mathPow(lhs, rhs),
                 17 => std.math.atan2(lhs, rhs),
                 else => @compileError("unsupported binary Math cproto id"),
             };
@@ -223,11 +223,11 @@ pub fn preparedOpCall(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *co
         1 => @abs(try mathArg(ctx, output, global, args, 0)),
         2 => @floor(try mathArg(ctx, output, global, args, 0)),
         3 => @ceil(try mathArg(ctx, output, global, args, 0)),
-        4 => qjsMathRound(try mathArg(ctx, output, global, args, 0)),
+        4 => mathRound(try mathArg(ctx, output, global, args, 0)),
         5 => @sqrt(try mathArg(ctx, output, global, args, 0)),
-        6 => qjsMathPow(try mathArg(ctx, output, global, args, 0), try mathArg(ctx, output, global, args, 1)),
-        7 => try qjsMathMinMax(ctx, output, global, args, false),
-        8 => try qjsMathMinMax(ctx, output, global, args, true),
+        6 => mathPow(try mathArg(ctx, output, global, args, 0), try mathArg(ctx, output, global, args, 1)),
+        7 => try mathMinMax(ctx, output, global, args, false),
+        8 => try mathMinMax(ctx, output, global, args, true),
         9 => mathRandom(ctx),
         10 => exp(try mathArg(ctx, output, global, args, 0)),
         11 => @sin(try mathArg(ctx, output, global, args, 0)),
@@ -251,12 +251,12 @@ pub fn preparedOpCall(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *co
         26 => std.math.expm1(try mathArg(ctx, output, global, args, 0)),
         27 => @as(f64, @floatCast(@as(f16, @floatCast(try mathArg(ctx, output, global, args, 0))))),
         28 => @as(f64, @floatCast(@as(f32, @floatCast(try mathArg(ctx, output, global, args, 0))))),
-        29 => try qjsMathHypot(ctx, output, global, args),
-        30 => @as(f64, @floatFromInt(qjsMathImul(try mathArg(ctx, output, global, args, 0), try mathArg(ctx, output, global, args, 1)))),
+        29 => try mathHypot(ctx, output, global, args),
+        30 => @as(f64, @floatFromInt(mathImul(try mathArg(ctx, output, global, args, 0), try mathArg(ctx, output, global, args, 1)))),
         31 => std.math.log1p(try mathArg(ctx, output, global, args, 0)),
         32 => log2(try mathArg(ctx, output, global, args, 0)),
         33 => @log10(try mathArg(ctx, output, global, args, 0)),
-        34 => qjsMathSign(try mathArg(ctx, output, global, args, 0)),
+        34 => mathSign(try mathArg(ctx, output, global, args, 0)),
         35 => std.math.sinh(try mathArg(ctx, output, global, args, 0)),
         36 => std.math.tanh(try mathArg(ctx, output, global, args, 0)),
         else => return error.TypeError,
@@ -285,7 +285,7 @@ pub fn toMathNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core
     return value_ops.numberValue(number_value) orelse std.math.nan(f64);
 }
 
-pub fn qjsMathMinMax(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, is_max: bool) !f64 {
+pub fn mathMinMax(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, is_max: bool) !f64 {
     if (args.len == 2) {
         const a_val = args[0];
         const b_val = args[1];
@@ -296,15 +296,15 @@ pub fn qjsMathMinMax(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *cor
             return @floatFromInt(if (is_max) (if (a_i32 > b_i32) a_i32 else b_i32) else (if (a_i32 < b_i32) a_i32 else b_i32));
         }
         if (a_val.isNumber() and b_val.isNumber()) {
-            const a = qjsPrimitiveMathNumber(a_val).?;
-            const b = qjsPrimitiveMathNumber(b_val).?;
+            const a = primitiveMathNumber(a_val).?;
+            const b = primitiveMathNumber(b_val).?;
             if (std.math.isNan(a)) return a;
             if (std.math.isNan(b)) return b;
-            return if (is_max) qjsFmax(a, b) else qjsFmin(a, b);
+            return if (is_max) fmax(a, b) else fmin(a, b);
         }
     }
     if (args.len == 0) return if (is_max) -std.math.inf(f64) else std.math.inf(f64);
-    if (qjsMathMinMaxPrimitiveFast(args, is_max)) |fast| return fast;
+    if (mathMinMaxPrimitiveFast(args, is_max)) |fast| return fast;
     var result = try toMathNumber(ctx, output, global, args[0]);
     for (args[1..]) |arg| {
         const number = try toMathNumber(ctx, output, global, arg);
@@ -312,31 +312,31 @@ pub fn qjsMathMinMax(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *cor
             result = if (std.math.isNan(number))
                 number
             else if (is_max)
-                qjsFmax(result, number)
+                fmax(result, number)
             else
-                qjsFmin(result, number);
+                fmin(result, number);
         }
     }
     return result;
 }
 
-pub fn qjsMathMinMaxPrimitiveFast(args: []const core.JSValue, is_max: bool) ?f64 {
+pub fn mathMinMaxPrimitiveFast(args: []const core.JSValue, is_max: bool) ?f64 {
     var result = if (is_max) -std.math.inf(f64) else std.math.inf(f64);
     for (args) |arg| {
-        const number = qjsPrimitiveMathNumber(arg) orelse return null;
+        const number = primitiveMathNumber(arg) orelse return null;
         if (!std.math.isNan(result)) {
             result = if (std.math.isNan(number))
                 number
             else if (is_max)
-                qjsFmax(result, number)
+                fmax(result, number)
             else
-                qjsFmin(result, number);
+                fmin(result, number);
         }
     }
     return result;
 }
 
-pub fn qjsPrimitiveMathNumber(value: core.JSValue) ?f64 {
+pub fn primitiveMathNumber(value: core.JSValue) ?f64 {
     if (value.isInt()) return @floatFromInt(value.asInt32().?);
     if (value.isFloat64()) return value.asFloat64().?;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
@@ -345,22 +345,22 @@ pub fn qjsPrimitiveMathNumber(value: core.JSValue) ?f64 {
     return null;
 }
 
-pub fn qjsFmin(a: f64, b: f64) f64 {
+pub fn fmin(a: f64, b: f64) f64 {
     if (a == 0 and b == 0) return @bitCast(@as(u64, @bitCast(a)) | @as(u64, @bitCast(b)));
     return if (a < b) a else b;
 }
 
-pub fn qjsFmax(a: f64, b: f64) f64 {
+pub fn fmax(a: f64, b: f64) f64 {
     if (a == 0 and b == 0) return @bitCast(@as(u64, @bitCast(a)) & @as(u64, @bitCast(b)));
     return if (a < b) b else a;
 }
 
-pub fn qjsMathPow(a: f64, b: f64) f64 {
+pub fn mathPow(a: f64, b: f64) f64 {
     if (!std.math.isFinite(b) and @abs(a) == 1) return std.math.nan(f64);
     return std.math.pow(f64, a, b);
 }
 
-pub fn qjsMathRound(a: f64) f64 {
+pub fn mathRound(a: f64) f64 {
     var bits: u64 = @bitCast(a);
     const exponent = (bits >> 52) & 0x7ff;
     if (exponent < 1023) {
@@ -379,7 +379,7 @@ pub fn qjsMathRound(a: f64) f64 {
     return @bitCast(bits);
 }
 
-pub fn qjsMathHypot(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue) !f64 {
+pub fn mathHypot(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue) !f64 {
     if (args.len == 0) return 0;
     var result = try toMathNumber(ctx, output, global, args[0]);
     if (args.len == 1) return @abs(result);
@@ -390,12 +390,12 @@ pub fn qjsMathHypot(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core
     return result;
 }
 
-pub fn qjsMathImul(lhs: f64, rhs: f64) i32 {
+pub fn mathImul(lhs: f64, rhs: f64) i32 {
     const product = toUint32Number(lhs) *% toUint32Number(rhs);
     return @bitCast(product);
 }
 
-pub fn qjsMathSign(value: f64) f64 {
+pub fn mathSign(value: f64) f64 {
     if (std.math.isNan(value) or value == 0) return value;
     return if (value < 0) -1 else 1;
 }
@@ -411,7 +411,7 @@ fn mathSumPreciseCall(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == host_call.ctx);
-    return qjsMathSumPrecise(
+    return mathSumPrecise(
         host_call.ctx,
         host_call.output,
         realm.global,
@@ -421,7 +421,7 @@ fn mathSumPreciseCall(
     );
 }
 
-pub fn qjsMathSumPrecise(
+pub fn mathSumPrecise(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -446,7 +446,7 @@ pub fn qjsMathSumPrecise(
         defer step.value.free(ctx.runtime);
         if (step.done) break;
         const number = value_ops.numberValue(step.value) orelse {
-            try call_runtime.qjsIteratorClose(ctx, output, global, iterator_value, caller_function, caller_frame);
+            try call_runtime.iteratorCloseValue(ctx, output, global, iterator_value, caller_function, caller_frame);
             return exception_ops.throwTypeErrorMessage(ctx, global, "not a number");
         };
         if (std.math.isNan(number)) {
@@ -571,11 +571,11 @@ pub fn call(id: u32, args: []const core.JSValue) !f64 {
         1 => @abs(a),
         2 => @floor(a),
         3 => @ceil(a),
-        4 => qjsMathRound(a),
+        4 => mathRound(a),
         5 => @sqrt(a),
-        6 => qjsMathPow(a, b),
-        7 => qjsMathMinMaxPrimitiveFast(args, false) orelse error.TypeError,
-        8 => qjsMathMinMaxPrimitiveFast(args, true) orelse error.TypeError,
+        6 => mathPow(a, b),
+        7 => mathMinMaxPrimitiveFast(args, false) orelse error.TypeError,
+        8 => mathMinMaxPrimitiveFast(args, true) orelse error.TypeError,
         // Random requires per-runtime state and is handled by mathOpCall before
         // this bare-runtime scalar fallback. Never return a fake constant.
         9 => error.TypeError,
@@ -598,12 +598,12 @@ pub fn call(id: u32, args: []const core.JSValue) !f64 {
         26 => std.math.expm1(a),
         27 => @floatCast(@as(f16, @floatCast(a))),
         28 => @floatCast(@as(f32, @floatCast(a))),
-        29 => qjsMathHypotPrimitive(args),
-        30 => @floatFromInt(qjsMathImul(a, b)),
+        29 => mathHypotPrimitive(args),
+        30 => @floatFromInt(mathImul(a, b)),
         31 => std.math.log1p(a),
         32 => log2(a),
         33 => @log10(a),
-        34 => qjsMathSign(a),
+        34 => mathSign(a),
         35 => std.math.sinh(a),
         36 => std.math.tanh(a),
         else => error.TypeError,
@@ -629,7 +629,7 @@ pub fn max(a: f64, b: f64) f64 {
     return if (a > b) a else b;
 }
 
-fn qjsMathHypotPrimitive(args: []const core.JSValue) !f64 {
+fn mathHypotPrimitive(args: []const core.JSValue) !f64 {
     if (args.len == 0) return 0;
     var result = try numberValue(args[0]);
     if (args.len == 1) return @abs(result);

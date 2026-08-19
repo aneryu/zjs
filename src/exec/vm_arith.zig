@@ -935,11 +935,7 @@ fn parseCheckedLocalShortBigIntLessThanImmediateCondition(code: []const u8, targ
     };
 }
 
-fn objectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
-}
+const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
 
 fn immediateInt32Operand(code: []const u8, pc: usize) ?ImmediateInt32 {
     if (pc >= code.len) return null;

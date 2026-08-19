@@ -37,34 +37,29 @@ The public comparison uses the 15-benchmark JavaScript Zoo suite. Scores are
 throughput; the ratio is `zjs score / QuickJS score`, so values at or above
 `1.0` indicate that zjs recorded the same or higher score in that benchmark.
 
-| Benchmark | QuickJS | zjs | zjs / QuickJS |
-| --- | ---: | ---: | ---: |
-| earley-boyer | 4,435.0 | 3,856.5 | 0.870 |
-| pdfjs | 7,186.0 | 6,581.5 | 0.916 |
-| box2d | 7,227.0 | 6,867.0 | 0.950 |
-| typescript | 21,929.5 | 21,188.5 | 0.966 |
-| splay | 6,714.5 | 6,825.0 | 1.016 |
-| deltablue | 1,405.0 | 1,436.5 | 1.022 |
-| richards | 1,613.5 | 1,686.5 | 1.045 |
-| gbemu | 12,536.0 | 13,355.5 | 1.065 |
-| mandreel | 1,983.0 | 2,128.0 | 1.073 |
-| crypto | 1,843.0 | 1,987.0 | 1.078 |
-| raytrace | 3,313.5 | 3,593.5 | 1.085 |
-| code-load | 31,953.5 | 35,050.0 | 1.097 |
-| zlib | 3,948.5 | 4,347.5 | 1.101 |
-| navier-stokes | 4,174.0 | 4,598.0 | 1.102 |
-| regexp | 794.0 | 921.5 | 1.161 |
-| **Throughput geomean** |  |  | **1.0335** |
+| Benchmark | zjs / QuickJS |
+| --- | ---: |
+| pdfjs | 0.849 |
+| earley-boyer | 0.886 |
+| box2d | 0.955 |
+| typescript | 0.958 |
+| splay | 1.013 |
+| deltablue | 1.028 |
+| richards | 1.041 |
+| gbemu | 1.069 |
+| crypto | 1.077 |
+| mandreel | 1.091 |
+| raytrace | 1.094 |
+| code-load | 1.095 |
+| navier-stokes | 1.105 |
+| zlib | 1.110 |
+| regexp | 1.139 |
+| **Throughput geomean** | **1.0304** |
 
 The suite also reports two latency sub-scores outside the 15-row throughput
-geomean:
+geomean: SplayLatency 0.993 and MandreelLatency 1.169.
 
-| Latency sub-score | QuickJS | zjs | zjs / QuickJS |
-| --- | ---: | ---: | ---: |
-| SplayLatency | 15,215.5 | 15,148.5 | 0.996 |
-| MandreelLatency | 13,223.5 | 15,826.0 | 1.197 |
-
-The comparison used zjs commit `0280e278`, Bellard QuickJS commit `04be246`,
+The comparison used zjs commit `0c32a71c`, Bellard QuickJS commit `04be246`,
 and 8 samples per benchmark. Of the 15 primary scores, 11 have a ratio at or
 above `1.0`.
 

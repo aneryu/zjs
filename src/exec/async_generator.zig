@@ -9,7 +9,7 @@
 //!   - js_async_generator_next          quickjs.c:21706 (asyncGeneratorEnqueue)
 //!   - js_async_generator_resume_next   quickjs.c:21568 (resumeNext + execBody)
 //!   - js_async_generator_await         quickjs.c:21446 (asyncGeneratorAwait)
-//!   - js_async_generator_resolve_function quickjs.c:21670 (qjsAsyncGeneratorResolveFunctionCall)
+//!   - js_async_generator_resolve_function quickjs.c:21670 (asyncGeneratorResolveFunctionCall)
 //!   - js_async_generator_complete      quickjs.c:21520 (complete)
 //!   - js_async_generator_completed_return quickjs.c:21532 (completedReturn)
 //!
@@ -31,7 +31,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const call_runtime = @import("call_runtime.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const exceptions = @import("exceptions.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
@@ -190,7 +190,7 @@ fn resolveFunction(
     action: ResolveAction,
     is_reject: bool,
 ) !core.JSValue {
-    const callback = try builtin_glue.qjsCreateDataFunction(rt, global, "", 1);
+    const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = object_ops.objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .async_generator_resolve);
@@ -208,16 +208,16 @@ fn asyncGeneratorAwait(
     value: core.JSValue,
     action: ResolveAction,
 ) HostError!void {
-    const promise_constructor = try promise_ops.qjsPromiseDefaultConstructor(ctx, global);
+    const promise_constructor = try promise_ops.promiseDefaultConstructor(ctx, global);
     defer promise_constructor.free(ctx.runtime);
-    const promise = try promise_ops.qjsPromiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, null, null);
+    const promise = try promise_ops.promiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, null, null);
     defer promise.free(ctx.runtime);
     const on_fulfilled = try resolveFunction(ctx.runtime, global, gen, action, false);
     defer on_fulfilled.free(ctx.runtime);
     const on_rejected = try resolveFunction(ctx.runtime, global, gen, action, true);
     defer on_rejected.free(ctx.runtime);
     // "no need to create 'thrownawayCapability' as in the spec" (quickjs.c:21464)
-    try promise_ops.qjsPerformPromiseThen(ctx, output, global, promise, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+    try promise_ops.performPromiseThen(ctx, output, global, promise, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
 
 /// Mirrors js_async_generator_completed_return (quickjs.c:21532), including
@@ -230,14 +230,14 @@ fn completedReturn(
     gen: *core.Object,
     value: core.JSValue,
 ) HostError!void {
-    const promise_constructor = try promise_ops.qjsPromiseDefaultConstructor(ctx, global);
+    const promise_constructor = try promise_ops.promiseDefaultConstructor(ctx, global);
     defer promise_constructor.free(ctx.runtime);
-    const promise = promise_ops.qjsPromiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, null, null) catch |err| blk: {
+    const promise = promise_ops.promiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, null, null) catch |err| blk: {
         switch (err) {
             error.OutOfMemory, error.ProcessExit, error.StackOverflow => return err,
             else => {},
         }
-        const reason = if (ctx.hasException()) ctx.takeException() else try exception_ops.qjsPromiseErrorValue(ctx, global, err);
+        const reason = if (ctx.hasException()) ctx.takeException() else try exception_ops.promiseErrorValue(ctx, global, err);
         defer reason.free(ctx.runtime);
         break :blk try core.promise.rejectedWithPrototype(ctx, reason, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
     };
@@ -246,7 +246,7 @@ fn completedReturn(
     defer on_fulfilled.free(ctx.runtime);
     const on_rejected = try resolveFunction(ctx.runtime, global, gen, .awaiting_return, true);
     defer on_rejected.free(ctx.runtime);
-    try promise_ops.qjsPerformPromiseThen(ctx, output, global, promise, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+    try promise_ops.performPromiseThen(ctx, output, global, promise, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +346,7 @@ fn execBody(
         }
         // exception completion: complete then reject with the pending
         // exception (quickjs.c:21624-21628)
-        const reason = try exception_ops.qjsPromiseErrorValue(ctx, global, err);
+        const reason = try exception_ops.promiseErrorValue(ctx, global, err);
         defer reason.free(rt);
         complete(ctx, gen);
         try settleHead(ctx, output, global, gen, reason, true);
@@ -370,7 +370,7 @@ fn execBody(
                     else => {},
                 }
                 // qjs: throw_flag=TRUE; goto resume_exec
-                const reason = if (ctx.hasException()) ctx.takeException() else try exception_ops.qjsPromiseErrorValue(ctx, global, err);
+                const reason = if (ctx.hasException()) ctx.takeException() else try exception_ops.promiseErrorValue(ctx, global, err);
                 defer reason.free(rt);
                 return try execBody(ctx, output, global, gen, .{ .throw_ = reason });
             };
@@ -385,7 +385,7 @@ fn execBody(
                     error.OutOfMemory, error.ProcessExit => return err,
                     else => {},
                 }
-                const reason = if (ctx.hasException()) ctx.takeException() else try exception_ops.qjsPromiseErrorValue(ctx, global, err);
+                const reason = if (ctx.hasException()) ctx.takeException() else try exception_ops.promiseErrorValue(ctx, global, err);
                 defer reason.free(rt);
                 return try execBody(ctx, output, global, gen, .{ .throw_ = reason });
             };
@@ -537,7 +537,7 @@ pub fn asyncGeneratorEnqueue(
 // quickjs.c:21670)
 // ---------------------------------------------------------------------------
 
-pub fn qjsAsyncGeneratorResolveFunctionCall(
+pub fn asyncGeneratorResolveFunctionCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,

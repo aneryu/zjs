@@ -2,7 +2,7 @@
 
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
-const iter_vm = @import("iterator_ops.zig");
+const iterator_ops = @import("iterator_ops.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
 const std = @import("std");
@@ -90,7 +90,7 @@ pub fn createForInIterator(
 
     // it->is_array = FALSE; it->obj = obj; it->idx = 0; it->tab_atom = NULL;
     // it->atom_count = 0; it->in_prototype_chain = FALSE (quickjs.c:16292-16297)
-    iterator.iteratorKindSlot().* = iter_vm.for_in_iterator_kind;
+    iterator.iteratorKindSlot().* = iterator_ops.for_in_iterator_kind;
     iterator.iteratorIndexSlot().* = 0;
     iterator.setIteratorLength(0);
     forInIsArraySlot(iterator).* = 0;

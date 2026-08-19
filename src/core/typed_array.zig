@@ -725,11 +725,7 @@ fn dataViewKindWidth(kind: u32) usize {
 
 // --- Object-shape guards ----------------------------------------------------
 
-pub fn expectObject(value: JSValue) !*Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    return @fieldParentPtr("header", header);
-}
+pub const expectObject = @import("value_semantics.zig").expectObject;
 
 pub fn expectArrayBufferObject(value: JSValue) !*Object {
     const obj = try expectObject(value);

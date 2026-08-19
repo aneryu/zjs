@@ -23,7 +23,7 @@ const repoRoot = process.cwd();
 
 const REQUIRED_PHASE_BOUNDARIES = [
   {
-    file: 'src/compiler_v2/root.zig',
+    file: 'src/compiler/root.zig',
     declaration: 'pub noinline fn compileFunctionV2ForPackedFinalize',
     symbol: 'compileFunctionV2ForPackedFinalize',
   },

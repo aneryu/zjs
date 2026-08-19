@@ -90,11 +90,9 @@ The checked performance gate is a ZJS self-baseline regression check, and
 single-script/runtime-profile artifacts are diagnostic. Do not treat
 external-process microbench timings as a semantic compatibility signal.
 
-Per-opcode profiling is currently unavailable: the build/CLI options remain,
-but the VM dispatcher does not populate opcode counts or timings. Historical
-runtime-profile artifacts remain evidence for their recorded binaries; do not
-refresh or use them for current attribution until an end-to-end non-zero-count
-test guards the restored scope.
+Per-opcode profiling requires the dedicated profiling build
+(`zig build zjs-profile`). The default `zjs` binary does not collect opcode
+counts and fails closed on `--profile-opcodes`.
 
 ## Documentation Scope
 

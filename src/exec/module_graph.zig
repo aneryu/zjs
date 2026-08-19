@@ -336,9 +336,9 @@ pub fn createModuleAwaitReactionPromise(
     global: *core.Object,
     awaited: core.JSValue,
 ) !core.JSValue {
-    const promise_constructor = try exec.promise_ops.qjsPromiseDefaultConstructor(context, global);
+    const promise_constructor = try exec.promise_ops.promiseDefaultConstructor(context, global);
     defer promise_constructor.free(runtime);
-    const awaited_promise = try exec.promise_ops.qjsPromiseStaticCall(
+    const awaited_promise = try exec.promise_ops.promiseStaticCall(
         context,
         output,
         global,
@@ -366,7 +366,7 @@ pub fn createModuleAwaitReactionPromise(
     defer resolve.free(runtime);
     const reject = try resolvers.getProperty(reject_atom);
     defer reject.free(runtime);
-    try exec.promise_ops.qjsPerformPromiseThen(
+    try exec.promise_ops.performPromiseThen(
         context,
         output,
         global,
@@ -664,7 +664,7 @@ fn dynamicImportJobRun(
                 // A TLA module returns its shared evaluation promise. Chain the
                 // import() capability instead of resolving it with the promise
                 // object itself (ContinueDynamicImport → PerformPromiseThen).
-                try exec.promise_ops.qjsPerformPromiseThen(
+                try exec.promise_ops.performPromiseThen(
                     ctx,
                     output,
                     global,

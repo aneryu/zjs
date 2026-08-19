@@ -51,7 +51,7 @@ pub const exec = @import("exec/root.zig");
 pub const libs = @import("libs/root.zig");
 pub const runtime = @import("runtime/root.zig");
 // QCP-1 scratch oracle surface for the CLI.
-pub const compiler_v2 = @import("compiler_v2/root.zig");
+pub const compiler = @import("compiler/root.zig");
 /// QCP-1 configuration signature, derived from the declarations the engine
 /// consumes. Surfaced on the CLI as `zjs --print-config-signature`.
 pub const config_signature = @import("config_signature.zig");

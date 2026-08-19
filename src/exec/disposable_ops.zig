@@ -2,7 +2,7 @@ const std = @import("std");
 const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode.zig");
 const frame_mod = @import("frame.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 
 const call_runtime = @import("call_runtime.zig");
 const object_ops = @import("object_ops.zig");
@@ -11,7 +11,7 @@ const callValueOrBytecodeSyncInternal = call_runtime.callValueOrBytecodeSyncInte
 const objectFromValue = object_ops.objectFromValue;
 const isCallableValue = call_runtime.isCallableValue;
 const getValueProperty = object_ops.getValueProperty;
-const qjsSuppressedErrorConstructWithPrototype = object_ops.qjsSuppressedErrorConstructWithPrototype;
+const suppressedErrorConstructWithPrototype = object_ops.suppressedErrorConstructWithPrototype;
 
 pub const DisposableStackMethod = enum(u8) {
     use = 1,
@@ -47,7 +47,7 @@ pub fn parserDisposableStackReceiver(receiver: core.JSValue) !*core.Object {
     return object;
 }
 
-pub fn qjsDisposableStackMethodCall(
+pub fn disposableStackMethodCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -62,16 +62,16 @@ pub fn qjsDisposableStackMethodCall(
     const method = disposableStackMethodFromMarker(marker) orelse return error.TypeError;
     const stack = try disposableStackReceiver(receiver);
     return switch (method) {
-        .use => try qjsDisposableStackUse(ctx, output, global, stack, args, caller_function, caller_frame),
-        .adopt => try qjsDisposableStackAdopt(ctx.runtime, stack, args),
-        .defer_ => try qjsDisposableStackDefer(ctx.runtime, stack, args),
-        .dispose => try qjsDisposableStackDispose(ctx, output, global, stack, caller_function, caller_frame),
-        .move => try qjsDisposableStackMove(ctx, global, stack),
+        .use => try disposableStackUse(ctx, output, global, stack, args, caller_function, caller_frame),
+        .adopt => try disposableStackAdopt(ctx.runtime, stack, args),
+        .defer_ => try disposableStackDefer(ctx.runtime, stack, args),
+        .dispose => try disposableStackDispose(ctx, output, global, stack, caller_function, caller_frame),
+        .move => try disposableStackMove(ctx, global, stack),
         .disposed_get => core.JSValue.boolean(stack.disposableStackDisposed()),
     };
 }
 
-pub fn qjsDisposableStackUse(
+pub fn disposableStackUse(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -92,7 +92,7 @@ pub fn qjsDisposableStackUse(
     return value.dup();
 }
 
-pub fn qjsDisposableStackAdopt(
+pub fn disposableStackAdopt(
     rt: *core.JSRuntime,
     stack: *core.Object,
     args: []const core.JSValue,
@@ -105,7 +105,7 @@ pub fn qjsDisposableStackAdopt(
     return value.dup();
 }
 
-pub fn qjsDisposableStackDefer(
+pub fn disposableStackDefer(
     rt: *core.JSRuntime,
     stack: *core.Object,
     args: []const core.JSValue,
@@ -117,7 +117,7 @@ pub fn qjsDisposableStackDefer(
     return core.JSValue.undefinedValue();
 }
 
-pub fn qjsDisposableStackDispose(
+pub fn disposableStackDispose(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -125,10 +125,10 @@ pub fn qjsDisposableStackDispose(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    return qjsDisposeDisposableStackResources(ctx, output, global, stack, null, caller_function, caller_frame);
+    return disposeDisposableStackResources(ctx, output, global, stack, null, caller_function, caller_frame);
 }
 
-pub fn qjsDisposableStackRecordDisposeError(
+pub fn disposableStackRecordDisposeError(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -141,7 +141,7 @@ pub fn qjsDisposableStackRecordDisposeError(
         var thrown_owned = true;
         errdefer if (thrown_owned) thrown.free(ctx.runtime);
 
-        const combined = try qjsSuppressedErrorForDispose(ctx, output, global, thrown, suppressed, caller_function, caller_frame);
+        const combined = try suppressedErrorForDispose(ctx, output, global, thrown, suppressed, caller_function, caller_frame);
         thrown_owned = false;
         pending_error.* = combined;
         thrown.free(ctx.runtime);
@@ -151,7 +151,7 @@ pub fn qjsDisposableStackRecordDisposeError(
     }
 }
 
-pub fn qjsDisposeDisposableStackResources(
+pub fn disposeDisposableStackResources(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -174,9 +174,9 @@ pub fn qjsDisposeDisposableStackResources(
 
     while (stack.popDisposableResource()) |resource| {
         defer resource.destroy(ctx.runtime);
-        qjsDisposeResource(ctx, output, global, resource, caller_function, caller_frame) catch |err| {
+        disposeResource(ctx, output, global, resource, caller_function, caller_frame) catch |err| {
             const thrown = try runtimeErrorValueForDisposableDispose(ctx, global, err);
-            try qjsDisposableStackRecordDisposeError(ctx, output, global, &pending_error, thrown, caller_function, caller_frame);
+            try disposableStackRecordDisposeError(ctx, output, global, &pending_error, thrown, caller_function, caller_frame);
         };
     }
 
@@ -188,7 +188,7 @@ pub fn qjsDisposeDisposableStackResources(
     return core.JSValue.undefinedValue();
 }
 
-pub fn qjsUsingAddSyncResource(
+pub fn usingAddSyncResource(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -208,7 +208,7 @@ pub fn qjsUsingAddSyncResource(
     return core.JSValue.undefinedValue();
 }
 
-pub fn qjsUsingDisposeSyncStack(
+pub fn usingDisposeSyncStack(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -216,10 +216,10 @@ pub fn qjsUsingDisposeSyncStack(
 ) !core.JSValue {
     if (args.len < 1) return error.TypeError;
     const stack = try parserDisposableStackReceiver(args[0]);
-    return qjsDisposeDisposableStackResources(ctx, output, global, stack, null, null, null);
+    return disposeDisposableStackResources(ctx, output, global, stack, null, null, null);
 }
 
-pub fn qjsUsingDisposeSyncStackForThrow(
+pub fn usingDisposeSyncStackForThrow(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -227,10 +227,10 @@ pub fn qjsUsingDisposeSyncStackForThrow(
 ) !core.JSValue {
     if (args.len < 2) return error.TypeError;
     const stack = try parserDisposableStackReceiver(args[0]);
-    return qjsDisposeDisposableStackResources(ctx, output, global, stack, args[1], null, null);
+    return disposeDisposableStackResources(ctx, output, global, stack, args[1], null, null);
 }
 
-pub fn qjsDisposeResource(
+pub fn disposeResource(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -259,7 +259,7 @@ pub fn runtimeErrorValueForDisposableDispose(
     return exception_ops.createNamedError(ctx, global, error_info.name, error_info.message);
 }
 
-pub fn qjsSuppressedErrorForDispose(
+pub fn suppressedErrorForDispose(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -270,10 +270,10 @@ pub fn qjsSuppressedErrorForDispose(
 ) !core.JSValue {
     const prototype = constructorPrototypeFromGlobal(ctx.runtime, global, "SuppressedError");
     const args = [_]core.JSValue{ error_value, suppressed_value };
-    return qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype, &args, caller_function, caller_frame);
+    return suppressedErrorConstructWithPrototype(ctx, output, global, prototype, &args, caller_function, caller_frame);
 }
 
-pub fn qjsDisposableStackMove(
+pub fn disposableStackMove(
     ctx: *core.JSContext,
     global: *core.Object,
     stack: *core.Object,

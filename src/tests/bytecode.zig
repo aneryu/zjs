@@ -4,7 +4,7 @@ const engine = zjs;
 
 const bytecode = zjs.bytecode;
 const core = zjs.core;
-const compiler_v2 = zjs.compiler_v2;
+const compiler = zjs.compiler;
 const frame_mod = zjs.exec.frame;
 const parser = zjs.parser;
 const parser_tests = @import("parser.zig");
@@ -248,10 +248,10 @@ const function_def = bytecode.function_def;
 /// attached Builder is rejected by `prepareCurrentBeforeChildren`, so every
 /// fixture that reaches the finalizer must emit through this.
 /// The Builder is owned by the FunctionDef and released by `fd.deinit`.
-fn attachV2Builder(fd: *function_def.FunctionDef) !*compiler_v2.Builder {
+fn attachV2Builder(fd: *function_def.FunctionDef) !*compiler.Builder {
     if (fd.v2_builder) |existing| return existing;
-    const b = try fd.memory.create(compiler_v2.Builder);
-    b.* = compiler_v2.Builder.init(fd.memory, fd.atoms);
+    const b = try fd.memory.create(compiler.Builder);
+    b.* = compiler.Builder.init(fd.memory, fd.atoms);
     fd.v2_builder = b;
     return b;
 }
@@ -1215,7 +1215,7 @@ test "compiler-v2 run rejects cyclic scope links before trusted lookup" {
     fd.vars[@intCast(local_idx)].scope_next = local_idx;
     try std.testing.expectError(
         error.InvalidBytecode,
-        compiler_v2.resolve_variables.run(&function, &fd),
+        compiler.resolve_variables.run(&function, &fd),
     );
 }
 
@@ -1259,14 +1259,14 @@ test "compiler-v2 parent miss proves corrupt and cyclic synthetic ancestors" {
     parent.vars[@intCast(parent_local_idx)].scope_next = parent_local_idx;
     try std.testing.expectError(
         error.InvalidBytecode,
-        compiler_v2.resolve_variables.run(&function, &child),
+        compiler.resolve_variables.run(&function, &child),
     );
 
     parent.vars[@intCast(parent_local_idx)].scope_next = -1;
     parent.parent = &parent;
     try std.testing.expectError(
         error.InvalidBytecode,
-        compiler_v2.resolve_variables.run(&function, &child),
+        compiler.resolve_variables.run(&function, &child),
     );
     parent.parent = null;
 }

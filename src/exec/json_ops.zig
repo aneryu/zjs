@@ -8,7 +8,7 @@ const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
 const coercion_ops = @import("coercion_ops.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const exceptions = @import("exceptions.zig");
 const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
@@ -129,7 +129,7 @@ fn jsonParseRecordCall(
         if (host_call.func_obj != null) return error.InvalidBuiltinRegistry;
         break :blk host_call.global orelse return error.InvalidBuiltinRegistry;
     };
-    if (try qjsJsonParseCall(ctx, host_call.output, global, host_call.args, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call))) |value| return value;
+    if (try jsonParseCall(ctx, host_call.output, global, host_call.args, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call))) |value| return value;
     return error.TypeError;
 }
 
@@ -143,7 +143,7 @@ fn jsonStringifyRecordCall(
     const ctx = host_call.ctx;
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == ctx);
-    if (try qjsJsonStringifyCall(ctx, host_call.output, realm.global, host_call.args, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call))) |value| return value;
+    if (try jsonStringifyCall(ctx, host_call.output, realm.global, host_call.args, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call))) |value| return value;
     return error.TypeError;
 }
 
@@ -1444,11 +1444,7 @@ fn cachedRealmObject(rt: *core.JSRuntime, global: ?*core.Object, slot: core.obje
     return objectFromValue(stored);
 }
 
-fn objectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
-}
+const objectFromValue = core.value_semantics.objectFromValue;
 
 fn constructorPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object, name: []const u8) ?*core.Object {
     _ = rt;
@@ -1852,7 +1848,7 @@ fn deinitLengthIndexAtom(rt: *core.JSRuntime, atom: anytype) void {
     if (atom.owned) rt.atoms.free(atom.atom);
 }
 
-pub fn qjsJsonParseCall(
+pub fn jsonParseCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1958,7 +1954,7 @@ pub fn qjsJsonParseCall(
         caller_function,
         caller_frame,
     );
-    return try qjsJsonInternalizeProperty(ctx, output, global, holder_value, root_key, reviver, &reviver_call, &parse_result.record, caller_function, caller_frame);
+    return try jsonInternalizeProperty(ctx, output, global, holder_value, root_key, reviver, &reviver_call, &parse_result.record, caller_function, caller_frame);
 }
 
 test "JSON.parse roots direct function bytecode input while coercing to string" {
@@ -1987,7 +1983,7 @@ test "JSON.parse roots direct function bytecode input while coercing to string" 
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    try std.testing.expectError(error.SyntaxError, qjsJsonParseCall(ctx, null, global, &args, null, null));
+    try std.testing.expectError(error.SyntaxError, jsonParseCall(ctx, null, global, &args, null, null));
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
     input.free(rt);
@@ -2004,7 +2000,7 @@ test "JSON.parse roots direct function bytecode input while coercing to string" 
 /// prior implementation did up to three), then recurses over children, then
 /// invokes the reviver with a `context` carrying `source` only for primitives
 /// whose parse-time value still matches (json#8).
-pub fn qjsJsonInternalizeProperty(
+pub fn jsonInternalizeProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2069,7 +2065,7 @@ pub fn qjsJsonInternalizeProperty(
                 const child_key = try object_ops.propertyAtomFromLengthIndex(ctx.runtime, index);
                 defer deinitLengthIndexAtom(ctx.runtime, child_key);
                 const child_record: ?*const JsonParseRecord = if (active_record) |rec| rec.arrayElement(index) else null;
-                try qjsJsonInternalizeChild(ctx, output, global, value, object, child_key.atom, rooted_reviver, reviver_call, child_record, caller_function, caller_frame);
+                try jsonInternalizeChild(ctx, output, global, value, object, child_key.atom, rooted_reviver, reviver_call, child_record, caller_function, caller_frame);
             }
         } else {
             // qjs snapshots own enumerable STRING property names ONCE via
@@ -2094,7 +2090,7 @@ pub fn qjsJsonInternalizeProperty(
             }
             for (enumerable_keys.items) |child_key| {
                 const child_record: ?*const JsonParseRecord = if (active_record) |rec| rec.findObjectEntry(child_key) else null;
-                try qjsJsonInternalizeChild(ctx, output, global, value, object, child_key, rooted_reviver, reviver_call, child_record, caller_function, caller_frame);
+                try jsonInternalizeChild(ctx, output, global, value, object, child_key, rooted_reviver, reviver_call, child_record, caller_function, caller_frame);
             }
         }
     }
@@ -2108,7 +2104,7 @@ pub fn qjsJsonInternalizeProperty(
     // context.source only for primitives with a surviving record
     // (quickjs.c:49784: the source branch is in the `else` of JS_IsObject(val)).
     const primitive_record: ?*const JsonParseRecord = if (object_ops.objectFromValue(value) == null) active_record else null;
-    context_value = try qjsJsonReviverContext(ctx.runtime, global, primitive_record);
+    context_value = try jsonReviverContext(ctx.runtime, global, primitive_record);
     defer {
         const owned_context = context_value;
         context_value = core.JSValue.undefinedValue();
@@ -2126,7 +2122,7 @@ pub fn qjsJsonInternalizeProperty(
 /// Recurse into one child then define/delete the result (the loop body of
 /// internalize_json_property, quickjs.c:49762-49782). The recursion performs the
 /// single [[Get]] for this child; no prefetch Get is done here.
-pub fn qjsJsonInternalizeChild(
+pub fn jsonInternalizeChild(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2160,7 +2156,7 @@ pub fn qjsJsonInternalizeChild(
         }
     }
 
-    revived = try qjsJsonInternalizeProperty(ctx, output, global, rooted_holder_value, key, rooted_reviver, reviver_call, record, caller_function, caller_frame);
+    revived = try jsonInternalizeProperty(ctx, output, global, rooted_holder_value, key, rooted_reviver, reviver_call, record, caller_function, caller_frame);
     defer {
         const owned_revived = revived;
         revived = core.JSValue.undefinedValue();
@@ -2169,7 +2165,7 @@ pub fn qjsJsonInternalizeChild(
     if (revived.isUndefined()) {
         _ = try object_ops.deleteValueProperty(ctx, output, global, rooted_holder_value, holder, key, caller_function, caller_frame);
     } else {
-        try qjsJsonCreateDataProperty(ctx, output, global, rooted_holder_value, holder, key, revived, caller_function, caller_frame);
+        try jsonCreateDataProperty(ctx, output, global, rooted_holder_value, holder, key, revived, caller_function, caller_frame);
     }
 }
 
@@ -2177,7 +2173,7 @@ pub fn qjsJsonInternalizeChild(
 /// 49784-49792 the primitive source branch). `record` is non-null only for a
 /// primitive value whose parse-time value survived the same-value guard; in
 /// that case `context.source` is created from the recorded source span.
-fn qjsJsonReviverContext(rt: *core.JSRuntime, global: *core.Object, record: ?*const JsonParseRecord) !core.JSValue {
+fn jsonReviverContext(rt: *core.JSRuntime, global: *core.Object, record: ?*const JsonParseRecord) !core.JSValue {
     var object_value = core.JSValue.undefinedValue();
     var source_value = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
@@ -2221,7 +2217,7 @@ fn qjsJsonReviverContext(rt: *core.JSRuntime, global: *core.Object, record: ?*co
     return object_value;
 }
 
-pub fn qjsJsonCreateDataProperty(
+pub fn jsonCreateDataProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2264,7 +2260,7 @@ pub fn qjsJsonCreateDataProperty(
     };
 }
 
-pub fn qjsJsonStringifyCall(
+pub fn jsonStringifyCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2296,12 +2292,12 @@ pub fn qjsJsonStringifyCall(
     }
 
     if (replacer.isUndefined() and space.isUndefined()) {
-        if (try qjsJsonStringifySimpleNoOptions(ctx.runtime, global, value)) |fast| return fast;
+        if (try jsonStringifySimpleNoOptions(ctx.runtime, global, value)) |fast| return fast;
     }
 
-    const property_list = try qjsJsonStringifyPropertyList(ctx, output, global, replacer, caller_function, caller_frame);
+    const property_list = try jsonStringifyPropertyList(ctx, output, global, replacer, caller_function, caller_frame);
     defer property_list.deinit(ctx.runtime);
-    var gap = try qjsJsonStringifyGap(ctx, output, global, space, caller_function, caller_frame);
+    var gap = try jsonStringifyGap(ctx, output, global, space, caller_function, caller_frame);
     defer gap.deinit(ctx.runtime.memory.allocator);
     var replacer_call_storage: call_runtime.SyncInternalCallSite = undefined;
     const replacer_call: ?*call_runtime.SyncInternalCallSite = if (call_runtime.isCallableValue(replacer)) blk: {
@@ -2339,7 +2335,7 @@ pub fn qjsJsonStringifyCall(
     defer buffer.deinit(ctx.runtime.memory.allocator);
     var stack = std.ArrayList(*core.Object).empty;
     defer stack.deinit(ctx.runtime.memory.allocator);
-    try qjsJsonSerializeProperty(ctx, output, global, &buffer, holder_value, holder, root_key, false, &stack, options, 0, caller_function, caller_frame);
+    try jsonSerializeProperty(ctx, output, global, &buffer, holder_value, holder, root_key, false, &stack, options, 0, caller_function, caller_frame);
     if (buffer.items.len == 0) return core.JSValue.undefinedValue();
     return try createJsonStringValue(ctx.runtime, buffer.items);
 }
@@ -2374,7 +2370,7 @@ test "JSON.stringify roots direct function bytecode value while creating holder"
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const maybe_result = try qjsJsonStringifyCall(ctx, null, global, &args, null, null);
+    const maybe_result = try jsonStringifyCall(ctx, null, global, &args, null, null);
     try std.testing.expect(maybe_result != null);
     const result = maybe_result.?;
     defer result.free(rt);
@@ -2390,19 +2386,19 @@ test "JSON.stringify roots direct function bytecode value while creating holder"
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn qjsJsonStringifySimpleNoOptions(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue) SimpleJsonStringifyError!?core.JSValue {
+fn jsonStringifySimpleNoOptions(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue) SimpleJsonStringifyError!?core.JSValue {
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     var stack = std.ArrayList(*core.Object).empty;
     defer stack.deinit(rt.memory.allocator);
-    return switch (try qjsJsonAppendSimpleValue(rt, global, &buffer, value, false, &stack)) {
+    return switch (try jsonAppendSimpleValue(rt, global, &buffer, value, false, &stack)) {
         .appended => try createJsonStringValue(rt, buffer.items),
         .omitted => core.JSValue.undefinedValue(),
         .fallback => null,
     };
 }
 
-fn qjsJsonAppendSimpleValue(
+fn jsonAppendSimpleValue(
     rt: *core.JSRuntime,
     global: *core.Object,
     buffer: *std.ArrayList(u8),
@@ -2459,12 +2455,12 @@ fn qjsJsonAppendSimpleValue(
         return .appended;
     };
     if (call_runtime.isCallableValue(value)) return .fallback;
-    if (!qjsJsonSimplePrototypeChainHasNoToJSON(object)) return .fallback;
-    if (object.isArray()) return try qjsJsonAppendSimpleArray(rt, global, buffer, object, stack);
-    return try qjsJsonAppendSimpleObject(rt, global, buffer, object, stack);
+    if (!jsonSimplePrototypeChainHasNoToJSON(object)) return .fallback;
+    if (object.isArray()) return try jsonAppendSimpleArray(rt, global, buffer, object, stack);
+    return try jsonAppendSimpleObject(rt, global, buffer, object, stack);
 }
 
-fn qjsJsonSimplePrototypeChainHasNoToJSON(object: *core.Object) bool {
+fn jsonSimplePrototypeChainHasNoToJSON(object: *core.Object) bool {
     const to_json_key = core.atom.ids.toJSON;
     var cursor: ?*core.Object = object;
     while (cursor) |current| {
@@ -2475,7 +2471,7 @@ fn qjsJsonSimplePrototypeChainHasNoToJSON(object: *core.Object) bool {
     return true;
 }
 
-fn qjsJsonAppendSimpleArray(
+fn jsonAppendSimpleArray(
     rt: *core.JSRuntime,
     global: *core.Object,
     buffer: *std.ArrayList(u8),
@@ -2484,7 +2480,7 @@ fn qjsJsonAppendSimpleArray(
 ) SimpleJsonStringifyError!SimpleJsonResult {
     const start = buffer.items.len;
     if (object.hasExoticMethods() or object.arrayElementStorageMode() != .dense) return .fallback;
-    if (qjsJsonObjectInStack(stack.items, object)) return error.TypeError;
+    if (jsonObjectInStack(stack.items, object)) return error.TypeError;
     const elements = object.arrayElements();
     if (object.arrayLength() > elements.len) return .fallback;
     for (object.shapeProps()) |prop| {
@@ -2501,7 +2497,7 @@ fn qjsJsonAppendSimpleArray(
     while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
         const element = elements[index];
-        switch (try qjsJsonAppendSimpleValue(rt, global, buffer, element, true, stack)) {
+        switch (try jsonAppendSimpleValue(rt, global, buffer, element, true, stack)) {
             .appended => {},
             .omitted => try buffer.appendSlice(rt.memory.allocator, "null"),
             .fallback => {
@@ -2514,7 +2510,7 @@ fn qjsJsonAppendSimpleArray(
     return .appended;
 }
 
-fn qjsJsonAppendSimpleObject(
+fn jsonAppendSimpleObject(
     rt: *core.JSRuntime,
     global: *core.Object,
     buffer: *std.ArrayList(u8),
@@ -2523,7 +2519,7 @@ fn qjsJsonAppendSimpleObject(
 ) SimpleJsonStringifyError!SimpleJsonResult {
     const start = buffer.items.len;
     if (object.hasExoticMethods() or object.isProxy() or object.class_id != core.class.ids.object) return .fallback;
-    if (qjsJsonObjectInStack(stack.items, object)) return error.TypeError;
+    if (jsonObjectInStack(stack.items, object)) return error.TypeError;
 
     try stack.append(rt.memory.allocator, object);
     defer _ = stack.pop();
@@ -2552,7 +2548,7 @@ fn qjsJsonAppendSimpleObject(
         if (emitted) try buffer.append(rt.memory.allocator, ',');
         try appendJsonAtomName(rt, buffer, prop.atom_id);
         try buffer.append(rt.memory.allocator, ':');
-        switch (try qjsJsonAppendSimpleValue(rt, global, buffer, child_value, false, stack)) {
+        switch (try jsonAppendSimpleValue(rt, global, buffer, child_value, false, stack)) {
             .appended => emitted = true,
             .omitted => {
                 buffer.shrinkRetainingCapacity(property_start);
@@ -2568,7 +2564,7 @@ fn qjsJsonAppendSimpleObject(
     return .appended;
 }
 
-pub fn qjsJsonStringifyPropertyList(
+pub fn jsonStringifyPropertyList(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2617,8 +2613,8 @@ pub fn qjsJsonStringifyPropertyList(
             item = core.JSValue.undefinedValue();
             owned_item.free(ctx.runtime);
         }
-        const atom = try qjsJsonStringifyPropertyListAtom(ctx, output, global, item, caller_function, caller_frame) orelse continue;
-        if (qjsJsonAtomListContains(list.items, atom)) {
+        const atom = try jsonStringifyPropertyListAtom(ctx, output, global, item, caller_function, caller_frame) orelse continue;
+        if (jsonAtomListContains(list.items, atom)) {
             ctx.runtime.atoms.free(atom);
             continue;
         }
@@ -2632,7 +2628,7 @@ pub fn qjsJsonStringifyPropertyList(
     };
 }
 
-fn qjsJsonStringifyPropertyListAtom(
+fn jsonStringifyPropertyListAtom(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2661,7 +2657,7 @@ fn qjsJsonStringifyPropertyListAtom(
 
     const needs_string = rooted_value.isString() or
         value_ops.numberValue(rooted_value) != null or
-        qjsJsonIsStringOrNumberObject(rooted_value);
+        jsonIsStringOrNumberObject(rooted_value);
     if (!needs_string) return null;
 
     string_value = try string_ops.toStringForAnnexB(ctx, output, global, rooted_value, caller_function, caller_frame);
@@ -2674,19 +2670,19 @@ fn qjsJsonStringifyPropertyListAtom(
     return try string_object.internAtom(ctx.runtime);
 }
 
-fn qjsJsonIsStringOrNumberObject(value: core.JSValue) bool {
+fn jsonIsStringOrNumberObject(value: core.JSValue) bool {
     const object = object_ops.objectFromValue(value) orelse return false;
     return object.class_id == core.class.ids.string or object.class_id == core.class.ids.number;
 }
 
-fn qjsJsonAtomListContains(items: []const core.Atom, atom: core.Atom) bool {
+fn jsonAtomListContains(items: []const core.Atom, atom: core.Atom) bool {
     for (items) |item| {
         if (item == atom) return true;
     }
     return false;
 }
 
-pub fn qjsJsonStringifyGap(
+pub fn jsonStringifyGap(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2733,7 +2729,7 @@ pub fn qjsJsonStringifyGap(
                     number_value = core.JSValue.undefinedValue();
                     owned_number.free(ctx.runtime);
                 }
-                return qjsJsonStringifyGap(ctx, output, global, number_value, caller_function, caller_frame);
+                return jsonStringifyGap(ctx, output, global, number_value, caller_function, caller_frame);
             } else if (object.class_id == core.class.ids.string) {
                 string_value = try string_ops.toStringForAnnexB(ctx, output, global, rooted_space, caller_function, caller_frame);
                 defer {
@@ -2741,15 +2737,15 @@ pub fn qjsJsonStringifyGap(
                     string_value = core.JSValue.undefinedValue();
                     owned_string.free(ctx.runtime);
                 }
-                return qjsJsonStringifyGap(ctx, output, global, string_value, caller_function, caller_frame);
+                return jsonStringifyGap(ctx, output, global, string_value, caller_function, caller_frame);
             } else if (object.class_id == core.class.ids.boolean) {
-                primitive = try qjsJsonPrimitiveWrapperValue(ctx.runtime, object) orelse return out;
+                primitive = try jsonPrimitiveWrapperValue(ctx.runtime, object) orelse return out;
                 defer {
                     const owned_primitive = primitive;
                     primitive = core.JSValue.undefinedValue();
                     owned_primitive.free(ctx.runtime);
                 }
-                return qjsJsonStringifyGap(ctx, output, global, primitive, caller_function, caller_frame);
+                return jsonStringifyGap(ctx, output, global, primitive, caller_function, caller_frame);
             }
         }
     }
@@ -2801,7 +2797,7 @@ pub fn qjsJsonStringifyGap(
     return out;
 }
 
-pub fn qjsJsonSerializeProperty(
+pub fn jsonSerializeProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2882,10 +2878,10 @@ pub fn qjsJsonSerializeProperty(
     }
 
     _ = holder;
-    try qjsJsonAppendValue(ctx, output, global, buffer, value, array_slot, stack, options, depth, caller_function, caller_frame);
+    try jsonAppendValue(ctx, output, global, buffer, value, array_slot, stack, options, depth, caller_function, caller_frame);
 }
 
-pub fn qjsJsonAppendValue(
+pub fn jsonAppendValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2970,7 +2966,7 @@ pub fn qjsJsonAppendValue(
                 number_value = core.JSValue.undefinedValue();
                 owned_number.free(ctx.runtime);
             }
-            try qjsJsonAppendValue(ctx, output, global, buffer, number_value, array_slot, stack, options, depth, caller_function, caller_frame);
+            try jsonAppendValue(ctx, output, global, buffer, number_value, array_slot, stack, options, depth, caller_function, caller_frame);
         } else if (object.class_id == core.class.ids.string) {
             string_value = try string_ops.toStringForAnnexB(ctx, output, global, rooted_value, caller_function, caller_frame);
             defer {
@@ -2978,15 +2974,15 @@ pub fn qjsJsonAppendValue(
                 string_value = core.JSValue.undefinedValue();
                 owned_string.free(ctx.runtime);
             }
-            try qjsJsonAppendValue(ctx, output, global, buffer, string_value, array_slot, stack, options, depth, caller_function, caller_frame);
+            try jsonAppendValue(ctx, output, global, buffer, string_value, array_slot, stack, options, depth, caller_function, caller_frame);
         } else if (object.class_id == core.class.ids.boolean) {
-            primitive = try qjsJsonPrimitiveWrapperValue(ctx.runtime, object) orelse core.JSValue.undefinedValue();
+            primitive = try jsonPrimitiveWrapperValue(ctx.runtime, object) orelse core.JSValue.undefinedValue();
             defer {
                 const owned_primitive = primitive;
                 primitive = core.JSValue.undefinedValue();
                 owned_primitive.free(ctx.runtime);
             }
-            try qjsJsonAppendValue(ctx, output, global, buffer, primitive, array_slot, stack, options, depth, caller_function, caller_frame);
+            try jsonAppendValue(ctx, output, global, buffer, primitive, array_slot, stack, options, depth, caller_function, caller_frame);
         } else if (object.class_id == core.class.ids.big_int) {
             primitive = coercion_ops.primitiveWrapperStoredValue(ctx.runtime, rooted_value) orelse return error.TypeError;
             defer {
@@ -2994,18 +2990,18 @@ pub fn qjsJsonAppendValue(
                 primitive = core.JSValue.undefinedValue();
                 owned_primitive.free(ctx.runtime);
             }
-            try qjsJsonAppendValue(ctx, output, global, buffer, primitive, array_slot, stack, options, depth, caller_function, caller_frame);
+            try jsonAppendValue(ctx, output, global, buffer, primitive, array_slot, stack, options, depth, caller_function, caller_frame);
         } else if (try core.array.isArrayValue(rooted_value)) {
-            try qjsJsonAppendArray(ctx, output, global, buffer, rooted_value, object, stack, options, depth, caller_function, caller_frame);
+            try jsonAppendArray(ctx, output, global, buffer, rooted_value, object, stack, options, depth, caller_function, caller_frame);
         } else {
-            try qjsJsonAppendObject(ctx, output, global, buffer, rooted_value, object, stack, options, depth, caller_function, caller_frame);
+            try jsonAppendObject(ctx, output, global, buffer, rooted_value, object, stack, options, depth, caller_function, caller_frame);
         }
     } else {
         try buffer.appendSlice(ctx.runtime.memory.allocator, "null");
     }
 }
 
-pub fn qjsJsonAppendArray(
+pub fn jsonAppendArray(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3035,7 +3031,7 @@ pub fn qjsJsonAppendArray(
         }
     }
 
-    if (qjsJsonObjectInStack(stack.items, object)) return error.TypeError;
+    if (jsonObjectInStack(stack.items, object)) return error.TypeError;
     try stack.append(ctx.runtime.memory.allocator, object);
     defer _ = stack.pop();
     const length_value = try object_ops.getValueProperty(ctx, output, global, rooted_value, core.atom.ids.length, caller_function, caller_frame);
@@ -3047,20 +3043,20 @@ pub fn qjsJsonAppendArray(
         if (index != 0) try buffer.append(ctx.runtime.memory.allocator, ',');
         if (options.gap.len != 0) {
             try buffer.append(ctx.runtime.memory.allocator, '\n');
-            try qjsJsonAppendIndent(ctx.runtime, buffer, options.gap, depth + 1);
+            try jsonAppendIndent(ctx.runtime, buffer, options.gap, depth + 1);
         }
         const child_key = try object_ops.propertyAtomFromLengthIndex(ctx.runtime, index);
         defer deinitLengthIndexAtom(ctx.runtime, child_key);
-        try qjsJsonSerializeProperty(ctx, output, global, buffer, rooted_value, object, child_key.atom, true, stack, options, depth + 1, caller_function, caller_frame);
+        try jsonSerializeProperty(ctx, output, global, buffer, rooted_value, object, child_key.atom, true, stack, options, depth + 1, caller_function, caller_frame);
     }
     if (options.gap.len != 0 and length != 0) {
         try buffer.append(ctx.runtime.memory.allocator, '\n');
-        try qjsJsonAppendIndent(ctx.runtime, buffer, options.gap, depth);
+        try jsonAppendIndent(ctx.runtime, buffer, options.gap, depth);
     }
     try buffer.append(ctx.runtime.memory.allocator, ']');
 }
 
-pub fn qjsJsonAppendObject(
+pub fn jsonAppendObject(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3090,7 +3086,7 @@ pub fn qjsJsonAppendObject(
         }
     }
 
-    if (qjsJsonObjectInStack(stack.items, object)) return error.TypeError;
+    if (jsonObjectInStack(stack.items, object)) return error.TypeError;
     try stack.append(ctx.runtime.memory.allocator, object);
     defer _ = stack.pop();
     try buffer.append(ctx.runtime.memory.allocator, '{');
@@ -3113,7 +3109,7 @@ pub fn qjsJsonAppendObject(
         const before = buffer.items.len;
         var child = std.ArrayList(u8).empty;
         defer child.deinit(ctx.runtime.memory.allocator);
-        try qjsJsonSerializeProperty(ctx, output, global, &child, rooted_value, object, key, false, stack, options, depth + 1, caller_function, caller_frame);
+        try jsonSerializeProperty(ctx, output, global, &child, rooted_value, object, key, false, stack, options, depth + 1, caller_function, caller_frame);
         if (child.items.len == 0) {
             buffer.shrinkRetainingCapacity(before);
             continue;
@@ -3121,7 +3117,7 @@ pub fn qjsJsonAppendObject(
         if (emitted) try buffer.append(ctx.runtime.memory.allocator, ',');
         if (options.gap.len != 0) {
             try buffer.append(ctx.runtime.memory.allocator, '\n');
-            try qjsJsonAppendIndent(ctx.runtime, buffer, options.gap, depth + 1);
+            try jsonAppendIndent(ctx.runtime, buffer, options.gap, depth + 1);
         }
         emitted = true;
         try appendJsonAtomName(ctx.runtime, buffer, key);
@@ -3130,12 +3126,12 @@ pub fn qjsJsonAppendObject(
     }
     if (options.gap.len != 0 and emitted) {
         try buffer.append(ctx.runtime.memory.allocator, '\n');
-        try qjsJsonAppendIndent(ctx.runtime, buffer, options.gap, depth);
+        try jsonAppendIndent(ctx.runtime, buffer, options.gap, depth);
     }
     try buffer.append(ctx.runtime.memory.allocator, '}');
 }
 
-pub fn qjsJsonPrimitiveWrapperValue(rt: *core.JSRuntime, object: *core.Object) !?core.JSValue {
+pub fn jsonPrimitiveWrapperValue(rt: *core.JSRuntime, object: *core.Object) !?core.JSValue {
     _ = rt;
     if (object.class_id == core.class.ids.string) {
         if (object.objectData()) |stored| return stored.dup();
@@ -3150,14 +3146,14 @@ pub fn qjsJsonPrimitiveWrapperValue(rt: *core.JSRuntime, object: *core.Object) !
     }
 }
 
-pub fn qjsJsonObjectInStack(items: []const *core.Object, object: *core.Object) bool {
+pub fn jsonObjectInStack(items: []const *core.Object, object: *core.Object) bool {
     for (items) |item| {
         if (item == object) return true;
     }
     return false;
 }
 
-pub fn qjsJsonAppendIndent(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), gap: []const u8, depth: usize) !void {
+pub fn jsonAppendIndent(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), gap: []const u8, depth: usize) !void {
     var index: usize = 0;
     while (index < depth) : (index += 1) try buffer.appendSlice(rt.memory.allocator, gap);
 }

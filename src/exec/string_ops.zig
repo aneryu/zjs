@@ -9,9 +9,9 @@ const string_id_lookup = core.host_function.builtin_method_id_lookup.string;
 const regexp_adapter = @import("regexp_adapter.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const call_mod = @import("call.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const frame_mod = @import("frame.zig");
-const iter_vm = @import("iterator_ops.zig");
+const iterator_ops = @import("iterator_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -313,11 +313,11 @@ const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
 const propertyAtomFromLengthIndex = object_ops.propertyAtomFromLengthIndex;
 const propertyEscapePattern = object_ops.propertyEscapePattern;
 const proxyTargetIsCallableObject = object_ops.proxyTargetIsCallableObject;
-const qjsArrayLastIndexSparseLarge = array_ops.qjsArrayLastIndexSparseLarge;
-const qjsIteratorPrototype = object_ops.qjsIteratorPrototype;
-const qjsRegExpConstructCall = regexp_fastpath.qjsRegExpConstructCall;
-const qjsRegExpExecGeneric = regexp_fastpath.qjsRegExpExecGeneric;
-const qjsRegExpSpeciesConstructor = regexp_fastpath.qjsRegExpSpeciesConstructor;
+const arrayLastIndexSparseLarge = array_ops.arrayLastIndexSparseLarge;
+const iteratorPrototype = object_ops.iteratorPrototype;
+const regExpConstructCall = regexp_fastpath.regExpConstructCall;
+const regExpExecGeneric = regexp_fastpath.regExpExecGeneric;
+const regExpSpeciesConstructor = regexp_fastpath.regExpSpeciesConstructor;
 const readUnicodePropertyClassEscape = object_ops.readUnicodePropertyClassEscape;
 const regExpConstructorFromGlobal = regexp_fastpath.regExpConstructorFromGlobal;
 const regExpExecPropertyIsDefault = object_ops.regExpExecPropertyIsDefault;
@@ -370,7 +370,7 @@ pub fn toStringForAnnexB(
 /// String.prototype method bodies open with (`js_string_charCodeAt` etc.,
 /// quickjs.c:45453). Exposed so the self-contained builtin bodies can perform
 /// it inline and be reached directly by the record — mirroring qjs's per-method
-/// dispatch — instead of routing through the exec `qjsStringPrototypeMethod`
+/// dispatch — instead of routing through the exec `stringPrototypeMethod`
 /// coercion tower.
 pub fn toStringCheckObject(
     ctx: *core.JSContext,
@@ -429,7 +429,7 @@ pub fn toOrdinaryPrimitiveString(
     return throwTypeErrorMessage(ctx, global, "toPrimitive");
 }
 
-pub fn qjsStringFunctionCall(
+pub fn stringFunctionCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -457,7 +457,7 @@ const regexp_construct_ref = core.function.NativeBuiltinRef{
     .id = @intFromEnum(method_ids.regexp.ConstructorMethod.construct),
 };
 
-pub fn qjsStringConstructWithPrototype(
+pub fn stringConstructWithPrototype(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -474,7 +474,7 @@ pub fn qjsStringConstructWithPrototype(
     return (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, string_construct_ref, prototype, &.{string_value}, caller_function, caller_frame)) orelse error.TypeError;
 }
 
-pub fn qjsStringConcat(
+pub fn stringConcat(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -501,9 +501,9 @@ pub fn qjsStringConcat(
         const receiver_string = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
         parts[0] = .{ .value = receiver_string };
         initialized_parts = 1;
-        if (qjsConcatLatin1Part(receiver_string)) |bytes| {
+        if (concatLatin1Part(receiver_string)) |bytes| {
             parts[0].latin1 = bytes;
-            total_len = try qjsConcatAddLength(total_len, bytes.len);
+            total_len = try concatAddLength(total_len, bytes.len);
         } else {
             direct_latin1 = false;
         }
@@ -514,9 +514,9 @@ pub fn qjsStringConcat(
             parts[part_index] = .{ .value = arg_string };
             initialized_parts = part_index + 1;
             if (direct_latin1) {
-                if (qjsConcatLatin1Part(arg_string)) |bytes| {
+                if (concatLatin1Part(arg_string)) |bytes| {
                     parts[part_index].latin1 = bytes;
-                    total_len = try qjsConcatAddLength(total_len, bytes.len);
+                    total_len = try concatAddLength(total_len, bytes.len);
                 } else {
                     direct_latin1 = false;
                 }
@@ -534,13 +534,13 @@ pub fn qjsStringConcat(
             return (try core.string.String.createLatin1Parts(ctx.runtime, byte_parts[0..part_count], total_len)).value();
         }
 
-        return qjsStringConcatFromConverted(ctx, parts[0..part_count]);
+        return stringConcatFromConverted(ctx, parts[0..part_count]);
     }
 
-    return qjsStringConcatSlow(ctx, output, global, this_value, args, caller_function, caller_frame);
+    return stringConcatSlow(ctx, output, global, this_value, args, caller_function, caller_frame);
 }
 
-fn qjsStringConcatSlow(
+fn stringConcatSlow(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -573,9 +573,9 @@ fn qjsStringConcatSlow(
         const body = value.asStringBody() orelse return error.TypeError;
         const data = body.resolveData();
         switch (data) {
-            .latin1 => |latin1_bytes| total = try qjsConcatAddLength(total, latin1_bytes.len),
+            .latin1 => |latin1_bytes| total = try concatAddLength(total, latin1_bytes.len),
             .utf16 => |units| {
-                total = try qjsConcatAddLength(total, units.len);
+                total = try concatAddLength(total, units.len);
                 wide = true;
             },
         }
@@ -591,7 +591,7 @@ fn qjsStringConcatSlow(
 /// 0x80-0xFF) reaching this leg produced a corrupt decode. Mirror qjs
 /// `JS_ConcatString1` (quickjs.c:4646) instead: flatten + measure each part
 /// (result wide iff any part is wide), then copy with per-unit widening.
-fn qjsStringConcatFromConverted(ctx: *core.JSContext, parts: []const QjsConcatPart) !core.JSValue {
+fn stringConcatFromConverted(ctx: *core.JSContext, parts: []const QjsConcatPart) !core.JSValue {
     const rt = ctx.runtime;
     var resolved: [qjs_concat_direct_part_limit]core.string.String.ResolvedData = undefined;
     var total: usize = 0;
@@ -600,9 +600,9 @@ fn qjsStringConcatFromConverted(ctx: *core.JSContext, parts: []const QjsConcatPa
         const body = part.value.asStringBody() orelse return error.TypeError;
         const data = body.resolveData();
         switch (data) {
-            .latin1 => |latin1_bytes| total = try qjsConcatAddLength(total, latin1_bytes.len),
+            .latin1 => |latin1_bytes| total = try concatAddLength(total, latin1_bytes.len),
             .utf16 => |units| {
-                total = try qjsConcatAddLength(total, units.len);
+                total = try concatAddLength(total, units.len);
                 wide = true;
             },
         }
@@ -612,19 +612,19 @@ fn qjsStringConcatFromConverted(ctx: *core.JSContext, parts: []const QjsConcatPa
     return (try core.string.String.createResolvedParts(rt, resolved[0..parts.len], total, wide)).value();
 }
 
-fn qjsConcatLatin1Part(value: core.JSValue) ?[]const u8 {
+fn concatLatin1Part(value: core.JSValue) ?[]const u8 {
     if (value.ropeBody() != null) return null;
     const string_value = value.asStringBodyRaw() orelse return null;
     return string_value.borrowLatin1();
 }
 
-fn qjsConcatAddLength(total: usize, addend: usize) !usize {
+fn concatAddLength(total: usize, addend: usize) !usize {
     const next = std.math.add(usize, total, addend) catch return error.StringTooLong;
     if (next > core.string.max_length) return error.StringTooLong;
     return next;
 }
 
-pub fn qjsStringReplace(
+pub fn stringReplace(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -633,7 +633,7 @@ pub fn qjsStringReplace(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    return qjsStringReplaceCore(ctx, output, global, this_value, args, false, caller_function, caller_frame);
+    return stringReplaceCore(ctx, output, global, this_value, args, false, caller_function, caller_frame);
 }
 
 /// js_string_replace (quickjs.c:46012, magic: 0 = replace / 1 = replaceAll).
@@ -645,7 +645,7 @@ pub fn qjsStringReplace(
 /// replace/replaceAll wrappers into the prototype-method dispatcher evicts
 /// the hot NumericArgs bodies from the dispatcher's inline budget
 /// (measured +4.6% on charCodeAt).
-noinline fn qjsStringReplaceCore(
+noinline fn stringReplaceCore(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -953,7 +953,7 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
     return value_ops.createStringValue(ctx.runtime, bytes.items);
 }
 
-pub fn qjsStringFromCodePoint(
+pub fn stringFromCodePoint(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -978,7 +978,7 @@ pub fn qjsStringFromCodePoint(
     return (try core.string.String.createUtf16(ctx.runtime, units.items)).value();
 }
 
-pub fn qjsStringRaw(
+pub fn stringRaw(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1031,7 +1031,7 @@ pub fn toObjectForStringRaw(ctx: *core.JSContext, global: *core.Object, value: c
     return primitiveObjectForAccess(ctx.runtime, global, value);
 }
 
-pub fn qjsStringFromCharCode(
+pub fn stringFromCharCode(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1074,19 +1074,19 @@ pub fn qjsStringFromCharCode(
     return (try core.string.String.createUtf16(ctx.runtime, units)).value();
 }
 
-pub fn qjsRegExpNativeBuiltinMatches(value: core.JSValue, expected_id: u32) bool {
+pub fn regExpNativeBuiltinMatches(value: core.JSValue, expected_id: u32) bool {
     const function_object = objectFromValue(value) orelse return false;
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return false;
     return native_ref.domain == .regexp and native_ref.id == expected_id;
 }
 
-pub fn qjsRegExpAutoInitBuiltinMatches(info: core.property.AutoInit, expected_id: u32) bool {
+pub fn regExpAutoInitBuiltinMatches(info: core.property.AutoInit, expected_id: u32) bool {
     if (info.kind != .native_function) return false;
     const native_ref = core.function.decodeNativeBuiltinId(info.native_builtin_id) orelse return false;
     return native_ref.domain == .regexp and native_ref.id == expected_id;
 }
 
-pub fn qjsRegExpToString(
+pub fn regExpToString(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1132,7 +1132,7 @@ pub fn regexpInternalStringValue(rt: *core.JSRuntime, object: *core.Object, sour
     return regexp_adapter.flagsStringValueFromBytecode(rt, object.regexpCompiledBytecode());
 }
 
-pub fn qjsRegExpSymbolSearch(
+pub fn regExpSymbolSearch(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1145,10 +1145,10 @@ pub fn qjsRegExpSymbolSearch(
     const string_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
-    return try qjsRegExpSymbolSearchGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
+    return try regExpSymbolSearchGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
 }
 
-pub fn qjsRegExpSymbolMatch(
+pub fn regExpSymbolMatch(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1161,10 +1161,10 @@ pub fn qjsRegExpSymbolMatch(
     const string_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
-    return try qjsRegExpSymbolMatchGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
+    return try regExpSymbolMatchGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
 }
 
-pub fn qjsRegExpSymbolMatchAll(
+pub fn regExpSymbolMatchAll(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1178,7 +1178,7 @@ pub fn qjsRegExpSymbolMatchAll(
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
 
-    const constructor_value = try qjsRegExpSpeciesConstructor(ctx, output, global, this_value, caller_function, caller_frame);
+    const constructor_value = try regExpSpeciesConstructor(ctx, output, global, this_value, caller_function, caller_frame);
     defer constructor_value.free(ctx.runtime);
 
     const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return error.TypeError;
@@ -1197,7 +1197,7 @@ pub fn qjsRegExpSymbolMatchAll(
     const last_index = try toLengthIndex(ctx, output, global, last_index_value);
     try setValuePropertyStrict(ctx, output, global, matcher, core.atom.ids.lastIndex, uint32NumberValue(toUint32Number(@floatFromInt(last_index))), caller_function, caller_frame);
 
-    const prototype = try qjsRegExpStringIteratorPrototype(ctx.runtime, global);
+    const prototype = try regExpStringIteratorPrototype(ctx.runtime, global);
     var prototype_owned = true;
     errdefer if (prototype_owned) prototype.value().free(ctx.runtime);
     const iterator = try core.Object.create(ctx.runtime, core.class.ids.regexp_string_iterator, prototype);
@@ -1207,14 +1207,14 @@ pub fn qjsRegExpSymbolMatchAll(
     try iterator.setOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot(), matcher);
     matcher_owned = false;
     try iterator.setOptionalValueSlot(ctx.runtime, iterator.iteratorDataSlot(), string_value.dup());
-    const global_flag = try qjsStringValueContainsByte(ctx.runtime, flags_string, 'g');
+    const global_flag = try stringValueContainsByte(ctx.runtime, flags_string, 'g');
     const unicode_flag = try regExpFlagsAreFullUnicode(ctx.runtime, flags_string);
     iterator.iteratorKindSlot().* = (if (global_flag) @as(u8, 1) else 0) | (if (unicode_flag) @as(u8, 2) else 0);
     iterator.iteratorIndexSlot().* = 0;
     return iterator.value();
 }
 
-pub fn qjsStringMatchAll(
+pub fn stringMatchAll(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1243,7 +1243,7 @@ pub fn qjsStringMatchAll(
                 return throwTypeErrorMessage(ctx, global, "cannot convert to object");
             const flags_string = try toStringForAnnexB(ctx, output, global, flags_value, caller_function, caller_frame);
             defer flags_string.free(ctx.runtime);
-            if (!try qjsStringValueContainsByte(ctx.runtime, flags_string, 'g'))
+            if (!try stringValueContainsByte(ctx.runtime, flags_string, 'g'))
                 return throwTypeErrorMessage(ctx, global, "regexp must have the 'g' flag");
         }
         if (!matcher.isUndefined() and !matcher.isNull()) {
@@ -1262,8 +1262,8 @@ pub fn qjsStringMatchAll(
     return callValueOrBytecodeRoot(ctx, output, global, matcher, match_all, &.{string_value}, caller_function, caller_frame);
 }
 
-pub fn qjsRegExpStringIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    const proto = try qjsIteratorPrototype(rt, global, "RegExp String Iterator");
+pub fn regExpStringIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
+    const proto = try iteratorPrototype(rt, global, "RegExp String Iterator");
     errdefer core.Object.destroyFromHeader(rt, &proto.header);
     const next = try core.function.nativeFunctionForGlobal(rt, global, "next", 0);
     defer next.free(rt);
@@ -1271,7 +1271,7 @@ pub fn qjsRegExpStringIteratorPrototype(rt: *core.JSRuntime, global: *core.Objec
     return proto;
 }
 
-pub fn qjsRegExpSymbolReplace(
+pub fn regExpSymbolReplace(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1285,10 +1285,10 @@ pub fn qjsRegExpSymbolReplace(
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
     const replace_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    return try qjsRegExpSymbolReplaceGeneric(ctx, output, global, this_value, string_value, replace_value, caller_function, caller_frame);
+    return try regExpSymbolReplaceGeneric(ctx, output, global, this_value, string_value, replace_value, caller_function, caller_frame);
 }
 
-pub fn qjsRegExpSymbolSplit(
+pub fn regExpSymbolSplit(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1302,9 +1302,9 @@ pub fn qjsRegExpSymbolSplit(
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
 
-    const constructor_value = try qjsRegExpSpeciesConstructor(ctx, output, global, this_value, caller_function, caller_frame);
+    const constructor_value = try regExpSpeciesConstructor(ctx, output, global, this_value, caller_function, caller_frame);
     defer constructor_value.free(ctx.runtime);
-    const flags_string = try qjsRegExpSplitFlags(ctx, output, global, this_value, caller_function, caller_frame);
+    const flags_string = try regExpSplitFlags(ctx, output, global, this_value, caller_function, caller_frame);
     defer flags_string.free(ctx.runtime);
     const construct_args = [_]core.JSValue{ this_value, flags_string };
     const splitter = try constructValueOrBytecode(ctx, output, global, constructor_value, &construct_args, caller_function, caller_frame);
@@ -1326,10 +1326,10 @@ pub fn qjsRegExpSymbolSplit(
         return out.value();
     }
     const unicode_matching = try regExpFlagsAreFullUnicode(ctx.runtime, flags_string);
-    return try qjsRegExpSymbolSplitGeneric(ctx, output, global, splitter, string_value, limit, unicode_matching, caller_function, caller_frame);
+    return try regExpSymbolSplitGeneric(ctx, output, global, splitter, string_value, limit, unicode_matching, caller_function, caller_frame);
 }
 
-pub fn qjsRegExpSplitFlags(
+pub fn regExpSplitFlags(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1346,7 +1346,7 @@ pub fn qjsRegExpSplitFlags(
     return value_ops.appendAsciiSuffixOwned(ctx.runtime, flags_string, "y");
 }
 
-pub fn qjsStringValueContainsByte(rt: *core.JSRuntime, string_value: core.JSValue, needle: u8) !bool {
+pub fn stringValueContainsByte(rt: *core.JSRuntime, string_value: core.JSValue, needle: u8) !bool {
     // All RegExp callers have already applied ToString. Match QuickJS's
     // string_indexof_char by inspecting the flat Latin-1/UTF-16 payload in
     // place; retain the generic conversion fallback for non-string callers.
@@ -1357,7 +1357,7 @@ pub fn qjsStringValueContainsByte(rt: *core.JSRuntime, string_value: core.JSValu
     return std.mem.indexOfScalar(u8, bytes.items, needle) != null;
 }
 
-pub fn qjsRegExpSymbolSplitGeneric(
+pub fn regExpSymbolSplitGeneric(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1380,7 +1380,7 @@ pub fn qjsRegExpSymbolSplitGeneric(
     var out_index: u32 = 0;
 
     if (input_len == 0) {
-        const result = try qjsRegExpExecGeneric(ctx, output, global, splitter, string_value, caller_function, caller_frame);
+        const result = try regExpExecGeneric(ctx, output, global, splitter, string_value, caller_function, caller_frame);
         defer result.free(ctx.runtime);
         if (result.isNull()) try defineSplitValueElement(ctx.runtime, out, out_index, string_value);
         return out.value();
@@ -1390,7 +1390,7 @@ pub fn qjsRegExpSymbolSplitGeneric(
     var pos: usize = 0;
     while (pos < input_len) {
         try setValuePropertyStrict(ctx, output, global, splitter, core.atom.ids.lastIndex, core.JSValue.int32(@intCast(pos)), caller_function, caller_frame);
-        const result = try qjsRegExpExecGeneric(ctx, output, global, splitter, string_value, caller_function, caller_frame);
+        const result = try regExpExecGeneric(ctx, output, global, splitter, string_value, caller_function, caller_frame);
         defer result.free(ctx.runtime);
         if (result.isNull()) {
             pos = advanceStringIndexBody(string_body, pos, unicode_matching);
@@ -1448,7 +1448,7 @@ pub fn advanceStringIndexUnits(units: []const u16, index: usize, unicode: bool) 
     return if (isLowSurrogateUnit(second)) index + 2 else index + 1;
 }
 
-pub fn qjsRegExpSymbolSearchGeneric(
+pub fn regExpSymbolSearchGeneric(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1463,7 +1463,7 @@ pub fn qjsRegExpSymbolSearchGeneric(
         try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
     }
 
-    const result = try qjsRegExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
+    const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
     defer result.free(ctx.runtime);
 
     const current = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
@@ -1478,7 +1478,7 @@ pub fn qjsRegExpSymbolSearchGeneric(
     return getValueProperty(ctx, output, global, result, index_atom, caller_function, caller_frame);
 }
 
-pub fn qjsRegExpSymbolMatchGeneric(
+pub fn regExpSymbolMatchGeneric(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1491,7 +1491,7 @@ pub fn qjsRegExpSymbolMatchGeneric(
     defer flags_string.free(ctx.runtime);
 
     if (!stringValueContainsUnitByte(flags_string, 'g')) {
-        return qjsRegExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
+        return regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
     }
 
     const full_unicode = try regExpFlagsAreFullUnicode(ctx.runtime, flags_string);
@@ -1501,7 +1501,7 @@ pub fn qjsRegExpSymbolMatchGeneric(
     errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
     var count: u32 = 0;
     while (true) {
-        const result = try qjsRegExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
+        const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
         defer result.free(ctx.runtime);
         if (result.isNull()) break;
         const zero_value = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(0), caller_function, caller_frame);
@@ -1543,7 +1543,7 @@ pub const ReplaceMatch = struct {
     groups: core.JSValue,
 };
 
-pub fn qjsRegExpSymbolReplaceGeneric(
+pub fn regExpSymbolReplaceGeneric(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1582,7 +1582,7 @@ pub fn qjsRegExpSymbolReplaceGeneric(
     if (!functional_replace) {
         if (objectFromValue(rx)) |rx_object| {
             if (object_ops.regExpIsStandard(ctx.runtime, rx_object)) {
-                if (try qjsRegExpReplaceFast(ctx, output, global, rx, string_value, replacement_string, caller_function, caller_frame)) |res| {
+                if (try regExpReplaceFast(ctx, output, global, rx, string_value, replacement_string, caller_function, caller_frame)) |res| {
                     return res;
                 }
             }
@@ -1591,7 +1591,7 @@ pub fn qjsRegExpSymbolReplaceGeneric(
 
     const flags_string = try getRegExpFlagsStringForReplace(ctx, output, global, rx, caller_function, caller_frame);
     defer flags_string.free(ctx.runtime);
-    const is_global = try qjsStringValueContainsByte(ctx.runtime, flags_string, 'g');
+    const is_global = try stringValueContainsByte(ctx.runtime, flags_string, 'g');
     const full_unicode = try regExpFlagsAreFullUnicode(ctx.runtime, flags_string);
     if (is_global) {
         try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
@@ -1604,7 +1604,7 @@ pub fn qjsRegExpSymbolReplaceGeneric(
     }
 
     while (true) {
-        const result = try qjsRegExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
+        const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
         if (result.isNull()) {
             result.free(ctx.runtime);
             break;
@@ -1666,7 +1666,7 @@ pub fn qjsRegExpSymbolReplaceGeneric(
 // reason QuickJS is ~18x faster here. Returns null to bail to the generic
 // driver when preconditions fail (non-RegExp receiver, missing bytecode,
 // coercible lastIndex required, or named groups present).
-pub fn qjsRegExpReplaceFast(
+pub fn regExpReplaceFast(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1780,7 +1780,7 @@ const ReplaceLiteralMatch = struct {
     index: usize,
 };
 
-pub fn qjsRegExpSymbolReplaceLiteral(
+pub fn regExpSymbolReplaceLiteral(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1806,7 +1806,7 @@ pub fn qjsRegExpSymbolReplaceLiteral(
     var matched_any = false;
 
     while (true) {
-        const result = try qjsRegExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
+        const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
         if (result.isNull()) {
             result.free(ctx.runtime);
             break;
@@ -2386,7 +2386,7 @@ pub fn callStringCharAtBody(
     return callStringBody(ctx, string_value, 0, &.{index_value});
 }
 
-pub fn qjsStringTrim(
+pub fn stringTrim(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2400,7 +2400,7 @@ pub fn qjsStringTrim(
     return callStringBody(ctx, string_value, method_id, &.{});
 }
 
-pub fn qjsStringPrototypeMethod(
+pub fn stringPrototypeMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2417,54 +2417,54 @@ pub fn qjsStringPrototypeMethod(
     // remaining bodies. They therefore run their own nullish check below and are
     // dispatched before the coarse check.
     if (method_id == string_id_lookup.legacy_split_method_id) {
-        return qjsStringSplit(ctx, output, global, this_value, args, caller_function, caller_frame);
+        return stringSplit(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (method_id == string_id_lookup.legacy_search_method_id) {
-        return qjsStringSearch(ctx, output, global, this_value, args, caller_function, caller_frame);
+        return stringSearch(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (method_id == string_id_lookup.legacy_match_method_id) {
-        return qjsStringMatch(ctx, output, global, this_value, args, caller_function, caller_frame);
+        return stringMatch(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (method_id == string_id_lookup.legacy_replace_method_id) {
-        return qjsStringReplace(ctx, output, global, this_value, args, caller_function, caller_frame);
+        return stringReplace(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (method_id == string_id_lookup.legacy_replace_all_method_id) {
-        return qjsStringReplaceAll(ctx, output, global, this_value, args, caller_function, caller_frame);
+        return stringReplaceAll(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (method_id == string_id_lookup.legacy_match_all_method_id) {
-        return qjsStringMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame);
+        return stringMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
     if (method_id == 10) {
-        return qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
+        return stringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     // Pad / Html / Normalize / LocaleCompare / NumericArgs bodies live in this
     // file (Phase 6b-3 STEP 3B moved them back from the transitional String
     // owner): they
     // are exec-only, reachable solely through this dispatcher. The RegExp-coupled
     // bodies (search/match/split/replaceAll/matchAll and
-    // `qjsStringSearchPositionMethod`, which observes RegExp via
+    // `stringSearchPositionMethod`, which observes RegExp via
     // `isRegExpForStringSearch`) and the BOTH bodies (concat) also stay in exec.
     if (method_id == 34 or method_id == 35) {
-        return qjsStringPad(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
+        return stringPad(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
     }
     if (method_id == 11 or method_id == 12 or method_id == 13 or method_id == 14 or method_id == 15 or
         method_id == 16 or method_id == 17 or method_id == 18 or method_id == 19 or method_id == 20 or
         method_id == 23 or method_id == 24 or method_id == 26)
     {
-        return qjsStringHtmlMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
+        return stringHtmlMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
     }
     if (method_id == string_id_lookup.legacy_normalize_method_id) {
-        return qjsStringNormalize(ctx, output, global, this_value, args, caller_function, caller_frame);
+        return stringNormalize(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (method_id == 36) {
-        return qjsStringLocaleCompare(ctx, output, global, this_value, args, caller_function, caller_frame);
+        return stringLocaleCompare(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (method_id == 4 or method_id == 5 or method_id == 6 or method_id == 7 or method_id == 28) {
-        return qjsStringSearchPositionMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
+        return stringSearchPositionMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
     }
     if (method_id == 0 or method_id == 1 or method_id == 25 or method_id == 29 or method_id == 30 or method_id == 31 or method_id == 32 or method_id == 33) {
-        return qjsStringNumericArgsMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
+        return stringNumericArgsMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
     }
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
@@ -2494,7 +2494,7 @@ pub fn appendUtf32FromStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u32),
 pub fn appendUtf16CodePoint(rt: *core.JSRuntime, out: *std.ArrayList(u16), code_point: u32) !void {
     return unicode_lib.appendUtf16CodePoint(rt.memory.allocator, out, @intCast(code_point));
 }
-pub fn qjsStringSearchPositionMethod(
+pub fn stringSearchPositionMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2548,7 +2548,7 @@ pub fn isRegExpForStringSearch(
     return isRegExpObservable(ctx, output, global, value, caller_function, caller_frame);
 }
 
-pub fn qjsStringReplaceAll(
+pub fn stringReplaceAll(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2557,10 +2557,10 @@ pub fn qjsStringReplaceAll(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    return qjsStringReplaceCore(ctx, output, global, this_value, args, true, caller_function, caller_frame);
+    return stringReplaceCore(ctx, output, global, this_value, args, true, caller_function, caller_frame);
 }
 
-pub fn qjsStringSearch(
+pub fn stringSearch(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2575,10 +2575,10 @@ pub fn qjsStringSearch(
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
     if (try callStringWellKnownMethod(ctx, output, global, string_value, regexp, "Symbol.search", caller_function, caller_frame)) |value| return value;
-    return try qjsStringRegExpCreateAndInvoke(ctx, output, global, string_value, regexp, "Symbol.search", caller_function, caller_frame);
+    return try stringRegExpCreateAndInvoke(ctx, output, global, string_value, regexp, "Symbol.search", caller_function, caller_frame);
 }
 
-pub fn qjsStringIterator(
+pub fn stringIteratorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2605,7 +2605,7 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
         if (stored.isObject()) return property_ops.expectObject(stored) catch return error.TypeError;
     }
 
-    const object = try qjsIteratorPrototype(ctx.runtime, global, "String Iterator");
+    const object = try iteratorPrototype(ctx.runtime, global, "String Iterator");
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
     try builtin_glue.defineNativeDataMethodWithNativeId(ctx.runtime, global, object, "next", 0, core.function.nativeBuiltinId(.string, @intFromEnum(method_ids.string.PrototypeMethod.iterator_next)));
 
@@ -2620,7 +2620,7 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
     return object;
 }
 
-pub fn qjsStringMatch(
+pub fn stringMatch(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2637,10 +2637,10 @@ pub fn qjsStringMatch(
     if (try callStringWellKnownMethod(ctx, output, global, this_value, regexp, "Symbol.match", caller_function, caller_frame)) |value| return value;
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
-    return try qjsStringRegExpCreateAndInvoke(ctx, output, global, string_value, regexp, "Symbol.match", caller_function, caller_frame);
+    return try stringRegExpCreateAndInvoke(ctx, output, global, string_value, regexp, "Symbol.match", caller_function, caller_frame);
 }
 
-pub fn qjsStringRegExpCreateAndInvoke(
+pub fn stringRegExpCreateAndInvoke(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2666,7 +2666,7 @@ pub fn qjsStringRegExpCreateAndInvoke(
         owned_pattern = pattern_string;
         pattern = pattern_string;
     }
-    const rx = try qjsRegExpConstructCall(ctx, output, global, objectFromValue(constructor), constructor, &.{pattern}, caller_function, caller_frame);
+    const rx = try regExpConstructCall(ctx, output, global, objectFromValue(constructor), constructor, &.{pattern}, caller_function, caller_frame);
     defer rx.free(ctx.runtime);
     if (try callStringWellKnownMethod(ctx, output, global, string_value, rx, symbol_name, caller_function, caller_frame)) |value| return value;
     // Mirrors js_string_match (quickjs.c:45881): the tail is
@@ -2697,7 +2697,7 @@ pub fn callStringWellKnownMethod(
     return try callValueOrBytecodeRoot(ctx, output, global, candidate, method, &method_args, caller_function, caller_frame);
 }
 
-pub fn qjsStringSplit(
+pub fn stringSplit(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2723,7 +2723,7 @@ pub fn qjsStringSplit(
 
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
-    if (args.len == 0) return qjsStringSplitBuiltinArray(ctx, global, string_value, &.{});
+    if (args.len == 0) return stringSplitBuiltinArray(ctx, global, string_value, &.{});
 
     var coerced: [2]core.JSValue = .{ core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
     var count: usize = 1;
@@ -2759,10 +2759,10 @@ pub fn qjsStringSplit(
         free_separator = true;
     }
 
-    return qjsStringSplitBuiltinArray(ctx, global, string_value, coerced[0..count]);
+    return stringSplitBuiltinArray(ctx, global, string_value, coerced[0..count]);
 }
 
-pub fn qjsStringSplitBuiltinArray(
+pub fn stringSplitBuiltinArray(
     ctx: *core.JSContext,
     global: *core.Object,
     string_value: core.JSValue,
@@ -2780,7 +2780,7 @@ pub fn qjsStringSplitBuiltinArray(
     return result;
 }
 
-pub fn qjsRegExpSplit(rt: *core.JSRuntime, separator: core.JSValue, string_value: core.JSValue, limit_value: core.JSValue) !?core.JSValue {
+pub fn regExpSplit(rt: *core.JSRuntime, separator: core.JSValue, string_value: core.JSValue, limit_value: core.JSValue) !?core.JSValue {
     const separator_object = property_ops.expectObject(separator) catch return null;
     if (separator_object.class_id != core.class.ids.regexp) return null;
     var source = std.ArrayList(u8).empty;
@@ -2883,7 +2883,7 @@ pub fn qjsRegExpSplit(rt: *core.JSRuntime, separator: core.JSValue, string_value
     return out.value();
 }
 
-pub fn qjsRegExpSplitWholeString(rt: *core.JSRuntime, string_value: core.JSValue) !core.JSValue {
+pub fn regExpSplitWholeString(rt: *core.JSRuntime, string_value: core.JSValue) !core.JSValue {
     const out = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &out.header);
     try defineSplitValueElement(rt, out, 0, string_value);
@@ -3614,7 +3614,7 @@ pub fn getStringPrototypeMethodId(rt: *core.JSRuntime, function_object: *core.Ob
     return string_id_lookup.decodePrototypeMethodId(native_ref.id);
 }
 
-pub fn qjsBigIntPrototypeToString(
+pub fn bigIntPrototypeToString(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3725,14 +3725,14 @@ pub fn annexBStringMethodId(name: []const u8) ?u32 {
     return null;
 }
 
-pub fn qjsFunctionToStringCall(
+pub fn functionToStringCall(
     ctx: *core.JSContext,
     this_value: core.JSValue,
 ) !core.JSValue {
     return try call_mod.functionToStringValue(ctx.runtime, this_value);
 }
 
-pub fn qjsErrorToStringCall(
+pub fn errorToStringCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3828,7 +3828,7 @@ pub fn thrownValueMatchesConstructor(rt: *core.JSRuntime, thrown_value: core.JSV
     return std.mem.eql(u8, name_bytes.items, expected_name);
 }
 
-pub fn qjsArraySearchCall(
+pub fn arraySearchCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3907,10 +3907,10 @@ pub fn qjsArraySearchCall(
             try arrayLastIndexStart(ctx, output, global, args, length)
         else
             try arrayFirstIndexStart(ctx, output, global, args, length);
-        return try array_ops.qjsTypedArraySearchScan(ctx.runtime, object, search_mode, search_value, cursor, length);
+        return try array_ops.typedArraySearchScan(ctx.runtime, object, search_mode, search_value, cursor, length);
     }
     if (mode == .last_index_of and length > 1_000_000) {
-        return try qjsArrayLastIndexSparseLarge(ctx, output, global, object, receiver_object_value, args, length, search_value);
+        return try arrayLastIndexSparseLarge(ctx, output, global, object, receiver_object_value, args, length, search_value);
     }
     if (mode == .last_index_of) {
         var cursor = try arrayLastIndexStart(ctx, output, global, args, length);
@@ -3988,7 +3988,7 @@ pub fn qjsArraySearchCall(
     return if (mode == .includes) core.JSValue.boolean(false) else core.JSValue.int32(-1);
 }
 
-pub fn qjsArrayConcatCall(
+pub fn arrayConcatCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4137,20 +4137,16 @@ pub fn appendCodepointUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), code
     return unicode_lib.appendUtf8CodePoint(rt.memory.allocator, buffer, codepoint);
 }
 
-pub fn qjsIteratorConcatCall(
+pub fn iteratorConcatCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
 ) !core.JSValue {
-    return iter_vm.qjsIteratorConcatCall(ctx, output, global, args, arrayPrototypeFromGlobal, getIteratorMethod, isCallableValue);
+    return iterator_ops.iteratorConcatCall(ctx, output, global, args, arrayPrototypeFromGlobal, getIteratorMethod, isCallableValue);
 }
 
-pub fn qjsDefineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
-    return iter_vm.qjsDefineToStringTag(rt, object, tag_name);
-}
-
-pub fn qjsRegExpStringIteratorNext(
+pub fn regExpStringIteratorNext(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4171,7 +4167,7 @@ pub fn qjsRegExpStringIteratorNext(
         iterator.iteratorIndexSlot().* = 1;
         return done_result;
     };
-    const result = try qjsRegExpExecGeneric(ctx, output, global, regexp, string_value, caller_function, caller_frame);
+    const result = try regExpExecGeneric(ctx, output, global, regexp, string_value, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     if (result.isNull()) {
         const done_result = try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
@@ -4297,7 +4293,7 @@ pub fn getStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: co
     return out.value();
 }
 
-pub fn qjsArrayToStringCall(
+pub fn arrayToStringCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4319,10 +4315,10 @@ pub fn qjsArrayToStringCall(
     if (isCallableValue(join_value)) {
         return try callValueOrBytecodeRoot(ctx, output, global, object_value, join_value, &.{}, caller_function, caller_frame);
     }
-    return try qjsObjectToStringIntrinsic(ctx, output, global, object_value, caller_function, caller_frame);
+    return try objectToStringIntrinsic(ctx, output, global, object_value, caller_function, caller_frame);
 }
 
-pub fn qjsArrayToLocaleStringCall(
+pub fn arrayToLocaleStringCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4378,7 +4374,7 @@ pub fn qjsArrayToLocaleStringCall(
     return try value_ops.createStringValue(ctx.runtime, bytes.items);
 }
 
-pub fn qjsObjectToLocaleStringCall(
+pub fn objectToLocaleStringCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4393,7 +4389,7 @@ pub fn qjsObjectToLocaleStringCall(
     return try callValueOrBytecodeRoot(ctx, output, global, this_value, method, &.{}, caller_function, caller_frame);
 }
 
-pub fn qjsObjectToStringCall(
+pub fn objectToStringCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4401,14 +4397,14 @@ pub fn qjsObjectToStringCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isUndefined()) return try qjsObjectTagString(ctx.runtime, "Undefined");
-    if (this_value.isNull()) return try qjsObjectTagString(ctx.runtime, "Null");
+    if (this_value.isUndefined()) return try objectTagString(ctx.runtime, "Undefined");
+    if (this_value.isNull()) return try objectTagString(ctx.runtime, "Null");
     const object_value = if (this_value.isObject()) this_value.dup() else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     defer object_value.free(ctx.runtime);
-    return try qjsObjectToStringIntrinsic(ctx, output, global, object_value, caller_function, caller_frame);
+    return try objectToStringIntrinsic(ctx, output, global, object_value, caller_function, caller_frame);
 }
 
-pub fn qjsObjectToStringIntrinsic(
+pub fn objectToStringIntrinsic(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4418,19 +4414,19 @@ pub fn qjsObjectToStringIntrinsic(
 ) !core.JSValue {
     const object = try property_ops.expectObject(object_value);
     const builtin_tag = try defaultObjectToStringTag(object);
-    const tag_atom = (comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return try qjsObjectTagString(ctx.runtime, "Object");
+    const tag_atom = (comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return try objectTagString(ctx.runtime, "Object");
     const tag_value = try getValueProperty(ctx, output, global, object_value, tag_atom, caller_function, caller_frame);
     defer tag_value.free(ctx.runtime);
     if (tag_value.isString()) {
         var tag = std.ArrayList(u8).empty;
         defer tag.deinit(ctx.runtime.memory.allocator);
         try value_ops.appendRawString(ctx.runtime, &tag, tag_value);
-        return try qjsObjectTagString(ctx.runtime, tag.items);
+        return try objectTagString(ctx.runtime, tag.items);
     }
-    return try qjsObjectTagString(ctx.runtime, builtin_tag);
+    return try objectTagString(ctx.runtime, builtin_tag);
 }
 
-pub fn qjsObjectTagString(rt: *core.JSRuntime, tag: []const u8) !core.JSValue {
+pub fn objectTagString(rt: *core.JSRuntime, tag: []const u8) !core.JSValue {
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try bytes.appendSlice(rt.memory.allocator, "[object ");
@@ -4569,7 +4565,7 @@ pub fn isLowSurrogateUnit(unit: u16) bool {
 // ---------------------------------------------------------------------------
 // Realm-aware String.prototype method bodies (pad / HTML wrappers / normalize /
 // localeCompare / numeric-arg methods). These are reachable ONLY through the
-// `qjsStringPrototypeMethod` dispatcher above (the `.string` builtin record
+// `stringPrototypeMethod` dispatcher above (the `.string` builtin record
 // handler `stringCall` routes the remaining shared prototype methods to it),
 // never from a dedicated builtin table entry, so they are exec-only. They were
 // briefly hosted in the transitional String owner (Phase 6b-2) and were moved
@@ -4679,7 +4675,7 @@ const StringBuffer = struct {
     }
 };
 
-pub fn qjsStringPad(
+pub fn stringPad(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4742,7 +4738,7 @@ pub fn qjsStringPad(
     return buffer.finish(ctx.runtime);
 }
 
-pub fn qjsStringNormalize(
+pub fn stringNormalize(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4782,7 +4778,7 @@ pub fn qjsStringNormalize(
     return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
 }
 
-pub fn qjsStringLocaleCompare(
+pub fn stringLocaleCompare(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4830,7 +4826,7 @@ fn normalizedUtf32(rt: *core.JSRuntime, value: core.JSValue, form: unicode_lib.N
     };
 }
 
-pub fn qjsStringNumericArgsMethod(
+pub fn stringNumericArgsMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4866,7 +4862,7 @@ pub fn qjsStringNumericArgsMethod(
         return callStringCharAtBody(ctx, string_value, index);
     }
     if (method_id == 25) {
-        return qjsStringSubstr(ctx, output, global, string_value, coerced[0..count]);
+        return stringSubstr(ctx, output, global, string_value, coerced[0..count]);
     }
     return callStringBody(ctx, string_value, method_id, coerced[0..count]) catch |err| switch (err) {
         error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid repeat count"),
@@ -4902,7 +4898,7 @@ fn int32OrUndefinedStringIndex(value: core.JSValue) ?i64 {
     return if (value.asInt32()) |int_value| @as(i64, int_value) else null;
 }
 
-pub fn qjsStringSubstr(
+pub fn stringSubstr(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4950,7 +4946,7 @@ pub fn qjsStringSubstr(
     return (try core.string.String.createUtf16(ctx.runtime, units.items[start..][0..requested_len])).value();
 }
 
-pub fn qjsStringHtmlMethod(
+pub fn stringHtmlMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4969,24 +4965,24 @@ pub fn qjsStringHtmlMethod(
     try appendStringValueUnits(ctx.runtime, &string_units, string_value);
 
     switch (method_id) {
-        11 => return qjsStringCreateHtml(ctx, string_units.items, "a", "name", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
-        12 => return qjsStringCreateHtml(ctx, string_units.items, "big", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        13 => return qjsStringCreateHtml(ctx, string_units.items, "blink", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        14 => return qjsStringCreateHtml(ctx, string_units.items, "b", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        15 => return qjsStringCreateHtml(ctx, string_units.items, "tt", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        16 => return qjsStringCreateHtml(ctx, string_units.items, "font", "color", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
-        17 => return qjsStringCreateHtml(ctx, string_units.items, "font", "size", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
-        18 => return qjsStringCreateHtml(ctx, string_units.items, "i", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        19 => return qjsStringCreateHtml(ctx, string_units.items, "a", "href", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
-        20 => return qjsStringCreateHtml(ctx, string_units.items, "small", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        23 => return qjsStringCreateHtml(ctx, string_units.items, "strike", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        24 => return qjsStringCreateHtml(ctx, string_units.items, "sub", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        26 => return qjsStringCreateHtml(ctx, string_units.items, "sup", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        11 => return stringCreateHtml(ctx, string_units.items, "a", "name", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        12 => return stringCreateHtml(ctx, string_units.items, "big", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        13 => return stringCreateHtml(ctx, string_units.items, "blink", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        14 => return stringCreateHtml(ctx, string_units.items, "b", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        15 => return stringCreateHtml(ctx, string_units.items, "tt", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        16 => return stringCreateHtml(ctx, string_units.items, "font", "color", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        17 => return stringCreateHtml(ctx, string_units.items, "font", "size", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        18 => return stringCreateHtml(ctx, string_units.items, "i", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        19 => return stringCreateHtml(ctx, string_units.items, "a", "href", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        20 => return stringCreateHtml(ctx, string_units.items, "small", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        23 => return stringCreateHtml(ctx, string_units.items, "strike", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        24 => return stringCreateHtml(ctx, string_units.items, "sub", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        26 => return stringCreateHtml(ctx, string_units.items, "sup", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
         else => return error.TypeError,
     }
 }
 
-fn qjsStringCreateHtml(
+fn stringCreateHtml(
     ctx: *core.JSContext,
     string_units: []const u16,
     tag: []const u8,

@@ -5,9 +5,9 @@
 and indirect eval support, generator resumption, and Atomics waiter
 machinery. The compatibility alias layer that `shared.zig` once
 carried has been removed; new callers should import the owning domain module
-directly. Fourteen forwarding shells remain in this file today
-(`qjsIteratorZip*` and siblings re-export `iterator_ops.zig`). That violates
-the move-criteria ban below; cleanup is registered as
+directly. A group of `qjsIteratorZip*` forwarding shells remains in this file
+today, re-exporting `iterator_ops.zig`. That violates the move-criteria ban
+below; cleanup is registered as
 [maintainability-backlog.md](../maintainability-backlog.md) **H5**.
 Remaining non-call-runtime code should continue to shrink in small
 behavior-preserving moves. This map is a refactor aid, not a status ledger.
@@ -22,18 +22,20 @@ helpers use the `vm_*.zig` prefix; broader domain helpers generally use the
 - `vm_call.zig`: call and construct opcode helpers.
 - `vm_control.zig`: branches, loops, returns, and control-flow helpers.
 - `vm_eval_module.zig`: eval/module execution helpers.
-- `vm_exception_ops.zig`: named error construction, TDZ errors, pending
+- `exception_ops.zig` (renamed from `vm_exception_ops.zig` 2026-08-19; every
+  importer already aliased it as `exception_ops`): named error construction,
+  TDZ errors, pending
   exception matching, and related error-object helpers.
 - `vm_gen_async.zig`: generator and async function helpers.
 - `vm_literal.zig`: literal construction helpers.
-- `vm_property.zig`: property, reference, global read/write/delete, and related
-  property fast-path opcode handlers.
-- `property_ic.zig`: non-cached direct own/prototype/global data-property
-  lookup/write helpers. The historical filename remains, and this file
-  itself already says so; the shape-keyed inline cache has been removed.
-  Renaming the file and deleting the zombie
-  `cachedSetObjectDataPropertyForPutFastPath` adapter is
-  [maintainability-backlog.md](../maintainability-backlog.md) **H6**.
+- `vm_property.zig` and its splits (`vm_property_field.zig`,
+  `vm_property_globals.zig`, `vm_property_locals.zig`,
+  `vm_property_private.zig`, `vm_property_ref.zig`): property, reference,
+  global read/write/delete, and related property fast-path opcode handlers.
+- `property_direct.zig` (renamed from the historical `property_ic.zig`
+  2026-08-19; the shape-keyed inline cache is long removed and the
+  always-false `cachedSet*` zombie was deleted): non-cached direct
+  own/prototype/global data-property lookup/write helpers.
 - `vm_regexp.zig`: RegExp VM helpers.
 - `vm_value.zig`: value conversion and primitive helper operations.
 
@@ -50,7 +52,7 @@ Move code out of `call_runtime.zig` only when the ownership boundary is clear:
 - Imports do not introduce cycles back through `call_runtime.zig`.
 - Moved helpers retain the same ownership, rooting, and exception behavior.
 - Callers reference the owning module directly; do not add new forwarding
-  aliases in `call_runtime.zig`. The existing 14 `qjsIteratorZip*` shells are
+  aliases in `call_runtime.zig`. The existing `qjsIteratorZip*` shells are
   a known deviation (backlog **H5**), not a license to add more.
 
 Prefer leaf helper groups first. Avoid moving an orchestration function if its
@@ -64,8 +66,6 @@ These domains are still reasonable candidates for future splits when touched:
 - closure and var-ref operations.
 - builtin wrapper glue that does not belong in an existing `builtins/` module
   (Reflect/Iterator-helper native records and similar `qjs*` call glue).
-- worker helper paths (the legacy `qjs:os`/`qjs:std` cluster and the dead
-  QjsWorker machinery have both been deleted).
 
 Do not create a new shard for a single unrelated helper. Leave nearby code in
 place until there is a stable domain boundary.

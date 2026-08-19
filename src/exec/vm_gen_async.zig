@@ -720,11 +720,7 @@ fn closeIteratorForPendingError(
     try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
 }
 
-fn objectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
-}
+const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
 
 fn readInt(comptime T: type, bytes: []const u8) T {
     return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);

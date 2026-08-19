@@ -3,7 +3,7 @@
 //! `exec.zig` `helpers` namespace so `helpers.foo` call sites stay unchanged.
 //!
 //! Rule D: this file `@import("zjs")` internally, so only Class-B roots may
-//! consume it. `src/compiler_v2/tests.zig` and in-tree runtime tests must
+//! consume it. `src/compiler/tests.zig` and in-tree runtime tests must
 //! never import this file — those roots already span the engine subtree by
 //! relative path, and pulling helpers in would be a file-exists-in-two-modules
 //! error.
@@ -74,8 +74,7 @@ pub fn runMutableVm(vm: *engine.exec.Vm, function: *const engine.bytecode.Byteco
 }
 
 pub fn objectFromValue(value: core.JSValue) *core.Object {
-    const header = value.refHeader().?;
-    return @fieldParentPtr("header", header);
+    return core.value_semantics.objectFromValue(value).?;
 }
 
 pub fn expectActiveSetStrings(object: *core.Object, comptime expected: []const []const u8) !void {
@@ -617,7 +616,7 @@ pub const vm_helpers = struct {
         var state = try ParseState.initWithRuntime(rt, &lex, &function);
         defer state.deinit(rt);
         try parser_core.parseExpr(&state);
-        try state.v2EmitOp(op.@"return");
+        try state.builderEmitOp(op.@"return");
 
         // Run the FunctionDef-backed finalize pipeline so locals are lowered
         // to get_loc / put_loc instead of falling back to global get_var /
@@ -641,7 +640,7 @@ pub const vm_helpers = struct {
         defer state.deinit(rt);
         state.top_level_functions_as_children = true;
         try parser_core.parseExpr(&state);
-        try state.v2EmitOp(op.@"return");
+        try state.builderEmitOp(op.@"return");
 
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, .{ .realm = ctx });
 
@@ -705,7 +704,7 @@ pub const vm_helpers = struct {
         // This helper executes global script code and only needs completion
         // capture; enableEvalReturn would incorrectly switch declarations to
         // direct-eval placement. Mirror compileQjsProgram's script setup.
-        try state.beginV2ProgramEmission();
+        try state.beginProgramEmission();
         try state.enableReturnCompletion();
         while (state.token.val != engine.parser.token.TOK_EOF) {
             try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });

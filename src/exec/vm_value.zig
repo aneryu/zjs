@@ -546,11 +546,7 @@ fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
     return object;
 }
 
-fn objectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
-}
+const objectFromValue = core.value_semantics.objectFromValue;
 
 fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;

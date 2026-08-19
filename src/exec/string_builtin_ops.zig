@@ -6,7 +6,7 @@ const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 // The `.string` builtin record table uses direct leaf handlers for the qjs-like
 // index reads and case conversion entries; its residual `stringCall` handler
-// dispatches the shared prototype-method ids into `qjsStringPrototypeMethod`
+// dispatches the shared prototype-method ids into `stringPrototypeMethod`
 // (BOTH-reachable: the string opcode/`call_runtime` host path also calls it).
 // Realm-aware pad/HTML/normalize/localeCompare/numeric-arg bodies remain
 // exec-only in `exec/string_ops.zig`.
@@ -369,7 +369,7 @@ fn stringFromCharCodeDirect(
     _ = this_value;
     _ = caller_function;
     _ = caller_frame;
-    const result = string_ops.qjsStringFromCharCode(ctx, output, global, args) catch |err| {
+    const result = string_ops.stringFromCharCode(ctx, output, global, args) catch |err| {
         return builtin_dispatch.nativeFromHostError(ctx, global, @as(HostError, @errorCast(err)));
     };
     return builtin_dispatch.nativeToBits(result);
@@ -387,7 +387,7 @@ fn stringFromCharCodeCall(
         std.debug.assert(realm.realm == host_call.ctx);
         break :blk realm.global;
     } else host_call.global orelse return error.TypeError;
-    return string_ops.qjsStringFromCharCode(host_call.ctx, host_call.output, global, host_call.args) catch |err| return @as(HostError, @errorCast(err));
+    return string_ops.stringFromCharCode(host_call.ctx, host_call.output, global, host_call.args) catch |err| return @as(HostError, @errorCast(err));
 }
 
 fn stringCharCodeAtDirect(
@@ -435,7 +435,7 @@ inline fn stringCharCodeAtDirectHost(
         .caller_frame = caller_frame,
     };
     if (try stringPrimitiveIndexRead(host_call, 29)) |value| return value;
-    // Do not bounce through `qjsStringPrototypeMethod` / `callStringBody`:
+    // Do not bounce through `stringPrototypeMethod` / `callStringBody`:
     // that re-enters this record's exec_direct with a null func_obj and
     // raises InvalidBuiltinRegistry. Coerce with the explicit ABI instead.
     const string_value = string_ops.toStringCheckObject(
@@ -545,7 +545,7 @@ fn stringCall(
     if (id == @intFromEnum(PrototypeMethod.iterator_next)) {
         const receiver = thisObject(this_value) orelse return error.TypeError;
         if (receiver.class_id != core.class.ids.string_iterator) return error.TypeError;
-        return iteratorNext(ctx.runtime, this_value) catch |err| switch (err) {
+        return stringIteratorNext(ctx.runtime, this_value) catch |err| switch (err) {
             error.TypeError => error.TypeError,
             else => err,
         };
@@ -554,7 +554,7 @@ fn stringCall(
     // `new String(...)` arrives through the construct record path
     // (`exec/construct.zig`) with `is_constructor` set and the resolved
     // wrapper prototype in `new_target`; `String(...)` called as a function
-    // falls through to `qjsStringFunctionCall` (the `ConstructorMethod.call`
+    // falls through to `stringFunctionCall` (the `ConstructorMethod.call`
     // case below).
     if (host_call.is_constructor and id == @intFromEnum(ConstructorMethod.call)) {
         return constructWithPrototype(ctx.runtime, args, host_call.new_target);
@@ -572,7 +572,7 @@ fn stringCall(
     // Other direct callers can pass `func_obj == null` with a realm `global`
     // and raw args, so they must fall through to the coercing dispatcher below.
     // This deliberately bypasses the prototype dispatcher
-    // (`string_ops.qjsStringPrototypeMethod`) — routing back through it would
+    // (`string_ops.stringPrototypeMethod`) — routing back through it would
     // re-enter this record (the dispatcher's own body call is one of the
     // converted sites) and recurse.
     if (host_call.func_obj == null and host_call.global == null and !host_call.is_constructor) {
@@ -592,13 +592,13 @@ fn stringCall(
         break :blk realm.global;
     } else host_call.global orelse return error.TypeError;
     return switch (id) {
-        @intFromEnum(ConstructorMethod.call) => string_ops.qjsStringFunctionCall(ctx, output, active_global, args, caller_function, caller_frame),
-        @intFromEnum(StaticMethod.from_char_code) => string_ops.qjsStringFromCharCode(ctx, output, active_global, args),
-        @intFromEnum(StaticMethod.from_code_point) => string_ops.qjsStringFromCodePoint(ctx, output, active_global, args),
-        @intFromEnum(StaticMethod.raw) => string_ops.qjsStringRaw(ctx, output, active_global, args, caller_function, caller_frame),
+        @intFromEnum(ConstructorMethod.call) => string_ops.stringFunctionCall(ctx, output, active_global, args, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.from_char_code) => string_ops.stringFromCharCode(ctx, output, active_global, args),
+        @intFromEnum(StaticMethod.from_code_point) => string_ops.stringFromCodePoint(ctx, output, active_global, args),
+        @intFromEnum(StaticMethod.raw) => string_ops.stringRaw(ctx, output, active_global, args, caller_function, caller_frame),
         else => {
             const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
-            return string_ops.qjsStringPrototypeMethod(ctx, output, active_global, this_value, method_id, args, caller_function, caller_frame);
+            return string_ops.stringPrototypeMethod(ctx, output, active_global, this_value, method_id, args, caller_function, caller_frame);
         },
     };
 }
@@ -686,11 +686,11 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
 // machinery consumes them directly. Re-exported here so this module's own
 // references (and any future builtin caller) keep the original name. The
 // produced iterator's `next` still carries the `(.string, iterator_next)`
-// native id, dispatching back into `iteratorNext` below through the record
+// native id, dispatching back into `stringIteratorNext` below through the record
 // table.
 pub const iterator = core.object.stringIterator;
 
-pub fn iteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
+pub fn stringIteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     const iterator_object = try expectObject(receiver);
     if (iterator_object.class_id != core.class.ids.string_iterator) return error.TypeError;
     const target = (iterator_object.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.JSValue.undefinedValue(), true);
@@ -2225,11 +2225,7 @@ test "string wrapper iterator split and match helpers keep values under GC" {
     try std.testing.expect((stringValueFromReceiver(input_value) orelse return error.TypeError).eqlBytes("ababa"));
 }
 
-fn expectObject(value: core.JSValue) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    return @fieldParentPtr("header", header);
-}
+const expectObject = core.value_semantics.expectObject;
 
 fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
     var object_value = object.value();

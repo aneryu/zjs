@@ -9,6 +9,112 @@ under the refactor-policy gates.
 
 ### 0.2.0 breaking public API
 
+- Renamed the compiler directory `src/compiler_v2/` → `src/compiler/` (owner
+  ruling 2026-08-19, reversing the earlier "ruled out" backlog entry). The
+  build step `test-compiler-v2` → `test-compiler` and the option
+  `-Dzjs_v2_layout` → `-Dzjs_compiler_layout`; both old names remain as
+  deprecated aliases until the next release. The attested configuration
+  signature string (`zjs-config-v2:compiler=v2,...`) is intentionally
+  unchanged: "v2" is the compiler's published identity, not the directory
+  name. Verified by the tightened identity-gate protocol: pre- and
+  post-rename sources each produce the identical stripped-image set across
+  both known build-bistability attractors (incremental-converged
+  `e93b69e8`, cold-cache `5df9578f`), so the rename provably changes no
+  machine code or data in either build mode.
+- Removed the `zjs.host.NativeBinding` `Storage.inlineValue` constant alias.
+  It was visually a sibling of the function `Storage.externalPtr(...)` while
+  actually being a constant for the enum tag `.inline_value`. Migration: use
+  the enum literal `.inline_value` directly.
+- Named the parser's dual emission streams (backlog H13): the builder-stream
+  State veneers dropped their `v2` prefix for `builder*` (`builderEmitOp`,
+  `activeBuilder`, …), the parser-error facade free functions dropped the
+  cryptic `v2F` prefix for `emitter*` (`emitterOp`, `emitterBindLabel`, … —
+  the `F` meant "parser-error-typed Facade"), ~30 `v2_*` locals/fields
+  dropped the prefix, and the dual-stream unions now tag their arms
+  `temp`/`builder`. The compiler-contract F-5/F-6 dead code (never-assigned
+  finally-label twin, four `*NoFinallyCapture` emitters,
+  `emitForwardJump*`/`patchForwardJump`; −78 lines) is deleted. The
+  identity gate first caught the deletion shifting `.text` by −432 bytes
+  (a struct-field deletion is a layout payload — the QCP-1B class); it
+  landed under the 2026-08-19 owner ruling that temporarily suspends the
+  zoo A/B requirement, with the layout effect measured and recorded. The
+  contract was also corrected where its description disagreed with the
+  code (the fixup lists have live assertion guards and stay).
+  `FunctionDef.v2_builder` keeps its name pending H10.
+- Removed the historical `qjs*` function prefix entirely (527 unique names;
+  owner ruling: mirroring quickjs.c is a transitional state, not the
+  project's identity — names describe function, not provenance; alignment
+  evidence stays in `// quickjs.c:N` comments and commit messages). 488
+  names stripped mechanically after a collision pre-scan; the 39 collision
+  cases were resolved individually: context-layer entry points gained a
+  `Call` suffix (`arrayBufferResizeCall`, `dataViewGetCall`, …), five
+  proved to be duplicates or dead forwards and were merged or deleted
+  (including a byte-identical double `freeValueList` in one file), and two
+  same-name/different-meaning pairs were disambiguated on both sides
+  (`iteratorCloseValue` vs the opcode pair; `descriptorFromObject` /
+  `descriptorFromObjectBare`).
+- Deduplication pass (backlog H4/H5, landed under the zoo-gate suspension):
+  every call site of the 17 `objectFromValue` copies that skipped the
+  VarRef-cell `kind` re-check was classified — no live bug; the authority
+  (checked, trusted-expression, and `expectObject` variants) sank to
+  `core.value_semantics`, and the copies became forwards or explicit
+  Trusted calls with the safety argument now named at each site. Deleted
+  the 15 pure-forwarding `qjsIteratorZip*`/`qjsIteratorHelper*` shells in
+  `call_runtime.zig` (zero external callers) and merged the
+  `functionPrototypeFromGlobal` / `numberValue` duplicate implementations.
+  GUIDE A.7 now requires a `mirror of <owner>, keep in sync` comment on any
+  layering-forced helper copy.
+- Disambiguated the remaining cross-file same-name traps:
+  `tailcall_dispatch.run` → `runDispatchLoop` (vs the outer `zjs_vm.run`),
+  `string_builtin_ops.iteratorNext` → `stringIteratorNext` (vs the
+  iterator-protocol `iterator_ops.iteratorNext`), `vm_property`'s
+  `fastInt32Add/Sub/Mul` → `checkedInt32Add/Sub/Mul` (overflow-intrinsic
+  strategy, vs `vm_arith`'s deliberately widening `fastInt32*`), and the
+  TDZ throw stragglers → `throwTdzReferenceError` /
+  `throwGlobalTdzReferenceError`. Documented the throw-helper patterns,
+  the `*ForFastPath` (ingredient) vs `*Fast` (fast variant) distinction,
+  and the `X_ops` / `X_builtin_ops` split rule in `docs/architecture.md`.
+- Renamed `src/exec/property_ic.zig` → `property_direct.zig`: the inline
+  cache it was named after is long deleted; the file holds non-cached
+  direct property fast paths. Deleted the always-false
+  `cachedSetObjectDataPropertyForPutFastPath` zombie (zero callers; its
+  "ABI stability" comment was stale). Disambiguated the H12 same-name
+  traps: `call.zig`'s global-slot property walk is now
+  `getValuePropertyViaGlobalSlots` (the full-semantics
+  `object_ops.getValueProperty` is unchanged), and `object_ops`'s
+  by-name define is now `defineDataPropertyByName` (the by-atom
+  `property_ops.defineDataProperty` is unchanged). Documented the exec
+  naming conventions (`vm_X` vs `X_ops` split, `Vm` suffix, `qjs*` prefix
+  caveat, ownership-suffix policy) in `docs/architecture.md` and GUIDE A.7.
+- Renamed `src/exec/vm_exception_ops.zig` → `exception_ops.zig` (all ~40
+  importers already aliased it as `exception_ops`), unified the nine
+  inverted `X_vm` import aliases onto their `vm_X` file names, renamed the
+  cryptic `td` alias to `dispatch` in the cold-handler table, unified
+  `module_exec` → `module_mod`, removed the duplicate `exec.eval` re-export
+  (`exec.eval_entry` remains), and deleted the orphan 17-line
+  `src/exec/iterator.zig` (no callers). Verified with the batch-tier
+  identity gate.
+- Refactor policy: added the identity-gate baseline registry
+  (`reports/identity/baseline.json`) and the batch tier for mechanical
+  rename campaigns (one identity closure per batch; per-change gating stays
+  for hot-path structural changes).
+- Naming-consistency pass (2026-08-19), verified change-free on both
+  build-bistability attractors (stripped-image identity): unified the
+  misleading `src/exec/` import aliases onto their file names (`class_vm` →
+  `object_ops`, `collection_vm` → `array_ops`, `iter_vm` → `iterator_ops`,
+  `date_vm` → `date_ops`, `weak_ref` → `builtin_glue`, `symbol_builtin` →
+  `primitive_ops`, `buffer_builtin` → `buffer_ops`, `function_bytecode` →
+  `bytecode`) and dropped the duplicate `object_ops` import in
+  `tailcall_dispatch.zig` (backlog H3). Renamed `construct.zig`'s local
+  `isErrorConstructorName` wrapper to `isConstructErrorObjectName` — it
+  forwards a *different* predicate (no `SuppressedError`) than the
+  identically named `vm_exception_ops` function (backlog H12 hazard).
+  Fixed the remaining GUIDE A.7 style violations: `cur_func` → `curFunc`
+  (parser), `h_*` comptime handler factories → `handler*` (dispatch colds),
+  `unicode_script` → `unicodeScript` (regexp properties). GUIDE A.7 now
+  documents the intentional mirror-name exemptions (`op_<opcode>` handlers,
+  ported dtoa C ABI names, JavaScript-identifier constants, camelCase
+  function-pointer vtable fields).
 - Removed empty public shells with no in-tree users:
   `zjs.object.Builder`, `zjs.object.Template`, the `zjs.compile` namespace
   (`SourceKind` / `Options` / `Cache`), and the `zjs.error` namespace
@@ -89,6 +195,16 @@ under the refactor-policy gates.
 - Split validation docs so ReleaseSafe, `test-oom`, `test-altrepr`,
   force-GC, and ownership-audit are phase-close or change-triggered, not
   checkpoint or per-commit gates.
+- Documentation terminal-state cleanup (2026-08-19): README/STATUS now carry
+  the clean-field zoo headline (1.0304, `main@0c32a71c`) instead of the
+  contaminated r3 numbers; stale claims fixed (per-opcode profiling works on
+  `zjs-profile`; strict-mode PTC is landed); `qcp1_switch_decision.md`
+  condensed to its close-out rulings (§0.1.6/§8/§8.5/§9 preserved);
+  `borrowed_atom_audit.md` trimmed to the ownership contract and governance
+  protocol; the 2026-07-27 subsystem baseline gained an errata header;
+  `docs/README.md` reorganized by audience; `docs/agents/` merged 4 files
+  into 2; the same-runtime verifier README moved to
+  `tools/perf/same_runtime/VERIFIER.md`.
 
 ## 0.1.0 - 2026-08-17
 

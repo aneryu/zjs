@@ -8242,6 +8242,8 @@ pub const Object = extern struct {
         return candidates.contains(@intFromPtr(function_bytecode));
     }
 
+    // mirror of value_semantics.objectFromValue (kind check included), keep
+    // in sync — kept local: object.zig <-> value_semantics import cycle.
     fn objectFromValue(stored: JSValue) ?*Object {
         const stored_header = stored.refHeader() orelse return null;
         if (stored_header.meta().flags.kind != .object) return null;

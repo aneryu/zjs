@@ -6,12 +6,12 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const stack_mod = @import("stack.zig");
 
-const property_vm = @import("vm_property.zig");
-const Step = property_vm.Step;
+const vm_property = @import("vm_property.zig");
+const Step = vm_property.Step;
 
 fn privateFieldAtom(
     ctx: *core.JSContext,

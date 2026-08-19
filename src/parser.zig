@@ -1219,7 +1219,7 @@ pub const lexer = struct {
                 },
                 else => {
                     // Legacy octal (\1..\7) is rejected in strict mode and in
-                    // template literals; QuickJS reports it via cur_func->is_strict_mode.
+                    // template literals; QuickJS reports it via curFunc->is_strict_mode.
                     if (c >= '1' and c <= '7') {
                         if (self.is_strict_mode or in_template) return error.LegacyOctalInStrictMode;
                         try appendUtf8(out, self.allocator, try self.consumeLegacyOctalEscape());
@@ -3671,7 +3671,7 @@ pub const parser_core = struct {
     const unicode = @import("libs/unicode.zig");
     const memory = @import("core/memory.zig");
     const JSValue = @import("core/value.zig").JSValue;
-    const compiler_v2 = @import("compiler_v2/root.zig");
+    const compiler = @import("compiler/root.zig");
 
     const bytecode_function = bytecode;
     const function_def_mod = bytecode.function_def;
@@ -3889,8 +3889,6 @@ pub const parser_core = struct {
         label_cont: i32,
         drop_count: i32,
         label_finally: i32,
-        /// QCP-1 S2-G3: v2 twin of label_finally (both unset in zjs — try uses return_finally_frames).
-        v2_label_finally: ?compiler_v2.LabelId = null,
         scope_level: i32,
         catch_marker_depth: u32,
         has_iterator: bool,
@@ -3906,8 +3904,8 @@ pub const parser_core = struct {
         break_fixups: std.ArrayList(usize) = .empty,
         continue_fixups: std.ArrayList(usize) = .empty,
         /// QCP-1 S2-G1: v2 parses carry the qjs label identities directly.
-        v2_break_label: ?compiler_v2.LabelId = null,
-        v2_continue_label: ?compiler_v2.LabelId = null,
+        break_label: ?compiler.LabelId = null,
+        continue_label: ?compiler.LabelId = null,
 
         fn deinit(self: *LabelFrame, allocator: std.mem.Allocator) void {
             self.break_fixups.deinit(allocator);
@@ -3919,13 +3917,13 @@ pub const parser_core = struct {
         top_break: ?*BlockEnv,
         break_fixups: std.ArrayList(usize),
         break_frame_lens: std.ArrayList(usize),
-        v2_break_frame_labels: std.ArrayList(compiler_v2.LabelId),
+        break_frame_labels: std.ArrayList(compiler.LabelId),
         break_frame_catch_marker_depths: std.ArrayList(u32),
         break_frame_cleanup_drops: std.ArrayList(u8),
         break_frame_cross_cleanup_drops: std.ArrayList(u8),
         continue_fixups: std.ArrayList(usize),
         continue_frame_lens: std.ArrayList(usize),
-        v2_continue_frame_labels: std.ArrayList(compiler_v2.LabelId),
+        continue_frame_labels: std.ArrayList(compiler.LabelId),
         continue_frame_break_frame_indices: std.ArrayList(usize),
         continue_frame_catch_marker_depths: std.ArrayList(u32),
         continue_frame_cleanup_drops: std.ArrayList(u8),
@@ -3949,7 +3947,7 @@ pub const parser_core = struct {
 
     const UsingBlockFrame = struct {
         stack_loc: ?u16 = null,
-        v2_catch_label: ?compiler_v2.LabelId = null,
+        catch_label: ?compiler.LabelId = null,
         catch_marker_depth: u32 = 0,
         seen_async_hint: bool = false,
     };
@@ -4063,7 +4061,7 @@ pub const parser_core = struct {
     /// so an inferred-name patch can update code and ownership in lockstep
     /// without a per-instruction side table.
     const ClassNamePatch = struct {
-        builder: *compiler_v2.Builder,
+        builder: *compiler.Builder,
         define_class_pos: u32,
         atom_index: u32,
         marker_pos: u32,
@@ -4210,7 +4208,7 @@ pub const parser_core = struct {
         /// TDZ, and local-slot assignment.
         ///
         /// The parser still emits to `function.code` as before; this is a
-        /// parallel structure that mirrors `JSParseState.cur_func`
+        /// parallel structure that mirrors `JSParseState.curFunc`
         /// (`quickjs.c:21581`). Tests in `qjs_parser_test.zig` assert the
         /// `vars` / `scopes` layout is populated correctly.
         function_def: function_def_mod.FunctionDef,
@@ -4221,7 +4219,7 @@ pub const parser_core = struct {
         declaration_conflict_indices: DeclarationConflictIndexRegistry = .empty,
 
         /// Stack of FunctionDef pointers for nested function parsing.
-        /// Mirrors `JSParseState.cur_func` stack management. The top of
+        /// Mirrors `JSParseState.curFunc` stack management. The top of
         /// the stack is the current function being parsed. When entering
         /// a nested function, we push a new FunctionDef; when exiting,
         /// we pop back to the parent.
@@ -4258,10 +4256,10 @@ pub const parser_core = struct {
         break_frame_lens: std.ArrayList(usize) = .empty,
         /// QCP-1 S2-G1: one LabelId per break/continue frame (qjs
         /// push_break_entry label_break/label_cont).
-        v2_break_frame_labels: std.ArrayList(compiler_v2.LabelId) = .empty,
+        break_frame_labels: std.ArrayList(compiler.LabelId) = .empty,
         continue_fixups: std.ArrayList(usize) = .empty,
         continue_frame_lens: std.ArrayList(usize) = .empty,
-        v2_continue_frame_labels: std.ArrayList(compiler_v2.LabelId) = .empty,
+        continue_frame_labels: std.ArrayList(compiler.LabelId) = .empty,
         continue_frame_break_frame_indices: std.ArrayList(usize) = .empty,
         break_frame_catch_marker_depths: std.ArrayList(u32) = .empty,
         break_frame_cleanup_drops: std.ArrayList(u8) = .empty,
@@ -4306,7 +4304,7 @@ pub const parser_core = struct {
             _ = state.function_def.appendScope(-1) catch return error.OutOfMemory;
             // The root's Builder is the emission destination from the first
             // event onward; attach it before any parse step can emit.
-            state.v2EnsureBuilderForFd(&state.function_def) catch return error.OutOfMemory;
+            state.ensureBuilderForFd(&state.function_def) catch return error.OutOfMemory;
             try lex.nextInto(&state.token);
             // Every standalone State is a program/eval root.  QuickJS pushes
             // its real body scope before js_parse_program (and therefore
@@ -4314,9 +4312,9 @@ pub const parser_core = struct {
             // the var/arg environment.  Only the IDENTITY is established here:
             // declaration semantics need it immediately, but the marker cannot
             // be emitted before the root's Builder exists, so
-            // `beginV2ProgramEmission` emits it as the stream's first event.
+            // `beginProgramEmission` emits it as the stream's first event.
             try state.beginFunctionBodyIdentityOnly();
-            // Note: cur_func_stack starts empty; cur_func() returns &function_def when empty
+            // Note: cur_func_stack starts empty; curFunc() returns &function_def when empty
             return state;
         }
 
@@ -4388,10 +4386,10 @@ pub const parser_core = struct {
             }
             self.break_fixups.deinit(self.function.memory.allocator);
             self.break_frame_lens.deinit(self.function.memory.allocator);
-            self.v2_break_frame_labels.deinit(self.function.memory.allocator);
+            self.break_frame_labels.deinit(self.function.memory.allocator);
             self.continue_fixups.deinit(self.function.memory.allocator);
             self.continue_frame_lens.deinit(self.function.memory.allocator);
-            self.v2_continue_frame_labels.deinit(self.function.memory.allocator);
+            self.continue_frame_labels.deinit(self.function.memory.allocator);
             self.continue_frame_break_frame_indices.deinit(self.function.memory.allocator);
             self.break_frame_catch_marker_depths.deinit(self.function.memory.allocator);
             self.break_frame_cleanup_drops.deinit(self.function.memory.allocator);
@@ -4413,9 +4411,9 @@ pub const parser_core = struct {
         }
 
         /// Get the current FunctionDef from the top of the stack.
-        /// Mirrors `JSParseState.cur_func` access. Returns the root
+        /// Mirrors `JSParseState.curFunc` access. Returns the root
         /// function_def when the stack is empty (top-level parsing).
-        fn cur_func(self: *State) *function_def_mod.FunctionDef {
+        fn curFunc(self: *State) *function_def_mod.FunctionDef {
             if (self.cur_func_stack.len == 0) {
                 return &self.function_def;
             }
@@ -4664,7 +4662,7 @@ pub const parser_core = struct {
             self.cur_func_stack = self.cur_func_stack.ptr[0..new_len];
             self.cur_func_stack[old_len] = fd;
             if (fd.v2_builder == null) {
-                self.v2EnsureBuilderForFd(fd) catch return error.OutOfMemory;
+                self.ensureBuilderForFd(fd) catch return error.OutOfMemory;
             }
         }
 
@@ -4697,9 +4695,9 @@ pub const parser_core = struct {
         /// `scope_level` to it. Call on entry to a new lexical block.
         pub fn pushScopeIdentity(self: *State) Error!void {
             const parent = self.scope_level;
-            const new_scope = self.cur_func().appendScope(parent) catch return error.OutOfMemory;
+            const new_scope = self.curFunc().appendScope(parent) catch return error.OutOfMemory;
             self.scope_level = new_scope;
-            self.cur_func().scope_level = new_scope;
+            self.curFunc().scope_level = new_scope;
         }
 
         /// Allocate a lexical scope and emit its phase-1 entry event.  Parser
@@ -4725,7 +4723,7 @@ pub const parser_core = struct {
         pub fn beginFunctionBodyIdentityOnly(self: *State) Error!void {
             try self.pushScopeIdentity();
             errdefer self.popScopeIdentity();
-            self.cur_func().body_scope = self.scope_level;
+            self.curFunc().body_scope = self.scope_level;
         }
 
         /// Function bodies remain the current scope through finalization, just
@@ -4740,20 +4738,20 @@ pub const parser_core = struct {
         /// correct chain.
         pub fn popScopeIdentity(self: *State) void {
             if (self.scope_level < 0) return;
-            const parent = self.cur_func().scopes[@intCast(self.scope_level)].parent;
+            const parent = self.curFunc().scopes[@intCast(self.scope_level)].parent;
             self.scope_level = parent;
-            self.cur_func().scope_level = parent;
+            self.curFunc().scope_level = parent;
             // Recompute scope_first for the new current scope (mirrors
             // `get_first_lexical_var` at `quickjs.c:23521`).
             var scope = parent;
-            self.cur_func().scope_first = -1;
+            self.curFunc().scope_first = -1;
             while (scope >= 0) {
-                const s_idx = self.cur_func().scopes[@intCast(scope)].first;
+                const s_idx = self.curFunc().scopes[@intCast(scope)].first;
                 if (s_idx >= 0) {
-                    self.cur_func().scope_first = s_idx;
+                    self.curFunc().scope_first = s_idx;
                     break;
                 }
-                scope = self.cur_func().scopes[@intCast(scope)].parent;
+                scope = self.curFunc().scopes[@intCast(scope)].parent;
             }
         }
 
@@ -4778,7 +4776,7 @@ pub const parser_core = struct {
             is_lexical: bool,
             is_const: bool,
         ) Error!i32 {
-            const fd = self.cur_func();
+            const fd = self.curFunc();
             const index_prepared = try self.prepareLinkedDeclarationIndexWrite(
                 fd,
                 name,
@@ -4825,16 +4823,16 @@ pub const parser_core = struct {
         };
 
         fn atFunctionBodyScope(self: *State) bool {
-            return self.cur_func().body_scope >= 0 and self.scope_level == self.cur_func().body_scope;
+            return self.curFunc().body_scope >= 0 and self.scope_level == self.curFunc().body_scope;
         }
 
         fn atProgramBodyScope(self: *State) bool {
-            return self.cur_func_stack.len == 0 and self.cur_func().is_eval and self.atFunctionBodyScope();
+            return self.cur_func_stack.len == 0 and self.curFunc().is_eval and self.atFunctionBodyScope();
         }
 
         fn isChildScope(self: *State, scope: i32, parent_scope: i32) bool {
             if (scope < 0 or parent_scope < 0) return false;
-            const scopes = self.cur_func().scopes;
+            const scopes = self.curFunc().scopes;
             var current = scope;
             var visited: usize = 0;
             while (current >= 0 and visited <= scopes.len) : (visited += 1) {
@@ -4846,7 +4844,7 @@ pub const parser_core = struct {
         }
 
         fn firstGlobalVarIndex(self: *State, name: Atom) ?usize {
-            for (self.cur_func().global_vars, 0..) |gv, idx| {
+            for (self.curFunc().global_vars, 0..) |gv, idx| {
                 if (gv.var_name == name) return idx;
             }
             return null;
@@ -4858,7 +4856,7 @@ pub const parser_core = struct {
         /// dirty. Only global-eval (not module/direct eval) adds the
         /// GLOBAL_VAR_OFFSET lexical fallback.
         fn findLexicalDeclarationLegacy(self: *State, name: Atom, check_catch: bool) ?LexicalDeclaration {
-            const fd = self.cur_func();
+            const fd = self.curFunc();
             var var_idx = fd.scope_first;
             var visited: usize = 0;
             while (var_idx >= 0 and visited <= fd.vars.len) : (visited += 1) {
@@ -4919,7 +4917,7 @@ pub const parser_core = struct {
             name: Atom,
             check_catch: bool,
         ) Error!?LexicalDeclaration {
-            const fd = self.cur_func();
+            const fd = self.curFunc();
             if (try self.declarationConflictIndex(fd)) |index| {
                 const indexed = self.findIndexedLexicalDeclaration(index, fd, name, check_catch) catch {
                     index.dirty = true;
@@ -4944,7 +4942,7 @@ pub const parser_core = struct {
         /// its `scope_next` field is the lexical scope where the declaration
         /// occurred.  Such rows are intentionally absent from scope.first.
         fn findFunctionVarInChildScopeLegacy(self: *State, name: Atom, scope_level: i32) ?u16 {
-            for (self.cur_func().vars, 0..) |vd, idx| {
+            for (self.curFunc().vars, 0..) |vd, idx| {
                 if (vd.var_name != name or vd.scope_level != 0) continue;
                 if (self.isChildScope(vd.scope_next, scope_level)) return @intCast(idx);
             }
@@ -4956,7 +4954,7 @@ pub const parser_core = struct {
             name: Atom,
             scope_level: i32,
         ) Error!?u16 {
-            const fd = self.cur_func();
+            const fd = self.curFunc();
             if (try self.declarationConflictIndex(fd)) |index| {
                 const key = DeclarationConflictIndex.scopeNameKey(scope_level, name) orelse {
                     index.dirty = true;
@@ -4980,7 +4978,7 @@ pub const parser_core = struct {
         }
 
         fn appendFunctionVarAtOrigin(self: *State, name: Atom, origin_scope: i32) Error!u16 {
-            const fd = self.cur_func();
+            const fd = self.curFunc();
             const index_prepared = try self.prepareFunctionVarOriginIndexWrite(fd, name, origin_scope);
             const idx = fd.appendVar(.{
                 .var_name = name,
@@ -4999,7 +4997,7 @@ pub const parser_core = struct {
         /// producer wrappers; every scope collision and physical row choice
         /// belongs here.
         pub fn defineVar(self: *State, name: Atom, var_def_type: DefineVarType) Error!DefinedVar {
-            const fd = self.cur_func();
+            const fd = self.curFunc();
             switch (var_def_type) {
                 .with_ => {
                     return .{ .local = @intCast(try self.addScopeVar(name, .normal, false, false)) };
@@ -5097,10 +5095,10 @@ pub const parser_core = struct {
         }
 
         fn scopeHasVar(self: *State, scope_idx: i32, name: Atom) bool {
-            if (scope_idx < 0 or @as(usize, @intCast(scope_idx)) >= self.cur_func().scopes.len) return false;
-            var var_idx = self.cur_func().scopes[@intCast(scope_idx)].first;
-            while (var_idx >= 0 and @as(usize, @intCast(var_idx)) < self.cur_func().vars.len) {
-                const var_def = self.cur_func().vars[@intCast(var_idx)];
+            if (scope_idx < 0 or @as(usize, @intCast(scope_idx)) >= self.curFunc().scopes.len) return false;
+            var var_idx = self.curFunc().scopes[@intCast(scope_idx)].first;
+            while (var_idx >= 0 and @as(usize, @intCast(var_idx)) < self.curFunc().vars.len) {
+                const var_def = self.curFunc().vars[@intCast(var_idx)];
                 if (var_def.scope_level != scope_idx) break;
                 if (var_def.var_name == name) return true;
                 var_idx = var_def.scope_next;
@@ -5110,15 +5108,15 @@ pub const parser_core = struct {
 
         fn visibleLexicalScopeVar(self: *State, name: Atom) ?u16 {
             var scope_idx = self.scope_level;
-            while (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < self.cur_func().scopes.len) {
-                var var_idx = self.cur_func().scopes[@intCast(scope_idx)].first;
-                while (var_idx >= 0 and @as(usize, @intCast(var_idx)) < self.cur_func().vars.len) {
-                    const var_def = self.cur_func().vars[@intCast(var_idx)];
+            while (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < self.curFunc().scopes.len) {
+                var var_idx = self.curFunc().scopes[@intCast(scope_idx)].first;
+                while (var_idx >= 0 and @as(usize, @intCast(var_idx)) < self.curFunc().vars.len) {
+                    const var_def = self.curFunc().vars[@intCast(var_idx)];
                     if (var_def.scope_level != scope_idx) break;
                     if (var_def.var_name == name and var_def.is_lexical) return @intCast(var_idx);
                     var_idx = var_def.scope_next;
                 }
-                scope_idx = self.cur_func().scopes[@intCast(scope_idx)].parent;
+                scope_idx = self.curFunc().scopes[@intCast(scope_idx)].parent;
             }
             return null;
         }
@@ -5126,7 +5124,7 @@ pub const parser_core = struct {
         /// qjs find_lexical_global_var (quickjs.c:24078): a global_vars entry with
         /// is_lexical set (a top-level let/const declared as JS_CLOSURE_GLOBAL_DECL).
         fn findLexicalGlobalVar(self: *State, name: Atom) bool {
-            for (self.cur_func().global_vars) |gv| {
+            for (self.curFunc().global_vars) |gv| {
                 if (gv.var_name == name and gv.is_lexical) return true;
             }
             return false;
@@ -5135,7 +5133,7 @@ pub const parser_core = struct {
         /// qjs find_global_var (quickjs.c:24066): any global_vars entry with this
         /// name — top-level var, hoisted function declaration, or lexical.
         fn findGlobalVar(self: *State, name: Atom) bool {
-            for (self.cur_func().global_vars) |gv| {
+            for (self.curFunc().global_vars) |gv| {
                 if (gv.var_name == name) return true;
             }
             return false;
@@ -5171,7 +5169,7 @@ pub const parser_core = struct {
         }
 
         fn findFunctionScopeVar(self: *State, name: Atom) ?u16 {
-            const vars = self.cur_func().vars;
+            const vars = self.curFunc().vars;
             var i = vars.len;
             while (i > 0) {
                 i -= 1;
@@ -5181,7 +5179,7 @@ pub const parser_core = struct {
         }
 
         fn addGlobalVar(self: *State, name: Atom, is_lexical: bool, is_const: bool) Error!void {
-            return self.cur_func().appendGlobalVar(.{
+            return self.curFunc().appendGlobalVar(.{
                 .cpool_idx = -1,
                 .force_init = false,
                 .is_configurable = self.eval_global_var_bindings and !is_lexical,
@@ -5193,7 +5191,7 @@ pub const parser_core = struct {
         }
 
         fn addGlobalAnnexBFunctionVar(self: *State, name: Atom, is_configurable: bool) Error!void {
-            return self.cur_func().appendGlobalVar(.{
+            return self.curFunc().appendGlobalVar(.{
                 .cpool_idx = -1,
                 // QuickJS only forces the Annex-B var copy in strict code;
                 // Annex B itself is a sloppy-code rule, so this declaration
@@ -5208,7 +5206,7 @@ pub const parser_core = struct {
         }
 
         fn addDirectEvalVarObjectVar(self: *State, name: Atom) Error!void {
-            const fd = self.cur_func();
+            const fd = self.curFunc();
             fd.appendGlobalVar(.{
                 .cpool_idx = -1,
                 .force_init = true,
@@ -5258,7 +5256,7 @@ pub const parser_core = struct {
         ///    (no expressions) still returns a sensible value.
         pub fn enableEvalReturn(self: *State) Error!void {
             self.is_eval = true;
-            self.cur_func().is_eval = true;
+            self.curFunc().is_eval = true;
             self.eval_delete_bindings = true;
             try self.enableReturnCompletion();
         }
@@ -5272,7 +5270,7 @@ pub const parser_core = struct {
             // program body lexical chain.
             const idx = try self.appendFunctionVarAtOrigin(eval_ret_atom, 0);
             self.eval_ret_idx = idx;
-            self.cur_func().eval_ret_idx = idx;
+            self.curFunc().eval_ret_idx = idx;
             // Emit the initialiser directly by slot. Every syntactic finally
             // adds another same-named `<ret>` save slot, so name lookup would
             // become ambiguous after the first one.
@@ -5376,7 +5374,7 @@ pub const parser_core = struct {
             source_start: usize,
             source_end: usize,
         ) Error!void {
-            for (self.cur_func().child_list) |child| {
+            for (self.curFunc().child_list) |child| {
                 if (child.parent_cpool_idx != cpool_idx) continue;
                 try self.setFunctionSourceRange(child, source_start, source_end);
                 return;
@@ -5406,18 +5404,18 @@ pub const parser_core = struct {
         }
 
         fn pushLabelFrame(s: *State, atom_id: Atom, allow_continue: bool) Error!usize {
-            var v2_break_label: ?compiler_v2.LabelId = null;
-            var v2_continue_label: ?compiler_v2.LabelId = null;
-            if (allow_continue) v2_continue_label = try v2FNewLabel(s);
-            v2_break_label = try v2FNewLabel(s);
+            var break_label: ?compiler.LabelId = null;
+            var continue_label: ?compiler.LabelId = null;
+            if (allow_continue) continue_label = try emitterNewLabel(s);
+            break_label = try emitterNewLabel(s);
             try s.label_frames.append(s.function.memory.allocator, LabelFrame{
                 .atom = atom_id,
                 .allow_continue = allow_continue,
                 .catch_marker_depth = s.active_catch_marker_depth,
                 .control_frame_depth = s.continue_frame_lens.items.len,
                 .break_frame_depth = s.break_frame_lens.items.len,
-                .v2_break_label = v2_break_label,
-                .v2_continue_label = v2_continue_label,
+                .break_label = break_label,
+                .continue_label = continue_label,
             });
             return s.label_frames.items.len - 1;
         }
@@ -5425,16 +5423,16 @@ pub const parser_core = struct {
         fn patchLabelBreaks(s: *State, frame_index: usize) Error!void {
             // qjs emit_label(label_break): the merge label binds unconditionally,
             // even with zero refs (resolve_labels_v2 drops dead labels).
-            if (s.label_frames.items[frame_index].v2_break_label) |label| {
-                try v2FBindLabel(s, label);
+            if (s.label_frames.items[frame_index].break_label) |label| {
+                try emitterBindLabel(s, label);
             }
         }
 
         fn patchLabelContinues(s: *State, frame_index: usize) Error!void {
             // qjs emit_label(label_cont): the merge label binds unconditionally,
             // even with zero refs (resolve_labels_v2 drops dead labels).
-            if (s.label_frames.items[frame_index].v2_continue_label) |label| {
-                try v2FBindLabel(s, label);
+            if (s.label_frames.items[frame_index].continue_label) |label| {
+                try emitterBindLabel(s, label);
             }
         }
 
@@ -5457,40 +5455,8 @@ pub const parser_core = struct {
             try emitControlThroughFinally(s, .{ .kind = .@"break", .label_atom = atom_id });
         }
 
-        fn emitLabelledBreakNoFinallyCapture(s: *State, atom_id: Atom) Error!void {
-            const frame_index = findLabelFrame(s, atom_id) orelse return Error.UnexpectedToken;
-            try emitCatchMarkerDropsToDepth(s, s.label_frames.items[frame_index].catch_marker_depth);
-            var frame_depth = s.break_frame_cleanup_drops.items.len;
-            while (frame_depth > s.label_frames.items[frame_index].break_frame_depth) {
-                frame_depth -= 1;
-                try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[frame_depth]);
-            }
-            if (s.label_frames.items[frame_index].allow_continue and s.label_frames.items[frame_index].break_frame_depth > 0) {
-                try emitUnlabelledBreakCleanup(s, s.break_frame_cleanup_drops.items[s.label_frames.items[frame_index].break_frame_depth - 1]);
-            }
-            const off = try emitForwardJumpNoSource(s, opcode.op.goto);
-            try s.label_frames.items[frame_index].break_fixups.append(s.function.memory.allocator, off);
-        }
-
         fn emitLabelledContinue(s: *State, atom_id: Atom) Error!void {
             try emitControlThroughFinally(s, .{ .kind = .@"continue", .label_atom = atom_id });
-        }
-
-        fn emitLabelledContinueNoFinallyCapture(s: *State, atom_id: Atom) Error!void {
-            const frame_index = findLabelFrame(s, atom_id) orelse return Error.UnexpectedToken;
-            if (!s.label_frames.items[frame_index].allow_continue) return Error.UnexpectedToken;
-            try emitCatchMarkerDropsToDepth(s, s.label_frames.items[frame_index].catch_marker_depth);
-            var frame_depth = s.continue_frame_lens.items.len;
-            while (frame_depth > s.label_frames.items[frame_index].control_frame_depth) {
-                frame_depth -= 1;
-                const break_frame_index = s.continue_frame_break_frame_indices.items[frame_depth];
-                try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[break_frame_index]);
-            }
-            if (s.label_frames.items[frame_index].control_frame_depth > 0) {
-                try emitCrossFrameCleanup(s, s.continue_frame_cleanup_drops.items[s.label_frames.items[frame_index].control_frame_depth - 1]);
-            }
-            const off = try emitForwardJumpNoSource(s, opcode.op.goto);
-            try s.label_frames.items[frame_index].continue_fixups.append(s.function.memory.allocator, off);
         }
 
         fn labelStartAtom(s: *State) ?Atom {
@@ -5507,20 +5473,20 @@ pub const parser_core = struct {
                 (s.in_async and atomNameEquals(s, atom_id, "await")) or
                 (s.in_class_static_block and atomNameEquals(s, atom_id, "await")) or
                 (s.in_generator and atomNameEquals(s, atom_id, "yield")) or
-                ((s.is_strict or s.cur_func().is_strict_mode) and atomNameEquals(s, atom_id, "yield"));
+                ((s.is_strict or s.curFunc().is_strict_mode) and atomNameEquals(s, atom_id, "yield"));
         }
 
         fn deinitCurrentControlFrames(s: *State) void {
             const allocator = s.function.memory.allocator;
             s.break_fixups.deinit(allocator);
             s.break_frame_lens.deinit(allocator);
-            s.v2_break_frame_labels.deinit(allocator);
+            s.break_frame_labels.deinit(allocator);
             s.break_frame_catch_marker_depths.deinit(allocator);
             s.break_frame_cleanup_drops.deinit(allocator);
             s.break_frame_cross_cleanup_drops.deinit(allocator);
             s.continue_fixups.deinit(allocator);
             s.continue_frame_lens.deinit(allocator);
-            s.v2_continue_frame_labels.deinit(allocator);
+            s.continue_frame_labels.deinit(allocator);
             s.continue_frame_break_frame_indices.deinit(allocator);
             s.continue_frame_catch_marker_depths.deinit(allocator);
             s.continue_frame_cleanup_drops.deinit(allocator);
@@ -5536,13 +5502,13 @@ pub const parser_core = struct {
                 .top_break = s.top_break,
                 .break_fixups = s.break_fixups,
                 .break_frame_lens = s.break_frame_lens,
-                .v2_break_frame_labels = s.v2_break_frame_labels,
+                .break_frame_labels = s.break_frame_labels,
                 .break_frame_catch_marker_depths = s.break_frame_catch_marker_depths,
                 .break_frame_cleanup_drops = s.break_frame_cleanup_drops,
                 .break_frame_cross_cleanup_drops = s.break_frame_cross_cleanup_drops,
                 .continue_fixups = s.continue_fixups,
                 .continue_frame_lens = s.continue_frame_lens,
-                .v2_continue_frame_labels = s.v2_continue_frame_labels,
+                .continue_frame_labels = s.continue_frame_labels,
                 .continue_frame_break_frame_indices = s.continue_frame_break_frame_indices,
                 .continue_frame_catch_marker_depths = s.continue_frame_catch_marker_depths,
                 .continue_frame_cleanup_drops = s.continue_frame_cleanup_drops,
@@ -5554,13 +5520,13 @@ pub const parser_core = struct {
             s.top_break = null;
             s.break_fixups = .empty;
             s.break_frame_lens = .empty;
-            s.v2_break_frame_labels = .empty;
+            s.break_frame_labels = .empty;
             s.break_frame_catch_marker_depths = .empty;
             s.break_frame_cleanup_drops = .empty;
             s.break_frame_cross_cleanup_drops = .empty;
             s.continue_fixups = .empty;
             s.continue_frame_lens = .empty;
-            s.v2_continue_frame_labels = .empty;
+            s.continue_frame_labels = .empty;
             s.continue_frame_break_frame_indices = .empty;
             s.continue_frame_catch_marker_depths = .empty;
             s.continue_frame_cleanup_drops = .empty;
@@ -5576,13 +5542,13 @@ pub const parser_core = struct {
             s.top_break = saved.top_break;
             s.break_fixups = saved.break_fixups;
             s.break_frame_lens = saved.break_frame_lens;
-            s.v2_break_frame_labels = saved.v2_break_frame_labels;
+            s.break_frame_labels = saved.break_frame_labels;
             s.break_frame_catch_marker_depths = saved.break_frame_catch_marker_depths;
             s.break_frame_cleanup_drops = saved.break_frame_cleanup_drops;
             s.break_frame_cross_cleanup_drops = saved.break_frame_cross_cleanup_drops;
             s.continue_fixups = saved.continue_fixups;
             s.continue_frame_lens = saved.continue_frame_lens;
-            s.v2_continue_frame_labels = saved.v2_continue_frame_labels;
+            s.continue_frame_labels = saved.continue_frame_labels;
             s.continue_frame_break_frame_indices = saved.continue_frame_break_frame_indices;
             s.continue_frame_catch_marker_depths = saved.continue_frame_catch_marker_depths;
             s.continue_frame_cleanup_drops = saved.continue_frame_cleanup_drops;
@@ -6067,11 +6033,11 @@ pub const parser_core = struct {
                 .code_len = self.currentCodeLen(),
                 .atom_len = self.currentAtomOperandLen(),
                 .source_loc_len = if (self.emit_to_function_def)
-                    self.cur_func().source_loc_slots.len
+                    self.curFunc().source_loc_slots.len
                 else
                     self.function.source_loc_slots.len,
                 .label_count = self.currentParserLabelCount(),
-                .last_opcode_pos = self.cur_func().last_opcode_pos,
+                .last_opcode_pos = self.curFunc().last_opcode_pos,
                 .last_opcode_source_offset = self.last_opcode_source_offset,
             };
         }
@@ -6083,7 +6049,7 @@ pub const parser_core = struct {
         /// resumes from.
         fn rollbackEmission(self: *State, snapshot: EmissionSnapshot) void {
             if (self.emit_to_function_def) {
-                const fd = self.cur_func();
+                const fd = self.curFunc();
                 fd.truncateAtomOperands(snapshot.atom_len);
                 fd.truncateSourceLocs(snapshot.source_loc_len);
                 fd.truncateByteCode(snapshot.code_len);
@@ -6093,7 +6059,7 @@ pub const parser_core = struct {
                 self.function.truncateCode(snapshot.code_len);
             }
             self.setParserLabelCount(snapshot.label_count);
-            self.cur_func().last_opcode_pos = snapshot.last_opcode_pos;
+            self.curFunc().last_opcode_pos = snapshot.last_opcode_pos;
             self.last_opcode_source_offset = snapshot.last_opcode_source_offset;
             // Emission rollback is an OOM-abort path (measured zero hits on
             // the compile corpus): a per-emission summary copy in
@@ -6103,18 +6069,18 @@ pub const parser_core = struct {
         }
 
         fn commitLastOpcode(self: *State, opcode_pos: usize) void {
-            self.cur_func().last_opcode_pos = @intCast(opcode_pos);
+            self.curFunc().last_opcode_pos = @intCast(opcode_pos);
         }
 
         fn currentParserLabelCount(self: *State) u32 {
             if (!self.emit_to_function_def) return self.root_parser_label_count;
-            std.debug.assert(self.cur_func().label_count >= 0);
-            return @intCast(self.cur_func().label_count);
+            std.debug.assert(self.curFunc().label_count >= 0);
+            return @intCast(self.curFunc().label_count);
         }
 
         fn setParserLabelCount(self: *State, count: u32) void {
             if (self.emit_to_function_def) {
-                self.cur_func().label_count = @intCast(count);
+                self.curFunc().label_count = @intCast(count);
             } else {
                 self.root_parser_label_count = count;
             }
@@ -6134,8 +6100,8 @@ pub const parser_core = struct {
         /// detach/owner transfer only begins after these claims succeed.
         fn reserveEmission(self: *State, code_bytes: usize, atom_operands: usize) Error!void {
             if (self.emit_to_function_def) {
-                try self.cur_func().reserveByteCode(code_bytes);
-                try self.cur_func().reserveAtomOperands(atom_operands);
+                try self.curFunc().reserveByteCode(code_bytes);
+                try self.curFunc().reserveAtomOperands(atom_operands);
             } else {
                 try self.function.reserveCode(code_bytes);
                 try self.function.reserveAtomOperands(atom_operands);
@@ -6145,7 +6111,7 @@ pub const parser_core = struct {
         fn appendBytesNoSourceAssumeCapacity(self: *State, bytes: []const u8) void {
             const pos = self.currentCodeLen();
             if (self.emit_to_function_def) {
-                self.cur_func().appendByteCodeAssumeCapacity(bytes);
+                self.curFunc().appendByteCodeAssumeCapacity(bytes);
             } else {
                 self.function.appendCodeAssumeCapacity(bytes);
             }
@@ -6154,7 +6120,7 @@ pub const parser_core = struct {
 
         fn appendAtomOperandAssumeCapacity(self: *State, atom_id: Atom) void {
             if (self.emit_to_function_def) {
-                self.cur_func().appendAtomOperandAssumeCapacity(atom_id);
+                self.curFunc().appendAtomOperandAssumeCapacity(atom_id);
             } else {
                 self.function.retainAtomOperandAssumeCapacity(atom_id);
             }
@@ -6162,7 +6128,7 @@ pub const parser_core = struct {
 
         fn appendOwnedAtomOperandAssumeCapacity(self: *State, atom_id: Atom) void {
             if (self.emit_to_function_def) {
-                self.cur_func().appendAtomOperandOwnedAssumeCapacity(atom_id);
+                self.curFunc().appendAtomOperandOwnedAssumeCapacity(atom_id);
             } else {
                 self.function.retainAtomOperandOwnedAssumeCapacity(atom_id);
             }
@@ -6175,7 +6141,7 @@ pub const parser_core = struct {
         }
 
         fn markDirectEvalCall(self: *State) Error!void {
-            const fd = self.cur_func();
+            const fd = self.curFunc();
             fd.has_eval_call = true;
         }
 
@@ -6391,9 +6357,9 @@ pub const parser_core = struct {
         fn closeScopes(self: *State, start_scope: i32, scope_stop: i32) Error!void {
             var scope = start_scope;
             while (scope > scope_stop) {
-                if (@as(usize, @intCast(scope)) >= self.cur_func().scopes.len) return Error.UnexpectedToken;
+                if (@as(usize, @intCast(scope)) >= self.curFunc().scopes.len) return Error.UnexpectedToken;
                 try self.emitLeaveScope(scope);
-                scope = self.cur_func().scopes[@intCast(scope)].parent;
+                scope = self.curFunc().scopes[@intCast(scope)].parent;
             }
         }
 
@@ -6401,7 +6367,7 @@ pub const parser_core = struct {
             const snapshot = self.takeEmissionSnapshot();
             errdefer self.rollbackEmission(snapshot);
             if (self.emit_to_function_def) {
-                try self.cur_func().appendAtomOperand(atom_id);
+                try self.curFunc().appendAtomOperand(atom_id);
             } else {
                 try self.function.retainAtomOperand(atom_id);
             }
@@ -6412,7 +6378,7 @@ pub const parser_core = struct {
             const snapshot = self.takeEmissionSnapshot();
             errdefer self.rollbackEmission(snapshot);
             if (self.emit_to_function_def) {
-                try self.cur_func().appendAtomOperand(atom_id);
+                try self.curFunc().appendAtomOperand(atom_id);
             } else {
                 try self.function.retainAtomOperand(atom_id);
             }
@@ -6424,7 +6390,7 @@ pub const parser_core = struct {
 
         fn appendOwnedAtomOperand(self: *State, atom_id: Atom) Error!void {
             if (self.emit_to_function_def) {
-                try self.cur_func().appendAtomOperandOwned(atom_id);
+                try self.curFunc().appendAtomOperandOwned(atom_id);
             } else {
                 try self.function.retainAtomOperandOwned(atom_id);
             }
@@ -6433,7 +6399,7 @@ pub const parser_core = struct {
         fn takeLastAtomOperand(self: *State) Error!Atom {
             if (self.currentAtomOperandLen() == 0) return Error.UnexpectedToken;
             return if (self.emit_to_function_def)
-                self.cur_func().takeLastAtomOperand()
+                self.curFunc().takeLastAtomOperand()
             else
                 self.function.takeLastAtomOperand();
         }
@@ -6445,7 +6411,7 @@ pub const parser_core = struct {
             const snapshot = self.takeEmissionSnapshot();
             errdefer self.rollbackEmission(snapshot);
             if (self.emit_to_function_def) {
-                try self.cur_func().appendAtomOperand(atom_id);
+                try self.curFunc().appendAtomOperand(atom_id);
             } else {
                 try self.function.retainAtomOperand(atom_id);
             }
@@ -6460,7 +6426,7 @@ pub const parser_core = struct {
             const snapshot = self.takeEmissionSnapshot();
             errdefer self.rollbackEmission(snapshot);
             if (self.emit_to_function_def) {
-                try self.cur_func().appendAtomOperand(atom_id);
+                try self.curFunc().appendAtomOperand(atom_id);
             } else {
                 try self.function.retainAtomOperand(atom_id);
             }
@@ -6475,7 +6441,7 @@ pub const parser_core = struct {
             const snapshot = self.takeEmissionSnapshot();
             errdefer self.rollbackEmission(snapshot);
             if (self.emit_to_function_def) {
-                try self.cur_func().appendAtomOperand(atom_id);
+                try self.curFunc().appendAtomOperand(atom_id);
             } else {
                 try self.function.retainAtomOperand(atom_id);
             }
@@ -6490,7 +6456,7 @@ pub const parser_core = struct {
             const snapshot = self.takeEmissionSnapshot();
             errdefer self.rollbackEmission(snapshot);
             if (self.emit_to_function_def) {
-                try self.cur_func().appendAtomOperand(atom_id);
+                try self.curFunc().appendAtomOperand(atom_id);
             } else {
                 try self.function.retainAtomOperand(atom_id);
             }
@@ -6594,16 +6560,16 @@ pub const parser_core = struct {
         }
 
         fn emitThisValue(self: *State) Error!void {
-            if (self.emit_to_function_def and self.cur_func().has_this_binding) {
+            if (self.emit_to_function_def and self.curFunc().has_this_binding) {
                 // Explicit `this` reads use the ordinary lexical check and
                 // therefore create a TDZ ReferenceError in the constructor's
                 // own realm. The caller-realm checkthis opcode is reserved for
                 // the synthetic derived-return fallback in emitReturnValue.
                 try self.emitScopeGetVar(atom_this);
             } else if (self.emit_to_function_def and
-                (self.cur_func().func_type == .arrow or
-                    self.cur_func().func_type == .class_static_init or
-                    self.cur_func().is_direct_eval))
+                (self.curFunc().func_type == .arrow or
+                    self.curFunc().func_type == .class_static_init or
+                    self.curFunc().is_direct_eval))
             {
                 // qjs TOK_THIS always emits OP_scope_get_var this
                 // (quickjs.c:26934-26939). Direct eval has no own ThisBinding
@@ -6641,7 +6607,7 @@ pub const parser_core = struct {
             // bytecode. Binding discovery belongs to the final topology pass,
             // after declarations and eval pseudo locals have been staged.
             if (self.emit_phase1_temp) return;
-            const current = self.cur_func();
+            const current = self.curFunc();
             // `arguments` is a binding of the current non-arrow function, so
             // it must be materialized before looking for a binding in any
             // parent. This mirrors QuickJS resolve_scope_var(), where the
@@ -6830,7 +6796,7 @@ pub const parser_core = struct {
         /// hidden local on the nearest non-arrow FunctionDef, then let the same
         /// ref chain used by user bindings carry it through nested arrows.
         fn ensureArrowSpecialCapture(self: *State, atom_id: Atom) Error!bool {
-            const current = self.cur_func();
+            const current = self.curFunc();
             if (current.func_type != .arrow) return false;
             if (atom_id != atom_this and atom_id != atom_new_target) return false;
 
@@ -6971,7 +6937,7 @@ pub const parser_core = struct {
         }
 
         fn ensureGlobalClosureVarIndex(self: *State, atom_id: Atom) Error!u16 {
-            const fd = self.cur_func();
+            const fd = self.curFunc();
             if (findGlobalClosureVarIndex(fd, atom_id)) |idx| return idx;
             const idx = fd.addClosureVar(.{
                 .closure_type = .global,
@@ -7025,9 +6991,9 @@ pub const parser_core = struct {
             const snapshot = self.takeEmissionSnapshot();
             errdefer self.rollbackEmission(snapshot);
             try self.emitOpU32(opcode.op.push_const, 0);
-            const opcode_pos: usize = @intCast(self.cur_func().last_opcode_pos);
+            const opcode_pos: usize = @intCast(self.curFunc().last_opcode_pos);
             const idx = if (self.emit_to_function_def or self.top_level_functions_as_children)
-                try self.cur_func().appendCpool(value)
+                try self.curFunc().appendCpool(value)
             else
                 try self.function.addConstant(value);
             std.mem.writeInt(u32, self.currentCode()[opcode_pos + 1 ..][0..4], idx, .little);
@@ -7039,9 +7005,9 @@ pub const parser_core = struct {
             const snapshot = self.takeEmissionSnapshot();
             errdefer self.rollbackEmission(snapshot);
             try self.emitOpU32(opcode.op.push_const, 0);
-            const opcode_pos: usize = @intCast(self.cur_func().last_opcode_pos);
+            const opcode_pos: usize = @intCast(self.curFunc().last_opcode_pos);
             const idx = if (self.emit_to_function_def or self.top_level_functions_as_children)
-                try self.cur_func().appendCpoolOwned(value)
+                try self.curFunc().appendCpoolOwned(value)
             else
                 try self.function.constants.appendOwned(value);
             value_owned = false;
@@ -7080,11 +7046,11 @@ pub const parser_core = struct {
         }
 
         fn invalidateLastOpcode(self: *State) void {
-            self.v2Builder().invalidateLastOpcode();
+            self.activeBuilder().invalidateLastOpcode();
         }
 
         fn flowTail(self: *State) *bytecode.FlowTailSummary {
-            if (self.emit_to_function_def) return &self.cur_func().flow_tail;
+            if (self.emit_to_function_def) return &self.curFunc().flow_tail;
             return &self.root_flow_tail;
         }
 
@@ -7222,7 +7188,7 @@ pub const parser_core = struct {
         fn appendBytesNoSource(self: *State, bytes: []const u8) Error!void {
             const pos = self.currentCodeLen();
             if (self.emit_to_function_def) {
-                try self.cur_func().appendByteCode(bytes);
+                try self.curFunc().appendByteCode(bytes);
             } else {
                 try self.function.appendCode(bytes);
             }
@@ -7234,8 +7200,8 @@ pub const parser_core = struct {
             errdefer self.rollbackEmission(snapshot);
             const inserted = try self.emitSourcePos(line_num, col_num);
             if (self.emit_to_function_def) {
-                const pc: u32 = @intCast(self.cur_func().byte_code.len);
-                if (inserted) try self.cur_func().appendSourceLoc(pc, @intCast(line_num), @intCast(col_num));
+                const pc: u32 = @intCast(self.curFunc().byte_code.len);
+                if (inserted) try self.curFunc().appendSourceLoc(pc, @intCast(line_num), @intCast(col_num));
                 return pc;
             } else {
                 const pc: u32 = @intCast(self.function.code.len);
@@ -7254,22 +7220,22 @@ pub const parser_core = struct {
         }
 
         // ===== QCP-1 stage 2P: compiler-v2 emission veneer =====
-        // Thin State-level wrappers over compiler_v2.Builder. The later facade
+        // Thin State-level wrappers over compiler.Builder. The later facade
         // groups call these; no production construct is migrated yet. Marker
         // precedes opcode, mirroring the appendBytesAt order.
 
         /// Builder of the function currently being parsed. Only meaningful
         /// during a v2 parse; the unwrap fails loudly for a v2 parse whose
         /// FunctionDef never began v2 emission.
-        pub fn v2Builder(self: *State) *compiler_v2.Builder {
-            return self.cur_func().v2_builder.?;
+        pub fn activeBuilder(self: *State) *compiler.Builder {
+            return self.curFunc().v2_builder.?;
         }
 
         /// v2 half of `emitSourcePosAndLoc`: record the (line,col) authority
         /// for the next emitted opcode. The Builder ignores non-positive
         /// coordinates.
-        pub fn v2AddSourceMarker(self: *State, line_num: u32, col_num: u32) compiler_v2.builder.Error!void {
-            const v2b = self.v2Builder();
+        pub fn builderAddSourceMarker(self: *State, line_num: u32, col_num: u32) compiler.builder.Error!void {
+            const v2b = self.activeBuilder();
             if (v2b.source_len != 0) {
                 const previous = v2b.source_slots[v2b.source_len - 1];
                 // QuickJS compares the last explicit source pointer and does
@@ -7280,84 +7246,84 @@ pub const parser_core = struct {
             try v2b.addSourceMarker(@intCast(line_num), @intCast(col_num));
         }
 
-        fn v2RecordPlainControl(self: *State, op_id: u8) compiler_v2.builder.Error!void {
+        fn builderRecordPlainControl(self: *State, op_id: u8) compiler.builder.Error!void {
             switch (op_id) {
                 opcode.op.@"return",
                 opcode.op.return_undef,
                 opcode.op.throw,
                 opcode.op.ret,
-                => try self.v2Builder().recordControl(.terminal),
+                => try self.activeBuilder().recordControl(.terminal),
                 else => {},
             }
         }
 
-        fn v2RecordU16Control(self: *State, op_id: u8) compiler_v2.builder.Error!void {
+        fn builderRecordU16Control(self: *State, op_id: u8) compiler.builder.Error!void {
             switch (op_id) {
-                opcode.op.tail_call, opcode.op.tail_call_method => try self.v2Builder().recordControl(.terminal),
-                opcode.op.apply_eval => try self.v2Builder().recordControl(.direct_eval),
+                opcode.op.tail_call, opcode.op.tail_call_method => try self.activeBuilder().recordControl(.terminal),
+                opcode.op.apply_eval => try self.activeBuilder().recordControl(.direct_eval),
                 else => {},
             }
         }
 
-        fn v2RecordU32Control(self: *State, op_id: u8) compiler_v2.builder.Error!void {
+        fn builderRecordU32Control(self: *State, op_id: u8) compiler.builder.Error!void {
             if (op_id == opcode.op.eval)
-                try self.v2Builder().recordControl(.direct_eval);
+                try self.activeBuilder().recordControl(.direct_eval);
         }
 
-        fn v2RecordAtomU8Control(self: *State, op_id: u8) compiler_v2.builder.Error!void {
+        fn builderRecordAtomU8Control(self: *State, op_id: u8) compiler.builder.Error!void {
             if (op_id == opcode.op.throw_error)
-                try self.v2Builder().recordControl(.terminal);
+                try self.activeBuilder().recordControl(.terminal);
         }
 
         /// QuickJS-style plain opcode emission: grammar productions add source
         /// markers explicitly; `emit_op()` itself is source-less.
-        pub fn v2EmitOp(self: *State, op_id: u8) compiler_v2.builder.Error!void {
-            try self.v2Builder().emitOp(op_id);
-            try self.v2RecordPlainControl(op_id);
+        pub fn builderEmitOp(self: *State, op_id: u8) compiler.builder.Error!void {
+            try self.activeBuilder().emitOp(op_id);
+            try self.builderRecordPlainControl(op_id);
         }
 
         /// Source-less immediate emitters, matching QuickJS emit_op + emit_u*.
-        pub fn v2EmitOpU8(self: *State, op_id: u8, val: u8) compiler_v2.builder.Error!void {
-            try self.v2Builder().emitOpU8(op_id, val);
+        pub fn builderEmitOpU8(self: *State, op_id: u8, val: u8) compiler.builder.Error!void {
+            try self.activeBuilder().emitOpU8(op_id, val);
         }
 
-        pub fn v2EmitOpU16(self: *State, op_id: u8, val: u16) compiler_v2.builder.Error!void {
-            try self.v2Builder().emitOpU16(op_id, val);
-            try self.v2RecordU16Control(op_id);
+        pub fn builderEmitOpU16(self: *State, op_id: u8, val: u16) compiler.builder.Error!void {
+            try self.activeBuilder().emitOpU16(op_id, val);
+            try self.builderRecordU16Control(op_id);
         }
 
-        pub fn v2EmitOpU32(self: *State, op_id: u8, val: u32) compiler_v2.builder.Error!void {
-            try self.v2Builder().emitOpU32(op_id, val);
-            try self.v2RecordU32Control(op_id);
+        pub fn builderEmitOpU32(self: *State, op_id: u8, val: u32) compiler.builder.Error!void {
+            try self.activeBuilder().emitOpU32(op_id, val);
+            try self.builderRecordU32Control(op_id);
         }
 
-        pub fn v2EmitOpI32(self: *State, op_id: u8, val: i32) compiler_v2.builder.Error!void {
-            try self.v2Builder().emitOpI32(op_id, val);
+        pub fn builderEmitOpI32(self: *State, op_id: u8, val: i32) compiler.builder.Error!void {
+            try self.activeBuilder().emitOpI32(op_id, val);
         }
 
         /// Source-less owned-atom emission. The grammar site owns any source
         /// marker; the Builder sink owns `atom_id` on every outcome.
-        pub fn v2EmitAtomOpOwned(self: *State, op_id: u8, atom_id: Atom) compiler_v2.builder.Error!void {
-            try self.v2Builder().emitAtomOpOwned(op_id, atom_id);
+        pub fn builderEmitAtomOpOwned(self: *State, op_id: u8, atom_id: Atom) compiler.builder.Error!void {
+            try self.activeBuilder().emitAtomOpOwned(op_id, atom_id);
         }
 
-        pub fn v2EmitAtomOpU8Owned(self: *State, op_id: u8, atom_id: Atom, val: u8) compiler_v2.builder.Error!void {
-            try self.v2Builder().emitAtomOpU8Owned(op_id, atom_id, val);
-            try self.v2RecordAtomU8Control(op_id);
+        pub fn builderEmitAtomOpU8Owned(self: *State, op_id: u8, atom_id: Atom, val: u8) compiler.builder.Error!void {
+            try self.activeBuilder().emitAtomOpU8Owned(op_id, atom_id, val);
+            try self.builderRecordAtomU8Control(op_id);
         }
 
-        pub fn v2EmitAtomOpU16Owned(self: *State, op_id: u8, atom_id: Atom, val: u16) compiler_v2.builder.Error!void {
-            try self.v2Builder().emitAtomOpU16Owned(op_id, atom_id, val);
+        pub fn builderEmitAtomOpU16Owned(self: *State, op_id: u8, atom_id: Atom, val: u16) compiler.builder.Error!void {
+            try self.activeBuilder().emitAtomOpU16Owned(op_id, atom_id, val);
         }
 
         /// QuickJS `emit_goto()` is source-less. The LabelId operand remains
         /// pending until resolve_labels_v2.
-        pub fn v2EmitJump(self: *State, op_id: u8, label: compiler_v2.LabelId) compiler_v2.builder.Error!void {
-            try self.v2Builder().emitJump(op_id, label);
+        pub fn builderEmitJump(self: *State, op_id: u8, label: compiler.LabelId) compiler.builder.Error!void {
+            try self.activeBuilder().emitJump(op_id, label);
         }
 
-        pub fn v2NewLabel(self: *State) compiler_v2.builder.Error!compiler_v2.LabelId {
-            return self.v2Builder().newLabel();
+        pub fn builderNewLabel(self: *State) compiler.builder.Error!compiler.LabelId {
+            return self.activeBuilder().newLabel();
         }
 
         /// Bind `label` at the current v2 position. A bound label is a
@@ -7365,8 +7331,8 @@ pub const parser_core = struct {
         /// emit_label leaves OP_label as the visible last opcode so no
         /// peephole fuses across the join (quickjs.c emit_label /
         /// fd->last_opcode_pos).
-        pub fn v2BindLabel(self: *State, label: compiler_v2.LabelId) compiler_v2.builder.Error!void {
-            const v2b = self.v2Builder();
+        pub fn builderBindLabel(self: *State, label: compiler.LabelId) compiler.builder.Error!void {
+            const v2b = self.activeBuilder();
             try v2b.bindLabel(label);
             v2b.invalidateLastOpcode();
         }
@@ -7374,8 +7340,8 @@ pub const parser_core = struct {
         /// Bind the identity analogue of a physical parser `OP_label`.
         /// Besides invalidating last-opcode provenance, this preserves the
         /// sequential-peephole barrier after the label loses all references.
-        pub fn v2BindParserLabel(self: *State, label: compiler_v2.LabelId) compiler_v2.builder.Error!void {
-            const v2b = self.v2Builder();
+        pub fn builderBindParserLabel(self: *State, label: compiler.LabelId) compiler.builder.Error!void {
+            const v2b = self.activeBuilder();
             try v2b.bindLabelMatchBarrier(label);
             v2b.invalidateLastOpcode();
         }
@@ -7383,11 +7349,11 @@ pub const parser_core = struct {
         /// QCP-1 S2-G4: give `fd` its v2 Builder (idempotent). Every FunctionDef
         /// emitted into during a v2 parse owns one; stage 5 replaces the
         /// test-entry wiring, not this per-fd provisioning.
-        pub fn v2EnsureBuilderForFd(self: *State, fd: *function_def_mod.FunctionDef) compiler_v2.builder.Error!void {
+        pub fn ensureBuilderForFd(self: *State, fd: *function_def_mod.FunctionDef) compiler.builder.Error!void {
             _ = self;
             if (fd.v2_builder == null) {
-                const v2b = try fd.memory.create(compiler_v2.Builder);
-                v2b.* = compiler_v2.Builder.init(fd.memory, fd.atoms);
+                const v2b = try fd.memory.create(compiler.Builder);
+                v2b.* = compiler.Builder.init(fd.memory, fd.atoms);
                 try v2b.enableControlIndex();
                 fd.v2_builder = v2b;
             }
@@ -7395,37 +7361,37 @@ pub const parser_core = struct {
 
         /// TEST HOOK: begin emission for the current function, allocating its
         /// Builder on first use.
-        pub fn beginV2EmissionForTest(self: *State) compiler_v2.builder.Error!void {
-            try self.v2EnsureBuilderForFd(self.cur_func());
+        pub fn beginBuilderEmissionForTest(self: *State) compiler.builder.Error!void {
+            try self.ensureBuilderForFd(self.curFunc());
         }
 
         /// Start a production program root. `initRootEmitter` established the
         /// body-scope identity before any Builder existed, so emit that one
         /// enter event into the freshly attached builder.
-        pub fn beginV2ProgramEmission(self: *State) compiler_v2.builder.Error!void {
-            try self.v2EnsureBuilderForFd(self.cur_func());
-            if (self.cur_func().body_scope < 0) return error.InvalidBytecode;
-            const v2b = self.v2Builder();
+        pub fn beginProgramEmission(self: *State) compiler.builder.Error!void {
+            try self.ensureBuilderForFd(self.curFunc());
+            if (self.curFunc().body_scope < 0) return error.InvalidBytecode;
+            const v2b = self.activeBuilder();
             const snapshot = v2b.snapshot();
             errdefer v2b.rollback(snapshot);
             // qjs push_scope emits OP_enter_scope without a source event
             // before js_parse_program (quickjs.c:24128-24135/31441).
-            try v2b.emitOpU16(opcode.op.enter_scope, @intCast(self.cur_func().body_scope));
+            try v2b.emitOpU16(opcode.op.enter_scope, @intCast(self.curFunc().body_scope));
         }
         // ===== end QCP-1 stage 2P veneer =====
 
         fn currentCodeLen(self: *State) usize {
-            if (self.emit_to_function_def) return self.cur_func().byte_code.len;
+            if (self.emit_to_function_def) return self.curFunc().byte_code.len;
             return self.function.code.len;
         }
 
         fn currentCode(self: *State) []u8 {
-            if (self.emit_to_function_def) return self.cur_func().byte_code;
+            if (self.emit_to_function_def) return self.curFunc().byte_code;
             return self.function.code;
         }
 
         fn currentAtomOperands(self: *State) []Atom {
-            if (self.emit_to_function_def) return self.cur_func().atom_operands;
+            if (self.emit_to_function_def) return self.curFunc().atom_operands;
             return self.function.atom_operands;
         }
 
@@ -7463,8 +7429,8 @@ pub const parser_core = struct {
         fn truncateCode(self: *State, target_len: usize) Error!void {
             // QCP-1 L3 gate (non-counting): rewinding the legacy stream during
             // a v2 parse belongs to the same migration hole as emitting into it.
-            if (self.cur_func().last_opcode_pos >= 0 and
-                @as(usize, @intCast(self.cur_func().last_opcode_pos)) >= target_len)
+            if (self.curFunc().last_opcode_pos >= 0 and
+                @as(usize, @intCast(self.curFunc().last_opcode_pos)) >= target_len)
             {
                 self.invalidateLastOpcode();
             }
@@ -7474,7 +7440,7 @@ pub const parser_core = struct {
             // truncation on the direct-truncate paths (the phase-2 streaming
             // source remap also relies on slot pcs staying non-decreasing).
             if (self.emit_to_function_def) {
-                const fd_slots = self.cur_func();
+                const fd_slots = self.curFunc();
                 var keep = fd_slots.source_loc_slots.len;
                 while (keep > 0 and fd_slots.source_loc_slots[keep - 1].pc >= target_len) keep -= 1;
                 fd_slots.truncateSourceLocs(keep);
@@ -7497,7 +7463,7 @@ pub const parser_core = struct {
                 }
             }
             if (self.emit_to_function_def) {
-                self.cur_func().truncateByteCode(target_len);
+                self.curFunc().truncateByteCode(target_len);
             } else {
                 self.function.truncateCode(target_len);
             }
@@ -7507,7 +7473,7 @@ pub const parser_core = struct {
         /// atom refcounts. The retain happens in `emitOpAtom`/`retainAtomOperand`.
         fn truncateAtomOperands(self: *State, target_len: usize) Error!void {
             if (self.emit_to_function_def) {
-                self.cur_func().truncateAtomOperands(target_len);
+                self.curFunc().truncateAtomOperands(target_len);
                 return;
             }
             self.function.truncateAtomOperands(target_len);
@@ -7515,7 +7481,7 @@ pub const parser_core = struct {
 
         fn currentAtomOperandLen(self: *State) usize {
             return if (self.emit_to_function_def)
-                self.cur_func().atom_operands.len
+                self.curFunc().atom_operands.len
             else
                 self.function.atom_operands.len;
         }
@@ -7563,7 +7529,7 @@ pub const parser_core = struct {
     /// `async await => 1` at sloppy top-level (quickjs.c:22749-22756).
     fn isAsyncArrowBindingIdentifierKind(s: *State, kind: tok.TokenKind) bool {
         if (kind == tok.TOK_IDENT) return true;
-        if (s.is_strict or s.cur_func().is_strict_mode) return false;
+        if (s.is_strict or s.curFunc().is_strict_mode) return false;
         return switch (kind) {
             tok.TOK_YIELD => !s.in_generator,
             tok.TOK_STATIC, tok.TOK_LET => true,
@@ -7646,7 +7612,7 @@ pub const parser_core = struct {
         // this earlier dispatch cannot reinterpret either expression form (or
         // an escaped reserved word) as an arrow parameter.
         if (s.peekKind() == tok.TOK_YIELD and
-            (s.in_generator or s.is_strict or s.cur_func().is_strict_mode)) return false;
+            (s.in_generator or s.is_strict or s.curFunc().is_strict_mode)) return false;
         if (s.peekKind() == tok.TOK_AWAIT and !canUseAwaitAsIdentifier(s)) return false;
         if (s.peekKind() == tok.TOK_IDENT) {
             if (s.token.payload.ident.has_escape and
@@ -7768,7 +7734,7 @@ pub const parser_core = struct {
         if (assign_opcode) |op_byte| {
             // qjs js_parse_assign_expr2 (quickjs.c:28218-28219): the
             // compound op is pinned to the operator's source event.
-            try v2FEmitOpAt(s, op_byte, operator_source.line_num, operator_source.col_num);
+            try emitterOpAt(s, op_byte, operator_source.line_num, operator_source.col_num);
         }
 
         if (is_plain_assign and direct_lhs_atom != null and lvalue.owns_name and
@@ -7836,7 +7802,7 @@ pub const parser_core = struct {
         }
 
         if (lvalue.depth == 3) {
-            try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.insert4);
+            try emitterOpU8(s, opcode.op.using, opcode.using_sub.insert4);
         } else {
             try Emitter.opNoSource(s, switch (lvalue.depth) {
                 0 => opcode.op.dup,
@@ -7875,7 +7841,7 @@ pub const parser_core = struct {
         label_offset: ?usize = null,
         /// QCP-1 S2-G4: v2 twin of `label_offset` — the scope_make_ref aux label
         /// travels as a LabelId; put binds it (qjs put_lvalue emit_label).
-        v2_ref_label: ?compiler_v2.LabelId = null,
+        ref_label: ?compiler.LabelId = null,
         depth: u8,
         invalid_call: bool = false,
 
@@ -8009,41 +7975,41 @@ pub const parser_core = struct {
     }
 
     /// QCP-1 S2-G4: v2 twin of `reemitLValueGetterAssumeCapacity` (all NoSource).
-    fn v2ReemitLValueGetter(s: *State, lvalue: *const LValue) Error!void {
+    fn reemitLValueGetter(s: *State, lvalue: *const LValue) Error!void {
         switch (lvalue.opcode) {
             .scope_var => {
                 std.debug.assert(s.emit_phase1_temp);
                 // qjs get_lvalue (quickjs.c:26009-26013): re-emit the retained
                 // scope getter while preserving the assignment target.
-                try v2FEmitAtomOpU16OwnedNoSource(s, opcode.op.scope_get_var, s.function.atoms.dup(lvalue.name), lvalue.scope);
+                try emitterAtomOpU16OwnedNoSource(s, opcode.op.scope_get_var, s.function.atoms.dup(lvalue.name), lvalue.scope);
             },
             .field => {
                 // qjs get_lvalue (quickjs.c:26015-26018): get_field2 preserves
                 // the base object beneath the loaded value.
-                try v2FEmitAtomOpOwnedNoSource(s, opcode.op.get_field2, s.function.atoms.dup(lvalue.name));
+                try emitterAtomOpOwnedNoSource(s, opcode.op.get_field2, s.function.atoms.dup(lvalue.name));
             },
             .private_field => {
                 std.debug.assert(s.emit_phase1_temp);
                 // qjs get_lvalue (quickjs.c:26019-26023): the private-field
                 // getter retains its base and phase-1 scope operand.
-                try v2FEmitAtomOpU16OwnedNoSource(s, opcode.op.scope_get_private_field2, s.function.atoms.dup(lvalue.name), lvalue.scope);
+                try emitterAtomOpU16OwnedNoSource(s, opcode.op.scope_get_private_field2, s.function.atoms.dup(lvalue.name), lvalue.scope);
             },
             .array_element => {
                 // qjs get_lvalue (quickjs.c:26024-26026): get_array_el3 keeps
                 // both base and property key for the later setter.
-                try v2FEmitOpNoSource(s, opcode.op.get_array_el3);
+                try emitterOpNoSource(s, opcode.op.get_array_el3);
             },
             .super_value => {
                 // qjs get_lvalue (quickjs.c:26027-26030): preserve the super
                 // receiver/base/key triple around the value load.
-                try v2FEmitOpNoSource(s, opcode.op.to_propkey);
-                try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.dup3);
-                try v2FEmitOpNoSource(s, opcode.op.get_super_value);
+                try emitterOpNoSource(s, opcode.op.to_propkey);
+                try emitterOpU8(s, opcode.op.using, opcode.using_sub.dup3);
+                try emitterOpNoSource(s, opcode.op.get_super_value);
             },
             .ref_value => {
                 // qjs get_lvalue (quickjs.c:26007-26008): load through the
                 // with-scope reference while retaining the ref pair.
-                try v2FEmitOpNoSource(s, opcode.op.get_ref_value);
+                try emitterOpNoSource(s, opcode.op.get_ref_value);
             },
         }
     }
@@ -8053,11 +8019,11 @@ pub const parser_core = struct {
     /// getter removal is the qjs `fd->byte_code.size = fd->last_opcode_pos`
     /// rewind (Builder.truncateTail after the ledger take-back).
     fn getLValue(s: *State, keep: bool) Error!LValue {
-        const v2b = s.v2Builder();
+        const v2b = s.activeBuilder();
         if (v2b.last_opcode_pos < 0) return Error.InvalidAssignmentTarget;
         const pos: u32 = @intCast(v2b.last_opcode_pos);
         const op_id = v2b.code[pos];
-        const fd = s.cur_func();
+        const fd = s.curFunc();
 
         // Annex-B runtime-error CallExpression target, same classification the
         // legacy twin runs: the call opcode must be the whole tail. The v2
@@ -8116,7 +8082,7 @@ pub const parser_core = struct {
                     strict_unresolved or
                     (!s.is_eval and !s.is_strict and !fd.is_strict_mode and
                         !has_current_binding and State.rhsContainsDirectEval(s));
-                const owned_name = v2b.takeTrailingAtomOpcodeOwned(pos, op_id, name) catch |err| return v2MapBuilderError(err);
+                const owned_name = v2b.takeTrailingAtomOpcodeOwned(pos, op_id, name) catch |err| return mapBuilderError(err);
                 lvalue = .{
                     .opcode = .scope_var,
                     .scope = scope,
@@ -8132,9 +8098,9 @@ pub const parser_core = struct {
                     // as an aux operand; update_label(fd, label, 1) is the emitter's ref_count
                     // bump. The operand receives a borrowed duplicate; the descriptor keeps the
                     // retained atom (legacy emitScopeMakeRefForLValueAssumeCapacity contract).
-                    const ref_label = try v2FNewLabel(s);
-                    try v2FEmitScopeRefOp(s, opcode.op.scope_make_ref, s.function.atoms.dup(owned_name), ref_label, scope);
-                    lvalue.v2_ref_label = ref_label;
+                    const ref_label = try emitterNewLabel(s);
+                    try emitterScopeRefOp(s, opcode.op.scope_make_ref, s.function.atoms.dup(owned_name), ref_label, scope);
+                    lvalue.ref_label = ref_label;
                 }
             },
             opcode.op.get_field => {
@@ -8142,7 +8108,7 @@ pub const parser_core = struct {
                 // field-name retain back before removing the getter.
                 if (pos + 5 != v2b.code_len) return Error.InvalidAssignmentTarget;
                 const name: Atom = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
-                const owned_name = v2b.takeTrailingAtomOpcodeOwned(pos, op_id, name) catch |err| return v2MapBuilderError(err);
+                const owned_name = v2b.takeTrailingAtomOpcodeOwned(pos, op_id, name) catch |err| return mapBuilderError(err);
                 lvalue = .{ .opcode = .field, .name = owned_name, .owns_name = true, .depth = 1 };
                 lvalue_initialized = true;
             },
@@ -8152,7 +8118,7 @@ pub const parser_core = struct {
                 if (!s.emit_phase1_temp or pos + 7 != v2b.code_len) return Error.InvalidAssignmentTarget;
                 const name: Atom = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
                 const scope = std.mem.readInt(u16, v2b.code[pos + 5 ..][0..2], .little);
-                const owned_name = v2b.takeTrailingAtomOpcodeOwned(pos, op_id, name) catch |err| return v2MapBuilderError(err);
+                const owned_name = v2b.takeTrailingAtomOpcodeOwned(pos, op_id, name) catch |err| return mapBuilderError(err);
                 lvalue = .{
                     .opcode = .private_field,
                     .scope = scope,
@@ -8166,7 +8132,7 @@ pub const parser_core = struct {
                 // qjs get_lvalue (quickjs.c:25972-25974,26024-26026): remove
                 // the one-byte array getter; its base/key remain on the stack.
                 if (pos + 1 != v2b.code_len) return Error.InvalidAssignmentTarget;
-                v2b.truncateLastOpcodePreserveSources(pos) catch |err| return v2MapBuilderError(err);
+                v2b.truncateLastOpcodePreserveSources(pos) catch |err| return mapBuilderError(err);
                 lvalue = .{ .opcode = .array_element, .depth = 2 };
                 lvalue_initialized = true;
             },
@@ -8174,14 +8140,14 @@ pub const parser_core = struct {
                 // qjs get_lvalue (quickjs.c:25975-25977,26027-26030): remove
                 // the super getter and preserve its three-value target depth.
                 if (pos + 1 != v2b.code_len) return Error.InvalidAssignmentTarget;
-                v2b.truncateLastOpcodePreserveSources(pos) catch |err| return v2MapBuilderError(err);
+                v2b.truncateLastOpcodePreserveSources(pos) catch |err| return mapBuilderError(err);
                 lvalue = .{ .opcode = .super_value, .depth = 3 };
                 lvalue_initialized = true;
             },
             else => return Error.InvalidAssignmentTarget,
         }
 
-        if (keep) try v2ReemitLValueGetter(s, &lvalue);
+        if (keep) try reemitLValueGetter(s, &lvalue);
         return lvalue;
     }
 
@@ -8220,7 +8186,7 @@ pub const parser_core = struct {
             .private_field => if (!s.emit_phase1_temp or !lvalue.owns_name) return Error.InvalidAssignmentTarget,
             .ref_value => {
                 if (!lvalue.owns_name) return Error.InvalidAssignmentTarget;
-                if (lvalue.v2_ref_label == null) return Error.UnexpectedToken;
+                if (lvalue.ref_label == null) return Error.UnexpectedToken;
             },
             .array_element, .super_value => {},
         }
@@ -8236,68 +8202,68 @@ pub const parser_core = struct {
             // after scope_make_ref consumes its auxiliary refcount. Preserve
             // that identity as a Stage-4 match barrier; the legacy phase-1
             // stream expresses the same boundary with OP_label.
-            try v2FBindParserLabel(s, lvalue.v2_ref_label.?);
+            try emitterBindParserLabel(s, lvalue.ref_label.?);
         }
 
         // qjs put_lvalue (quickjs.c:26081-26161): apply the selected stack
         // preservation shuffle before emitting the setter. insert4 was
         // reclaimed for fusion v4 and emits as using+sub.
         if (lvalue.opcode == .super_value and mode == .keep_top)
-            try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.insert4)
+            try emitterOpU8(s, opcode.op.using, opcode.using_sub.insert4)
         else if (lvalue.opcode == .super_value and mode == .keep_second)
-            try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.perm5)
+            try emitterOpU8(s, opcode.op.using, opcode.using_sub.perm5)
         else if (lvalue.opcode == .super_value and mode == .no_keep_bottom)
-            try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.rot4l)
-        else if (shuffle_op) |op_id| try v2FEmitOpNoSource(s, op_id);
+            try emitterOpU8(s, opcode.op.using, opcode.using_sub.rot4l)
+        else if (shuffle_op) |op_id| try emitterOpNoSource(s, op_id);
 
         switch (lvalue.opcode) {
             .scope_var => {
                 // qjs put_lvalue (quickjs.c:26167-26170): transfer the retained
                 // binding atom into scope_put_var's phase-1 operand ledger.
                 lvalue.owns_name = false;
-                try v2FEmitAtomOpU16OwnedNoSource(s, opcode.op.scope_put_var, lvalue.name, lvalue.scope);
+                try emitterAtomOpU16OwnedNoSource(s, opcode.op.scope_put_var, lvalue.name, lvalue.scope);
             },
             .field => {
                 // qjs put_lvalue (quickjs.c:26172-26175): transfer the retained
                 // field-name atom into put_field.
                 lvalue.owns_name = false;
-                try v2FEmitAtomOpOwnedNoSource(s, opcode.op.put_field, lvalue.name);
+                try emitterAtomOpOwnedNoSource(s, opcode.op.put_field, lvalue.name);
             },
             .private_field => {
                 // qjs put_lvalue (quickjs.c:26176-26179): transfer the retained
                 // private name and scope into the phase-1 setter.
                 lvalue.owns_name = false;
-                try v2FEmitAtomOpU16OwnedNoSource(s, opcode.op.scope_put_private_field, lvalue.name, lvalue.scope);
+                try emitterAtomOpU16OwnedNoSource(s, opcode.op.scope_put_private_field, lvalue.name, lvalue.scope);
             },
             .array_element => {
                 // qjs put_lvalue (quickjs.c:26181-26183): consume base/key/value.
-                try v2FEmitOpNoSource(s, opcode.op.put_array_el);
+                try emitterOpNoSource(s, opcode.op.put_array_el);
             },
             .ref_value => {
                 // qjs put_lvalue (quickjs.c:26184-26186): store through the
                 // reference pair whose label was bound above.
-                try v2FEmitOpNoSource(s, opcode.op.put_ref_value);
+                try emitterOpNoSource(s, opcode.op.put_ref_value);
             },
             .super_value => {
                 // qjs put_lvalue (quickjs.c:26187-26189): store through the
                 // preserved super receiver/base/key triple.
-                try v2FEmitOpNoSource(s, opcode.op.put_super_value);
+                try emitterOpNoSource(s, opcode.op.put_super_value);
             },
         }
     }
 
     fn isNonLexicalBinding(s: *State, atom_id: Atom) bool {
-        for (s.cur_func().closure_var) |cv| {
+        for (s.curFunc().closure_var) |cv| {
             if (cv.var_name == atom_id) return !cv.isLexical();
         }
-        for (s.cur_func().vars) |v| {
+        for (s.curFunc().vars) |v| {
             if (v.var_name == atom_id) return !v.is_lexical;
         }
         return s.emit_to_function_def;
     }
 
     fn hasKnownBinding(s: *State, atom_id: Atom) bool {
-        for (s.cur_func().closure_var) |cv| {
+        for (s.curFunc().closure_var) |cv| {
             if (cv.var_name == atom_id) return true;
         }
         // QuickJS keeps top-level declarations in `global_vars` until
@@ -8306,21 +8272,21 @@ pub const parser_core = struct {
         // and module redeclaration checks) must therefore consult the
         // declaration table directly rather than relying on parser-created
         // closure placeholders.
-        for (s.cur_func().global_vars) |gv| {
+        for (s.curFunc().global_vars) |gv| {
             if (gv.var_name == atom_id) return true;
         }
         var scope = s.scope_level;
-        while (scope >= 0 and @as(usize, @intCast(scope)) < s.cur_func().scopes.len) {
-            var idx = s.cur_func().scopes[@intCast(scope)].first;
-            while (idx >= 0 and @as(usize, @intCast(idx)) < s.cur_func().vars.len) {
-                const v = s.cur_func().vars[@intCast(idx)];
+        while (scope >= 0 and @as(usize, @intCast(scope)) < s.curFunc().scopes.len) {
+            var idx = s.curFunc().scopes[@intCast(scope)].first;
+            while (idx >= 0 and @as(usize, @intCast(idx)) < s.curFunc().vars.len) {
+                const v = s.curFunc().vars[@intCast(idx)];
                 if (v.scope_level != scope) break;
                 if (v.var_name == atom_id) return true;
                 idx = v.scope_next;
             }
-            scope = s.cur_func().scopes[@intCast(scope)].parent;
+            scope = s.curFunc().scopes[@intCast(scope)].parent;
         }
-        for (s.cur_func().args) |a| {
+        for (s.curFunc().args) |a| {
             if (a.var_name == atom_id) return true;
         }
         return false;
@@ -8349,8 +8315,8 @@ pub const parser_core = struct {
         // A compound assignment or an update operator reads the target first,
         // and that read already throws for an unresolvable strict reference.
         if (keep) return false;
-        if (!(s.is_strict or s.cur_func().is_strict_mode)) return false;
-        if (s.is_eval or s.lex.is_module or s.cur_func().is_module) return false;
+        if (!(s.is_strict or s.curFunc().is_strict_mode)) return false;
+        if (s.is_eval or s.lex.is_module or s.curFunc().is_module) return false;
         if (s.cur_func_stack.len != 0) return false;
         return !hasKnownBinding(s, atom_id);
     }
@@ -8360,7 +8326,7 @@ pub const parser_core = struct {
         // FunctionDef has arguments_allowed=false (quickjs.c:36472). Both
         // instance and static initializers now use that real function
         // boundary, and arrows inherit its entry contract.
-        return !s.cur_func().arguments_allowed;
+        return !s.curFunc().arguments_allowed;
     }
 
     fn atomListContains(list: []const Atom, atom_id: Atom) bool {
@@ -8435,17 +8401,17 @@ pub const parser_core = struct {
             s.last_coalesce_expr_depth = s.assign_expr_depth;
             // qjs js_parse_coalesce_expr: label1 = new_label(); every non-nullish
             // test jumps to it; emit_label(label1) after the operand loop.
-            const end_label = try v2FNewLabel(s);
+            const end_label = try emitterNewLabel(s);
             const rhs_flags = forceResultNeeded(flags);
             while (s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
                 try s.advance();
-                try v2FEmitOp(s, opcode.op.dup);
-                try v2FEmitOp(s, opcode.op.is_undefined_or_null);
-                try v2FEmitJump(s, opcode.op.if_false, end_label);
-                try v2FEmitOp(s, opcode.op.drop);
+                try emitterOp(s, opcode.op.dup);
+                try emitterOp(s, opcode.op.is_undefined_or_null);
+                try emitterJump(s, opcode.op.if_false, end_label);
+                try emitterOp(s, opcode.op.drop);
                 try parseExprBinary(s, 8, rhs_flags);
             }
-            try v2FBindLabel(s, end_label);
+            try emitterBindLabel(s, end_label);
         }
     }
 
@@ -8559,7 +8525,7 @@ pub const parser_core = struct {
             const operator_line_num = s.token.line_num;
             const operator_col_num = s.token.col_num;
             try s.advance();
-            if (s.cur_func().use_short_opcodes and
+            if (s.curFunc().use_short_opcodes and
                 s.peekKind() == tok.TOK_NUMBER and
                 !s.token.payload.num.is_bigint)
             {
@@ -8603,14 +8569,14 @@ pub const parser_core = struct {
             try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted, .yield_forbidden = true });
             // QuickJS patches only the actual last phase-1 scope getter. A
             // member/call/comma/control tail therefore remains untouched.
-            const v2b = s.v2Builder();
+            const v2b = s.activeBuilder();
             if (v2b.last_opcode_pos >= 0) {
                 const pos: usize = @intCast(v2b.last_opcode_pos);
                 if (pos < v2b.code_len and v2b.code[pos] == opcode.op.scope_get_var) {
                     v2b.code[pos] = opcode.op.scope_get_var_undef;
                 }
             }
-            try v2FEmitOp(s, opcode.op.typeof);
+            try emitterOp(s, opcode.op.typeof);
             return;
         }
         if (k == tok.TOK_DELETE) {
@@ -8633,7 +8599,7 @@ pub const parser_core = struct {
             }
             // qjs js_parse_unary (quickjs.c:27648-27649): prefix update is
             // pinned to the operator's source event.
-            try v2FEmitOpAt(s, update_op, operator_source.line_num, operator_source.col_num);
+            try emitterOpAt(s, update_op, operator_source.line_num, operator_source.col_num);
             try putLValue(s, &lvalue, .keep_top);
             if (flags.pow_allowed and s.peekKind() == tok.TOK_POW) {
                 const exponent_source = SourcePosition{
@@ -8656,7 +8622,7 @@ pub const parser_core = struct {
             if (flags.yield_forbidden) return Error.UnexpectedToken;
             if (s.in_parameter_initializer and s.in_generator) return Error.UnexpectedToken;
             if (!s.in_generator) {
-                if (s.is_strict or s.cur_func().is_strict_mode) return Error.YieldOutsideGenerator;
+                if (s.is_strict or s.curFunc().is_strict_mode) return Error.YieldOutsideGenerator;
                 var next_has_line_terminator = false;
                 const next_kind = s.peekNextKindWithLineTerminator(&next_has_line_terminator);
                 if (!next_has_line_terminator and
@@ -8762,83 +8728,83 @@ pub const parser_core = struct {
         const done_atom = atom_module.predefinedId("done", .string) orelse return Error.UnexpectedToken;
         const value_atom = atom_module.predefinedId("value", .string) orelse return Error.UnexpectedToken;
 
-        try v2FEmitOp(s, if (is_async) opcode.op.for_await_of_start else opcode.op.for_of_start);
-        try v2FEmitOp(s, opcode.op.drop);
-        try v2FEmitOp(s, opcode.op.undefined);
-        try v2FEmitOp(s, opcode.op.undefined);
+        try emitterOp(s, if (is_async) opcode.op.for_await_of_start else opcode.op.for_of_start);
+        try emitterOp(s, opcode.op.drop);
+        try emitterOp(s, opcode.op.undefined);
+        try emitterOp(s, opcode.op.undefined);
 
-        const loop_label = try v2FNewLabel(s);
-        try v2FBindLabelRaw(s, loop_label);
-        try v2FEmitOp(s, opcode.op.iterator_next);
-        if (is_async) try v2FEmitOp(s, opcode.op.await);
-        try v2FEmitOp(s, opcode.op.iterator_check_object);
-        try v2FEmitAtomOpOwned(s, opcode.op.get_field2, s.function.atoms.dup(done_atom));
-        const label_next = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.if_true, label_next);
+        const loop_label = try emitterNewLabel(s);
+        try emitterBindLabelRaw(s, loop_label);
+        try emitterOp(s, opcode.op.iterator_next);
+        if (is_async) try emitterOp(s, opcode.op.await);
+        try emitterOp(s, opcode.op.iterator_check_object);
+        try emitterAtomOpOwned(s, opcode.op.get_field2, s.function.atoms.dup(done_atom));
+        const label_next = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.if_true, label_next);
 
-        const yield_label = try v2FNewLabel(s);
-        try v2FBindLabelRaw(s, yield_label);
+        const yield_label = try emitterNewLabel(s);
+        try emitterBindLabelRaw(s, yield_label);
         if (is_async) {
-            try v2FEmitAtomOpOwned(s, opcode.op.get_field, s.function.atoms.dup(value_atom));
-            try v2FEmitOp(s, opcode.op.async_yield_star);
+            try emitterAtomOpOwned(s, opcode.op.get_field, s.function.atoms.dup(value_atom));
+            try emitterOp(s, opcode.op.async_yield_star);
         } else {
-            try v2FEmitOp(s, opcode.op.yield_star);
+            try emitterOp(s, opcode.op.yield_star);
         }
-        try v2FEmitOp(s, opcode.op.dup);
-        const label_return = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.if_true, label_return);
-        try v2FEmitOp(s, opcode.op.drop);
-        try v2FEmitJump(s, opcode.op.goto, loop_label);
+        try emitterOp(s, opcode.op.dup);
+        const label_return = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.if_true, label_return);
+        try emitterOp(s, opcode.op.drop);
+        try emitterJump(s, opcode.op.goto, loop_label);
 
-        try v2FBindLabel(s, label_return);
-        try v2FEmitOpI32(s, opcode.op.push_i32, 2);
-        try v2FEmitOp(s, opcode.op.strict_eq);
-        const label_throw = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.if_true, label_throw);
+        try emitterBindLabel(s, label_return);
+        try emitterOpI32(s, opcode.op.push_i32, 2);
+        try emitterOp(s, opcode.op.strict_eq);
+        const label_throw = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.if_true, label_throw);
 
-        if (is_async) try v2FEmitOp(s, opcode.op.await);
-        try v2FEmitOpU8(s, opcode.op.iterator_call, 0);
-        const label_return1 = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.if_true, label_return1);
-        if (is_async) try v2FEmitOp(s, opcode.op.await);
-        try v2FEmitOp(s, opcode.op.iterator_check_object);
-        try v2FEmitAtomOpOwned(s, opcode.op.get_field2, s.function.atoms.dup(done_atom));
-        try v2FEmitJump(s, opcode.op.if_false, yield_label);
+        if (is_async) try emitterOp(s, opcode.op.await);
+        try emitterOpU8(s, opcode.op.iterator_call, 0);
+        const label_return1 = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.if_true, label_return1);
+        if (is_async) try emitterOp(s, opcode.op.await);
+        try emitterOp(s, opcode.op.iterator_check_object);
+        try emitterAtomOpOwned(s, opcode.op.get_field2, s.function.atoms.dup(done_atom));
+        try emitterJump(s, opcode.op.if_false, yield_label);
 
-        try v2FEmitAtomOpOwned(s, opcode.op.get_field, s.function.atoms.dup(value_atom));
+        try emitterAtomOpOwned(s, opcode.op.get_field, s.function.atoms.dup(value_atom));
 
-        try v2FBindLabel(s, label_return1);
-        try v2FEmitOp(s, opcode.op.nip);
-        try v2FEmitOp(s, opcode.op.nip);
-        try v2FEmitOp(s, opcode.op.nip);
-        if (is_async) try v2FEmitOp(s, opcode.op.await);
+        try emitterBindLabel(s, label_return1);
+        try emitterOp(s, opcode.op.nip);
+        try emitterOp(s, opcode.op.nip);
+        try emitterOp(s, opcode.op.nip);
+        if (is_async) try emitterOp(s, opcode.op.await);
         try emitReturnValue(s, false);
 
-        try v2FBindLabel(s, label_throw);
-        try v2FEmitOpU8(s, opcode.op.iterator_call, 1);
-        const label_throw1 = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.if_true, label_throw1);
-        if (is_async) try v2FEmitOp(s, opcode.op.await);
-        try v2FEmitOp(s, opcode.op.iterator_check_object);
-        try v2FEmitAtomOpOwned(s, opcode.op.get_field2, s.function.atoms.dup(done_atom));
-        try v2FEmitJump(s, opcode.op.if_false, yield_label);
-        const goto_next = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.goto, goto_next);
+        try emitterBindLabel(s, label_throw);
+        try emitterOpU8(s, opcode.op.iterator_call, 1);
+        const label_throw1 = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.if_true, label_throw1);
+        if (is_async) try emitterOp(s, opcode.op.await);
+        try emitterOp(s, opcode.op.iterator_check_object);
+        try emitterAtomOpOwned(s, opcode.op.get_field2, s.function.atoms.dup(done_atom));
+        try emitterJump(s, opcode.op.if_false, yield_label);
+        const goto_next = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.goto, goto_next);
 
-        try v2FBindLabel(s, label_throw1);
-        try v2FEmitOpU8(s, opcode.op.iterator_call, 2);
-        const label_throw2 = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.if_true, label_throw2);
-        if (is_async) try v2FEmitOp(s, opcode.op.await);
-        try v2FBindLabel(s, label_throw2);
-        try v2FEmitAtomOpU8Owned(s, opcode.op.throw_error, s.function.atoms.dup(atom_module.null_atom), 4);
+        try emitterBindLabel(s, label_throw1);
+        try emitterOpU8(s, opcode.op.iterator_call, 2);
+        const label_throw2 = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.if_true, label_throw2);
+        if (is_async) try emitterOp(s, opcode.op.await);
+        try emitterBindLabel(s, label_throw2);
+        try emitterAtomOpU8Owned(s, opcode.op.throw_error, s.function.atoms.dup(atom_module.null_atom), 4);
 
-        try v2FBindLabel(s, label_next);
-        try v2FBindLabel(s, goto_next);
-        try v2FEmitAtomOpOwned(s, opcode.op.get_field, s.function.atoms.dup(value_atom));
-        try v2FEmitOp(s, opcode.op.nip);
-        try v2FEmitOp(s, opcode.op.nip);
-        try v2FEmitOp(s, opcode.op.nip);
+        try emitterBindLabel(s, label_next);
+        try emitterBindLabel(s, goto_next);
+        try emitterAtomOpOwned(s, opcode.op.get_field, s.function.atoms.dup(value_atom));
+        try emitterOp(s, opcode.op.nip);
+        try emitterOp(s, opcode.op.nip);
+        try emitterOp(s, opcode.op.nip);
     }
 
     /// Emit `this` for a super-property receiver. Synthetic field initializer
@@ -8869,12 +8835,12 @@ pub const parser_core = struct {
     }
 
     fn discardTrailingGetSuper(s: *State) Error!void {
-        const builder = s.v2Builder();
+        const builder = s.activeBuilder();
         if (builder.last_opcode_pos < 0) return Error.UnexpectedToken;
         const pos: u32 = @intCast(builder.last_opcode_pos);
         if (pos + 1 != builder.code_len or builder.code[pos] != opcode.op.get_super)
             return Error.UnexpectedToken;
-        builder.truncateLastOpcodePreserveSources(pos) catch |err| return v2MapBuilderError(err);
+        builder.truncateLastOpcodePreserveSources(pos) catch |err| return mapBuilderError(err);
     }
 
     fn isDeleteSuperReference(s: *State) bool {
@@ -8965,12 +8931,12 @@ pub const parser_core = struct {
     /// by fresh emission: old source events at the removed tail disappear,
     /// while newly appended events, relocations, and binds move left with the
     /// replacement. All invariants are checked before the no-fail commit.
-    fn v2CompactAppendedTailReplacement(
+    fn compactAppendedTailReplacement(
         s: *State,
-        snapshot: compiler_v2.builder.Snapshot,
+        snapshot: compiler.builder.Snapshot,
         remove_start: u32,
     ) Error!void {
-        const v2b = s.v2Builder();
+        const v2b = s.activeBuilder();
         if (remove_start >= snapshot.code_len or snapshot.code_len > v2b.code_len) {
             return Error.UnexpectedToken;
         }
@@ -9056,9 +9022,9 @@ pub const parser_core = struct {
     /// Recover the shared optional-chain exit from Builder label identity.
     /// The chain producer binds it raw at the getter end and at least one
     /// source-less `goto` relocation references it. Ambiguity fails closed.
-    fn v2OptionalChainExitAtEnd(s: *State) Error!compiler_v2.LabelId {
-        const v2b = s.v2Builder();
-        var found: ?compiler_v2.LabelId = null;
+    fn optionalChainExitAtEnd(s: *State) Error!compiler.LabelId {
+        const v2b = s.activeBuilder();
+        var found: ?compiler.LabelId = null;
         var label_index: u32 = 0;
         while (label_index < v2b.label_len) : (label_index += 1) {
             const slot = v2b.label_slots[label_index];
@@ -9067,7 +9033,7 @@ pub const parser_core = struct {
             var has_chain_goto = false;
             var reloc_index = slot.first_reloc;
             var walked: u32 = 0;
-            while (reloc_index != compiler_v2.labels.no_reloc) {
+            while (reloc_index != compiler.labels.no_reloc) {
                 if (reloc_index >= v2b.reloc_len or walked >= v2b.reloc_len) {
                     return Error.UnexpectedToken;
                 }
@@ -9089,12 +9055,12 @@ pub const parser_core = struct {
         return found orelse Error.UnexpectedToken;
     }
 
-    fn v2EmitDeleteNonReference(s: *State) Error!void {
-        const v2b = s.v2Builder();
+    fn emitDeleteNonReference(s: *State) Error!void {
+        const v2b = s.activeBuilder();
         const snapshot = v2b.snapshot();
         errdefer v2b.rollback(snapshot);
-        try v2FEmitOp(s, opcode.op.drop);
-        try v2FEmitOp(s, opcode.op.push_true);
+        try emitterOp(s, opcode.op.drop);
+        try emitterOp(s, opcode.op.push_true);
     }
 
     /// v2 twin of `js_parse_delete` over Builder.last_opcode_pos. Same-width
@@ -9102,15 +9068,15 @@ pub const parser_core = struct {
     /// atom-less getters are replaced transactionally by appending first and
     /// compacting only after every allocation succeeds.
     fn finishDelete(s: *State) Error!void {
-        const v2b = s.v2Builder();
-        if (v2b.last_opcode_pos < 0) return v2EmitDeleteNonReference(s);
+        const v2b = s.activeBuilder();
+        if (v2b.last_opcode_pos < 0) return emitDeleteNonReference(s);
         const pos: u32 = @intCast(v2b.last_opcode_pos);
         if (pos >= v2b.code_len) return Error.UnexpectedToken;
 
         switch (v2b.code[pos]) {
             opcode.op.get_field_opt_chain,
             opcode.op.get_array_el_opt_chain,
-            => return v2RewriteOptionalChainDelete(s, pos),
+            => return rewriteOptionalChainDeleteBuilder(s, pos),
             opcode.op.get_field => {
                 if (pos + 5 != v2b.code_len or v2b.atom_len == 0) return Error.UnexpectedToken;
                 const atom_id = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
@@ -9118,23 +9084,23 @@ pub const parser_core = struct {
                 if (atomNameIsPrivate(s, atom_id)) return Error.UnexpectedToken;
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
-                try v2FEmitOp(s, opcode.op.delete);
+                try emitterOp(s, opcode.op.delete);
                 v2b.code[pos] = opcode.op.push_atom_value;
             },
             opcode.op.get_array_el => {
                 if (pos + 1 != v2b.code_len) return Error.UnexpectedToken;
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
-                try v2FEmitOp(s, opcode.op.delete);
-                try v2CompactAppendedTailReplacement(s, snapshot, pos);
+                try emitterOp(s, opcode.op.delete);
+                try compactAppendedTailReplacement(s, snapshot, pos);
             },
             opcode.op.get_length => {
                 if (pos + 1 != v2b.code_len) return Error.UnexpectedToken;
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
-                try v2FEmitAtomOpOwned(s, opcode.op.push_atom_value, s.function.atoms.dup(atom_module.ids.length));
-                try v2FEmitOp(s, opcode.op.delete);
-                try v2CompactAppendedTailReplacement(s, snapshot, pos);
+                try emitterAtomOpOwned(s, opcode.op.push_atom_value, s.function.atoms.dup(atom_module.ids.length));
+                try emitterOp(s, opcode.op.delete);
+                try compactAppendedTailReplacement(s, snapshot, pos);
             },
             opcode.op.scope_get_var => {
                 if (!s.emit_phase1_temp or pos + 7 != v2b.code_len or v2b.atom_len == 0) {
@@ -9143,9 +9109,9 @@ pub const parser_core = struct {
                 const name = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
                 if (v2b.atom_operands[v2b.atom_len - 1] != name) return Error.UnexpectedToken;
                 if (name == atom_this or name == atom_new_target) {
-                    return v2EmitDeleteNonReference(s);
+                    return emitDeleteNonReference(s);
                 }
-                if (s.is_strict or s.cur_func().is_strict_mode) return Error.UnexpectedToken;
+                if (s.is_strict or s.curFunc().is_strict_mode) return Error.UnexpectedToken;
                 v2b.code[pos] = opcode.op.scope_delete_var;
             },
             opcode.op.scope_get_private_field => return Error.UnexpectedToken,
@@ -9153,22 +9119,22 @@ pub const parser_core = struct {
                 if (pos + 1 != v2b.code_len) return Error.UnexpectedToken;
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
-                try v2FEmitAtomOpU8Owned(s, opcode.op.throw_error, s.function.atoms.dup(atom_module.null_atom), 3);
-                try v2CompactAppendedTailReplacement(s, snapshot, pos);
+                try emitterAtomOpU8Owned(s, opcode.op.throw_error, s.function.atoms.dup(atom_module.null_atom), 3);
+                try compactAppendedTailReplacement(s, snapshot, pos);
             },
-            else => return v2EmitDeleteNonReference(s),
+            else => return emitDeleteNonReference(s),
         }
     }
 
     /// v2 optional-delete bridge using the already-bound chain-exit LabelId.
     /// No absolute PC enters the v2 stream: the exit bind is moved to the
     /// cleanup pad, and the new join is born as a LabelId relocation.
-    fn v2RewriteOptionalChainDelete(s: *State, pos: u32) Error!void {
-        const v2b = s.v2Builder();
+    fn rewriteOptionalChainDeleteBuilder(s: *State, pos: u32) Error!void {
+        const v2b = s.activeBuilder();
         const field_form = v2b.code[pos] == opcode.op.get_field_opt_chain;
         const getter_size: u32 = if (field_form) 5 else 1;
         if (pos + getter_size != v2b.code_len) return Error.UnexpectedToken;
-        const optional_label = try v2OptionalChainExitAtEnd(s);
+        const optional_label = try optionalChainExitAtEnd(s);
 
         if (field_form) {
             if (v2b.atom_len == 0) return Error.UnexpectedToken;
@@ -9177,8 +9143,8 @@ pub const parser_core = struct {
             if (atomNameIsPrivate(s, atom_id)) {
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
-                try v2FEmitOpNoSource(s, opcode.op.drop);
-                try v2FEmitOpNoSource(s, opcode.op.push_true);
+                try emitterOpNoSource(s, opcode.op.drop);
+                try emitterOpNoSource(s, opcode.op.push_true);
                 v2b.code[pos] = opcode.op.get_field;
                 return;
             }
@@ -9186,19 +9152,19 @@ pub const parser_core = struct {
 
         const snapshot = v2b.snapshot();
         errdefer v2b.rollback(snapshot);
-        const next_label = try v2FNewLabel(s);
-        try v2FEmitOpNoSource(s, opcode.op.delete);
-        try v2FEmitJumpNoSource(s, opcode.op.goto, next_label);
+        const next_label = try emitterNewLabel(s);
+        try emitterOpNoSource(s, opcode.op.delete);
+        try emitterJumpNoSource(s, opcode.op.goto, next_label);
         const cleanup_offset = v2b.code_len;
-        try v2FEmitOpNoSource(s, opcode.op.drop);
-        try v2FEmitOpNoSource(s, opcode.op.push_true);
-        try v2FBindParserLabel(s, next_label);
+        try emitterOpNoSource(s, opcode.op.drop);
+        try emitterOpNoSource(s, opcode.op.push_true);
+        try emitterBindParserLabel(s, next_label);
 
         if (field_form) {
             v2b.code[pos] = opcode.op.push_atom_value;
             v2b.label_slots[optional_label.index()].bound_offset = cleanup_offset;
         } else {
-            try v2CompactAppendedTailReplacement(s, snapshot, pos);
+            try compactAppendedTailReplacement(s, snapshot, pos);
             v2b.label_slots[optional_label.index()].bound_offset = cleanup_offset - getter_size;
         }
     }
@@ -9294,7 +9260,7 @@ pub const parser_core = struct {
         consumer: CallConsumerKind,
         has_optional_site: bool,
     ) Error!PreparedCallReference {
-        const v2b = s.v2Builder();
+        const v2b = s.activeBuilder();
         if (v2b.last_opcode_pos < 0)
             return .{ .kind = .plain, .optional_drop_count = 1 };
         const pos: u32 = @intCast(v2b.last_opcode_pos);
@@ -9307,7 +9273,7 @@ pub const parser_core = struct {
                 const field_form = v2b.code[pos] == opcode.op.get_field_opt_chain;
                 const getter_size: u32 = if (field_form) 5 else 1;
                 if (pos + getter_size != v2b.code_len) return Error.UnexpectedToken;
-                const optional_label = try v2OptionalChainExitAtEnd(s);
+                const optional_label = try optionalChainExitAtEnd(s);
                 if (field_form) {
                     if (v2b.atom_len == 0) return Error.UnexpectedToken;
                     const atom_id = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
@@ -9321,11 +9287,11 @@ pub const parser_core = struct {
                 // both targets as LabelIds instead of raw OP_label bytes.
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
-                const next_label = try v2FNewLabel(s);
-                try v2FEmitJumpNoSource(s, opcode.op.goto, next_label);
+                const next_label = try emitterNewLabel(s);
+                try emitterJumpNoSource(s, opcode.op.goto, next_label);
                 const cleanup_offset = v2b.code_len;
-                try v2FEmitOpNoSource(s, opcode.op.undefined);
-                try v2FBindParserLabel(s, next_label);
+                try emitterOpNoSource(s, opcode.op.undefined);
+                try emitterBindParserLabel(s, next_label);
 
                 v2b.code[pos] = if (field_form) opcode.op.get_field2 else opcode.op.get_array_el2;
                 v2b.label_slots[optional_label.index()].bound_offset = cleanup_offset;
@@ -9365,7 +9331,7 @@ pub const parser_core = struct {
                 if (consumer == .normal and !has_optional_site and name == atom_module.ids.eval_) {
                     return .{ .kind = .direct_eval, .optional_drop_count = 1 };
                 }
-                if (hasWithScopeFrom(s.cur_func(), scope)) {
+                if (hasWithScopeFrom(s.curFunc(), scope)) {
                     v2b.code[pos] = opcode.op.scope_get_ref;
                     return .{ .kind = .method, .optional_drop_count = 1 };
                 }
@@ -9382,34 +9348,34 @@ pub const parser_core = struct {
         line_num: u32,
         col_num: u32,
     ) Error!void {
-        const snapshot = s.v2Builder().snapshot();
-        errdefer s.v2Builder().rollback(snapshot);
+        const snapshot = s.activeBuilder().snapshot();
+        errdefer s.activeBuilder().rollback(snapshot);
         // qjs call emission pins one source event to the callee and emits
         // the selected call/apply tail without further markers
         // (quickjs.c:26623-26763).
-        try v2FAddSourceMarker(s, line_num, col_num);
+        try emitterAddSourceMarker(s, line_num, col_num);
         switch (shape) {
             .direct => |argc| switch (prepared.kind) {
-                .plain => try v2FEmitOpU16NoSource(s, opcode.op.call, argc),
-                .method => try v2FEmitOpU16NoSource(s, opcode.op.call_method, argc),
+                .plain => try emitterOpU16NoSource(s, opcode.op.call, argc),
+                .method => try emitterOpU16NoSource(s, opcode.op.call_method, argc),
                 .direct_eval => {
                     const eval_scope: u16 = @intCast(s.scope_level);
-                    try v2FEmitOpU32NoSource(s, opcode.op.eval, @as(u32, argc) | (@as(u32, eval_scope) << 16));
+                    try emitterOpU32NoSource(s, opcode.op.eval, @as(u32, argc) | (@as(u32, eval_scope) << 16));
                 },
             },
             .applied => switch (prepared.kind) {
                 .plain => {
-                    try v2FEmitOpNoSource(s, opcode.op.undefined);
-                    try v2FEmitOpNoSource(s, opcode.op.swap);
-                    try v2FEmitOpU16NoSource(s, opcode.op.apply, 0);
+                    try emitterOpNoSource(s, opcode.op.undefined);
+                    try emitterOpNoSource(s, opcode.op.swap);
+                    try emitterOpU16NoSource(s, opcode.op.apply, 0);
                 },
                 .method => {
-                    try v2FEmitOpNoSource(s, opcode.op.perm3);
-                    try v2FEmitOpU16NoSource(s, opcode.op.apply, 0);
+                    try emitterOpNoSource(s, opcode.op.perm3);
+                    try emitterOpU16NoSource(s, opcode.op.apply, 0);
                 },
                 .direct_eval => {
                     const eval_scope: u16 = @intCast(s.scope_level);
-                    try v2FEmitOpU16NoSource(s, opcode.op.apply_eval, eval_scope);
+                    try emitterOpU16NoSource(s, opcode.op.apply_eval, eval_scope);
                 },
             },
         }
@@ -9418,7 +9384,7 @@ pub const parser_core = struct {
 
     fn emitPlainCallFromStack(s: *State, shape: CallArgsShape) Error!void {
         switch (shape) {
-            .direct => |argc| try v2FEmitOpU16(s, opcode.op.call, argc),
+            .direct => |argc| try emitterOpU16(s, opcode.op.call, argc),
             .applied => {
                 try Emitter.op(s, opcode.op.undefined);
                 try Emitter.op(s, opcode.op.swap);
@@ -9453,7 +9419,7 @@ pub const parser_core = struct {
         }
         // qjs js_parse_unary postfix arm (quickjs.c:27700-27702): postfix
         // update is pinned to the operator's source event.
-        try v2FEmitOpAt(s, update_op, operator_source.line_num, operator_source.col_num);
+        try emitterOpAt(s, update_op, operator_source.line_num, operator_source.col_num);
         try putLValue(s, &lvalue, .keep_second);
     }
 
@@ -9478,9 +9444,9 @@ pub const parser_core = struct {
             // v2 chain close: no in-stream raw label marker — the bind slot
             // carries the position; the pseudo getter rewrite is identical.
             // resolve_labels_v2 later lowers *_opt_chain exactly like phase 2.
-            const v2b = s.v2Builder();
+            const v2b = s.activeBuilder();
             const getter_end = v2b.code_len;
-            try v2FBindParserLabelRaw(s, label.v2);
+            try emitterBindParserLabelRaw(s, label.builder);
             if (v2b.last_opcode_pos >= 0) {
                 const pos: usize = @intCast(v2b.last_opcode_pos);
                 if (pos + 5 == getter_end and v2b.code[pos] == opcode.op.get_field) {
@@ -9496,9 +9462,9 @@ pub const parser_core = struct {
         if (was_super and optional_chain_label == null and s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
             if (!s.allow_super_call) return Error.UnexpectedToken;
             const call_source = SourceLoc{ .line = s.token.line_num, .col = s.token.col_num };
-            const active_func_idx = s.cur_func().this_active_func_var_idx;
-            const new_target_idx = s.cur_func().new_target_var_idx;
-            const this_idx = s.cur_func().this_var_idx;
+            const active_func_idx = s.curFunc().this_active_func_var_idx;
+            const new_target_idx = s.curFunc().new_target_var_idx;
+            const this_idx = s.curFunc().this_var_idx;
             if (active_func_idx < 0 or new_target_idx < 0 or this_idx < 0) {
                 try emitCapturedSuperConstructorCall(s, flags, call_source);
                 s.last_was_super = false;
@@ -9510,8 +9476,8 @@ pub const parser_core = struct {
             try Emitter.opU16(s, opcode.op.get_loc, @intCast(new_target_idx));
             const shape = try parseCallArgs(s, flags);
             switch (shape) {
-                .direct => |argc| try v2FEmitOpU16At(s, opcode.op.call_constructor, argc, call_source.line, call_source.col),
-                .applied => try v2FEmitOpU16At(s, opcode.op.apply, 1, call_source.line, call_source.col),
+                .direct => |argc| try emitterOpU16At(s, opcode.op.call_constructor, argc, call_source.line, call_source.col),
+                .applied => try emitterOpU16At(s, opcode.op.apply, 1, call_source.line, call_source.col),
             }
             try Emitter.op(s, opcode.op.dup);
             try Emitter.opU16(s, opcode.op.put_loc_check_init, @intCast(this_idx));
@@ -9632,15 +9598,15 @@ pub const parser_core = struct {
             try Emitter.op(s, opcode.op.dup);
             const shape = try parseCallArgs(s, flags);
             switch (shape) {
-                .direct => |argc| try v2FEmitOpU16At(s, opcode.op.call_constructor, argc, call_line, call_col),
+                .direct => |argc| try emitterOpU16At(s, opcode.op.call_constructor, argc, call_line, call_col),
                 .applied => {
                     // `new X(...args)`. Stack here: [func, func(dup =
                     // new.target), array]. QuickJS FUNC_CALL_NEW emits
                     // `perm3 ; apply 1` (`quickjs.c:27359-27364`,
                     // "obj func array -> func obj array") so apply consumes
                     // the dup'd callee as the new.target slot.
-                    try v2FEmitOp(s, opcode.op.perm3);
-                    try v2FEmitOpU16At(s, opcode.op.apply, 1, call_line, call_col);
+                    try emitterOp(s, opcode.op.perm3);
+                    try emitterOpU16At(s, opcode.op.apply, 1, call_line, call_col);
                 },
             }
         } else {
@@ -9840,9 +9806,9 @@ pub const parser_core = struct {
                 s.last_was_super = false;
                 if (was_super and !s.allow_super_call) return Error.UnexpectedToken;
                 if (was_super) {
-                    const active_func_idx = s.cur_func().this_active_func_var_idx;
-                    const new_target_idx = s.cur_func().new_target_var_idx;
-                    const this_idx = s.cur_func().this_var_idx;
+                    const active_func_idx = s.curFunc().this_active_func_var_idx;
+                    const new_target_idx = s.curFunc().new_target_var_idx;
+                    const this_idx = s.curFunc().this_var_idx;
                     if (active_func_idx < 0 or new_target_idx < 0 or this_idx < 0) {
                         try emitCapturedSuperConstructorCall(s, flags, .{ .line = callee_line, .col = callee_col });
                         continue;
@@ -9853,8 +9819,8 @@ pub const parser_core = struct {
                     try Emitter.opU16(s, opcode.op.get_loc, @intCast(new_target_idx));
                     const shape = try parseCallArgs(s, flags);
                     switch (shape) {
-                        .direct => |argc| try v2FEmitOpU16At(s, opcode.op.call_constructor, argc, callee_line, callee_col),
-                        .applied => try v2FEmitOpU16At(s, opcode.op.apply, 1, callee_line, callee_col),
+                        .direct => |argc| try emitterOpU16At(s, opcode.op.call_constructor, argc, callee_line, callee_col),
+                        .applied => try emitterOpU16At(s, opcode.op.apply, 1, callee_line, callee_col),
                     }
                     try Emitter.op(s, opcode.op.dup);
                     try Emitter.opU16(s, opcode.op.put_loc_check_init, @intCast(this_idx));
@@ -9965,7 +9931,7 @@ pub const parser_core = struct {
         drop_count: u8,
     ) Error!void {
         // qjs optional_chain_test (quickjs.c:26814), labels born as LabelIds.
-        const v2b = s.v2Builder();
+        const v2b = s.activeBuilder();
         const snap = v2b.snapshot();
         const old_label = optional_chain_label.*;
         errdefer {
@@ -9973,18 +9939,18 @@ pub const parser_core = struct {
             optional_chain_label.* = old_label;
         }
         if (optional_chain_label.* == null)
-            optional_chain_label.* = .{ .v2 = try v2FNewLabel(s) };
-        try v2FEmitOp(s, opcode.op.dup);
-        try v2FEmitOp(s, opcode.op.is_undefined_or_null);
-        const next_label = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.if_false, next_label);
+            optional_chain_label.* = .{ .builder = try emitterNewLabel(s) };
+        try emitterOp(s, opcode.op.dup);
+        try emitterOp(s, opcode.op.is_undefined_or_null);
+        const next_label = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.if_false, next_label);
         var i: u8 = 0;
         while (i < drop_count) : (i += 1) {
-            try v2FEmitOp(s, opcode.op.drop);
+            try emitterOp(s, opcode.op.drop);
         }
-        try v2FEmitOp(s, opcode.op.undefined);
-        try v2FEmitJumpNoSource(s, opcode.op.goto, optional_chain_label.*.?.v2);
-        try v2FBindLabel(s, next_label);
+        try emitterOp(s, opcode.op.undefined);
+        try emitterJumpNoSource(s, opcode.op.goto, optional_chain_label.*.?.builder);
+        try emitterBindLabel(s, next_label);
     }
 
     /// Parse a `(arg0, arg1, ...)` argument list and return the call shape.
@@ -10186,7 +10152,7 @@ pub const parser_core = struct {
             => {
                 if (!isIdentifierLikeToken(s)) return Error.UnexpectedToken;
                 if (s.peekKind() == tok.TOK_AWAIT and !canUseAwaitAsIdentifier(s)) return Error.AwaitOutsideAsyncFunction;
-                if (s.peekKind() == tok.TOK_YIELD and (s.in_generator or s.is_strict or s.cur_func().is_strict_mode)) return Error.YieldOutsideGenerator;
+                if (s.peekKind() == tok.TOK_YIELD and (s.in_generator or s.is_strict or s.curFunc().is_strict_mode)) return Error.YieldOutsideGenerator;
                 if (s.peekKind() == tok.TOK_IDENT and
                     escapedIdentifierIsReservedWordForCurrentContext(s, s.token.payload.ident.atom, s.token.payload.ident.has_escape))
                 {
@@ -10234,7 +10200,7 @@ pub const parser_core = struct {
                 s.last_was_super = false;
             },
             tok.TOK_LET => {
-                if (s.is_strict or s.cur_func().is_strict_mode) return Error.UnexpectedToken;
+                if (s.is_strict or s.curFunc().is_strict_mode) return Error.UnexpectedToken;
                 try emitGrammarSource(s, .{
                     .line_num = s.token.line_num,
                     .col_num = s.token.col_num,
@@ -10736,8 +10702,8 @@ pub const parser_core = struct {
             try s.advance();
         } else if (tok.isKeyword(k)) {
             atom_id = tok.keywordAtom(k);
-            allow_shorthand = (k == tok.TOK_YIELD and !s.in_generator and !(s.is_strict or s.cur_func().is_strict_mode)) or
-                (k == tok.TOK_LET and !(s.is_strict or s.cur_func().is_strict_mode));
+            allow_shorthand = (k == tok.TOK_YIELD and !s.in_generator and !(s.is_strict or s.curFunc().is_strict_mode)) or
+                (k == tok.TOK_LET and !(s.is_strict or s.curFunc().is_strict_mode));
             try s.advance();
         } else if (k == tok.TOK_STRING) {
             atom_id = try s.function.atoms.internString(s.token.payload.str.bytes);
@@ -10771,7 +10737,7 @@ pub const parser_core = struct {
     fn escapedIdentifierIsReservedWordForBinding(s: *State, atom_id: Atom, has_escape: bool) bool {
         if (!has_escape) return false;
         const name = s.function.atoms.name(atom_id) orelse return false;
-        const strict = s.is_strict or s.cur_func().is_strict_mode;
+        const strict = s.is_strict or s.curFunc().is_strict_mode;
         return std.mem.eql(u8, name, "null") or
             std.mem.eql(u8, name, "false") or
             std.mem.eql(u8, name, "true") or
@@ -10845,7 +10811,7 @@ pub const parser_core = struct {
                 (s.lex.is_module and atomNameEquals(s, atom_id, "await")) or
                 (s.in_class_static_block and atomNameEquals(s, atom_id, "await")) or
                 (s.in_generator and atomNameEquals(s, atom_id, "yield")) or
-                ((s.is_strict or s.cur_func().is_strict_mode) and atomNameEquals(s, atom_id, "yield")));
+                ((s.is_strict or s.curFunc().is_strict_mode) and atomNameEquals(s, atom_id, "yield")));
     }
 
     fn isInvalidStrictFunctionBindingName(s: *State, atom_id: Atom) bool {
@@ -10860,14 +10826,14 @@ pub const parser_core = struct {
     fn isIdentifierLikeToken(s: *State) bool {
         return s.peekKind() == tok.TOK_IDENT or
             (s.peekKind() == tok.TOK_AWAIT and canUseAwaitAsIdentifier(s)) or
-            (s.peekKind() == tok.TOK_YIELD and !s.in_generator and !(s.is_strict or s.cur_func().is_strict_mode)) or
+            (s.peekKind() == tok.TOK_YIELD and !s.in_generator and !(s.is_strict or s.curFunc().is_strict_mode)) or
             isSloppyFutureReservedBindingToken(s) or
-            (!(s.is_strict or s.cur_func().is_strict_mode) and
+            (!(s.is_strict or s.curFunc().is_strict_mode) and
                 (s.peekKind() == tok.TOK_STATIC or s.peekKind() == tok.TOK_LET));
     }
 
     fn isSloppyFutureReservedBindingToken(s: *State) bool {
-        return !(s.is_strict or s.cur_func().is_strict_mode) and isSloppyFutureReservedToken(s.peekKind());
+        return !(s.is_strict or s.curFunc().is_strict_mode) and isSloppyFutureReservedToken(s.peekKind());
     }
 
     fn isSloppyFutureReservedToken(kind: tok.TokenKind) bool {
@@ -11106,14 +11072,14 @@ pub const parser_core = struct {
     /// `bind`, and any jump that references it before then is a relocation the
     /// resolver patches.
     const Label = struct {
-        v2: compiler_v2.LabelId = undefined,
+        id: compiler.LabelId = undefined,
     };
 
     /// QCP-1 P3: the PHYSICAL-label family — the one that survives into the
     /// stream as an `OP_label` marker (qjs emit_label/emit_goto). Unlike
     /// `Label`, any number of jumps may target one `PhysLabel`.
     const PhysLabel = struct {
-        v2: compiler_v2.LabelId = undefined,
+        id: compiler.LabelId = undefined,
     };
 
     /// The emission interface the parser speaks: `Emitter.<verb>(state, ...)`.
@@ -11129,90 +11095,90 @@ pub const parser_core = struct {
     const Emitter = struct {
         // CONTROL FLOW. Deliberately out-of-line; see the note above.
         fn newLabel(s: *State, label: *Label) Error!void {
-            label.v2 = try v2FNewLabel(s);
+            label.id = try emitterNewLabel(s);
         }
         fn jump(s: *State, op_id: u8, label: *Label) Error!void {
-            return v2FEmitJump(s, op_id, label.v2);
+            return emitterJump(s, op_id, label.id);
         }
         fn jumpNoSource(s: *State, op_id: u8, label: *Label) Error!void {
-            return v2FEmitJumpNoSource(s, op_id, label.v2);
+            return emitterJumpNoSource(s, op_id, label.id);
         }
         fn bind(s: *State, label: *Label) Error!void {
-            return v2FBindLabel(s, label.v2);
+            return emitterBindLabel(s, label.id);
         }
         fn bindTarget(s: *State, label: *Label) Error!void {
-            return v2FBindLabel(s, label.v2);
+            return emitterBindLabel(s, label.id);
         }
         fn newPhysLabel(s: *State, label: *PhysLabel) Error!void {
-            label.v2 = try v2FNewLabel(s);
+            label.id = try emitterNewLabel(s);
         }
         fn jumpPhys(s: *State, op_id: u8, label: *PhysLabel) Error!void {
-            return v2FEmitJump(s, op_id, label.v2);
+            return emitterJump(s, op_id, label.id);
         }
         fn jumpPhysNoSource(s: *State, op_id: u8, label: *PhysLabel) Error!void {
-            return v2FEmitJumpNoSource(s, op_id, label.v2);
+            return emitterJumpNoSource(s, op_id, label.id);
         }
         fn bindPhys(s: *State, label: *PhysLabel) Error!void {
-            return v2FBindParserLabel(s, label.v2);
+            return emitterBindParserLabel(s, label.id);
         }
 
         inline fn op(s: *State, op_id: u8) Error!void {
-            return v2FEmitOp(s, op_id);
+            return emitterOp(s, op_id);
         }
         inline fn opNoSource(s: *State, op_id: u8) Error!void {
-            return v2FEmitOpNoSource(s, op_id);
+            return emitterOpNoSource(s, op_id);
         }
         inline fn opAt(s: *State, op_id: u8, line_num: u32, col_num: u32) Error!void {
-            return v2FEmitOpAt(s, op_id, line_num, col_num);
+            return emitterOpAt(s, op_id, line_num, col_num);
         }
         inline fn opU8(s: *State, op_id: u8, val: u8) Error!void {
-            return v2FEmitOpU8(s, op_id, val);
+            return emitterOpU8(s, op_id, val);
         }
         inline fn opU16(s: *State, op_id: u8, val: u16) Error!void {
-            return v2FEmitOpU16(s, op_id, val);
+            return emitterOpU16(s, op_id, val);
         }
         inline fn opU16NoSource(s: *State, op_id: u8, val: u16) Error!void {
-            return v2FEmitOpU16NoSource(s, op_id, val);
+            return emitterOpU16NoSource(s, op_id, val);
         }
         inline fn opU16At(s: *State, op_id: u8, val: u16, line_num: u32, col_num: u32) Error!void {
-            return v2FEmitOpU16At(s, op_id, val, line_num, col_num);
+            return emitterOpU16At(s, op_id, val, line_num, col_num);
         }
         inline fn opU32(s: *State, op_id: u8, val: u32) Error!void {
-            return v2FEmitOpU32(s, op_id, val);
+            return emitterOpU32(s, op_id, val);
         }
         inline fn opU32NoSource(s: *State, op_id: u8, val: u32) Error!void {
-            return v2FEmitOpU32NoSource(s, op_id, val);
+            return emitterOpU32NoSource(s, op_id, val);
         }
         inline fn opI32(s: *State, op_id: u8, val: i32) Error!void {
-            return v2FEmitOpI32(s, op_id, val);
+            return emitterOpI32(s, op_id, val);
         }
         inline fn opAtom(s: *State, op_id: u8, atom_id: Atom) Error!void {
-            return v2FEmitAtomOpOwned(s, op_id, s.function.atoms.dup(atom_id));
+            return emitterAtomOpOwned(s, op_id, s.function.atoms.dup(atom_id));
         }
         inline fn opAtomNoSource(s: *State, op_id: u8, atom_id: Atom) Error!void {
-            return v2FEmitAtomOpOwnedNoSource(s, op_id, s.function.atoms.dup(atom_id));
+            return emitterAtomOpOwnedNoSource(s, op_id, s.function.atoms.dup(atom_id));
         }
         inline fn opAtomU8(s: *State, op_id: u8, atom_id: Atom, val: u8) Error!void {
-            return v2FEmitAtomOpU8Owned(s, op_id, s.function.atoms.dup(atom_id), val);
+            return emitterAtomOpU8Owned(s, op_id, s.function.atoms.dup(atom_id), val);
         }
         inline fn opAtomU16(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
-            return v2FEmitAtomOpU16Owned(s, op_id, s.function.atoms.dup(atom_id), val);
+            return emitterAtomOpU16Owned(s, op_id, s.function.atoms.dup(atom_id), val);
         }
         inline fn opAtomU16NoSource(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
-            return v2FEmitAtomOpU16OwnedNoSource(s, op_id, s.function.atoms.dup(atom_id), val);
+            return emitterAtomOpU16OwnedNoSource(s, op_id, s.function.atoms.dup(atom_id), val);
         }
         inline fn pushConst(s: *State, value: JSValue) Error!void {
-            return v2FEmitPushConst(s, value);
+            return emitterPushConst(s, value);
         }
         inline fn pushConstOwned(s: *State, value: JSValue) Error!void {
-            return v2FEmitPushConstOwned(s, value);
+            return emitterPushConstOwned(s, value);
         }
     };
 
     // ===== QCP-1 S2-G1: parser-error-typed facade over the S2P v2 veneer =====
     // Construct arms call these; the S2P State veneers stay builder-typed.
 
-    fn v2MapBuilderError(err: compiler_v2.builder.Error) Error {
+    fn mapBuilderError(err: compiler.builder.Error) Error {
         return switch (err) {
             error.OutOfMemory => Error.OutOfMemory,
             error.BytecodeOverflow => Error.BytecodeOverflow,
@@ -11222,152 +11188,152 @@ pub const parser_core = struct {
         };
     }
 
-    fn v2FNewLabel(s: *State) Error!compiler_v2.LabelId {
-        return s.v2NewLabel() catch |err| v2MapBuilderError(err);
+    fn emitterNewLabel(s: *State) Error!compiler.LabelId {
+        return s.builderNewLabel() catch |err| mapBuilderError(err);
     }
 
     /// v2 mirror of `emitForwardJump`/`emitParserLabelJump` (marker'd).
-    fn v2FEmitJump(s: *State, op_id: u8, label: compiler_v2.LabelId) Error!void {
-        s.v2EmitJump(op_id, label) catch |err| return v2MapBuilderError(err);
+    fn emitterJump(s: *State, op_id: u8, label: compiler.LabelId) Error!void {
+        s.builderEmitJump(op_id, label) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `emitForwardJumpNoSource`/`emitParserLabelJumpNoSource`.
-    fn v2FEmitJumpNoSource(s: *State, op_id: u8, label: compiler_v2.LabelId) Error!void {
-        s.v2Builder().emitJump(op_id, label) catch |err| return v2MapBuilderError(err);
+    fn emitterJumpNoSource(s: *State, op_id: u8, label: compiler.LabelId) Error!void {
+        s.activeBuilder().emitJump(op_id, label) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOp` (marker'd).
-    fn v2FEmitOp(s: *State, op_id: u8) Error!void {
-        s.v2EmitOp(op_id) catch |err| return v2MapBuilderError(err);
+    fn emitterOp(s: *State, op_id: u8) Error!void {
+        s.builderEmitOp(op_id) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpNoSource`.
-    fn v2FEmitOpNoSource(s: *State, op_id: u8) Error!void {
-        s.v2Builder().emitOp(op_id) catch |err| return v2MapBuilderError(err);
-        s.v2RecordPlainControl(op_id) catch |err| return v2MapBuilderError(err);
+    fn emitterOpNoSource(s: *State, op_id: u8) Error!void {
+        s.activeBuilder().emitOp(op_id) catch |err| return mapBuilderError(err);
+        s.builderRecordPlainControl(op_id) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of the `emitSourcePosAndLoc` + `emitOpNoSource` pair: one opcode
     /// pinned to an explicit source event (assignment/update operators).
-    fn v2FEmitOpAt(s: *State, op_id: u8, line_num: u32, col_num: u32) Error!void {
-        s.v2AddSourceMarker(line_num, col_num) catch |err| return v2MapBuilderError(err);
-        s.v2Builder().emitOp(op_id) catch |err| return v2MapBuilderError(err);
-        s.v2RecordPlainControl(op_id) catch |err| return v2MapBuilderError(err);
+    fn emitterOpAt(s: *State, op_id: u8, line_num: u32, col_num: u32) Error!void {
+        s.builderAddSourceMarker(line_num, col_num) catch |err| return mapBuilderError(err);
+        s.activeBuilder().emitOp(op_id) catch |err| return mapBuilderError(err);
+        s.builderRecordPlainControl(op_id) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpU16At`: one explicit source marker followed
     /// by the compact u16 instruction, as a single rollback transaction.
-    fn v2FEmitOpU16At(s: *State, op_id: u8, val: u16, line_num: u32, col_num: u32) Error!void {
-        const v2b = s.v2Builder();
+    fn emitterOpU16At(s: *State, op_id: u8, val: u16, line_num: u32, col_num: u32) Error!void {
+        const v2b = s.activeBuilder();
         const snapshot = v2b.snapshot();
         errdefer v2b.rollback(snapshot);
-        try v2FAddSourceMarker(s, line_num, col_num);
-        v2b.emitOpU16(op_id, val) catch |err| return v2MapBuilderError(err);
-        s.v2RecordU16Control(op_id) catch |err| return v2MapBuilderError(err);
+        try emitterAddSourceMarker(s, line_num, col_num);
+        v2b.emitOpU16(op_id, val) catch |err| return mapBuilderError(err);
+        s.builderRecordU16Control(op_id) catch |err| return mapBuilderError(err);
     }
 
     /// v2 half of an explicit source event followed by one or more NoSource
     /// instructions. The caller owns the surrounding Builder transaction.
-    fn v2FAddSourceMarker(s: *State, line_num: u32, col_num: u32) Error!void {
-        s.v2AddSourceMarker(line_num, col_num) catch |err| return v2MapBuilderError(err);
+    fn emitterAddSourceMarker(s: *State, line_num: u32, col_num: u32) Error!void {
+        s.builderAddSourceMarker(line_num, col_num) catch |err| return mapBuilderError(err);
     }
 
     /// The parser's direct counterpart of QuickJS `emit_source_pos()`. Plain
     /// emitters never infer a location; only grammar sites call this helper.
     fn emitGrammarSource(s: *State, source: SourcePosition) Error!void {
-        try v2FAddSourceMarker(s, source.line_num, source.col_num);
+        try emitterAddSourceMarker(s, source.line_num, source.col_num);
     }
 
     /// v2 mirror of `State.emitOpAtom` — ownership of `atom_id` (one retain)
     /// transfers into the builder ledger (marker'd).
-    fn v2FEmitAtomOpOwned(s: *State, op_id: u8, atom_id: Atom) Error!void {
-        s.v2EmitAtomOpOwned(op_id, atom_id) catch |err| return v2MapBuilderError(err);
+    fn emitterAtomOpOwned(s: *State, op_id: u8, atom_id: Atom) Error!void {
+        s.builderEmitAtomOpOwned(op_id, atom_id) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `emitOpAtomNoSource` — owned-atom sink, no marker.
-    fn v2FEmitAtomOpOwnedNoSource(s: *State, op_id: u8, atom_id: Atom) Error!void {
-        s.v2Builder().emitAtomOpOwned(op_id, atom_id) catch |err| return v2MapBuilderError(err);
+    fn emitterAtomOpOwnedNoSource(s: *State, op_id: u8, atom_id: Atom) Error!void {
+        s.activeBuilder().emitAtomOpOwned(op_id, atom_id) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `emitOpAtomU16NoSource` — owned-atom sink, no marker.
-    fn v2FEmitAtomOpU16OwnedNoSource(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
-        s.v2Builder().emitAtomOpU16Owned(op_id, atom_id, val) catch |err| return v2MapBuilderError(err);
+    fn emitterAtomOpU16OwnedNoSource(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
+        s.activeBuilder().emitAtomOpU16Owned(op_id, atom_id, val) catch |err| return mapBuilderError(err);
     }
 
     /// v2 scope-ref emission (qjs get_lvalue OP_scope_make_ref): owned atom,
     /// aux32 LabelId operand, scope operand; no marker (legacy emits it NoSource).
-    fn v2FEmitScopeRefOp(s: *State, op_id: u8, atom_id: Atom, label: compiler_v2.LabelId, scope: u16) Error!void {
-        s.v2Builder().emitScopeRefOpOwned(op_id, atom_id, label, scope) catch |err| return v2MapBuilderError(err);
+    fn emitterScopeRefOp(s: *State, op_id: u8, atom_id: Atom, label: compiler.LabelId, scope: u16) Error!void {
+        s.activeBuilder().emitScopeRefOpOwned(op_id, atom_id, label, scope) catch |err| return mapBuilderError(err);
     }
 
     /// v2 ledger take-back for the getter rewind.
-    fn v2FTakeLastAtomOwned(s: *State) Error!Atom {
-        return s.v2Builder().takeLastAtomOwned() catch |err| v2MapBuilderError(err);
+    fn emitterTakeLastAtomOwned(s: *State) Error!Atom {
+        return s.activeBuilder().takeLastAtomOwned() catch |err| mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpAtomU8` — ownership of `atom_id` (one
     /// retain) transfers into the builder ledger (marker'd).
-    fn v2FEmitAtomOpU8Owned(s: *State, op_id: u8, atom_id: Atom, val: u8) Error!void {
-        s.v2EmitAtomOpU8Owned(op_id, atom_id, val) catch |err| return v2MapBuilderError(err);
+    fn emitterAtomOpU8Owned(s: *State, op_id: u8, atom_id: Atom, val: u8) Error!void {
+        s.builderEmitAtomOpU8Owned(op_id, atom_id, val) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpAtomU16` — owned atom plus scope/u16
     /// immediate, with the current source marker.
-    fn v2FEmitAtomOpU16Owned(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
-        s.v2EmitAtomOpU16Owned(op_id, atom_id, val) catch |err| return v2MapBuilderError(err);
+    fn emitterAtomOpU16Owned(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
+        s.builderEmitAtomOpU16Owned(op_id, atom_id, val) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpU8` (marker'd).
-    fn v2FEmitOpU8(s: *State, op_id: u8, val: u8) Error!void {
-        s.v2EmitOpU8(op_id, val) catch |err| return v2MapBuilderError(err);
+    fn emitterOpU8(s: *State, op_id: u8, val: u8) Error!void {
+        s.builderEmitOpU8(op_id, val) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpU16` (marker'd).
-    fn v2FEmitOpU16(s: *State, op_id: u8, val: u16) Error!void {
-        s.v2EmitOpU16(op_id, val) catch |err| return v2MapBuilderError(err);
+    fn emitterOpU16(s: *State, op_id: u8, val: u16) Error!void {
+        s.builderEmitOpU16(op_id, val) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpU32` (marker'd).
-    fn v2FEmitOpU32(s: *State, op_id: u8, val: u32) Error!void {
-        s.v2EmitOpU32(op_id, val) catch |err| return v2MapBuilderError(err);
+    fn emitterOpU32(s: *State, op_id: u8, val: u32) Error!void {
+        s.builderEmitOpU32(op_id, val) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpI32` (marker'd). QuickJS emits the signed
     /// literal payload directly after OP_push_i32 (quickjs.c:26847-26853).
-    fn v2FEmitOpI32(s: *State, op_id: u8, val: i32) Error!void {
-        s.v2EmitOpI32(op_id, val) catch |err| return v2MapBuilderError(err);
+    fn emitterOpI32(s: *State, op_id: u8, val: i32) Error!void {
+        s.builderEmitOpI32(op_id, val) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitPushConst`: publish the placeholder instruction
     /// first, then append the duplicated value and patch its cpool index. This
     /// preserves QuickJS emit_push_const ordering (quickjs.c:23974-24004) and
     /// lets Builder rollback remove the instruction if the cpool grow fails.
-    fn v2FEmitPushConst(s: *State, value: JSValue) Error!void {
-        const v2b = s.v2Builder();
+    fn emitterPushConst(s: *State, value: JSValue) Error!void {
+        const v2b = s.activeBuilder();
         const snapshot = v2b.snapshot();
         errdefer v2b.rollback(snapshot);
-        try v2FEmitOpU32(s, opcode.op.push_const, 0);
+        try emitterOpU32(s, opcode.op.push_const, 0);
         const opcode_pos: usize = @intCast(v2b.last_opcode_pos);
         const idx = if (s.emit_to_function_def or s.top_level_functions_as_children)
-            try s.cur_func().appendCpool(value)
+            try s.curFunc().appendCpool(value)
         else
             try s.function.addConstant(value);
         std.mem.writeInt(u32, v2b.code[opcode_pos + 1 ..][0..4], idx, .little);
     }
 
-    /// Owned-value variant of v2FEmitPushConst. Ownership transfers only after
+    /// Owned-value variant of emitterPushConst. Ownership transfers only after
     /// the cpool append succeeds; every earlier failure frees the caller value
     /// and rolls the Builder back to its complete pre-emission snapshot.
-    fn v2FEmitPushConstOwned(s: *State, value: JSValue) Error!void {
+    fn emitterPushConstOwned(s: *State, value: JSValue) Error!void {
         var value_owned = true;
         errdefer if (value_owned) value.free(s.runtime.?);
-        const v2b = s.v2Builder();
+        const v2b = s.activeBuilder();
         const snapshot = v2b.snapshot();
         errdefer v2b.rollback(snapshot);
-        try v2FEmitOpU32(s, opcode.op.push_const, 0);
+        try emitterOpU32(s, opcode.op.push_const, 0);
         const opcode_pos: usize = @intCast(v2b.last_opcode_pos);
         const idx = if (s.emit_to_function_def or s.top_level_functions_as_children)
-            try s.cur_func().appendCpoolOwned(value)
+            try s.curFunc().appendCpoolOwned(value)
         else
             try s.function.constants.appendOwned(value);
         value_owned = false;
@@ -11375,89 +11341,67 @@ pub const parser_core = struct {
     }
 
     /// v2 mirror of `State.emitOpU16NoSource`.
-    fn v2FEmitOpU16NoSource(s: *State, op_id: u8, val: u16) Error!void {
-        s.v2Builder().emitOpU16(op_id, val) catch |err| return v2MapBuilderError(err);
-        s.v2RecordU16Control(op_id) catch |err| return v2MapBuilderError(err);
+    fn emitterOpU16NoSource(s: *State, op_id: u8, val: u16) Error!void {
+        s.activeBuilder().emitOpU16(op_id, val) catch |err| return mapBuilderError(err);
+        s.builderRecordU16Control(op_id) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpU32NoSource`.
-    fn v2FEmitOpU32NoSource(s: *State, op_id: u8, val: u32) Error!void {
-        s.v2Builder().emitOpU32(op_id, val) catch |err| return v2MapBuilderError(err);
-        s.v2RecordU32Control(op_id) catch |err| return v2MapBuilderError(err);
+    fn emitterOpU32NoSource(s: *State, op_id: u8, val: u32) Error!void {
+        s.activeBuilder().emitOpU32(op_id, val) catch |err| return mapBuilderError(err);
+        s.builderRecordU32Control(op_id) catch |err| return mapBuilderError(err);
     }
 
     /// v2 detach/splice facade over the Builder segment machinery.
-    fn v2FDetachTail(s: *State, mark: compiler_v2.builder.Snapshot) Error!compiler_v2.builder.DetachedSegment {
-        return s.v2Builder().detachTail(mark) catch |err| v2MapBuilderError(err);
+    fn emitterDetachTail(s: *State, mark: compiler.builder.Snapshot) Error!compiler.builder.DetachedSegment {
+        return s.activeBuilder().detachTail(mark) catch |err| mapBuilderError(err);
     }
 
     /// Code moved through the legacy appendMovedCodeWithAtoms contract keeps
     /// code and atom ownership, while truncateCode discards its parser source
     /// slots and the splice does not replay them (class runtime and for-update
     /// chunks both use that contract).
-    fn v2FDiscardDetachedSources(s: *State, seg: *compiler_v2.builder.DetachedSegment) void {
+    fn emitterDiscardDetachedSources(s: *State, seg: *compiler.builder.DetachedSegment) void {
         const sources = seg.sources;
         seg.sources = &.{};
-        if (sources.len != 0) s.function.memory.free(compiler_v2.builder.SourceSlot, sources);
+        if (sources.len != 0) s.function.memory.free(compiler.builder.SourceSlot, sources);
     }
 
-    fn v2FSpliceSegment(s: *State, seg: *compiler_v2.builder.DetachedSegment) Error!void {
-        s.v2Builder().spliceSegment(seg) catch |err| return v2MapBuilderError(err);
+    fn emitterSpliceSegment(s: *State, seg: *compiler.builder.DetachedSegment) Error!void {
+        s.activeBuilder().spliceSegment(seg) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `patchForwardJump` / `emitParserLabelNoSource`: bind at the
     /// current position AND forget the last opcode (control-flow merge).
-    fn v2FBindLabel(s: *State, label: compiler_v2.LabelId) Error!void {
-        s.v2BindLabel(label) catch |err| return v2MapBuilderError(err);
+    fn emitterBindLabel(s: *State, label: compiler.LabelId) Error!void {
+        s.builderBindLabel(label) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `emitParserLabelRawNoSource`: bind WITHOUT invalidating the
     /// last opcode (the preceding real opcode stays visible as call/delete
     /// provenance — qjs emit_label_raw).
-    fn v2FBindLabelRaw(s: *State, label: compiler_v2.LabelId) Error!void {
-        s.v2Builder().bindLabel(label) catch |err| return v2MapBuilderError(err);
+    fn emitterBindLabelRaw(s: *State, label: compiler.LabelId) Error!void {
+        s.activeBuilder().bindLabel(label) catch |err| return mapBuilderError(err);
     }
 
     /// Identity-native counterpart of `emitParserLabelNoSource`: retain the
     /// physical label's Stage-4 match barrier and invalidate opcode provenance.
-    fn v2FBindParserLabel(s: *State, label: compiler_v2.LabelId) Error!void {
-        s.v2BindParserLabel(label) catch |err| return v2MapBuilderError(err);
+    fn emitterBindParserLabel(s: *State, label: compiler.LabelId) Error!void {
+        s.builderBindParserLabel(label) catch |err| return mapBuilderError(err);
     }
 
     /// Raw physical-label counterpart used when the preceding getter/call
     /// must remain the parser's visible last opcode.
-    fn v2FBindParserLabelRaw(s: *State, label: compiler_v2.LabelId) Error!void {
-        s.v2Builder().bindLabelMatchBarrier(label) catch |err| return v2MapBuilderError(err);
+    fn emitterBindParserLabelRaw(s: *State, label: compiler.LabelId) Error!void {
+        s.activeBuilder().bindLabelMatchBarrier(label) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `patchJumpTarget`: redirect a pending jump to a boundary
     /// that is already bound elsewhere. Like its legacy twin it emits nothing
     /// and does NOT invalidate the last opcode — no control-flow merge happens
     /// at the current position.
-    fn v2FRetargetLabel(s: *State, from: compiler_v2.LabelId, to: compiler_v2.LabelId) Error!void {
-        s.v2Builder().retargetLabelRefs(from, to) catch |err| return v2MapBuilderError(err);
-    }
-
-    /// Emit a forward-jump opcode with a placeholder absolute target. The
-    /// caller passes the offset back to `patchForwardJump` once the target
-    /// is known. The parser uses absolute u32 offsets; `resolve_labels`
-    /// lowers these to relative `goto8`/`goto16`/`label`s.
-    fn emitForwardJump(s: *State, op_id: u8) Error!usize {
-        var bytes: [5]u8 = undefined;
-        bytes[0] = op_id;
-        std.mem.writeInt(u32, bytes[1..5], 0, .little);
-        const operand_offset = s.currentCodeLen() + 1;
-        try s.emitOpcodeBytesNoSource(&bytes);
-        return operand_offset;
-    }
-
-    fn emitForwardJumpNoSource(s: *State, op_id: u8) Error!usize {
-        var bytes: [5]u8 = undefined;
-        bytes[0] = op_id;
-        std.mem.writeInt(u32, bytes[1..5], 0, .little);
-        const operand_offset = s.currentCodeLen() + 1;
-        try s.emitOpcodeBytesNoSource(&bytes);
-        return operand_offset;
+    fn emitterRetargetLabel(s: *State, from: compiler.LabelId, to: compiler.LabelId) Error!void {
+        s.activeBuilder().retargetLabelRefs(from, to) catch |err| return mapBuilderError(err);
     }
 
     const ParserLabelRef = struct {
@@ -11467,16 +11411,16 @@ pub const parser_core = struct {
     /// QCP-1 S2-G1: chain-exit label identity for `?.` — a legacy parser label
     /// or a v2 LabelId depending on the emission backend of the current parse.
     const OptionalChainLabel = union(enum) {
-        legacy: ParserLabelRef,
-        v2: compiler_v2.LabelId,
+        temp: ParserLabelRef,
+        builder: compiler.LabelId,
     };
 
     /// QCP-1 S2-G3: finally-target identity for gosub emission — a legacy parser
     /// label or a v2 LabelId depending on the emission backend of the parse
     /// (same shape as OptionalChainLabel).
     const FinallyLabel = union(enum) {
-        legacy: ParserLabelRef,
-        v2: compiler_v2.LabelId,
+        temp: ParserLabelRef,
+        builder: compiler.LabelId,
     };
 
     fn newParserLabel(s: *State) ParserLabelRef {
@@ -11719,8 +11663,8 @@ pub const parser_core = struct {
         try s.continue_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
         try s.continue_frame_cleanup_drops.append(s.function.memory.allocator, 0);
         // qjs push_break_entry order: label_cont first, then label_break.
-        try s.v2_continue_frame_labels.append(s.function.memory.allocator, try v2FNewLabel(s));
-        try s.v2_break_frame_labels.append(s.function.memory.allocator, try v2FNewLabel(s));
+        try s.continue_frame_labels.append(s.function.memory.allocator, try emitterNewLabel(s));
+        try s.break_frame_labels.append(s.function.memory.allocator, try emitterNewLabel(s));
     }
 
     fn pushBreakOnlyFrame(s: *State) Error!void {
@@ -11728,7 +11672,7 @@ pub const parser_core = struct {
         try s.break_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
         try s.break_frame_cleanup_drops.append(s.function.memory.allocator, 0);
         try s.break_frame_cross_cleanup_drops.append(s.function.memory.allocator, 0);
-        try s.v2_break_frame_labels.append(s.function.memory.allocator, try v2FNewLabel(s));
+        try s.break_frame_labels.append(s.function.memory.allocator, try emitterNewLabel(s));
     }
 
     /// Put a real break/continue target in the same ordered environment chain
@@ -11825,23 +11769,9 @@ pub const parser_core = struct {
         try emitControlThroughFinally(s, .{ .kind = .@"break" });
     }
 
-    fn emitUnlabelledBreakNoFinallyCapture(s: *State) Error!void {
-        try emitCatchMarkerDropsToDepth(s, s.break_frame_catch_marker_depths.getLast());
-        try emitUnlabelledBreakCleanup(s, s.break_frame_cleanup_drops.getLast());
-        const off = try emitForwardJumpNoSource(s, opcode.op.goto);
-        try s.break_fixups.append(s.function.memory.allocator, off);
-    }
-
     fn emitUnlabelledContinue(s: *State) Error!void {
         if (s.continue_frame_lens.items.len == 0) return;
         try emitControlThroughFinally(s, .{ .kind = .@"continue" });
-    }
-
-    fn emitUnlabelledContinueNoFinallyCapture(s: *State) Error!void {
-        try emitCatchMarkerDropsToDepth(s, s.continue_frame_catch_marker_depths.getLast());
-        try emitCrossFrameCleanup(s, s.continue_frame_cleanup_drops.getLast());
-        const off = try emitForwardJumpNoSource(s, opcode.op.goto);
-        try s.continue_fixups.append(s.function.memory.allocator, off);
     }
 
     fn enterSwitchContinueCleanup(s: *State) void {
@@ -11913,8 +11843,8 @@ pub const parser_core = struct {
     /// binds emit zero bytes, so a while-family back-edge `goto` would otherwise
     /// look like "cannot continue" even though `break` lands at the case end.
     /// Keep this 5-opcode terminator set; do not reuse `isLiveCode`'s wider set.
-    fn v2CaseTailCanFallthrough(s: *State, scan_start: u32, body_start: u32) bool {
-        const v2b = s.v2Builder();
+    fn caseTailCanFallthrough(s: *State, scan_start: u32, body_start: u32) bool {
+        const v2b = s.activeBuilder();
         var pc: usize = if (v2b.code_len > body_start) body_start else scan_start;
         var last: ?u8 = null;
         while (pc < v2b.code_len) {
@@ -11946,16 +11876,16 @@ pub const parser_core = struct {
 
     /// QCP-1 S2-G3: v2 twin of `isLiveCode` — qjs js_is_live_code
     /// (quickjs.c:23816) over the v2 temp stream: get_prev_opcode is
-    /// Builder.last_opcode_pos (every v2FBindLabel invalidated it, so any merge
+    /// Builder.last_opcode_pos (every emitterBindLabel invalidated it, so any merge
     /// bound at the current end already answers live, exactly like qjs OP_label
     /// being the visible prev opcode). The ref_count scan covers raw binds
-    /// (v2FBindLabelRaw keeps call/delete provenance): a referenced label BOUND
+    /// (emitterBindLabelRaw keeps call/delete provenance): a referenced label BOUND
     /// exactly at the current end is an incoming edge (the legacy
     /// max_absolute_target >= tail_start answer). Labels not yet bound are
     /// future handler/exit targets and are NOT incoming edges — the twin of the
     /// legacy tagged-parser-label exclusion.
     pub fn isLiveCode(s: *State) bool {
-        const v2b = s.v2Builder();
+        const v2b = s.activeBuilder();
         const live = blk: {
             if (v2b.last_opcode_pos < 0) break :blk true;
             break :blk switch (v2b.code[@intCast(v2b.last_opcode_pos)]) {
@@ -11984,7 +11914,7 @@ pub const parser_core = struct {
     /// QCP-1 S2-G3 TEST HOOK: the script/plain-function epilogue tail under v2
     /// (decision + terminal), callable from the emission harness exactly as the
     /// script epilogue runs it.
-    pub fn v2EmitPlainTailForTest(s: *State) Error!void {
+    pub fn emitPlainTailForTest(s: *State) Error!void {
         if (isLiveCode(s)) try s.emitReturnUndefined();
     }
 
@@ -12128,8 +12058,8 @@ pub const parser_core = struct {
     }
 
     fn patchContinueFrame(s: *State) Error!void {
-        if (s.v2_continue_frame_labels.items.len == 0) return Error.UnexpectedToken;
-        try v2FBindLabel(s, s.v2_continue_frame_labels.getLast());
+        if (s.continue_frame_labels.items.len == 0) return Error.UnexpectedToken;
+        try emitterBindLabel(s, s.continue_frame_labels.getLast());
     }
 
     fn popBreakFrameAndPatch(s: *State) Error!void {
@@ -12143,9 +12073,9 @@ pub const parser_core = struct {
         _ = s.break_frame_cleanup_drops.pop().?;
         _ = s.break_frame_cross_cleanup_drops.pop().?;
         // The continue label was bound by patchContinueFrame; only pop it.
-        _ = s.v2_continue_frame_labels.pop() orelse return Error.UnexpectedToken;
-        const break_label = s.v2_break_frame_labels.pop() orelse return Error.UnexpectedToken;
-        try v2FBindLabel(s, break_label);
+        _ = s.continue_frame_labels.pop() orelse return Error.UnexpectedToken;
+        const break_label = s.break_frame_labels.pop() orelse return Error.UnexpectedToken;
+        try emitterBindLabel(s, break_label);
         std.debug.assert(s.break_fixups.items.len == start);
     }
 
@@ -12155,8 +12085,8 @@ pub const parser_core = struct {
         _ = s.break_frame_catch_marker_depths.pop().?;
         _ = s.break_frame_cleanup_drops.pop().?;
         _ = s.break_frame_cross_cleanup_drops.pop().?;
-        const break_label = s.v2_break_frame_labels.pop() orelse return Error.UnexpectedToken;
-        try v2FBindLabel(s, break_label);
+        const break_label = s.break_frame_labels.pop() orelse return Error.UnexpectedToken;
+        try emitterBindLabel(s, break_label);
         std.debug.assert(s.break_fixups.items.len == start);
     }
 
@@ -12258,7 +12188,7 @@ pub const parser_core = struct {
 
     fn predeclareSlashStartsRegexp(s: *State, previous_token_kind: ?tok.TokenKind) bool {
         const previous = previous_token_kind orelse return true;
-        if (previous == tok.TOK_YIELD and !s.in_generator and !(s.is_strict or s.cur_func().is_strict_mode)) {
+        if (previous == tok.TOK_YIELD and !s.in_generator and !(s.is_strict or s.curFunc().is_strict_mode)) {
             return false;
         }
         if (previous == tok.TOK_AWAIT and canUseAwaitAsIdentifier(s)) {
@@ -12387,8 +12317,8 @@ pub const parser_core = struct {
     fn tokenKindCanStartUsingBinding(s: *State, kind: tok.TokenKind) bool {
         return kind == tok.TOK_IDENT or
             (kind == tok.TOK_AWAIT and canUseAwaitAsIdentifier(s)) or
-            (kind == tok.TOK_YIELD and !s.in_generator and !(s.is_strict or s.cur_func().is_strict_mode)) or
-            (!(s.is_strict or s.cur_func().is_strict_mode) and
+            (kind == tok.TOK_YIELD and !s.in_generator and !(s.is_strict or s.curFunc().is_strict_mode)) or
+            (!(s.is_strict or s.curFunc().is_strict_mode) and
                 (kind == tok.TOK_STATIC or kind == tok.TOK_LET or
                     kind == tok.TOK_IMPLEMENTS or kind == tok.TOK_INTERFACE or kind == tok.TOK_PACKAGE or
                     kind == tok.TOK_PRIVATE or kind == tok.TOK_PROTECTED or kind == tok.TOK_PUBLIC));
@@ -12480,15 +12410,15 @@ pub const parser_core = struct {
         if (s.using_block_frames.items[frame_index].stack_loc) |stack_loc| return stack_loc;
 
         const stack_loc = try emitCreateUsingDisposableStack(s);
-        var v2_catch_label: ?compiler_v2.LabelId = null;
+        var catch_label: ?compiler.LabelId = null;
         // zjs-only explicit-resource-management lowering: keep the
         // synthetic catch edge identity-native until final layout.
-        v2_catch_label = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.@"catch", v2_catch_label.?);
+        catch_label = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.@"catch", catch_label.?);
         s.active_catch_marker_depth += 1;
         s.using_block_frames.items[frame_index] = .{
             .stack_loc = stack_loc,
-            .v2_catch_label = v2_catch_label,
+            .catch_label = catch_label,
             .catch_marker_depth = s.active_catch_marker_depth,
         };
         return stack_loc;
@@ -12515,15 +12445,15 @@ pub const parser_core = struct {
         s.active_catch_marker_depth -= 1;
         // zjs-only explicit-resource-management lowering: normal and
         // throw completions converge through real catch/end LabelIds.
-        const catch_label = frame.v2_catch_label orelse return Error.UnexpectedToken;
-        try v2FEmitOp(s, opcode.op.drop);
+        const catch_label = frame.catch_label orelse return Error.UnexpectedToken;
+        try emitterOp(s, opcode.op.drop);
         try emitUsingDisposeStack(s, stack_loc, frame.seen_async_hint);
         try s.emitCloseLoc(stack_loc);
-        const end_label = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.goto, end_label);
-        try v2FBindLabel(s, catch_label);
+        const end_label = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.goto, end_label);
+        try emitterBindLabel(s, catch_label);
         try emitUsingDisposeStackForThrow(s, stack_loc, frame.seen_async_hint);
-        try v2FBindLabel(s, end_label);
+        try emitterBindLabel(s, end_label);
         _ = s.using_block_frames.pop();
     }
 
@@ -12614,9 +12544,9 @@ pub const parser_core = struct {
                 std.mem.eql(u8, str_payload.bytes, "use strict"))
             {
                 if (directive_contains_legacy_escape or str_payload.contains_legacy_escape) return Error.UnexpectedToken;
-                s.cur_func().has_use_strict = true;
+                s.curFunc().has_use_strict = true;
                 s.is_strict = true;
-                s.cur_func().is_strict_mode = true;
+                s.curFunc().is_strict_mode = true;
                 s.lex.is_strict_mode = true;
             }
             if (expressionStatementKeepsCompletion(s)) {
@@ -12737,7 +12667,7 @@ pub const parser_core = struct {
 
         // Acquire the declaration owner before advance releases the token's
         // identifier retain (qjs next_token/free_token ownership order).
-        const existing_var = s.cur_func().findVar(enum_atom);
+        const existing_var = s.curFunc().findVar(enum_atom);
         if (existing_var < 0) {
             _ = try s.addScopeVar(enum_atom, .normal, false, false);
         }
@@ -12852,7 +12782,7 @@ pub const parser_core = struct {
 
         // FunctionDef must own the name before advance releases the token.
         // Existing declarations already provide that owner.
-        const existing_var = s.cur_func().findVar(ns_atom);
+        const existing_var = s.curFunc().findVar(ns_atom);
         if (existing_var < 0) {
             _ = try s.addScopeVar(ns_atom, .normal, false, false);
         }
@@ -13008,7 +12938,7 @@ pub const parser_core = struct {
             {
                 return Error.UnexpectedToken;
             }
-            const mask = if (!s.cur_func().is_strict_mode and decl_mask.func_with_label)
+            const mask = if (!s.curFunc().is_strict_mode and decl_mask.func_with_label)
                 DeclMask{ .func = true, .func_with_label = true }
             else
                 DeclMask{};
@@ -13215,7 +13145,7 @@ pub const parser_core = struct {
                 var if_false_label: Label = .{};
                 try Emitter.newLabel(s, &if_false_label);
                 try Emitter.jump(s, opcode.op.if_false, &if_false_label);
-                const allow_annex_b_if_function = !s.is_strict and !s.cur_func().is_strict_mode;
+                const allow_annex_b_if_function = !s.is_strict and !s.curFunc().is_strict_mode;
                 const then_is_annex_b_function =
                     allow_annex_b_if_function and
                     s.peekKind() == tok.TOK_FUNCTION and
@@ -13398,19 +13328,19 @@ pub const parser_core = struct {
                     }
                     if (for_has_initializer) try s.closeScopes(s.scope_level, block_scope_level);
 
-                    var v2_top_label: compiler_v2.LabelId = undefined;
-                    const v2b = s.v2Builder();
+                    var top_label: compiler.LabelId = undefined;
+                    const v2b = s.activeBuilder();
                     const snapshot = v2b.snapshot();
                     errdefer v2b.rollback(snapshot);
                     // qjs TOK_FOR binds label_test before the condition;
                     // labels themselves carry no source event.
-                    v2_top_label = try v2FNewLabel(s);
+                    top_label = try emitterNewLabel(s);
                     // The legacy twin is a physical `OP_label`, so it keeps
                     // the Stage-4 sequential-match barrier even once the
                     // backedge dies (a loop body whose only exit is an outer
                     // `continue` leaves this label unreferenced, and legacy
                     // still refuses to fuse `put_loc; get_loc` across it).
-                    try v2FBindParserLabel(s, v2_top_label);
+                    try emitterBindParserLabel(s, top_label);
 
                     // Test condition.
                     if (s.peekKind() != ';') {
@@ -13420,16 +13350,16 @@ pub const parser_core = struct {
                     }
                     try s.expectToken(';');
 
-                    var v2_exit_label: compiler_v2.LabelId = undefined;
-                    v2_exit_label = try v2FNewLabel(s);
-                    try v2FEmitJump(s, opcode.op.if_false, v2_exit_label);
+                    var exit_label: compiler.LabelId = undefined;
+                    exit_label = try emitterNewLabel(s);
+                    try emitterJump(s, opcode.op.if_false, exit_label);
 
                     // Parse the update while still inside the parenthesized
                     // for-head, then move its emitted bytes after the body.
                     const update_start = s.currentCodeLen();
                     const update_atom_start = s.currentAtomOperandLen();
-                    var v2_update_mark: compiler_v2.builder.Snapshot = undefined;
-                    v2_update_mark = s.v2Builder().snapshot();
+                    var update_mark: compiler.builder.Snapshot = undefined;
+                    update_mark = s.activeBuilder().snapshot();
                     if (s.peekKind() != ')') {
                         // Phase 1 keeps the normal expression result and emits
                         // the discard explicitly, like QuickJS. The final pass
@@ -13442,8 +13372,8 @@ pub const parser_core = struct {
                     const update_code = s.currentCode()[update_start..];
                     const update_atoms = s.currentAtomOperands()[update_atom_start..];
                     var saved_update: []u8 = &.{};
-                    var v2_update_seg: compiler_v2.builder.DetachedSegment = .{};
-                    defer s.v2Builder().discardSegment(&v2_update_seg);
+                    var update_seg: compiler.builder.DetachedSegment = .{};
+                    defer s.activeBuilder().discardSegment(&update_seg);
                     if (update_code.len != 0) {
                         saved_update = try s.function.memory.alloc(u8, update_code.len);
                         @memcpy(saved_update, update_code);
@@ -13463,11 +13393,11 @@ pub const parser_core = struct {
                     // qjs TOK_FOR: the update block is moved after the body. v2 detach keeps
                     // LabelIds intact — only slot offsets shift at the splice. An empty
                     // update detaches nothing (S2-G2 byte-shape preserved).
-                    if (s.v2Builder().code_len != v2_update_mark.code_len) {
-                        v2_update_seg = try v2FDetachTail(s, v2_update_mark);
+                    if (s.activeBuilder().code_len != update_mark.code_len) {
+                        update_seg = try emitterDetachTail(s, update_mark);
                         // Legacy truncateCode + appendMovedCodeWithAtoms
                         // drops the detached update's out-of-band markers.
-                        v2FDiscardDetachedSources(s, &v2_update_seg);
+                        emitterDiscardDetachedSources(s, &update_seg);
                     }
                     try s.expectToken(')');
                     // Body.
@@ -13485,10 +13415,10 @@ pub const parser_core = struct {
                     if (label_frame) |idx| try s.patchLabelContinues(idx);
                     // qjs TOK_FOR: append the detached update after the
                     // body and patched continue exits.
-                    if (v2_update_seg.code.len != 0) try v2FSpliceSegment(s, &v2_update_seg);
+                    if (update_seg.code.len != 0) try emitterSpliceSegment(s, &update_seg);
 
-                    try v2FEmitJump(s, opcode.op.goto, v2_top_label);
-                    try v2FBindLabel(s, v2_exit_label);
+                    try emitterJump(s, opcode.op.goto, top_label);
+                    try emitterBindLabel(s, exit_label);
                     popControlBlock(s, &loop_block);
                     loop_block_active = false;
                     try popBreakFrameAndPatch(s);
@@ -13567,11 +13497,11 @@ pub const parser_core = struct {
                 // Keep unmatched case-test exits separate from matched
                 // fallthrough jumps: once a case has matched, later case tests
                 // are skipped and only their bodies run.
-                var v2_no_match_labels: [64]compiler_v2.LabelId = undefined;
+                var no_match_labels: [64]compiler.LabelId = undefined;
                 var no_match_jumps_count: usize = 0;
-                var v2_fallthrough_label: ?compiler_v2.LabelId = null;
+                var fallthrough_label: ?compiler.LabelId = null;
                 var has_default = false;
-                var v2_default_label: ?compiler_v2.LabelId = null;
+                var default_label: ?compiler.LabelId = null;
                 var default_waiting_for_body = false;
                 // Floor for the v2 clause-tail flow scan: `caseCanFallthrough`
                 // reads the whole emission stream, so an empty clause body has
@@ -13579,14 +13509,14 @@ pub const parser_core = struct {
                 // emits its dispatch test (or, for a leading `default`, the
                 // dispatch-continuation goto) after this point, so the widened
                 // range always carries the answer.
-                const v2_clause_scan_start: u32 = s.v2Builder().code_len;
+                const clause_scan_start: u32 = s.activeBuilder().code_len;
 
                 while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
                     if (s.peekKind() == tok.TOK_CASE) {
                         // qjs TOK_SWITCH (quickjs.c:29305): label_case binds at
                         // the next case test before dispatch continues.
-                        for (v2_no_match_labels[0..no_match_jumps_count]) |label| {
-                            try v2FBindLabel(s, label);
+                        for (no_match_labels[0..no_match_jumps_count]) |label| {
+                            try emitterBindLabel(s, label);
                         }
                         no_match_jumps_count = 0;
 
@@ -13596,28 +13526,28 @@ pub const parser_core = struct {
                         try parseExpr(s);
                         try s.expectToken(':');
                         try Emitter.op(s, opcode.op.strict_eq);
-                        const next_case_label = try v2FNewLabel(s);
-                        try v2FEmitJump(s, opcode.op.if_false, next_case_label);
-                        if (no_match_jumps_count >= v2_no_match_labels.len) return Error.UnexpectedToken;
-                        v2_no_match_labels[no_match_jumps_count] = next_case_label;
+                        const next_case_label = try emitterNewLabel(s);
+                        try emitterJump(s, opcode.op.if_false, next_case_label);
+                        if (no_match_jumps_count >= no_match_labels.len) return Error.UnexpectedToken;
+                        no_match_labels[no_match_jumps_count] = next_case_label;
                         no_match_jumps_count += 1;
-                        if (v2_fallthrough_label) |label| {
-                            try v2FBindLabel(s, label);
-                            v2_fallthrough_label = null;
+                        if (fallthrough_label) |label| {
+                            try emitterBindLabel(s, label);
+                            fallthrough_label = null;
                         }
 
                         // Matched: keep the discriminant on stack until the
                         // common switch epilogue, matching QuickJS's case shape.
-                        var v2_body_start: u32 = undefined;
-                        v2_body_start = s.v2Builder().code_len;
+                        var body_start: u32 = undefined;
+                        body_start = s.activeBuilder().code_len;
                         const has_case_body = s.peekKind() != tok.TOK_CASE and
                             s.peekKind() != tok.TOK_DEFAULT and
                             s.peekKind() != '}' and
                             s.peekKind() != tok.TOK_EOF;
                         if (default_waiting_for_body and has_case_body) {
-                            const default_label = try v2FNewLabel(s);
-                            try v2FBindLabel(s, default_label);
-                            v2_default_label = default_label;
+                            const clause_default_label = try emitterNewLabel(s);
+                            try emitterBindLabel(s, clause_default_label);
+                            default_label = clause_default_label;
                             default_waiting_for_body = false;
                         }
                         while (s.peekKind() != tok.TOK_CASE and
@@ -13632,38 +13562,38 @@ pub const parser_core = struct {
                         // tails. Do not also require "no switch-break in the
                         // body" — that drops `case 0: if(false) break; y(); case 1:`.
                         const case_tail_can_fallthrough =
-                            v2CaseTailCanFallthrough(s, v2_clause_scan_start, v2_body_start);
+                            caseTailCanFallthrough(s, clause_scan_start, body_start);
                         if ((s.peekKind() == tok.TOK_CASE or s.peekKind() == tok.TOK_DEFAULT) and
                             case_tail_can_fallthrough)
                         {
-                            const fallthrough_label = try v2FNewLabel(s);
-                            try v2FEmitJump(s, opcode.op.goto, fallthrough_label);
-                            v2_fallthrough_label = fallthrough_label;
+                            const clause_fallthrough_label = try emitterNewLabel(s);
+                            try emitterJump(s, opcode.op.goto, clause_fallthrough_label);
+                            fallthrough_label = clause_fallthrough_label;
                         }
                     } else if (s.peekKind() == tok.TOK_DEFAULT) {
                         if (has_default) return Error.UnexpectedToken;
                         try s.advance();
                         try s.expectToken(':');
                         if (no_match_jumps_count == 0) {
-                            if (no_match_jumps_count >= v2_no_match_labels.len) return Error.UnexpectedToken;
-                            const no_match_label = try v2FNewLabel(s);
-                            try v2FEmitJump(s, opcode.op.goto, no_match_label);
-                            v2_no_match_labels[no_match_jumps_count] = no_match_label;
+                            if (no_match_jumps_count >= no_match_labels.len) return Error.UnexpectedToken;
+                            const no_match_label = try emitterNewLabel(s);
+                            try emitterJump(s, opcode.op.goto, no_match_label);
+                            no_match_labels[no_match_jumps_count] = no_match_label;
                             no_match_jumps_count += 1;
                         }
-                        var v2_body_start: u32 = undefined;
-                        v2_body_start = s.v2Builder().code_len;
-                        if (v2_fallthrough_label) |label| {
-                            try v2FBindLabel(s, label);
-                            v2_fallthrough_label = null;
+                        var body_start: u32 = undefined;
+                        body_start = s.activeBuilder().code_len;
+                        if (fallthrough_label) |label| {
+                            try emitterBindLabel(s, label);
+                            fallthrough_label = null;
                         }
 
                         // Default body label.
-                        var v2_default_candidate: compiler_v2.LabelId = undefined;
+                        var default_candidate: compiler.LabelId = undefined;
                         // Eager candidate: legacy decides default_body_start after parsing the
                         // body; the v2 bind must happen at the body-start position itself.
-                        v2_default_candidate = try v2FNewLabel(s);
-                        try v2FBindLabel(s, v2_default_candidate);
+                        default_candidate = try emitterNewLabel(s);
+                        try emitterBindLabel(s, default_candidate);
                         has_default = true;
                         while (s.peekKind() != tok.TOK_CASE and
                             s.peekKind() != tok.TOK_DEFAULT and
@@ -13672,18 +13602,18 @@ pub const parser_core = struct {
                         {
                             try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
                         }
-                        if (s.v2Builder().code_len == v2_body_start and s.peekKind() == tok.TOK_CASE) {
+                        if (s.activeBuilder().code_len == body_start and s.peekKind() == tok.TOK_CASE) {
                             default_waiting_for_body = true;
                         } else {
-                            v2_default_label = v2_default_candidate;
+                            default_label = default_candidate;
                             default_waiting_for_body = false;
                         }
                         const case_tail_can_fallthrough =
-                            v2CaseTailCanFallthrough(s, v2_clause_scan_start, v2_body_start);
+                            caseTailCanFallthrough(s, clause_scan_start, body_start);
                         if (s.peekKind() == tok.TOK_CASE and case_tail_can_fallthrough) {
-                            const fallthrough_label = try v2FNewLabel(s);
-                            try v2FEmitJump(s, opcode.op.goto, fallthrough_label);
-                            v2_fallthrough_label = fallthrough_label;
+                            const clause_fallthrough_label = try emitterNewLabel(s);
+                            try emitterJump(s, opcode.op.goto, clause_fallthrough_label);
+                            fallthrough_label = clause_fallthrough_label;
                         }
                     } else {
                         return Error.UnexpectedToken;
@@ -13708,19 +13638,19 @@ pub const parser_core = struct {
                 // `switch (0) { default: if (false) ; else ; }` kept a `goto` to
                 // its own fallthrough that legacy folds away.
                 if (no_match_jumps_count != 0) {
-                    if (v2_default_label) |default_label| {
-                        for (v2_no_match_labels[0..no_match_jumps_count]) |label| {
-                            try v2FRetargetLabel(s, label, default_label);
+                    if (default_label) |bound_default_label| {
+                        for (no_match_labels[0..no_match_jumps_count]) |label| {
+                            try emitterRetargetLabel(s, label, bound_default_label);
                         }
                     } else {
                         // No default clause: unmatched dispatch falls through to
                         // the common discriminant drop (`patchForwardJump`).
-                        for (v2_no_match_labels[0..no_match_jumps_count]) |label| {
-                            try v2FBindLabel(s, label);
+                        for (no_match_labels[0..no_match_jumps_count]) |label| {
+                            try emitterBindLabel(s, label);
                         }
                     }
                 }
-                if (v2_fallthrough_label) |label| try v2FBindLabel(s, label);
+                if (fallthrough_label) |label| try emitterBindLabel(s, label);
                 popControlBlock(s, &switch_block);
                 switch_block_active = false;
                 try popBreakOnlyFrameAndPatch(s);
@@ -13735,22 +13665,22 @@ pub const parser_core = struct {
                 try s.advance();
                 try s.setEvalReturnUndefined();
 
-                var v2_label_catch: compiler_v2.LabelId = undefined;
-                var v2_label_catch2: compiler_v2.LabelId = undefined;
-                var v2_label_finally: compiler_v2.LabelId = undefined;
-                var v2_label_end: compiler_v2.LabelId = undefined;
+                var label_catch: compiler.LabelId = undefined;
+                var label_catch2: compiler.LabelId = undefined;
+                var label_finally: compiler.LabelId = undefined;
+                var label_end: compiler.LabelId = undefined;
                 // qjs TOK_TRY (quickjs.c:29396-29400) creates all four labels upfront;
                 // v2 label discipline requires every created label to end up bound, and
                 // a no-catch try never binds catch2 — so catch2 is created at its first
                 // use in the catch clause (id order differs from qjs; resolved output
                 // is unaffected because ids are per-function creation indices).
-                v2_label_catch = try v2FNewLabel(s);
-                v2_label_finally = try v2FNewLabel(s);
-                v2_label_end = try v2FNewLabel(s);
-                const finally_ref: FinallyLabel = .{ .v2 = v2_label_finally };
+                label_catch = try emitterNewLabel(s);
+                label_finally = try emitterNewLabel(s);
+                label_end = try emitterNewLabel(s);
+                const finally_ref: FinallyLabel = .{ .builder = label_finally };
 
                 // qjs TOK_TRY (quickjs.c:29401): emit_goto(OP_catch, label_catch) — the handler target is born as a LabelId.
-                try v2FEmitJump(s, opcode.op.@"catch", v2_label_catch);
+                try emitterJump(s, opcode.op.@"catch", label_catch);
                 const outer_catch_depth = s.active_catch_marker_depth;
                 s.active_catch_marker_depth += 1;
                 const try_frame = try pushReturnFinallyFrame(s, finally_ref, outer_catch_depth);
@@ -13768,17 +13698,17 @@ pub const parser_core = struct {
 
                 if (isLiveCode(s)) {
                     // qjs TOK_TRY live try tail (quickjs.c:29412-29420): drop, undefined, gosub finally, drop, goto end.
-                    try v2FEmitOpNoSource(s, opcode.op.drop);
-                    try v2FEmitOpNoSource(s, opcode.op.undefined);
-                    try v2FEmitJumpNoSource(s, opcode.op.gosub, v2_label_finally);
-                    try v2FEmitOpNoSource(s, opcode.op.drop);
-                    try v2FEmitJumpNoSource(s, opcode.op.goto, v2_label_end);
+                    try emitterOpNoSource(s, opcode.op.drop);
+                    try emitterOpNoSource(s, opcode.op.undefined);
+                    try emitterJumpNoSource(s, opcode.op.gosub, label_finally);
+                    try emitterOpNoSource(s, opcode.op.drop);
+                    try emitterJumpNoSource(s, opcode.op.goto, label_end);
                 }
 
                 if (s.peekKind() == tok.TOK_CATCH) {
                     try s.advance();
                     // qjs TOK_TRY catch entry (quickjs.c:29427-29428): bind label_catch at the handler entry.
-                    try v2FBindParserLabel(s, v2_label_catch);
+                    try emitterBindParserLabel(s, label_catch);
 
                     try s.pushScope();
                     var catch_binding_scope_active = true;
@@ -13806,7 +13736,7 @@ pub const parser_core = struct {
                                 s.token.payload.ident.atom
                             else
                                 tok.keywordAtom(s.peekKind());
-                            if ((s.is_strict or s.cur_func().is_strict_mode) and
+                            if ((s.is_strict or s.curFunc().is_strict_mode) and
                                 (atomNameEquals(s, catch_atom, "eval") or atomNameEquals(s, catch_atom, "arguments")))
                             {
                                 return Error.UnexpectedToken;
@@ -13819,8 +13749,8 @@ pub const parser_core = struct {
                     }
 
                     // qjs TOK_TRY catch body (quickjs.c:29460-29461): create and target the second catch handler.
-                    v2_label_catch2 = try v2FNewLabel(s);
-                    try v2FEmitJump(s, opcode.op.@"catch", v2_label_catch2);
+                    label_catch2 = try emitterNewLabel(s);
+                    try emitterJump(s, opcode.op.@"catch", label_catch2);
                     const catch_body_outer_depth = s.active_catch_marker_depth;
                     s.active_catch_marker_depth += 1;
                     const catch_frame = try pushReturnFinallyFrame(s, finally_ref, catch_body_outer_depth);
@@ -13848,28 +13778,28 @@ pub const parser_core = struct {
 
                     if (isLiveCode(s)) {
                         // qjs TOK_TRY live catch tail (quickjs.c:29475-29483): drop, undefined, gosub finally, drop, goto end.
-                        try v2FEmitOpNoSource(s, opcode.op.drop);
-                        try v2FEmitOpNoSource(s, opcode.op.undefined);
-                        try v2FEmitJumpNoSource(s, opcode.op.gosub, v2_label_finally);
-                        try v2FEmitOpNoSource(s, opcode.op.drop);
-                        try v2FEmitJumpNoSource(s, opcode.op.goto, v2_label_end);
+                        try emitterOpNoSource(s, opcode.op.drop);
+                        try emitterOpNoSource(s, opcode.op.undefined);
+                        try emitterJumpNoSource(s, opcode.op.gosub, label_finally);
+                        try emitterOpNoSource(s, opcode.op.drop);
+                        try emitterJumpNoSource(s, opcode.op.goto, label_end);
                     }
 
                     // qjs TOK_TRY catch rethrow (quickjs.c:29485-29490): bind catch2, gosub finally, then throw.
-                    try v2FBindParserLabel(s, v2_label_catch2);
-                    try v2FEmitJumpNoSource(s, opcode.op.gosub, v2_label_finally);
-                    try v2FEmitOpNoSource(s, opcode.op.throw);
+                    try emitterBindParserLabel(s, label_catch2);
+                    try emitterJumpNoSource(s, opcode.op.gosub, label_finally);
+                    try emitterOpNoSource(s, opcode.op.throw);
                 } else if (s.peekKind() == tok.TOK_FINALLY) {
                     // qjs TOK_TRY finally-only rethrow (quickjs.c:29492-29498): bind catch, gosub finally, then throw.
-                    try v2FBindParserLabel(s, v2_label_catch);
-                    try v2FEmitJumpNoSource(s, opcode.op.gosub, v2_label_finally);
-                    try v2FEmitOpNoSource(s, opcode.op.throw);
+                    try emitterBindParserLabel(s, label_catch);
+                    try emitterJumpNoSource(s, opcode.op.gosub, label_finally);
+                    try emitterOpNoSource(s, opcode.op.throw);
                 } else {
                     return Error.UnexpectedToken;
                 }
 
                 // qjs TOK_TRY finally entry (quickjs.c:29503): bind label_finally.
-                try v2FBindParserLabel(s, v2_label_finally);
+                try emitterBindParserLabel(s, label_finally);
                 if (s.peekKind() == tok.TOK_FINALLY) {
                     try s.advance();
                     try parseSharedFinallyBlock(s);
@@ -13877,7 +13807,7 @@ pub const parser_core = struct {
                 // qjs TOK_TRY finally return (quickjs.c:29538): emit OP_ret.
                 try Emitter.opNoSource(s, opcode.op.ret);
                 // qjs TOK_TRY exit (quickjs.c:29539): bind label_end.
-                try v2FBindParserLabel(s, v2_label_end);
+                try emitterBindParserLabel(s, label_end);
             },
             tok.TOK_DEBUGGER => {
                 try s.advance();
@@ -13928,7 +13858,7 @@ pub const parser_core = struct {
             const atom_id = s.function.atoms.dup(identifierLikeAtom(s));
             defer s.function.atoms.free(atom_id);
             if (atomNameEquals(s, atom_id, "let")) return Error.UnexpectedToken;
-            if ((s.is_strict or s.cur_func().is_strict_mode) and
+            if ((s.is_strict or s.curFunc().is_strict_mode) and
                 (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
             {
                 return Error.UnexpectedToken;
@@ -13973,7 +13903,7 @@ pub const parser_core = struct {
     /// strict mode qjs lexes `let` as TOK_LET and never consults is_let, so
     /// `let` is always a declaration there.
     fn canTreatLetAsExpressionStatement(s: *State, decl_mask: DeclMask) bool {
-        if (s.is_strict or s.cur_func().is_strict_mode) return false;
+        if (s.is_strict or s.curFunc().is_strict_mode) return false;
         const saved_pos = s.lex.pos;
         const saved_line = s.lex.line;
         const saved_col = s.lex.col;
@@ -14181,8 +14111,8 @@ pub const parser_core = struct {
             try emitStackTopCatchMarkerDropsToDepth(s, &catch_marker_depth, frame.catch_marker_depth);
             // qjs emit_return (quickjs.c:28447-28449): execute each crossed finally via gosub.
             switch (frame.finally_label) {
-                .legacy => |label| try emitParserLabelJumpNoSource(s, opcode.op.gosub, label),
-                .v2 => |label| try v2FEmitJumpNoSource(s, opcode.op.gosub, label),
+                .temp => |label| try emitParserLabelJumpNoSource(s, opcode.op.gosub, label),
+                .builder => |label| try emitterJumpNoSource(s, opcode.op.gosub, label),
             }
         }
         try emitBlockEnvReturnCleanupUntil(s, &block_cursor, null, &catch_marker_depth);
@@ -14194,30 +14124,30 @@ pub const parser_core = struct {
     /// once. Async-generator explicit values await before any cleanup, matching
     /// QuickJS emit_return.
     const UpdatedSourceLoc = union(enum) {
-        legacy: struct {
+        temp: struct {
             index: usize,
             previous: bytecode.pipeline_pc2line.SourceLocSlot,
         },
-        v2: struct {
+        builder: struct {
             index: usize,
-            previous: compiler_v2.builder.SourceSlot,
+            previous: compiler.builder.SourceSlot,
         },
     };
 
     fn restoreSourceLoc(s: *State, updated: UpdatedSourceLoc) void {
         switch (updated) {
-            .legacy => |legacy| {
+            .temp => |temp| {
                 const slots = if (s.emit_to_function_def)
-                    s.cur_func().source_loc_slots
+                    s.curFunc().source_loc_slots
                 else
                     s.function.source_loc_slots;
-                std.debug.assert(legacy.index < slots.len);
-                slots[legacy.index] = legacy.previous;
+                std.debug.assert(temp.index < slots.len);
+                slots[temp.index] = temp.previous;
             },
-            .v2 => |v2| {
-                const builder = s.v2Builder();
-                std.debug.assert(v2.index < @as(usize, @intCast(builder.source_len)));
-                builder.source_slots[v2.index] = v2.previous;
+            .builder => |builder_slot| {
+                const builder = s.activeBuilder();
+                std.debug.assert(builder_slot.index < @as(usize, @intCast(builder.source_len)));
+                builder.source_slots[builder_slot.index] = builder_slot.previous;
             },
         }
     }
@@ -14236,7 +14166,7 @@ pub const parser_core = struct {
         // return` and attributes the call site to the return keyword. The
         // v2 marker is already out of band, so update that exact marker
         // before emitting the terminal return with the same source.
-        const builder = s.v2Builder();
+        const builder = s.activeBuilder();
         if (builder.last_opcode_pos < 0) return null;
         const pc: u32 = @intCast(builder.last_opcode_pos);
         if (pc >= builder.code_len) return Error.UnexpectedToken;
@@ -14251,7 +14181,7 @@ pub const parser_core = struct {
             if (marker.temp_offset == pc) {
                 builder.source_slots[index].line = @intCast(source.line_num);
                 builder.source_slots[index].col = @intCast(source.col_num);
-                return .{ .v2 = .{ .index = index, .previous = marker } };
+                return .{ .builder = .{ .index = index, .previous = marker } };
             }
         }
         // QuickJS's bare-template concat path emits OP_call_method with no
@@ -14265,7 +14195,7 @@ pub const parser_core = struct {
             return Error.UnexpectedToken;
         }
         builder.addSourceMarker(@intCast(source.line_num), @intCast(source.col_num)) catch |err|
-            return v2MapBuilderError(err);
+            return mapBuilderError(err);
         builder.source_slots[builder.source_len - 1].temp_offset = pc;
         return null;
     }
@@ -14419,20 +14349,20 @@ pub const parser_core = struct {
         // v2: the jump is born as the frame's LabelId (qjs emit_goto to
         // label_break/label_cont); no operand-offset fixup lists.
         const label = if (resolved.label_frame_index) |label_index| switch (target.kind) {
-            .@"break" => s.label_frames.items[label_index].v2_break_label,
-            .@"continue" => s.label_frames.items[label_index].v2_continue_label,
+            .@"break" => s.label_frames.items[label_index].break_label,
+            .@"continue" => s.label_frames.items[label_index].continue_label,
         } else switch (target.kind) {
             .@"break" => blk: {
-                if (resolved.depth == 0 or resolved.depth > s.v2_break_frame_labels.items.len) break :blk null;
-                break :blk s.v2_break_frame_labels.items[resolved.depth - 1];
+                if (resolved.depth == 0 or resolved.depth > s.break_frame_labels.items.len) break :blk null;
+                break :blk s.break_frame_labels.items[resolved.depth - 1];
             },
             .@"continue" => blk: {
-                if (resolved.depth == 0 or resolved.depth > s.v2_continue_frame_labels.items.len) break :blk null;
-                break :blk s.v2_continue_frame_labels.items[resolved.depth - 1];
+                if (resolved.depth == 0 or resolved.depth > s.continue_frame_labels.items.len) break :blk null;
+                break :blk s.continue_frame_labels.items[resolved.depth - 1];
             },
         };
         const label_id = label orelse return Error.UnexpectedToken;
-        try v2FEmitJumpNoSource(s, opcode.op.goto, label_id);
+        try emitterJumpNoSource(s, opcode.op.goto, label_id);
     }
 
     fn emitCrossedControlBlockCleanup(s: *State, block: *const BlockEnv) Error!void {
@@ -14443,12 +14373,6 @@ pub const parser_core = struct {
         }
         while (dropped < block.drop_count) : (dropped += 1) {
             try Emitter.opNoSource(s, opcode.op.drop);
-        }
-        if (block.v2_label_finally) |label| {
-            // qjs emit_break (quickjs.c:28373-28377): undefined, gosub crossed finally, then drop.
-            try v2FEmitOpNoSource(s, opcode.op.undefined);
-            try v2FEmitJumpNoSource(s, opcode.op.gosub, label);
-            try v2FEmitOpNoSource(s, opcode.op.drop);
         }
     }
 
@@ -14518,8 +14442,8 @@ pub const parser_core = struct {
             // qjs emit_break/emit_return (quickjs.c:28373-28377/28447-28449): keep stack depth across a crossed finally.
             try Emitter.opNoSource(s, opcode.op.undefined);
             switch (return_frame.finally_label) {
-                .legacy => |label| try emitParserLabelJumpNoSource(s, opcode.op.gosub, label),
-                .v2 => |label| try v2FEmitJumpNoSource(s, opcode.op.gosub, label),
+                .temp => |label| try emitParserLabelJumpNoSource(s, opcode.op.gosub, label),
+                .builder => |label| try emitterJumpNoSource(s, opcode.op.gosub, label),
             }
             // qjs emit_break (quickjs.c:28376-28377): discard the crossed finalizer completion.
             try Emitter.opNoSource(s, opcode.op.drop);
@@ -14535,16 +14459,6 @@ pub const parser_core = struct {
             &catch_marker_depth,
         )) return;
         return Error.UnexpectedToken;
-    }
-
-    fn patchForwardJump(s: *State, operand_offset: usize) Error!void {
-        // QCP-1 L3 gate lives in publishParserLabelTarget, the single mutation
-        // primitive every patch helper funnels through.
-        const target: u32 = @intCast(s.currentCodeLen());
-        try s.publishParserLabelTarget(operand_offset, target);
-        // Patching to the current position represents a normal QuickJS label.
-        // A control-flow merge cannot inherit an lvalue from one predecessor.
-        s.invalidateLastOpcode();
     }
 
     fn patchJumpTarget(s: *State, operand_offset: usize, target: u32) Error!void {
@@ -14587,7 +14501,7 @@ pub const parser_core = struct {
     fn needVarReference(s: *State, var_tok: tok.TokenKind) bool {
         if (var_tok != tok.TOK_VAR) return false;
 
-        const fd = s.cur_func();
+        const fd = s.curFunc();
         if (!s.is_strict and !fd.is_strict_mode and !s.lex.is_module) return true;
 
         const is_global_var = s.cur_func_stack.len == 0 and
@@ -14604,7 +14518,7 @@ pub const parser_core = struct {
                 s.peekKind() == tok.TOK_LET or
                 s.peekKind() == tok.TOK_AWAIT or
                 isSloppyFutureReservedBindingToken(s)) and
-                !(s.is_strict or s.cur_func().is_strict_mode) and
+                !(s.is_strict or s.curFunc().is_strict_mode) and
                 !(s.peekKind() == tok.TOK_YIELD and s.in_generator) and
                 !(s.peekKind() == tok.TOK_AWAIT and !canUseAwaitAsIdentifier(s));
             const binding_identifier = isIdentifierLikeToken(s);
@@ -14622,7 +14536,7 @@ pub const parser_core = struct {
                     return Error.UnexpectedToken;
                 }
                 if (is_lexical and atomNameEquals(s, atom_id, "let")) return Error.UnexpectedToken;
-                if ((s.is_strict or s.cur_func().is_strict_mode) and
+                if ((s.is_strict or s.curFunc().is_strict_mode) and
                     (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
                 {
                     return Error.UnexpectedToken;
@@ -14641,15 +14555,15 @@ pub const parser_core = struct {
 
                 var hoisted_arguments_var_idx: ?i32 = null;
                 if (!is_lexical and atomNameEquals(s, atom_id, "arguments") and
-                    s.cur_func().func_type != .arrow and
-                    s.cur_func().func_type != .class_static_init and
-                    s.cur_func().has_parameter_expressions and
-                    s.cur_func().arguments_var_idx >= 0 and
-                    s.cur_func().arguments_arg_idx < 0)
+                    s.curFunc().func_type != .arrow and
+                    s.curFunc().func_type != .class_static_init and
+                    s.curFunc().has_parameter_expressions and
+                    s.curFunc().arguments_var_idx >= 0 and
+                    s.curFunc().arguments_arg_idx < 0)
                 {
-                    const body_arguments_idx: u16 = @intCast(s.cur_func().arguments_var_idx);
+                    const body_arguments_idx: u16 = @intCast(s.curFunc().arguments_var_idx);
                     hoisted_arguments_var_idx = body_arguments_idx;
-                    try ensureParameterArgumentsLocals(s.cur_func());
+                    try ensureParameterArgumentsLocals(s.curFunc());
                 }
 
                 const defined = try s.defineVar(atom_id, if (is_lexical)
@@ -14661,7 +14575,7 @@ pub const parser_core = struct {
                         .local => |idx| {
                             local_lexical_idx = idx;
                             if (s.emit_lexical_tdz_at_decl) {
-                                s.cur_func().vars[idx].tdz_emitted_at_decl = true;
+                                s.curFunc().vars[idx].tdz_emitted_at_decl = true;
                             }
                         },
                         .global => {},
@@ -14669,7 +14583,7 @@ pub const parser_core = struct {
                     }
                 } else if (atomNameEquals(s, atom_id, "arguments")) {
                     switch (defined) {
-                        .local => |idx| s.cur_func().arguments_var_idx = hoisted_arguments_var_idx orelse idx,
+                        .local => |idx| s.curFunc().arguments_var_idx = hoisted_arguments_var_idx orelse idx,
                         .argument => {},
                         .global => {},
                     }
@@ -14705,9 +14619,9 @@ pub const parser_core = struct {
                     try setObjectName(s, atom_id);
                     // QJS pins this source event to the `=` token and then emits
                     // put_lvalue/the direct put without another source marker.
-                    const emission_snapshot = s.v2Builder().snapshot();
-                    errdefer s.v2Builder().rollback(emission_snapshot);
-                    try v2FAddSourceMarker(s, initializer_source.line_num, initializer_source.col_num);
+                    const emission_snapshot = s.activeBuilder().snapshot();
+                    errdefer s.activeBuilder().rollback(emission_snapshot);
+                    try emitterAddSourceMarker(s, initializer_source.line_num, initializer_source.col_num);
                     if (declaration_lvalue) |*lvalue| {
                         try putLValue(s, lvalue, .no_keep);
                     } else if (is_lexical) {
@@ -14766,7 +14680,7 @@ pub const parser_core = struct {
     }
 
     fn parseWith(s: *State) Error!void {
-        if (s.is_strict or s.cur_func().is_strict_mode) return Error.UnexpectedToken;
+        if (s.is_strict or s.curFunc().is_strict_mode) return Error.UnexpectedToken;
         try s.advance();
         try s.expectToken('(');
         try parseExpr(s);
@@ -14796,9 +14710,9 @@ pub const parser_core = struct {
 
     fn declareForInOfVarBinding(s: *State, atom_id: Atom) Error!void {
         const defined = try s.defineVar(atom_id, .var_);
-        if (atomNameEquals(s, atom_id, "arguments") and s.cur_func().has_arguments_binding) {
+        if (atomNameEquals(s, atom_id, "arguments") and s.curFunc().has_arguments_binding) {
             switch (defined) {
-                .local => |idx| s.cur_func().arguments_var_idx = idx,
+                .local => |idx| s.curFunc().arguments_var_idx = idx,
                 .argument, .global => {},
             }
         }
@@ -14823,17 +14737,17 @@ pub const parser_core = struct {
         try s.pushScope();
         pushed_for_scope = true;
 
-        var v2_expr_label: compiler_v2.LabelId = undefined;
-        var v2_assign_label: compiler_v2.LabelId = undefined;
+        var expr_label: compiler.LabelId = undefined;
+        var assign_label: compiler.LabelId = undefined;
         // qjs js_parse_for_in_of: goto label_expr; label_assign bound at the
         // one-pass target block (backward if_false re-enters it).
-        v2_expr_label = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.goto, v2_expr_label);
-        v2_assign_label = try v2FNewLabel(s);
-        try v2FBindLabel(s, v2_assign_label);
+        expr_label = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.goto, expr_label);
+        assign_label = try emitterNewLabel(s);
+        try emitterBindLabel(s, assign_label);
 
         const let_as_identifier = var_tok == tok.TOK_LET and
-            !s.is_strict and !s.cur_func().is_strict_mode and
+            !s.is_strict and !s.curFunc().is_strict_mode and
             s.peekNextKind() == tok.TOK_IN;
         const direct_using_kind = directUsingDeclarationKind(s);
         const parse_using_decl = if (direct_using_kind) |using_kind|
@@ -14856,7 +14770,7 @@ pub const parser_core = struct {
             }
             const atom_id = identifierLikeAtom(s);
             if (atomNameEquals(s, atom_id, "let")) return Error.UnexpectedToken;
-            if ((s.is_strict or s.cur_func().is_strict_mode) and
+            if ((s.is_strict or s.curFunc().is_strict_mode) and
                 (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
             {
                 return Error.UnexpectedToken;
@@ -14905,14 +14819,14 @@ pub const parser_core = struct {
                     (s.peekKind() == tok.TOK_YIELD or s.peekKind() == tok.TOK_STATIC or
                         s.peekKind() == tok.TOK_LET or s.peekKind() == tok.TOK_AWAIT or
                         isSloppyFutureReservedBindingToken(s)) and
-                    !(s.is_strict or s.cur_func().is_strict_mode) and
+                    !(s.is_strict or s.curFunc().is_strict_mode) and
                     !(s.peekKind() == tok.TOK_YIELD and s.in_generator) and
                     !(s.peekKind() == tok.TOK_AWAIT and !canUseAwaitAsIdentifier(s));
                 if (!isIdentifierLikeToken(s) and !sloppy_keyword_var) return Error.UnexpectedToken;
                 if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
                 const atom_id = identifierLikeAtom(s);
                 if (is_lexical and atomNameEquals(s, atom_id, "let")) return Error.UnexpectedToken;
-                if ((s.is_strict or s.cur_func().is_strict_mode) and
+                if ((s.is_strict or s.curFunc().is_strict_mode) and
                     (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
                 {
                     return Error.UnexpectedToken;
@@ -14972,7 +14886,7 @@ pub const parser_core = struct {
                     // target block are now ONE program point, so the pending
                     // reference moves onto the identity that already denotes
                     // it (`retargetLabelRefs`).
-                    try v2FRetargetLabel(s, v2_expr_label, v2_assign_label);
+                    try emitterRetargetLabel(s, expr_label, assign_label);
                     try emitInvalidAssignmentTarget(s);
                 } else {
                     try putLValue(s, &lvalue, .no_keep_bottom);
@@ -14980,20 +14894,20 @@ pub const parser_core = struct {
             }
         }
 
-        var v2_body_label: compiler_v2.LabelId = undefined;
-        v2_body_label = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.goto, v2_body_label);
-        // An invalid call target already consumed `v2_expr_label` by
+        var body_label: compiler.LabelId = undefined;
+        body_label = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.goto, body_label);
+        // An invalid call target already consumed `expr_label` by
         // retargeting it onto the assignment boundary (which also bound
         // it); binding it again would be a double bind.
-        if (!invalid_assignment_target) try v2FBindLabel(s, v2_expr_label);
+        if (!invalid_assignment_target) try emitterBindLabel(s, expr_label);
 
         // Annex-B legacy initializer: only sloppy non-lexical simple
         // for-in declarations accept it.
         var has_var_initializer = false;
         if (s.peekKind() == @as(tok.TokenKind, @intCast('='))) {
             if (target_var_initializer_atom == null or target_is_pattern or
-                target_is_lexical_decl or s.is_strict or s.cur_func().is_strict_mode)
+                target_is_lexical_decl or s.is_strict or s.curFunc().is_strict_mode)
             {
                 return Error.UnexpectedToken;
             }
@@ -15025,10 +14939,10 @@ pub const parser_core = struct {
             try Emitter.op(s, opcode.op.for_in_start);
         }
 
-        var v2_next_label: compiler_v2.LabelId = undefined;
-        v2_next_label = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.goto, v2_next_label);
-        try v2FBindLabel(s, v2_body_label);
+        var next_label: compiler.LabelId = undefined;
+        next_label = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.goto, next_label);
+        try emitterBindLabel(s, body_label);
 
         const loop_label = s.pending_label_atom;
         s.pending_label_atom = null;
@@ -15095,7 +15009,7 @@ pub const parser_core = struct {
         try s.closeScopes(s.scope_level, block_scope_level);
         try patchContinueFrame(s);
         if (label_frame) |idx| try s.patchLabelContinues(idx);
-        try v2FBindLabel(s, v2_next_label);
+        try emitterBindLabel(s, next_label);
         if (is_for_of) {
             if (is_for_await) {
                 try Emitter.opNoSource(s, opcode.op.for_await_of_next);
@@ -15109,9 +15023,9 @@ pub const parser_core = struct {
         }
 
         if (is_for_await) {
-            try v2FEmitJumpNoSource(s, opcode.op.if_false, v2_assign_label);
+            try emitterJumpNoSource(s, opcode.op.if_false, assign_label);
         } else {
-            try v2FEmitJump(s, opcode.op.if_false, v2_assign_label);
+            try emitterJump(s, opcode.op.if_false, assign_label);
         }
 
         if (is_for_await) {
@@ -15260,7 +15174,7 @@ pub const parser_core = struct {
         // Parse function name (required for declarations)
         const has_decl_name = s.peekKind() == tok.TOK_IDENT or
             (s.peekKind() == tok.TOK_AWAIT and canUseAwaitAsIdentifier(s)) or
-            (s.peekKind() == tok.TOK_YIELD and !(s.is_strict or s.cur_func().is_strict_mode));
+            (s.peekKind() == tok.TOK_YIELD and !(s.is_strict or s.curFunc().is_strict_mode));
         if (!has_decl_name) {
             return Error.UnexpectedToken;
         }
@@ -15320,7 +15234,7 @@ pub const parser_core = struct {
         defer if (owned_name) |name_atom| s.function.atoms.free(name_atom);
         const has_name = s.peekKind() == tok.TOK_IDENT or
             (s.peekKind() == tok.TOK_AWAIT and !s.in_async and !s.lex.is_module) or
-            (s.peekKind() == tok.TOK_YIELD and !(s.is_strict or s.cur_func().is_strict_mode));
+            (s.peekKind() == tok.TOK_YIELD and !(s.is_strict or s.curFunc().is_strict_mode));
         if (has_name) {
             // qjs js_parse_function_decl2 retains a named-expression atom
             // across next_token (quickjs.c:36551-36556).
@@ -15328,7 +15242,7 @@ pub const parser_core = struct {
             owned_name = name_atom;
             if (is_generator and atomNameEquals(s, name_atom, "yield")) return Error.UnexpectedToken;
             if (func_kind == .async and is_generator and atomNameEquals(s, name_atom, "await")) return Error.UnexpectedToken;
-            if ((s.is_strict or s.cur_func().is_strict_mode) and
+            if ((s.is_strict or s.curFunc().is_strict_mode) and
                 (atomNameEquals(s, name_atom, "eval") or atomNameEquals(s, name_atom, "arguments")))
             {
                 return Error.UnexpectedToken;
@@ -15472,7 +15386,7 @@ pub const parser_core = struct {
 
             const parameter_scan = try scanParameterList(s);
             try s.expectToken('(');
-            if (capture_child) s.cur_func().has_parameter_expressions = parameter_scan.has_parameter_expressions;
+            if (capture_child) s.curFunc().has_parameter_expressions = parameter_scan.has_parameter_expressions;
             const parameter_scope = if (capture_child and parameter_scan.has_parameter_expressions)
                 try enterParameterExpressionScope(s)
             else
@@ -15494,7 +15408,7 @@ pub const parser_core = struct {
                         }
                     }
                     const arg_index = param_count;
-                    const strict_params = s.is_strict or s.cur_func().is_strict_mode;
+                    const strict_params = s.is_strict or s.curFunc().is_strict_mode;
                     if (func_kind == .set and strict_params and
                         (atomNameEquals(s, param_atom, "eval") or atomNameEquals(s, param_atom, "arguments")))
                     {
@@ -15507,7 +15421,7 @@ pub const parser_core = struct {
                             break;
                         }
                     }
-                    for (s.cur_func().vars) |existing| {
+                    for (s.curFunc().vars) |existing| {
                         if (existing.var_name == param_atom) return Error.UnexpectedToken;
                     }
                     try appendOwnedParserAtom(s, &parameters.simple_names, param_atom);
@@ -15515,7 +15429,7 @@ pub const parser_core = struct {
                         if (parameter_scope != null) {
                             try appendParameterExpressionBinding(s, param_atom);
                         }
-                        _ = try s.cur_func().appendArg(.{
+                        _ = try s.curFunc().appendArg(.{
                             .var_name = param_atom,
                             .scope_level = 0,
                             .is_lexical = false,
@@ -15593,7 +15507,7 @@ pub const parser_core = struct {
                         for (parameters.simple_names.items) |existing| {
                             if (existing == rest_atom) return Error.UnexpectedToken;
                         }
-                        for (s.cur_func().vars) |existing| {
+                        for (s.curFunc().vars) |existing| {
                             if (existing.var_name == rest_atom) return Error.UnexpectedToken;
                         }
                         try appendOwnedParserAtom(s, &parameters.simple_names, rest_atom);
@@ -15601,7 +15515,7 @@ pub const parser_core = struct {
                             if (parameter_scope != null) {
                                 try appendParameterExpressionBinding(s, rest_atom);
                             }
-                            const idx = try s.cur_func().appendArg(.{
+                            const idx = try s.curFunc().appendArg(.{
                                 .var_name = rest_atom,
                                 .scope_level = 0,
                                 .is_lexical = false,
@@ -15611,7 +15525,7 @@ pub const parser_core = struct {
                             if (idx != @as(i32, @intCast(arg_index))) return Error.UnexpectedToken;
                             try Emitter.opU16(s, opcode.op.rest, @intCast(arg_index));
                             try Emitter.opU16(s, opcode.op.put_arg, @intCast(arg_index));
-                            s.cur_func().defined_arg_count = @intCast(arg_index);
+                            s.curFunc().defined_arg_count = @intCast(arg_index);
                         }
                         if (parameter_scope != null) {
                             try initializeParameterScopeBinding(s, rest_atom, arg_index);
@@ -15621,7 +15535,7 @@ pub const parser_core = struct {
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
                             try Emitter.opU16(s, opcode.op.rest, @intCast(arg_index));
-                            s.cur_func().defined_arg_count = @intCast(arg_index);
+                            s.curFunc().defined_arg_count = @intCast(arg_index);
                         } else {
                             try Emitter.op(s, opcode.op.undefined);
                         }
@@ -15636,7 +15550,7 @@ pub const parser_core = struct {
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
                             try Emitter.opU16(s, opcode.op.rest, @intCast(arg_index));
-                            s.cur_func().defined_arg_count = @intCast(arg_index);
+                            s.curFunc().defined_arg_count = @intCast(arg_index);
                         } else {
                             try Emitter.op(s, opcode.op.undefined);
                         }
@@ -15668,10 +15582,10 @@ pub const parser_core = struct {
 
         if (func_kind == .get and (param_count != 0 or has_rest_parameter)) return Error.UnexpectedToken;
         if (func_kind == .set and (param_count != 1 or has_rest_parameter)) return Error.UnexpectedToken;
-        if (capture_child) s.cur_func().has_simple_parameter_list = parameters.has_simple_list;
+        if (capture_child) s.curFunc().has_simple_parameter_list = parameters.has_simple_list;
         if (capture_child) {
             if (first_default_param) |defined_count| {
-                s.cur_func().defined_arg_count = @intCast(defined_count);
+                s.curFunc().defined_arg_count = @intCast(defined_count);
             }
         }
         return parameters;
@@ -15692,7 +15606,7 @@ pub const parser_core = struct {
             else => {},
         }
         s.last_function_child_index = null;
-        const parent_fd = s.cur_func();
+        const parent_fd = s.curFunc();
         const capture_child = s.cur_func_stack.len > 0 or s.top_level_functions_as_children;
         var function_decl_plan: FunctionDeclPlan = .{};
         // Consume the method-context marker set by emitObjectMethodFunction /
@@ -16107,9 +16021,9 @@ pub const parser_core = struct {
             if (!capture_child) s.return_depth -= 1;
         }
         try parseFunctionBodyBlock(s);
-        if (s.is_strict) s.cur_func().is_strict_mode = true;
-        if (s.cur_func().is_strict_mode) {
-            if (s.cur_func().has_use_strict and !parameters.has_simple_list) return Error.UnexpectedToken;
+        if (s.is_strict) s.curFunc().is_strict_mode = true;
+        if (s.curFunc().is_strict_mode) {
+            if (s.curFunc().has_use_strict and !parameters.has_simple_list) return Error.UnexpectedToken;
             switch (func_kind) {
                 .normal, .async, .generator, .async_generator => {
                     if (function_pending_name) |name| {
@@ -16132,7 +16046,7 @@ pub const parser_core = struct {
                 func_kind == .method or func_kind == .get or func_kind == .set or
                 func_kind == .arrow or
                 func_kind == .class_constructor or func_kind == .derived_class_constructor or
-                !parameters.has_simple_list or s.is_strict or s.cur_func().is_strict_mode))
+                !parameters.has_simple_list or s.is_strict or s.curFunc().is_strict_mode))
             return Error.UnexpectedToken;
         s.leaveControlBoundary(saved_control_frames);
         control_boundary_active = false;
@@ -16169,7 +16083,7 @@ pub const parser_core = struct {
         s.pending_function_export_default = function_pending_export_default;
 
         if (capture_child) {
-            if (source_start) |start| try s.captureFunctionSource(s.cur_func(), start.offset);
+            if (source_start) |start| try s.captureFunctionSource(s.curFunc(), start.offset);
             const child_ptr = s.popFunction();
             child_pushed = false;
             var child_moved = false;
@@ -16307,7 +16221,7 @@ pub const parser_core = struct {
         if (func_kind == .async or func_kind == .async_generator) {
             s.features.insert(.async_function);
         }
-        const parent_fd = s.cur_func();
+        const parent_fd = s.curFunc();
         const capture_child = s.cur_func_stack.len > 0 or s.top_level_functions_as_children;
         const saved_emit_to_function_def = s.emit_to_function_def;
         const saved_last_opcode_source_offset = s.last_opcode_source_offset;
@@ -16408,11 +16322,11 @@ pub const parser_core = struct {
             // Single bare identifier parameter.
             if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
             const param_atom = identifierLikeAtom(s);
-            if ((s.is_strict or s.cur_func().is_strict_mode) and isInvalidStrictFunctionBindingName(s, param_atom)) {
+            if ((s.is_strict or s.curFunc().is_strict_mode) and isInvalidStrictFunctionBindingName(s, param_atom)) {
                 return Error.UnexpectedToken;
             }
             if (capture_child) {
-                _ = try s.cur_func().appendArg(.{
+                _ = try s.curFunc().appendArg(.{
                     .var_name = param_atom,
                     .scope_level = 0,
                     .is_lexical = false,
@@ -16427,7 +16341,7 @@ pub const parser_core = struct {
             var first_default_param: ?u32 = null;
             const parameter_scan = try scanParameterList(s);
             try s.expectToken('(');
-            if (capture_child) s.cur_func().has_parameter_expressions = parameter_scan.has_parameter_expressions;
+            if (capture_child) s.curFunc().has_parameter_expressions = parameter_scan.has_parameter_expressions;
             const parameter_scope = if (capture_child and parameter_scan.has_parameter_expressions)
                 try enterParameterExpressionScope(s)
             else
@@ -16439,7 +16353,7 @@ pub const parser_core = struct {
                     if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
                     const param_atom = identifierLikeAtom(s);
                     try appendArrowParamBindingName(s, &param_names, param_atom);
-                    for (s.cur_func().vars) |existing| {
+                    for (s.curFunc().vars) |existing| {
                         if (existing.var_name == param_atom) return Error.UnexpectedToken;
                     }
                     const arg_index = param_count;
@@ -16447,7 +16361,7 @@ pub const parser_core = struct {
                         if (parameter_scope != null) {
                             try appendParameterExpressionBinding(s, param_atom);
                         }
-                        _ = try s.cur_func().appendArg(.{
+                        _ = try s.curFunc().appendArg(.{
                             .var_name = param_atom,
                             .scope_level = 0,
                             .is_lexical = false,
@@ -16523,14 +16437,14 @@ pub const parser_core = struct {
                         if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
                         const param_atom = identifierLikeAtom(s);
                         try appendArrowParamBindingName(s, &param_names, param_atom);
-                        for (s.cur_func().vars) |existing| {
+                        for (s.curFunc().vars) |existing| {
                             if (existing.var_name == param_atom) return Error.UnexpectedToken;
                         }
                         if (capture_child) {
                             if (parameter_scope != null) {
                                 try appendParameterExpressionBinding(s, param_atom);
                             }
-                            const idx = try s.cur_func().appendArg(.{
+                            const idx = try s.curFunc().appendArg(.{
                                 .var_name = param_atom,
                                 .scope_level = 0,
                                 .is_lexical = false,
@@ -16540,7 +16454,7 @@ pub const parser_core = struct {
                             if (idx != @as(i32, @intCast(arg_index))) return Error.UnexpectedToken;
                             try Emitter.opU16(s, opcode.op.rest, @intCast(arg_index));
                             try Emitter.opU16(s, opcode.op.put_arg, @intCast(arg_index));
-                            s.cur_func().defined_arg_count = @intCast(arg_index);
+                            s.curFunc().defined_arg_count = @intCast(arg_index);
                         }
                         if (parameter_scope != null) {
                             try initializeParameterScopeBinding(s, param_atom, arg_index);
@@ -16550,7 +16464,7 @@ pub const parser_core = struct {
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
                             try Emitter.opU16(s, opcode.op.rest, @intCast(arg_index));
-                            s.cur_func().defined_arg_count = @intCast(arg_index);
+                            s.curFunc().defined_arg_count = @intCast(arg_index);
                         } else {
                             try Emitter.op(s, opcode.op.undefined);
                         }
@@ -16565,7 +16479,7 @@ pub const parser_core = struct {
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
                             try Emitter.opU16(s, opcode.op.rest, @intCast(arg_index));
-                            s.cur_func().defined_arg_count = @intCast(arg_index);
+                            s.curFunc().defined_arg_count = @intCast(arg_index);
                         } else {
                             try Emitter.op(s, opcode.op.undefined);
                         }
@@ -16593,20 +16507,20 @@ pub const parser_core = struct {
 
             try s.expectToken(')');
             if (parameter_scope) |scope| try leaveParameterExpressionScope(s, scope);
-            if (s.is_strict or s.cur_func().is_strict_mode) {
+            if (s.is_strict or s.curFunc().is_strict_mode) {
                 for (param_names.items) |param_name| {
                     if (isInvalidStrictFunctionBindingName(s, param_name)) return Error.UnexpectedToken;
                 }
             }
             if (capture_child) {
                 if (first_default_param) |defined_count| {
-                    s.cur_func().defined_arg_count = @intCast(defined_count);
+                    s.curFunc().defined_arg_count = @intCast(defined_count);
                 }
             }
         }
 
         if (capture_child) {
-            s.cur_func().has_simple_parameter_list = !has_non_simple_params;
+            s.curFunc().has_simple_parameter_list = !has_non_simple_params;
         }
 
         // Expect =>
@@ -16633,7 +16547,7 @@ pub const parser_core = struct {
                 if (!capture_child) s.return_depth -= 1;
             }
             try parseFunctionBodyBlock(s);
-            if (has_non_simple_params and s.cur_func().has_use_strict) return Error.UnexpectedToken;
+            if (has_non_simple_params and s.curFunc().has_use_strict) return Error.UnexpectedToken;
             if (capture_child) {
                 // qjs arrow function tail (quickjs.c:36946): js_is_live_code alone decides.
                 const needs_return = isLiveCode(s);
@@ -16666,7 +16580,7 @@ pub const parser_core = struct {
         control_boundary_active = false;
 
         if (capture_child) {
-            try s.captureFunctionSource(s.cur_func(), source_start.offset);
+            try s.captureFunctionSource(s.curFunc(), source_start.offset);
             const child_ptr = s.popFunction();
             child_pushed = false;
             var child_moved = false;
@@ -16781,16 +16695,16 @@ pub const parser_core = struct {
     }
 
     fn checkPatternParameterDuplicate(s: *State, name: Atom) Error!void {
-        for (s.cur_func().args) |arg| {
+        for (s.curFunc().args) |arg| {
             if (arg.var_name == name) return Error.UnexpectedToken;
         }
-        for (s.cur_func().vars) |variable| {
+        for (s.curFunc().vars) |variable| {
             if (variable.var_name == name) return Error.UnexpectedToken;
         }
     }
 
     fn definePatternBindingAtom(s: *State, binding: PatternBindingMode, name: Atom) Error!PatternTarget {
-        if ((s.is_strict or s.cur_func().is_strict_mode) and
+        if ((s.is_strict or s.curFunc().is_strict_mode) and
             (atomNameEquals(s, name, "eval") or atomNameEquals(s, name, "arguments")))
         {
             return Error.UnexpectedToken;
@@ -16818,7 +16732,7 @@ pub const parser_core = struct {
                 // No decl-time set_loc_uninitialized — see the simple-decl
                 // producer: the enter_scope lowering owns the single arming.
                 .local => |idx| if (s.emit_lexical_tdz_at_decl) {
-                    s.cur_func().vars[idx].tdz_emitted_at_decl = true;
+                    s.curFunc().vars[idx].tdz_emitted_at_decl = true;
                 },
                 .global => {},
                 .argument => unreachable,
@@ -16935,8 +16849,8 @@ pub const parser_core = struct {
             1 => try Emitter.opU8(s, opcode.op.using, opcode.using_sub.rot3r),
             2 => try Emitter.opU8(s, opcode.op.using, opcode.using_sub.swap2),
             3 => {
-                try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.rot5l);
-                try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.rot5l);
+                try emitterOpU8(s, opcode.op.using, opcode.using_sub.rot5l);
+                try emitterOpU8(s, opcode.op.using, opcode.using_sub.rot5l);
             },
             else => unreachable,
         }
@@ -16967,21 +16881,21 @@ pub const parser_core = struct {
     }
 
     fn emitArrayPatternRest(s: *State, target_depth: u8) Error!void {
-        var v2_next: compiler_v2.LabelId = undefined;
-        var v2_done: compiler_v2.LabelId = undefined;
-        try v2FEmitOpU16(s, opcode.op.array_from, 0);
-        try v2FEmitOpI32(s, opcode.op.push_i32, 0);
-        v2_next = try v2FNewLabel(s);
-        try v2FBindLabelRaw(s, v2_next);
-        try v2FEmitOpU8(s, opcode.op.for_of_next, target_depth + 2);
-        v2_done = try v2FNewLabel(s);
-        try v2FEmitJump(s, opcode.op.if_true, v2_done);
-        try v2FEmitOp(s, opcode.op.define_array_el);
-        try v2FEmitOp(s, opcode.op.inc);
-        try v2FEmitJump(s, opcode.op.goto, v2_next);
-        try v2FBindLabel(s, v2_done);
-        try v2FEmitOp(s, opcode.op.drop);
-        try v2FEmitOp(s, opcode.op.drop);
+        var next: compiler.LabelId = undefined;
+        var done: compiler.LabelId = undefined;
+        try emitterOpU16(s, opcode.op.array_from, 0);
+        try emitterOpI32(s, opcode.op.push_i32, 0);
+        next = try emitterNewLabel(s);
+        try emitterBindLabelRaw(s, next);
+        try emitterOpU8(s, opcode.op.for_of_next, target_depth + 2);
+        done = try emitterNewLabel(s);
+        try emitterJump(s, opcode.op.if_true, done);
+        try emitterOp(s, opcode.op.define_array_el);
+        try emitterOp(s, opcode.op.inc);
+        try emitterJump(s, opcode.op.goto, next);
+        try emitterBindLabel(s, done);
+        try emitterOp(s, opcode.op.drop);
+        try emitterOp(s, opcode.op.drop);
     }
 
     fn pushPatternIteratorBlock(s: *State, block: *BlockEnv) void {
@@ -17280,21 +17194,21 @@ pub const parser_core = struct {
             topology.following == @as(tok.TokenKind, @intCast('='));
         if (!has_value and !has_initializer) return Error.UnexpectedToken;
 
-        var v2_parse_label: compiler_v2.LabelId = undefined;
-        var v2_assign_label: compiler_v2.LabelId = undefined;
+        var parse_label: compiler.LabelId = undefined;
+        var assign_label: compiler.LabelId = undefined;
         if (has_initializer) {
-            v2_parse_label = try v2FNewLabel(s);
+            parse_label = try emitterNewLabel(s);
             if (has_value) {
-                try v2FEmitOp(s, opcode.op.dup);
-                try v2FEmitOp(s, opcode.op.undefined);
-                try v2FEmitOp(s, opcode.op.strict_eq);
-                try v2FEmitJump(s, opcode.op.if_true, v2_parse_label);
+                try emitterOp(s, opcode.op.dup);
+                try emitterOp(s, opcode.op.undefined);
+                try emitterOp(s, opcode.op.strict_eq);
+                try emitterJump(s, opcode.op.if_true, parse_label);
             } else {
-                try v2FEmitJump(s, opcode.op.goto, v2_parse_label);
+                try emitterJump(s, opcode.op.goto, parse_label);
             }
-            v2_assign_label = try v2FNewLabel(s);
-            try v2FBindLabelRaw(s, v2_assign_label);
-            if (!has_value) try v2FEmitOp(s, opcode.op.dup);
+            assign_label = try emitterNewLabel(s);
+            try emitterBindLabelRaw(s, assign_label);
+            if (!has_value) try emitterOp(s, opcode.op.dup);
         }
 
         switch (s.peekKind()) {
@@ -17304,14 +17218,14 @@ pub const parser_core = struct {
         }
 
         if (has_initializer) {
-            const v2_done = try v2FNewLabel(s);
-            try v2FEmitJump(s, opcode.op.goto, v2_done);
-            try v2FBindLabel(s, v2_parse_label);
-            if (has_value) try v2FEmitOp(s, opcode.op.drop);
+            const done = try emitterNewLabel(s);
+            try emitterJump(s, opcode.op.goto, done);
+            try emitterBindLabel(s, parse_label);
+            if (has_value) try emitterOp(s, opcode.op.drop);
             try s.expectToken('=');
             try parseAssignExpr2(s, initializer_flags);
-            try v2FEmitJump(s, opcode.op.goto, v2_assign_label);
-            try v2FBindLabel(s, v2_done);
+            try emitterJump(s, opcode.op.goto, assign_label);
+            try emitterBindLabel(s, done);
         }
         return has_initializer;
     }
@@ -17360,11 +17274,11 @@ pub const parser_core = struct {
             .last_token_line_num = s.last_token_line_num,
             .last_token_col_num = s.last_token_col_num,
             .last_opcode_source_offset = s.last_opcode_source_offset,
-            .last_opcode_pos = s.cur_func().last_opcode_pos,
+            .last_opcode_pos = s.curFunc().last_opcode_pos,
             .code_len = s.currentCodeLen(),
             .atom_len = s.currentAtomOperandLen(),
             .source_loc_len = if (s.emit_to_function_def)
-                s.cur_func().source_loc_slots.len
+                s.curFunc().source_loc_slots.len
             else
                 s.function.source_loc_slots.len,
             .label_count = s.currentParserLabelCount(),
@@ -17563,7 +17477,7 @@ pub const parser_core = struct {
     }
 
     fn enterParameterExpressionScope(s: *State) Error!i32 {
-        const fd = s.cur_func();
+        const fd = s.curFunc();
         const scope = fd.appendScope(-1) catch return error.OutOfMemory;
         s.scope_level = scope;
         fd.scope_level = scope;
@@ -17618,7 +17532,7 @@ pub const parser_core = struct {
     }
 
     fn leaveParameterExpressionScope(s: *State, parameter_scope: i32) Error!void {
-        const fd = s.cur_func();
+        const fd = s.curFunc();
         var var_index = fd.scopes[@intCast(parameter_scope)].first;
         var visited: usize = 0;
         while (var_index >= 0 and visited <= fd.vars.len) : (visited += 1) {
@@ -17655,7 +17569,7 @@ pub const parser_core = struct {
     }
 
     fn ensureDestructuringArgSlot(s: *State, arg_index: u32) Error!void {
-        const child = s.cur_func();
+        const child = s.curFunc();
         while (child.args.len <= arg_index) {
             _ = try child.appendArg(.{
                 .var_name = atom_module.null_atom,
@@ -17673,7 +17587,7 @@ pub const parser_core = struct {
     }
 
     fn findCurrentScopeVar(s: *State, atom_id: Atom) ?u16 {
-        const vars = s.cur_func().vars;
+        const vars = s.curFunc().vars;
         var i: usize = vars.len;
         while (i > 0) {
             i -= 1;
@@ -17687,7 +17601,7 @@ pub const parser_core = struct {
     }
 
     fn appendAnonymousTempLocal(s: *State) Error!u16 {
-        const idx = try s.cur_func().appendVar(.{
+        const idx = try s.curFunc().appendVar(.{
             .var_name = atom_module.null_atom,
             .scope_level = 0,
             .is_lexical = false,
@@ -17704,7 +17618,7 @@ pub const parser_core = struct {
 
     fn trailingClassNamePatch(
         s: *State,
-        builder: *compiler_v2.Builder,
+        builder: *compiler.Builder,
         marker_pos: u32,
     ) Error!ClassNamePatch {
         const patch = s.last_class_name_patch orelse return Error.UnexpectedToken;
@@ -17740,7 +17654,7 @@ pub const parser_core = struct {
     /// object/define_class instruction and never become FunctionDef.func_name
     /// or a named-expression self binding.
     fn setObjectName(s: *State, atom_id: Atom) Error!void {
-        const builder = s.v2Builder();
+        const builder = s.activeBuilder();
         if (builder.last_opcode_pos < 0) return;
         const opcode_pos: u32 = @intCast(builder.last_opcode_pos);
         const opcode_index: usize = @intCast(opcode_pos);
@@ -17758,7 +17672,7 @@ pub const parser_core = struct {
                     opcode.op.set_name,
                     atom_module.null_atom,
                     atom_id,
-                ) catch |err| return v2MapBuilderError(err);
+                ) catch |err| return mapBuilderError(err);
             },
             opcode.op.set_class_name => {
                 const patch = try trailingClassNamePatch(s, builder, opcode_pos);
@@ -17768,7 +17682,7 @@ pub const parser_core = struct {
                     opcode.op.define_class,
                     atom_module.ids.empty_string,
                     atom_id,
-                ) catch |err| return v2MapBuilderError(err);
+                ) catch |err| return mapBuilderError(err);
                 builder.invalidateLastOpcode();
                 s.last_class_name_patch = null;
             },
@@ -17781,7 +17695,7 @@ pub const parser_core = struct {
     /// class definition consume the computed property key before any static
     /// initializer runs.
     fn setObjectNameComputed(s: *State) Error!void {
-        const builder = s.v2Builder();
+        const builder = s.activeBuilder();
         if (builder.last_opcode_pos < 0) return;
         const opcode_pos: u32 = @intCast(builder.last_opcode_pos);
         const opcode_index: usize = @intCast(opcode_pos);
@@ -17796,7 +17710,7 @@ pub const parser_core = struct {
                     opcode.op.set_name,
                     atom_module.null_atom,
                     opcode.op.set_name_computed,
-                ) catch |err| return v2MapBuilderError(err);
+                ) catch |err| return mapBuilderError(err);
             },
             opcode.op.set_class_name => {
                 const patch = try trailingClassNamePatch(s, builder, opcode_pos);
@@ -18028,12 +17942,12 @@ pub const parser_core = struct {
                     if (s.class_constructor_cpool_idx != null) return Error.UnexpectedToken;
                     s.in_constructor = true;
                 }
-                var v2_ctor_snap: compiler_v2.builder.Snapshot = undefined;
+                var ctor_snap: compiler.builder.Snapshot = undefined;
                 // qjs js_parse_class: the explicit constructor's closure expression is
                 // discarded — the class references the child through push_const. Builder
                 // snapshot taken BEFORE the emission it may roll back (no boundary bind
                 // is pending here).
-                v2_ctor_snap = s.v2Builder().snapshot();
+                ctor_snap = s.activeBuilder().snapshot();
                 // Parse parameters with proper function kind for constructor/method
                 const kind: ParseFunctionKind = if (is_constructor)
                     if (s.class_has_extends) .derived_class_constructor else .class_constructor
@@ -18044,8 +17958,8 @@ pub const parser_core = struct {
                     if (s.last_function_child_index) |child_index| {
                         // qjs js_parse_class: discard the constructor's
                         // ordinary fclosure expression from the parent.
-                        s.v2Builder().rollback(v2_ctor_snap);
-                        const cpool_idx = s.cur_func().child_list[child_index].parent_cpool_idx;
+                        s.activeBuilder().rollback(ctor_snap);
+                        const cpool_idx = s.curFunc().child_list[child_index].parent_cpool_idx;
                         if (cpool_idx < 0 or cpool_idx > std.math.maxInt(u16)) return Error.UnexpectedToken;
                         s.class_constructor_cpool_idx = @intCast(cpool_idx);
                     }
@@ -18142,8 +18056,8 @@ pub const parser_core = struct {
     /// discriminator used to validate getter/setter pairing.
     fn addPrivateClassBinding(s: *State, atom_id: Atom, kind: function_def_mod.VarKind) Error!u16 {
         const idx = try s.addScopeVar(atom_id, kind, true, true);
-        if (idx < 0 or @as(usize, @intCast(idx)) >= s.cur_func().vars.len) return Error.UnexpectedToken;
-        s.cur_func().vars[@intCast(idx)].is_static_private = s.is_static;
+        if (idx < 0 or @as(usize, @intCast(idx)) >= s.curFunc().vars.len) return Error.UnexpectedToken;
+        s.curFunc().vars[@intCast(idx)].is_static_private = s.is_static;
         return @intCast(idx);
     }
 
@@ -18157,7 +18071,7 @@ pub const parser_core = struct {
 
     fn preparePrivateAccessorBinding(s: *State, atom_id: Atom, is_getter: bool) Error!void {
         if (findCurrentScopeVar(s, atom_id)) |idx| {
-            const vd = &s.cur_func().vars[idx];
+            const vd = &s.curFunc().vars[idx];
             if (vd.is_static_private != s.is_static) return Error.UnexpectedToken;
             const expected: function_def_mod.VarKind = if (is_getter) .private_setter else .private_getter;
             if (vd.var_kind != expected) return Error.UnexpectedToken;
@@ -18184,7 +18098,7 @@ pub const parser_core = struct {
         }
         s.class_instance_private_brand_needed = true;
         const child_index = try ensureClassFieldsInitFunction(s);
-        const parent = s.cur_func();
+        const parent = s.curFunc();
         if (child_index >= parent.child_list.len) return Error.UnexpectedToken;
         const init_fd = parent.child_list[child_index];
         // qjs js_parse_class: enable the dormant instance-brand prologue
@@ -18230,7 +18144,7 @@ pub const parser_core = struct {
         has_initializer: bool,
     ) Error!void {
         const child_index = try ensureClassStaticInitFunction(s);
-        const parent_fd = s.cur_func();
+        const parent_fd = s.curFunc();
         if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
         const init_fd = parent_fd.child_list[child_index];
 
@@ -18331,7 +18245,7 @@ pub const parser_core = struct {
         is_private: bool,
     ) Error!void {
         const child_index = try ensureClassFieldsInitFunction(s);
-        const parent_fd = s.cur_func();
+        const parent_fd = s.curFunc();
         if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
         const init_fd = parent_fd.child_list[child_index];
 
@@ -18424,7 +18338,7 @@ pub const parser_core = struct {
     }
 
     fn createClassFieldsInitFunction(s: *State, include_instance_brand_prologue: bool) Error!usize {
-        const parent_fd = s.cur_func();
+        const parent_fd = s.curFunc();
         const child_fd = try s.function.memory.create(function_def_mod.FunctionDef);
         child_fd.* = function_def_mod.FunctionDef.init(s.function.memory, s.function.atoms, atom_class_fields_init);
         var child_moved = false;
@@ -18447,19 +18361,19 @@ pub const parser_core = struct {
         child_fd.super_allowed = true;
         child_fd.arguments_allowed = false;
         _ = child_fd.appendScope(-1) catch return error.OutOfMemory;
-        s.v2EnsureBuilderForFd(child_fd) catch return error.OutOfMemory;
+        s.ensureBuilderForFd(child_fd) catch return error.OutOfMemory;
         if (include_instance_brand_prologue) {
             // qjs js_parse_class: dormant instance-brand prologue (push_false patched to
             // push_true by the first private method/accessor); the skip target is born
             // as a LabelId instead of the legacy absolute base+15.
             const v2b = child_fd.v2_builder.?;
-            v2b.emitOp(opcode.op.push_false) catch |err| return v2MapBuilderError(err);
-            const skip = v2b.newLabel() catch |err| return v2MapBuilderError(err);
-            v2b.emitJump(opcode.op.if_false, skip) catch |err| return v2MapBuilderError(err);
-            v2b.emitOp(opcode.op.push_this) catch |err| return v2MapBuilderError(err);
-            v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, s.function.atoms.dup(atom_module.ids.home_object), 0) catch |err| return v2MapBuilderError(err);
-            v2b.emitOp(opcode.op.add_brand) catch |err| return v2MapBuilderError(err);
-            v2b.bindLabel(skip) catch |err| return v2MapBuilderError(err);
+            v2b.emitOp(opcode.op.push_false) catch |err| return mapBuilderError(err);
+            const skip = v2b.newLabel() catch |err| return mapBuilderError(err);
+            v2b.emitJump(opcode.op.if_false, skip) catch |err| return mapBuilderError(err);
+            v2b.emitOp(opcode.op.push_this) catch |err| return mapBuilderError(err);
+            v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, s.function.atoms.dup(atom_module.ids.home_object), 0) catch |err| return mapBuilderError(err);
+            v2b.emitOp(opcode.op.add_brand) catch |err| return mapBuilderError(err);
+            v2b.bindLabel(skip) catch |err| return mapBuilderError(err);
             v2b.invalidateLastOpcode();
         }
         const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
@@ -18481,7 +18395,7 @@ pub const parser_core = struct {
     }
 
     fn finishClassInitFunction(s: *State, child_index: usize) Error!void {
-        const parent_fd = s.cur_func();
+        const parent_fd = s.curFunc();
         if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
         const init_fd = parent_fd.child_list[child_index];
         // qjs js_is_live_code shape over the child's temp stream: get_prev_opcode
@@ -18494,8 +18408,8 @@ pub const parser_core = struct {
             else => true,
         };
         if (needs_return) {
-            v2b.emitOp(opcode.op.return_undef) catch |err| return v2MapBuilderError(err);
-            v2b.recordControl(.terminal) catch |err| return v2MapBuilderError(err);
+            v2b.emitOp(opcode.op.return_undef) catch |err| return mapBuilderError(err);
+            v2b.recordControl(.terminal) catch |err| return mapBuilderError(err);
         }
     }
 
@@ -18668,7 +18582,7 @@ pub const parser_core = struct {
 
     fn emitInstanceComputedPublicFieldInitializer(s: *State, key_atom: Atom, has_initializer: bool) Error!void {
         const child_index = try ensureClassFieldsInitFunction(s);
-        const parent_fd = s.cur_func();
+        const parent_fd = s.curFunc();
         if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
         const init_fd = parent_fd.child_list[child_index];
 
@@ -18782,7 +18696,7 @@ pub const parser_core = struct {
 
     fn emitClassStaticBlock(s: *State) Error!void {
         const child_index = try ensureClassStaticInitFunction(s);
-        const parent_fd = s.cur_func();
+        const parent_fd = s.curFunc();
         if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
         const init_fd = parent_fd.child_list[child_index];
 
@@ -18961,7 +18875,7 @@ pub const parser_core = struct {
 
     fn emitClassFieldsInitValue(s: *State, class_fields_init_child_index: ?u16) Error!void {
         if (class_fields_init_child_index) |child_index| {
-            const parent_fd = s.cur_func();
+            const parent_fd = s.curFunc();
             if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
             const cpool_idx = parent_fd.child_list[child_index].parent_cpool_idx;
             if (cpool_idx < 0) return Error.UnexpectedToken;
@@ -18985,7 +18899,7 @@ pub const parser_core = struct {
 
     fn emitClassStaticInitCall(s: *State, class_static_init_child_index: ?u16) Error!void {
         const child_index = class_static_init_child_index orelse return;
-        const parent_fd = s.cur_func();
+        const parent_fd = s.curFunc();
         if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
         const cpool_idx = parent_fd.child_list[child_index].parent_cpool_idx;
         if (cpool_idx < 0) return Error.UnexpectedToken;
@@ -18995,11 +18909,11 @@ pub const parser_core = struct {
         // initializer immediately. Mirrors quickjs.c:25735-25744.
         // qjs js_parse_class (quickjs.c:25735-25744): invoke the static
         // initializer with the constructor as home object and receiver.
-        try v2FEmitOp(s, opcode.op.dup);
+        try emitterOp(s, opcode.op.dup);
         try s.emitFClosure(@intCast(cpool_idx));
-        try v2FEmitOp(s, opcode.op.set_home_object);
-        try v2FEmitOpU16(s, opcode.op.call_method, 0);
-        try v2FEmitOp(s, opcode.op.drop);
+        try emitterOp(s, opcode.op.set_home_object);
+        try emitterOpU16(s, opcode.op.call_method, 0);
+        try emitterOp(s, opcode.op.drop);
     }
 
     /// The class stack is `[constructor, prototype]`. Private instance members
@@ -19128,27 +19042,27 @@ pub const parser_core = struct {
             .local => |idx| idx,
             else => unreachable,
         };
-        s.cur_func().vars[class_fields_init_local_idx.?].tdz_emitted_at_decl = true;
+        s.curFunc().vars[class_fields_init_local_idx.?].tdz_emitted_at_decl = true;
 
         // Parse class body. Constructor parsing records a child FunctionDef;
         // class definition bytecode references that child through push_const /
         // define_class instead of the normal fclosure expression path.
-        var v2_class_mark: compiler_v2.builder.Snapshot = undefined;
-        v2_class_mark = s.v2Builder().snapshot();
+        var class_mark: compiler.builder.Snapshot = undefined;
+        class_mark = s.activeBuilder().snapshot();
         try parseClassBodyAfterOpen(s);
         const class_source_end = s.last_token_end_offset;
         try finishClassFieldsInitFunction(s);
         try finishClassStaticInitFunction(s);
-        var v2_runtime_seg: compiler_v2.builder.DetachedSegment = .{};
-        defer s.v2Builder().discardSegment(&v2_runtime_seg);
+        var runtime_seg: compiler.builder.DetachedSegment = .{};
+        defer s.activeBuilder().discardSegment(&runtime_seg);
         // qjs js_parse_class (quickjs.c:25274): the body's runtime bytecode is
         // deferred and re-emitted after define_class; v2 detaches the builder
         // tail — LabelIds are function-global, so no operand rebase exists.
-        v2_runtime_seg = try v2FDetachTail(s, v2_class_mark);
+        runtime_seg = try emitterDetachTail(s, class_mark);
         // The legacy class move intentionally transports only code+atoms;
         // its truncate removes body source slots before the runtime block
         // is appended. Preserve that exact pc2line product in v2.
-        v2FDiscardDetachedSources(s, &v2_runtime_seg);
+        emitterDiscardDetachedSources(s, &runtime_seg);
         const default_constructor_name = class_name orelse if (is_decl) s.function.name else atom_module.ids.empty_string;
         const class_constructor_cpool_idx = s.class_constructor_cpool_idx orelse
             try appendDefaultClassConstructor(s, default_constructor_name);
@@ -19216,7 +19130,7 @@ pub const parser_core = struct {
             try emitClassPrivateBrands(s, class_instance_private_brand_needed, class_static_private_brand_needed);
             // qjs js_parse_class (quickjs.c:25274): the deferred runtime
             // block is spliced after define_class.
-            try v2FSpliceSegment(s, &v2_runtime_seg);
+            try emitterSpliceSegment(s, &runtime_seg);
             // ClassElement computed names run while the inner class binding is
             // still in TDZ (`class C { [C](){} }` must throw). Initialize the
             // name only after those keys (and method definitions) have run.
@@ -19274,7 +19188,7 @@ pub const parser_core = struct {
                 try Emitter.opU16(s, opcode.op.set_loc_uninitialized, fields_idx);
             }
             try emitClassDefineOperands(s, class_constructor_cpool_idx);
-            const define_builder = s.v2Builder();
+            const define_builder = s.activeBuilder();
             const define_class_pos = define_builder.code_len;
             const define_class_atom_index = define_builder.atom_len;
             // qjs js_parse_class: define the expression's class object
@@ -19285,7 +19199,7 @@ pub const parser_core = struct {
             try emitClassPrivateBrands(s, class_instance_private_brand_needed, class_static_private_brand_needed);
             // qjs js_parse_class (quickjs.c:25274): splice the expression's
             // deferred runtime block after define_class.
-            try v2FSpliceSegment(s, &v2_runtime_seg);
+            try emitterSpliceSegment(s, &runtime_seg);
             // Same TDZ as the declaration path: computed names in the spliced
             // body must observe an uninitialized class-name binding.
             if (class_name_local_idx) |local_idx| try emitClassLocalInitFromClassStack(s, local_idx);
@@ -19341,16 +19255,16 @@ pub const parser_core = struct {
             // qjs emit_class_field_init (quickjs.c:25184-25207): the skip target is a
             // LabelId bound at the shared drop (legacy absolute base+20).
             const v2b = fd.v2_builder.?;
-            v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, fd.atoms.dup(atom_class_fields_init), @intCast(fd.scope_level)) catch |err| return v2MapBuilderError(err);
-            v2b.emitOp(opcode.op.dup) catch |err| return v2MapBuilderError(err);
-            const skip = v2b.newLabel() catch |err| return v2MapBuilderError(err);
-            v2b.emitJump(opcode.op.if_false, skip) catch |err| return v2MapBuilderError(err);
-            v2b.emitOpU16(this_read_op, this_idx) catch |err| return v2MapBuilderError(err);
-            v2b.emitOp(opcode.op.swap) catch |err| return v2MapBuilderError(err);
-            v2b.emitOpU16(opcode.op.call_method, 0) catch |err| return v2MapBuilderError(err);
-            v2b.bindLabel(skip) catch |err| return v2MapBuilderError(err);
+            v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, fd.atoms.dup(atom_class_fields_init), @intCast(fd.scope_level)) catch |err| return mapBuilderError(err);
+            v2b.emitOp(opcode.op.dup) catch |err| return mapBuilderError(err);
+            const skip = v2b.newLabel() catch |err| return mapBuilderError(err);
+            v2b.emitJump(opcode.op.if_false, skip) catch |err| return mapBuilderError(err);
+            v2b.emitOpU16(this_read_op, this_idx) catch |err| return mapBuilderError(err);
+            v2b.emitOp(opcode.op.swap) catch |err| return mapBuilderError(err);
+            v2b.emitOpU16(opcode.op.call_method, 0) catch |err| return mapBuilderError(err);
+            v2b.bindLabel(skip) catch |err| return mapBuilderError(err);
             v2b.invalidateLastOpcode();
-            v2b.emitOp(opcode.op.drop) catch |err| return v2MapBuilderError(err);
+            v2b.emitOp(opcode.op.drop) catch |err| return mapBuilderError(err);
         } else {
             const base: u32 = @intCast(fd.byte_code.len);
             var code: [21]u8 = undefined;
@@ -19373,7 +19287,7 @@ pub const parser_core = struct {
     }
 
     fn appendDefaultClassConstructor(s: *State, name_atom: Atom) Error!u16 {
-        const parent_fd = s.cur_func();
+        const parent_fd = s.curFunc();
         const child_fd = try s.function.memory.create(function_def_mod.FunctionDef);
         child_fd.* = function_def_mod.FunctionDef.init(s.function.memory, s.function.atoms, name_atom);
         var child_moved = false;
@@ -19403,7 +19317,7 @@ pub const parser_core = struct {
         const body_scope = child_fd.appendScope(0) catch return error.OutOfMemory;
         child_fd.body_scope = body_scope;
         child_fd.scope_level = body_scope;
-        s.v2EnsureBuilderForFd(child_fd) catch return error.OutOfMemory;
+        s.ensureBuilderForFd(child_fd) catch return error.OutOfMemory;
         // Pinned qjs default base constructors enter through OP_check_ctor.
         // Default derived constructors use OP_init_ctor below, whose handler
         // performs the new.target gate while initializing derived state.
@@ -19411,19 +19325,19 @@ pub const parser_core = struct {
         if (!s.class_has_extends) {
             // qjs js_parse_class_default_ctor (quickjs.c:25109): a base
             // default constructor first verifies construct invocation.
-            v2b.emitOp(opcode.op.check_ctor) catch |err| return v2MapBuilderError(err);
+            v2b.emitOp(opcode.op.check_ctor) catch |err| return mapBuilderError(err);
         }
         // qjs js_parse_class_default_ctor: enter the synthetic constructor
         // body scope through the child builder without a source marker.
-        v2b.emitOpU16(opcode.op.enter_scope, @intCast(body_scope)) catch |err| return v2MapBuilderError(err);
+        v2b.emitOpU16(opcode.op.enter_scope, @intCast(body_scope)) catch |err| return mapBuilderError(err);
         const this_idx_i32 = child_fd.ensureThisBinding() catch return error.OutOfMemory;
         if (this_idx_i32 < 0 or this_idx_i32 > std.math.maxInt(u16)) return Error.UnexpectedToken;
         const this_idx: u16 = @intCast(this_idx_i32);
         if (s.class_has_extends) {
             // qjs js_parse_class_default_ctor (quickjs.c:25109): initialize
             // derived-constructor state and its checked this binding.
-            v2b.emitOp(opcode.op.init_ctor) catch |err| return v2MapBuilderError(err);
-            v2b.emitOpU16(opcode.op.put_loc_check_init, this_idx) catch |err| return v2MapBuilderError(err);
+            v2b.emitOp(opcode.op.init_ctor) catch |err| return mapBuilderError(err);
+            v2b.emitOpU16(opcode.op.put_loc_check_init, this_idx) catch |err| return mapBuilderError(err);
             try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
             // qjs js_parse_class_default_ctor ends with emit_return(s, FALSE)
             // (quickjs.c:25152); the derived arm (quickjs.c:28455-28472)
@@ -19432,15 +19346,15 @@ pub const parser_core = struct {
             // get_loc_checkthis (quickjs.c:33073-33077).
             // qjs js_parse_class_default_ctor: return the initialized
             // derived this value after running instance field setup.
-            v2b.emitOpU16(opcode.op.get_loc_checkthis, this_idx) catch |err| return v2MapBuilderError(err);
-            v2b.emitOp(opcode.op.@"return") catch |err| return v2MapBuilderError(err);
-            v2b.recordControl(.terminal) catch |err| return v2MapBuilderError(err);
+            v2b.emitOpU16(opcode.op.get_loc_checkthis, this_idx) catch |err| return mapBuilderError(err);
+            v2b.emitOp(opcode.op.@"return") catch |err| return mapBuilderError(err);
+            v2b.recordControl(.terminal) catch |err| return mapBuilderError(err);
         } else {
             try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
             // qjs js_parse_class_default_ctor: a base default constructor
             // completes with return_undef after instance field setup.
-            v2b.emitOp(opcode.op.return_undef) catch |err| return v2MapBuilderError(err);
-            v2b.recordControl(.terminal) catch |err| return v2MapBuilderError(err);
+            v2b.emitOp(opcode.op.return_undef) catch |err| return mapBuilderError(err);
+            v2b.recordControl(.terminal) catch |err| return mapBuilderError(err);
         }
         const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
         child_fd.parent_cpool_idx = cpool_idx;
@@ -19638,8 +19552,8 @@ pub const parser_core = struct {
         is_namespace: bool,
     ) Error!void {
         if (hasKnownBinding(s, local_name)) return Error.UnexpectedToken;
-        if (s.cur_func().closure_var.len > std.math.maxInt(u16)) return error.BytecodeOverflow;
-        const raw_var_idx = try s.cur_func().addClosureVar(.{
+        if (s.curFunc().closure_var.len > std.math.maxInt(u16)) return error.BytecodeOverflow;
+        const raw_var_idx = try s.curFunc().addClosureVar(.{
             // qjs add_import: namespace imports own a MODULE_DECL slot that
             // linking fills with the namespace cell; named/default imports are
             // MODULE_IMPORT aliases of an exported binding.
@@ -19647,7 +19561,7 @@ pub const parser_core = struct {
             .is_lexical = true,
             .is_const = true,
             .var_kind = .normal,
-            .var_idx = @intCast(s.cur_func().closure_var.len),
+            .var_idx = @intCast(s.curFunc().closure_var.len),
             .var_name = local_name,
         });
         if (raw_var_idx < 0 or raw_var_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
@@ -20097,7 +20011,7 @@ pub const compile_entry = struct {
     const JSRuntime = @import("core/runtime.zig").JSRuntime;
     const JSValue = @import("core/value.zig").JSValue;
     const bytecode = @import("bytecode.zig");
-    const compiler_v2 = @import("compiler_v2/root.zig");
+    const compiler = @import("compiler/root.zig");
     const unicode = @import("libs/unicode.zig");
     const lexer_mod = lexer;
     const parser_impl = parser_core;
@@ -20588,7 +20502,7 @@ pub const compile_entry = struct {
             _ = function.ensureModule();
         }
 
-        try state.beginV2ProgramEmission();
+        try state.beginProgramEmission();
 
         const return_completion = options.mode == .eval_direct or options.mode == .eval_indirect or options.return_completion;
         if (options.mode == .eval_direct or options.mode == .eval_indirect) {

@@ -8,7 +8,7 @@ const stack_mod = @import("stack.zig");
 const call_runtime = @import("call_runtime.zig");
 const disposable_ops = @import("disposable_ops.zig");
 const promise_ops = @import("promise_ops.zig");
-const value_vm = @import("vm_value.zig");
+const vm_value = @import("vm_value.zig");
 
 pub const Step = enum {
     done,
@@ -52,7 +52,7 @@ pub noinline fn createStackVm(
     output: ?*std.Io.Writer,
 ) !Step {
     try stack.reserveAdditional(1);
-    const value = promise_ops.qjsUsingCreateAsyncDisposableStack(ctx, global) catch |err| {
+    const value = promise_ops.usingCreateAsyncDisposableStack(ctx, global) catch |err| {
         return routeRuntimeError(ctx, output, global, stack, frame, catch_target, err);
     };
     stack.pushOwnedAssumeCapacity(value);
@@ -80,51 +80,51 @@ pub noinline fn execVm(
         bytecode.opcode.using_sub.dispose => disposeStackVm(ctx, output, global, stack, frame, catch_target, .normal),
         bytecode.opcode.using_sub.dispose_throw => disposeStackVm(ctx, output, global, stack, frame, catch_target, .throw),
         bytecode.opcode.using_sub.is_undefined => {
-            try value_vm.isUndefined(ctx.runtime, stack);
+            try vm_value.isUndefined(ctx.runtime, stack);
             return .done;
         },
         bytecode.opcode.using_sub.typeof_is_undefined => {
-            try value_vm.typeOfIsUndefined(ctx.runtime, stack);
+            try vm_value.typeOfIsUndefined(ctx.runtime, stack);
             return .done;
         },
         bytecode.opcode.using_sub.typeof_is_function => {
-            try value_vm.typeOfIsFunction(ctx.runtime, stack);
+            try vm_value.typeOfIsFunction(ctx.runtime, stack);
             return .done;
         },
         bytecode.opcode.using_sub.insert4 => {
-            try value_vm.insert4(ctx, stack);
+            try vm_value.insert4(ctx, stack);
             return .done;
         },
         bytecode.opcode.using_sub.rot5l => {
-            try value_vm.rot5l(ctx, stack);
+            try vm_value.rot5l(ctx, stack);
             return .done;
         },
         bytecode.opcode.using_sub.perm5 => {
-            try value_vm.perm5(ctx, stack);
+            try vm_value.perm5(ctx, stack);
             return .done;
         },
         bytecode.opcode.using_sub.dup2 => {
-            try value_vm.dup2(ctx, stack);
+            try vm_value.dup2(ctx, stack);
             return .done;
         },
         bytecode.opcode.using_sub.swap2 => {
-            try value_vm.swap2(ctx, stack);
+            try vm_value.swap2(ctx, stack);
             return .done;
         },
         bytecode.opcode.using_sub.rot3r => {
-            try value_vm.rot3r(ctx, stack);
+            try vm_value.rot3r(ctx, stack);
             return .done;
         },
         bytecode.opcode.using_sub.rot4l => {
-            try value_vm.rot4l(ctx, stack);
+            try vm_value.rot4l(ctx, stack);
             return .done;
         },
         bytecode.opcode.using_sub.dup3 => {
-            try value_vm.dup3(ctx, stack);
+            try vm_value.dup3(ctx, stack);
             return .done;
         },
         bytecode.opcode.using_sub.dup1 => {
-            try value_vm.dup1(ctx, stack);
+            try vm_value.dup1(ctx, stack);
             return .done;
         },
         else => error.InvalidBytecode,
@@ -150,8 +150,8 @@ fn addResourceWithHint(
     const args = stack.values[stack_len - 2 .. stack_len];
 
     const result = switch (hint) {
-        .sync => disposable_ops.qjsUsingAddSyncResource(ctx, output, global, args),
-        .async => promise_ops.qjsUsingAddAsyncResource(ctx, output, global, args),
+        .sync => disposable_ops.usingAddSyncResource(ctx, output, global, args),
+        .async => promise_ops.usingAddAsyncResource(ctx, output, global, args),
     } catch |err| {
         try popOwnedOperands(ctx.runtime, stack, 2);
         return routeRuntimeError(ctx, output, global, stack, frame, catch_target, err);
@@ -172,18 +172,18 @@ fn disposeStack(
     if (!disposable_stack.disposableStackHasAsyncHint()) {
         if (completion) |thrown| {
             const args = [_]core.JSValue{ stack_value, thrown };
-            return disposable_ops.qjsUsingDisposeSyncStackForThrow(ctx, output, global, &args);
+            return disposable_ops.usingDisposeSyncStackForThrow(ctx, output, global, &args);
         }
         const args = [_]core.JSValue{stack_value};
-        return disposable_ops.qjsUsingDisposeSyncStack(ctx, output, global, &args);
+        return disposable_ops.usingDisposeSyncStack(ctx, output, global, &args);
     }
 
     if (completion) |thrown| {
         const args = [_]core.JSValue{ stack_value, thrown };
-        return promise_ops.qjsUsingDisposeAsyncStackForThrow(ctx, output, global, &args);
+        return promise_ops.usingDisposeAsyncStackForThrow(ctx, output, global, &args);
     }
     const args = [_]core.JSValue{stack_value};
-    return promise_ops.qjsUsingDisposeAsyncStack(ctx, output, global, &args);
+    return promise_ops.usingDisposeAsyncStack(ctx, output, global, &args);
 }
 
 pub noinline fn disposeStackVm(

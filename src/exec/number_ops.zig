@@ -5,7 +5,7 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const exceptions = @import("exceptions.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -102,23 +102,23 @@ fn numberCall(
     const caller_frame = builtin_dispatch.callerFrame(host_call);
     return switch (id) {
         @intFromEnum(StaticMethod.parse_int) => {
-            if (call_global) |global| return builtin_glue.qjsGlobalParseInt(ctx, host_call.output, global, args, caller_function, caller_frame);
+            if (call_global) |global| return builtin_glue.globalParseInt(ctx, host_call.output, global, args, caller_function, caller_frame);
             const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             const radix = if (args.len >= 2) args[1] else null;
             return value_ops.numberToValue(try parseIntValue(ctx.runtime, input, radix));
         },
         @intFromEnum(StaticMethod.parse_float) => {
-            if (call_global) |global| return builtin_glue.qjsGlobalParseFloat(ctx, host_call.output, global, args, caller_function, caller_frame);
+            if (call_global) |global| return builtin_glue.globalParseFloat(ctx, host_call.output, global, args, caller_function, caller_frame);
             const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             return value_ops.numberToValue(try parseFloatValue(ctx.runtime, input));
         },
         @intFromEnum(StaticMethod.is_nan) => {
             const global = call_global orelse return error.TypeError;
-            return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, host_call.output, global, host_call.this_value, args, true);
+            return builtin_glue.globalIsNaNOrFinite(ctx, host_call.output, global, host_call.this_value, args, true);
         },
         @intFromEnum(StaticMethod.is_finite) => {
             const global = call_global orelse return error.TypeError;
-            return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, host_call.output, global, host_call.this_value, args, false);
+            return builtin_glue.globalIsNaNOrFinite(ctx, host_call.output, global, host_call.this_value, args, false);
         },
         @intFromEnum(StaticMethod.is_integer) => {
             const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -149,7 +149,7 @@ fn numberCall(
 /// formatters below; receiver/range failures map to the spec error messages.
 /// `id` is a `PrototypeMethod` enum value. This is a builtin method body (it
 /// reaches the VM coercion/exception ops), so exec routes here through the
-/// record table (`object_ops.qjsNumberPrototypeMethod` ->
+/// record table (`object_ops.numberPrototypeMethod` ->
 /// `builtin_dispatch.callInternalRecord`) instead of naming it directly.
 fn numberPrototypeMethod(
     ctx: *core.JSContext,

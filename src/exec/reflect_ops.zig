@@ -33,10 +33,10 @@ const array_construct_ref = core.function.NativeBuiltinRef{
 const activeGlobalObject = call.activeGlobalObject;
 const callValueWithThisGlobalsAndGlobal = call.callValueWithThisGlobalsAndGlobal;
 const defineObjectProperty = call.defineObjectProperty;
-const descriptorFromObject = call.descriptorFromObject;
+const descriptorFromObjectBare = call.descriptorFromObjectBare;
 const expectObjectArg = call.expectObjectArg;
-const functionPrototypeFromGlobal = call.functionPrototypeFromGlobal;
-const getValueProperty = call.getValueProperty;
+const functionPrototypeFromGlobal = object_ops.functionPrototypeFromGlobal;
+const getValuePropertyViaGlobalSlots = call.getValuePropertyViaGlobalSlots;
 const isCallableObjectValue = call.isCallableObjectValue;
 const nativeFunctionName = call.nativeFunctionName;
 const primitiveWrapper = call.primitiveWrapper;
@@ -56,7 +56,7 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
     // `[[Prototype]]` and run the record's construct branch through the table,
     // matching the `exec/construct.zig` `new X()` path (Phase 6b-3d/6b-3e). This
     // is the null-global `Reflect.construct` fallback (the VM-global path runs
-    // through `qjsReflectConstructCall` -> the VM construct dispatcher), so the
+    // through `reflectConstructCall` -> the VM construct dispatcher), so the
     // raw argument-list values are forwarded without VM-context coercion, as
     // before.
     if (core.function.decodeNativeBuiltinId(target.nativeFunctionId())) |native_ref| {
@@ -387,7 +387,7 @@ fn proxyReflectHasProperty(
     const handler_value = proxy.proxyHandler() orelse return error.TypeError;
     const has_atom = try ctx.runtime.internAtom("has");
     defer ctx.runtime.atoms.free(has_atom);
-    const trap = try getValueProperty(ctx, output, global, globals, handler_value, has_atom);
+    const trap = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, handler_value, has_atom);
     defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return reflectHasProperty(ctx, output, global, globals, target, atom_id);
     const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, atom_id);
@@ -425,7 +425,7 @@ pub fn reflectDefineProperty(rt: *core.JSRuntime, args: []const core.JSValue) !c
     const key = try property_ops.propertyKeyAtom(rt, args[1]);
     defer rt.atoms.free(key);
     const desc_object = try expectObjectArg(args[2]);
-    const desc = try descriptorFromObject(rt, desc_object);
+    const desc = try descriptorFromObjectBare(rt, desc_object);
     defer desc.destroy(rt);
     if (core.object.isTypedArrayObject(object)) {
         if (try typedArrayReflectDefineOwnProperty(rt, object, key, desc)) |ok| return core.JSValue.boolean(ok);
@@ -457,7 +457,7 @@ pub fn reflectSet(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (global) |global_object| {
-        if (try call_runtime.qjsReflectSetCall(ctx, output, global_object, args, null, null)) |value| {
+        if (try call_runtime.reflectSetCall(ctx, output, global_object, args, null, null)) |value| {
             return value;
         }
     }

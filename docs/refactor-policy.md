@@ -3,6 +3,15 @@
 This repository prices file-level reorganization of hot-path code as a real
 performance tax. The rules below are the policy.
 
+> **Temporary suspension (owner ruling, 2026-08-19): the rule-2 zoo A/B
+> requirement is suspended.** Hot-path changes that cannot pass an identity
+> gate may land on the full test ladder alone. The identity gates and the
+> baseline registry remain in force as change-classification instruments
+> (run them and record whether machine code changed), but a failed identity
+> comparison is information, not a merge blocker, while this suspension
+> holds. Reinstate rule 2 before the next official zoo measurement campaign
+> re-baselines the headline.
+
 1. Maintainability refactors proceed by risk zone. COLD-zone work — docs,
    build graph, test harnesses, tools, dead-asset removal, and files outside
    the hot path — may proceed freely under the normal validation ladder.
@@ -39,6 +48,32 @@ performance tax. The rules below are the policy.
    src/internal_root.zig && zig build zjs`, or a clean cache). Observed
    2026-08-18: a post-merge first build differed, the forced recompile was
    bit-identical to the baseline.
+   Identity-gate protocol under build bistability (tightened 2026-08-19 after
+   the compiler-rename verification):
+   - Compare the **stripped whole image**, not `--only-section=.text`. This
+     repository's linker script places the opcode handlers in a separate
+     `.text.zjs.op_handlers` section, so a `.text`-only extraction silently
+     skips the hot island; the stripped image also covers `.rodata` shifts
+     from reflected names or embedded paths.
+   - One matching build proves only that the change **can** reproduce the
+     baseline image, not that it **always** does. The build is bistable
+     (known attractors: incremental-converged vs cold-cache). A pass
+     requires closing the attractor set: the changed source and the baseline
+     source must each produce byte-identical images **per attractor**
+     (converged rebuild vs clean-worktree cold build). A first-build
+     mismatch is not a failure verdict by itself — rebuild before
+     concluding, then close both attractors.
+   - **Baseline registry**: `reports/identity/baseline.json` records the
+     verified per-attractor image hashes for the current baseline commit.
+     A gate check builds the candidate and compares against the registry;
+     do not rebuild the baseline each time. Refresh the registry when main
+     moves.
+   - **Batch tier** (owner-approved 2026-08-19): mechanical rename/alias
+     campaigns may accumulate on a branch with per-change test evidence
+     only, then pass **one** identity closure for the whole batch before
+     merge. On a batch failure, bisect within the batch. Per-change identity
+     gating remains required for hot-path **structural** changes (layout,
+     linker script, frame/dispatch surgery).
 
 ## Why
 

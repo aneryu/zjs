@@ -279,7 +279,7 @@ pub const Frame = struct {
     current_function: JSValue = JSValue.undefinedValue(),
     /// u32 halves sharing the old `usize` slot: argc is u16-bounded everywhere
     /// upstream, and the freed half persists this frame's committed
-    /// bytecode-stack charge (`qjsBytecodeFrameAllocaSize` at construction) so
+    /// bytecode-stack charge (`bytecodeFrameAllocaSize` at construction) so
     /// the pop paths release the budget with one load instead of re-deriving
     /// it from the function header on every return. Every pop asserts the
     /// stored figure against the recompute in Debug (lockstep guard).

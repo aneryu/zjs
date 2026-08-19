@@ -2536,7 +2536,7 @@ pub fn assertSameValue(actual: zjs.JSValue, expected: zjs.JSValue) !zjs.JSValue 
     return zjs.JSValue.undefinedValue();
 }
 
-pub fn qjsTest262EvalScript(
+pub fn test262EvalScript(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
     global: *zjs.Object,
@@ -2857,7 +2857,7 @@ pub fn test262AgentIsDone(agent: *Test262Agent) bool {
     return agent.done;
 }
 
-pub fn qjsTest262AgentStart(
+pub fn test262AgentStart(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
     global: ?*zjs.Object,
@@ -2888,7 +2888,7 @@ pub fn qjsTest262AgentStart(
     return zjs.JSValue.undefinedValue();
 }
 
-pub fn qjsTest262AgentBroadcast(
+pub fn test262AgentBroadcast(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
     global: ?*zjs.Object,
@@ -2913,7 +2913,7 @@ pub fn qjsTest262AgentBroadcast(
     return zjs.JSValue.undefinedValue();
 }
 
-pub fn qjsTest262AgentReceiveBroadcast(
+pub fn test262AgentReceiveBroadcast(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
     global: ?*zjs.Object,
@@ -2945,7 +2945,7 @@ pub fn qjsTest262AgentReceiveBroadcast(
     return zjs.JSValue.undefinedValue();
 }
 
-pub fn qjsTest262AgentReport(
+pub fn test262AgentReport(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
     global: ?*zjs.Object,
@@ -2961,7 +2961,7 @@ pub fn qjsTest262AgentReport(
     return zjs.JSValue.undefinedValue();
 }
 
-pub fn qjsTest262AgentGetReport(
+pub fn test262AgentGetReport(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
     global: ?*zjs.Object,
@@ -2983,7 +2983,7 @@ pub fn qjsTest262AgentGetReport(
     return ctx.createString(report);
 }
 
-pub fn qjsTest262AgentLeaving(
+pub fn test262AgentLeaving(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
     global: ?*zjs.Object,
@@ -3003,7 +3003,7 @@ pub fn qjsTest262AgentLeaving(
     return zjs.JSValue.undefinedValue();
 }
 
-pub fn qjsTest262AgentSleep(
+pub fn test262AgentSleep(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
     global: ?*zjs.Object,
@@ -3021,7 +3021,7 @@ pub fn qjsTest262AgentSleep(
     return zjs.JSValue.undefinedValue();
 }
 
-pub fn qjsTest262AgentMonotonicNow(
+pub fn test262AgentMonotonicNow(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
     global: ?*zjs.Object,
@@ -3066,14 +3066,14 @@ pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *z
         length: i32,
         call: zjs.ExternalHostCallFn,
     }{
-        .{ .name = "start", .length = 1, .call = wrapExternal(qjsTest262AgentStart) },
-        .{ .name = "broadcast", .length = 1, .call = wrapExternal(qjsTest262AgentBroadcast) },
-        .{ .name = "receiveBroadcast", .length = 0, .call = wrapExternal(qjsTest262AgentReceiveBroadcast) },
-        .{ .name = "report", .length = 1, .call = wrapExternal(qjsTest262AgentReport) },
-        .{ .name = "getReport", .length = 0, .call = wrapExternal(qjsTest262AgentGetReport) },
-        .{ .name = "leaving", .length = 0, .call = wrapExternal(qjsTest262AgentLeaving) },
-        .{ .name = "sleep", .length = 1, .call = wrapExternal(qjsTest262AgentSleep) },
-        .{ .name = "monotonicNow", .length = 0, .call = wrapExternal(qjsTest262AgentMonotonicNow) },
+        .{ .name = "start", .length = 1, .call = wrapExternal(test262AgentStart) },
+        .{ .name = "broadcast", .length = 1, .call = wrapExternal(test262AgentBroadcast) },
+        .{ .name = "receiveBroadcast", .length = 0, .call = wrapExternal(test262AgentReceiveBroadcast) },
+        .{ .name = "report", .length = 1, .call = wrapExternal(test262AgentReport) },
+        .{ .name = "getReport", .length = 0, .call = wrapExternal(test262AgentGetReport) },
+        .{ .name = "leaving", .length = 0, .call = wrapExternal(test262AgentLeaving) },
+        .{ .name = "sleep", .length = 1, .call = wrapExternal(test262AgentSleep) },
+        .{ .name = "monotonicNow", .length = 0, .call = wrapExternal(test262AgentMonotonicNow) },
     };
 
     inline for (agent_methods) |m| {
@@ -3086,7 +3086,7 @@ pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *z
 
     // Register evalScript on $262
     {
-        const func_val = try createExternalHostFunction(rt, ctx, "evalScript", 1, wrapExternalWithFunc(qjsTest262EvalScript));
+        const func_val = try createExternalHostFunction(rt, ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript));
         defer func_val.free(rt);
         try ctx.defineDataProperty(ns_target, "evalScript", func_val, .{ .enumerable = false });
     }
@@ -3103,21 +3103,21 @@ pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *z
 
     // Register createRealm on $262
     {
-        const func_val = try createExternalHostFunction(rt, ctx, "createRealm", 0, wrapExternal(qjsTest262CreateRealm));
+        const func_val = try createExternalHostFunction(rt, ctx, "createRealm", 0, wrapExternal(test262CreateRealm));
         defer func_val.free(rt);
         try ctx.defineDataProperty(ns_target, "createRealm", func_val, .{ .enumerable = false });
     }
 
     // Register detachArrayBuffer on $262
     {
-        const func_val = try createExternalHostFunction(rt, ctx, "detachArrayBuffer", 1, wrapExternal(qjsTest262DetachArrayBuffer));
+        const func_val = try createExternalHostFunction(rt, ctx, "detachArrayBuffer", 1, wrapExternal(test262DetachArrayBuffer));
         defer func_val.free(rt);
         try ctx.defineDataProperty(ns_target, "detachArrayBuffer", func_val, .{ .enumerable = false });
     }
 
     // Register gc on $262
     {
-        const func_val = try createExternalHostFunction(rt, ctx, "gc", 0, wrapExternal(qjsTest262Gc));
+        const func_val = try createExternalHostFunction(rt, ctx, "gc", 0, wrapExternal(test262Gc));
         defer func_val.free(rt);
         try ctx.defineDataProperty(ns_target, "gc", func_val, .{ .enumerable = false });
     }
@@ -3482,7 +3482,7 @@ fn hostCallIsHtmlDda(
     return zjs.JSValue.nullValue();
 }
 
-fn qjsTest262CreateRealm(
+fn test262CreateRealm(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
     global: ?*zjs.Object,
@@ -3494,13 +3494,13 @@ fn qjsTest262CreateRealm(
     const realm_value = try ctx.createRealm();
     errdefer realm_value.free(ctx.runtimePtr());
     const realm_global = try ctx.realmGlobalObject(realm_value);
-    const eval_func = try createExternalHostFunctionWithRealm(ctx.runtimePtr(), ctx, "evalScript", 1, wrapExternalWithFunc(qjsTest262EvalScript), false, realm_global);
+    const eval_func = try createExternalHostFunctionWithRealm(ctx.runtimePtr(), ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript), false, realm_global);
     defer eval_func.free(ctx.runtimePtr());
     try ctx.defineDataProperty(realm_value, "evalScript", eval_func, .{});
     return realm_value;
 }
 
-fn qjsTest262DetachArrayBuffer(
+fn test262DetachArrayBuffer(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
     global: ?*zjs.Object,
@@ -3512,7 +3512,7 @@ fn qjsTest262DetachArrayBuffer(
     return try runtime_layer.detachArrayBuffer(ctx.core, args[0]);
 }
 
-fn qjsTest262Gc(
+fn test262Gc(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
     global: ?*zjs.Object,
@@ -3643,7 +3643,7 @@ test "test262 evalScript uses the installed function realm" {
     const realm_global_object = try ctx.realmGlobalObject(realm);
     try ctx.defineDataProperty(realm_global, "realmMarker", zjs.JSValue.int32(30), .{});
 
-    const eval_func = try createExternalHostFunctionWithRealm(rt, ctx, "evalScript", 1, wrapExternalWithFunc(qjsTest262EvalScript), false, realm_global_object);
+    const eval_func = try createExternalHostFunctionWithRealm(rt, ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript), false, realm_global_object);
     defer eval_func.free(rt);
 
     const source = try ctx.createString("realmMarker + 12");

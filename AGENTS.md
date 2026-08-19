@@ -55,17 +55,16 @@ zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc
 ```
 
 `compiler=v2` is the only compiler. `layout=short` is the release layout;
-`-Dzjs_v2_layout=plain` is an A/B diagnostic. Every engine-bearing artifact
+`-Dzjs_compiler_layout=plain` is an A/B diagnostic. Every engine-bearing artifact
 attests the configuration signature at compile time. See
 `docs/qcp1_switch_decision.md` §9 if a layout-sensitive compiler change is in
 scope.
 
 ## Agent skills
 
-Issues and PRDs live under `.scratch/<feature>/`. See
-`docs/agents/issue-tracker.md` and `docs/agents/triage-labels.md`.
-Domain notes: `docs/agents/domain.md`.
-Cross-session project lessons and evidence rules:
+Issues and PRDs live under `.scratch/<feature>/`; conventions and triage
+labels: `docs/agents/issue-tracker.md`.
+Cross-session project lessons, domain-context routing, and evidence rules:
 `docs/agents/project-experience.md`.
 
 ## Repository Layout
@@ -75,7 +74,7 @@ See `docs/architecture.md`. Short map:
 - `src/root.zig`: public embedder entry.
 - `src/core/`: values, runtime, objects, GC.
 - `src/parser.zig`: lexer, parser, TypeScript erasure.
-- `src/compiler_v2/`: the compiler.
+- `src/compiler/`: the compiler.
 - `src/bytecode.zig`: bytecode carrier and packing.
 - `src/exec/`: VM, builtins, calls, modules, promises.
 - `src/runtime/`: event loop and native plugins.

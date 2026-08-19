@@ -5,10 +5,10 @@ const build_options = @import("build_options");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
-const collection_vm = @import("array_ops.zig");
+const array_ops = @import("array_ops.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const class_init_ops = @import("class_init_ops.zig");
 const inline_calls = @import("inline_calls.zig");
@@ -137,7 +137,7 @@ pub fn enterInlineCallDepthMode(
 /// QuickJS JS_CallInternal's planned `alloca_size` for a normal bytecode
 /// target called without COPY_ARGV (quickjs.c:17828-17836). Tail opcodes use
 /// flags=0, so only missing arguments allocate the padded argv prefix.
-pub fn qjsBytecodeFrameAllocaSize(
+pub fn bytecodeFrameAllocaSize(
     function: *const bytecode.FunctionBytecode,
     argc: usize,
     copy_argv: bool,
@@ -153,13 +153,13 @@ pub fn qjsBytecodeFrameAllocaSize(
         @as(usize, function.var_ref_count) * @sizeOf(*core.VarRef);
 }
 
-/// Leaf-family pricing of `qjsBytecodeFrameAllocaSize`. Every published leaf
+/// Leaf-family pricing of `bytecodeFrameAllocaSize`. Every published leaf
 /// commits with copy_argv=false and argc >= arg_count (empty/forwarded leaves
 /// are zero-arg bodies; the exact-args family asserts argc == arg_count), so
 /// the qjs padded-argv prefix is always empty and the figure collapses to
 /// function-header scalars — no argc load and no pricing select on the
 /// per-return release path.
-pub inline fn qjsBytecodeLeafFrameAllocaSize(
+pub inline fn bytecodeLeafFrameAllocaSize(
     function: *const bytecode.FunctionBytecode,
 ) usize {
     const value_slots = @as(usize, function.var_count) + @as(usize, function.stack_size);
@@ -193,7 +193,7 @@ pub inline fn canEnterInlineCallDepthMode(
     argc: usize,
     copy_argv: bool,
 ) bool {
-    return canEnterInlineCallDepthBytes(ctx, qjsBytecodeFrameAllocaSize(function, argc, copy_argv));
+    return canEnterInlineCallDepthBytes(ctx, bytecodeFrameAllocaSize(function, argc, copy_argv));
 }
 
 /// Byte-priced variants: constructors that already hold the planned frame
@@ -223,7 +223,7 @@ pub inline fn commitInlineCallDepthMode(
     argc: usize,
     copy_argv: bool,
 ) void {
-    commitInlineCallDepthBytes(ctx, qjsBytecodeFrameAllocaSize(function, argc, copy_argv));
+    commitInlineCallDepthBytes(ctx, bytecodeFrameAllocaSize(function, argc, copy_argv));
 }
 
 pub inline fn commitInlineCallDepthBytes(
@@ -305,7 +305,7 @@ pub inline fn leaveInlineCallDepth(
     function: *const bytecode.FunctionBytecode,
     argc: usize,
 ) void {
-    const planned_stack_bytes = qjsBytecodeFrameAllocaSize(function, argc, false);
+    const planned_stack_bytes = bytecodeFrameAllocaSize(function, argc, false);
     leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
 }
 
@@ -541,7 +541,7 @@ pub noinline fn closure(
         frame.pc += 1;
         break :blk value;
     };
-    try collection_vm.pushFunctionClosure(ctx, frame, stack, function, global, index);
+    try array_ops.pushFunctionClosure(ctx, frame, stack, function, global, index);
     return .done;
 }
 
@@ -870,7 +870,7 @@ pub noinline fn callMethod(
         stack.pushOwnedAssumeCapacity(value);
         return .done;
     }
-    const maybe_array_result = collection_vm.qjsArrayMethodFastCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
+    const maybe_array_result = array_ops.arrayMethodFastCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
         call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
@@ -957,7 +957,7 @@ pub noinline fn tailCallMethod(
         call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         return .{ .return_value = value };
     }
-    const maybe_array_result = collection_vm.qjsArrayMethodFastCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
+    const maybe_array_result = array_ops.arrayMethodFastCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
         call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
         return err;
@@ -1002,7 +1002,7 @@ inline fn fastNativeMethodCall(
     // can switch authority before record selection and stack preflight.
     //
     // A table MISS returns null so the caller falls through to the array
-    // fast-array storage fallback (`qjsArrayMethodFastCall`, which keeps the
+    // fast-array storage fallback (`arrayMethodFastCall`, which keeps the
     // name-based TypedArray slice/subarray path that has no native-builtin id)
     // and then the generic value/bytecode dispatch. Among encoded native
     // domains, only the separate host mechanism intentionally has no standard
@@ -1049,13 +1049,13 @@ pub noinline fn apply(
         const func = stack.values[region_base];
         const new_target = stack.values[region_base + 1];
         const array_value = stack.values[region_base + 2];
-        var apply_args = collection_vm.argsFromArray(ctx.runtime, array_value) catch |err| {
+        var apply_args = array_ops.argsFromArray(ctx.runtime, array_value) catch |err| {
             call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         defer call_runtime.freeArgs(ctx.runtime, apply_args);
-        var apply_args_root = collection_vm.ValueSliceRoot{};
+        var apply_args_root = array_ops.ValueSliceRoot{};
         apply_args_root.init(ctx.runtime, &apply_args);
         defer apply_args_root.deinit();
 
@@ -1117,13 +1117,13 @@ pub noinline fn apply(
     const func = stack.values[region_base];
     const this_value = stack.values[region_base + 1];
     const array_value = stack.values[region_base + 2];
-    var apply_args = collection_vm.argsFromArray(ctx.runtime, array_value) catch |err| {
+    var apply_args = array_ops.argsFromArray(ctx.runtime, array_value) catch |err| {
         call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer call_runtime.freeArgs(ctx.runtime, apply_args);
-    var apply_args_root = collection_vm.ValueSliceRoot{};
+    var apply_args_root = array_ops.ValueSliceRoot{};
     apply_args_root.init(ctx.runtime, &apply_args);
     defer apply_args_root.deinit();
 

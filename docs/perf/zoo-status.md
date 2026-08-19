@@ -14,8 +14,9 @@ claim. It is not the `perf-self-check` self-baseline gate.
 | At or above 1.0 | **11 / 15** |
 
 Full provenance, window attestation and the per-round build-bistability
-record: `zoo-r0-measure/headline-r0-final.md` (direct after-vs-qjs sample;
-no synthesized ratios).
+record: `headline-r0-final.md` in the maintainer's local zoo-r0 campaign
+archive (not in this repository; direct after-vs-qjs sample, no synthesized
+ratios).
 
 ## Superseded (do not cite)
 
@@ -27,7 +28,7 @@ no synthesized ratios).
 The clean-field re-baseline that replaced both is campaign zoo-r0 Gate 0
 (2026-08-18 evening): serial CPU-19 geomean **1.0259**, parallel-calibrated
 **1.0292**, throughput MDE 0.53%, layout geomean band 0.33pp
-(`zoo-r0-measure/BASELINE-R0.md`). The r3 "1.0335" was
+(`BASELINE-R0.md`, maintainer-local campaign archive). The r3 "1.0335" was
 contamination-inflated mainly through pdfjs (0.916 contaminated vs 0.846
 clean, confirmed on both protocols).
 
@@ -75,8 +76,8 @@ proof-carrying numeric/string opcodes (static proveability 0/1560 TS,
 pairs ≈0 dynamically), frame-prologue slimming (predicted 1.34%, measured
 0.16%), dense-get re-proof (0.16–0.26%), rope/string equality region
 (event ceilings ≤0.36%), `get_field` arms (own-hit already 7 insn cheaper
-than qjs). Per-mechanism verdict pointers:
-`zoo-r0-integration/MECHANISM-LEDGER-R0.md`.
+than qjs). Per-mechanism verdicts: `MECHANISM-LEDGER-R0.md` in the
+maintainer-local campaign archive.
 
 The shared remainder — front-end density/miss tax (2.1–2.4× FE-stall on
 all four laggards) and the +10–12 cyc/call family constant — is documented
@@ -87,8 +88,8 @@ Do not cite the 2026-06-13 QuickJS-ng microbench files or older 0.93 geomean
 handoffs as current. Those artifacts were removed from the active tree; recover
 them from git history if needed.
 
-The local-handoff regression gate is still (performance gates never run in
-shared-runner CI; the measurement contract forbids it)
+The local-handoff regression gate is still the following command (performance
+gates never run in shared-runner CI; the measurement contract forbids it):
 
 ```sh
 zig build perf-self-check --summary all

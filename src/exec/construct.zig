@@ -203,7 +203,7 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
             return constructPrimitiveWrapper(rt, core.class.ids.number, prototype, primitive);
         }
         if (std.mem.eql(u8, name, "Boolean")) return constructPrimitiveWrapper(rt, core.class.ids.boolean, prototype, core.JSValue.boolean(rooted_args.len >= 1 and value_ops.isTruthy(rooted_args[0])));
-        if (isErrorConstructorName(name)) return constructErrorObject(rt, name, constructor.value(), prototype, rooted_args);
+        if (isConstructErrorObjectName(name)) return constructErrorObject(rt, name, constructor.value(), prototype, rooted_args);
     }
 
     const instance = try core.Object.create(rt, core.class.ids.object, prototype);
@@ -579,7 +579,7 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
     return instance.value();
 }
 
-pub fn isErrorConstructorName(name: []const u8) bool {
+pub fn isConstructErrorObjectName(name: []const u8) bool {
     return core.error_names.isConstructErrorObjectName(name);
 }
 
@@ -1285,11 +1285,7 @@ fn getCollectionAdder(rt: *core.JSRuntime, collection: *core.Object, name: []con
     return core.JSValue.undefinedValue();
 }
 
-fn expectObject(value: core.JSValue) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    return @fieldParentPtr("header", header);
-}
+const expectObject = core.value_semantics.expectObject;
 
 fn expectStringValue(rt: *core.JSRuntime, expected: []const u8, value: core.JSValue) !void {
     var actual = std.ArrayList(u8).empty;

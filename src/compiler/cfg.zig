@@ -73,13 +73,13 @@ pub const DiffBucket = enum {
 pub const OracleReport = if (audit_oracles) struct {
     // boundary set: every legacy-notion boundary claim resolved against the
     // v2 identity that owns it.
-    legacy_boundaries: u64 = 0,
-    v2_boundaries: u64 = 0,
+    temp_boundaries: u64 = 0,
+    builder_boundaries: u64 = 0,
     missing_boundaries: u64 = 0,
     extra_boundaries: u64 = 0,
     duplicated_boundaries: u64 = 0,
     // per-category legacy claim totals (the ruling's four boundary
-    // categories), reported as provenance for `legacy_boundaries`.
+    // categories), reported as provenance for `temp_boundaries`.
     instruction_claims: u64 = 0,
     control_flow_claims: u64 = 0,
     optimization_claims: u64 = 0,
@@ -1628,7 +1628,7 @@ pub fn auditInstructionOwnership(
         if (instruction_live != cfg_live) {
             recordDiffBucket(.ownership_mismatch);
             std.debug.panic(
-                "compiler_v2 oracle violation: bucket=OWNERSHIP_MISMATCH category=cfg_ownership_divergence role=position construct=opcode_0x{x:0>2} key=block={d} identities=[instruction_live={}, cfg_live={}] offset={d}",
+                "compiler oracle violation: bucket=OWNERSHIP_MISMATCH category=cfg_ownership_divergence role=position construct=opcode_0x{x:0>2} key=block={d} identities=[instruction_live={}, cfg_live={}] offset={d}",
                 .{ input.code[pc], block_index, instruction_live, cfg_live, pc },
             );
         }
@@ -1802,7 +1802,7 @@ fn panicBoundaryUniquenessViolation(
     var message_buffer: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&message_buffer);
     writer.print(
-        "compiler_v2 oracle violation: bucket={s} category={s} role={s} construct=opcode_0x{x:0>2} key={s} identities=[",
+        "compiler oracle violation: bucket={s} category={s} role={s} construct=opcode_0x{x:0>2} key={s} identities=[",
         .{ bucket.name(), category, @tagName(role), op_id, semantic_key },
     ) catch unreachable;
     writeReportIdentity(&writer, identities[0]);
@@ -2074,12 +2074,12 @@ pub fn recordDiffBucket(bucket: DiffBucket) void {
 pub fn oracleReportSnapshot() OracleReport {
     if (comptime !audit_oracles) return .{};
     var report: OracleReport = .{
-        .legacy_boundaries = @atomicLoad(
+        .temp_boundaries = @atomicLoad(
             u64,
-            &oracle_report.legacy_boundaries,
+            &oracle_report.temp_boundaries,
             .monotonic,
         ),
-        .v2_boundaries = @atomicLoad(u64, &oracle_report.v2_boundaries, .monotonic),
+        .builder_boundaries = @atomicLoad(u64, &oracle_report.builder_boundaries, .monotonic),
         .missing_boundaries = @atomicLoad(
             u64,
             &oracle_report.missing_boundaries,
@@ -2119,8 +2119,8 @@ pub fn oracleReportSnapshot() OracleReport {
 
 pub fn resetOracleReport() void {
     if (comptime !audit_oracles) return;
-    @atomicStore(u64, &oracle_report.legacy_boundaries, 0, .monotonic);
-    @atomicStore(u64, &oracle_report.v2_boundaries, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.temp_boundaries, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.builder_boundaries, 0, .monotonic);
     @atomicStore(u64, &oracle_report.missing_boundaries, 0, .monotonic);
     @atomicStore(u64, &oracle_report.extra_boundaries, 0, .monotonic);
     @atomicStore(u64, &oracle_report.duplicated_boundaries, 0, .monotonic);
@@ -2166,7 +2166,7 @@ const BoundaryReportAccounting = if (audit_oracles) struct {
     semantic_words: []usize,
     claims: [4]u64 = .{0} ** 4,
     distinct: [4]u64 = .{0} ** 4,
-    v2_distinct: u64 = 0,
+    builder_distinct: u64 = 0,
     missing: u64 = 0,
     ownership_transfer: u64 = 0,
     ownership_release: u64 = 0,
@@ -2199,7 +2199,7 @@ const BoundaryReportAccounting = if (audit_oracles) struct {
         }
         if (!bitIsSet(self.any_words, offset_index)) {
             setBit(self.any_words, offset_index);
-            self.v2_distinct += 1;
+            self.builder_distinct += 1;
         }
     }
 } else struct {};
@@ -2356,8 +2356,8 @@ pub fn formatOracleReport(buffer: []u8, report: OracleReport) []const u8 {
         \\  {s}={d}
         \\
     , .{
-        report.legacy_boundaries,
-        report.v2_boundaries,
+        report.temp_boundaries,
+        report.builder_boundaries,
         report.missing_boundaries,
         report.extra_boundaries,
         report.duplicated_boundaries,
@@ -3249,15 +3249,15 @@ pub fn auditBoundaryUniqueness(
             }
         }
 
-        var legacy_boundaries: u64 = 0;
+        var temp_boundaries: u64 = 0;
         var duplicated_boundaries: u64 = 0;
         for (accounting.claims, accounting.distinct) |claims, distinct| {
-            legacy_boundaries += claims;
+            temp_boundaries += claims;
             duplicated_boundaries += claims - distinct;
         }
 
-        reportAdd("legacy_boundaries", legacy_boundaries);
-        reportAdd("v2_boundaries", accounting.v2_distinct);
+        reportAdd("temp_boundaries", temp_boundaries);
+        reportAdd("builder_boundaries", accounting.builder_distinct);
         reportAdd("missing_boundaries", accounting.missing);
         reportAdd("extra_boundaries", extra_boundaries);
         reportAdd("duplicated_boundaries", duplicated_boundaries);
@@ -3289,7 +3289,7 @@ pub fn auditBoundaryUniqueness(
     );
 }
 
-test "compiler_v2.cfg: unreachable self-loop does not retain its block" {
+test "compiler.cfg: unreachable self-loop does not retain its block" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -3324,7 +3324,7 @@ test "compiler_v2.cfg: unreachable self-loop does not retain its block" {
     try auditInstructionOwnership(&rt.memory, &input, &graph);
 }
 
-test "compiler_v2.cfg: alias group coalescing is downstream-indistinguishable" {
+test "compiler.cfg: alias group coalescing is downstream-indistinguishable" {
     resetFanoutCensus();
     defer resetFanoutCensus();
 
@@ -3423,7 +3423,7 @@ const AnchorSplitFixture = struct {
     }
 };
 
-test "compiler_v2.cfg: class A arm fires when a source event resolves off its boundary" {
+test "compiler.cfg: class A arm fires when a source event resolves off its boundary" {
     resetFanoutCensus();
     resetAnchorSplitCensus();
     defer resetFanoutCensus();
@@ -3478,7 +3478,7 @@ test "compiler_v2.cfg: class A arm fires when a source event resolves off its bo
     );
 }
 
-test "compiler_v2.cfg: class A arm fires when a fold replacement resolves off its boundary" {
+test "compiler.cfg: class A arm fires when a fold replacement resolves off its boundary" {
     resetFanoutCensus();
     resetAnchorSplitCensus();
     defer resetFanoutCensus();
@@ -3547,7 +3547,7 @@ test "compiler_v2.cfg: class A arm fires when a fold replacement resolves off it
     );
 }
 
-test "compiler_v2.cfg: oracle report counts boundary categories" {
+test "compiler.cfg: oracle report counts boundary categories" {
     resetOracleReport();
     defer resetOracleReport();
     if (comptime !audit_oracles) return;
@@ -3589,8 +3589,8 @@ test "compiler_v2.cfg: oracle report counts boundary categories" {
     // four union offsets. Control flow claims target 6 and terminals 5 and 6:
     // three claims over two offsets, hence one duplicate. The source marker
     // contributes one debug claim at 6; there are no optimization claims.
-    try std.testing.expectEqual(@as(u64, 8), report.legacy_boundaries);
-    try std.testing.expectEqual(@as(u64, 4), report.v2_boundaries);
+    try std.testing.expectEqual(@as(u64, 8), report.temp_boundaries);
+    try std.testing.expectEqual(@as(u64, 4), report.builder_boundaries);
     try std.testing.expectEqual(@as(u64, 0), report.missing_boundaries);
     try std.testing.expectEqual(@as(u64, 0), report.extra_boundaries);
     try std.testing.expectEqual(@as(u64, 1), report.duplicated_boundaries);
@@ -3600,14 +3600,14 @@ test "compiler_v2.cfg: oracle report counts boundary categories" {
     try std.testing.expectEqual(@as(u64, 1), report.debug_claims);
 }
 
-test "compiler_v2.cfg: oracle report formats summary then diff buckets" {
+test "compiler.cfg: oracle report formats summary then diff buckets" {
     resetOracleReport();
     defer resetOracleReport();
     if (comptime !audit_oracles) return;
 
     const report: OracleReport = .{
-        .legacy_boundaries = 101,
-        .v2_boundaries = 102,
+        .temp_boundaries = 101,
+        .builder_boundaries = 102,
         .missing_boundaries = 103,
         .extra_boundaries = 104,
         .duplicated_boundaries = 105,
@@ -3644,7 +3644,7 @@ test "compiler_v2.cfg: oracle report formats summary then diff buckets" {
     , formatOracleReport(&buffer, report));
 }
 
-test "compiler_v2.cfg: diff bucket names are the ruling's six" {
+test "compiler.cfg: diff bucket names are the ruling's six" {
     resetOracleReport();
     defer resetOracleReport();
 
@@ -3662,7 +3662,7 @@ test "compiler_v2.cfg: diff bucket names are the ruling's six" {
     );
 }
 
-test "compiler_v2.cfg: split alias identities are rejected" {
+test "compiler.cfg: split alias identities are rejected" {
     const binds = [_]BindEntry{
         .{ .input_offset = 4, .label_index = 0 },
         .{ .input_offset = 4, .label_index = 1 },
@@ -3679,7 +3679,7 @@ test "compiler_v2.cfg: split alias identities are rejected" {
     try std.testing.expectEqual(@as(u32, 10), split.second_offset);
 }
 
-test "compiler_v2.cfg: fold spans record one replacement identity each" {
+test "compiler.cfg: fold spans record one replacement identity each" {
     const unique = [_]OptimizationBoundary{
         .{
             .kind = .make_ref_head,
@@ -3711,7 +3711,7 @@ test "compiler_v2.cfg: fold spans record one replacement identity each" {
     try std.testing.expectEqual(OptimizationBoundaryKind.gosub_empty, owners.second.kind);
 }
 
-test "compiler_v2.cfg: bind strictly inside a fold is rejected" {
+test "compiler.cfg: bind strictly inside a fold is rejected" {
     const binds = [_]BindEntry{
         .{ .input_offset = 0, .label_index = 0 },
         .{ .input_offset = 4, .label_index = 1 },
@@ -3736,7 +3736,7 @@ test "compiler_v2.cfg: bind strictly inside a fold is rejected" {
     try std.testing.expect(bindInsideFold(&binds, ending_at_bind) == null);
 }
 
-test "compiler_v2.cfg: canonical identity collapses aliases but not boundaries" {
+test "compiler.cfg: canonical identity collapses aliases but not boundaries" {
     const binds = [_]BindEntry{
         .{ .input_offset = 3, .label_index = 0 },
         .{ .input_offset = 3, .label_index = 1 },
@@ -3761,7 +3761,7 @@ test "compiler_v2.cfg: canonical identity collapses aliases but not boundaries" 
     );
 }
 
-test "compiler_v2.cfg: a reference naming a retired alias is a split" {
+test "compiler.cfg: a reference naming a retired alias is a split" {
     const binds = [_]BindEntry{
         .{ .input_offset = 6, .label_index = 0 },
         .{ .input_offset = 6, .label_index = 1 },

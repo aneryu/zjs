@@ -7,8 +7,8 @@ const platform_clock = @import("../platform_clock.zig");
 const call = @import("call.zig");
 const call_runtime = @import("call_runtime.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
-const exception_ops = @import("vm_exception_ops.zig");
-const module_exec = @import("module.zig");
+const exception_ops = @import("exception_ops.zig");
+const module_mod = @import("module.zig");
 const module_graph = @import("module_graph.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
@@ -19,7 +19,7 @@ const zjs_vm = @import("zjs_vm.zig");
 
 pub fn evalScriptSource(ctx: *core.JSContext, source_text: []const u8, options: core.context.ScriptEvalOptions) !core.JSValue {
     const global = options.realm_global orelse try zjs_vm.contextGlobal(ctx);
-    return call.qjsEvalGlobalScriptSource(ctx, options.output, global, source_text, options.filename);
+    return call.evalGlobalScriptSource(ctx, options.output, global, source_text, options.filename);
 }
 
 pub fn evalScriptValue(ctx: *core.JSContext, source_value: core.JSValue, options: core.context.ScriptEvalOptions) !core.JSValue {
@@ -91,7 +91,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     if (options.mode == .module) {
         const artifact = compiled.takeModuleArtifact() orelse return error.InvalidBytecode;
         const referrer_path: ?[]const u8 = if (std.mem.eql(u8, options.filename, "<eval>")) null else options.filename;
-        const record = try module_exec.installParsedModuleArtifact(
+        const record = try module_mod.installParsedModuleArtifact(
             ctx,
             module_name,
             artifact,
@@ -101,8 +101,8 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         module_record = record;
         switch (record.status) {
             .unlinked => {
-                var diagnostic: module_exec.LinkDiagnostic = .{};
-                module_exec.linkModule(ctx, record, &diagnostic) catch |err| {
+                var diagnostic: module_mod.LinkDiagnostic = .{};
+                module_mod.linkModule(ctx, record, &diagnostic) catch |err| {
                     try module_graph.throwModuleLinkError(rt, ctx, options.filename, err, &diagnostic);
                     return moduleResolutionError(err);
                 };
@@ -119,7 +119,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
             .linking => return error.ModuleLinkFailed,
         }
         if (should_evaluate_module) {
-            function = try module_exec.moduleFunctionBytecode(record);
+            function = try module_mod.moduleFunctionBytecode(record);
         }
     } else {
         function = compiled.functionBytecode() orelse return error.InvalidBytecode;
@@ -253,7 +253,7 @@ fn runEvalModule(
 
     while (true) {
         const vm_start = monotonicNanos();
-        const result = module_exec.runModuleEvaluationStep(
+        const result = module_mod.runModuleEvaluationStep(
             ctx,
             record,
             output,

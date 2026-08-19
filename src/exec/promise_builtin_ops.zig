@@ -72,7 +72,7 @@ fn promisePrototypeEntry(
 
 /// Shared record handler for `Promise.prototype.then` / `catch` / `finally`
 /// (qjs `js_promise_proto_funcs`, quickjs.c:54376). The magic only selects
-/// which of the three method names `qjsPromiseThen` branches on, so the whole
+/// which of the three method names `promiseThen` branches on, so the whole
 /// body -- the `JS_GetOpaque2` receiver check (quickjs.c:54253), the
 /// `JS_SpeciesConstructor` derivation (quickjs.c:54257), `catch`'s
 /// unconditional `JS_Invoke(this, "then", ...)` re-entry (quickjs.c:54275) and
@@ -92,7 +92,7 @@ fn promisePrototypeCall(
         @intFromEnum(PrototypeMethod.finally) => "finally",
         else => return error.TypeError,
     };
-    const result = try promise_ops.qjsPromiseThen(
+    const result = try promise_ops.promiseThen(
         host_call.ctx,
         host_call.output,
         realm.global,
@@ -102,7 +102,7 @@ fn promisePrototypeCall(
         builtin_dispatch.callerBytecode(host_call),
         builtin_dispatch.callerFrame(host_call),
     );
-    // `qjsPromiseThen` only reports "not mine" for callers that reached it by
+    // `promiseThen` only reports "not mine" for callers that reached it by
     // name; every id routed here is one of its three methods.
     return result orelse error.TypeError;
 }
@@ -116,7 +116,7 @@ fn promiseResolveCall(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == host_call.ctx);
-    return promise_ops.qjsPromiseResolveStaticCall(
+    return promise_ops.promiseResolveStaticCall(
         host_call.ctx,
         host_call.output,
         realm.global,
@@ -148,7 +148,7 @@ fn promiseStaticCall(
         @intFromEnum(StaticMethod.all_settled_keyed) => .all_settled_keyed,
         else => return error.TypeError,
     };
-    return promise_ops.qjsPromiseStaticCall(
+    return promise_ops.promiseStaticCall(
         host_call.ctx,
         host_call.output,
         realm.global,

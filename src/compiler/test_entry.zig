@@ -85,7 +85,7 @@ pub fn parseAndCompileV2TestProgram(
     }
     state.emit_phase1_temp = options.emit_phase1_temp;
 
-    try state.beginV2ProgramEmission();
+    try state.beginProgramEmission();
     try Parser.parseProgramStatements(
         &state,
         .{ .func = true, .func_with_label = true, .other = true },

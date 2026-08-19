@@ -14,7 +14,7 @@ const object_ops = zjs.exec.object_ops;
 const array_ops = zjs.exec.array_ops;
 const frame_mod = zjs.exec.frame;
 const inline_calls = zjs.exec.inline_calls;
-const test_entry = zjs.compiler_v2.test_entry;
+const test_entry = zjs.compiler.test_entry;
 
 const makeFunction = helpers.makeFunction;
 const runFunction = helpers.runFunction;
@@ -10833,7 +10833,7 @@ test "prepared Promise reactions reserve storage without claiming FIFO order" {
 
     const promise = try core.Object.create(js.runtime, core.class.ids.promise, null);
     defer promise.value().free(js.runtime);
-    const reaction = try engine.exec.promise_ops.qjsPromiseReactionRecord(
+    const reaction = try engine.exec.promise_ops.promiseReactionRecord(
         js.runtime,
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
@@ -10841,9 +10841,9 @@ test "prepared Promise reactions reserve storage without claiming FIFO order" {
         core.JSValue.undefinedValue(),
     );
     defer reaction.free(js.runtime);
-    try engine.exec.promise_ops.qjsAppendPromiseReaction(js.runtime, promise, reaction);
+    try engine.exec.promise_ops.appendPromiseReaction(js.runtime, promise, reaction);
 
-    var prepared = try engine.exec.promise_ops.qjsPreparePromiseReactionJobs(
+    var prepared = try engine.exec.promise_ops.preparePromiseReactionJobs(
         js.context,
         promise,
         core.JSValue.int32(42),
@@ -11175,7 +11175,7 @@ test "thenable job reservation OOM leaves resolving function retryable" {
 
     js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
     defer js.runtime.setMemoryLimit(null);
-    try std.testing.expectError(error.OutOfMemory, engine.exec.promise_ops.qjsPromiseResolvingFunctionCall(
+    try std.testing.expectError(error.OutOfMemory, engine.exec.promise_ops.promiseResolvingFunctionCall(
         js.context,
         null,
         global,
@@ -11190,7 +11190,7 @@ test "thenable job reservation OOM leaves resolving function retryable" {
     try std.testing.expect(promise.promiseResult() == null);
 
     js.runtime.setMemoryLimit(null);
-    const result = try engine.exec.promise_ops.qjsPromiseResolvingFunctionCall(
+    const result = try engine.exec.promise_ops.promiseResolvingFunctionCall(
         js.context,
         null,
         global,
@@ -11215,7 +11215,7 @@ test "published Promise resolution survives resolver collection through typed FI
 
     const promise = try core.Object.create(js.runtime, core.class.ids.promise, null);
     defer promise.value().free(js.runtime);
-    const reaction = try engine.exec.promise_ops.qjsPromiseReactionRecord(
+    const reaction = try engine.exec.promise_ops.promiseReactionRecord(
         js.runtime,
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
@@ -11223,7 +11223,7 @@ test "published Promise resolution survives resolver collection through typed FI
         core.JSValue.undefinedValue(),
     );
     defer reaction.free(js.runtime);
-    try engine.exec.promise_ops.qjsAppendPromiseReaction(js.runtime, promise, reaction);
+    try engine.exec.promise_ops.appendPromiseReaction(js.runtime, promise, reaction);
 
     const resolving = try engine.exec.promise_ops.createPromiseResolvingPair(js.runtime, global, promise.value());
     var resolving_alive = true;
@@ -11237,7 +11237,7 @@ test "published Promise resolution survives resolver collection through typed FI
     // preparation to fail after the resolving once-guard has committed.
     try js.runtime.job_queue.ensureCapacity(1);
     js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
-    const result = try engine.exec.promise_ops.qjsPromiseResolvingFunctionCall(
+    const result = try engine.exec.promise_ops.promiseResolvingFunctionCall(
         js.context,
         null,
         global,
@@ -18407,7 +18407,7 @@ test "FinalizationRegistry cleanup job keeps registry realm before invoking call
     callback_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
     callback_object.externalHostFunctionIdSlot().* = external_id;
 
-    const registry_value = try object_ops.qjsConstructFinalizationRegistryWithPrototype(
+    const registry_value = try object_ops.constructFinalizationRegistryWithPrototype(
         registry_realm,
         callback,
         null,

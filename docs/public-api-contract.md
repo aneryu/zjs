@@ -71,10 +71,11 @@ names.
 ## Runtime And Context
 
 `JSRuntime` owns allocator-backed engine state, atom tables, GC state, public
-handle scopes, memory limits, interrupt hooks, legacy opcode-profiling state,
-and runtime cleanup. The profiling types remain public, but the current VM
-dispatcher does not populate per-opcode counts; this surface must not be
-presented as a working profiler until the execution scope is restored.
+handle scopes, memory limits, interrupt hooks, opcode-profiling state, and
+runtime cleanup. The profiling types are public, but per-opcode counts are
+populated only in profiling builds (`zig build zjs-profile` /
+`-Dzjs_enable_opcode_profile=true`); default builds fail closed on
+`--profile-opcodes`.
 
 `JSContext` owns a realm and exposes public helpers for:
 

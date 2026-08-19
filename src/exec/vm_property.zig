@@ -3,7 +3,7 @@ const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
-const property_ic = @import("property_ic.zig");
+const property_direct = @import("property_direct.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const call_mod = @import("call.zig");
@@ -14,10 +14,10 @@ const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
-const globalDataPropertyValueForFastPath = property_ic.globalDataPropertyValueForFastPath;
-const ordinaryDataPropertyBorrowedValueForFastPath = property_ic.ordinaryDataPropertyBorrowedValueForFastPath;
-const globalWritableDataStoreAvailableForFastPath = property_ic.globalWritableDataStoreAvailableForFastPath;
-const setGlobalWritableDataStoreForFastPathOwned = property_ic.setGlobalWritableDataStoreForFastPathOwned;
+const globalDataPropertyValueForFastPath = property_direct.globalDataPropertyValueForFastPath;
+const ordinaryDataPropertyBorrowedValueForFastPath = property_direct.ordinaryDataPropertyBorrowedValueForFastPath;
+const globalWritableDataStoreAvailableForFastPath = property_direct.globalWritableDataStoreAvailableForFastPath;
+const setGlobalWritableDataStoreForFastPathOwned = property_direct.setGlobalWritableDataStoreForFastPathOwned;
 
 const op = bytecode.opcode.op;
 const atom_string = core.atom.predefinedId("String", .string).?;
@@ -1234,30 +1234,26 @@ pub fn fastArrayOwnIntElementSet(rt: *core.JSRuntime, value: core.JSValue, key: 
     return object.setOwnWritableDataProperty(rt, core.atom.atomFromUInt32(@intCast(index_i32)), new_value);
 }
 
-pub fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
+pub fn checkedInt32Add(lhs: i32, rhs: i32) core.JSValue {
     const result = @addWithOverflow(lhs, rhs);
     if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) + @as(f64, @floatFromInt(rhs)));
 }
 
-pub fn fastInt32Sub(lhs: i32, rhs: i32) core.JSValue {
+pub fn checkedInt32Sub(lhs: i32, rhs: i32) core.JSValue {
     const result = @subWithOverflow(lhs, rhs);
     if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) - @as(f64, @floatFromInt(rhs)));
 }
 
-pub fn fastInt32Mul(lhs: i32, rhs: i32) core.JSValue {
+pub fn checkedInt32Mul(lhs: i32, rhs: i32) core.JSValue {
     if ((lhs == 0 and rhs < 0) or (rhs == 0 and lhs < 0)) return core.JSValue.float64(-0.0);
     const result = @mulWithOverflow(lhs, rhs);
     if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) * @as(f64, @floatFromInt(rhs)));
 }
 
-fn objectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
-}
+const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
 
 pub fn stringFromValue(value: core.JSValue) ?*core.string.String {
     if (!value.isString()) return null;

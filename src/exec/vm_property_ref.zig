@@ -4,12 +4,12 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
-const property_ic = @import("property_ic.zig");
+const property_direct = @import("property_direct.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
 
 const call_runtime = @import("call_runtime.zig");
-const exception_ops = @import("vm_exception_ops.zig");
+const exception_ops = @import("exception_ops.zig");
 const array_ops = @import("array_ops.zig");
 const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
@@ -17,17 +17,17 @@ const readInt = call_runtime.readInt;
 const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 // Helpers that remain in vm_property.zig (shared with the leftover handlers).
-const property_vm = @import("vm_property.zig");
-const Step = property_vm.Step;
-const decodeGlobalDataGet = property_vm.decodeGlobalDataGet;
-const frameHasVarRefBinding = property_vm.frameHasVarRefBinding;
-const hasObjectBinding = property_vm.hasObjectBinding;
-const stringFromValue = property_vm.stringFromValue;
-const varRefReadableBorrowed = property_vm.varRefReadableBorrowed;
+const vm_property = @import("vm_property.zig");
+const Step = vm_property.Step;
+const decodeGlobalDataGet = vm_property.decodeGlobalDataGet;
+const frameHasVarRefBinding = vm_property.frameHasVarRefBinding;
+const hasObjectBinding = vm_property.hasObjectBinding;
+const stringFromValue = vm_property.stringFromValue;
+const varRefReadableBorrowed = vm_property.varRefReadableBorrowed;
 
-const globalDataPropertyValueForFastPath = property_ic.globalDataPropertyValueForFastPath;
-const globalWritableDataStoreAvailableForFastPath = property_ic.globalWritableDataStoreAvailableForFastPath;
-const setGlobalWritableDataStoreForFastPathOwned = property_ic.setGlobalWritableDataStoreForFastPathOwned;
+const globalDataPropertyValueForFastPath = property_direct.globalDataPropertyValueForFastPath;
+const globalWritableDataStoreAvailableForFastPath = property_direct.globalWritableDataStoreAvailableForFastPath;
+const setGlobalWritableDataStoreForFastPathOwned = property_direct.setGlobalWritableDataStoreForFastPathOwned;
 
 const op = bytecode.opcode.op;
 
@@ -200,7 +200,7 @@ pub fn makeVarRef(
                         .var_ref => env.prop_values[index].slot.var_ref.varRefValue().isUninitialized(),
                         .accessor, .auto_init => return error.InvalidBytecode,
                     };
-                    if (is_uninitialized) return exception_ops.throwTdzReference(ctx);
+                    if (is_uninitialized) return exception_ops.throwTdzReferenceError(ctx);
                     if (!flags.writable) {
                         _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
                         return error.TypeError;

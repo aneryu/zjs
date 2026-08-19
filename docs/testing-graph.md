@@ -32,7 +32,7 @@ Mixing the two styles is a `file exists in two modules` compile error.
 ### Class A: relative-path roots
 
 The root already spans the engine subtree by relative import
-(`runtime/root.zig`, `compiler_v2/root.zig`). It must **not** `@import("zjs")`.
+(`runtime/root.zig`, `compiler/root.zig`). It must **not** `@import("zjs")`.
 Attest with the relative spelling:
 
 ```zig
@@ -41,7 +41,7 @@ comptime {
 }
 ```
 
-Today: `src/runtime_tests.zig`, `src/compiler_v2_tests.zig`.
+Today: `src/runtime_tests.zig`, `src/compiler_tests.zig`.
 
 ### Class B: `zjs`-module roots
 
@@ -69,7 +69,7 @@ test binary would attest the wrong `optimize` field.
 ### `helpers.zig` (rule D)
 
 `src/tests/helpers.zig` `@import("zjs")` internally. Only Class-B roots may
-consume it. Class-A roots (`compiler_v2/tests.zig`, in-tree runtime tests)
+consume it. Class-A roots (`compiler/tests.zig`, in-tree runtime tests)
 must never import it.
 
 ## Attest matrix
@@ -98,7 +98,7 @@ Each scoped target is `src/<area>_tests.zig` × a trailing-dot filter:
 | `test-builtins` | `src/builtins_tests.zig` | `tests.builtins.` |
 | `test-runtime` | `src/runtime_tests.zig` | `runtime.` |
 | `test-runner` | `src/runner_tests.zig` | `cli.run_test262.` |
-| `test-compiler-v2` | `src/compiler_v2_tests.zig` | `compiler_v2.` |
+| `test-compiler` | `src/compiler_tests.zig` | `compiler.` |
 | `test-embedding` | `src/embedding_tests.zig` | `tests.embedding_examples.` |
 
 The trailing dot is the namespace boundary. `test-embedding` uses an
@@ -122,3 +122,4 @@ Removed next release. Each alias `dependOn`s the new step.
 | `quick-check` | `quick-gate` |
 | `checkpoint-check` | `checkpoint-gate` |
 | `test262-gate` | `test262-check` |
+| `test-compiler-v2` | `test-compiler` |
