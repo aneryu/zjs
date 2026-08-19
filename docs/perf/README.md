@@ -6,7 +6,8 @@ it does not require a local C QuickJS binary.
 
 Current design notes:
 
-- [Zoo status vs Bellard QuickJS](zoo-status.md)
+- [bench-v8 status vs Bellard QuickJS](bench-v8-status.md) — the public claim
+- [Zoo status (internal diagnostic)](zoo-status.md)
 - [Object and shape implementation](object-shape-design.md)
 - [`exec/call_runtime.zig` decomposition map](shared-vm-decomposition.md)
 - Frozen subsystem baseline (historical):
@@ -201,7 +202,7 @@ The active checked-in self baseline is
 
 The 2026-06-13 QuickJS-ng `*-vs-quickjs*` snapshots were removed from the
 active tree. Do not recover them as a current Bellard-QuickJS comparison.
-The public zoo claim is [zoo-status.md](zoo-status.md).
+The public claim is [bench-v8-status.md](bench-v8-status.md); the zoo suite stays as an internal diagnostic ([zoo-status.md](zoo-status.md)).
 
 Its environment note is `reports/perf/baseline/env-zjs-self.md`. Refresh it
 with:

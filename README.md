@@ -33,40 +33,33 @@ for untrusted code, the QuickJS C ABI, or complete TypeScript language support.
 
 ## Performance Compared With QuickJS
 
-The public comparison uses the 15-benchmark JavaScript Zoo suite. Scores are
-throughput; the ratio is `zjs score / QuickJS score`, so values at or above
-`1.0` indicate that zjs recorded the same or higher score in that benchmark.
+The public comparison uses **bench-v8** — the V8 benchmark suite version 7
+that upstream QuickJS publishes its own scores with. The suite is vendored
+in this repository (`tools/perf/bench_v8/`). Scores are the suite's
+self-reported numbers (higher is better); the ratio is
+`zjs score / QuickJS score`.
 
-| Benchmark | zjs / QuickJS |
-| --- | ---: |
-| pdfjs | 0.849 |
-| earley-boyer | 0.886 |
-| box2d | 0.955 |
-| typescript | 0.958 |
-| splay | 1.013 |
-| deltablue | 1.028 |
-| richards | 1.041 |
-| gbemu | 1.069 |
-| crypto | 1.077 |
-| mandreel | 1.091 |
-| raytrace | 1.094 |
-| code-load | 1.095 |
-| navier-stokes | 1.105 |
-| zlib | 1.110 |
-| regexp | 1.139 |
-| **Throughput geomean** | **1.0304** |
+| Benchmark | zjs | QuickJS | zjs / QuickJS |
+| --- | ---: | ---: | ---: |
+| EarleyBoyer | 3,950 | 4,492 | 0.879 |
+| Splay | 7,346 | 7,208 | 1.019 |
+| DeltaBlue | 1,457 | 1,411 | 1.033 |
+| Richards | 1,700 | 1,614 | 1.054 |
+| Crypto | 2,346 | 2,198 | 1.068 |
+| RayTrace | 3,687 | 3,367 | 1.095 |
+| NavierStokes | 4,792 | 4,307 | 1.113 |
+| RegExp | 976 | 854 | 1.144 |
+| **Composite Score (version 7)** | **2,706** | **2,586** | **1.0464** |
 
-The suite also reports two latency sub-scores outside the 15-row throughput
-geomean: SplayLatency 0.993 and MandreelLatency 1.169.
+The comparison used zjs commit `da875a7d`, Bellard QuickJS commit `04be246`,
+and 8 pinned interleaved samples per engine (medians). Of the 8 benchmarks,
+7 have a ratio at or above `1.0`.
 
-The comparison used zjs commit `0c32a71c`, Bellard QuickJS commit `04be246`,
-and 8 samples per benchmark. Of the 15 primary scores, 11 have a ratio at or
-above `1.0`.
-
-Measurements were collected on an ARM Cortex-X925 Linux host with pinned CPU
-clusters. The QuickJS reference used its upstream release build. Protocol,
+Measurements were collected on an ARM Cortex-X925 Linux host with a pinned
+CPU. The QuickJS reference used its upstream release build. Protocol,
 machine details, current results, and reproduction notes are recorded in
-[docs/perf/zoo-status.md](docs/perf/zoo-status.md) and [STATUS.md](STATUS.md).
+[docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md) and
+[STATUS.md](STATUS.md).
 
 ## Compatibility
 

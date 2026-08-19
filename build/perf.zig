@@ -18,6 +18,14 @@ pub fn addPerfSteps(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts) void {
     const perf_benchmark_step = b.step("perf-benchmark", "Run a repeatable diagnostic JS performance benchmark");
     perf_benchmark_step.dependOn(&run_perf_benchmark.step);
 
+    // Diagnostic single run of the vendored bench-v8 suite (the public
+    // performance metric; official comparisons use run_benchv8_compare.py
+    // on the measurement machine, never CI).
+    const run_bench_v8 = b.addSystemCommand(&.{ "python3", "tools/perf/bench_v8/run_local.py" });
+    run_bench_v8.addArtifactArg(zjs_exe);
+    const perf_bench_v8_step = b.step("perf-bench-v8", "Run the vendored bench-v8 (V8 suite v7) once on zjs");
+    perf_bench_v8_step.dependOn(&run_bench_v8.step);
+
     const perf_runtime_profiles_step = b.step("perf-runtime-profiles", "Record zjs runtime profiles for focused benchmark scripts");
 
     inline for (profiles.runtime_profiles) |profile| {

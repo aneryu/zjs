@@ -1,0 +1,2 @@
+# Vendored third-party benchmark sources, kept byte-identical to upstream.
+suite/* -whitespace

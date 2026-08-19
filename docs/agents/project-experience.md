@@ -337,7 +337,7 @@ partial evidence is more useful than a polished but unsupported success claim.
 - Source ownership and layering: [architecture.md](../architecture.md)
 - Contribution scope: [CONTRIBUTING.md](../../CONTRIBUTING.md)
 - Performance contracts: [Performance Workflow](../perf/README.md)
-- Current public Zoo snapshot: [Zoo status](../perf/zoo-status.md)
+- Current public performance snapshot: [bench-v8 status](../perf/bench-v8-status.md); internal zoo diagnostic: [Zoo status](../perf/zoo-status.md)
 - Historical subsystem baseline and evidence vocabulary:
   [QuickJS subsystem baseline](../qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)
 - Local issue/PRD workflow and triage labels: [issue tracker](issue-tracker.md)

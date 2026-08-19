@@ -7,6 +7,16 @@ breaking public-API cleanup is approved for this cycle; hot-path structural
 refactors are deferred to `docs/maintainability-backlog.md` and land only
 under the refactor-policy gates.
 
+- Switched the public performance metric to **bench-v8** (the V8 benchmark
+  suite version 7 — the suite upstream QuickJS publishes its scores with)
+  and vendored it unmodified under `tools/perf/bench_v8/suite/` (from the
+  V8 repository at tag 7.9.317; BSD license headers retained). Added the
+  pinned ABBA-interleaved comparison runner
+  (`tools/perf/bench_v8/run_benchv8_compare.py`), a `perf-bench-v8`
+  diagnostic build step, and `docs/perf/bench-v8-status.md` as the
+  authoritative score page. The 15-benchmark zoo suite remains an internal
+  diagnostic; its last baseline is preserved in `docs/perf/zoo-status.md`.
+
 ### 0.2.0 breaking public API
 
 - Renamed the compiler directory `src/compiler_v2/` → `src/compiler/` (owner

@@ -39,8 +39,11 @@ when needed.
 
 ## Performance
 
-- [Zoo status vs QuickJS](perf/zoo-status.md): the public 15-benchmark geomean
-  claim — the single authoritative score source.
+- [bench-v8 status vs QuickJS](perf/bench-v8-status.md): the public
+  performance claim (V8 suite v7 — the suite upstream QuickJS publishes
+  with) — the single authoritative score source.
+- [Zoo status vs QuickJS](perf/zoo-status.md): internal 15-benchmark
+  diagnostic suite (broader coverage; last zoo baseline preserved).
 - [Performance Workflow](perf/README.md): self-baseline gate, measurement
   contract, profiling, PMU discipline.
 - [Object And Shape Implementation](perf/object-shape-design.md): fixed

@@ -22,7 +22,8 @@
 >   仍成立（见 `docs/perf/object-shape-design.md`）。
 > - §17.2/§22.4：`tools/regexp-direct-demo/` 已删除，相关复核命令不可执行。
 > - §20：全部性能数字已被后续战役取代；当前口径见
->   `docs/perf/zoo-status.md`。
+>   `docs/perf/bench-v8-status.md`（公开指标）与 `docs/perf/zoo-status.md`
+>   （内部诊断）。
 > - §1.1 的 zjs 基线 SHA `32e881db` 因 2026-08-18 的历史重写不在 main
 >   谱系上，仅存于侧分支/tag。
 

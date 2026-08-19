@@ -16,13 +16,16 @@ source-phase imports, and PTC.
 
 ## Performance
 
-The authoritative score source is `docs/perf/zoo-status.md`; this page does
-not maintain its own copy of the zoo numbers.
+The authoritative score source is `docs/perf/bench-v8-status.md` (the V8
+benchmark suite v7 — the suite upstream QuickJS publishes with, vendored in
+`tools/perf/bench_v8/`); this page does not maintain its own copy of the
+numbers.
 
-Current headline (zoo-status 2026-08-19 clean-field close, `main@0c32a71c`,
-official 8-sample parallel-cluster protocol): geomean **1.0304**, 11/15
-benchmarks at or above 1.0. The remaining laggards are listed in zoo-status
-(pdfjs / earley-boyer / box2d / typescript).
+Current headline (2026-08-19, `main@da875a7d`, serial pinned 8-sample
+ABBA protocol): composite Score ratio **1.0464** (zjs 2706 / qjs 2586),
+7/8 benchmarks at or above 1.0. The remaining laggard is EarleyBoyer
+(0.879). The 15-benchmark zoo suite stays as an internal diagnostic
+(`docs/perf/zoo-status.md`, last baseline geomean 1.0304).
 
 This is a maintainer single-machine measurement; there is no independent
 reproduction yet.

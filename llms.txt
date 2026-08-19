@@ -24,7 +24,7 @@ is not a TypeScript type checker or a replacement for tsc.
 - [Public API contract](https://github.com/aneryu/zjs/blob/main/docs/public-api-contract.md): supported Zig API surface and ownership rules.
 - [Architecture](https://github.com/aneryu/zjs/blob/main/docs/architecture.md): parser, compiler, bytecode, VM, runtime, and binding layout.
 - [Security boundary](https://github.com/aneryu/zjs/blob/main/docs/security-boundary.md): trusted-code assumptions and reliability controls.
-- [Performance vs QuickJS](https://github.com/aneryu/zjs/blob/main/docs/perf/zoo-status.md): current measured comparison, provenance, and caveats.
+- [Performance vs QuickJS](https://github.com/aneryu/zjs/blob/main/docs/perf/bench-v8-status.md): current measured comparison, provenance, and caveats.
 - [Documentation map](https://github.com/aneryu/zjs/blob/main/docs/README.md): index of active project documentation.
 
 ## Project And Contribution

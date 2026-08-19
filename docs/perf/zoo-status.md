@@ -1,7 +1,14 @@
 # Zoo status vs Bellard QuickJS
 
-Checked headline for the 15-benchmark zoo. This is the public performance
-claim. It is not the `perf-self-check` self-baseline gate.
+> **2026-08-19 (owner ruling): the public performance metric moved to
+> bench-v8** — the V8 benchmark suite v7 that upstream QuickJS publishes
+> its own numbers with. See
+> [bench-v8-status.md](bench-v8-status.md). The zoo suite remains an
+> internal diagnostic (broader coverage: 15 benchmarks vs 8); the numbers
+> below stay as the last zoo baseline.
+
+Checked headline for the 15-benchmark zoo. It is not the `perf-self-check`
+self-baseline gate.
 
 | Field | Value |
 | --- | --- |
