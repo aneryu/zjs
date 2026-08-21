@@ -12958,12 +12958,15 @@ pub const phase_ownership = struct {
     }
 
     fn parseStateAtomOwners(rt: *const core.JSRuntime, state: *const ParseState) usize {
-        // Parser.State.deinit releases class_private_bound_names, while its
-        // Lexer.freeToken call releases an identifier/private-name token.
+        // Parser.State.deinit releases the namespace/declaration slots and
+        // class_private_bound_names, while its Lexer.freeToken call releases
+        // an identifier/private-name token.
         var count: usize = switch (state.token.payload) {
             .ident => |ident| atomSlotCount(rt, ident.atom),
             else => 0,
         };
+        if (state.current_namespace_atom) |atom_id| count += atomSlotCount(rt, atom_id);
+        if (state.last_declared_atom) |atom_id| count += atomSlotCount(rt, atom_id);
         for (state.class_private_bound_names.items) |atom_id| count += atomSlotCount(rt, atom_id);
         return count;
     }

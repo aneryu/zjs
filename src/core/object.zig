@@ -244,21 +244,6 @@ fn destroyValueSliceWithCapacity(rt: *JSRuntime, slot: *[]JSValue, capacity: *us
     }
 }
 
-fn destroyOptionalValueSlice(rt: *JSRuntime, slot: *[]?JSValue, capacity: *usize) void {
-    const values = slot.*;
-    const old_capacity = capacity.*;
-    slot.* = &.{};
-    capacity.* = 0;
-    for (values) |maybe_value| {
-        if (maybe_value) |stored| stored.free(rt);
-    }
-    if (old_capacity != 0) {
-        rt.memory.free(?JSValue, values.ptr[0..old_capacity]);
-    } else if (values.len != 0) {
-        rt.memory.free(?JSValue, values);
-    }
-}
-
 fn destroyAtomSlice(rt: *JSRuntime, slot: *[]atom.Atom) void {
     const atoms = slot.*;
     slot.* = &.{};
@@ -889,8 +874,6 @@ pub const RealmValueSlot = enum(u8) {
     callsite_prototype,
     count,
 };
-
-const realm_value_slot_count: usize = @intFromEnum(RealmValueSlot.count);
 
 /// State belonging to the global *object*, not to the realm. Intrinsics,
 /// prototypes, eval, lexical state, random state, and initial Shapes are owned
@@ -4342,18 +4325,11 @@ pub const Object = extern struct {
             .{ .value = &rooted_held_value },
             .{ .value = &rooted_unregister_token },
         };
-        const root_frame = runtime_mod.ValueRootFrame{
-            .previous = rt.active_value_roots,
+        var root_frame = runtime_mod.ValueRootFrame{
             .values = &root_values,
         };
-        if (comptime runtime_mod.value_root_frames_enabled) {
-            rt.active_value_roots = &root_frame;
-        }
-        defer {
-            if (comptime runtime_mod.value_root_frames_enabled) {
-                rt.active_value_roots = root_frame.previous;
-            }
-        }
+        root_frame.activate(rt);
+        defer root_frame.deactivate(rt);
 
         const target_identity = try weakIdentityFromValue(rt, rooted_target);
         const unregister_token_identity = try weakIdentityFromValue(rt, rooted_unregister_token);
@@ -5202,21 +5178,9 @@ pub const Object = extern struct {
     pub fn setWeakRefTarget(self: *Object, rt: *JSRuntime, target: JSValue) !void {
         std.debug.assert(self.class_id == class.ids.weak_ref);
         var rooted_target = target;
-        var root_values = [_]runtime_mod.ValueRootValue{
-            .{ .value = &rooted_target },
-        };
-        const root_frame = runtime_mod.ValueRootFrame{
-            .previous = rt.active_value_roots,
-            .values = &root_values,
-        };
-        if (comptime runtime_mod.value_root_frames_enabled) {
-            rt.active_value_roots = &root_frame;
-        }
-        defer {
-            if (comptime runtime_mod.value_root_frames_enabled) {
-                rt.active_value_roots = root_frame.previous;
-            }
-        }
+        var root_frame = runtime_mod.rootValues(.{&rooted_target});
+        root_frame.activate(rt);
+        defer root_frame.deactivate(rt);
 
         const weak_target_identity = try weakIdentityFromValue(rt, rooted_target);
         try rt.registerBorrowedReferenceHolder(self);
@@ -11727,7 +11691,7 @@ pub const Object = extern struct {
                     .atom_id = prop.atom_id,
                 });
             }
-            std.mem.sort(IndexKey, index_keys.items, {}, indexKeyLessThan);
+            std.sort.heap(IndexKey, index_keys.items, {}, indexKeyLessThan);
             var previous_index: ?u32 = null;
             for (index_keys.items) |index_key| {
                 if (previous_index) |previous| {
@@ -12793,15 +12757,6 @@ fn isTypedArrayObjectForSetFastPath(object: *const Object) bool {
 // which imports these predicates. `src/exec/buffer_ops.zig` owns the
 // JS-visible record surface that uses both blocks.
 
-fn typedArrayBackingBufferObject(object: *Object) !*Object {
-    const value = object.typedArrayBuffer() orelse return error.TypeError;
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    const buffer: *Object = @fieldParentPtr("header", header);
-    if (buffer.class_id != class.ids.array_buffer and buffer.class_id != class.ids.shared_array_buffer) return error.TypeError;
-    return buffer;
-}
-
 pub fn isTypedArrayObject(object: *const Object) bool {
     const payload = object.typedArrayPayloadFast() orelse return false;
     return payload.buffer != null and payload.element_size != 0;
@@ -13116,21 +13071,9 @@ fn entriesAtomToStringValue(rt: *JSRuntime, atom_id: atom.Atom) !JSValue {
 fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue, prototype: ?*Object) !JSValue {
     var rooted_value = value;
     defer rooted_value.free(rt);
-    var root_values = [_]runtime_mod.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = runtime_mod.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime runtime_mod.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime runtime_mod.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = runtime_mod.rootValues(.{&rooted_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const arr = try Object.createArray(rt, prototype);
     errdefer Object.destroyFromHeader(rt, &arr.header);
@@ -13151,23 +13094,9 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode, protot
     var rooted_value = value;
     var out_value = JSValue.undefinedValue();
     var element_val = JSValue.undefinedValue();
-    var root_values = [_]runtime_mod.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &out_value },
-        .{ .value = &element_val },
-    };
-    const root_frame = runtime_mod.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime runtime_mod.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime runtime_mod.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = runtime_mod.rootValues(.{ &rooted_value, &out_value, &element_val });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const object = try ownEntriesExpectObject(rooted_value);
     const owned_keys = try object.ownKeys(rt);
@@ -13258,24 +13187,14 @@ pub fn stringIterator(ctx: *context_mod.RealmContext, receiver: JSValue) !JSValu
     var target = JSValue.undefinedValue();
     var prototype_value = JSValue.undefinedValue();
     var object_value = JSValue.undefinedValue();
-    var root_values = [_]runtime_mod.ValueRootValue{
-        .{ .value = &rooted_receiver },
-        .{ .value = &target },
-        .{ .value = &prototype_value },
-        .{ .value = &object_value },
-    };
-    const root_frame = runtime_mod.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime runtime_mod.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime runtime_mod.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = runtime_mod.rootValues(.{
+        &rooted_receiver,
+        &target,
+        &prototype_value,
+        &object_value,
+    });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     target = try stringIteratorPrimitiveValue(rooted_receiver);
     defer target.free(rt);

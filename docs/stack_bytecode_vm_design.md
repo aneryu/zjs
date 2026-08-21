@@ -66,7 +66,9 @@ resident storage instead of borrowing the arena.
 
 Live values in the VM stay alive via refcount-on-push and deterministic
 frame teardown. `ValueRootFrame` is for host/builtin boundaries, not
-generic root registration of every VM frame.
+generic root registration of every VM frame. Its `activate` / `deactivate`
+interface owns the test-only LIFO link and restoration protocol; callers
+provide only the root storage and keep its stack address valid for that scope.
 
 ## 4. Property Access
 

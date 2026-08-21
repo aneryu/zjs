@@ -1,7 +1,10 @@
 const std = @import("std");
+const function_ops = @import("function_ops.zig");
+const reflect_ops = @import("reflect_ops.zig");
+const atomics_ops = @import("atomics_ops.zig");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
-const jobs_mod = @import("../core/jobs.zig");
+const jobs_mod = core.jobs;
 const call_mod = @import("call.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
@@ -43,35 +46,35 @@ const forof_ops = @import("forof_ops.zig");
 const object_ops = @import("object_ops.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const string_ops = @import("string_ops.zig");
-const AtomicsWaiter = call_runtime.AtomicsWaiter;
-const ReflectConstructResolution = call_runtime.ReflectConstructResolution;
+const AtomicsWaiter = atomics_ops.AtomicsWaiter;
+const ReflectConstructResolution = reflect_ops.ReflectConstructResolution;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
 const atomicsBufferObject = object_ops.atomicsBufferObject;
-const atomicsElementBytes = call_runtime.atomicsElementBytes;
-const atomicsLinkWaiter = call_runtime.atomicsLinkWaiter;
-const atomicsMaskBits = call_runtime.atomicsMaskBits;
-const atomicsReadBits = call_runtime.atomicsReadBits;
-const atomicsReleaseWaiterKey = call_runtime.atomicsReleaseWaiterKey;
-const atomicsRetainWaiterKey = call_runtime.atomicsRetainWaiterKey;
+const atomicsElementBytes = atomics_ops.atomicsElementBytes;
+const atomicsLinkWaiter = atomics_ops.atomicsLinkWaiter;
+const atomicsMaskBits = atomics_ops.atomicsMaskBits;
+const atomicsReadBits = atomics_ops.atomicsReadBits;
+const atomicsReleaseWaiterKey = atomics_ops.atomicsReleaseWaiterKey;
+const atomicsRetainWaiterKey = atomics_ops.atomicsRetainWaiterKey;
 const atomicsTypedArray = array_ops.atomicsTypedArray;
 const atomicsTypedArrayIsBigInt = array_ops.atomicsTypedArrayIsBigInt;
-const atomicsValidateAccess = call_runtime.atomicsValidateAccess;
-const atomicsValidateIndex = call_runtime.atomicsValidateIndex;
-const atomicsWaitTimeoutMilliseconds = call_runtime.atomicsWaitTimeoutMilliseconds;
-const atomicsWaiterIo = call_runtime.atomicsWaiterIo;
-const atomicsWaiterKey = call_runtime.atomicsWaiterKey;
+const atomicsValidateAccess = atomics_ops.atomicsValidateAccess;
+const atomicsValidateIndex = atomics_ops.atomicsValidateIndex;
+const atomicsWaitTimeoutMilliseconds = atomics_ops.atomicsWaitTimeoutMilliseconds;
+const atomicsWaiterIo = atomics_ops.atomicsWaiterIo;
+const atomicsWaiterKey = atomics_ops.atomicsWaiterKey;
 const boundFunctionArgs = call_runtime.boundFunctionArgs;
 const cachedRealmObject = object_ops.cachedRealmObject;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const callableObjectFromValue = object_ops.callableObjectFromValue;
 const closeIteratorFromVm = forof_ops.closeIteratorFromVm;
 const closeIteratorFromVmImpl = forof_ops.closeIteratorFromVmImpl;
-const constructDynamicFunctionFromSource = call_runtime.constructDynamicFunctionFromSource;
+const constructDynamicFunctionFromSource = function_ops.constructDynamicFunctionFromSource;
 const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
 const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
 const constructorPrototypeObject = object_ops.constructorPrototypeObject;
 const createGeneratorObject = object_ops.createGeneratorObject;
-const createIteratorResult = call_runtime.createIteratorResult;
+const createIteratorResult = iterator_ops.createIteratorResult;
 const defineDataPropertyByName = object_ops.defineDataPropertyByName;
 const defineValueProperty = object_ops.defineValueProperty;
 const findForOfIteratorIndex = forof_ops.findForOfIteratorIndex;
@@ -88,22 +91,22 @@ const objectPrototypeFromGlobal = object_ops.objectPrototypeFromGlobal;
 const objectRealmGlobal = object_ops.objectRealmGlobal;
 const objectRestOwnKeys = object_ops.objectRestOwnKeys;
 const pollGCSafePoint = call_runtime.pollGCSafePoint;
-const processExpiredAtomicsWaiters = call_runtime.processExpiredAtomicsWaiters;
+const processExpiredAtomicsWaiters = atomics_ops.processExpiredAtomicsWaiters;
 const proxyAwareOwnPropertyDescriptor = object_ops.proxyAwareOwnPropertyDescriptor;
 const proxyTrapKeyValue = object_ops.proxyTrapKeyValue;
 const createBuiltinFunction = builtin_glue.createBuiltinFunction;
 const defineToStringTag = iterator_ops.defineToStringTag;
 const suppressedErrorForDispose = disposable_ops.suppressedErrorForDispose;
-const runNextAtomicsHostCompletion = call_runtime.runNextAtomicsHostCompletion;
+const runNextAtomicsHostCompletion = atomics_ops.runNextAtomicsHostCompletion;
 const runNextOsRwHandler = call_runtime.runNextOsRwHandler;
 const runNextOsTimer = call_runtime.runNextOsTimer;
 const runtimeErrorValueForDisposableDispose = disposable_ops.runtimeErrorValueForDisposableDispose;
 const setGeneratorResumeCompletionType = call_runtime.setGeneratorResumeCompletionType;
 const storeRealmValue = builtin_glue.storeRealmValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
-const toBigIntBitsForAtomics = call_runtime.toBigIntBitsForAtomics;
-const toInt32BitsForAtomics = call_runtime.toInt32BitsForAtomics;
-const toNumberForAtomics = call_runtime.toNumberForAtomics;
+const toBigIntBitsForAtomics = atomics_ops.toBigIntBitsForAtomics;
+const toInt32BitsForAtomics = atomics_ops.toInt32BitsForAtomics;
+const toNumberForAtomics = atomics_ops.toNumberForAtomics;
 const valueTruthy = coercion_ops.valueTruthy;
 
 pub fn promisePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
@@ -722,21 +725,9 @@ pub const PromiseResolvingPairVm = struct {
 
 pub fn createPromiseResolvingState(rt: *core.JSRuntime) !*core.Object {
     var state_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &state_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&state_val});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const state = try core.Object.create(rt, core.class.ids.object, null);
     state_val = state.value();
@@ -750,23 +741,9 @@ pub fn createPromiseResolvingPair(rt: *core.JSRuntime, global: *core.Object, pro
     var resolve_val = core.JSValue.undefinedValue();
     var reject_val = core.JSValue.undefinedValue();
 
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &state_val },
-        .{ .value = &resolve_val },
-        .{ .value = &reject_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &state_val, &resolve_val, &reject_val });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     defer state_val.free(rt);
     defer resolve_val.free(rt);
@@ -788,23 +765,9 @@ pub fn createPromiseResolvingFunction(rt: *core.JSRuntime, global: *core.Object,
     var rooted_promise = promise;
     var state_val = state.value();
     var function_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_promise },
-        .{ .value = &state_val },
-        .{ .value = &function_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_promise, &state_val, &function_val });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const function_proto = functionPrototypeFromGlobal(rt, global) orelse return error.InvalidBuiltinRegistry;
     function_val = try core.function.nativeDataFunctionWithPrototype(rt, function_proto, "", 1);
@@ -930,24 +893,14 @@ pub fn promiseReactionRecord(
     var rooted_on_rejected = on_rejected;
     var rooted_resolve = resolve;
     var rooted_reject = reject;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_on_fulfilled },
-        .{ .value = &rooted_on_rejected },
-        .{ .value = &rooted_resolve },
-        .{ .value = &rooted_reject },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &rooted_on_fulfilled,
+        &rooted_on_rejected,
+        &rooted_resolve,
+        &rooted_reject,
+    });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &record.header);
@@ -1163,21 +1116,9 @@ pub fn preparePromiseReactionJobs(
     const reactions = promise.promiseReactions();
     if (reactions.len == 0) return .{};
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const jobs = try ctx.runtime.memory.alloc(jobs_mod.Job, reactions.len);
     var prepared = PreparedPromiseReactionJobs{ .jobs = jobs };
@@ -1192,19 +1133,6 @@ pub fn preparePromiseReactionJobs(
     try ctx.runtime.job_queue.reserveEntries(prepared.initialized);
     prepared.reserved_entries = prepared.initialized;
     return prepared;
-}
-
-pub fn queuePromiseReactions(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    promise: *core.Object,
-    value: core.JSValue,
-    rejected: bool,
-) !void {
-    _ = global;
-    var prepared = try preparePromiseReactionJobs(ctx, promise, value, rejected);
-    errdefer prepared.deinit(ctx.runtime);
-    prepared.commit(ctx, promise);
 }
 
 pub fn promiseSettleValue(
@@ -2302,25 +2230,15 @@ pub fn promiseCapability(
     var promise_value = core.JSValue.undefinedValue();
     var resolve_value = core.JSValue.undefinedValue();
     var reject_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &slot_value },
-        .{ .value = &executor_value },
-        .{ .value = &promise_value },
-        .{ .value = &resolve_value },
-        .{ .value = &reject_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &slot_value,
+        &executor_value,
+        &promise_value,
+        &resolve_value,
+        &reject_value,
+    });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     defer slot_value.free(ctx.runtime);
     defer executor_value.free(ctx.runtime);
@@ -2369,25 +2287,15 @@ pub fn promiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *core
     var result_value = core.JSValue.undefinedValue();
     var key_value = core.JSValue.undefinedValue();
     var value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &keys_value },
-        .{ .value = &values_value },
-        .{ .value = &result_value },
-        .{ .value = &key_value },
-        .{ .value = &value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &keys_value,
+        &values_value,
+        &result_value,
+        &key_value,
+        &value,
+    });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const result = try core.Object.create(rt, core.class.ids.object, null);
     result_value = result.value();
@@ -2466,21 +2374,9 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
 
 pub fn promiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: core.JSValue) !core.JSValue {
     var rooted_payload = payload;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_payload },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_payload});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &record.header);
@@ -2529,23 +2425,9 @@ pub fn promiseCombinatorState(rt: *core.JSRuntime, resolve_value: core.JSValue, 
     var rooted_resolve = resolve_value;
     var rooted_reject = reject_value;
     var rooted_values = values.value();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_resolve },
-        .{ .value = &rooted_reject },
-        .{ .value = &rooted_values },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_resolve, &rooted_reject, &rooted_values });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const state = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &state.header);
@@ -3435,28 +3317,16 @@ pub fn atomicsLinkAsyncWaiter(waiter: *AtomicsWaiter) void {
     const ctx = waiter.realm.borrow().?;
     ctx.runtime.assertOwnerThread();
     const io = atomicsWaiterIo();
-    call_runtime.atomics_waiter_mutex.lockUncancelable(io);
-    defer call_runtime.atomics_waiter_mutex.unlock(io);
+    atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
+    defer atomics_ops.atomics_waiter_mutex.unlock(io);
     atomicsLinkWaiter(waiter);
 }
 
 pub fn atomicsWaitAsyncResult(ctx: *core.JSContext, is_async: bool, value: core.JSValue) !core.JSValue {
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const result = try core.Object.create(ctx.runtime, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &result.header);
@@ -3721,21 +3591,9 @@ pub fn asyncFunctionSettle(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!void {
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const promise_value = continuation.generatorAsyncPromise() orelse return error.TypeError;
     const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise_value);
@@ -3893,7 +3751,7 @@ pub fn asyncFromSyncIteratorThrow(
         // IteratorClose(sync_iter) with no pending exception; a close failure
         // rejects with that error, otherwise reject the TypeError
         // (quickjs.c:54515-54519).
-        call_runtime.iteratorCloseValue(ctx, output, global, sync_iterator, caller_function, caller_frame) catch |err| {
+        iterator_ops.iteratorCloseValue(ctx, output, global, sync_iterator, caller_function, caller_frame) catch |err| {
             return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
         };
         const reason = try exception_ops.createNamedError(ctx, global, "TypeError", "throw is not a method");
@@ -3944,7 +3802,7 @@ pub fn asyncFromSyncIteratorCloseWrapCall(
     defer reason.free(ctx.runtime);
     // JS_IteratorClose(…, TRUE): the close runs with the exception logically
     // pending — its own result and failures are discarded.
-    call_runtime.iteratorCloseValue(ctx, output, global, sync_iterator, null, null) catch {
+    iterator_ops.iteratorCloseValue(ctx, output, global, sync_iterator, null, null) catch {
         if (ctx.hasException()) ctx.clearException();
     };
     _ = ctx.throwValue(reason.dup());
@@ -4053,7 +3911,7 @@ pub fn asyncFromSyncIteratorContinuation(
         // PromiseResolve threw: close the sync iterator with the exception
         // pending, then reject (quickjs.c:54544-54549).
         if (close_on_rejection and !done) {
-            call_runtime.iteratorCloseValue(ctx, output, global, sync_iterator, caller_function, caller_frame) catch {
+            iterator_ops.iteratorCloseValue(ctx, output, global, sync_iterator, caller_function, caller_frame) catch {
                 if (ctx.hasException()) ctx.clearException();
             };
         }
@@ -4133,23 +3991,13 @@ pub fn promiseFinallyCallback(
     var rooted_payload = payload orelse core.JSValue.undefinedValue();
     var rooted_on_finally = on_finally orelse core.JSValue.undefinedValue();
     var rooted_constructor = constructor_value orelse core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_payload },
-        .{ .value = &rooted_on_finally },
-        .{ .value = &rooted_constructor },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &rooted_payload,
+        &rooted_on_finally,
+        &rooted_constructor,
+    });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const callback = try builtin_glue.createDataFunction(rt, global, "", if (mode == .fulfill or mode == .reject) 1 else 0);
     errdefer callback.free(rt);
@@ -4514,22 +4362,9 @@ pub fn settlePendingPromiseReaction(
     defer callback_value.free(ctx.runtime);
     var arg = if (promise.promiseReactionArg()) |stored| stored.dup() else core.JSValue.undefinedValue();
     defer arg.free(ctx.runtime);
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &callback_value },
-        .{ .value = &arg },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &callback_value, &arg });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     try promise.setPromiseReactionCallback(ctx.runtime, null);
     try promise.setPromiseReactionArg(ctx.runtime, null);
@@ -4879,48 +4714,6 @@ pub fn finishAwaitedPromise(ctx: *core.JSContext, promise: *core.Object) !core.J
         return error.JSException;
     }
     return result;
-}
-
-pub fn reflectConstructResolveBound(
-    rt: *core.JSRuntime,
-    target_value: core.JSValue,
-    new_target_value: core.JSValue,
-    args: []const core.JSValue,
-) !ReflectConstructResolution {
-    var target = target_value;
-    var effective_new_target = new_target_value;
-    var current_args: []const core.JSValue = args;
-    var owned_args: []core.JSValue = &.{};
-    var rooted_owned_args: []core.JSValue = &.{};
-    var owned_args_root = ValueSliceRoot{};
-    owned_args_root.init(rt, &rooted_owned_args);
-    defer owned_args_root.deinit();
-    errdefer if (owned_args.len != 0) {
-        freeArgs(rt, owned_args);
-        rooted_owned_args = &.{};
-    };
-
-    while (callableObjectFromValue(target)) |function_object| {
-        if (function_object.class_id != core.class.ids.bound_function) break;
-        const combined = try boundFunctionArgs(rt, function_object, current_args);
-        const previous_owned_args = owned_args;
-        rooted_owned_args = combined;
-        owned_args = combined;
-        current_args = owned_args;
-        if (previous_owned_args.len != 0) freeArgs(rt, previous_owned_args);
-        const next_target = function_object.boundTarget() orelse return error.TypeError;
-        if (target.sameValue(effective_new_target)) {
-            effective_new_target = next_target;
-        }
-        target = next_target;
-    }
-
-    return .{
-        .target = target,
-        .new_target = effective_new_target,
-        .args = current_args,
-        .owned_args = owned_args,
-    };
 }
 
 pub fn rejectModuleNamespaceSuperSet(ctx: *core.JSContext, receiver: core.JSValue, atom_id: core.Atom) !bool {

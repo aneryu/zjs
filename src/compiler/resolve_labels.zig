@@ -243,15 +243,6 @@ fn resolvedJumpAddress(
     return @intCast(target);
 }
 
-const SourcePoint = struct {
-    line: i32,
-    col: i32,
-};
-
-fn sourcePointEqual(lhs: SourcePoint, rhs: SourcePoint) bool {
-    return lhs.line == rhs.line and lhs.col == rhs.col;
-}
-
 const Instruction = struct {
     op_id: u8,
     size: u32,
@@ -481,7 +472,7 @@ const Resolver = struct {
     atom_cursor: u32 = 0,
     source_cursor: u32 = 0,
     source_attach_cursor: u32 = 0,
-    last_attached_source: ?SourcePoint = null,
+    last_attached_source: ?cfg.SourcePoint = null,
     last_pc: u32 = 0,
     last_sz: u32 = 0,
     /// Expected B opcode for the live A, or 0 if the last emit is not a
@@ -594,7 +585,7 @@ const Resolver = struct {
                 };
                 index += 1;
             }
-            std.mem.sort(BindEntry, self.binds, {}, bindLessThan);
+            std.sort.heap(BindEntry, self.binds, {}, bindLessThan);
         }
         self.refreshBindFrontier();
 
@@ -1050,9 +1041,9 @@ const Resolver = struct {
         // loop below.
         if (self.source_attach_cursor == self.source_cursor - 1) {
             const source = self.input_sources[self.source_attach_cursor];
-            const pending = SourcePoint{ .line = source.line, .col = source.col };
+            const pending = cfg.SourcePoint{ .line = source.line, .col = source.col };
             if (self.last_attached_source) |last| {
-                if (sourcePointEqual(last, pending)) {
+                if (last.eql(pending)) {
                     self.source_attach_cursor += 1;
                     return;
                 }
@@ -1078,9 +1069,9 @@ const Resolver = struct {
         while (self.source_attach_cursor < self.source_cursor) {
             const source = self.input_sources[self.source_attach_cursor];
             self.source_attach_cursor += 1;
-            const pending = SourcePoint{ .line = source.line, .col = source.col };
+            const pending = cfg.SourcePoint{ .line = source.line, .col = source.col };
             if (self.last_attached_source) |last| {
-                if (sourcePointEqual(last, pending)) continue;
+                if (last.eql(pending)) continue;
             }
             self.output_sources[self.output_source_len] = .{
                 .pc = self.output_len,
@@ -1115,9 +1106,9 @@ const Resolver = struct {
         var index = start;
         while (index < end) : (index += 1) {
             const source = self.input_sources[index];
-            const pending = SourcePoint{ .line = source.line, .col = source.col };
+            const pending = cfg.SourcePoint{ .line = source.line, .col = source.col };
             if (self.last_attached_source) |last| {
-                if (sourcePointEqual(last, pending)) continue;
+                if (last.eql(pending)) continue;
             }
             self.output_sources[self.output_source_len] = .{
                 .pc = output_pc,

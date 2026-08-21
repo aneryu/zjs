@@ -1147,6 +1147,29 @@ pub fn compareStringValues(a: JSValue, b: JSValue, eq_only: bool) ?i32 {
     return if (a_len < b_len) -1 else if (a_len > b_len) 1 else 0;
 }
 
+/// Append `value`'s text to `buffer` as UTF-8. Non-string values append
+/// nothing — callers coerce first when they need ToString.
+///
+/// This is the single owner of the operation qjs spells `JS_ToCStringLen2`
+/// (quickjs.c:4458). Eight hand-written copies of it existed, and their
+/// comments record the same defect being repaired independently six times:
+/// latin1 0x80-0xFF must WIDEN to UTF-8 rather than land as raw bytes, and
+/// UTF-16 surrogate pairs must combine into one 4-byte sequence rather than
+/// encode per unit (the CESU-8 form, which cannot byte-match an astral needle
+/// encoded the canonical way). It lives in core because two of the copies are
+/// core files, which cannot import exec.
+pub fn appendValueUtf8(rt: *JSRuntime, buffer: *std.ArrayList(u8), value: JSValue) !void {
+    const string_value = value.asStringBody() orelse return;
+    try string_value.ensureFlat(rt);
+    switch (string_value.resolveData()) {
+        .latin1 => |bytes| {
+            if (isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
+            for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, byte);
+        },
+        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
+    }
+}
+
 /// QJS `hash_string_rope`: hash leaf chunks in order without flattening. Flat
 /// strings retain their existing cached hash; ropes intentionally do not add a
 /// duplicate cache field, matching QJS's rope layout.
@@ -1626,10 +1649,6 @@ fn nextStringCapacity(current: usize, needed: usize) usize {
 pub fn foldHash30(full: u32) u30 {
     const raw: u30 = @truncate(full);
     return if (raw == 0) 1 else raw;
-}
-
-pub fn hashBytes(bytes: []const u8) u32 {
-    return hashLatin1(bytes, 0);
 }
 
 pub fn hashLatin1(bytes: []const u8, seed: u32) u32 {

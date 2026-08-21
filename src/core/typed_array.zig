@@ -38,6 +38,7 @@ const class = @import("class.zig");
 const descriptor = @import("descriptor.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
+const value_string = @import("value_string.zig");
 const value_format = @import("value_format.zig");
 const value_semantics = @import("value_semantics.zig");
 
@@ -51,12 +52,7 @@ const Atom = atom.Atom;
 const Descriptor = descriptor.Descriptor;
 const DynamicImportError = @import("context.zig").DynamicImportError;
 
-const AppendStringError = error{
-    OutOfMemory,
-    TypeError,
-    InvalidRadix,
-    NoSpaceLeft,
-} || DynamicImportError;
+const AppendStringError = value_string.AppendStringError;
 
 // --- ArrayBuffer construction / storage helpers (engine core) ---------------
 
@@ -890,7 +886,7 @@ fn coerceNumber(rt: *JSRuntime, value: JSValue) !f64 {
     if (value.isString()) {
         var bytes = std.ArrayList(u8).empty;
         defer bytes.deinit(rt.memory.allocator);
-        try appendRawString(rt, &bytes, value);
+        try string.appendValueUtf8(rt, &bytes, value);
         return parseJsNumber(bytes.items);
     }
     return std.math.nan(f64);
@@ -1036,7 +1032,7 @@ fn valueToBigInt64Bits(rt: *JSRuntime, value: JSValue) !u64 {
 }
 
 fn toBigIntValue(rt: *JSRuntime, value: JSValue) !bignum.BigInt {
-    if (value.isBigInt()) return cloneBigIntValue(rt, value);
+    if (value.isBigInt()) return value_format.cloneBigIntValue(rt.memory.allocator, value);
     if (value.isNumber()) return error.TypeError;
     if (value.asBool()) |bool_value| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, if (bool_value) 1 else 0);
 
@@ -1053,16 +1049,6 @@ fn toBigIntValue(rt: *JSRuntime, value: JSValue) !bignum.BigInt {
             error.BigIntTooLarge => error.BigIntTooLarge,
             else => error.SyntaxError,
         };
-    }
-    return error.TypeError;
-}
-
-fn cloneBigIntValue(rt: *JSRuntime, value: JSValue) !bignum.BigInt {
-    if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
-    if (value.isBigInt() and value.refHeader() != null) {
-        const header = value.refHeader().?;
-        const big: *bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return big.borrowedValue(rt.memory.allocator).cloneWithAllocator(rt.memory.allocator);
     }
     return error.TypeError;
 }
@@ -1093,81 +1079,7 @@ fn parseJsNumber(bytes: []const u8) f64 {
     return value_format.parseJsNumber(bytes);
 }
 
+/// This file's policy for the shared bare-runtime ToString owner.
 fn appendValueString(rt: *JSRuntime, buffer: *std.ArrayList(u8), value: JSValue) AppendStringError!void {
-    if (value.asInt32()) |int_value| {
-        var int_buf: [32]u8 = undefined;
-        const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
-        try buffer.appendSlice(rt.memory.allocator, printed);
-    } else if (value.asFloat64()) |float_value| {
-        if (std.math.isNan(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "NaN");
-        } else if (std.math.isPositiveInf(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "Infinity");
-        } else if (std.math.isNegativeInf(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "-Infinity");
-        } else if (std.math.isNegativeZero(float_value)) {
-            try buffer.append(rt.memory.allocator, '0');
-        } else {
-            var float_buf: [64]u8 = undefined;
-            const printed = try std.fmt.bufPrint(&float_buf, "{d}", .{float_value});
-            try buffer.appendSlice(rt.memory.allocator, printed);
-        }
-    } else if (value.isBigInt()) {
-        var big = try cloneBigIntValue(rt, value);
-        defer big.deinit();
-        const printed = try big.formatBase10Alloc(rt.memory.allocator);
-        defer rt.memory.allocator.free(printed);
-        try buffer.appendSlice(rt.memory.allocator, printed);
-    } else if (value.asBool()) |bool_value| {
-        try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
-    } else if (value.isUndefined()) {
-        try buffer.appendSlice(rt.memory.allocator, "undefined");
-    } else if (value.isNull()) {
-        try buffer.appendSlice(rt.memory.allocator, "null");
-    } else if (value.isString()) {
-        try appendRawString(rt, buffer, value);
-    } else if (value.isObject()) {
-        const header = value.refHeader() orelse return;
-        const object_value: *Object = @fieldParentPtr("header", header);
-        if (object_value.class_id == class.ids.string) {
-            const data = object_value.objectData() orelse return error.TypeError;
-            try appendValueString(rt, buffer, data);
-        } else if (object_value.class_id == class.ids.array_buffer) {
-            try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
-        } else if (object_value.class_id == class.ids.promise) {
-            try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.isArray()) {
-            try appendArrayString(rt, buffer, object_value);
-        } else {
-            try buffer.appendSlice(rt.memory.allocator, "[object Object]");
-        }
-    } else {
-        try buffer.appendSlice(rt.memory.allocator, "[object Object]");
-    }
-}
-
-fn appendRawString(rt: *JSRuntime, buffer: *std.ArrayList(u8), value: JSValue) !void {
-    // Width-aware UTF-8 like exec.value_ops.appendRawString (qjs
-    // JS_ToCStringLen2, quickjs.c:4458): raw latin1 0x80-0xFF bytes and the
-    // old "\u{x}" wide-unit escapes both corrupted the byte buffer that
-    // downstream parsing (trimJsWhitespace handles UTF-8) consumes.
-    const string_value = value.asStringBody() orelse return;
-    try string_value.ensureFlat(rt);
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| {
-            if (string.isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
-            for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, byte);
-        },
-        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
-    }
-}
-
-fn appendArrayString(rt: *JSRuntime, buffer: *std.ArrayList(u8), obj: *Object) AppendStringError!void {
-    var index: u32 = 0;
-    while (index < obj.arrayLength()) : (index += 1) {
-        if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = try obj.getProperty(atom.atomFromUInt32(index));
-        defer value.free(rt);
-        if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
-    }
+    return value_string.appendValueString(rt, buffer, value, .{});
 }

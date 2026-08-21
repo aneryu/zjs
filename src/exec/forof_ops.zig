@@ -66,22 +66,9 @@ pub fn createForInIterator(
 
     var iterator_val = core.JSValue.undefinedValue();
     var source_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &iterator_val },
-        .{ .value = &source_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &iterator_val, &source_val });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
     defer source_val.free(rt);
 
     const iterator = try core.Object.create(rt, core.class.ids.for_in_iterator, null);
@@ -368,10 +355,6 @@ pub fn closeStackTopForOfIteratorForPendingErrorInternal(
         _ = ctx.throwValue(value.dup());
         if (pending_out_of_memory) ctx.markExceptionOutOfMemory();
     }
-}
-
-pub fn findTopClosableForOfRecordIndex(stack: *const stack_mod.Stack) ?usize {
-    return findTopClosableForOfRecordIndexBefore(stack, stack.len());
 }
 
 fn findTopClosableForOfRecordIndexBefore(stack: *const stack_mod.Stack, before: usize) ?usize {

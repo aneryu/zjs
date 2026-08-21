@@ -56,10 +56,6 @@ fn collectionPrimitiveMethodCall(
     return (try builtin_dispatch.callInternalRecord(ctx, null, null, globals, null, this_value, native_ref, args, null, null)) orelse error.TypeError;
 }
 
-pub fn ordinaryObject(rt: *core.JSRuntime) !*core.Object {
-    return core.Object.create(rt, core.class.ids.object, null);
-}
-
 pub fn functionObject(ctx: *core.RealmContext, name: core.Atom) !core.JSValue {
     const rt = ctx.runtimePtr();
     const function_proto = ctx.cached_function_proto orelse return error.InvalidBuiltinRegistry;
@@ -95,19 +91,12 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
         .{ .value = &rooted_callee },
         .{ .value = &rooted_instance },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const constructor = try expectConstructor(rooted_callee);
     var owned_prototype_value: ?core.JSValue = null;
@@ -279,18 +268,11 @@ pub fn constructTypedArrayValue(rt: *core.JSRuntime, constructor: *core.Object, 
     var root_slices = [_]core.runtime.ValueRootSlice{
         rooted_args_buffer.slice(),
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const buffer = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.int32(0);
     if (buffer.isObject()) {
@@ -318,18 +300,11 @@ pub fn constructErrorObject(rt: *core.JSRuntime, name: []const u8, constructor: 
     var root_slices = [_]core.runtime.ValueRootSlice{
         rooted_args_buffer.slice(),
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     if (std.mem.eql(u8, name, "AggregateError")) return constructAggregateErrorObject(rt, constructor, prototype, rooted_args);
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
@@ -384,18 +359,11 @@ pub fn constructDOMExceptionObject(rt: *core.JSRuntime, prototype: ?*core.Object
     var root_slices = [_]core.runtime.ValueRootSlice{
         rooted_args_buffer.slice(),
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
@@ -514,19 +482,12 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
     var root_slices = [_]core.runtime.ValueRootSlice{
         rooted_args_buffer.slice(),
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     defer errors_array_val.free(rt);
     defer copied_error_val.free(rt);
@@ -583,12 +544,6 @@ pub fn isConstructErrorObjectName(name: []const u8) bool {
     return core.error_names.isConstructErrorObjectName(name);
 }
 
-fn constructOrdinaryInstance(rt: *core.JSRuntime, prototype: ?*core.Object) !core.JSValue {
-    const instance = try core.Object.create(rt, core.class.ids.object, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &instance.header);
-    return instance.value();
-}
-
 fn constructWeakRef(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     if (args.len < 1 or !core.symbol.canBeHeldWeakly(rt, args[0])) return error.TypeError;
     return weakRefWithPrototype(rt, args[0], prototype);
@@ -599,18 +554,11 @@ pub fn weakRefWithPrototype(rt: *core.JSRuntime, target: core.JSValue, prototype
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_target },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const instance = try core.Object.create(rt, core.class.ids.weak_ref, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
@@ -673,21 +621,9 @@ fn defineData(
 
 fn constructPrimitiveWrapper(rt: *core.JSRuntime, class_id: core.class.ClassId, prototype: ?*core.Object, primitive: core.JSValue) !core.JSValue {
     var rooted_primitive = primitive;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_primitive },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_primitive});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const instance = try core.Object.create(rt, class_id, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
@@ -772,24 +708,14 @@ fn constructTypedArrayArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, 
     var object_value = core.JSValue.undefinedValue();
     var value = core.JSValue.undefinedValue();
     var coerced = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &backing_buffer },
-        .{ .value = &object_value },
-        .{ .value = &value },
-        .{ .value = &coerced },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &backing_buffer,
+        &object_value,
+        &value,
+        &coerced,
+    });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     defer backing_buffer.free(rt);
     defer object_value.free(rt);
@@ -827,23 +753,9 @@ fn constructTypedArrayTypedArrayInput(rt: *core.JSRuntime, prototype: ?*core.Obj
     var backing_buffer = core.JSValue.undefinedValue();
     var object_value = core.JSValue.undefinedValue();
     var value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &backing_buffer },
-        .{ .value = &object_value },
-        .{ .value = &value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &backing_buffer, &object_value, &value });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     defer backing_buffer.free(rt);
     defer object_value.free(rt);
@@ -875,24 +787,14 @@ fn constructTypedArrayArrayLikeInput(rt: *core.JSRuntime, prototype: ?*core.Obje
     var object_value = core.JSValue.undefinedValue();
     var value = core.JSValue.undefinedValue();
     var coerced = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &backing_buffer },
-        .{ .value = &object_value },
-        .{ .value = &value },
-        .{ .value = &coerced },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &backing_buffer,
+        &object_value,
+        &value,
+        &coerced,
+    });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     defer backing_buffer.free(rt);
     defer object_value.free(rt);
@@ -919,13 +821,6 @@ fn constructTypedArrayArrayLikeInput(rt: *core.JSRuntime, prototype: ?*core.Obje
 
 fn createTypedArrayBackingBuffer(rt: *core.JSRuntime, array_buffer_prototype: *core.Object, byte_length: i32) !core.JSValue {
     return core.typed_array.arrayBufferConstructLength(rt, @intCast(byte_length), null, array_buffer_prototype);
-}
-
-fn activeGlobalObject(rt: *core.JSRuntime, globals: []globals_mod.Slot) !?*core.Object {
-    const global_value = try globals_mod.getByName(rt, globals, "globalThis");
-    defer global_value.free(rt);
-    if (!global_value.isObject()) return null;
-    return try expectObject(global_value);
 }
 
 fn typedArraySourceValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
@@ -1008,64 +903,6 @@ fn constructCollectionValue(
         }
     }
     return collection_value;
-}
-
-pub fn constructCollectionClosure(
-    ctx: *core.JSContext,
-    encoded: i32,
-    globals: []globals_mod.Slot,
-) !core.JSValue {
-    const rt = ctx.runtime;
-    if (encoded < 0) return error.TypeError;
-    const collection_kind: u32 = @intCast(@divTrunc(encoded, 10));
-    const arg_mode: i32 = @mod(encoded, 10);
-    const prototype_value = try collectionPrototypeValueFromGlobals(rt, collection_kind, globals);
-    defer prototype_value.free(rt);
-    const prototype = if (prototype_value.isObject()) try expectObject(prototype_value) else null;
-
-    var args: []core.JSValue = &.{};
-    var arg_storage: [1]core.JSValue = undefined;
-    switch (arg_mode) {
-        0 => {},
-        1 => {
-            const array = try core.Object.createArray(rt, null);
-            arg_storage[0] = array.value();
-            args = arg_storage[0..1];
-        },
-        2 => {
-            arg_storage[0] = try globals_mod.getByName(rt, globals, "iterable");
-            args = arg_storage[0..1];
-        },
-        else => return error.TypeError,
-    }
-    defer {
-        for (args) |arg| arg.free(rt);
-    }
-    return constructCollectionValue(ctx, collection_kind, prototype, args, globals);
-}
-
-fn collectionPrototypeValueFromGlobals(rt: *core.JSRuntime, kind: u32, globals: []globals_mod.Slot) !core.JSValue {
-    const name = collectionName(kind) orelse return error.TypeError;
-    var constructor_value = try globals_mod.getByName(rt, globals, name);
-    if (constructor_value.isUndefined()) {
-        constructor_value.free(rt);
-        constructor_value = try globalObjectProperty(rt, globals, name);
-    }
-    defer constructor_value.free(rt);
-    const constructor = try expectObject(constructor_value);
-    const prototype_value = try constructor.getProperty(core.atom.ids.prototype);
-    if (prototype_value.isObject()) return prototype_value;
-    prototype_value.free(rt);
-    return core.JSValue.nullValue();
-}
-
-fn globalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {
-    const global_value = try globals_mod.getByName(rt, globals, "globalThis");
-    defer global_value.free(rt);
-    const global = try expectObject(global_value);
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
-    return try global.getProperty(key);
 }
 
 fn constructCollectionFromIterator(
@@ -1301,16 +1138,6 @@ fn constructorName(rt: *core.JSRuntime, constructor: *core.Object) !?[]u8 {
     errdefer buffer.deinit(rt.memory.allocator);
     try value_ops.appendRawString(rt, &buffer, value);
     return try buffer.toOwnedSlice(rt.memory.allocator);
-}
-
-fn collectionName(kind: u32) ?[]const u8 {
-    return switch (kind) {
-        1 => "Map",
-        2 => "Set",
-        3 => "WeakMap",
-        4 => "WeakSet",
-        else => null,
-    };
 }
 
 fn isCallableObject(value: core.JSValue) bool {

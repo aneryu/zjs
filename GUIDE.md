@@ -109,6 +109,13 @@ Goals:
   to the single owner. An unmarked copy is a defect: the 2026-08-19 audit
   found 17 `objectFromValue` copies silently relying on an inlined-elsewhere
   safety argument.
+- Sort with `std.sort.heap` unless stability is observable. `std.mem.sort`
+  is `std.sort.block`, whose in-place merge costs about **22 KB of machine
+  code per element type** — eleven instantiations were 258 KB of the 4.6 MB
+  binary. Heapsort costs about 0.2 KB. Reach for `std.mem.sort` only when
+  equal elements are distinguishable *and* their relative order is
+  observable; the two sites that qualify (`Array.prototype.sort`'s default
+  string order, the RegExp `v`-flag string set) say so in a comment.
 - Small modules; ABI and business logic do not share a large file.
   Lifetime clarity beats short code.
 - Discard unused values with `_ = ...`. Never silently discard errors or

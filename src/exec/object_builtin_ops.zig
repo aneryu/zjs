@@ -1,4 +1,5 @@
 const core = @import("../core/root.zig");
+const iterator_ops = @import("iterator_ops.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call = @import("call.zig");
@@ -38,8 +39,8 @@ const objectGetPrototypeOfStep = object_ops.objectGetPrototypeOfStep;
 const objectGetPrototypeOfValue = object_ops.objectGetPrototypeOfValue;
 const definePropertiesOnTarget = call_runtime.definePropertiesOnTarget;
 const isCallableValue = call_runtime.isCallableValue;
-const iteratorForValue = call_runtime.iteratorForValue;
-const closeIteratorForFromEntriesAbrupt = call_runtime.closeIteratorForFromEntriesAbrupt;
+const iteratorForValue = iterator_ops.iteratorForValue;
+const closeIteratorForFromEntriesAbrupt = iterator_ops.closeIteratorForFromEntriesAbrupt;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
 const valueTruthy = coercion_ops.valueTruthy;
@@ -115,35 +116,6 @@ pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "fromEntries")) return @intFromEnum(StaticMethod.from_entries);
     if (std.mem.eql(u8, name, "groupBy")) return @intFromEnum(StaticMethod.group_by);
     return null;
-}
-
-pub fn staticMethodName(id: u32) ?[]const u8 {
-    return switch (id) {
-        @intFromEnum(StaticMethod.assign) => "assign",
-        @intFromEnum(StaticMethod.create) => "create",
-        @intFromEnum(StaticMethod.define_property) => "defineProperty",
-        @intFromEnum(StaticMethod.define_properties) => "defineProperties",
-        @intFromEnum(StaticMethod.get_own_property_descriptor) => "getOwnPropertyDescriptor",
-        @intFromEnum(StaticMethod.get_own_property_descriptors) => "getOwnPropertyDescriptors",
-        @intFromEnum(StaticMethod.get_own_property_names) => "getOwnPropertyNames",
-        @intFromEnum(StaticMethod.get_own_property_symbols) => "getOwnPropertySymbols",
-        @intFromEnum(StaticMethod.get_prototype_of) => "getPrototypeOf",
-        @intFromEnum(StaticMethod.has_own) => "hasOwn",
-        @intFromEnum(StaticMethod.is_extensible) => "isExtensible",
-        @intFromEnum(StaticMethod.keys) => "keys",
-        @intFromEnum(StaticMethod.prevent_extensions) => "preventExtensions",
-        @intFromEnum(StaticMethod.seal) => "seal",
-        @intFromEnum(StaticMethod.is_sealed) => "isSealed",
-        @intFromEnum(StaticMethod.is_frozen) => "isFrozen",
-        @intFromEnum(StaticMethod.set_prototype_of) => "setPrototypeOf",
-        @intFromEnum(StaticMethod.values) => "values",
-        @intFromEnum(StaticMethod.entries) => "entries",
-        @intFromEnum(StaticMethod.is) => "is",
-        @intFromEnum(StaticMethod.freeze) => "freeze",
-        @intFromEnum(StaticMethod.from_entries) => "fromEntries",
-        @intFromEnum(StaticMethod.group_by) => "groupBy",
-        else => null,
-    };
 }
 
 pub fn prototypeMethodId(name: []const u8) ?u32 {
@@ -376,18 +348,11 @@ pub fn literal(rt: *core.JSRuntime, names: []const core.Atom, values: []const co
     if (names.len != values.len) return error.TypeError;
     const rooted = try RootedValueCopies.init(rt, values);
     defer rooted.deinit(rt);
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = rooted.roots,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -455,25 +420,13 @@ const expectObject = core.value_semantics.expectObject;
 fn entryArrayValue(rt: *core.JSRuntime, key: core.Atom, value: core.JSValue) !core.JSValue {
     var rooted_value = value;
     defer rooted_value.free(rt);
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const array = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &array.header);
-    const key_value = try atomToStringValue(rt, key);
+    const key_value = try rt.atoms.toStringValue(rt, key);
     defer key_value.free(rt);
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(key_value, true, true, true));
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(rooted_value, true, true, true));
@@ -521,10 +474,6 @@ test "object entryArrayValue roots direct function bytecode value while creating
     entry_value_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
-
-fn atomToStringValue(rt: *core.JSRuntime, atom_id: core.Atom) !core.JSValue {
-    return rt.atoms.toStringValue(rt, atom_id);
 }
 
 // ==========================================================================
@@ -974,8 +923,9 @@ fn objectAddEntriesStepValue(
 
     const next_result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, caller_function, caller_frame);
     defer next_result_value.free(ctx.runtime);
+    // No class-based dispatch: IteratorStep reads `done`/`value` off whatever
+    // object `next()` returned (see iterator_ops.iteratorStepValue).
     const next_result = objectFromValue(next_result_value) orelse return error.TypeError;
-    if (next_result.class_id == core.class.ids.regexp) return .{ .value = core.JSValue.undefinedValue(), .done = false };
 
     const done_key = core.atom.predefinedId("done", .string).?;
     const done = try getValueProperty(ctx, output, global, next_result.value(), done_key, caller_function, caller_frame);

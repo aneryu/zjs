@@ -1,21 +1,18 @@
 const core = @import("../core/root.zig");
+const iterator_ops = @import("iterator_ops.zig");
 const core_array = @import("../core/array.zig");
 const unicode = @import("../libs/unicode.zig");
 const buffer_ops = @import("buffer_ops.zig");
 const bignum = @import("../libs/bigint.zig");
 const std = @import("std");
+const call_runtime = @import("call_runtime.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const exception_ops = @import("exception_ops.zig");
 
 const HostError = @import("exceptions.zig").HostError;
 
-const AppendStringError = error{
-    OutOfMemory,
-    TypeError,
-    InvalidRadix,
-    NoSpaceLeft,
-} || core.context.DynamicImportError;
+const AppendStringError = core.value_string.AppendStringError;
 
 const RootedValueCopies = struct {
     values: []core.JSValue,
@@ -233,20 +230,12 @@ fn arrayEntryWithHandler(
     };
 }
 
-fn genericMagicHandler(entry: core.host_function.InternalEntry) ?core.host_function.NativeGenericMagicFn {
-    const native = entry.native_function orelse return null;
-    return switch (native) {
-        .generic_magic => |handler| handler,
-        else => null,
-    };
-}
-
 test "Array.push has a dedicated native record handler" {
     var found = false;
     for (internal_entries) |entry| {
         if (entry.id != @intFromEnum(PrototypeMethod.push)) continue;
         found = true;
-        try std.testing.expect(genericMagicHandler(entry).? == &arrayPushCall);
+        try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &arrayPushCall);
         try std.testing.expect(entry.exec_direct != null);
         try std.testing.expect(entry.exec_direct.? ==
             builtin_dispatch.execDirectFunction(&arrayPushDirect));
@@ -260,7 +249,7 @@ test "Array.splice has a dedicated native record handler" {
     for (internal_entries) |entry| {
         if (entry.id != @intFromEnum(PrototypeMethod.splice)) continue;
         found = true;
-        try std.testing.expect(genericMagicHandler(entry).? == &arraySpliceCall);
+        try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &arraySpliceCall);
         try std.testing.expect(entry.exec_direct != null);
         try std.testing.expect(entry.exec_direct.? ==
             builtin_dispatch.execDirectFunction(&arraySpliceDirect));
@@ -272,7 +261,7 @@ test "Array.splice has a dedicated native record handler" {
 test "Array.pop has a dedicated native record handler" {
     var pop_call: ?core.host_function.NativeGenericMagicFn = null;
     for (internal_entries) |entry| {
-        if (entry.id == @intFromEnum(PrototypeMethod.pop)) pop_call = genericMagicHandler(entry);
+        if (entry.id == @intFromEnum(PrototypeMethod.pop)) pop_call = core.host_function.genericMagicHandler(entry);
     }
     try std.testing.expect(pop_call != null);
     try std.testing.expect(pop_call.? == &arrayPopCall);
@@ -519,18 +508,9 @@ fn arrayPopCall(
     )) orelse error.TypeError;
 }
 
-pub fn isArrayIndex(bytes: []const u8) bool {
-    return core_array.isArrayIndexName(bytes);
-}
-
 // Proxy-aware `Array.isArray` predicate relocated to engine core
 // (`core/array.zig`) in Phase 6b-3 STEP 2; re-exported here unchanged.
 pub const isArrayValue = core_array.isArrayValue;
-
-pub fn lengthAfterSet(index: u32, current: u32) u32 {
-    if (index >= current) return index + 1;
-    return current;
-}
 
 /// QuickJS source map: narrow array literal helper used by transitional
 /// `new_array` bytecode.
@@ -555,18 +535,11 @@ pub fn constructConstructorWithPrototype(rt: *core.JSRuntime, args: []const core
 pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rooted = try RootedValueCopies.init(rt, values);
     defer rooted.deinit(rt);
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = rooted.roots,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const object = try core.Object.createArray(rt, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -786,30 +759,13 @@ fn arrayIteratorValue(rt: *core.JSRuntime, target: *core.Object, index: u32, kin
     };
 }
 
+/// Owning wrapper over the single `CreateIterResultObject` owner. This record
+/// arm carries no realm handle, so the result has no prototype — the live
+/// array iterator runs through `iterator_ops.arrayIteratorNext`, which does.
 fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JSValue {
     var rooted_value = value;
     defer rooted_value.free(rt);
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
-
-    const result = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &result.header);
-    try result.defineOwnProperty(rt, core.atom.predefinedId("value", .string).?, core.Descriptor.data(rooted_value, true, true, true));
-    try result.defineOwnProperty(rt, core.atom.predefinedId("done", .string).?, core.Descriptor.data(core.JSValue.boolean(done), true, true, true));
-    return result.value();
+    return iterator_ops.createIteratorResult(rt, null, rooted_value, done);
 }
 
 test "array iteratorResult roots direct function bytecode value while creating result" {
@@ -1123,7 +1079,7 @@ fn indexSearch(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, m
 fn stringSearchValue(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, mode: SearchMode) !core.JSValue {
     var haystack = std.ArrayList(u8).empty;
     defer haystack.deinit(rt.memory.allocator);
-    try appendRawString(rt, &haystack, value);
+    try core.string.appendValueUtf8(rt, &haystack, value);
     var query = std.ArrayList(u8).empty;
     defer query.deinit(rt.memory.allocator);
     try appendValueString(rt, &query, needle);
@@ -1166,22 +1122,9 @@ fn splice(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSV
     const delete_count: u32 = @intCast(args[1].asInt32() orelse 0);
     var insert_a = args[2];
     var insert_b = args[3];
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &insert_a },
-        .{ .value = &insert_b },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &insert_a, &insert_b });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const removed = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &removed.header);
@@ -1292,6 +1235,10 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
         key_owned = false;
     }
 
+    // Stability is observable here and required by ES2019: entries whose
+    // string keys compare equal must keep their original relative order, and
+    // they are distinct values, so `std.sort.heap` (which the rest of the tree
+    // uses to avoid block sort's ~22 KB per element type) is not a substitute.
     std.mem.sort(SortEntry, entries.items, {}, struct {
         fn lessThan(_: void, lhs: SortEntry, rhs: SortEntry) bool {
             return std.mem.lessThan(u8, lhs.key, rhs.key);
@@ -1315,34 +1262,15 @@ fn concat(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValu
     var rooted_receiver = receiver;
     const rooted_args = try RootedValueCopies.init(rt, args);
     defer rooted_args.deinit(rt);
-    var receiver_root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_receiver },
-    };
-    const receiver_root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &receiver_root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &receiver_root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = receiver_root_frame.previous;
-        }
-    }
+    var receiver_root_frame = core.runtime.rootValues(.{&rooted_receiver});
+    receiver_root_frame.activate(rt);
+    defer receiver_root_frame.deactivate(rt);
 
-    const args_root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var args_root_frame = core.runtime.ValueRootFrame{
         .values = rooted_args.roots,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &args_root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = args_root_frame.previous;
-        }
-    }
+    args_root_frame.activate(rt);
+    defer args_root_frame.deactivate(rt);
 
     const out = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &out.header);
@@ -1404,89 +1332,6 @@ fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     return str.value();
 }
 
-fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    // Width-aware UTF-8 like exec.value_ops.appendRawString (qjs
-    // JS_ToCStringLen2, quickjs.c:4458). The old legs appended raw latin1
-    // bytes and silently DROPPED non-ASCII UTF-16 units, so the byte
-    // haystack in stringSearchValue could never match the UTF-8 query that
-    // appendValueString builds for wide needles.
-    const string_value = value.asStringBody() orelse return;
-    try string_value.ensureFlat(rt);
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| {
-            if (core.string.isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
-            for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, byte);
-        },
-        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
-    }
-}
-
-fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
-    if (value.asInt32()) |int_value| {
-        var int_buf: [32]u8 = undefined;
-        const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
-        try buffer.appendSlice(rt.memory.allocator, printed);
-    } else if (value.asFloat64()) |float_value| {
-        if (std.math.isNan(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "NaN");
-        } else if (std.math.isPositiveInf(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "Infinity");
-        } else if (std.math.isNegativeInf(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "-Infinity");
-        } else if (std.math.isNegativeZero(float_value)) {
-            try buffer.append(rt.memory.allocator, '0');
-        } else {
-            var float_buf: [64]u8 = undefined;
-            const printed = try std.fmt.bufPrint(&float_buf, "{d}", .{float_value});
-            try buffer.appendSlice(rt.memory.allocator, printed);
-        }
-    } else if (value.isBigInt()) {
-        var big = try cloneBigIntValue(rt, value);
-        defer big.deinit();
-        const printed = try big.formatBase10Alloc(rt.memory.allocator);
-        defer rt.memory.allocator.free(printed);
-        try buffer.appendSlice(rt.memory.allocator, printed);
-    } else if (value.asBool()) |bool_value| {
-        try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
-    } else if (value.isUndefined()) {
-        try buffer.appendSlice(rt.memory.allocator, "undefined");
-    } else if (value.isNull()) {
-        try buffer.appendSlice(rt.memory.allocator, "null");
-    } else if (value.isString()) {
-        // Same width-aware UTF-8 encoding as appendRawString above so the
-        // buffers this module builds (search queries, sort keys) share one
-        // deterministic byte form across string representations.
-        try appendRawString(rt, buffer, value);
-    } else if (value.isObject()) {
-        const header = value.refHeader() orelse return;
-        const object_value: *core.Object = @fieldParentPtr("header", header);
-        if (object_value.class_id == core.class.ids.string) {
-            const data = object_value.objectData() orelse return error.TypeError;
-            try appendValueString(rt, buffer, data);
-        } else if (object_value.class_id == core.class.ids.array_buffer) {
-            try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
-        } else if (object_value.class_id == core.class.ids.promise) {
-            try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.isArray()) {
-            try appendArrayString(rt, buffer, object_value);
-        } else {
-            try buffer.appendSlice(rt.memory.allocator, "[object Object]");
-        }
-    } else {
-        try buffer.appendSlice(rt.memory.allocator, "[object Object]");
-    }
-}
-
-fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
-    var index: u32 = 0;
-    while (index < object.arrayLength()) : (index += 1) {
-        if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = try object.getProperty(core.atom.atomFromUInt32(index));
-        defer value.free(rt);
-        if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
-    }
-}
-
 fn valuesEqual(a: core.JSValue, b: core.JSValue) bool {
     if (a.isBigInt() and b.isBigInt()) {
         return (compareBigIntValues(a, b) orelse return false) == .eq;
@@ -1545,12 +1390,7 @@ fn compareStringValues(a: core.JSValue, b: core.JSValue) ?i32 {
     return core.string.compareStringValues(a, b, false);
 }
 
-fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
-    if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
-    if (value.isBigInt() and value.refHeader() != null) {
-        const header = value.refHeader().?;
-        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return big.borrowedValue(rt.memory.allocator).cloneWithAllocator(rt.memory.allocator);
-    }
-    return error.TypeError;
+/// This file's policy for the shared bare-runtime ToString owner.
+fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
+    return core.value_string.appendValueString(rt, buffer, value, .{});
 }

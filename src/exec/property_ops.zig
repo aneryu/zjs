@@ -25,23 +25,11 @@ pub fn getPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.
     return try object_value.getProperty(atom_id);
 }
 
-pub fn setPropertyValue(rt: *core.JSRuntime, object_value: core.JSValue, atom_id: core.Atom, value: core.JSValue) !core.JSValue {
-    const object = try expectObject(object_value);
-    try object.setProperty(rt, atom_id, value);
-    return core.JSValue.undefinedValue();
-}
-
 pub fn optionalGetPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
     _ = rt;
     if (value.isNull() or value.isUndefined()) return core.JSValue.undefinedValue();
     const object_value = try expectObject(value);
     return try object_value.getProperty(atom_id);
-}
-
-pub fn getIndexValue(rt: *core.JSRuntime, value: core.JSValue, index: u32) !core.JSValue {
-    const object_value = try expectObject(value);
-    _ = rt;
-    return try object_value.getProperty(core.atom.atomFromUInt32(index));
 }
 
 pub fn propertyIn(rt: *core.JSRuntime, object_value: core.JSValue, key_value: core.JSValue) !core.JSValue {
@@ -51,37 +39,6 @@ pub fn propertyIn(rt: *core.JSRuntime, object_value: core.JSValue, key_value: co
     var found = object.hasProperty(key);
     if (!found and value_ops.atomNameEql(rt, key, "toString")) found = true;
     return core.JSValue.boolean(found);
-}
-
-pub fn instanceOfObject(value: core.JSValue) core.JSValue {
-    return core.JSValue.boolean(objectHeader(value) != null);
-}
-
-pub fn instanceOfArray(value: core.JSValue) core.JSValue {
-    const header = objectHeader(value) orelse return core.JSValue.boolean(false);
-    const object: *core.Object = @fieldParentPtr("header", header);
-    return core.JSValue.boolean(object.isArray());
-}
-
-pub fn instanceOf(rt: *core.JSRuntime, value: core.JSValue, constructor_value: core.JSValue) !core.JSValue {
-    const header = objectHeader(value) orelse return core.JSValue.boolean(false);
-    const object: *core.Object = @fieldParentPtr("header", header);
-
-    const constructor_header = objectHeader(constructor_value) orelse return error.TypeError;
-    const constructor: *core.Object = @fieldParentPtr("header", constructor_header);
-    const prototype_key = try rt.internAtom("prototype");
-    defer rt.atoms.free(prototype_key);
-    const prototype_value = try constructor.getProperty(prototype_key);
-    defer prototype_value.free(rt);
-    const prototype_header = objectHeader(prototype_value) orelse return error.TypeError;
-    const prototype: *core.Object = @fieldParentPtr("header", prototype_header);
-
-    var cursor = object.getPrototype();
-    while (cursor) |candidate| {
-        if (candidate == prototype) return core.JSValue.boolean(true);
-        cursor = candidate.getPrototype();
-    }
-    return core.JSValue.boolean(false);
 }
 
 pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
@@ -100,12 +57,3 @@ pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
 }
 
 pub const expectObject = core.value_semantics.expectObject;
-
-// mirror of core.value_semantics.objectFromValue's check sequence, keep in
-// sync — header-level form for the header-consuming helpers above.
-fn objectHeader(value: core.JSValue) ?*core.gc.Header {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    if (header.meta().flags.kind != .object) return null;
-    return header;
-}

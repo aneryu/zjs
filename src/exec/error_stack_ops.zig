@@ -1,6 +1,10 @@
 //! Error.stack capture/formatting, backtrace naming and CallSite helpers.
 
 const std = @import("std");
+const frame_mod = @import("frame.zig");
+const method_ids = core.host_function.builtin_method_ids;
+const error_stack_ops = @import("error_stack_ops.zig");
+const bytecode = @import("../bytecode.zig");
 
 const core = @import("../core/root.zig");
 const exception_ops = @import("exception_ops.zig");
@@ -20,12 +24,6 @@ const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const defineDataPropertyByName = object_ops.defineDataPropertyByName;
 const formatCapturedErrorStackStringValue = string_ops.formatCapturedErrorStackStringValue;
 const isCallableValue = call_runtime.isCallableValue;
-
-pub fn defineErrorStack(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, instance: *core.Object) !void {
-    const stack_value = try buildErrorStackValue(ctx, output, global, instance.value(), null);
-    defer stack_value.free(ctx.runtime);
-    try defineDataPropertyByName(ctx.runtime, instance, "stack", stack_value, true, false, true);
-}
 
 pub fn captureErrorStack(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, instance: *core.Object) !void {
     _ = output;
@@ -255,4 +253,116 @@ pub fn appendCallSiteFileName(rt: *core.JSRuntime, bytes: *std.ArrayList(u8), si
         return;
     }
     try value_ops.appendRawString(rt, bytes, file_value);
+}
+
+pub fn errorStackGetter(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+) !core.JSValue {
+    const object = object_ops.objectFromValue(this_value) orelse return error.TypeError;
+    if (object.class_id != core.class.ids.error_) return core.JSValue.undefinedValue();
+    if (object.errorStack()) |stack| return stack.dup();
+    if (object.errorStackSites()) |sites| {
+        const stack = try error_stack_ops.formatCapturedErrorStackValue(ctx, output, global, this_value, sites, object.errorStackSiteCount());
+        errdefer stack.free(ctx.runtime);
+        try object.setErrorStack(ctx.runtime, stack);
+        return stack;
+    }
+    return error_stack_ops.buildErrorStackValue(ctx, output, global, this_value, null);
+}
+
+pub fn errorStackSetter(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const receiver = object_ops.objectFromValue(this_value) orelse return error.TypeError;
+    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    if (!value.isString()) return error.TypeError;
+
+    if (object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "Error")) |error_proto| {
+        if (object_ops.sameObjectIdentity(this_value, error_proto.value())) return error.TypeError;
+    }
+
+    const stack_key = try ctx.runtime.internAtom("stack");
+    defer ctx.runtime.atoms.free(stack_key);
+    const desc = try object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global, receiver, stack_key, caller_function, caller_frame);
+    defer if (desc) |item| item.destroy(ctx.runtime);
+
+    if (desc == null) {
+        const create_desc = core.Descriptor.data(value, true, true, true);
+        const ok = if (receiver.proxyTarget() != null)
+            try object_ops.proxyDefineOwnProperty(ctx, output, global, receiver, stack_key, create_desc, caller_function, caller_frame)
+        else blk: {
+            receiver.defineOwnProperty(ctx.runtime, stack_key, create_desc) catch |err| switch (err) {
+                error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => break :blk false,
+                error.InvalidLength => return error.RangeError,
+                else => return err,
+            };
+            break :blk true;
+        };
+        if (!ok) return error.TypeError;
+        return core.JSValue.undefinedValue();
+    }
+
+    const own_desc = desc.?;
+    if (own_desc.kind == .accessor and object_ops.sameObjectIdentity(own_desc.setter, function_object.value()) and isErrorStackSetterValue(own_desc.setter)) {
+        if (try object_ops.proxySetTrapForErrorStackSetter(ctx, output, global, this_value, receiver, stack_key, value, caller_function, caller_frame)) {
+            return core.JSValue.undefinedValue();
+        }
+        try object_ops.defineErrorStackDataProperty(ctx, output, global, receiver, stack_key, core.Descriptor.data(value, true, true, true), caller_function, caller_frame);
+        return core.JSValue.undefinedValue();
+    }
+
+    if (receiver.proxyTarget() != null) {
+        const ok = try object_ops.proxySetValueProperty(ctx, output, global, this_value, receiver, stack_key, value, caller_function, caller_frame);
+        if (!ok) return error.TypeError;
+        return core.JSValue.undefinedValue();
+    }
+
+    switch (own_desc.kind) {
+        .accessor => {
+            if (own_desc.setter.isUndefined()) return error.TypeError;
+            const result = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, this_value, own_desc.setter, &.{value}, caller_function, caller_frame);
+            result.free(ctx.runtime);
+            return core.JSValue.undefinedValue();
+        },
+        .data, .generic => {
+            if (own_desc.kind == .data and own_desc.writable == false) return error.TypeError;
+            try object_ops.defineErrorStackDataProperty(ctx, output, global, receiver, stack_key, core.Descriptor{ .kind = .data, .value = value, .value_present = true }, caller_function, caller_frame);
+            return core.JSValue.undefinedValue();
+        },
+    }
+}
+
+pub fn isErrorStackSetterValue(value: core.JSValue) bool {
+    const object = object_ops.objectFromValue(value) orelse return false;
+    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionId()) orelse return false;
+    return native_ref.domain == .error_object and native_ref.id == @intFromEnum(method_ids.error_object.PrototypeMethod.stack_setter);
+}
+
+pub fn errorCaptureStackTrace(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    if (args.len < 1 or !args[0].isObject()) return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
+    const target = try property_ops.expectObject(args[0]);
+    const skip_name = if (args.len >= 2 and isCallableValue(args[1]))
+        try exception_ops.functionNameBytes(ctx.runtime, args[1])
+    else
+        null;
+    defer if (skip_name) |bytes| ctx.runtime.memory.allocator.free(bytes);
+    const stack_value = try error_stack_ops.buildErrorStackValue(ctx, output, global, args[0], skip_name);
+    defer stack_value.free(ctx.runtime);
+    try object_ops.defineDataPropertyByName(ctx.runtime, target, "stack", stack_value, true, false, true);
+    return core.JSValue.undefinedValue();
 }

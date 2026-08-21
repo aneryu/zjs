@@ -698,7 +698,11 @@ test "public API surface snapshot matches the checked-in name lists" {
     // is visible; do not call names such as freeObjectAssumeObject*.
     // 89 -> 88 on 2026-08-19: `has_fast_int32_slot_move` went away with the
     // NaN-boxed representation it existed to discriminate.
+    // 88 -> 89 on 2026-08-20: `catchTarget`, the decoder for the catch-marker
+    // offset `asCatchOffset` (already public) encodes. Three dispatch files
+    // had hand-written that decode; it belongs next to the encoding. The
+    // surface grew by one on purpose — which is what this pin is for.
     const jsvalue_decl_count = @typeInfo(zjs.JSValue).@"struct".decls.len;
-    try std.testing.expectEqual(@as(usize, 88), jsvalue_decl_count);
+    try std.testing.expectEqual(@as(usize, 89), jsvalue_decl_count);
     try std.testing.expect(@hasDecl(zjs.JSValue, "freeObjectAssumeObjectDuringActiveBytecode"));
 }

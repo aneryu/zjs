@@ -1,4 +1,5 @@
 const std = @import("std");
+const atomics_ops = @import("../exec/atomics_ops.zig");
 
 const core = @import("../core/root.zig");
 const exec = @import("../exec/root.zig");
@@ -19,12 +20,11 @@ pub fn cleanupAtomicsWaitersForContext(ctx: *zjs.JSContext) void {
 }
 
 pub fn wakeAtomicsWaitersForRuntimes(primary: *zjs.JSRuntime, related: []const *zjs.JSRuntime) void {
-    const call_runtime = exec.call_runtime;
-    const io = call_runtime.atomicsWaiterIo();
-    call_runtime.atomics_waiter_mutex.lockUncancelable(io);
-    defer call_runtime.atomics_waiter_mutex.unlock(io);
+    const io = atomics_ops.atomicsWaiterIo();
+    atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
+    defer atomics_ops.atomics_waiter_mutex.unlock(io);
 
-    var cursor = call_runtime.atomics_waiters;
+    var cursor = atomics_ops.atomics_waiters;
     while (cursor) |waiter| {
         if (waiter.realm.borrow()) |ctx| {
             if (ctx.runtime == primary or runtimeListContains(related, ctx.runtime)) {

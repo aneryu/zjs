@@ -7,6 +7,209 @@ breaking public-API cleanup is approved for this cycle; hot-path structural
 refactors are deferred to `docs/maintainability-backlog.md` and land only
 under the refactor-policy gates.
 
+- **Fixed: `new Set`/`Map` bulk filled past a user-overridable adder.** The
+  dense fast path calls the adder once per element but advances the iterator's
+  cursor only once, at the end, and skips IteratorClose — invisible for the
+  builtin `add`/`set`, plainly visible for a subclass's. A `Set` subclass whose
+  `add` peeked at the source iterator read a cursor still at 0 (`peek 1` and
+  every element, where QuickJS gives `peek 2` and every other one), and a
+  subclass whose `add` threw let the error escape without running the
+  iterator's `return`. The guard now also requires the adder to be the builtin;
+  a subclass falls back to the ordinary IteratorStep/IteratorClose loop, and
+  the fast path still triggers for plain `new Set([1,2,3])`.
+
+- **Fixed: a skipped test that leaked was counted twice** in the timing test
+  runner. The leak check turned the outcome into a failure but left the skip
+  tally standing, so one test reported as `1 skipped; 1 failed`.
+
+- **Collapsed the hand-written parser state snapshots** (−146 lines in
+  `parser.zig`). The lexer cursor was saved and restored field by field at 11
+  sites even though `takeLexerCursorSnapshot`/`restoreLexerCursorSnapshot`
+  already existed and only three sites used them. Two of the 11 —
+  the `export default function`/`class` lookaheads — restored six fields
+  instead of seven, leaving `got_lf` (the flag automatic-semicolon insertion
+  reads) describing the token the lookahead scanned rather than the current
+  one; they now restore the full cursor. Separately, entering a class field
+  initializer function saved, set and restored the same ten parser fields in
+  three byte-identical copies, now `enterFieldInitFunction` /
+  `leaveFieldInitFunction`. A class static block displaces four more fields on
+  top of those ten and still open-codes them; that difference is documented at
+  the type rather than silently unified.
+
+- **One owner for the engine's error surface.** `RuntimeError` and `HostError`
+  had three hand-written copies between them, and they had drifted:
+  `context.DynamicImportError` was `HostError` spelled out member for member
+  (123 = 123, both differences empty), and `host_function.CallbackError` — whose
+  own doc comment called itself a mirror — was missing `StringTooLong`,
+  `DerivedConstructorReturn` and `DerivedThisUninitialized`. The definitions now
+  live in `core/errors.zig`, which core surfaces can name and which
+  `exec.exceptions` re-exports.
+  *Fixes an undefined-behaviour hazard:* `collection_adapter` bridged the gap
+  with `@errorCast`, narrowing whatever `closure.callWithThis` returned down to
+  `CallbackError`. That call actually returns `HostError`, so any I/O failure
+  raised inside a `Map`/`Set` `forEach` or `groupBy` callback hit an error code
+  outside the destination set — a safety panic in Debug, undefined behaviour in
+  ReleaseFast. With the set defined correctly the cast is gone entirely.
+
+- **Deleted 246 more unreferenced declarations, tree-wide** (−2,829 lines
+  across 64 files). The previous sweep only looked at nine `exec/` files and
+  only asked whether a name appears anywhere in the tree. Two corrections
+  found the rest: deletion cascades, so the sweep runs to a fixed point
+  (four rounds); and a **non-`pub` declaration is only visible in its own
+  file**, so counting tree-wide hits lets a same-named declaration elsewhere
+  keep a dead one alive. `call.zig`'s private `promiseCombinatorCall` — a
+  143-line second implementation of the Promise combinators, with no
+  callers — survived the first sweep exactly that way.
+  `libs/unicode/data.zig` is excluded: its property tables are referenced by
+  comptime name concatenation, which no text scan can see.
+
+- **Deleted 118 unreferenced declarations across nine `exec/` files**
+  (−2,087 lines, `.text` −1,596 bytes). Reachability was established by
+  deletion rather than by inspection: the tree compiles, and Zig would have
+  refused any name that still had a reference. Only top-level declarations
+  were touched — struct fields are layout-bearing in this repository and stay.
+  Names mentioned only in a doc comment count as referenced and were kept.
+
+- **Fixed: `new Set`/`Map`/`WeakSet`/`WeakMap` indexed an Array argument
+  instead of iterating it.** The dense read was selected on `isArray()`
+  alone, so an array carrying its own `@@iterator` — or a patched
+  `%ArrayIteratorPrototype%.next` — was silently indexed, while spread,
+  for-of, `Array.from`, destructuring and `yield*` honoured it in the same
+  process. The dense read now happens inside the iterator path, behind the
+  same guard `appendSpreadValuesEnumerate` already applied, and reads from
+  the iterator's target rather than the source.
+
+- **Fixed: replacing `globalThis.Iterator` detached every builtin iterator
+  prototype.** %IteratorPrototype% is a realm intrinsic, but it was resolved
+  by walking the writable `Iterator` global and reading `.prototype` — so
+  the first thing an Iterator-Helpers polyfill does broke Map, Set, Array and
+  String iterators (`[...map.entries()]` threw `TypeError`) and made
+  `Array.from(str.matchAll(re))` silently return `[]`. Deleting the binding
+  was worse: two copies of the resolver invented two *different* synthetic
+  bases, so Map and Array iterators stopped sharing one. It now reads the
+  realm's class-prototype table, where the `Iterator` constructor already
+  registered it, and the two copies became one.
+
+- **Fixed: `Array.of`, `Array.from` and `Array.fromAsync` never ran a Proxy
+  constructor's `construct` trap.** IsConstructor had two implementations;
+  the one these entries used fell off its last branch with
+  `class_id == c_closure`, so every Proxy answered false. The result was
+  silent: a plain Array was fabricated and the trap counted zero calls, where
+  the pinned QuickJS calls it once and returns the constructor's object. The
+  two implementations are now one (−24 lines), and all 31 constructor shapes
+  probed — plain/arrow/class/generator/async/method/getter, bound chains,
+  builtins, and Proxies of each — agree with QuickJS.
+
+- **Fixed: `Iterator.from` returned the source unwrapped when it should have
+  wrapped it.** `Iterator.from` tests %Iterator%-instance-hood on the
+  RESOLVED iterator, after `GetIteratorFlattenable`; this tested the SOURCE,
+  before resolving, and only the branch where the source had no
+  `@@iterator` could produce a wrapper at all. A class that is iterable,
+  returns itself from `@@iterator`, and is not an %Iterator% therefore came
+  back unwrapped with no iterator helpers on it —
+  `Iterator.from(new T()).take(2)` threw `TypeError: not a function` where
+  the pinned QuickJS returns the values. Three `sm/Iterator/from/*` test262
+  cases left the exclusion list; the suite went 49,775 → 49,778 prepared,
+  44,581 → 44,584 passed.
+
+- **Fixed: `Number.prototype.toString(radix)` produced digits that name a
+  different double.** For the 30 radices that are not a power of two, the
+  digits did not identify the value they came from: 829 of 1,000 random
+  doubles at radices 3/5/7/11/36 decoded back to a *neighbouring* double.
+  Powers of two (2/4/8/16/32) were always exact, so hex and binary were never
+  affected. The cause was a hand-rolled converter generating digits from an
+  approximation; it is deleted (−96 lines) and the radix now goes through the
+  same faithful `js_dtoa` port radix 10 already used — its wrappers had simply
+  hard-coded 10. After: 0 of 2,100 round-trip failures, and byte-identical to
+  the pinned QuickJS on all 2,100.
+
+  Routing a non-decimal radix through that port also required fixing a stack
+  buffer overflow on the way in: a `[9]u8` bounce buffer sized for the only
+  radix that had ever reached it (10, whose `digits_per_limb` is exactly 9).
+  Radix 3 writes 20 digits there. Upstream `dtoa.c` uses no temporary at all,
+  and now neither does this.
+- **`call_runtime.zig` sheds the Atomics, Reflect and iterator-protocol
+  domains** (backlog H1, first three batches). Atomics: 1,000 lines and 44 top-level `pub fn`s moved to
+  `atomics_ops.zig`, which until now held only an 88-line record table whose
+  own doc comment pointed back at `call_runtime` for the method bodies.
+  Reflect: eleven decls, interleaved with unrelated ones rather than
+  contiguous, moved to `reflect_ops.zig`. Iterator protocol: fifteen decls to
+  `iterator_ops.zig`, including `createIteratorResult`, whose four hand-written
+  copies were merged earlier the same day. The call-chain file is down from
+  7,510 lines / 208 pub fns to **5,811 / 144**. `Error.stack` and dynamic
+  `Function` construction are still queued.
+- **Merged the byte-identical cross-file duplicates** (−145 lines): 17 groups
+  found by a same-name/same-body census, plus `monotonicNanos` (six copies,
+  one of them an inlined body in a CLI root that could not reach
+  `platform_clock.zig` — now exported through `internal_root`), and a
+  `SourcePoint` struct declared identically in two resolver files.
+- **One owner for the bare-runtime `ToString` fallback** (`core.value_string`,
+  −363 lines). Seven copies of `appendValueString`, seven of its array leg,
+  six BigInt cloners, five `appendUtf8CodePoint` wrappers and seven identical
+  `AppendStringError` unions were spread across `exec/` and `core/`. Three of
+  the four ways they had drifted were accidental and are now unified: float
+  formatting (five copies used Zig's `{d}`, which renders `1e20` as `1e20`
+  rather than the ECMAScript `100000000000000000000` — latent, since every
+  reachable path coerces through a realm-aware `ToString` first), BigInt
+  rendering, and string encoding. The fourth is real and survives as a
+  comptime `Policy`: callers legitimately disagree about Symbols, primitive
+  wrapper objects, and what a value with no `ToString` form becomes, so each
+  site keeps exactly its previous behavior.
+- **One owner for string-to-UTF-8 appending.** Eight hand-written copies of
+  qjs `JS_ToCStringLen2` existed across `exec/` and `core/`, and their comments
+  recorded the same defect being repaired independently six times: latin1
+  0x80-0xFF must widen to UTF-8 instead of landing raw, and UTF-16 surrogate
+  pairs must combine into one 4-byte sequence instead of encoding per unit. Two
+  copies still carried an older form. Authority sank to
+  `core.string.appendValueUtf8` — core, because two of the copies are core
+  files, which cannot import exec. `value_ops.appendRawString` stays as the
+  published embedding name and forwards. −99 lines.
+- **Fixed: Map, Set and String iterator results had no prototype.** ES
+  `CreateIterResultObject` (7.4.14) is `OrdinaryObjectCreate(%Object.prototype%)`,
+  and the pinned QuickJS agrees, but `new Map().entries().next()` returned a
+  null-prototype object — so `.hasOwnProperty` on an iterator result threw
+  `TypeError: not a function` and `String(result)` threw. Array, generator,
+  arguments, typed-array and RegExp iterators were already correct.
+
+  The cause was duplication: four hand-written copies of
+  `CreateIterResultObject` existed alongside the real owner, and two of them
+  passed a null prototype. All four are now thin wrappers over
+  `createIteratorResult`, each stating its ownership contract (three consume
+  the value, the closure one borrows). The Map/Set dispatch arm was also
+  discarding a realm it already held — it called the global-less `methodCall`
+  where every neighbouring arm calls `methodCallObjectWithGlobal`. Regression
+  test pins all eleven builtin iterator producers to the same answer.
+- **Binary size: the release artifact went from 31.2 MB to 4.26 MB** (tarball
+  7.5 MB → 1.9 MB), with the engine's own machine code down 8.2%
+  (4,646,632 → 4,264,592 bytes stripped). Three independent items:
+  - **Release tarballs now ship a stripped `zjs`.** 26 MB of the old artifact
+    was DWARF that no user reads. `nightly.yml` strips post-link, before the
+    configuration-signature check, so the check runs on the bytes that ship
+    and `.text` plus the `.text.zjs.op_handlers` island stay byte-identical to
+    the binary the gates measured — a `-fstrip` build does not (it moves
+    `.text` by 40 bytes). arm64 macOS re-signs, because `strip` invalidates
+    the ad-hoc signature. No build step strips by default: `nm`, `addr2line`
+    and `perf` attribution all need the symbols.
+  - **ReleaseFast CLIs panic with the message only** (−209 KB,
+    `src/cli/panic_policy.zig`). The default handler drags in an ELF symbol
+    reader, a DWARF line-table reader, a flate decompressor and two 30 KB-class
+    sort instantiations to symbolize a trace that a stripped binary cannot
+    resolve anyway. Debug and ReleaseSafe keep the full handler, so `zjs-dev`
+    and every test artifact still print resolved traces.
+  - **Sorting moved off `std.mem.sort` where stability is not observable**
+    (−173 KB). `std.mem.sort` is `std.sort.block`, whose in-place merge costs
+    ~22 KB of machine code *per element type*; eleven instantiations were
+    258 KB. Sixteen call sites moved to `std.sort.heap` (~0.2 KB each); the
+    two sites where equal elements are distinguishable and ordered —
+    `Array.prototype.sort`'s default string order and the RegExp `v`-flag
+    string set — keep the stable sort and now say why. Rule recorded in
+    GUIDE A.7.
+
+  Validation: `checkpoint-gate`, `test-exec`, test262 0/49775, and a
+  refactor-policy rule-2 bench-v8 A/B against the merge base
+  (`20ccc8c1`) — composite Score medians 2717 / 2716, ratio **1.0006**, with
+  per-suite deltas mixed in sign (RegExp +3.4%, RayTrace −0.9%), the signature
+  of layout noise rather than a semantic effect.
 - **Fixed four independent memory leaks** that each tripped the
   `allocation_count == 1` teardown assert in `JSRuntime.deinit`, which had
   blocked running the Debug test262 suite as one process (it aborted after

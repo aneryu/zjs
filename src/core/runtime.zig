@@ -408,7 +408,77 @@ pub const ValueRootFrame = struct {
     slices: []const ValueRootSlice = &.{},
     values: []const ValueRootValue = &.{},
     objects: []const ObjectRootValue = &.{},
+
+    /// Activate this frame at its final stack address. The matching
+    /// `deactivate` must run before the frame or any referenced root storage
+    /// leaves scope. Production builds erase both operations at compile time.
+    pub inline fn activate(self: *ValueRootFrame, rt: *JSRuntime) void {
+        if (comptime value_root_frames_enabled) {
+            std.debug.assert(rt.active_value_roots != self);
+            self.previous = rt.active_value_roots;
+            rt.active_value_roots = self;
+        }
+    }
+
+    /// Restore the frame that was active before `activate`. Root frames are a
+    /// strict LIFO stack; the assertion localizes mismatched scope teardown at
+    /// the registration seam instead of leaving a stale stack pointer in the
+    /// runtime.
+    pub inline fn deactivate(self: *ValueRootFrame, rt: *JSRuntime) void {
+        if (comptime value_root_frames_enabled) {
+            std.debug.assert(rt.active_value_roots == self);
+            rt.active_value_roots = self.previous;
+            self.previous = null;
+        }
+    }
 };
+
+/// A `ValueRootFrame` plus the storage it points at, held in one local.
+///
+/// The manual spelling of this — declare a `[_]ValueRootValue` array, declare
+/// a frame whose `.values` points at it, activate, defer deactivate — was
+/// written out at every rooting site in the tree. `rootValues` collapses the
+/// declarations, leaving the two operations that carry meaning:
+///
+///     var roots = core.runtime.rootValues(.{ &receiver, &argument });
+///     roots.activate(rt);
+///     defer roots.deactivate(rt);
+///
+/// Activation stays a separate step on purpose. The frame links itself into
+/// the runtime BY ADDRESS, so it must be linked once it sits in its final
+/// stack slot — not in the temporary a returning constructor builds it in.
+pub fn ValueRootScope(comptime count: usize) type {
+    return struct {
+        const Self = @This();
+
+        storage: [count]ValueRootValue,
+        frame: ValueRootFrame = .{},
+
+        /// Point the frame at this scope's own storage, then link it. The
+        /// slice is taken here rather than in `rootValues` for the same
+        /// reason the link is: `storage` only has its final address now.
+        pub inline fn activate(self: *Self, rt: *JSRuntime) void {
+            if (comptime value_root_frames_enabled) {
+                self.frame.values = &self.storage;
+                self.frame.activate(rt);
+            }
+        }
+
+        pub inline fn deactivate(self: *Self, rt: *JSRuntime) void {
+            self.frame.deactivate(rt);
+        }
+    };
+}
+
+/// Build an inactive `ValueRootScope` over `slots`, a tuple of `*JSValue`.
+/// The caller activates it; see `ValueRootScope`.
+pub inline fn rootValues(slots: anytype) ValueRootScope(slots.len) {
+    var scope: ValueRootScope(slots.len) = .{ .storage = undefined };
+    if (comptime value_root_frames_enabled) {
+        inline for (slots, 0..) |slot, index| scope.storage[index] = .{ .value = slot };
+    }
+    return scope;
+}
 
 pub const RootTraceError = std.mem.Allocator.Error || error{PayloadMarkFailed};
 
@@ -522,8 +592,6 @@ pub const JSValueHandle = struct {
         return value;
     }
 };
-
-const PersistentValue = JSValueHandle;
 
 pub const LocalHandle = struct {
     slot: *RootSlot,
@@ -3553,6 +3621,30 @@ fn appendRuntimeWeakRootSlot(account: *memory.MemoryAccount, slice: *[]*WeakRoot
     const len = slice.*.len;
     slice.* = slice.*.ptr[0 .. len + 1];
     slice.*[len] = item;
+}
+
+test "value root frame activation restores nested scopes" {
+    var rt: JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    try std.testing.expect(rt.active_value_roots == null);
+    {
+        var outer = ValueRootFrame{};
+        outer.activate(&rt);
+        defer outer.deactivate(&rt);
+        try std.testing.expect(rt.active_value_roots == &outer);
+
+        {
+            var inner = ValueRootFrame{};
+            inner.activate(&rt);
+            defer inner.deactivate(&rt);
+            try std.testing.expect(rt.active_value_roots == &inner);
+        }
+
+        try std.testing.expect(rt.active_value_roots == &outer);
+    }
+    try std.testing.expect(rt.active_value_roots == null);
 }
 
 test "value handle uses runtime persistent root slot" {

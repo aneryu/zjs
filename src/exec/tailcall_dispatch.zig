@@ -982,21 +982,9 @@ fn completeProxyGetContinuation(vm: *Vm, result: JSValue, atom_id: core.Atom) Ho
     defer vm.ctx.runtime.atoms.free(atom_id);
     const rt = vm.ctx.runtime;
     var rooted_result = result;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_result },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_result});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const stack = vm.stack;
     std.debug.assert(stack.len() >= 2);
@@ -3806,12 +3794,6 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     return @call(.always_tail, propertyTailHandler(vm, .put_field_add), .{ pc, sp, var_buf, vm });
 }
 
-// Root the padded leaves so the tombstone blocks cannot be stripped.
-export const zjs_f_tombstone_get_field: Handler = op_get_field;
-export const zjs_f_tombstone_get_field2: Handler = op_get_field2;
-export const zjs_f_tombstone_get_field2_cm: Handler = op_get_field2_call_method;
-export const zjs_f_tombstone_put_field: Handler = op_put_field;
-
 /// Resident add-tail for the hot put_field miss (T6-W1). qjs OP_put_field's
 /// slow leg is ONE JS_SetPropertyInternal direct call from the shared
 /// interpreter frame (quickjs.c:19188-19203 -> 9706-9890) — no shell
@@ -6130,9 +6112,6 @@ const specials: colds.SpecialHandlers = .{
 /// so the cold publish+helper is NOT inlined into the lean fast handler.
 const cold_built = colds.buildTable(specials, false);
 const cold_table: [256]Handler = cold_built.table;
-/// Wave-22: exported so the three type-test coldStd leaves stay in the
-/// island at their v2.1 source order (240/242/243 slots are fusion now).
-export const zjs_w22_island_keep: [12]Handler = cold_built.keep;
 // O1 exact-args leaf cold constructors. Defined AFTER the handler cluster
 // so their machine code lands past the established opcode bodies: inserting
 // them mid-cluster shifted every subsequent handler address and reproducibly

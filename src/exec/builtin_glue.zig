@@ -4,6 +4,7 @@
 //! uri_ops / json_ops.
 
 const call_mod = @import("call.zig");
+const iterator_ops = @import("iterator_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const bytecode = @import("../bytecode.zig");
 const array_ops = @import("array_ops.zig");
@@ -11,6 +12,7 @@ const core = @import("../core/root.zig");
 const HostError = @import("exceptions.zig").HostError;
 const method_ids = core.host_function.builtin_method_ids;
 const buffer_id_lookup = core.host_function.builtin_method_id_lookup.buffer;
+const collection_id_lookup = core.host_function.builtin_method_id_lookup.collection;
 const date_ops = @import("date_ops.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
@@ -33,8 +35,8 @@ const functionPrototypeFromGlobal = object_ops.functionPrototypeFromGlobal;
 const getIteratorMethod = call_runtime.getIteratorMethod;
 const getValueProperty = object_ops.getValueProperty;
 const isCallableValue = call_runtime.isCallableValue;
-const iteratorCloseWithCompletionAndPropagate = call_runtime.iteratorCloseWithCompletionAndPropagate;
-const iteratorStepValue = call_runtime.iteratorStepValue;
+const iteratorCloseWithCompletionAndPropagate = iterator_ops.iteratorCloseWithCompletionAndPropagate;
+const iteratorStepValue = iterator_ops.iteratorStepValue;
 const lengthIndexValue = array_ops.lengthIndexValue;
 const objectFromValue = object_ops.objectFromValue;
 const arrayBufferAccessor = array_ops.arrayBufferAccessor;
@@ -161,18 +163,6 @@ pub fn globalIsNaNOrFinite(
     defer number_value.free(ctx.runtime);
     const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
     return core.JSValue.boolean(if (is_nan) std.math.isNan(number) else std.math.isFinite(number));
-}
-
-pub fn dateToPrimitiveNativeRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    return date_ops.dateToPrimitiveCall(ctx, output, global, this_value, args, caller_function, caller_frame);
 }
 
 pub fn toNumberLikeArgument(
@@ -575,7 +565,51 @@ pub fn addCollectionEntriesFromIterator(
     if (!isCallableValue(iterator_method)) return error.TypeError;
     const iterator_value = try callValueOrBytecodeRoot(ctx, output, global, iterable_value, iterator_method, &.{}, null, null);
     defer iterator_value.free(ctx.runtime);
-    _ = try property_ops.expectObject(iterator_value);
+    const iterator = try property_ops.expectObject(iterator_value);
+
+    // Dense bulk fill, taken ONLY when the default Array iteration protocol is
+    // provably intact: the constructed iterator is a default Array Iterator of
+    // value kind, its `next` is the builtin, and its target is a hole-free
+    // fast array. Same guard as `call_runtime.appendSpreadValuesEnumerate`,
+    // and read from the ITERATOR'S target rather than from the source, so a
+    // repointed `@@iterator` still lands on the right array.
+    //
+    // The adder must be the builtin too. Bulk filling advances the iterator's
+    // cursor once at the end instead of once per element, and skips the
+    // per-element IteratorClose, so a user-visible `add`/`set` would observe
+    // both: `class S extends Set { add(v) { return it.next().value; } }` reads
+    // a cursor that has not moved, and an `add` that throws would escape
+    // without running the iterator's `return`. A builtin adder runs no user
+    // code, which is what makes the whole batch unobservable.
+    fast: {
+        const next_key = try ctx.runtime.internAtom("next");
+        defer ctx.runtime.atoms.free(next_key);
+        const next_method = try getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
+        defer next_method.free(ctx.runtime);
+        const next_obj = objectFromValue(next_method) orelse break :fast;
+        if (!next_obj.isArrayIteratorNextFunction()) break :fast;
+        if (iterator.class_id != core.class.ids.array_iterator) break :fast;
+        if (iterator.iteratorKindSlot().* != 2) break :fast; // 2 == value kind
+        if (iterator.iteratorIndexSlot().* != 0) break :fast; // partially drained
+        const adder_obj = objectFromValue(adder) orelse break :fast;
+        const adder_ref = core.function.decodeNativeBuiltinId(adder_obj.nativeFunctionId()) orelse break :fast;
+        if (adder_ref.domain != .collection) break :fast;
+        const adder_name: []const u8 = if (kind == 1 or kind == 3) "set" else "add";
+        const builtin_adder_id = collection_id_lookup.prototypeMethodId(adder_name) orelse break :fast;
+        if (adder_ref.id != builtin_adder_id) break :fast;
+        const target_value = (iterator.iteratorTargetSlot().*) orelse break :fast;
+        const target_obj = objectFromValue(target_value) orelse break :fast;
+        if (!target_obj.isArray() or target_obj.hasExoticMethods() or target_obj.proxyTarget() != null) break :fast;
+        const elements = target_obj.arrayElements();
+        if (@as(usize, @intCast(target_obj.arrayLength())) != elements.len) break :fast;
+        // A builtin adder only fails on allocation, but `return` is still the
+        // user's, and IteratorClose has to run before the failure propagates.
+        array_ops.addCollectionEntriesFromArray(ctx, output, global, collection_value, kind, target_obj, adder) catch |err| {
+            return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
+        };
+        iterator.iteratorIndexSlot().* = elements.len;
+        return;
+    }
 
     while (true) {
         const step = iteratorStepValue(ctx, output, global, iterator_value) catch |err| {

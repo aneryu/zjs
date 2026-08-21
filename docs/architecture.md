@@ -181,7 +181,15 @@ Host functions register through `ExternalHostCall` on the public API
 ## Libraries, CLI, tests
 
 - `src/libs/`: regexp, unicode, bigint, number formatting
-- `src/cli/`: `zjs` and `run-test262`
+- `src/cli/`: `zjs` and `run-test262`; `run_test262_options.zig` owns the
+  latter's arguments, `run_test262_config.zig` owns configuration files and
+  feature overrides, `run_test262_names.zig` owns allocated name sets and
+  natural ordering, `run_test262_metadata.zig` owns frontmatter parsing,
+  `run_test262_known_errors.zig` owns the expected-failure ledger, and
+  `run_test262_source.zig` owns harness caching, local source overrides, and
+  source assembly. `run_test262_host.zig` owns Test262 globals and the
+  `$262.agent` coordinator. `run_test262_reporter.zig` owns synchronized
+  stderr, failure buckets, directory summaries, and report files
 - `src/tests/`: Zig unit and integration entrypoints
 - `tests/fixtures/`: plugin fixtures and test262 overrides. CLI smoke
   coverage lives in `src/tests/smoke_test.zig` (inline scripts, `zig build

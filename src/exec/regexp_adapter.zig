@@ -32,46 +32,6 @@ fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool {
     return runtime.checkNativeStackOverflow(alloca_size);
 }
 
-pub fn execOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!ExecStatus {
-    var match: Match = undefined;
-    return switch (try execIntoMatchOnStringFromIndex(rt, compiled, string_value, start_index, &match)) {
-        .match => .{ .result = .match, .match = match },
-        .no_match => .{ .result = .no_match },
-        .out_of_range => .{ .result = .out_of_range },
-        .not_available => .{ .result = .not_available },
-    };
-}
-
-pub fn execIntoMatchOnStringFromIndex(
-    rt: *core.JSRuntime,
-    compiled: Compiled,
-    string_value: core.JSValue,
-    start_index: usize,
-    out_match: *Match,
-) ExecError!ExecResult {
-    const string_object = string_value.asStringBody() orelse return .not_available;
-    try string_object.ensureFlat(rt);
-
-    const options = execOptions(rt);
-    return switch (string_object.resolveData()) {
-        .latin1 => |bytes| try regexp_bytecode.execIntoMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, out_match),
-        .utf16 => |units| try regexp_bytecode.execIntoMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, out_match),
-    };
-}
-
-pub fn execCaptureSlotsOnStringFromIndex(
-    rt: *core.JSRuntime,
-    compiled: Compiled,
-    string_value: core.JSValue,
-    start_index: usize,
-    capture: []usize,
-) ExecError!ExecResult {
-    const string_object = string_value.asStringBody() orelse return .not_available;
-    try string_object.ensureFlat(rt);
-
-    return execCaptureSlotsOnResolvedStringFromIndex(rt, compiled, string_object.resolveData(), start_index, capture);
-}
-
 /// Execute against the flat string payload already retained by the caller.
 /// QuickJS carries the same `JSString *`/buffer from `js_regexp_exec` into
 /// `lre_exec`; keeping the resolved width here avoids re-decoding a JSValue on

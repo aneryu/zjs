@@ -254,11 +254,6 @@ pub fn ownDataPropertyValueMaterializedForFastPath(rt: *core.JSRuntime, value: c
     };
 }
 
-fn ownDataPropertyBorrowedAt(object: *core.Object, index: usize, atom_id: core.Atom) ?core.JSValue {
-    const slot = dataSlotAt(object, index, atom_id) orelse return null;
-    return slot.value.*;
-}
-
 fn writableOwnDataPropertyLookupForObject(object: *core.Object, atom_id: core.Atom) ?BorrowedOwnDataLookup {
     const lookup = ownDataPropertyLookupForFastPath(object, atom_id) orelse return null;
     return writableOwnDataPropertyLookup(object, lookup, atom_id);
@@ -577,12 +572,6 @@ fn dataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot 
     if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return null;
     const entry = &object.prop_values[index];
     return .{ .entry = entry, .value = &entry.slot.data };
-}
-
-inline fn trustedDataPropertyBorrowedAt(object: *core.Object, index: usize) ?core.JSValue {
-    if (index >= object.shape_ref.prop_count) return null;
-    if (object.propFlagsAt(index).kind != .data) return null;
-    return object.prop_values[index].slot.data;
 }
 
 test "fast own data property replacement retains private brand atom" {

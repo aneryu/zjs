@@ -55,7 +55,7 @@ const clearRegExpLegacySlot = regexp_fastpath.clearRegExpLegacySlot;
 const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
 const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
 const createDataPropertyOrThrow = object_ops.createDataPropertyOrThrow;
-const createIteratorResult = call_runtime.createIteratorResult;
+const createIteratorResult = iterator_ops.createIteratorResult;
 const createRegExpIndicesArray = array_ops.createRegExpIndicesArray;
 const defineFreshNonIndexDataProperty = object_ops.defineFreshNonIndexDataProperty;
 const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
@@ -1774,101 +1774,6 @@ fn advanceStringIndexData(data: core.string.String.ResolvedData, index: usize, u
     };
 }
 
-const ReplaceLiteralMatch = struct {
-    result: core.JSValue,
-    matched: core.JSValue,
-    index: usize,
-};
-
-pub fn regExpSymbolReplaceLiteral(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    rx: core.JSValue,
-    string_value: core.JSValue,
-    replacement_string: core.JSValue,
-    is_global: bool,
-    full_unicode: bool,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    var source_units = std.ArrayList(u16).empty;
-    defer source_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &source_units, string_value);
-
-    var replacement_units = std.ArrayList(u16).empty;
-    defer replacement_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &replacement_units, replacement_string);
-
-    var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
-    var next_source_position: usize = 0;
-    var matched_any = false;
-
-    while (true) {
-        const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
-        if (result.isNull()) {
-            result.free(ctx.runtime);
-            break;
-        }
-        if (!result.isObject()) {
-            result.free(ctx.runtime);
-            return error.TypeError;
-        }
-
-        const match = try captureReplaceLiteralMatch(ctx, output, global, result, string_value, caller_function, caller_frame);
-        defer {
-            match.result.free(ctx.runtime);
-            match.matched.free(ctx.runtime);
-        }
-
-        matched_any = true;
-        const matched_len = try stringLengthIndex(ctx.runtime, match.matched);
-        const position = @min(match.index, source_units.items.len);
-        if (position >= next_source_position) {
-            try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[next_source_position..position]);
-            try out.appendSlice(ctx.runtime.memory.allocator, replacement_units.items);
-            next_source_position = @min(source_units.items.len, position + matched_len);
-        }
-
-        if (!is_global) break;
-        if (isEmptyStringValue(ctx.runtime, match.matched)) {
-            const last_index = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
-            defer last_index.free(ctx.runtime);
-            const next = try advanceStringIndexNumber(ctx, output, global, string_value, last_index, full_unicode);
-            try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, next, caller_function, caller_frame);
-        }
-    }
-
-    if (!matched_any) return string_value.dup();
-    try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[next_source_position..]);
-    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
-}
-
-pub fn captureReplaceLiteralMatch(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    result: core.JSValue,
-    string_value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !ReplaceLiteralMatch {
-    errdefer result.free(ctx.runtime);
-    const matched_value = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(0), caller_function, caller_frame);
-    errdefer matched_value.free(ctx.runtime);
-    const matched = try toStringForAnnexB(ctx, output, global, matched_value, caller_function, caller_frame);
-    matched_value.free(ctx.runtime);
-    errdefer matched.free(ctx.runtime);
-
-    const index_atom = (comptime core.atom.predefinedId("index", .string)) orelse return error.TypeError;
-    const index_value = try getValueProperty(ctx, output, global, result, index_atom, caller_function, caller_frame);
-    defer index_value.free(ctx.runtime);
-    const string_len = try stringLengthIndex(ctx.runtime, string_value);
-    const index = @min(try toLengthIndex(ctx, output, global, index_value), string_len);
-    return .{ .result = result, .matched = matched, .index = index };
-}
-
 pub fn appendStringValueUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) !void {
     const string_object = value.asStringBody() orelse {
         var bytes = std.ArrayList(u8).empty;
@@ -2281,21 +2186,6 @@ pub fn stringAtomId(value: core.JSValue) ?core.Atom {
     return string_value.atom_id;
 }
 
-pub fn nativeFunctionMatcherUnicodeClassAsciiResult(source: []const u8, flags: []const u8, string_value: core.JSValue, start_index: usize) ?bool {
-    if (flags.len != 0 or start_index != 0) return null;
-    const is_id_start = std.mem.startsWith(u8, source, "(?:[A-Za-z");
-    const is_id_continue = std.mem.startsWith(u8, source, "(?:[0-9A-Z_a-z");
-    if (!is_id_start and !is_id_continue) return null;
-    if (!string_value.isString() or core.string.stringValueLenUnchecked(string_value) != 1) return null;
-    const unit = core.string.stringValueCodeUnitAtUnchecked(string_value, 0);
-    if (unit > 0x7f) return null;
-    const byte: u8 = @intCast(unit);
-    if (unicode_lib.isAsciiAlphaByte(byte)) return true;
-    if (is_id_continue and unicode_lib.isAsciiDigitByte(byte)) return true;
-    if (is_id_continue and byte == '_') return true;
-    return false;
-}
-
 pub fn findPropertyEscapeMatch(source: []const u8, string_value: core.JSValue, start_index: usize, sticky: bool) ?RegExpMatch {
     const parsed = propertyEscapePattern(source) orelse return null;
     const string_object = string_value.asStringBody() orelse return null;
@@ -2384,20 +2274,6 @@ pub fn callStringCharAtBody(
     index_value: core.JSValue,
 ) !core.JSValue {
     return callStringBody(ctx, string_value, 0, &.{index_value});
-}
-
-pub fn stringTrim(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    method_id: u32,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
-    return callStringBody(ctx, string_value, method_id, &.{});
 }
 
 pub fn stringPrototypeMethod(
@@ -2780,279 +2656,12 @@ pub fn stringSplitBuiltinArray(
     return result;
 }
 
-pub fn regExpSplit(rt: *core.JSRuntime, separator: core.JSValue, string_value: core.JSValue, limit_value: core.JSValue) !?core.JSValue {
-    const separator_object = property_ops.expectObject(separator) catch return null;
-    if (separator_object.class_id != core.class.ids.regexp) return null;
-    var source = std.ArrayList(u8).empty;
-    defer source.deinit(rt.memory.allocator);
-    if (!try appendRegExpSource(rt, separator_object, &source)) return null;
-
-    var flags = std.ArrayList(u8).empty;
-    defer flags.deinit(rt.memory.allocator);
-    if (!try appendRegExpFlags(rt, separator_object, &flags)) return null;
-    // Use sticky flag for split iteration
-    var split_flags = std.ArrayList(u8).empty;
-    defer split_flags.deinit(rt.memory.allocator);
-    try split_flags.appendSlice(rt.memory.allocator, flags.items);
-    if (std.mem.indexOfScalar(u8, split_flags.items, 'y') == null) {
-        try split_flags.append(rt.memory.allocator, 'y');
-    }
-
-    const limit = if (limit_value.isUndefined()) std.math.maxInt(u32) else toUint32Number(value_ops.numberValue(limit_value) orelse std.math.nan(f64));
-    const out = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
-    if (limit == 0) return out.value();
-
-    var compiled = regexp_adapter.compileWithRuntime(rt, source.items, split_flags.items) catch |err| switch (err) {
-        error.InvalidPattern, error.Unsupported => return null,
-        error.StackOverflow => return error.StackOverflow,
-        else => |other| return other,
-    };
-    defer compiled.deinit(rt.memory.allocator);
-
-    const input_len = try stringLengthIndex(rt, string_value);
-
-    if (input_len == 0) {
-        const status = regexp_adapter.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
-            error.BytecodeCorrupt, error.Timeout => return null,
-            else => return err,
-        };
-        if (status.result == .match) return out.value();
-        const slice = try stringSliceValue(rt, string_value, 0, 0);
-        defer slice.free(rt);
-        try defineSplitValueElement(rt, out, 0, slice);
-        return out.value();
-    }
-    if (std.mem.eql(u8, source.items, "(?:)")) {
-        var index: u32 = 0;
-        while (index < input_len) : (index += 1) {
-            const ch = try stringSliceValue(rt, string_value, index, 1);
-            defer ch.free(rt);
-            try defineSplitValueElement(rt, out, index, ch);
-            if (index + 1 >= limit) return out.value();
-        }
-        return out.value();
-    }
-
-    var start: usize = 0;
-    var pos: usize = 0;
-    var out_index: u32 = 0;
-    while (pos <= input_len) {
-        const status = regexp_adapter.execOnStringFromIndex(rt, compiled, string_value, pos) catch |err| switch (err) {
-            error.BytecodeCorrupt, error.Timeout => return null,
-            else => return err,
-        };
-        switch (status.result) {
-            .match => {
-                const match = status.match;
-                const match_len = match.end - match.start;
-                if (match_len == 0) {
-                    pos += 1;
-                    continue;
-                }
-                const before = try stringSliceValue(rt, string_value, start, pos - start);
-                defer before.free(rt);
-                try defineSplitValueElement(rt, out, out_index, before);
-                out_index += 1;
-                if (out_index >= limit) return out.value();
-                // Append captures
-                var ci: usize = 0;
-                while (ci < match.capture_count) : (ci += 1) {
-                    const capture = match.captures[ci];
-                    if (capture.start) |cs| {
-                        const cap_str = try stringSliceValue(rt, string_value, cs, capture.end.? - cs);
-                        defer cap_str.free(rt);
-                        try defineSplitValueElement(rt, out, out_index, cap_str);
-                    } else {
-                        try defineSplitValueElement(rt, out, out_index, core.JSValue.undefinedValue());
-                    }
-                    out_index += 1;
-                    if (out_index >= limit) return out.value();
-                }
-                pos += match_len;
-                start = pos;
-            },
-            .no_match, .out_of_range, .not_available => {
-                pos += 1;
-            },
-        }
-    }
-    const tail = try stringSliceValue(rt, string_value, start, input_len - start);
-    defer tail.free(rt);
-    try defineSplitValueElement(rt, out, out_index, tail);
-    return out.value();
-}
-
-pub fn regExpSplitWholeString(rt: *core.JSRuntime, string_value: core.JSValue) !core.JSValue {
-    const out = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
-    try defineSplitValueElement(rt, out, 0, string_value);
-    return out.value();
-}
-
-pub fn advanceStringIndexStringValue(string_value: *const core.string.String, index: usize, unicode: bool) usize {
-    if (!unicode or index + 1 >= string_value.len()) return index + 1;
-    const first = string_value.codeUnitAt(index);
-    const second = string_value.codeUnitAt(index + 1);
-    return index + if (isHighSurrogateUnit(first) and isLowSurrogateUnit(second)) @as(usize, 2) else 1;
-}
-
-pub fn findStringUnitMatch(value: core.JSValue, unit: u16, start: usize) ?usize {
-    const string_value = value.asStringBody() orelse return null;
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| {
-            if (unit > 0xff) return null;
-            var index = start;
-            while (index < bytes.len) : (index += 1) {
-                if (bytes[index] == @as(u8, @intCast(unit))) return index;
-            }
-        },
-        .utf16 => |units| {
-            var index = start;
-            while (index < units.len) : (index += 1) {
-                if (units[index] == unit) return index;
-            }
-        },
-    }
-    return null;
-}
-
-pub fn isStringLineStartPosition(string_value: *const core.string.String, pos: usize, multiline: bool) bool {
-    if (pos == 0) return true;
-    if (!multiline or pos > string_value.len()) return false;
-    return isLineTerminatorUnit(string_value.codeUnitAt(pos - 1));
-}
-
-pub fn isStringLineEndPosition(string_value: *const core.string.String, pos: usize, multiline: bool) bool {
-    if (pos == string_value.len()) return true;
-    if (!multiline or pos > string_value.len()) return false;
-    return isLineTerminatorUnit(string_value.codeUnitAt(pos));
-}
-
-pub fn stringCodePointAt(string_value: *const core.string.String, pos: usize) ?struct { value: u21, len: usize } {
-    if (pos >= string_value.len()) return null;
-    const first = string_value.codeUnitAt(pos);
-    if (isHighSurrogateUnit(first) and pos + 1 < string_value.len()) {
-        const second = string_value.codeUnitAt(pos + 1);
-        if (isLowSurrogateUnit(second)) return .{ .value = codePointFromSurrogatePair(first, second), .len = 2 };
-    }
-    return .{ .value = @intCast(first), .len = 1 };
-}
-
 pub fn codePointFromSurrogatePair(high: u16, low: u16) u21 {
     return unicode_lib.codePointFromSurrogatePair(high, low);
 }
 
 pub fn surrogatePairFromCodePoint(code_point: u21) unicode_lib.SurrogatePair {
     return unicode_lib.surrogatePairFromCodePoint(code_point);
-}
-
-pub fn findUnicodeFoldClassMatch(value: core.JSValue, unit: u16, start: usize) ?usize {
-    const string_value = value.asStringBody() orelse return null;
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| {
-            var index = start;
-            while (index < bytes.len) : (index += 1) {
-                if (unicodeSimpleFoldClassMatches(unit, bytes[index])) return index;
-            }
-        },
-        .utf16 => |units| {
-            var index = start;
-            while (index < units.len) : (index += 1) {
-                if (unicodeSimpleFoldClassMatches(unit, units[index])) return index;
-            }
-        },
-    }
-    return null;
-}
-
-pub fn unicodeSimpleFoldClassMatches(pattern: u16, input: u16) bool {
-    if (pattern == input) return true;
-    return (pattern == 0x212a and (input == 'K' or input == 'k')) or
-        ((pattern == 'K' or pattern == 'k') and input == 0x212a) or
-        (pattern == 0x0390 and input == 0x1fd3) or
-        (pattern == 0x1fd3 and input == 0x0390) or
-        (pattern == 0x03b0 and input == 0x1fe3) or
-        (pattern == 0x1fe3 and input == 0x03b0) or
-        (pattern == 0xfb05 and input == 0xfb06) or
-        (pattern == 0xfb06 and input == 0xfb05);
-}
-
-pub fn isStringHighSurrogateAt(value: core.JSValue, index: usize) bool {
-    const string_value = value.asStringBody() orelse return false;
-    return switch (string_value.resolveData()) {
-        .latin1 => false,
-        .utf16 => |units| index < units.len and isHighSurrogateUnit(units[index]),
-    };
-}
-
-pub fn singleDotAnchoredMatches(rt: *core.JSRuntime, string_value: core.JSValue, flags: []const u8) !bool {
-    const string_object = string_value.asStringBody() orelse return false;
-    try string_object.ensureFlat(rt);
-    const dot_all = std.mem.indexOfScalar(u8, flags, 's') != null;
-    const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null;
-    switch (string_object.resolveData()) {
-        .latin1 => |bytes| {
-            if (bytes.len != 1) return false;
-            return dot_all or !isRegExpLineTerminator(bytes[0]);
-        },
-        .utf16 => |units| {
-            if (unicode and units.len == 2 and isHighSurrogateUnit(units[0]) and isLowSurrogateUnit(units[1])) return true;
-            if (units.len != 1) return false;
-            return dot_all or !isRegExpLineTerminator(units[0]);
-        },
-    }
-}
-
-pub fn anchoredWhitespaceMatches(string_value: core.JSValue) bool {
-    const string_object = string_value.asStringBody() orelse return false;
-    switch (string_object.resolveData()) {
-        .latin1 => |bytes| {
-            if (bytes.len == 0) return false;
-            for (bytes) |byte| {
-                if (!isEcmaWhitespaceOrLineTerminator(byte)) return false;
-            }
-            return true;
-        },
-        .utf16 => |units| {
-            if (units.len == 0) return false;
-            for (units) |unit| {
-                if (!isEcmaWhitespaceOrLineTerminator(unit)) return false;
-            }
-            return true;
-        },
-    }
-}
-
-pub fn anchoredSingleNonWhitespaceMatches(string_value: core.JSValue, unicode: bool) bool {
-    const string_object = string_value.asStringBody() orelse return false;
-    switch (string_object.resolveData()) {
-        .latin1 => |bytes| return bytes.len == 1 and !isEcmaWhitespaceOrLineTerminator(bytes[0]),
-        .utf16 => |units| {
-            if (unicode and units.len == 2 and isHighSurrogateUnit(units[0]) and isLowSurrogateUnit(units[1])) return true;
-            return units.len == 1 and !isEcmaWhitespaceOrLineTerminator(units[0]);
-        },
-    }
-}
-
-pub fn anchoredComplementClassMatches(source: []const u8, string_value: core.JSValue) bool {
-    const string_object = string_value.asStringBody() orelse return false;
-    switch (string_object.resolveData()) {
-        .latin1 => |bytes| {
-            if (bytes.len == 0) return false;
-            for (bytes) |byte| {
-                if (!complementClassUnitMatches(source, byte)) return false;
-            }
-            return true;
-        },
-        .utf16 => |units| {
-            if (units.len == 0) return false;
-            for (units) |unit| {
-                if (!complementClassUnitMatches(source, unit)) return false;
-            }
-            return true;
-        },
-    }
 }
 
 pub fn anchoredBinaryPropertyMatches(source: []const u8, string_value: core.JSValue) bool {
@@ -3102,13 +2711,6 @@ pub fn readUtf16CodePoint(units: []const u16, index: *usize) u21 {
     index.* += 1;
     return @intCast(high);
 }
-pub fn complementClassUnitMatches(source: []const u8, unit: u16) bool {
-    if (std.mem.eql(u8, source, "^\\D+$")) return !isAsciiDigitUnit(unit);
-    if (std.mem.eql(u8, source, "^\\W+$")) return !isAsciiWordUnit(unit);
-    if (std.mem.eql(u8, source, "^\\S+$")) return !isEcmaWhitespaceOrLineTerminator(unit);
-    return false;
-}
-
 pub const RegExpMatch = struct {
     index: usize,
     len: usize,
@@ -3167,19 +2769,6 @@ pub fn decodeRegExpLegacyCaptureSlice(value: core.JSValue) ?LazyRegExpLegacyCapt
     };
 }
 
-pub fn defineSplitStringElement(rt: *core.JSRuntime, object: *core.Object, index: u32, bytes: []const u8) !void {
-    const value = value_ops.createStringValue(rt, bytes) catch |err| switch (err) {
-        error.InvalidUtf8 => try createStringFromByteUnits(rt, bytes),
-        else => return err,
-    };
-    try defineSplitValueElementOwned(rt, object, index, value);
-}
-
-pub fn defineSplitUnitsElement(rt: *core.JSRuntime, object: *core.Object, index: u32, units: []const u16) !void {
-    const value = (try core.string.String.createUtf16(rt, units)).value();
-    try defineSplitValueElementOwned(rt, object, index, value);
-}
-
 pub fn defineSplitSliceElement(rt: *core.JSRuntime, object: *core.Object, index: u32, input: core.JSValue, start: usize, len: usize) !void {
     const value = try stringSliceValue(rt, input, start, len);
     try defineSplitValueElementOwned(rt, object, index, value);
@@ -3224,44 +2813,6 @@ pub fn defineSplitValueElementOwned(rt: *core.JSRuntime, object: *core.Object, i
     if (appended) return;
     defer value.free(rt);
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
-}
-
-pub fn regExpMatchHasNamedCaptures(found: *const RegExpMatch) bool {
-    return found.has_named_captures;
-}
-
-pub fn createRegExpMatchArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: *const RegExpMatch, has_indices: bool) !core.JSValue {
-    const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
-    try defineSplitStringElement(rt, out, 0, input_bytes[found.index .. found.index + found.len]);
-    var capture_index: usize = 0;
-    while (capture_index < found.capture_count) : (capture_index += 1) {
-        const capture = found.captureAt(capture_index);
-        if (capture.undefined) {
-            try defineSplitValueElement(rt, out, @intCast(capture_index + 1), core.JSValue.undefinedValue());
-        } else {
-            try defineSplitStringElement(rt, out, @intCast(capture_index + 1), input_bytes[capture.start .. capture.start + capture.len]);
-        }
-    }
-    const input = value_ops.createStringValue(rt, input_bytes) catch |err| switch (err) {
-        error.InvalidUtf8 => try createStringFromByteUnits(rt, input_bytes),
-        else => return err,
-    };
-    defer input.free(rt);
-    if (!has_indices and !regExpMatchHasNamedCaptures(found)) {
-        try out.defineRegExpMatchMetadataPropertiesAssumingNew(rt, @intCast(found.index), input, core.JSValue.undefinedValue());
-    } else {
-        try defineFreshNonIndexDataProperty(rt, out, (comptime core.atom.predefinedId("index", .string)).?, core.JSValue.int32(@intCast(found.index)), true, true, true);
-        try defineFreshNonIndexDataProperty(rt, out, (comptime core.atom.predefinedId("input", .string)).?, input, true, true, true);
-        try defineRegExpGroupsProperty(rt, out, input_bytes, found);
-    }
-    if (has_indices) {
-        const indices = try createRegExpIndicesArray(rt, global, input_bytes, found);
-        defer indices.free(rt);
-        const indices_atom = (comptime core.atom.predefinedId("indices", .string)) orelse return error.TypeError;
-        try defineFreshNonIndexDataProperty(rt, out, indices_atom, indices, true, true, true);
-    }
-    return out.value();
 }
 
 // Standard bootstrap creates all five initial shapes together. Keep this
@@ -3364,34 +2915,6 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     out.adoptDenseArrayElementsAssumingEmpty(elements[0..element_count]);
     transferred = true;
     out.flags.may_have_indexed_properties = true;
-}
-
-pub fn createRegExpMatchArrayNoCapturesFromValue(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: *const RegExpMatch, input_len: usize, has_indices: bool) !core.JSValue {
-    std.debug.assert(found.capture_count == 0);
-    const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
-
-    const matched = try stringSliceValue(rt, input_value, found.index, found.len);
-    defer matched.free(rt);
-    try out.initDenseArrayIndexZeroAssumingEmpty(rt, matched);
-
-    try updateRegExpLegacyStaticsNoCaptures(rt, global, input_value, found, input_len);
-
-    if (!has_indices) {
-        try out.defineRegExpMatchMetadataPropertiesAssumingNew(rt, @intCast(found.index), input_value, core.JSValue.undefinedValue());
-    } else {
-        try defineFreshNonIndexDataProperty(rt, out, (comptime core.atom.predefinedId("index", .string)).?, core.JSValue.int32(@intCast(found.index)), true, true, true);
-        try defineFreshNonIndexDataProperty(rt, out, (comptime core.atom.predefinedId("input", .string)).?, input_value, true, true, true);
-        const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
-        try defineFreshNonIndexDataProperty(rt, out, groups_atom, core.JSValue.undefinedValue(), true, true, true);
-    }
-    if (has_indices) {
-        const indices = try createRegExpIndicesArray(rt, global, &.{}, found);
-        defer indices.free(rt);
-        const indices_atom = (comptime core.atom.predefinedId("indices", .string)) orelse return error.TypeError;
-        try defineFreshNonIndexDataProperty(rt, out, indices_atom, indices, true, true, true);
-    }
-    return out.value();
 }
 
 pub fn updateRegExpLegacyStaticsForMatchValues(
@@ -3537,21 +3060,6 @@ pub fn updateRegExpLegacyStaticsLazyForMatch(rt: *core.JSRuntime, global: *core.
     return true;
 }
 
-pub fn createStartOfLineUnicodeMatchArray(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue) !core.JSValue {
-    const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
-
-    try defineSplitValueElement(rt, out, 0, input_value);
-    const capture = try value_ops.createStringValue(rt, "f");
-    defer capture.free(rt);
-    try defineSplitValueElement(rt, out, 1, capture);
-    try out.defineOwnProperty(rt, (comptime core.atom.predefinedId("index", .string)).?, core.Descriptor.data(core.JSValue.int32(0), true, true, true));
-    try out.defineOwnProperty(rt, (comptime core.atom.predefinedId("input", .string)).?, core.Descriptor.data(input_value, true, true, true));
-    const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
-    try out.defineOwnProperty(rt, groups_atom, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
-    return out.value();
-}
-
 pub fn appendUtf8CodePointForRegExpName(rt: *core.JSRuntime, out: *std.ArrayList(u8), cp: u21) !void {
     return unicode_lib.appendUtf8CodePoint(rt.memory.allocator, out, cp);
 }
@@ -3566,26 +3074,6 @@ pub fn isLowSurrogateCodePoint(cp: u21) bool {
 
 pub fn combinedSurrogateCodePoint(high: u16, low: u16) u21 {
     return unicode_lib.codePointFromSurrogatePair(high, low);
-}
-
-pub fn createRegExpMatchArrayFromStringValue(rt: *core.JSRuntime, input_value: core.JSValue, found: *const RegExpMatch) !core.JSValue {
-    const out = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
-    try defineSplitValueElement(rt, out, 0, input_value);
-    try out.defineOwnProperty(rt, (comptime core.atom.predefinedId("index", .string)).?, core.Descriptor.data(core.JSValue.int32(@intCast(found.index)), true, true, true));
-    try out.defineOwnProperty(rt, (comptime core.atom.predefinedId("input", .string)).?, core.Descriptor.data(input_value, true, true, true));
-    return out.value();
-}
-
-pub fn createRegExpMatchArrayFromStringSliceValue(rt: *core.JSRuntime, input_value: core.JSValue, start: usize, len: usize) !core.JSValue {
-    const out = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
-    const match_value = try stringSliceValue(rt, input_value, start, len);
-    defer match_value.free(rt);
-    try defineSplitValueElement(rt, out, 0, match_value);
-    try out.defineOwnProperty(rt, (comptime core.atom.predefinedId("index", .string)).?, core.Descriptor.data(core.JSValue.int32(@intCast(start)), true, true, true));
-    try out.defineOwnProperty(rt, (comptime core.atom.predefinedId("input", .string)).?, core.Descriptor.data(input_value, true, true, true));
-    return out.value();
 }
 
 pub fn stringSliceValue(rt: *core.JSRuntime, value: core.JSValue, start: usize, len: usize) !core.JSValue {
@@ -3676,25 +3164,6 @@ pub fn standardStringMethodId(name: []const u8) ?u32 {
     return null;
 }
 
-pub fn primitiveStringMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "toString")) return 9;
-    if (std.mem.eql(u8, name, "concat")) return 10;
-    if (standardStringMethodId(name)) |method_id| {
-        if (method_id == string_id_lookup.legacy_match_all_method_id) return null;
-        return method_id;
-    }
-    return annexBStringMethodId(name);
-}
-
-pub fn genericTrimStringMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "trim")) return 8;
-    if (std.mem.eql(u8, name, "trimStart")) return 21;
-    if (std.mem.eql(u8, name, "trimEnd")) return 22;
-    if (std.mem.eql(u8, name, "trimLeft")) return 21;
-    if (std.mem.eql(u8, name, "trimRight")) return 22;
-    return null;
-}
-
 pub fn isStringMethodReceiver(value: core.JSValue) bool {
     if (value.isString()) return true;
     if (!value.isObject()) return !value.isNull() and !value.isUndefined();
@@ -3723,13 +3192,6 @@ pub fn annexBStringMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "sup")) return 26;
     if (std.mem.eql(u8, name, "split")) return string_id_lookup.legacy_split_method_id;
     return null;
-}
-
-pub fn functionToStringCall(
-    ctx: *core.JSContext,
-    this_value: core.JSValue,
-) !core.JSValue {
-    return try call_mod.functionToStringValue(ctx.runtime, this_value);
 }
 
 pub fn errorToStringCall(
@@ -4111,17 +3573,6 @@ pub fn uint8ArrayStringBytes(rt: *core.JSRuntime, value: core.JSValue) !std.Arra
     return bytes;
 }
 
-pub fn privateAtomNamesMatch(rt: *core.JSRuntime, left: core.Atom, right: core.Atom) bool {
-    const left_name = rt.atoms.name(left) orelse return false;
-    const right_name = rt.atoms.name(right) orelse return false;
-    return std.mem.eql(u8, left_name, right_name);
-}
-
-pub const KeywordMatch = struct {
-    index: usize,
-    keyword: []const u8,
-};
-
 pub fn appendSourceStringUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     // Eval and Function constructor source conversion use
     // JS_ToCStringLen's non-CESU-8 mode in QuickJS: a valid UTF-16 surrogate
@@ -4131,10 +3582,6 @@ pub fn appendSourceStringUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), v
     var utf8 = try core.JSValue.String.Utf8.fromValue(rt.memory.allocator, value);
     defer utf8.deinit();
     try buffer.appendSlice(rt.memory.allocator, utf8.slice());
-}
-
-pub fn appendCodepointUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), codepoint: u21) !void {
-    return unicode_lib.appendUtf8CodePoint(rt.memory.allocator, buffer, codepoint);
 }
 
 pub fn iteratorConcatCall(
@@ -4230,30 +3677,6 @@ pub fn getFastStringPrimitiveDataProperty(
     if (proto.findOwnDataValueFast(atom_id, &slow)) |value| return value.dup();
     if (slow) return try ownDataOrAutoInitPropertyValue(proto, atom_id);
     return null;
-}
-
-/// Comptime bitset of the predefined atom ids whose name is a standard
-/// String.prototype method. Built from the SAME `prototypeMethodId` map, so the
-/// membership result is identical — but the per-access check below becomes an
-/// O(1) integer-indexed lookup instead of `atoms.name()` + a ~40-way
-/// `std.mem.eql` chain on every `s.method()` resolution. A user string equal to
-/// a method name interns to its predefined atom id (interning is by content),
-/// so dynamic atoms (id > predefined_count) are correctly never methods.
-const string_method_atom_bits = blk: {
-    @setEvalBranchQuota(400000);
-    var bits = [_]bool{false} ** (core.atom.predefined_count + 1);
-    for (core.atom.predefined_atoms) |pa| {
-        if (pa.kind == .string and string_id_lookup.prototypeMethodId(pa.name) != null) {
-            bits[pa.id] = true;
-        }
-    }
-    break :blk bits;
-};
-
-pub fn isStandardStringPrototypeMethodAtom(rt: *core.JSRuntime, atom_id: core.Atom) bool {
-    _ = rt;
-    if (core.atom.isTaggedInt(atom_id) or atom_id == 0 or atom_id > core.atom.predefined_count) return false;
-    return string_method_atom_bits[atom_id];
 }
 
 pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, unit: u16) !void {
@@ -4516,17 +3939,6 @@ pub fn stringObjectHasIndexProperty(rt: *core.JSRuntime, object: *core.Object, a
 
 // String unit/byte classification helpers (moved from the VM call runtime).
 
-pub fn bytesAreAscii(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (!byteIsAscii(byte)) return false;
-    }
-    return true;
-}
-
-pub fn byteIsAscii(byte: u8) bool {
-    return byte < 0x80;
-}
-
 pub fn appendUtf16UnitsAsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
     return unicode_lib.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units);
 }
@@ -4536,10 +3948,6 @@ pub fn appendAsciiUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), bytes: []
 
 pub fn isLineTerminatorUnit(unit: u16) bool {
     return unicode_lib.isEcmaLineTerminatorUnit(unit);
-}
-
-pub fn isEcmaWhitespaceOrLineTerminator(unit: u16) bool {
-    return unicode_lib.isEcmaWhitespaceOrLineTerminatorUnit(unit);
 }
 
 pub fn isAsciiDigitUnit(unit: u16) bool {

@@ -8,6 +8,7 @@
 //! the bytecode pipeline has removed temporary opcodes.
 
 const builtin = @import("builtin");
+const atomics_ops = @import("atomics_ops.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");
@@ -63,21 +64,9 @@ pub fn runWithOutput(
             .root_global,
         );
         defer root_function_value.free(ctx.runtime);
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &root_function_value },
-        };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = ctx.runtime.active_value_roots,
-            .values = &root_values,
-        };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = &root_frame;
-        }
-        defer {
-            if (comptime core.runtime.value_root_frames_enabled) {
-                ctx.runtime.active_value_roots = root_frame.previous;
-            }
-        }
+        var root_frame = core.runtime.rootValues(.{&root_function_value});
+        root_frame.activate(ctx.runtime);
+        defer root_frame.deactivate(ctx.runtime);
         const root_function_object = object_ops.functionObjectFromValue(root_function_value) orelse return error.InvalidBytecode;
         const this_value = if (function.runtimeStrictMode()) core.JSValue.undefinedValue() else global_object.value();
         return runWithCallEnv(.{
@@ -113,74 +102,6 @@ pub fn runWithOutputAndVarRefs(
     const global_object = try contextGlobal(ctx);
     const this_value = if (function.isModule() or function.runtimeStrictMode()) core.JSValue.undefinedValue() else global_object.value();
     return runWithArgs(ctx, stack, function, this_value, &.{}, var_refs, output, global_object, false, false, false);
-}
-
-/// QuickJS module linking invokes the same module bytecode used for normal
-/// evaluation, but with `this === true`. The compiler-emitted entry gate runs
-/// only declaration instantiation and returns before the module body.
-pub fn runModuleInstantiationWithVarRefs(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    var_refs: []const *core.VarRef,
-) !core.JSValue {
-    if (!function.isModule()) return error.InvalidBytecode;
-    const global_object = try contextGlobal(ctx);
-    return runWithArgs(
-        ctx,
-        stack,
-        function,
-        core.JSValue.boolean(true),
-        &.{},
-        var_refs,
-        null,
-        global_object,
-        false,
-        false,
-        false,
-    );
-}
-
-pub fn runModuleWithOutputAndVarRefsState(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    output: ?*std.Io.Writer,
-    var_refs: []const *core.VarRef,
-    module_state: *core.Object,
-    resume_value: ?core.JSValue,
-) !core.JSValue {
-    return runModuleWithOutputAndVarRefsStateAtPc(ctx, stack, function, output, var_refs, module_state, resume_value, 0);
-}
-
-pub fn runModuleWithOutputAndVarRefsStateAtPc(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    output: ?*std.Io.Writer,
-    var_refs: []const *core.VarRef,
-    module_state: *core.Object,
-    resume_value: ?core.JSValue,
-    initial_pc: usize,
-) !core.JSValue {
-    const global_object = try contextGlobal(ctx);
-    // Module continuations use caller-owned standalone stack storage. Finalize
-    // their execution record after the Frame unwinds; FAM-backed states must
-    // instead wait for the wrapper that owns the borrowed Stack window.
-    const finalize_completion = !module_state.generatorStackUsesCombinedStorage();
-    defer if (finalize_completion) module_state.finalizeGeneratorExecutionCompletion(ctx.runtime);
-    return runWithCallEnv(.{
-        .ctx = ctx,
-        .stack = stack,
-        .function = function,
-        .var_refs = var_refs,
-        .output = output,
-        .global = global_object,
-        .generator_state = module_state,
-        .resume_value = resume_value,
-        .suspend_on_module_await = true,
-        .initial_pc = initial_pc,
-    });
 }
 
 /// Lazily build and cache the per-context global object. Subsequent
@@ -341,21 +262,9 @@ fn runCanonicalRootWithArgs(
         capture_source,
     );
     defer root_function_value.free(ctx.runtime);
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &root_function_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&root_function_value});
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
     const root_object = object_ops.functionObjectFromValue(root_function_value) orelse return error.InvalidBytecode;
 
     return runWithCallEnv(.{
@@ -879,7 +788,7 @@ fn reserveEntryFrameCapacity(entry_stack: *stack_mod.Stack, entry_function: *con
 pub const arraySortCall = array_ops.arraySortCall;
 pub const arrayByCopyCall = array_ops.arrayByCopyCall;
 pub const drainPendingPromiseJobs = promise_ops.drainPendingPromiseJobs;
-pub const cleanupAtomicsWaitersForContext = call_runtime.cleanupAtomicsWaitersForContext;
+pub const cleanupAtomicsWaitersForContext = atomics_ops.cleanupAtomicsWaitersForContext;
 const throwTypeErrorIntrinsicForGlobal = call_runtime.throwTypeErrorIntrinsicForGlobal;
 pub const getValueProperty = object_ops.getValueProperty;
 

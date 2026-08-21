@@ -33,21 +33,9 @@ fn jsonBytesAreAscii(bytes: []const u8) bool {
 /// Append the JSON quoted-string form of a string JSValue to `buffer`.
 pub fn appendJsonStringValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const string_value = rooted_value.asStringBody() orelse {
         try appendEscapedJsonString(rt, buffer, "");

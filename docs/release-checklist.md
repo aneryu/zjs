@@ -48,6 +48,24 @@ shortcuts. Do not rerun them as prerequisites for the aggregate release gate.
 - `COMPATIBILITY.md` and `LIMITATIONS.md` do not overclaim.
 - Release notes state that the engine is trusted-code only.
 
+## Artifacts
+
+- Release tarballs carry a **stripped** `zjs`. `.github/workflows/nightly.yml`
+  runs `strip` (plus `codesign -s -` on arm64 macOS, which `strip` invalidates)
+  before the configuration-signature check, so the check runs against the exact
+  bytes shipped and a broken strip fails the release rather than the user.
+- Stripping is post-link on purpose: it leaves `.text` and the
+  `.text.zjs.op_handlers` island byte-identical to the binary the gates
+  measured. Building with `-fstrip` instead moves `.text` by 40 bytes, which
+  would ship a layout the performance gate never measured.
+- Reproduce a release artifact locally with `zig build zjs && strip
+  zig-out/bin/zjs`. Do not strip a binary you intend to profile: `nm`,
+  `addr2line`, and `perf` attribution all need the symbols, which is why no
+  build step strips by default.
+- Shipped ReleaseFast binaries panic with the message only, no stack trace
+  (`src/cli/panic_policy.zig`). A stripped binary cannot symbolize a trace
+  anyway; `zjs-dev` and every test artifact keep the full handler.
+
 ## Hygiene
 
 - `git diff --check` passes.

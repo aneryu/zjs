@@ -9,7 +9,6 @@ pub fn host(globals: []globals_mod.Slot) CallbackHost {
     return .{
         .globals = globals,
         .call = callWithThis,
-        .kind = closureKind,
     };
 }
 
@@ -20,9 +19,5 @@ fn callWithThis(
     args: []const core.JSValue,
     globals: []globals_mod.Slot,
 ) CallbackError!core.JSValue {
-    return closure_mod.callWithThis(rt, callback, this_value, args, globals) catch |err| return @errorCast(err);
-}
-
-fn closureKind(rt: *core.JSRuntime, callback: core.JSValue) CallbackError!i32 {
-    return closure_mod.closureKind(rt, callback) catch |err| return @errorCast(err);
+    return closure_mod.callWithThis(rt, callback, this_value, args, globals);
 }

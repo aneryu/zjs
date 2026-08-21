@@ -9,6 +9,7 @@
 //! domain-local method id; unoccupied slots have `native_function == null`.
 
 const std = @import("std");
+const atomics_ops = @import("atomics_ops.zig");
 const core = @import("../core/root.zig");
 const array = @import("array_builtin_ops.zig");
 const atomics = @import("atomics_ops.zig");

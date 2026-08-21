@@ -26,8 +26,8 @@ taken as the ratio of per-engine median composites.
 
 ## Usage
 
-Official comparison (measurement machine, pinned, ABBA-interleaved,
-medians; refuses to run unpinned):
+Official comparison against QuickJS — the published metric. Serial, pinned,
+ABBA-interleaved, medians; refuses to run unpinned:
 
 ```bash
 flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
@@ -35,6 +35,25 @@ flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
     --zjs zig-out/bin/zjs --qjs /home/aneryu/quickjs/qjs \
     --samples 8 --output /tmp/benchv8.json
 ```
+
+Refactor-policy rule 2 A/B — two-cluster parallel, about two minutes instead
+of thirteen. Each lane runs both binaries at the same instant, one per
+cluster, swapping clusters every batch:
+
+```bash
+flock -x /tmp/zjs-host-heavy.lock taskset -c 5-9,15-19 \
+  python3 tools/perf/bench_v8/run_benchv8_compare.py \
+    --zjs <candidate> --baseline <merge-base build> \
+    --parallel-clusters 5-9 15-19 \
+    --samples 8 --output /tmp/refactor-ab.json
+```
+
+Parallelism is legal for the A/B because it consumes only the ratio. It is
+NOT legal for `--qjs`, which publishes an absolute score: sharing L3 and
+memory bandwidth lowers every absolute score, so a parallel number is not
+comparable to the published serial one. The tool refuses the combination
+rather than trusting the caller to remember, and the JSON artifact records
+which protocol produced its numbers.
 
 Local diagnostic single run (no pinning, no gate value):
 

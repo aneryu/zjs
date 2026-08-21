@@ -430,11 +430,6 @@ pub const anchor_exemplars_per_case: u32 = 6;
 pub var anchor_exemplars: [anchor_exemplar_capacity]AnchorExemplar = undefined;
 pub var anchor_exemplar_len: u32 = 0;
 
-fn anchorAdd(counter: *u64, amount: u64) void {
-    if (comptime !audit_oracles) return;
-    censusAdd(counter, amount);
-}
-
 fn recordAnchorCase(case: AnchorCase) void {
     if (comptime !audit_oracles) return;
     censusAdd(&anchor_split_census.cases[@intFromEnum(case)], 1);
@@ -2917,7 +2912,7 @@ pub fn auditBoundaryUniqueness(
             return error.OutOfMemory;
         defer memory.free(OptimizationBoundary, sorted_bounds);
         @memcpy(sorted_bounds, opt_bounds);
-        std.mem.sort(OptimizationBoundary, sorted_bounds, {}, optimizationBoundaryLessThan);
+        std.sort.heap(OptimizationBoundary, sorted_bounds, {}, optimizationBoundaryLessThan);
         if (duplicateReplacementOwner(sorted_bounds)) |duplicate| {
             var key_buffer: [384]u8 = undefined;
             var key_writer = std.Io.Writer.fixed(&key_buffer);
@@ -3308,7 +3303,7 @@ test "compiler.cfg: unreachable self-loop does not retain its block" {
         .{ .input_offset = input.label_slots[dead.index()].bound_offset, .label_index = dead.index() },
         .{ .input_offset = input.label_slots[merge.index()].bound_offset, .label_index = merge.index() },
     };
-    std.mem.sort(BindEntry, &binds, {}, bindLessThan);
+    std.sort.heap(BindEntry, &binds, {}, bindLessThan);
 
     var graph = try build(&rt.memory, &input, &binds);
     defer graph.deinit();
@@ -3351,7 +3346,7 @@ test "compiler.cfg: alias group coalescing is downstream-indistinguishable" {
             .label_index = alias.index(),
         },
     };
-    std.mem.sort(BindEntry, &binds, {}, bindLessThan);
+    std.sort.heap(BindEntry, &binds, {}, bindLessThan);
 
     var graph = try build(&rt.memory, &input, &binds);
     defer graph.deinit();
@@ -3777,3 +3772,14 @@ test "compiler.cfg: a reference naming a retired alias is a split" {
     try std.testing.expectEqual(@as(u32, 6), split.input_offset);
     try std.testing.expect(referenceToRetiredAlias(&binds, &product_labels, 1, 6) == null);
 }
+
+/// A source line/column pair. Defined identically in two resolver files
+/// before 2026-08-20.
+pub const SourcePoint = struct {
+    line: i32,
+    col: i32,
+
+    pub fn eql(self: SourcePoint, other: SourcePoint) bool {
+        return self.line == other.line and self.col == other.col;
+    }
+};

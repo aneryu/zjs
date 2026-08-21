@@ -1,4 +1,5 @@
 const std = @import("std");
+const iterator_ops = @import("iterator_ops.zig");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -31,11 +32,6 @@ const AwaitSuspendMode = enum {
     /// FUNC_RET_AWAIT with the operand at cur_sp[-1]).
     raw,
 };
-
-pub fn reserveGeneratorStackAdditional(rt: *core.JSRuntime, stack: *stack_mod.Stack, generator: *core.Object, additional: usize) !void {
-    const execution = generator.generatorPayloadPtr().execution orelse return error.TypeError;
-    return reserveGeneratorExecutionStackAdditional(rt, stack, execution, additional);
-}
 
 inline fn reserveGeneratorExecutionStackAdditional(rt: *core.JSRuntime, stack: *stack_mod.Stack, execution: *core.object.GeneratorExecutionState, additional: usize) !void {
     const parked = &execution.suspended.storage.stack;
@@ -561,15 +557,15 @@ fn yieldStarRaw(
         } else {
             const iterable = try stack.pop();
             defer iterable.free(ctx.runtime);
-            iterator_value = try call_runtime.iteratorForValue(ctx, output, global, iterable, function, frame);
+            iterator_value = try iterator_ops.iteratorForValue(ctx, output, global, iterable, function, frame);
         }
     } else {
         const iterable = try stack.pop();
         defer iterable.free(ctx.runtime);
-        iterator_value = try call_runtime.iteratorForValue(ctx, output, global, iterable, function, frame);
+        iterator_value = try iterator_ops.iteratorForValue(ctx, output, global, iterable, function, frame);
     }
     defer iterator_value.free(ctx.runtime);
-    const step = try call_runtime.iteratorStepResult(ctx, output, global, iterator_value, next_arg);
+    const step = try iterator_ops.iteratorStepResult(ctx, output, global, iterator_value, next_arg);
     defer step.result.free(ctx.runtime);
     defer step.value.free(ctx.runtime);
     if (step.done) {

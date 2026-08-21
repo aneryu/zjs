@@ -992,14 +992,6 @@ fn consumeInlineThenPhysical(frame: *const frame_mod.Frame, remaining: *usize) ?
     return null;
 }
 
-/// Backwards-compatible whole-Machine resolver used by colocated machinery
-/// tests. Active invocations publish `resolveMachineBacktraceView` instead so
-/// synchronous native callbacks can split the chain at their fence.
-pub fn resolveMachineBacktrace(data: ?*const anyopaque, index: usize) ?core.ActiveBacktraceSnapshot {
-    const machine: *const Machine = @ptrCast(@alignCast(data.?));
-    return resolveMachineBacktraceRange(machine, machine.top, null, true, index);
-}
-
 pub fn resolveMachineBacktraceView(data: ?*const anyopaque, index: usize) ?core.ActiveBacktraceSnapshot {
     const view: *const MachineBacktraceView = @ptrCast(@alignCast(data.?));
     const top = if (view.live) view.machine.top else view.frozen_top;

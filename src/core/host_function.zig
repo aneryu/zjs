@@ -7,6 +7,7 @@ const RealmContext = context.RealmContext;
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const global_slots = @import("global_slots.zig");
 const class = @import("class.zig");
+const errors = @import("errors.zig");
 const ClassId = class.ClassId;
 
 pub const ids = struct {
@@ -76,90 +77,16 @@ pub const ExternalRecord = struct {
 //
 // The collection iteration helpers (Map/Set forEach, Array.prototype callback
 // methods, group-by) invoke a user callback through this small protocol struct.
-// It is pure: a function-pointer pair plus the realm global slots, with zero VM
+// It is pure: a function pointer plus the realm global slots, with zero VM
 // dependence, so it lives in core beside the other host-function protocol
-// types. `src/exec/collection_adapter.zig` supplies the concrete `call`/`kind`
-// implementations that route into the VM, and `exec/collection_ops.zig`
+// types. `src/exec/collection_adapter.zig` supplies the concrete `call`
+// implementation that routes into the VM, and `exec/collection_ops.zig`
 // re-exports these names so its method bodies keep using them unchanged.
 
-/// Error set surfaced by collection callbacks. Mirrors the engine's host error
-/// surface so a callback's failure can propagate unchanged through the pure
-/// collection helpers.
-pub const CallbackError = error{
-    AccessorWithoutSetter,
-    AmbiguousExport,
-    AwaitOutsideAsyncFunction,
-    BigIntTooLarge,
-    BytecodeCorrupt,
-    BytecodeOverflow,
-    ClosureVarNotFound,
-    CodepointTooLarge,
-    DivisionByZero,
-    DuplicateClass,
-    DualCompileMismatch,
-    EvalError,
-    IncompatibleDescriptor,
-    Interrupted,
-    InvalidAssignmentTarget,
-    InvalidAtom,
-    InvalidBytecode,
-    InvalidBuiltinRegistry,
-    InvalidCharacter,
-    InvalidCharacterError,
-    InvalidClassId,
-    InvalidEscape,
-    InvalidIdentifier,
-    InvalidLength,
-    InvalidLhs,
-    InvalidNumber,
-    InvalidNumberLiteral,
-    InvalidOpcode,
-    InvalidPattern,
-    InvalidPrivateName,
-    InvalidRadix,
-    InvalidRegExp,
-    InvalidUnicodeEscape,
-    InvalidUtf8,
-    LegacyOctalInStrictMode,
-    MissingExport,
-    ModuleLinkFailed,
-    ModuleNotFound,
-    NegativeExponent,
-    NoSpaceLeft,
-    NotExtensible,
-    NotRegExpLiteral,
-    OutOfMemory,
-    Overflow,
-    Pc2LineOverflow,
-    Pc2LineTruncated,
-    ProcessExit,
-    PrototypeCycle,
-    RangeError,
-    ReadOnly,
-    ReferenceError,
-    StackMismatch,
-    StackOverflow,
-    StackUnderflow,
-    SyntaxError,
-    SystemError,
-    JSException,
-    Timeout,
-    TooManyJobArgs,
-    TypeError,
-    URIError,
-    UnhandledPromiseRejection,
-    UnterminatedComment,
-    UnterminatedRegExp,
-    UnterminatedString,
-    UnterminatedTemplate,
-    UnexpectedEof,
-    UnexpectedToken,
-    UnsupportedSimpleJson,
-    Utf8CannotEncodeSurrogateHalf,
-    Utf8EncodesSurrogateHalf,
-    YieldOutsideGenerator,
-    HtmlCommentInModule,
-};
+/// Error set surfaced by collection callbacks. A callback re-enters the engine
+/// and may write to the host's output, so it can fail with anything in the host
+/// error surface -- exactly what `closure.callWithThis` returns.
+pub const CallbackError = errors.HostError;
 
 pub const CallbackCallFn = *const fn (
     rt: *JSRuntime,
@@ -169,15 +96,9 @@ pub const CallbackCallFn = *const fn (
     globals: []global_slots.Slot,
 ) CallbackError!JSValue;
 
-pub const CallbackKindFn = *const fn (
-    rt: *JSRuntime,
-    callback: JSValue,
-) CallbackError!i32;
-
 pub const CallbackHost = struct {
     globals: []global_slots.Slot = &.{},
     call: ?CallbackCallFn = null,
-    kind: ?CallbackKindFn = null,
 
     pub fn callWithThis(self: CallbackHost, rt: *JSRuntime, callback: JSValue, this_value: JSValue, args: []const JSValue) !JSValue {
         const call_fn = self.call orelse return error.TypeError;
@@ -186,11 +107,6 @@ pub const CallbackHost = struct {
 
     pub fn callValue(self: CallbackHost, rt: *JSRuntime, callback: JSValue, args: []const JSValue) !JSValue {
         return self.callWithThis(rt, callback, JSValue.undefinedValue(), args);
-    }
-
-    pub fn closureKind(self: CallbackHost, rt: *JSRuntime, callback: JSValue) ?i32 {
-        const kind_fn = self.kind orelse return null;
-        return kind_fn(rt, callback) catch null;
     }
 };
 
@@ -1574,4 +1490,14 @@ test "builtin method-id helpers preserve load-bearing id values" {
     try testing.expectEqual(@as(?u32, 1), lookup.buffer.dataViewGetKindFromRecordId(get_int8));
     try testing.expectEqualStrings("byteLength", lookup.buffer.arrayBufferAccessorNameFromRecordId(401).?);
     try testing.expectEqual(@as(?u32, 465), lookup.buffer.typedArrayAccessorMethodId("[Symbol.toStringTag]"));
+}
+
+/// The generic-magic native handler an internal entry carries, if it is that
+/// shape. Two builtin record files spelled this switch out.
+pub fn genericMagicHandler(entry: InternalEntry) ?NativeGenericMagicFn {
+    const native = entry.native_function orelse return null;
+    return switch (native) {
+        .generic_magic => |handler| handler,
+        else => null,
+    };
 }

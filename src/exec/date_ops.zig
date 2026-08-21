@@ -339,11 +339,6 @@ fn dateOrdinaryToPrimitive(
     return error.TypeError;
 }
 
-const ms_per_second: i64 = 1000;
-const ms_per_minute: i64 = 60 * ms_per_second;
-const ms_per_hour: i64 = 60 * ms_per_minute;
-pub const ms_per_day: i64 = 24 * ms_per_hour;
-
 pub const StaticMethod = core.host_function.builtin_method_ids.date.StaticMethod;
 
 // Relocated to engine core (`core/host_function.zig`, next to

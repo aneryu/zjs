@@ -53,9 +53,16 @@ jobs:
           node-version: "24"
       - run: zig build engine-production-gate --summary all
       - run: zig build test -Doptimize=ReleaseSafe --summary all
-      - name: Verify benchmark CLI contract
+      # Strip BEFORE the contract check, so the check runs against the exact
+      # bytes the tarball ships. Debug info is 85% of the artifact (29 MB ->
+      # 4.4 MB, 7.5 MB -> 1.9 MB compressed) and nothing on the user side reads
+      # it. `strip` is post-link, so `.text` and the `.text.zjs.op_handlers`
+      # island stay byte-identical to the binary the gates just measured --
+      # a `-fstrip` build would not (it moves `.text` by 40 bytes).
+      - name: Strip and verify benchmark CLI contract
         run: |
           test "$(uname -m)" = "x86_64"
+          strip zig-out/bin/zjs
           expected="zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off"
           test "$(zig-out/bin/zjs --print-config-signature)" = "$expected"
       - name: Package Linux binary
@@ -80,9 +87,15 @@ jobs:
           version: "0.16.0"
       - run: zig build zjs --summary all
       - run: zig build smoke --summary all
-      - name: Verify benchmark CLI contract
+      # Same stripping rationale as the Linux job. On arm64 macOS `strip`
+      # invalidates the ad-hoc code signature the loader requires, so re-sign
+      # immediately; the contract check that follows is what proves the
+      # stripped-and-resigned binary still executes.
+      - name: Strip and verify benchmark CLI contract
         run: |
           test "$(uname -m)" = "arm64"
+          strip -x zig-out/bin/zjs
+          codesign -s - -f zig-out/bin/zjs
           expected="zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off"
           test "$(zig-out/bin/zjs --print-config-signature)" = "$expected"
       - name: Package macOS binary

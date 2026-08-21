@@ -1,4 +1,5 @@
 const std = @import("std");
+const function_ops = @import("function_ops.zig");
 const builtin = @import("builtin");
 const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -37,7 +38,7 @@ pub const Step = enum { done, continue_loop };
 
 // --- Dynamically gathered call_runtime aliases (excluding local definitions) ---
 const DataViewConstructorArgs = builtin_glue.DataViewConstructorArgs;
-const DynamicFunctionKind = call_runtime.DynamicFunctionKind;
+const DynamicFunctionKind = function_ops.DynamicFunctionKind;
 const IntegrityLevel = call_runtime.IntegrityLevel;
 const LengthIndexAtom = array_ops.LengthIndexAtom;
 const RegExpMatch = string_ops.RegExpMatch;
@@ -61,9 +62,9 @@ const callAccessorSetter = call_runtime.callAccessorSetter;
 const callSiteFunctionNameValue = error_stack_ops.callSiteFunctionNameValue;
 const callValueOrBytecodeSyncInternal = call_runtime.callValueOrBytecodeSyncInternalOutlined;
 const captureErrorStack = error_stack_ops.captureErrorStack;
-const closeIteratorForFromEntriesAbrupt = call_runtime.closeIteratorForFromEntriesAbrupt;
+const closeIteratorForFromEntriesAbrupt = iterator_ops.closeIteratorForFromEntriesAbrupt;
 const createArrayFromArgs = array_ops.createArrayFromArgs;
-const createIteratorResult = call_runtime.createIteratorResult;
+const createIteratorResult = iterator_ops.createIteratorResult;
 const createRegExpIndexPair = regexp_fastpath.createRegExpIndexPair;
 const createRegExpMatchArrayFromValue = string_ops.createRegExpMatchArrayFromValue;
 const createStringFromByteUnits = string_ops.createStringFromByteUnits;
@@ -92,7 +93,7 @@ const ordinarySetWithReceiver = call_runtime.ordinarySetWithReceiver;
 const bigIntPrototypeToString = string_ops.bigIntPrototypeToString;
 const createArrayDataOrTypedArrayElement = array_ops.createArrayDataOrTypedArrayElement;
 const defineToStringTag = iterator_ops.defineToStringTag;
-const iteratorCloseValue = call_runtime.iteratorCloseValue;
+const iteratorCloseValue = iterator_ops.iteratorCloseValue;
 const objectEntryArrayValue = array_ops.objectEntryArrayValue;
 const regExpAutoInitBuiltinMatches = string_ops.regExpAutoInitBuiltinMatches;
 const regExpNativeBuiltinMatches = string_ops.regExpNativeBuiltinMatches;
@@ -496,21 +497,9 @@ fn createBytecodeFunctionObjectInternal(
     var rooted_value = value;
     defer rooted_value.free(ctx.runtime);
     if (!rooted_value.isFunctionBytecode()) return error.InvalidBytecode;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const fb = functionBytecodeFromValue(rooted_value) orelse return error.InvalidBytecode;
     // qjs `js_closure` (quickjs.c:17369-17417) does not re-validate the
@@ -686,21 +675,9 @@ pub fn constructPrimitiveWrapperWithPrototype(
     primitive: core.JSValue,
 ) !core.JSValue {
     var rooted_primitive = primitive;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_primitive },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_primitive});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, class_id, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -754,19 +731,12 @@ pub fn aggregateErrorConstructWithPrototype(
     var root_slices = [_]core.runtime.ValueRootSlice{
         rooted_args_buffer.slice(),
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     defer cause_val.free(rt);
 
@@ -893,18 +863,11 @@ pub fn suppressedErrorConstructWithPrototype(
     var root_slices = [_]core.runtime.ValueRootSlice{
         rooted_args_buffer.slice(),
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     const instance_value = instance.value();
@@ -1008,19 +971,12 @@ pub fn errorConstructWithPrototype(
     var root_slices = [_]core.runtime.ValueRootSlice{
         rooted_args_buffer.slice(),
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     defer cause_val.free(rt);
 
@@ -1400,11 +1356,6 @@ pub fn datePrototypeMethod(
         else => return err,
     };
     return result orelse throwTypeErrorMessage(ctx, global, "not a Date object");
-}
-
-pub fn isAnchoredBinaryPropertySource(source: []const u8) bool {
-    const name = anchoredBinaryPropertyName(source) orelse return false;
-    return isRuntimeSupportedBinaryPropertyName(name);
 }
 
 pub fn anchoredBinaryPropertyName(source: []const u8) ?[]const u8 {
@@ -1834,18 +1785,11 @@ pub fn constructFinalizationRegistryWithPrototype(
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_cleanup_callback },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const instance = try core.Object.createFinalizationRegistry(rt, ctx, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
@@ -1879,14 +1823,13 @@ pub fn constructCollectionWithPrototypeFromVm(
     defer adder.free(ctx.runtime);
     if (!isCallableValue(adder)) return error.TypeError;
 
-    const source = property_ops.expectObject(args[0]) catch null;
-    if (source) |source_object| {
-        if (source_object.isArray()) {
-            try addCollectionEntriesFromArray(ctx, output, global, collection_value, kind, source_object, adder);
-            return collection_value;
-        }
-    }
-
+    // The dense array read used to be selected here, on `isArray()` alone, so
+    // an array with an own `@@iterator` — or a patched
+    // `%ArrayIteratorPrototype%.next` — was silently indexed instead of
+    // iterated. That decision now lives inside the iterator path, which makes
+    // it only after resolving `@@iterator` and only when the protocol is
+    // provably untampered; it is the same guard `appendSpreadValuesEnumerate`
+    // already applies for `[...src]`.
     try addCollectionEntriesFromIterator(ctx, output, global, collection_value, kind, args[0], adder);
     return collection_value;
 }
@@ -2150,23 +2093,9 @@ pub fn destructuringObjectRest(
 
     var out_value = core.JSValue.undefinedValue();
     var value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &source_value },
-        .{ .value = &out_value },
-        .{ .value = &value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &source_value, &out_value, &value });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
     defer value.free(ctx.runtime);
 
     const out = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
@@ -2357,19 +2286,12 @@ pub fn createGeneratorObject(
         .{ .borrowed = input_args },
         .{ .borrowed_cells = input_var_refs },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     // The finalized FB is both the qjs-style execution record and the source
     // of the frame dimensions used for the parameter-prologue allocation.
@@ -3155,18 +3077,11 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_primitive },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const prototype = primitivePrototypeForAccess(rt, global, rooted_primitive) orelse return error.TypeError;
     if (rooted_primitive.isString()) {
@@ -3527,23 +3442,9 @@ pub fn objectEnumerableOwnPropertiesCall(
     var element = core.JSValue.undefinedValue();
     defer element.free(ctx.runtime);
 
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &object_value },
-        .{ .value = &out_value },
-        .{ .value = &element },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &object_value, &out_value, &element });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     for (keys) |key| {
         if (ctx.runtime.atoms.isPublicSymbol(key)) continue;
@@ -3766,23 +3667,9 @@ pub fn descriptorObjectFromDescriptor(rt: *core.JSRuntime, global: *core.Object,
     var desc_value = desc.value;
     var desc_getter = desc.getter;
     var desc_setter = desc.setter;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &desc_value },
-        .{ .value = &desc_getter },
-        .{ .value = &desc_setter },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &desc_value, &desc_getter, &desc_setter });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -3961,39 +3848,6 @@ pub fn optionalBoolDescriptorProperty(
     const value = try getValueProperty(ctx, output, global, desc_value, atom_id, caller_function, caller_frame);
     defer value.free(ctx.runtime);
     return valueTruthy(value);
-}
-
-pub fn getAccessorDescriptorValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    object: *core.Object,
-    atom_id: core.Atom,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (try findPropertyDescriptor(ctx.runtime, object, atom_id)) |desc| {
-        defer desc.destroy(ctx.runtime);
-        if (desc.kind != .accessor) return null;
-        if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
-        return try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
-    }
-    return null;
-}
-
-pub fn getPrototypePropertyValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    object: *core.Object,
-    atom_id: core.Atom,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const prototype = object.getPrototype() orelse return null;
-    return getPropertyValueFromObjectChain(ctx, output, global, receiver, prototype, atom_id, caller_function, caller_frame);
 }
 
 inline fn getPropertyValueFromObjectChain(
@@ -4554,22 +4408,9 @@ pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const obj = try stack.pop();
     var rooted_obj = obj;
     defer obj.free(ctx.runtime);
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_home },
-        .{ .value = &rooted_obj },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_home, &rooted_obj });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const home = try property_ops.expectObject(rooted_home);
     const brand_atom = try ensureHomeObjectBrand(ctx.runtime, home);
@@ -4678,29 +4519,19 @@ pub noinline fn defineClass(
     defer superclass_proto.free(ctx.runtime);
     var proto_value = core.JSValue.undefinedValue();
     defer proto_value.free(ctx.runtime);
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &ctor_source },
-        .{ .value = &parent_value },
-        .{ .value = &saved_class_binding },
-        .{ .value = &superclass_value },
-        .{ .value = &ctor },
-        .{ .value = &computed_key },
-        .{ .value = &name_value },
-        .{ .value = &superclass_proto },
-        .{ .value = &proto_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &ctor_source,
+        &parent_value,
+        &saved_class_binding,
+        &superclass_value,
+        &ctor,
+        &computed_key,
+        &name_value,
+        &superclass_proto,
+        &proto_value,
+    });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     if ((flags & 1) != 0) {
         superclass_value = parent_value;
@@ -4851,25 +4682,15 @@ fn defineObjectMethodValue(
     defer getter.free(rt);
     var setter = core.JSValue.undefinedValue();
     defer setter.free(rt);
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_obj },
-        .{ .value = &rooted_value },
-        .{ .value = &name_value },
-        .{ .value = &getter },
-        .{ .value = &setter },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &rooted_obj,
+        &rooted_value,
+        &name_value,
+        &getter,
+        &setter,
+    });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const object = try property_ops.expectObject(obj);
     if (rt.atoms.kind(atom_id) == .private) return error.InvalidBytecode;
@@ -5564,23 +5385,9 @@ pub fn proxyDefineValueForReflectSet(
     var rooted_value = value;
     var key_value = core.JSValue.undefinedValue();
     var desc_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &key_value },
-        .{ .value = &desc_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_value, &key_value, &desc_value });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const target_value = proxy.proxyTarget() orelse return error.TypeError;
     const handler_value = proxy.proxyHandler() orelse return error.TypeError;

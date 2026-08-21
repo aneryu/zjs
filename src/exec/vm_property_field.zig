@@ -78,61 +78,6 @@ const op = bytecode.opcode.op;
 const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
 const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
 
-const RegExpMatchGet = union(enum) {
-    binding: BindingGet,
-    global: GlobalBindingGet,
-};
-
-const RegExpMatchPut = union(enum) {
-    binding: BindingPut,
-    global: GlobalBindingPut,
-};
-
-fn sameBindingGetPut(get: BindingGet, put: BindingPut) bool {
-    return get.idx == put.idx and get.is_var_ref == put.is_var_ref;
-}
-
-fn decodeRegExpMatchGet(function: *const bytecode.FunctionBytecode, pc: usize) ?RegExpMatchGet {
-    const code = function.byteCode();
-    if (decodeBindingGet(code, pc)) |get| return .{ .binding = get };
-    if (decodeGlobalDataGet(function, pc)) |get| return .{ .global = get };
-    return null;
-}
-
-fn decodeRegExpMatchPut(function: *const bytecode.FunctionBytecode, pc: usize) ?RegExpMatchPut {
-    const code = function.byteCode();
-    if (decodeBindingPut(code, pc)) |put| return .{ .binding = put };
-    if (decodeGlobalPut(function, pc)) |put| return .{ .global = put };
-    return null;
-}
-
-fn regExpMatchGetNextPc(get: RegExpMatchGet) usize {
-    return switch (get) {
-        .binding => |binding| binding.next_pc,
-        .global => |global| global.next_pc,
-    };
-}
-
-fn regExpMatchPutNextPc(put: RegExpMatchPut) usize {
-    return switch (put) {
-        .binding => |binding| binding.operand_pc + binding.consume,
-        .global => |global| global.next_pc,
-    };
-}
-
-fn sameRegExpMatchGetPut(get: RegExpMatchGet, put: RegExpMatchPut) bool {
-    return switch (get) {
-        .binding => |get_binding| switch (put) {
-            .binding => |put_binding| sameBindingGetPut(get_binding, put_binding),
-            .global => false,
-        },
-        .global => |get_global| switch (put) {
-            .binding => false,
-            .global => |put_global| get_global.atom == put_global.atom,
-        },
-    };
-}
-
 pub fn toPropKey(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -917,22 +862,6 @@ pub inline fn putFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom
     return null;
 }
 
-pub inline fn putFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
-    const slot = putFieldFastSlot(rt, receiver, atom_id) orelse return false;
-    // Integer-pair slot access (qjs set_value's swap-then-free ldp/stp form,
-    // quickjs.c:5091): a 128-bit SIMD store here stalls every 64-bit
-    // re-reader of the slot — the get_field hit and the for-of done/value
-    // probes read property slots as integer halves (JSValue.loadSlotAsIntPair
-    // note). (When the stored value is copy-only LLVM may re-fuse the split
-    // store into a `str q`; a 64-bit load fully contained in a 128-bit store
-    // still forwards, so that lowering is harmless — the split source form
-    // just keeps the value SSA-scalar and forwarding-eligible.)
-    const old_value = core.JSValue.loadSlotAsIntPair(slot);
-    core.JSValue.storeSlotAsIntPair(slot, value);
-    old_value.free(rt);
-    return true;
-}
-
 inline fn replaceTopBorrowed(
     rt: *core.JSRuntime,
     stack: *stack_mod.Stack,
@@ -982,16 +911,6 @@ fn setArrayLengthForPutFieldFastPath(
     // no sparse conversion). This is the `arr.length = bigger` fast path.
     object.setArrayLength(new_len);
     return true;
-}
-
-fn stringFromCharCodeInt32Value(rt: *core.JSRuntime, code: i32) !core.JSValue {
-    const unit: u16 = @intCast(@as(u32, @bitCast(code)) & 0xffff);
-    if (unit <= 0xff) {
-        const byte: u8 = @intCast(unit);
-        if (try rt.singleByteString(byte)) |cached| return cached.value().dup();
-        return (try core.string.String.createAscii(rt, &.{byte})).value();
-    }
-    return (try core.string.String.createUtf16(rt, &.{unit})).value();
 }
 
 /// OP_put_array_el continuation after the resident handler misses. The caller

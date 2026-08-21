@@ -2,12 +2,13 @@
 //! mechanism is part of the VM core, not a client builtin (QuickJS keeps
 //! `js_atomics_wait` in the engine; see quickjs.c:61234 and the roadmap's
 //! "keep the Atomics wait machinery in exec" decision). The typed record handler
-//! (`call_runtime.atomicsCallForNativeRecord`) switches on this
+//! (`atomics_ops.atomicsCallForNativeRecord`) switches on this
 //! `StaticMethod` selector, and the wait/notify state machine lives beside it
 //! in `call_runtime.zig`. The install-time name->id mapping (`methodId`) lives
 //! in `exec/atomics_ops.zig`, beside the Atomics function-list entries.
 
 const std = @import("std");
+const atomics_ops = @import("atomics_ops.zig");
 
 pub const StaticMethod = enum(u32) {
     add = 1,

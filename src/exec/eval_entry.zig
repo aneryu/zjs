@@ -1,4 +1,5 @@
 const std = @import("std");
+const atomics_ops = @import("atomics_ops.zig");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -50,7 +51,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     defer if (module_name != core.atom.null_atom) rt.atoms.free(module_name);
 
     var compile_timing: bytecode.CompileTiming = .{};
-    const compile_start = monotonicNanos();
+    const compile_start = platform_clock.monotonicNanos();
     var compiled = try parser.compile(.{
         .realm = ctx,
         .policy = .{ .runtime_strict = options.runtime_strict },
@@ -68,7 +69,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         .return_completion = options.mode == .script,
     });
     if (options.timing) |timing| {
-        const compile_ns = elapsedNanosSince(compile_start);
+        const compile_ns = platform_clock.elapsedNanosSince(compile_start);
         timing.parse_ns += compile_ns;
         timing.compile_ns += compile_ns;
         timing.compile_frontend_ns += compile_timing.frontend_ns;
@@ -87,7 +88,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     var module_record: ?*core.module.ModuleRecord = null;
     var should_evaluate_module = false;
     var function: ?*const bytecode.FunctionBytecode = null;
-    const first_execute_start = if (options.mode != .module and options.timing != null) monotonicNanos() else 0;
+    const first_execute_start = if (options.mode != .module and options.timing != null) platform_clock.monotonicNanos() else 0;
     if (options.mode == .module) {
         const artifact = compiled.takeModuleArtifact() orelse return error.InvalidBytecode;
         const referrer_path: ?[]const u8 = if (std.mem.eql(u8, options.filename, "<eval>")) null else options.filename;
@@ -104,7 +105,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
                 var diagnostic: module_mod.LinkDiagnostic = .{};
                 module_mod.linkModule(ctx, record, &diagnostic) catch |err| {
                     try module_graph.throwModuleLinkError(rt, ctx, options.filename, err, &diagnostic);
-                    return moduleResolutionError(err);
+                    return module_graph.moduleResolutionError(err);
                 };
                 if (record.status != .linked) return error.InvalidBytecode;
                 should_evaluate_module = true;
@@ -129,7 +130,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // JS_EvalFunctionInternal first calls js_closure. Move the Result's sole FB
     // owner into that object. Module roots were moved as one artifact into their
     // record above and linkModule published the persistent function/captures.
-    const root_function_publish_start = if (module_record == null and options.timing != null) monotonicNanos() else 0;
+    const root_function_publish_start = if (module_record == null and options.timing != null) platform_clock.monotonicNanos() else 0;
     var root_function_value = core.JSValue.undefinedValue();
     defer root_function_value.free(rt);
     var root_function_object: ?*core.Object = null;
@@ -147,24 +148,12 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         );
         root_function_object = object_ops.objectFromValue(root_function_value) orelse return error.InvalidBytecode;
     }
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &root_function_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&root_function_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
     if (module_record == null) {
         if (options.timing) |timing| {
-            timing.root_function_publish_ns += elapsedNanosSince(root_function_publish_start);
+            timing.root_function_publish_ns += platform_clock.elapsedNanosSince(root_function_publish_start);
         }
     }
 
@@ -185,7 +174,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         break :blk value;
     } else blk: {
         const root_function = function orelse return error.InvalidBytecode;
-        const vm_start = monotonicNanos();
+        const vm_start = platform_clock.monotonicNanos();
         var stack = stack_mod.Stack.init(&rt.memory, ctx.stackLimit());
         defer stack.deinit(rt);
         try stack.reserveAdditional(root_function.stack_size);
@@ -209,12 +198,12 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
                 .global_declarations_prevalidated = true,
             });
         } else return error.InvalidBytecode;
-        if (options.timing) |timing| timing.vm_run_ns += elapsedNanosSince(vm_start);
+        if (options.timing) |timing| timing.vm_run_ns += platform_clock.elapsedNanosSince(vm_start);
         break :blk value;
     };
     if (module_record == null) {
         if (options.timing) |timing| {
-            timing.first_execute_ns += elapsedNanosSince(first_execute_start);
+            timing.first_execute_ns += platform_clock.elapsedNanosSince(first_execute_start);
         }
     }
     // The completion value is owned here while the post-run steps below can
@@ -223,9 +212,9 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     errdefer result.free(rt);
 
     const global_object = try zjs_vm.contextGlobal(ctx);
-    const jobs_start = monotonicNanos();
+    const jobs_start = platform_clock.monotonicNanos();
     try zjs_vm.drainPendingPromiseJobs(ctx, options.output, global_object);
-    if (options.timing) |timing| timing.promise_jobs_ns += elapsedNanosSince(jobs_start);
+    if (options.timing) |timing| timing.promise_jobs_ns += platform_clock.elapsedNanosSince(jobs_start);
 
     if (options.mode == .script and
         (options.discard_script_result or !options.return_completion))
@@ -252,15 +241,15 @@ fn runEvalModule(
     };
 
     while (true) {
-        const vm_start = monotonicNanos();
+        const vm_start = platform_clock.monotonicNanos();
         const result = module_mod.runModuleEvaluationStep(
             ctx,
             record,
             output,
             module_state,
             resume_value,
-        ) catch |err| return moduleResolutionError(err);
-        if (timing) |item| item.vm_run_ns += elapsedNanosSince(vm_start);
+        ) catch |err| return module_graph.moduleResolutionError(err);
+        if (timing) |item| item.vm_run_ns += platform_clock.elapsedNanosSince(vm_start);
         if (resume_value) |value| {
             value.free(rt);
             resume_value = null;
@@ -316,9 +305,9 @@ fn waitForModuleAwaitReaction(
 
     while (reaction.promiseResult() == null) {
         const progressed = progress: {
-            const jobs_start = monotonicNanos();
+            const jobs_start = platform_clock.monotonicNanos();
             defer if (timing) |item| {
-                item.promise_jobs_ns += elapsedNanosSince(jobs_start);
+                item.promise_jobs_ns += platform_clock.elapsedNanosSince(jobs_start);
             };
             switch (try promise_ops.drainOnePendingJob(ctx, output, global)) {
                 .success => break :progress true,
@@ -350,14 +339,7 @@ fn runOneModuleAwaitHostEvent(
     if (try call.runNextOsSignalHandler(ctx, output, global)) return true;
     if (try call_runtime.runNextOsRwHandler(ctx, output, global)) return true;
     if (try call_runtime.runNextOsTimer(ctx, output, global)) return true;
-    return call_runtime.runNextAtomicsHostCompletion(ctx, false);
-}
-
-fn moduleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError}) {
-    return switch (err) {
-        error.MissingExport, error.AmbiguousExport => error.SyntaxError,
-        else => err,
-    };
+    return atomics_ops.runNextAtomicsHostCompletion(ctx, false);
 }
 
 fn parserMode(mode: core.context.EvalMode) parser.Mode {
@@ -377,21 +359,4 @@ fn parserSourceKind(kind: core.context.EvalSourceKind) parser.SourceKind {
     };
 }
 
-fn elapsedNanosSince(start: u64) u64 {
-    const end = monotonicNanos();
-    return if (end > start) end - start else 0;
-}
-
-fn monotonicNanos() u64 {
-    return platform_clock.monotonicNanos();
-}
-
 // Eval compile wrappers (moved from the dissolved exec/eval.zig).
-
-pub fn compileDirect(realm: *core.RealmContext, source: []const u8) !parser.Result {
-    return parser.compile(.{ .realm = realm }, source, .{ .mode = .eval_direct, .filename = "<eval>" });
-}
-
-pub fn compileIndirect(realm: *core.RealmContext, source: []const u8) !parser.Result {
-    return parser.compile(.{ .realm = realm }, source, .{ .mode = .eval_indirect, .filename = "<eval>" });
-}

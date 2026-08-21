@@ -12,6 +12,14 @@ pub fn monotonicNanos() u64 {
     return if (nanos <= 0) 0 else @intCast(nanos);
 }
 
+/// Nanoseconds elapsed since `start`, saturating at zero. A monotonic clock
+/// can still read backwards across a suspend/resume boundary; every caller
+/// wanted the clamp, and three of them wrote it out.
+pub fn elapsedNanosSince(start: u64) u64 {
+    const end = monotonicNanos();
+    return if (end > start) end - start else 0;
+}
+
 /// Cross-platform wall clock in microseconds since the Unix epoch.
 pub fn realtimeMicros() i64 {
     return std.Io.Clock.Timestamp.now(io(), .real).raw.toMicroseconds();

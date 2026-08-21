@@ -49,6 +49,10 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import measurement_pinning  # noqa: E402  (path set above)
+from measurement_pinning import effective_affinity, parse_cpu_list  # noqa: E402
+
 # The Octane 2.0 set as vendored by javascript-zoo. `v8-v7*.js` belong to a
 # different suite and are deliberately excluded; add them explicitly if wanted.
 DEFAULT_BENCHES = [
@@ -112,8 +116,6 @@ def git_describe(repo: Path) -> dict:
     }
 
 
-def effective_affinity() -> set[int]:
-    return set(os.sched_getaffinity(0))
 
 
 def cpu_model() -> str | None:
@@ -135,34 +137,6 @@ def parse_scores(text: str) -> dict[str, int]:
     return scores
 
 
-def parse_cpu_list(spec: str) -> list[int]:
-    """Parse Linux cpulist syntax while preserving lane order."""
-    cpus: list[int] = []
-    seen: set[int] = set()
-    for raw_part in spec.split(","):
-        part = raw_part.strip()
-        if not part:
-            raise ValueError(f"invalid empty CPU-list component in {spec!r}")
-        if "-" in part:
-            bounds = part.split("-")
-            if len(bounds) != 2 or not all(bound.isdigit() for bound in bounds):
-                raise ValueError(f"invalid CPU range {part!r}")
-            start, end = (int(bound) for bound in bounds)
-            if end < start:
-                raise ValueError(f"descending CPU range {part!r} is not allowed")
-            values = range(start, end + 1)
-        else:
-            if not part.isdigit():
-                raise ValueError(f"invalid CPU {part!r}")
-            values = (int(part),)
-        for cpu in values:
-            if cpu in seen:
-                raise ValueError(f"CPU {cpu} occurs more than once in {spec!r}")
-            cpus.append(cpu)
-            seen.add(cpu)
-    if not cpus:
-        raise ValueError("CPU list must not be empty")
-    return cpus
 
 
 def run_one(binary: Path, script: Path, cpu: int, timeout: int) -> tuple[dict[str, int], float]:

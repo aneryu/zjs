@@ -252,10 +252,20 @@ pub fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const
         return string.value();
     }
 
+    // qjs js_number_toString -> js_dtoa2(d, base, 0, JS_DTOA_FORMAT_FREE |
+    // JS_DTOA_EXP_DISABLED) (quickjs.c:44989). The same faithful js_dtoa port
+    // that radix 10 goes through, with the radix actually passed: it emits
+    // digits from the exact value, which is what makes the result identify the
+    // double. The hand-rolled converter this replaces generated digits from an
+    // approximation and lost the last significant digit — 829 of 1,000 random
+    // doubles at radices 3/5/7/11/36 decoded back to a NEIGHBOURING double.
+    const flags = dtoa.JS_DTOA_FORMAT_FREE | dtoa.JS_DTOA_EXP_DISABLED;
+    const needed = try dtoa.radixMaxLen(number, @intCast(radix), 0, flags);
     var out = std.ArrayList(u8).empty;
     defer out.deinit(rt.memory.allocator);
-    try appendRadixInteger(rt, &out, number, @intCast(radix));
-    const string = try core.string.String.createAscii(rt, out.items);
+    try out.resize(rt.memory.allocator, needed);
+    const text = try dtoa.formatRadix(out.items, number, @intCast(radix), 0, flags);
+    const string = try core.string.String.createAscii(rt, text);
     return string.value();
 }
 
@@ -283,110 +293,4 @@ fn integerDigitsArgument(rt: *core.JSRuntime, args: []const core.JSValue, defaul
     if (truncated <= @as(f64, @floatFromInt(std.math.minInt(i32)))) return std.math.minInt(i32);
     if (truncated >= @as(f64, @floatFromInt(std.math.maxInt(i32)))) return std.math.maxInt(i32);
     return @intFromFloat(truncated);
-}
-
-const radix_digit_chars = "0123456789abcdefghijklmnopqrstuvwxyz";
-
-/// Unbiased exponent minus mantissa width: > 0 means the double's unit in the
-/// last place exceeds 1, i.e. successive integers are no longer representable.
-fn radixDoubleExponent(value: f64) i32 {
-    const bits: u64 = @bitCast(value);
-    const biased: i32 = @intCast((bits >> 52) & 0x7ff);
-    return biased - 1075;
-}
-
-/// Free-format radix conversion for Number.prototype.toString(radix != 10)
-/// (qjs js_number_toString -> js_dtoa2(d, base, 0, JS_DTOA_FORMAT_FREE |
-/// JS_DTOA_EXP_DISABLED), quickjs.c:44989). Delta-terminated shortest digit
-/// generation: fractional digits emit until the remaining fraction is within
-/// half an ulp of the source value (with round-half-even and carry
-/// propagation into the integer part), and integer digits are produced
-/// exactly for the whole double range (no more >= 2^128 @intFromFloat).
-/// Output parity with qjs is enforced by the dual-engine fuzz suite.
-fn appendRadixInteger(rt: *core.JSRuntime, out: *std.ArrayList(u8), number: f64, radix: u8) !void {
-    if (std.math.isNan(number)) {
-        try out.appendSlice(rt.memory.allocator, "NaN");
-        return;
-    }
-    if (!std.math.isFinite(number)) {
-        try out.appendSlice(rt.memory.allocator, if (number < 0) "-Infinity" else "Infinity");
-        return;
-    }
-    if (number == 0) {
-        try out.append(rt.memory.allocator, '0');
-        return;
-    }
-    var value = number;
-    if (value < 0) {
-        try out.append(rt.memory.allocator, '-');
-        value = -value;
-    }
-    const radix_f: f64 = @floatFromInt(radix);
-
-    var integer_part = @floor(value);
-    var fraction = value - integer_part;
-    // Half the distance to the next representable double; floor at the
-    // smallest subnormal so the loop always terminates.
-    const value_bits: u64 = @bitCast(value);
-    const next_up: f64 = @bitCast(value_bits + 1);
-    var delta: f64 = 0.5 * (next_up - value);
-    const min_subnormal: f64 = @bitCast(@as(u64, 1));
-    if (delta < min_subnormal) delta = min_subnormal;
-
-    var fraction_buf: [1200]u8 = undefined;
-    var fraction_len: usize = 0;
-    if (fraction >= delta) {
-        while (true) {
-            fraction *= radix_f;
-            delta *= radix_f;
-            var digit: usize = @intFromFloat(fraction);
-            fraction -= @as(f64, @floatFromInt(digit));
-            fraction_buf[fraction_len] = radix_digit_chars[digit];
-            fraction_len += 1;
-            var rounded_up = false;
-            if (fraction > 0.5 or (fraction == 0.5 and (digit & 1) == 1)) {
-                if (fraction + delta > 1.0) {
-                    // Round up the tail, carrying into the integer part when
-                    // every fractional digit overflows.
-                    while (true) {
-                        if (fraction_len == 0) {
-                            integer_part += 1;
-                            break;
-                        }
-                        fraction_len -= 1;
-                        const c = fraction_buf[fraction_len];
-                        digit = if (c > '9') c - 'a' + 10 else c - '0';
-                        if (digit + 1 < radix) {
-                            fraction_buf[fraction_len] = radix_digit_chars[digit + 1];
-                            fraction_len += 1;
-                            break;
-                        }
-                    }
-                    rounded_up = true;
-                }
-            }
-            if (rounded_up or fraction < delta) break;
-        }
-    }
-
-    var integer_buf: [1200]u8 = undefined;
-    var integer_cursor: usize = integer_buf.len;
-    // Digits below the double's precision are exact zeros.
-    while (radixDoubleExponent(integer_part / radix_f) > 0) {
-        integer_part /= radix_f;
-        integer_cursor -= 1;
-        integer_buf[integer_cursor] = '0';
-    }
-    while (true) {
-        const remainder = @rem(integer_part, radix_f);
-        integer_cursor -= 1;
-        integer_buf[integer_cursor] = radix_digit_chars[@intFromFloat(remainder)];
-        integer_part = (integer_part - remainder) / radix_f;
-        if (integer_part <= 0) break;
-    }
-    try out.appendSlice(rt.memory.allocator, integer_buf[integer_cursor..]);
-    if (fraction_len != 0) {
-        try out.append(rt.memory.allocator, '.');
-        try out.appendSlice(rt.memory.allocator, fraction_buf[0..fraction_len]);
-    }
 }

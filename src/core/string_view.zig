@@ -124,7 +124,7 @@ pub fn JSString(comptime Value: type) type {
                     var index: usize = 0;
                     while (index < utf16.len) {
                         const unit = utf16[index];
-                        if (!cesu8 and isHighSurrogate(unit) and index + 1 < utf16.len and isLowSurrogate(utf16[index + 1])) {
+                        if (!cesu8 and unicode.isHighSurrogateUnit(unit) and index + 1 < utf16.len and unicode.isLowSurrogateUnit(utf16[index + 1])) {
                             const cp = surrogatePairCodePoint(unit, utf16[index + 1]);
                             offset += writeUtf8CodePoint(out[offset..], cp);
                             index += 2;
@@ -152,7 +152,7 @@ fn utf8LenUtf16(units: []const u16, cesu8: bool) usize {
     var index: usize = 0;
     while (index < units.len) {
         const unit = units[index];
-        if (!cesu8 and isHighSurrogate(unit) and index + 1 < units.len and isLowSurrogate(units[index + 1])) {
+        if (!cesu8 and unicode.isHighSurrogateUnit(unit) and index + 1 < units.len and unicode.isLowSurrogateUnit(units[index + 1])) {
             len += 4;
             index += 2;
             continue;
@@ -194,14 +194,6 @@ fn writeUtf8CodePoint(out: []u8, code_point: u32) usize {
     out[2] = @intCast(0x80 | ((code_point >> 6) & 0x3f));
     out[3] = @intCast(0x80 | (code_point & 0x3f));
     return 4;
-}
-
-fn isHighSurrogate(unit: u16) bool {
-    return unicode.isHighSurrogateUnit(unit);
-}
-
-fn isLowSurrogate(unit: u16) bool {
-    return unicode.isLowSurrogateUnit(unit);
 }
 
 fn surrogatePairCodePoint(high: u16, low: u16) u32 {

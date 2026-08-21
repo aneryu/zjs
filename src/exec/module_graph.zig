@@ -1,6 +1,7 @@
 const std = @import("std");
+const atomics_ops = @import("atomics_ops.zig");
 const core = @import("../core/root.zig");
-const jobs_mod = @import("../core/jobs.zig");
+const jobs_mod = core.jobs;
 const parser = @import("../parser.zig");
 const platform_clock = @import("../platform_clock.zig");
 const exec = @import("root.zig");
@@ -1205,7 +1206,7 @@ fn drainOneModuleHostEvent(context: *core.JSContext, output: ?*std.Io.Writer) !b
     if (try exec.call.runNextOsSignalHandler(context, output, global)) return true;
     if (try exec.call_runtime.runNextOsRwHandler(context, output, global)) return true;
     if (try exec.call_runtime.runNextOsTimer(context, output, global)) return true;
-    return exec.call_runtime.runNextAtomicsHostCompletion(context, false);
+    return exec.atomics_ops.runNextAtomicsHostCompletion(context, false);
 }
 
 const ModuleDrainResult = union(enum) {
@@ -1572,7 +1573,7 @@ fn freeModuleEvalStep(runtime: *core.JSRuntime, step: ModuleEvalStep) void {
     }
 }
 
-fn moduleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError}) {
+pub fn moduleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError}) {
     return switch (err) {
         error.MissingExport, error.AmbiguousExport => error.SyntaxError,
         else => err,
@@ -2202,8 +2203,4 @@ fn wrapSourceByKind(
             return try bytes_list.toOwnedSlice(allocator);
         },
     }
-}
-
-fn monotonicNanos() u64 {
-    return platform_clock.monotonicNanos();
 }

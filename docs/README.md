@@ -54,6 +54,8 @@ when needed.
   hot-path moves need a bench-v8 A/B.
 - [Maintainability Backlog](maintainability-backlog.md): priced HOT-zone
   refactor queue (H1–H12).
+- [Code Volume](code-volume.md): line-count composition, the remaining
+  reduction queue, and what was ruled unrecoverable (and why).
 
 ## Status And Release
 

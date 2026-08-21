@@ -1,5 +1,5 @@
 const core = @import("../core/root.zig");
-const bignum = @import("../libs/bigint.zig");
+const iterator_ops = @import("iterator_ops.zig");
 const number_format = @import("../libs/number_format.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
@@ -11,18 +11,14 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 // Realm-aware pad/HTML/normalize/localeCompare/numeric-arg bodies remain
 // exec-only in `exec/string_ops.zig`.
 const string_ops = @import("string_ops.zig");
+const call_runtime = @import("call_runtime.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const exceptions = @import("exceptions.zig");
 
 const HostError = exceptions.HostError;
 const NativeCall = builtin_dispatch.NativeCall;
 
-const AppendStringError = error{
-    OutOfMemory,
-    TypeError,
-    InvalidRadix,
-    NoSpaceLeft,
-} || core.context.DynamicImportError;
+const AppendStringError = core.value_string.AppendStringError;
 
 const TrimMode = enum { start, end, both };
 
@@ -153,20 +149,12 @@ fn stringEntryWithHandler(
     };
 }
 
-fn genericMagicHandler(entry: core.host_function.InternalEntry) ?core.host_function.NativeGenericMagicFn {
-    const native = entry.native_function orelse return null;
-    return switch (native) {
-        .generic_magic => |handler| handler,
-        else => null,
-    };
-}
-
 test "String.charCodeAt uses exec_direct and a dedicated handler" {
     var found = false;
     for (internal_entries) |entry| {
         if (entry.id != @intFromEnum(PrototypeMethod.char_code_at)) continue;
         found = true;
-        try std.testing.expect(genericMagicHandler(entry).? == &stringCharCodeAtCall);
+        try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &stringCharCodeAtCall);
         try std.testing.expect(entry.exec_direct != null);
         try std.testing.expect(entry.exec_direct.? ==
             builtin_dispatch.execDirectFunction(&stringCharCodeAtDirect));
@@ -180,7 +168,7 @@ test "String.fromCharCode uses exec_direct and a dedicated handler" {
     for (internal_entries) |entry| {
         if (entry.id != @intFromEnum(StaticMethod.from_char_code)) continue;
         found = true;
-        try std.testing.expect(genericMagicHandler(entry).? == &stringFromCharCodeCall);
+        try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &stringFromCharCodeCall);
         try std.testing.expect(entry.exec_direct != null);
         try std.testing.expect(entry.exec_direct.? ==
             builtin_dispatch.execDirectFunction(&stringFromCharCodeDirect));
@@ -193,8 +181,8 @@ test "String case conversion methods have a dedicated native record handler" {
     var upper_call: ?core.host_function.NativeGenericMagicFn = null;
     var lower_call: ?core.host_function.NativeGenericMagicFn = null;
     for (internal_entries) |entry| {
-        if (entry.id == @intFromEnum(PrototypeMethod.to_upper_case)) upper_call = genericMagicHandler(entry);
-        if (entry.id == @intFromEnum(PrototypeMethod.to_lower_case)) lower_call = genericMagicHandler(entry);
+        if (entry.id == @intFromEnum(PrototypeMethod.to_upper_case)) upper_call = core.host_function.genericMagicHandler(entry);
+        if (entry.id == @intFromEnum(PrototypeMethod.to_lower_case)) lower_call = core.host_function.genericMagicHandler(entry);
     }
     try std.testing.expect(upper_call != null);
     try std.testing.expect(lower_call != null);
@@ -551,7 +539,7 @@ fn stringCall(
     if (id == @intFromEnum(PrototypeMethod.iterator_next)) {
         const receiver = thisObject(this_value) orelse return error.TypeError;
         if (receiver.class_id != core.class.ids.string_iterator) return error.TypeError;
-        return stringIteratorNext(ctx.runtime, this_value) catch |err| switch (err) {
+        return stringIteratorNext(ctx.runtime, ctx.globalObject() catch null, this_value) catch |err| switch (err) {
             error.TypeError => error.TypeError,
             else => err,
         };
@@ -645,19 +633,12 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
         .{ .value = &data_value },
         .{ .value = &object_value },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     if (rooted_args.len >= 1 and rooted_args[0].isSymbol()) return error.TypeError;
     data_value = if (rooted_args.len >= 1)
@@ -696,14 +677,14 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
 // table.
 pub const iterator = core.object.stringIterator;
 
-pub fn stringIteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
+pub fn stringIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, receiver: core.JSValue) !core.JSValue {
     const iterator_object = try expectObject(receiver);
     if (iterator_object.class_id != core.class.ids.string_iterator) return error.TypeError;
-    const target = (iterator_object.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.JSValue.undefinedValue(), true);
+    const target = (iterator_object.iteratorTargetSlot().*) orelse return iteratorResult(rt, global, core.JSValue.undefinedValue(), true);
     if (!target.isString()) return error.TypeError;
     const target_len = core.string.stringValueLenUnchecked(target);
     if ((iterator_object.iteratorIndexSlot().*) >= target_len) {
-        const done_result = try iteratorResult(rt, core.JSValue.undefinedValue(), true);
+        const done_result = try iteratorResult(rt, global, core.JSValue.undefinedValue(), true);
         iterator_object.clearOptionalValueSlot(rt, iterator_object.iteratorTargetSlot());
         return done_result;
     }
@@ -721,11 +702,11 @@ pub fn stringIteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSV
         const byte: u8 = @intCast(first);
         if (byte <= 0x7f) {
             if (try rt.singleByteString(byte)) |cached| {
-                return iteratorResult(rt, cached.value().dup(), false);
+                return iteratorResult(rt, global, cached.value().dup(), false);
             }
         }
         const out = try core.string.String.createLatin1(rt, &.{byte});
-        return iteratorResult(rt, out.value(), false);
+        return iteratorResult(rt, global, out.value(), false);
     }
 
     if (isHighSurrogateUnit(first) and index + 1 < target_len) {
@@ -734,14 +715,14 @@ pub fn stringIteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSV
             iterator_object.iteratorIndexSlot().* += 2;
             const units: [2]u16 = .{ first, second };
             const out = try core.string.String.createUtf16(rt, &units);
-            return iteratorResult(rt, out.value(), false);
+            return iteratorResult(rt, global, out.value(), false);
         }
     }
 
     iterator_object.iteratorIndexSlot().* += 1;
     const units: [1]u16 = .{first};
     const out = try core.string.String.createUtf16(rt, &units);
-    return iteratorResult(rt, out.value(), false);
+    return iteratorResult(rt, global, out.value(), false);
 }
 
 /// Legacy primitive-only String.fromCharCode helper used by transitional bytecode.
@@ -1050,19 +1031,12 @@ fn split(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !co
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &out_value },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const out = try core.Object.createArray(rt, null);
     out_value = out.value();
@@ -1125,19 +1099,12 @@ fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core
         .{ .value = &out_value },
         .{ .value = &sep_value },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     if (stringValueFromReceiver(rooted_receiver)) |string_value| {
         try string_value.ensureFlat(rt);
@@ -1216,19 +1183,12 @@ fn match(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !co
         .{ .value = &out_value },
         .{ .value = &input },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     var needle = std.ArrayList(u8).empty;
     defer needle.deinit(rt.memory.allocator);
@@ -1290,18 +1250,11 @@ fn defineStringElement(rt: *core.JSRuntime, object: *core.Object, index: u32, by
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &object_value },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const value = try createStringValue(rt, bytes);
     try defineValueElement(rt, object, index, value);
@@ -1309,21 +1262,9 @@ fn defineStringElement(rt: *core.JSRuntime, object: *core.Object, index: u32, by
 
 fn defineStringSliceElement(rt: *core.JSRuntime, object: *core.Object, index: u32, string_value: *core.string.String, start: usize, slice_len: usize) !void {
     var object_value = object.value();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &object_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&object_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const value = (try core.string.String.createSlice(rt, string_value, start, slice_len)).value();
     try defineValueElement(rt, object, index, value);
@@ -1332,67 +1273,19 @@ fn defineStringSliceElement(rt: *core.JSRuntime, object: *core.Object, index: u3
 fn defineValueElement(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !void {
     var object_value = object.value();
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &object_value },
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &object_value, &rooted_value });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     defer rooted_value.free(rt);
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(rooted_value, true, true, true));
 }
 
-fn defineStringIndexProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, bytes: []const u8) !void {
-    var object_value = object.value();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &object_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
-
-    const value = try createStringValue(rt, bytes);
-    defer value.free(rt);
-    try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, false, true, false));
-}
-
 fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, unit: u16) !void {
     var object_value = object.value();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &object_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&object_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const units: [1]u16 = .{unit};
     const string = try core.string.String.createUtf16(rt, &units);
@@ -1971,7 +1864,7 @@ fn containsReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const c
 
 fn appendStringReceiverBytes(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), target: core.JSValue) !void {
     if (target.isString()) {
-        try appendRawString(rt, buffer, target);
+        try core.string.appendValueUtf8(rt, buffer, target);
         return;
     }
     if (target.isObject()) {
@@ -2110,30 +2003,12 @@ fn stringValueFromReceiverRaw(value: core.JSValue) ?core.JSValue {
     return string_value;
 }
 
-fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JSValue {
+/// Owning wrapper over the single `CreateIterResultObject` owner: this file's
+/// callers hand over their reference to `value`.
+fn iteratorResult(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue, done: bool) !core.JSValue {
     var rooted_value = value;
     defer rooted_value.free(rt);
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
-
-    const result = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &result.header);
-    try result.defineOwnProperty(rt, core.atom.predefinedId("value", .string).?, core.Descriptor.data(rooted_value, true, true, true));
-    try result.defineOwnProperty(rt, core.atom.predefinedId("done", .string).?, core.Descriptor.data(core.JSValue.boolean(done), true, true, true));
-    return result.value();
+    return iterator_ops.createIteratorResult(rt, global, rooted_value, done);
 }
 
 test "string iteratorResult roots direct function bytecode value while creating result" {
@@ -2156,7 +2031,7 @@ test "string iteratorResult roots direct function bytecode value while creating 
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const iterator_result_value = try iteratorResult(rt, result_value.dup(), false);
+    const iterator_result_value = try iteratorResult(rt, null, result_value.dup(), false);
     var iterator_result_alive = true;
     defer if (iterator_result_alive) iterator_result_value.free(rt);
     const iterator_result = try expectObject(iterator_result_value);
@@ -2235,21 +2110,9 @@ const expectObject = core.value_semantics.expectObject;
 
 fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
     var object_value = object.value();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &object_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&object_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
@@ -2258,109 +2121,13 @@ fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8
 
 fn defineReadonlyIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
     var object_value = object.value();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &object_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&object_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), false, false, false));
-}
-
-fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
-    if (value.asInt32()) |int_value| {
-        var int_buf: [32]u8 = undefined;
-        const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
-        try buffer.appendSlice(rt.memory.allocator, printed);
-    } else if (value.asFloat64()) |float_value| {
-        if (std.math.isNan(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "NaN");
-        } else if (std.math.isPositiveInf(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "Infinity");
-        } else if (std.math.isNegativeInf(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "-Infinity");
-        } else if (std.math.isNegativeZero(float_value)) {
-            try buffer.append(rt.memory.allocator, '0');
-        } else {
-            var float_buf: [64]u8 = undefined;
-            const printed = try core.value_format.formatFiniteNumber(&float_buf, float_value);
-            try buffer.appendSlice(rt.memory.allocator, printed);
-        }
-    } else if (value.isBigInt()) {
-        var big = try cloneBigIntValue(rt, value);
-        defer big.deinit();
-        const printed = try big.formatBase10Alloc(rt.memory.allocator);
-        defer rt.memory.allocator.free(printed);
-        try buffer.appendSlice(rt.memory.allocator, printed);
-    } else if (value.asBool()) |bool_value| {
-        try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
-    } else if (value.isUndefined()) {
-        try buffer.appendSlice(rt.memory.allocator, "undefined");
-    } else if (value.isNull()) {
-        try buffer.appendSlice(rt.memory.allocator, "null");
-    } else if (value.isString()) {
-        try appendRawString(rt, buffer, value);
-    } else if (value.isObject()) {
-        const header = value.refHeader() orelse return;
-        const object_value: *core.Object = @fieldParentPtr("header", header);
-        if (object_value.class_id == core.class.ids.string) {
-            const data = object_value.objectData() orelse return error.TypeError;
-            try appendValueString(rt, buffer, data);
-        } else if (object_value.class_id == core.class.ids.number or object_value.class_id == core.class.ids.boolean or
-            object_value.class_id == core.class.ids.big_int or object_value.class_id == core.class.ids.symbol)
-        {
-            const primitive = (object_value.objectData() orelse return error.TypeError).dup();
-            defer primitive.free(rt);
-            try appendValueString(rt, buffer, primitive);
-        } else if (object_value.class_id == core.class.ids.array_buffer) {
-            try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
-        } else if (object_value.class_id == core.class.ids.promise) {
-            try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.isArray()) {
-            try appendArrayString(rt, buffer, object_value);
-        } else {
-            try buffer.appendSlice(rt.memory.allocator, "[object Object]");
-        }
-    } else {
-        try buffer.appendSlice(rt.memory.allocator, "[object Object]");
-    }
-}
-
-fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const string_value = value.asStringBody() orelse return;
-    try string_value.ensureFlat(rt);
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| {
-            for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);
-        },
-        // Combine surrogate pairs (canonical appendUtf16UnitsAsUtf8) instead
-        // of encoding each unit separately: the per-unit CESU-8 form could
-        // never byte-match astral needles that appendValueString encodes as
-        // 4-byte UTF-8 in the byte-search fallbacks.
-        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
-    }
-}
-
-fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
-    var index: u32 = 0;
-    while (index < object.arrayLength()) : (index += 1) {
-        if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = try object.getProperty(core.atom.atomFromUInt32(index));
-        defer value.free(rt);
-        if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
-    }
 }
 
 fn stringSearchStart(rt: *core.JSRuntime, length: usize, value: core.JSValue) !usize {
@@ -2420,26 +2187,17 @@ fn parseJsNumber(bytes: []const u8) f64 {
     return core.value_format.parseJsNumber(bytes);
 }
 
-fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
-    if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
-    if (value.isBigInt() and value.refHeader() != null) {
-        const header = value.refHeader().?;
-        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return big.borrowedValue(rt.memory.allocator).cloneWithAllocator(rt.memory.allocator);
-    }
-    return error.TypeError;
-}
-
 fn numberValue(value: core.JSValue) ?f64 {
     if (value.isInt()) return @floatFromInt(value.asInt32().?);
     if (value.isFloat64()) return value.asFloat64().?;
     return null;
 }
 
-fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
-    return unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, cp);
-}
-
 fn isTrimCodeUnit(unit: u16) bool {
     return unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit);
+}
+
+/// This file's policy for the shared bare-runtime ToString owner.
+fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
+    return core.value_string.appendValueString(rt, buffer, value, .{ .unwrap_wrappers = true });
 }

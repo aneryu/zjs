@@ -2136,7 +2136,7 @@ pub const lexer = struct {
         try markTypeAssertions(self.allocator, self.source, tokens.items, &ranges);
         try markNonNullAssertions(self.allocator, self.source, tokens.items, &ranges);
 
-        std.mem.sort(Range, ranges.items, {}, rangeLessThan);
+        std.sort.heap(Range, ranges.items, {}, rangeLessThan);
         self.skipped_intervals.clearRetainingCapacity();
         for (ranges.items) |range| {
             if (self.skipped_intervals.items.len == 0 or range.start > self.skipped_intervals.items[self.skipped_intervals.items.len - 1].end) {
@@ -4187,6 +4187,8 @@ pub const parser_core = struct {
         eval_annex_b_blocked_function_names: []const Atom = &.{},
         features: std.EnumSet(FeatureImpl) = .initEmpty(),
         in_namespace: bool = false,
+        /// Owned atom slots. Setters retain borrowed inputs and release the
+        /// previous value; `deinit` releases any value left in the slot.
         current_namespace_atom: ?Atom = null,
         last_declared_atom: ?Atom = null,
         current_parameter_properties: ?std.ArrayList(Atom) = null,
@@ -4240,8 +4242,6 @@ pub const parser_core = struct {
         last_function_child_index: ?u16 = null,
         class_constructor_cpool_idx: ?u16 = null,
         last_class_name_patch: ?ClassNamePatch = null,
-        last_var_decl_atom: ?Atom = null,
-        last_class_decl_atom: ?Atom = null,
         // True while parsing the parameter list of a class/object-literal
         // method. Mirrors qjs func_type == JS_PARSE_FUNC_METHOD in the
         // duplicate-argument check gate (quickjs.c:36443-36448).
@@ -4357,6 +4357,14 @@ pub const parser_core = struct {
         /// so callers pass their existing runtime pointer.
         pub fn deinit(self: *State, rt: anytype) void {
             self.deinitDeclarationConflictIndices();
+            if (self.current_namespace_atom) |atom_id| {
+                self.function.atoms.free(atom_id);
+                self.current_namespace_atom = null;
+            }
+            if (self.last_declared_atom) |atom_id| {
+                self.function.atoms.free(atom_id);
+                self.last_declared_atom = null;
+            }
             if (self.source_line_starts.len != 0) {
                 self.function.memory.allocator.free(self.source_line_starts);
                 self.source_line_starts = &.{};
@@ -4408,6 +4416,18 @@ pub const parser_core = struct {
             self.truncateClassPrivateBoundNames(0);
             self.class_private_bound_names.deinit(self.function.memory.allocator);
             self.function_def.deinit(rt);
+        }
+
+        fn setCurrentNamespaceAtom(self: *State, atom_id: ?Atom) void {
+            const replacement = if (atom_id) |atom| self.function.atoms.dup(atom) else null;
+            if (self.current_namespace_atom) |old| self.function.atoms.free(old);
+            self.current_namespace_atom = replacement;
+        }
+
+        fn setLastDeclaredAtom(self: *State, atom_id: Atom) void {
+            const replacement = self.function.atoms.dup(atom_id);
+            if (self.last_declared_atom) |old| self.function.atoms.free(old);
+            self.last_declared_atom = replacement;
         }
 
         /// Get the current FunctionDef from the top of the stack.
@@ -5459,13 +5479,13 @@ pub const parser_core = struct {
             try emitControlThroughFinally(s, .{ .kind = .@"continue", .label_atom = atom_id });
         }
 
-        fn labelStartAtom(s: *State) ?Atom {
+        fn labelStartAtomOwned(s: *State) ?Atom {
             if (!isIdentifierLikeToken(s)) return null;
             if (s.peekNextKind() != @as(tok.TokenKind, @intCast(':'))) return null;
             const kind = s.peekKind();
             const atom_id = identifierLikeAtom(s);
             if (kind == tok.TOK_IDENT and escapedIdentifierIsReservedWordForCurrentContext(s, atom_id, s.token.payload.ident.has_escape)) return null;
-            return atom_id;
+            return s.function.atoms.dup(atom_id);
         }
 
         fn isReservedLabelIdentifier(s: *State, atom_id: Atom) bool {
@@ -5598,22 +5618,8 @@ pub const parser_core = struct {
         /// Peek at the next token kind without consuming the current token.
         /// Saves and restores lexer position so the cached token stays valid.
         fn peekNextKind(s: *State) tok.TokenKind {
-            const saved_pos = s.lex.pos;
-            const saved_line = s.lex.line;
-            const saved_col = s.lex.col;
-            const saved_got_lf = s.lex.got_lf;
-            const saved_mark_pos = s.lex.mark_pos;
-            const saved_mark_line = s.lex.mark_line;
-            const saved_mark_col = s.lex.mark_col;
-            defer {
-                s.lex.pos = saved_pos;
-                s.lex.line = saved_line;
-                s.lex.col = saved_col;
-                s.lex.got_lf = saved_got_lf;
-                s.lex.mark_pos = saved_mark_pos;
-                s.lex.mark_line = saved_mark_line;
-                s.lex.mark_col = saved_mark_col;
-            }
+            const saved_cursor = takeLexerCursorSnapshot(s);
+            defer restoreLexerCursorSnapshot(s, saved_cursor);
             var peek_token: tok.Token = undefined;
             s.lex.nextInto(&peek_token) catch return tok.TOK_EOF;
             defer s.lex.freeToken(&peek_token);
@@ -5621,22 +5627,8 @@ pub const parser_core = struct {
         }
 
         fn peekNextIsOfToken(s: *State) bool {
-            const saved_pos = s.lex.pos;
-            const saved_line = s.lex.line;
-            const saved_col = s.lex.col;
-            const saved_got_lf = s.lex.got_lf;
-            const saved_mark_pos = s.lex.mark_pos;
-            const saved_mark_line = s.lex.mark_line;
-            const saved_mark_col = s.lex.mark_col;
-            defer {
-                s.lex.pos = saved_pos;
-                s.lex.line = saved_line;
-                s.lex.col = saved_col;
-                s.lex.got_lf = saved_got_lf;
-                s.lex.mark_pos = saved_mark_pos;
-                s.lex.mark_line = saved_mark_line;
-                s.lex.mark_col = saved_mark_col;
-            }
+            const saved_cursor = takeLexerCursorSnapshot(s);
+            defer restoreLexerCursorSnapshot(s, saved_cursor);
             var peek_token: tok.Token = undefined;
             s.lex.nextInto(&peek_token) catch return false;
             defer s.lex.freeToken(&peek_token);
@@ -5647,22 +5639,8 @@ pub const parser_core = struct {
         }
 
         fn peekNextKindNoLineTerminator(s: *State, expected: tok.TokenKind) bool {
-            const saved_pos = s.lex.pos;
-            const saved_line = s.lex.line;
-            const saved_col = s.lex.col;
-            const saved_got_lf = s.lex.got_lf;
-            const saved_mark_pos = s.lex.mark_pos;
-            const saved_mark_line = s.lex.mark_line;
-            const saved_mark_col = s.lex.mark_col;
-            defer {
-                s.lex.pos = saved_pos;
-                s.lex.line = saved_line;
-                s.lex.col = saved_col;
-                s.lex.got_lf = saved_got_lf;
-                s.lex.mark_pos = saved_mark_pos;
-                s.lex.mark_line = saved_mark_line;
-                s.lex.mark_col = saved_mark_col;
-            }
+            const saved_cursor = takeLexerCursorSnapshot(s);
+            defer restoreLexerCursorSnapshot(s, saved_cursor);
             var peek_token: tok.Token = undefined;
             s.lex.nextInto(&peek_token) catch return false;
             defer s.lex.freeToken(&peek_token);
@@ -5671,22 +5649,8 @@ pub const parser_core = struct {
         }
 
         fn peekNextKindWithLineTerminator(s: *State, line_terminator: *bool) tok.TokenKind {
-            const saved_pos = s.lex.pos;
-            const saved_line = s.lex.line;
-            const saved_col = s.lex.col;
-            const saved_got_lf = s.lex.got_lf;
-            const saved_mark_pos = s.lex.mark_pos;
-            const saved_mark_line = s.lex.mark_line;
-            const saved_mark_col = s.lex.mark_col;
-            defer {
-                s.lex.pos = saved_pos;
-                s.lex.line = saved_line;
-                s.lex.col = saved_col;
-                s.lex.got_lf = saved_got_lf;
-                s.lex.mark_pos = saved_mark_pos;
-                s.lex.mark_line = saved_mark_line;
-                s.lex.mark_col = saved_mark_col;
-            }
+            const saved_cursor = takeLexerCursorSnapshot(s);
+            defer restoreLexerCursorSnapshot(s, saved_cursor);
             var peek_token: tok.Token = undefined;
             s.lex.nextInto(&peek_token) catch return tok.TOK_EOF;
             defer s.lex.freeToken(&peek_token);
@@ -5700,25 +5664,13 @@ pub const parser_core = struct {
         /// grammar and diagnostics. This remains separate until the unified
         /// scanner can preserve the production CodeLoad layout gate.
         fn forHeadHasNoTopLevelSemicolon(s: *State) bool {
-            const saved_pos = s.lex.pos;
-            const saved_line = s.lex.line;
-            const saved_col = s.lex.col;
-            const saved_got_lf = s.lex.got_lf;
-            const saved_mark_pos = s.lex.mark_pos;
-            const saved_mark_line = s.lex.mark_line;
-            const saved_mark_col = s.lex.mark_col;
+            const saved_cursor = takeLexerCursorSnapshot(s);
             // The scan consumes `s.token` while advancing. Keep an independent
             // owner for the token restored at the end.
             const saved_token = s.lex.dupToken(s.token) catch return false;
             defer {
                 s.lex.freeToken(&s.token);
-                s.lex.pos = saved_pos;
-                s.lex.line = saved_line;
-                s.lex.col = saved_col;
-                s.lex.got_lf = saved_got_lf;
-                s.lex.mark_pos = saved_mark_pos;
-                s.lex.mark_line = saved_mark_line;
-                s.lex.mark_col = saved_mark_col;
+                restoreLexerCursorSnapshot(s, saved_cursor);
                 s.token = saved_token;
             }
 
@@ -5787,26 +5739,14 @@ pub const parser_core = struct {
         /// top-level boundary. Nested function bodies are not part of the
         /// current function's direct-eval environment.
         fn rhsContainsDirectEval(s: *State) bool {
-            const saved_pos = s.lex.pos;
-            const saved_line = s.lex.line;
-            const saved_col = s.lex.col;
-            const saved_got_lf = s.lex.got_lf;
-            const saved_mark_pos = s.lex.mark_pos;
-            const saved_mark_line = s.lex.mark_line;
-            const saved_mark_col = s.lex.mark_col;
+            const saved_cursor = takeLexerCursorSnapshot(s);
             // The scan advances past the current token and releases its atom.
             // Keep an independent owner for the token restored at the end;
             // copying the token struct would restore a dead identifier atom.
             const saved_token = s.lex.dupToken(s.token) catch return false;
             defer {
                 s.lex.freeToken(&s.token);
-                s.lex.pos = saved_pos;
-                s.lex.line = saved_line;
-                s.lex.col = saved_col;
-                s.lex.got_lf = saved_got_lf;
-                s.lex.mark_pos = saved_mark_pos;
-                s.lex.mark_line = saved_mark_line;
-                s.lex.mark_col = saved_mark_col;
+                restoreLexerCursorSnapshot(s, saved_cursor);
                 s.token = saved_token;
             }
 
@@ -7674,13 +7614,14 @@ pub const parser_core = struct {
 
         if (try parseArrowAssignment(s, flags)) return;
         if (try parseDestructuringAssignment(s, flags)) return;
-        // QuickJS keeps only this source atom for anonymous-function naming;
-        // assignment-target identity itself comes exclusively from the last
-        // emitted opcode below.
+        // QuickJS's `name0` is not duplicated because the emitted getter pins
+        // it. Keep a local owner instead, so anonymous-function naming does
+        // not depend on that downstream operand's lifetime.
         const direct_lhs_atom: ?Atom = if (s.peekKind() == tok.TOK_IDENT)
-            s.token.payload.ident.atom
+            s.function.atoms.dup(s.token.payload.ident.atom)
         else
             null;
+        defer if (direct_lhs_atom) |atom_id| s.function.atoms.free(atom_id);
 
         try parseCondExpr(s, flags);
 
@@ -8843,65 +8784,6 @@ pub const parser_core = struct {
         builder.truncateLastOpcodePreserveSources(pos) catch |err| return mapBuilderError(err);
     }
 
-    fn isDeleteSuperReference(s: *State) bool {
-        if (s.peekKind() != tok.TOK_SUPER) return false;
-        const next = s.peekNextKind();
-        return next == @as(tok.TokenKind, @intCast('.')) or next == @as(tok.TokenKind, @intCast('['));
-    }
-
-    fn parseDeleteSuperReference(s: *State, flags: ParseFlags) Error!void {
-        try s.advance(); // super
-        if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
-            try s.advance();
-            const name = if (s.peekKind() == tok.TOK_IDENT)
-                s.token.payload.ident.atom
-            else if (tok.isKeyword(s.peekKind()))
-                tok.keywordAtom(s.peekKind())
-            else if (s.peekKind() == tok.TOK_DELETE)
-                @as(Atom, 9)
-            else if (s.peekKind() == tok.TOK_CATCH)
-                @as(Atom, 25)
-            else
-                return Error.UnexpectedToken;
-            // Retain before `advance()` releases the token, exactly as the
-            // live member-access paths do (`parseMemberChain`,
-            // `parseNewCalleeMemberAccess`).
-            const retained_name = s.function.atoms.dup(name);
-            defer s.function.atoms.free(retained_name);
-            try s.advance();
-            if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
-                try s.emitOp(opcode.op.get_super);
-                try s.emitOpAtom(opcode.op.push_atom_value, retained_name);
-                try s.emitOp(opcode.op.get_super_value);
-                const shape = try parseCallArgs(s, flags);
-                switch (shape) {
-                    .direct => |argc| try s.emitOpU16(opcode.op.call, argc),
-                    .applied => try s.emitOpU16(opcode.op.apply, 0),
-                }
-                try s.emitOp(opcode.op.drop);
-                try s.emitOp(opcode.op.push_true);
-                return;
-            }
-        } else if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
-            try s.advance();
-            try s.emitOp(opcode.op.push_this);
-            try s.emitOp(opcode.op.drop);
-            try parseExpr(s);
-            try expectPunct(s, ']');
-        } else {
-            return Error.UnexpectedToken;
-        }
-        try emitDeleteSuperError(s);
-    }
-
-    fn emitDeleteSuperError(s: *State) Error!void {
-        try s.emitOpAtomU8(opcode.op.throw_error, atom_module.null_atom, 3);
-    }
-
-    fn endsWithGetSuperValue(code: []const u8, min_pos: usize) bool {
-        return code.len > min_pos and code[code.len - 1] == opcode.op.get_super_value;
-    }
-
     /// `js_parse_delete` (`quickjs.c:26829`). Generic implementation: parse
     /// a unary-style operand normally, then classify the trailing emission
     /// and rewrite it into a delete shape:
@@ -8918,8 +8800,8 @@ pub const parser_core = struct {
     ///
     /// This handles arbitrary chain depths (`delete a.b.c`,
     /// `delete a.b[i]`, etc.) because the rewrite touches only the final
-    /// access. Optional-chain `delete a?.b` / `delete super.x` /
-    /// `delete #priv` are deferred.
+    /// access. Optional-chain and `super` references have dedicated trailing
+    /// opcode rewrites; private references are rejected.
     fn parseDelete(s: *State, flags: ParseFlags) Error!void {
         try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted });
         return finishDelete(s);
@@ -10126,7 +10008,7 @@ pub const parser_core = struct {
             },
             tok.TOK_CLASS => {
                 // Class expression
-                try parseClass(s, false);
+                _ = try parseClass(s, false);
             },
             tok.TOK_FUNCTION => {
                 // Function expression: function or async function
@@ -10867,7 +10749,13 @@ pub const parser_core = struct {
     }
 
     fn identifierLikeAtom(s: *State) Atom {
+        // The current token owns this id.
+        // borrowed-atom: valid only until advance(); retain via identifierLikeAtomOwned
         return if (s.peekKind() == tok.TOK_IDENT) s.token.payload.ident.atom else tok.keywordAtom(s.peekKind());
+    }
+
+    fn identifierLikeAtomOwned(s: *State) Atom {
+        return s.function.atoms.dup(identifierLikeAtom(s));
     }
 
     fn identifierLikeHasInvalidEscapeForBinding(s: *State) bool {
@@ -12276,22 +12164,8 @@ pub const parser_core = struct {
 
     fn awaitUsingDeclarationStart(s: *State) bool {
         if (s.peekKind() != tok.TOK_AWAIT) return false;
-        const saved_pos = s.lex.pos;
-        const saved_line = s.lex.line;
-        const saved_col = s.lex.col;
-        const saved_got_lf = s.lex.got_lf;
-        const saved_mark_pos = s.lex.mark_pos;
-        const saved_mark_line = s.lex.mark_line;
-        const saved_mark_col = s.lex.mark_col;
-        defer {
-            s.lex.pos = saved_pos;
-            s.lex.line = saved_line;
-            s.lex.col = saved_col;
-            s.lex.got_lf = saved_got_lf;
-            s.lex.mark_pos = saved_mark_pos;
-            s.lex.mark_line = saved_mark_line;
-            s.lex.mark_col = saved_mark_col;
-        }
+        const saved_cursor = takeLexerCursorSnapshot(s);
+        defer restoreLexerCursorSnapshot(s, saved_cursor);
 
         var using_token: tok.Token = undefined;
         s.lex.nextInto(&using_token) catch return false;
@@ -12663,7 +12537,8 @@ pub const parser_core = struct {
     fn parseEnumDeclaration(s: *State) Error!void {
         try s.expectToken(tok.TOK_ENUM);
         if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-        const enum_atom = s.token.payload.ident.atom;
+        const enum_atom = identifierLikeAtomOwned(s);
+        defer s.function.atoms.free(enum_atom);
 
         // Acquire the declaration owner before advance releases the token's
         // identifier retain (qjs next_token/free_token ownership order).
@@ -12760,7 +12635,7 @@ pub const parser_core = struct {
         }
 
         try s.expectToken('}');
-        s.last_declared_atom = enum_atom;
+        s.setLastDeclaredAtom(enum_atom);
 
         if (s.namespace_export) {
             if (s.current_namespace_atom) |ns_atom| {
@@ -12778,7 +12653,8 @@ pub const parser_core = struct {
 
     fn parseNamespaceDeclarationWithIdent(s: *State) Error!void {
         if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-        const ns_atom = s.token.payload.ident.atom;
+        const ns_atom = identifierLikeAtomOwned(s);
+        defer s.function.atoms.free(ns_atom);
 
         // FunctionDef must own the name before advance releases the token.
         // Existing declarations already provide that owner.
@@ -12804,12 +12680,16 @@ pub const parser_core = struct {
 
             try s.pushScopeIdentity();
             const saved_in_namespace = s.in_namespace;
-            const saved_namespace_atom = s.current_namespace_atom;
+            const saved_namespace_atom = if (s.current_namespace_atom) |atom_id|
+                s.function.atoms.dup(atom_id)
+            else
+                null;
+            defer if (saved_namespace_atom) |atom_id| s.function.atoms.free(atom_id);
             s.in_namespace = true;
-            s.current_namespace_atom = ns_atom;
+            s.setCurrentNamespaceAtom(ns_atom);
             defer {
                 s.in_namespace = saved_in_namespace;
-                s.current_namespace_atom = saved_namespace_atom;
+                s.setCurrentNamespaceAtom(saved_namespace_atom);
                 s.popScopeIdentity();
             }
 
@@ -12821,7 +12701,7 @@ pub const parser_core = struct {
                 try Emitter.opAtom(s, opcode.op.put_field, nested_atom);
             }
 
-            s.last_declared_atom = ns_atom;
+            s.setLastDeclaredAtom(ns_atom);
             if (s.namespace_export) {
                 if (s.current_namespace_atom) |parent_ns| {
                     try s.emitScopeGetVar(parent_ns);
@@ -12835,12 +12715,16 @@ pub const parser_core = struct {
         try s.expectToken('{');
         try s.pushScopeIdentity();
         const saved_in_namespace = s.in_namespace;
-        const saved_namespace_atom = s.current_namespace_atom;
+        const saved_namespace_atom = if (s.current_namespace_atom) |atom_id|
+            s.function.atoms.dup(atom_id)
+        else
+            null;
+        defer if (saved_namespace_atom) |atom_id| s.function.atoms.free(atom_id);
         s.in_namespace = true;
-        s.current_namespace_atom = ns_atom;
+        s.setCurrentNamespaceAtom(ns_atom);
         defer {
             s.in_namespace = saved_in_namespace;
-            s.current_namespace_atom = saved_namespace_atom;
+            s.setCurrentNamespaceAtom(saved_namespace_atom);
             s.popScopeIdentity();
         }
 
@@ -12849,7 +12733,7 @@ pub const parser_core = struct {
         }
 
         try s.expectToken('}');
-        s.last_declared_atom = ns_atom;
+        s.setLastDeclaredAtom(ns_atom);
 
         if (s.namespace_export) {
             if (saved_namespace_atom) |parent_ns| {
@@ -12905,11 +12789,9 @@ pub const parser_core = struct {
     fn parseStatementOrDeclSlow(s: *State, decl_mask: DeclMask) Error!void {
         const tok_kind = s.peekKind();
 
-        if (s.labelStartAtom()) |token_label_atom| {
-            // labelStartAtom borrows the current token payload. Keep the label
-            // identity live across `advance()` and the complete labelled
-            // statement; LabelFrame itself deliberately does not own atoms.
-            const label_atom = s.function.atoms.dup(token_label_atom);
+        if (s.labelStartAtomOwned()) |label_atom| {
+            // LabelFrame deliberately does not own atoms, so this local owner
+            // spans `advance()` and the complete labelled statement.
             defer s.function.atoms.free(label_atom);
             if (s.isReservedLabelIdentifier(label_atom)) return Error.UnexpectedToken;
             if (s.hasActiveLabel(label_atom)) return Error.UnexpectedToken;
@@ -13022,7 +12904,6 @@ pub const parser_core = struct {
                 }
                 const var_tok = tok_kind;
                 try s.advance();
-                s.last_var_decl_atom = null;
                 try parseVar(s, var_tok, false, ParseFlags.default);
                 _ = try s.expectSemicolon();
             },
@@ -13043,7 +12924,8 @@ pub const parser_core = struct {
                 if (!decl_mask.func) {
                     return Error.UnexpectedToken;
                 }
-                try parseClass(s, true);
+                const name_atom = (try parseClass(s, true)) orelse return Error.UnexpectedToken;
+                defer s.function.atoms.free(name_atom);
             },
             tok.TOK_IDENT => {
                 if (s.lex.is_typescript and s.isIdent("namespace") and s.peekNextKind() == tok.TOK_IDENT) {
@@ -13732,10 +13614,8 @@ pub const parser_core = struct {
                             );
                         } else {
                             if (!isIdentifierLikeToken(s)) return Error.UnexpectedToken;
-                            const catch_atom = if (s.peekKind() == tok.TOK_IDENT)
-                                s.token.payload.ident.atom
-                            else
-                                tok.keywordAtom(s.peekKind());
+                            const catch_atom = identifierLikeAtomOwned(s);
+                            defer s.function.atoms.free(catch_atom);
                             if ((s.is_strict or s.curFunc().is_strict_mode) and
                                 (atomNameEquals(s, catch_atom, "eval") or atomNameEquals(s, catch_atom, "arguments")))
                             {
@@ -13904,27 +13784,13 @@ pub const parser_core = struct {
     /// `let` is always a declaration there.
     fn canTreatLetAsExpressionStatement(s: *State, decl_mask: DeclMask) bool {
         if (s.is_strict or s.curFunc().is_strict_mode) return false;
-        const saved_pos = s.lex.pos;
-        const saved_line = s.lex.line;
-        const saved_col = s.lex.col;
-        const saved_got_lf = s.lex.got_lf;
-        const saved_mark_pos = s.lex.mark_pos;
-        const saved_mark_line = s.lex.mark_line;
-        const saved_mark_col = s.lex.mark_col;
+        const saved_cursor = takeLexerCursorSnapshot(s);
         const current_line = s.token.line_num;
         // The lexer restore must be armed before the fallible scan: `nextInto()`
         // moves `pos` past the peeked token before it can fail (the identifier
         // atom is interned last), so a failure that escaped this frame with the
         // restore still unarmed would leave the parser mid-token.
-        defer {
-            s.lex.pos = saved_pos;
-            s.lex.line = saved_line;
-            s.lex.col = saved_col;
-            s.lex.got_lf = saved_got_lf;
-            s.lex.mark_pos = saved_mark_pos;
-            s.lex.mark_line = saved_mark_line;
-            s.lex.mark_col = saved_mark_col;
-        }
+        defer restoreLexerCursorSnapshot(s, saved_cursor);
         var peek_token: tok.Token = undefined;
         s.lex.nextInto(&peek_token) catch return false;
         defer s.lex.freeToken(&peek_token);
@@ -14541,7 +14407,6 @@ pub const parser_core = struct {
                 {
                     return Error.UnexpectedToken;
                 }
-                s.last_var_decl_atom = atom_id;
                 var local_lexical_idx: ?u16 = null;
                 try s.advance();
 
@@ -14724,6 +14589,8 @@ pub const parser_core = struct {
         const block_scope_level = s.scope_level;
         const var_tok = s.peekKind();
         var target_atom: ?Atom = null;
+        var target_atom_owner: ?Atom = null;
+        defer if (target_atom_owner) |atom_id| s.function.atoms.free(atom_id);
         var target_is_lexical_decl = false;
         var target_is_pattern = false;
         var target_is_using_decl = false;
@@ -14768,7 +14635,8 @@ pub const parser_core = struct {
             if (!isIdentifierLikeToken(s) or identifierLikeHasInvalidEscapeForBinding(s)) {
                 return Error.UnexpectedToken;
             }
-            const atom_id = identifierLikeAtom(s);
+            const atom_id = identifierLikeAtomOwned(s);
+            target_atom_owner = atom_id;
             if (atomNameEquals(s, atom_id, "let")) return Error.UnexpectedToken;
             if ((s.is_strict or s.curFunc().is_strict_mode) and
                 (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
@@ -14824,7 +14692,8 @@ pub const parser_core = struct {
                     !(s.peekKind() == tok.TOK_AWAIT and !canUseAwaitAsIdentifier(s));
                 if (!isIdentifierLikeToken(s) and !sloppy_keyword_var) return Error.UnexpectedToken;
                 if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
-                const atom_id = identifierLikeAtom(s);
+                const atom_id = identifierLikeAtomOwned(s);
+                target_atom_owner = atom_id;
                 if (is_lexical and atomNameEquals(s, atom_id, "let")) return Error.UnexpectedToken;
                 if ((s.is_strict or s.curFunc().is_strict_mode) and
                     (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
@@ -15182,7 +15051,7 @@ pub const parser_core = struct {
         // next_token releases the token (quickjs.c:36551-36556).
         const name_atom = s.function.atoms.dup(identifierLikeAtom(s));
         defer s.function.atoms.free(name_atom);
-        s.last_declared_atom = name_atom;
+        s.setLastDeclaredAtom(name_atom);
         if (s.lex.is_module and s.atProgramBodyScope() and hasKnownBinding(s, name_atom)) {
             return Error.UnexpectedToken;
         }
@@ -15401,7 +15270,8 @@ pub const parser_core = struct {
                     }
                 }
                 if (isIdentifierLikeToken(s)) {
-                    const param_atom = identifierLikeAtom(s);
+                    const param_atom = identifierLikeAtomOwned(s);
+                    defer s.function.atoms.free(param_atom);
                     if (has_modifier) {
                         if (s.current_parameter_properties) |*props| {
                             try appendOwnedParserAtom(s, props, param_atom);
@@ -16351,7 +16221,8 @@ pub const parser_core = struct {
             while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
                 if (isIdentifierLikeToken(s)) {
                     if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
-                    const param_atom = identifierLikeAtom(s);
+                    const param_atom = identifierLikeAtomOwned(s);
+                    defer s.function.atoms.free(param_atom);
                     try appendArrowParamBindingName(s, &param_names, param_atom);
                     for (s.curFunc().vars) |existing| {
                         if (existing.var_name == param_atom) return Error.UnexpectedToken;
@@ -18117,15 +17988,16 @@ pub const parser_core = struct {
         return atom_id == atom_module.ids.constructor or atom_id == atom_module.ids.prototype;
     }
 
-    fn classNameAtom(s: *State) ?Atom {
+    /// Return one owned retain for the current class name. The caller frees.
+    fn classNameAtomOwned(s: *State) ?Atom {
         const kind = s.peekKind();
         if (kind == tok.TOK_IDENT) {
             const atom_id = s.token.payload.ident.atom;
             if (escapedIdentifierIsReservedClassName(s, atom_id, s.token.payload.ident.has_escape)) return null;
-            return atom_id;
+            return s.function.atoms.dup(atom_id);
         }
         if (kind == tok.TOK_AWAIT and canUseAwaitAsIdentifier(s)) {
-            return tok.keywordAtom(kind);
+            return s.function.atoms.dup(tok.keywordAtom(kind));
         }
         return null;
     }
@@ -18134,6 +18006,68 @@ pub const parser_core = struct {
         if (!has_escape) return false;
         return escapedIdentifierIsReservedWordForShorthandBinding(s, atom_id, has_escape) or
             ((s.lex.is_module or s.in_async or s.in_class_static_block) and atomNameEquals(s, atom_id, "await"));
+    }
+
+    /// Parser state that emitting into a class field initializer function
+    /// displaces. `enterFieldInitFunction` takes it and installs the initializer
+    /// context; `leaveFieldInitFunction` puts it back and pops the function.
+    ///
+    /// A class static block displaces four more fields on top of these ten
+    /// (`pending_function_name`, `pending_function_is_decl`,
+    /// `in_class_static_block`, `is_static`) and still saves them by hand.
+    const FieldInitContext = struct {
+        emit_to_function_def: bool,
+        last_opcode_source_offset: ?u32,
+        scope_level: i32,
+        is_strict: bool,
+        lex_is_strict: bool,
+        allow_super: bool,
+        allow_super_call: bool,
+        new_target_allowed: bool,
+        in_constructor: bool,
+        last_function_child_index: ?u16,
+    };
+
+    fn enterFieldInitFunction(s: *State, init_fd: *function_def_mod.FunctionDef) Error!FieldInitContext {
+        const saved: FieldInitContext = .{
+            .emit_to_function_def = s.emit_to_function_def,
+            .last_opcode_source_offset = s.last_opcode_source_offset,
+            .scope_level = s.scope_level,
+            .is_strict = s.is_strict,
+            .lex_is_strict = s.lex.is_strict_mode,
+            .allow_super = s.allow_super,
+            .allow_super_call = s.allow_super_call,
+            .new_target_allowed = s.new_target_allowed,
+            .in_constructor = s.in_constructor,
+            .last_function_child_index = s.last_function_child_index,
+        };
+        // Nothing below `pushFunction` can fail, so a caller that received a
+        // context is always paired with exactly one `leaveFieldInitFunction`.
+        try s.pushFunction(init_fd);
+        s.emit_to_function_def = true;
+        s.last_opcode_source_offset = null;
+        s.scope_level = 0;
+        s.is_strict = true;
+        s.lex.is_strict_mode = true;
+        s.allow_super = true;
+        s.allow_super_call = false;
+        s.new_target_allowed = true;
+        s.in_constructor = false;
+        return saved;
+    }
+
+    fn leaveFieldInitFunction(s: *State, saved: FieldInitContext) void {
+        _ = s.popFunction();
+        s.emit_to_function_def = saved.emit_to_function_def;
+        s.last_opcode_source_offset = saved.last_opcode_source_offset;
+        s.scope_level = saved.scope_level;
+        s.is_strict = saved.is_strict;
+        s.lex.is_strict_mode = saved.lex_is_strict;
+        s.allow_super = saved.allow_super;
+        s.allow_super_call = saved.allow_super_call;
+        s.new_target_allowed = saved.new_target_allowed;
+        s.in_constructor = saved.in_constructor;
+        s.last_function_child_index = saved.last_function_child_index;
     }
 
     fn emitStaticFieldInitializer(
@@ -18148,40 +18082,8 @@ pub const parser_core = struct {
         if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
         const init_fd = parent_fd.child_list[child_index];
 
-        const saved_emit_to_function_def = s.emit_to_function_def;
-        const saved_last_opcode_source_offset = s.last_opcode_source_offset;
-        const saved_scope_level = s.scope_level;
-        const saved_is_strict = s.is_strict;
-        const saved_lex_is_strict = s.lex.is_strict_mode;
-        const saved_allow_super = s.allow_super;
-        const saved_allow_super_call = s.allow_super_call;
-        const saved_new_target_allowed = s.new_target_allowed;
-        const saved_in_constructor = s.in_constructor;
-        const saved_last_function_child_index = s.last_function_child_index;
-
-        try s.pushFunction(init_fd);
-        s.emit_to_function_def = true;
-        s.last_opcode_source_offset = null;
-        s.scope_level = 0;
-        s.is_strict = true;
-        s.lex.is_strict_mode = true;
-        s.allow_super = true;
-        s.allow_super_call = false;
-        s.new_target_allowed = true;
-        s.in_constructor = false;
-        errdefer {
-            _ = s.popFunction();
-            s.emit_to_function_def = saved_emit_to_function_def;
-            s.last_opcode_source_offset = saved_last_opcode_source_offset;
-            s.scope_level = saved_scope_level;
-            s.is_strict = saved_is_strict;
-            s.lex.is_strict_mode = saved_lex_is_strict;
-            s.allow_super = saved_allow_super;
-            s.allow_super_call = saved_allow_super_call;
-            s.new_target_allowed = saved_new_target_allowed;
-            s.in_constructor = saved_in_constructor;
-            s.last_function_child_index = saved_last_function_child_index;
-        }
+        const saved_ctx = try enterFieldInitFunction(s, init_fd);
+        errdefer leaveFieldInitFunction(s, saved_ctx);
 
         try s.emitScopeGetVar(atom_this);
         if (is_private or is_computed) try s.emitScopeGetVar(atom_id);
@@ -18217,17 +18119,7 @@ pub const parser_core = struct {
             try Emitter.op(s, opcode.op.drop);
         }
 
-        _ = s.popFunction();
-        s.emit_to_function_def = saved_emit_to_function_def;
-        s.last_opcode_source_offset = saved_last_opcode_source_offset;
-        s.scope_level = saved_scope_level;
-        s.is_strict = saved_is_strict;
-        s.lex.is_strict_mode = saved_lex_is_strict;
-        s.allow_super = saved_allow_super;
-        s.allow_super_call = saved_allow_super_call;
-        s.new_target_allowed = saved_new_target_allowed;
-        s.in_constructor = saved_in_constructor;
-        s.last_function_child_index = saved_last_function_child_index;
+        leaveFieldInitFunction(s, saved_ctx);
     }
 
     fn emitPublicFieldNoInitializer(s: *State, atom_id: Atom) Error!void {
@@ -18249,40 +18141,8 @@ pub const parser_core = struct {
         if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
         const init_fd = parent_fd.child_list[child_index];
 
-        const saved_emit_to_function_def = s.emit_to_function_def;
-        const saved_last_opcode_source_offset = s.last_opcode_source_offset;
-        const saved_scope_level = s.scope_level;
-        const saved_is_strict = s.is_strict;
-        const saved_lex_is_strict = s.lex.is_strict_mode;
-        const saved_allow_super = s.allow_super;
-        const saved_allow_super_call = s.allow_super_call;
-        const saved_new_target_allowed = s.new_target_allowed;
-        const saved_in_constructor = s.in_constructor;
-        const saved_last_function_child_index = s.last_function_child_index;
-
-        try s.pushFunction(init_fd);
-        s.emit_to_function_def = true;
-        s.last_opcode_source_offset = null;
-        s.scope_level = 0;
-        s.is_strict = true;
-        s.lex.is_strict_mode = true;
-        s.allow_super = true;
-        s.allow_super_call = false;
-        s.new_target_allowed = true;
-        s.in_constructor = false;
-        errdefer {
-            _ = s.popFunction();
-            s.emit_to_function_def = saved_emit_to_function_def;
-            s.last_opcode_source_offset = saved_last_opcode_source_offset;
-            s.scope_level = saved_scope_level;
-            s.is_strict = saved_is_strict;
-            s.lex.is_strict_mode = saved_lex_is_strict;
-            s.allow_super = saved_allow_super;
-            s.allow_super_call = saved_allow_super_call;
-            s.new_target_allowed = saved_new_target_allowed;
-            s.in_constructor = saved_in_constructor;
-            s.last_function_child_index = saved_last_function_child_index;
-        }
+        const saved_ctx = try enterFieldInitFunction(s, init_fd);
+        errdefer leaveFieldInitFunction(s, saved_ctx);
 
         // qjs js_parse_class: instance field initializers begin from the
         // receiver supplied as this.
@@ -18310,17 +18170,7 @@ pub const parser_core = struct {
         // qjs js_parse_class: discard the instance field definition result.
         try Emitter.op(s, opcode.op.drop);
 
-        _ = s.popFunction();
-        s.emit_to_function_def = saved_emit_to_function_def;
-        s.last_opcode_source_offset = saved_last_opcode_source_offset;
-        s.scope_level = saved_scope_level;
-        s.is_strict = saved_is_strict;
-        s.lex.is_strict_mode = saved_lex_is_strict;
-        s.allow_super = saved_allow_super;
-        s.allow_super_call = saved_allow_super_call;
-        s.new_target_allowed = saved_new_target_allowed;
-        s.in_constructor = saved_in_constructor;
-        s.last_function_child_index = saved_last_function_child_index;
+        leaveFieldInitFunction(s, saved_ctx);
     }
 
     fn ensureClassFieldsInitFunction(s: *State) Error!usize {
@@ -18586,40 +18436,8 @@ pub const parser_core = struct {
         if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
         const init_fd = parent_fd.child_list[child_index];
 
-        const saved_emit_to_function_def = s.emit_to_function_def;
-        const saved_last_opcode_source_offset = s.last_opcode_source_offset;
-        const saved_scope_level = s.scope_level;
-        const saved_is_strict = s.is_strict;
-        const saved_lex_is_strict = s.lex.is_strict_mode;
-        const saved_allow_super = s.allow_super;
-        const saved_allow_super_call = s.allow_super_call;
-        const saved_new_target_allowed = s.new_target_allowed;
-        const saved_in_constructor = s.in_constructor;
-        const saved_last_function_child_index = s.last_function_child_index;
-
-        try s.pushFunction(init_fd);
-        s.emit_to_function_def = true;
-        s.last_opcode_source_offset = null;
-        s.scope_level = 0;
-        s.is_strict = true;
-        s.lex.is_strict_mode = true;
-        s.allow_super = true;
-        s.allow_super_call = false;
-        s.new_target_allowed = true;
-        s.in_constructor = false;
-        errdefer {
-            _ = s.popFunction();
-            s.emit_to_function_def = saved_emit_to_function_def;
-            s.last_opcode_source_offset = saved_last_opcode_source_offset;
-            s.scope_level = saved_scope_level;
-            s.is_strict = saved_is_strict;
-            s.lex.is_strict_mode = saved_lex_is_strict;
-            s.allow_super = saved_allow_super;
-            s.allow_super_call = saved_allow_super_call;
-            s.new_target_allowed = saved_new_target_allowed;
-            s.in_constructor = saved_in_constructor;
-            s.last_function_child_index = saved_last_function_child_index;
-        }
+        const saved_ctx = try enterFieldInitFunction(s, init_fd);
+        errdefer leaveFieldInitFunction(s, saved_ctx);
 
         // qjs js_parse_class: computed instance fields begin from the
         // receiver supplied as this.
@@ -18638,17 +18456,7 @@ pub const parser_core = struct {
         // qjs js_parse_class: discard the computed field definition result.
         try Emitter.op(s, opcode.op.drop);
 
-        _ = s.popFunction();
-        s.emit_to_function_def = saved_emit_to_function_def;
-        s.last_opcode_source_offset = saved_last_opcode_source_offset;
-        s.scope_level = saved_scope_level;
-        s.is_strict = saved_is_strict;
-        s.lex.is_strict_mode = saved_lex_is_strict;
-        s.allow_super = saved_allow_super;
-        s.allow_super_call = saved_allow_super_call;
-        s.new_target_allowed = saved_new_target_allowed;
-        s.in_constructor = saved_in_constructor;
-        s.last_function_child_index = saved_last_function_child_index;
+        leaveFieldInitFunction(s, saved_ctx);
     }
 
     fn emitInstanceClassComputedElement(s: *State, kind: ParseFunctionKind, source_start: FunctionSourceStart) Error!void {
@@ -18793,22 +18601,8 @@ pub const parser_core = struct {
     fn collectClassPrivateBoundNames(s: *State, bound_start: usize) Error!void {
         if (s.peekKind() != @as(tok.TokenKind, @intCast('{'))) return;
 
-        const saved_pos = s.lex.pos;
-        const saved_line = s.lex.line;
-        const saved_col = s.lex.col;
-        const saved_got_lf = s.lex.got_lf;
-        const saved_mark_pos = s.lex.mark_pos;
-        const saved_mark_line = s.lex.mark_line;
-        const saved_mark_col = s.lex.mark_col;
-        defer {
-            s.lex.pos = saved_pos;
-            s.lex.line = saved_line;
-            s.lex.col = saved_col;
-            s.lex.got_lf = saved_got_lf;
-            s.lex.mark_pos = saved_mark_pos;
-            s.lex.mark_line = saved_mark_line;
-            s.lex.mark_col = saved_mark_col;
-        }
+        const saved_cursor = takeLexerCursorSnapshot(s);
+        defer restoreLexerCursorSnapshot(s, saved_cursor);
 
         var brace_depth: usize = 1;
         var paren_depth: usize = 0;
@@ -18948,25 +18742,22 @@ pub const parser_core = struct {
 
     /// Parse class declaration or expression
     /// Mirrors `js_parse_class` in quickjs.c:24667
-    fn parseClass(s: *State, is_decl: bool) Error!void {
+    /// Class declarations return their name as an owned atom; expressions
+    /// return null. The caller frees a returned name.
+    fn parseClass(s: *State, is_decl: bool) Error!?Atom {
         s.features.insert(.class_);
         const class_source_start = s.currentTokenStartOffset();
         try s.expectToken(tok.TOK_CLASS);
-        if (is_decl) s.last_class_decl_atom = null;
 
         // Parse class name (required for declarations, optional for expressions)
         var class_name: ?Atom = null;
         defer if (class_name) |name_atom| s.function.atoms.free(name_atom);
         if (is_decl) {
-            const name_atom = classNameAtom(s) orelse return Error.UnexpectedToken;
-            // qjs js_parse_class duplicates the class name before consuming
-            // its token (quickjs.c:25295-25304).
-            class_name = s.function.atoms.dup(name_atom);
-            s.last_class_decl_atom = name_atom;
+            class_name = classNameAtomOwned(s) orelse return Error.UnexpectedToken;
             try s.advance();
         } else {
-            if (classNameAtom(s)) |name_atom| {
-                class_name = s.function.atoms.dup(name_atom);
+            if (classNameAtomOwned(s)) |name_atom| {
+                class_name = name_atom;
                 try s.advance();
             }
         }
@@ -19229,6 +19020,13 @@ pub const parser_core = struct {
                 };
             }
         }
+
+        if (is_decl) {
+            const declaration_name_atom = class_name orelse return Error.UnexpectedToken;
+            class_name = null;
+            return declaration_name_atom;
+        }
+        return null;
     }
 
     fn appendClassFieldInitCallToFunctionDef(
@@ -19671,12 +19469,12 @@ pub const parser_core = struct {
         if (next_tok == tok.TOK_DEFAULT) {
             try s.advance();
             if (s.peekKind() == tok.TOK_CLASS) {
-                if (exportDefaultClassNameOwned(s)) |name_atom| {
+                if (hasExportDefaultClassName(s)) {
+                    const name_atom = (try parseClass(s, true)) orelse return Error.UnexpectedToken;
                     defer s.function.atoms.free(name_atom);
-                    try parseClass(s, true);
                     try addModuleExportName(s, atom_default, name_atom);
                 } else {
-                    try parseClass(s, false);
+                    _ = try parseClass(s, false);
                     try setObjectName(s, atom_default);
                     try ensureModuleDefaultExportBinding(s);
                     try s.emitScopePutVarInit(atom_star_default);
@@ -19841,8 +19639,9 @@ pub const parser_core = struct {
 
         // export class
         if (next_tok == tok.TOK_CLASS) {
-            try parseClass(s, true);
-            if (s.last_class_decl_atom) |name_atom| try addModuleExportName(s, name_atom, name_atom);
+            const name_atom = (try parseClass(s, true)) orelse return Error.UnexpectedToken;
+            defer s.function.atoms.free(name_atom);
+            try addModuleExportName(s, name_atom, name_atom);
             return;
         }
 
@@ -19872,12 +19671,7 @@ pub const parser_core = struct {
     /// pops the LIFO free list), which is luck, not ownership. Same contract as
     /// `moduleImportNameAtomOwned`; the caller frees.
     fn exportDefaultFunctionNameOwned(s: *State) ?Atom {
-        const saved_pos = s.lex.pos;
-        const saved_line = s.lex.line;
-        const saved_col = s.lex.col;
-        const saved_mark_pos = s.lex.mark_pos;
-        const saved_mark_line = s.lex.mark_line;
-        const saved_mark_col = s.lex.mark_col;
+        const saved_cursor = takeLexerCursorSnapshot(s);
         // The position restore must be armed before the fallible scan: `nextInto()`
         // moves `pos` past the peeked token before it can fail (the identifier
         // atom is interned last, quickjs.c mirror at parser.zig lexIdentifier),
@@ -19885,14 +19679,7 @@ pub const parser_core = struct {
         // would leave the caller parsing from mid-token - `export function f()`
         // would resume on `(` and report a spurious SyntaxError instead of
         // letting the allocation failure propagate.
-        defer {
-            s.lex.pos = saved_pos;
-            s.lex.line = saved_line;
-            s.lex.col = saved_col;
-            s.lex.mark_pos = saved_mark_pos;
-            s.lex.mark_line = saved_mark_line;
-            s.lex.mark_col = saved_mark_col;
-        }
+        defer restoreLexerCursorSnapshot(s, saved_cursor);
         var first: tok.Token = undefined;
         s.lex.nextInto(&first) catch return null;
         defer s.lex.freeToken(&first);
@@ -19907,29 +19694,17 @@ pub const parser_core = struct {
         return null;
     }
 
-    /// Owned counterpart of `exportDefaultFunctionNameOwned` for `class`.
-    /// The caller frees.
-    fn exportDefaultClassNameOwned(s: *State) ?Atom {
-        const saved_pos = s.lex.pos;
-        const saved_line = s.lex.line;
-        const saved_col = s.lex.col;
-        const saved_mark_pos = s.lex.mark_pos;
-        const saved_mark_line = s.lex.mark_line;
-        const saved_mark_col = s.lex.mark_col;
+    /// Return whether `export default class` has a declaration name. The
+    /// lookahead token is released here; `parseClass` returns the real owner.
+    fn hasExportDefaultClassName(s: *State) bool {
+        const saved_cursor = takeLexerCursorSnapshot(s);
         // Same ordering contract as `exportDefaultFunctionNameOwned`: arm the
         // position restore before the fallible peek.
-        defer {
-            s.lex.pos = saved_pos;
-            s.lex.line = saved_line;
-            s.lex.col = saved_col;
-            s.lex.mark_pos = saved_mark_pos;
-            s.lex.mark_line = saved_mark_line;
-            s.lex.mark_col = saved_mark_col;
-        }
+        defer restoreLexerCursorSnapshot(s, saved_cursor);
         var name: tok.Token = undefined;
-        s.lex.nextInto(&name) catch return null;
+        s.lex.nextInto(&name) catch return false;
         defer s.lex.freeToken(&name);
-        return if (name.val == tok.TOK_IDENT) s.function.atoms.dup(name.payload.ident.atom) else null;
+        return name.val == tok.TOK_IDENT;
     }
 
     /// Parse from clause: from 'module'
@@ -20279,12 +20054,8 @@ pub const compile_entry = struct {
     }
 
     fn elapsedNanosSince(start: u64) u64 {
-        const end = monotonicNanos();
+        const end = platform_clock.monotonicNanos();
         return if (end > start) end - start else 0;
-    }
-
-    fn monotonicNanos() u64 {
-        return platform_clock.monotonicNanos();
     }
 
     fn initCompileCarrier(
@@ -20441,7 +20212,7 @@ pub const compile_entry = struct {
         function: *bytecode.Bytecode,
         features: *std.EnumSet(FeatureImpl),
     ) !*bytecode.FunctionBytecode {
-        const frontend_start = if (compile_context.timing != null) monotonicNanos() else 0;
+        const frontend_start = if (compile_context.timing != null) platform_clock.monotonicNanos() else 0;
         const effective_strict = options.strict;
         var lex = lexer_mod.Lexer.init(rt.memory.allocator, &rt.atoms, source);
         defer lex.deinit();
@@ -20563,7 +20334,7 @@ pub const compile_entry = struct {
         // additionally prevents a future finalizer helper from accidentally
         // retaining an arena-backed allocation. Restore it before State.deinit
         // so parser scratch still unwinds under the allocator that created it.
-        const finalize_start = if (compile_context.timing != null) monotonicNanos() else 0;
+        const finalize_start = if (compile_context.timing != null) platform_clock.monotonicNanos() else 0;
         const parse_allocator = rt.memory.allocator;
         rt.memory.allocator = compile_context.artifactAllocator();
         defer rt.memory.allocator = parse_allocator;

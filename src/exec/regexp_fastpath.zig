@@ -512,13 +512,6 @@ pub fn regExpSpeciesConstructor(
     return species_value.dup();
 }
 
-pub fn isDefaultRegExpConstructor(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue) bool {
-    const regexp_atom = comptime core.atom.predefinedId("RegExp", .string).?;
-    const default_constructor = try global.getProperty(regexp_atom);
-    defer default_constructor.free(rt);
-    return sameObjectIdentity(default_constructor, value);
-}
-
 pub fn regExpFlagsAreFullUnicode(rt: *core.JSRuntime, flags_string: core.JSValue) !bool {
     return try stringValueContainsByte(rt, flags_string, 'u') or
         try stringValueContainsByte(rt, flags_string, 'v');
@@ -963,20 +956,6 @@ pub fn appendRegExpFlags(rt: *core.JSRuntime, object: *core.Object, out: *std.Ar
     return true;
 }
 
-pub fn appendRegExpInputUnits(rt: *core.JSRuntime, out: *std.ArrayList(u8), value: core.JSValue) !void {
-    const string_value = value.asStringBody() orelse return value_ops.appendRawString(rt, out, value);
-    try string_value.ensureFlat(rt);
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| try out.appendSlice(rt.memory.allocator, bytes),
-        .utf16 => |units| {
-            for (units) |unit| {
-                const tag: u8 = if (unit <= 0xff) @intCast(unit) else @intCast(unit >> 8);
-                try out.append(rt.memory.allocator, tag);
-            }
-        },
-    }
-}
-
 pub fn isRegExpLineTerminator(unit: u16) bool {
     return unicode_lib.isEcmaLineTerminatorUnit(unit);
 }
@@ -991,14 +970,6 @@ pub fn regexpLastIndex(rt: *core.JSRuntime, object: *core.Object) usize {
         return @intFromFloat(@floor(float_value));
     }
     return 0;
-}
-
-pub fn setRegExpLastIndex(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
-    const value = if (index <= @as(usize, @intCast(std.math.maxInt(i32))))
-        core.JSValue.int32(@intCast(index))
-    else
-        core.JSValue.float64(@floatFromInt(index));
-    object.setProperty(rt, core.atom.ids.lastIndex, value) catch return error.TypeError;
 }
 
 pub fn updateRegExpLegacyStaticsNoCaptures(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: *const RegExpMatch, input_len: usize) !void {

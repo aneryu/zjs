@@ -1126,17 +1126,6 @@ fn addSmallInPlace(value: *BigInt, addend: Limb) !void {
     value.limbs = next;
 }
 
-fn setBit(value: *BigInt, bit: usize) !void {
-    const limb_index = bit / limb_bits;
-    if (value.limbs.len <= limb_index) {
-        const old_len = value.limbs.len;
-        value.limbs = try value.allocator.realloc(value.limbs, limb_index + 1);
-        @memset(value.limbs[old_len..], 0);
-    }
-    const offset: u6 = @intCast(bit % limb_bits);
-    value.limbs[limb_index] |= @as(Limb, 1) << offset;
-}
-
 fn fromTwosComplement(allocator: std.mem.Allocator, limbs: []const Limb, width: usize) !BigInt {
     if (limbs.len == 0) return .{ .allocator = allocator };
     const sign_limb = (width - 1) / limb_bits;
@@ -1203,30 +1192,6 @@ fn invertOrder(order: std.math.Order) std.math.Order {
         .eq => .eq,
         .gt => .lt,
     };
-}
-
-fn fitsI128(value: BigInt) bool {
-    if (value.limbs.len > 2) return false;
-    if (value.limbs.len < 2) return true;
-    const limit: u128 = if (value.negative) (@as(u128, 1) << 127) else ((@as(u128, 1) << 127) - 1);
-    var out: u128 = 0;
-    var i = value.limbs.len;
-    while (i > 0) {
-        i -= 1;
-        out = (out << @as(u7, limb_bits)) | value.limbs[i];
-    }
-    return out <= limit;
-}
-
-fn toI128(value: BigInt) i128 {
-    var out: u128 = 0;
-    var i = value.limbs.len;
-    while (i > 0) {
-        i -= 1;
-        out = (out << @as(u7, limb_bits)) | value.limbs[i];
-    }
-    const signed: i128 = @intCast(out);
-    return if (value.negative) -signed else signed;
 }
 
 test "bigint functionality" {

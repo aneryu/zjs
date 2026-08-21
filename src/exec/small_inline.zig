@@ -13,7 +13,6 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
-const stack_mod = @import("stack.zig");
 const object_ops = @import("object_ops.zig");
 const function_ops = @import("function_ops.zig");
 const Shape = @import("../core/shape.zig").Shape;
@@ -25,8 +24,6 @@ const JSValue = core.JSValue;
 const Object = core.Object;
 
 pub const max_code: usize = 40;
-pub const max_slots: usize = 4;
-pub const max_stack: usize = 4;
 pub const max_depth: u8 = 2;
 pub const monomorph_hits: u8 = 8;
 pub const max_sites: u8 = 16;
@@ -265,10 +262,6 @@ fn budgetRemaining(rt: *const JSRuntime) usize {
     if (rt.small_inline_specialized_bytes >= cap) return 0;
     return cap - rt.small_inline_specialized_bytes;
 }
-
-pub const TakeResult = struct {
-    site: *const InlinedSite,
-};
 
 pub fn findInlinedSite(fb: *const FunctionBytecode, call_pc: u32) ?*const InlinedSite {
     const state = callerState(fb) orelse return null;

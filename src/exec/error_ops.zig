@@ -1,4 +1,5 @@
 const core = @import("../core/root.zig");
+const error_stack_ops = @import("error_stack_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call = @import("call.zig");
 const call_runtime = @import("call_runtime.zig");
@@ -60,16 +61,16 @@ fn errorCall(
         const receiver = call.thisObject(this_value) orelse return error.TypeError;
         if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
         if (!try call_runtime.constructorNameEqlLocal(ctx.runtime, receiver, "Error")) return error.TypeError;
-        return call_runtime.errorCaptureStackTrace(ctx, output, realm.global, args);
+        return error_stack_ops.errorCaptureStackTrace(ctx, output, realm.global, args);
     }
 
     const func_obj = host_call.func_obj;
     return switch (id) {
         @intFromEnum(PrototypeMethod.to_string) => string_ops.errorToStringCall(ctx, output, realm.global, this_value, caller_function, caller_frame),
-        @intFromEnum(PrototypeMethod.stack_getter) => call_runtime.errorStackGetter(ctx, output, realm.global, this_value),
+        @intFromEnum(PrototypeMethod.stack_getter) => error_stack_ops.errorStackGetter(ctx, output, realm.global, this_value),
         @intFromEnum(PrototypeMethod.stack_setter) => blk: {
             const setter_func = func_obj orelse return error.TypeError;
-            break :blk call_runtime.errorStackSetter(ctx, output, realm.global, this_value, setter_func, args, caller_function, caller_frame);
+            break :blk error_stack_ops.errorStackSetter(ctx, output, realm.global, this_value, setter_func, args, caller_function, caller_frame);
         },
         else => error.TypeError,
     };

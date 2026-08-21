@@ -1,11 +1,11 @@
 {
   "comment": "Identity-gate baseline registry (refactor-policy rule 4). Stripped whole-image md5 of the ReleaseFast zjs. The build is bistable: a given source tree reaches more than one image, and WHICH one is not a function of the build protocol. So this records the SET of images the baseline source is known to produce; a candidate passes when repeated builds land inside this set and never outside it.",
   "target": "aarch64-linux (maintainer measurement machine)",
-  "baseline_commit": "0df866e6",
-  "verified": "2026-08-19",
+  "baseline_commit": "11ca5f84",
+  "verified": "2026-08-20",
   "admissible_images": [
-    "b79373c2ce00e9dc7213c9c55c4af2e8",
-    "5564b2d87e5b2b21712bf125509f4bf1"
+    "9517eee2e10aa1d2f380a411b87a7e48",
+    "4e6e64f32f55383d0f71c7c6b0d1d2be"
   ],
   "protocol": {
     "cold_cache": "copy the tracked tree to a scratch dir; zig build zjs; strip -o img zig-out/bin/zjs; md5sum img",
@@ -13,9 +13,12 @@
     "sampling": "Repeat the incremental build at least 3x per source. One build proves nothing: the basin choice varies run to run."
   },
   "notes": [
-    "2026-08-19, gates-audit: sampled 3x incremental (b79373c2 / 5564b2d8 / b79373c2) plus one cold build (5564b2d8) on this tree.",
+    "2026-08-20, maintainability batches (11ca5f84): sampled 3x incremental (9517eee2 all three) plus one cold build (4e6e64f3). Three commits since the previous entry each removed instructions deliberately (root-frame scope collapse, iterator-result merge, UTF-8 owner merge), so none of them could have been checked against the old set -- each carried a rule-2 bench-v8 A/B instead.",
+    "2026-08-20, size campaign (7ff06059): sampled 3x incremental (4f379779 all three) plus one cold build (9079caf1). The two basins are cleanly split by protocol this time -- incremental 4,262,960 bytes, cold 4,264,592 -- but that is one observation of the split, not a rule; the sampling requirement stands.",
+    "Both hashes are ~382 KB below the previous baseline because the commit is a deliberate machine-code change (sort instantiations, ReleaseFast panic policy), not an identity-preserving refactor. Its evidence is the rule-2 bench-v8 A/B (composite ratio 1.0006), not this registry.",
+    "2026-08-19, gates-audit: sampled 3x incremental (b79373c2 / 5564b2d8 / b79373c2) plus one cold build (5564b2d8) on that tree.",
     "These hashes differ from the previous baseline (efb32e60 / 1e29ac2b at 711cbfc6) because this commit carries real engine changes -- four leak fixes and the out-of-memory contract repair -- not only the machine-code-identical NaN-boxing deletion. That deletion was verified separately against 711cbfc6 and reproduced its image set exactly.",
     "The schema records an admissible image SET rather than one hash per protocol name. The old shape asserted each protocol yields a fixed image, which sampling falsifies: the same protocol on the same source yields either image. Reading a single incremental build as a verdict fails good changes spuriously.",
-    "Prior lineage (single-sample, per the old schema, so treat as one observation each): 711cbfc6 = {efb32e60, 1e29ac2b}; 03328070 = efb32e60 both; b325d7b1 = e93b69e8(incremental)/5df9578f(cold); naming-only = 223fc498/d43abd31; post-dedup = e2d49022."
+    "Prior lineage: 0df866e6 = {b79373c2, 5564b2d8} (3x incremental + cold). Single-sample observations under the old schema, so treat each as one observation: 711cbfc6 = {efb32e60, 1e29ac2b}; 03328070 = efb32e60 both; b325d7b1 = e93b69e8(incremental)/5df9578f(cold); naming-only = 223fc498/d43abd31; post-dedup = e2d49022."
   ]
 }

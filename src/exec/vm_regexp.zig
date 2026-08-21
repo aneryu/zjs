@@ -18,22 +18,9 @@ fn constructCompiledLiteralInRealm(
 
     var source_val = source;
     var compiled_root = compiled_value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &source_val },
-        .{ .value = &compiled_root },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &source_val, &compiled_root });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const object = try core.Object.createRegExpFromShape(rt, initial_shape);
     errdefer core.Object.destroyFromHeader(rt, &object.header);

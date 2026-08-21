@@ -49,7 +49,7 @@ const constructorPrototypeObject = object_ops.constructorPrototypeObject;
 const createBytecodeFunctionObject = object_ops.createBytecodeFunctionObject;
 const createCallSiteObject = object_ops.createCallSiteObject;
 const createDataPropertyOrThrow = object_ops.createDataPropertyOrThrow;
-const createIteratorResult = call_runtime.createIteratorResult;
+const createIteratorResult = iterator_ops.createIteratorResult;
 const createRegExpIndexPair = regexp_fastpath.createRegExpIndexPair;
 const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
 const defineRegExpIndicesGroupsProperty = object_ops.defineRegExpIndicesGroupsProperty;
@@ -82,8 +82,8 @@ const arraySearchCall = string_ops.arraySearchCall;
 const arrayToLocaleStringCall = string_ops.arrayToLocaleStringCall;
 const arrayToStringCall = string_ops.arrayToStringCall;
 const collectIteratorValues = call_runtime.collectIteratorValues;
-const iteratorCallForNativeRecord = call_runtime.iteratorCallForNativeRecord;
-const iteratorCloseValue = call_runtime.iteratorCloseValue;
+const iteratorCallForNativeRecord = iterator_ops.iteratorCallForNativeRecord;
+const iteratorCloseValue = iterator_ops.iteratorCloseValue;
 const iteratorPrototype = object_ops.iteratorPrototype;
 const objectEnumerableOwnPropertiesCall = object_ops.objectEnumerableOwnPropertiesCall;
 const readInt = call_runtime.readInt;
@@ -131,7 +131,7 @@ pub fn popCatchMarker(rt: *core.JSRuntime, stack: *stack_mod.Stack) !??usize {
             continue;
         }
         const popped = try stack.pop();
-        if (marker.isCatchOffset()) return catchTargetFromMarker(popped);
+        if (marker.isCatchOffset()) return popped.catchTarget();
         popped.free(rt);
     }
     return null;
@@ -333,28 +333,18 @@ pub fn aggregateErrorsIterableToArray(
     var done = core.JSValue.undefinedValue();
     var item = core.JSValue.undefinedValue();
 
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_iterable },
-        .{ .value = &iterator_method },
-        .{ .value = &iterator_value },
-        .{ .value = &next_method },
-        .{ .value = &out_value },
-        .{ .value = &next_result_value },
-        .{ .value = &done },
-        .{ .value = &item },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &rooted_iterable,
+        &iterator_method,
+        &iterator_value,
+        &next_method,
+        &out_value,
+        &next_result_value,
+        &done,
+        &item,
+    });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     defer iterator_method.free(ctx.runtime);
     defer iterator_value.free(ctx.runtime);
@@ -502,49 +492,6 @@ pub const TypedArrayLengthPrintStore = struct {
     next_pc: usize,
 };
 
-pub fn decodeTypedArrayLengthPrintStore(code: []const u8, pc: usize) ?TypedArrayLengthPrintStore {
-    if (pc >= code.len) return null;
-    return switch (code[pc]) {
-        op.put_loc0 => .{ .local_index = 0, .next_pc = pc + 1 },
-        op.put_loc1 => .{ .local_index = 1, .next_pc = pc + 1 },
-        op.put_loc2 => .{ .local_index = 2, .next_pc = pc + 1 },
-        op.put_loc3 => .{ .local_index = 3, .next_pc = pc + 1 },
-        op.put_loc, op.put_loc_check, op.put_loc_check_init => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .local_index = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 };
-        },
-        op.put_loc8 => blk: {
-            if (pc + 2 > code.len) return null;
-            break :blk .{ .local_index = code[pc + 1], .next_pc = pc + 2 };
-        },
-        else => null,
-    };
-}
-
-pub const TypedArrayLengthPrintLocalGet = struct {
-    idx: u16,
-    next_pc: usize,
-};
-
-pub fn decodeTypedArrayLengthPrintLocalGet(code: []const u8, pc: usize) ?TypedArrayLengthPrintLocalGet {
-    if (pc >= code.len) return null;
-    return switch (code[pc]) {
-        op.get_loc0 => .{ .idx = 0, .next_pc = pc + 1 },
-        op.get_loc1 => .{ .idx = 1, .next_pc = pc + 1 },
-        op.get_loc2 => .{ .idx = 2, .next_pc = pc + 1 },
-        op.get_loc3 => .{ .idx = 3, .next_pc = pc + 1 },
-        op.get_loc, op.get_loc_check => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 };
-        },
-        op.get_loc8 => blk: {
-            if (pc + 2 > code.len) return null;
-            break :blk .{ .idx = code[pc + 1], .next_pc = pc + 2 };
-        },
-        else => null,
-    };
-}
-
 pub fn typedArrayConstructVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -657,23 +604,9 @@ pub fn typedArrayConstructArrayLikeVm(
     var result_value = core.JSValue.undefinedValue();
     var item = core.JSValue.undefinedValue();
     var coerced = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &result_value },
-        .{ .value = &item },
-        .{ .value = &coerced },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &result_value, &item, &coerced });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     defer result_value.free(ctx.runtime);
     defer item.free(ctx.runtime);
@@ -737,22 +670,9 @@ pub fn typedArrayConstructArrayLikeOwnDataFast(
 
     var item = core.JSValue.undefinedValue();
     var coerced = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &item },
-        .{ .value = &coerced },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &item, &coerced });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
     defer item.free(ctx.runtime);
     defer coerced.free(ctx.runtime);
 
@@ -885,26 +805,16 @@ pub fn typedArrayConstructFromIterable(
     var done = core.JSValue.undefinedValue();
     var item = core.JSValue.undefinedValue();
 
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &iterator },
-        .{ .value = &values_value },
-        .{ .value = &next_method },
-        .{ .value = &next },
-        .{ .value = &done },
-        .{ .value = &item },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &iterator,
+        &values_value,
+        &next_method,
+        &next,
+        &done,
+        &item,
+    });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     defer iterator.free(ctx.runtime);
     defer values_value.free(ctx.runtime);
@@ -1519,34 +1429,6 @@ pub fn addCollectionEntriesFromArray(
     }
 }
 
-pub fn arrayForEachCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    func: core.JSValue,
-    args: []const core.JSValue,
-) !?core.JSValue {
-    if (args.len < 1 or !isCallableValue(args[0])) return null;
-    const object = property_ops.expectObject(receiver) catch return null;
-    if (!object.isArray()) return null;
-    const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.for_each))) {
-        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "forEach")) return null;
-    }
-
-    const callback_this = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    var index: u32 = 0;
-    while (index < object.arrayLength()) : (index += 1) {
-        const item = try object.getProperty(core.atom.atomFromUInt32(index));
-        defer item.free(ctx.runtime);
-        const index_value = core.JSValue.int32(@intCast(index));
-        const callback_result = try callValueOrBytecodeSyncInternal(ctx, output, global, callback_this, args[0], &.{ item, index_value, receiver }, null, null);
-        callback_result.free(ctx.runtime);
-    }
-    return core.JSValue.undefinedValue();
-}
-
 pub fn arrayAtCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1889,18 +1771,11 @@ pub fn typedArrayMapFilter(
     var root_slices = [_]core.runtime.ValueRootSlice{
         .{ .mutable = &rooted_kept },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     var kept_count: usize = 0;
     errdefer {
@@ -2090,7 +1965,7 @@ pub fn arrayReduceRightSparseLarge(
         if (index >= length) continue;
         try indexed.append(ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
     }
-    std.mem.sort(SparseIndexKey, indexed.items, {}, struct {
+    std.sort.heap(SparseIndexKey, indexed.items, {}, struct {
         fn lessThan(_: void, a: SparseIndexKey, b: SparseIndexKey) bool {
             return a.index > b.index;
         }
@@ -2418,7 +2293,7 @@ pub fn arrayLastIndexSparseLarge(
         if (index >= start_exclusive or index >= length) continue;
         try indexed.append(ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
     }
-    std.mem.sort(SparseIndexKey, indexed.items, {}, struct {
+    std.sort.heap(SparseIndexKey, indexed.items, {}, struct {
         fn lessThan(_: void, a: SparseIndexKey, b: SparseIndexKey) bool {
             return a.index > b.index;
         }
@@ -2535,21 +2410,9 @@ pub fn arraySliceCall(
 
             // memory.alloc can GC; root the fresh array across the allocation
             // (mirror the entries-pair precedent at objectEntryArrayValue).
-            var root_values = [_]core.runtime.ValueRootValue{
-                .{ .value = &out_value },
-            };
-            const root_frame = core.runtime.ValueRootFrame{
-                .previous = ctx.runtime.active_value_roots,
-                .values = &root_values,
-            };
-            if (comptime core.runtime.value_root_frames_enabled) {
-                ctx.runtime.active_value_roots = &root_frame;
-            }
-            defer {
-                if (comptime core.runtime.value_root_frames_enabled) {
-                    ctx.runtime.active_value_roots = root_frame.previous;
-                }
-            }
+            var root_frame = core.runtime.rootValues(.{&out_value});
+            root_frame.activate(ctx.runtime);
+            defer root_frame.deactivate(ctx.runtime);
 
             if (count > 0) {
                 const elements = try ctx.runtime.memory.alloc(core.JSValue, count);
@@ -2787,21 +2650,9 @@ fn fastDenseArraySplice(
 
     // memory.alloc and fastArrayEnsureCapacity below can GC; root the fresh
     // array across both.
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &removed_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&removed_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     if (actual_delete_count > 0) {
         const elements = try rt.memory.alloc(core.JSValue, actual_delete_count);
@@ -3453,15 +3304,6 @@ fn fastEmptyArrayPop(ctx: *core.JSContext, global: *core.Object, object: *core.O
     return core.JSValue.undefinedValue();
 }
 
-pub fn fastDensePrimitiveArrayPop(object: *core.Object) ?core.JSValue {
-    if (!object.isArray() or !object.flags.length_writable) return null;
-    if (object.fastArrayCount() != object.arrayLength()) return null;
-    const slot = object.borrowLastFastArrayElement() orelse return null;
-    const value = slot.*;
-    if (!canFastJoinPrimitive(value)) return null;
-    return object.takeLastFullyDenseFastArrayElement();
-}
-
 pub fn arrayShiftCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -3786,7 +3628,7 @@ pub fn arrayUnshiftSparseLarge(
             try candidates.append(ctx.runtime.memory.allocator, index - insert_count);
         }
     }
-    std.mem.sort(usize, candidates.items, {}, struct {
+    std.sort.heap(usize, candidates.items, {}, struct {
         fn lessThan(_: void, a: usize, b: usize) bool {
             return a > b;
         }
@@ -3843,19 +3685,6 @@ pub fn ensureLengthWritableForArrayBuiltin(ctx: *core.JSContext, object: *core.O
         if (desc.kind == .data and desc.writable == false) return error.TypeError;
         if (desc.kind == .accessor and desc.setter.isUndefined()) return error.TypeError;
     }
-}
-
-pub fn verifyArrayLikeLengthSet(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    expected: usize,
-) !void {
-    const length_value = try getValueProperty(ctx, output, global, receiver, core.atom.ids.length, null, null);
-    defer length_value.free(ctx.runtime);
-    const actual = try toLengthIndex(ctx, output, global, length_value);
-    if (actual != expected) return error.TypeError;
 }
 
 pub fn arrayRelativeIndex(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, arg_index: usize, length: usize, default_value: usize) !usize {
@@ -4109,7 +3938,7 @@ pub fn arrayFromCall(
     const length = try toLengthIndex(ctx, output, global, length_value);
     if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
 
-    var out_value = if (try isConstructorForArrayOf(ctx.runtime, constructor_value))
+    var out_value = if (try call_runtime.isConstructorLike(ctx, constructor_value))
         try constructValueOrBytecode(ctx, output, global, constructor_value, &.{core.JSValue.int32(@intCast(length))}, caller_function, caller_frame)
     else blk: {
         const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
@@ -4262,18 +4091,11 @@ fn fromAsyncStart(
     const state = try core.Object.create(rt, core.class.ids.object, null);
     var state_val = state.value();
     var root_values = [_]core.runtime.ValueRootValue{.{ .value = &state_val }};
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
     defer state_val.free(rt);
 
     try fromAsyncStateSet(rt, state, "resolve", resolve);
@@ -4329,7 +4151,7 @@ fn fromAsyncStart(
         }
 
         // 3.j.i: A = IsConstructor(C) ? Construct(C) : ArrayCreate(0).
-        const target = if (try isConstructorForArrayOf(rt, constructor_value))
+        const target = if (try call_runtime.isConstructorLike(ctx, constructor_value))
             try constructValueOrBytecode(ctx, output, global, constructor_value, &.{}, caller_function, caller_frame)
         else blk: {
             const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
@@ -4355,7 +4177,7 @@ fn fromAsyncStart(
     try fromAsyncStateSet(rt, state, "len", core.JSValue.number(len));
 
     // 3.k.iv-v: A = IsConstructor(C) ? Construct(C, «𝔽(len)») : ArrayCreate(len).
-    const target = if (try isConstructorForArrayOf(rt, constructor_value))
+    const target = if (try call_runtime.isConstructorLike(ctx, constructor_value))
         try constructValueOrBytecode(ctx, output, global, constructor_value, &.{core.JSValue.number(len)}, caller_function, caller_frame)
     else blk: {
         // ArrayCreate step 1: len > 2^32-1 -> RangeError.
@@ -4423,18 +4245,11 @@ pub fn arrayFromAsyncContinuationCall(
     const rt = ctx.runtime;
     var state_val = fromAsyncStateGet(rt, function_object, "state");
     var root_values = [_]core.runtime.ValueRootValue{.{ .value = &state_val }};
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
     defer state_val.free(rt);
     const state = objectFromValue(state_val) orelse return error.TypeError;
     const rejected = blk: {
@@ -4754,7 +4569,7 @@ pub fn typedArrayFromStaticCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!try isConstructorForArrayOf(ctx.runtime, constructor_value)) return error.TypeError;
+    if (!try call_runtime.isConstructorLike(ctx, constructor_value)) return error.TypeError;
     if (args.len < 1 or args[0].isNull() or args[0].isUndefined()) return error.TypeError;
     const map_fn: ?core.JSValue = if (args.len >= 2 and !args[1].isUndefined()) blk: {
         if (!isCallableValue(args[1])) return error.TypeError;
@@ -4877,7 +4692,7 @@ pub fn arrayFromArrayLike(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const out_value = if (try isConstructorForArrayOf(ctx.runtime, constructor_value)) blk: {
+    const out_value = if (try call_runtime.isConstructorLike(ctx, constructor_value)) blk: {
         if (fixed_length) |length| {
             break :blk try constructValueOrBytecode(ctx, output, global, constructor_value, &.{core.JSValue.int32(@intCast(length))}, caller_function, caller_frame);
         }
@@ -4933,7 +4748,7 @@ pub fn arrayFromIteratorLike(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    var out_value = if (try isConstructorForArrayOf(ctx.runtime, constructor_value))
+    var out_value = if (try call_runtime.isConstructorLike(ctx, constructor_value))
         try constructValueOrBytecode(ctx, output, global, constructor_value, &.{}, caller_function, caller_frame)
     else
         (try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global))).value();
@@ -5013,7 +4828,7 @@ pub fn arrayOfCall(
     if (args.len > @as(usize, @intCast(std.math.maxInt(i32)))) return error.RangeError;
 
     const length_value = core.JSValue.int32(@intCast(args.len));
-    var out_value = if (try isConstructorForArrayOf(ctx.runtime, constructor_value))
+    var out_value = if (try call_runtime.isConstructorLike(ctx, constructor_value))
         try constructValueOrBytecode(ctx, output, global, constructor_value, &.{length_value}, caller_function, caller_frame)
     else blk: {
         const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
@@ -5083,7 +4898,7 @@ pub fn typedArrayOfStaticCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!try isConstructorForArrayOf(ctx.runtime, constructor_value)) return error.TypeError;
+    if (!try call_runtime.isConstructorLike(ctx, constructor_value)) return error.TypeError;
     if (args.len > std.math.maxInt(u32)) return error.RangeError;
 
     const out_value = try typedArrayCreateWithLength(ctx, output, global, constructor_value, args.len, caller_function, caller_frame);
@@ -5123,30 +4938,6 @@ pub fn typedArrayConstructorObject(value: core.JSValue) ?*core.Object {
     const object = objectFromValue(value) orelse return null;
     if (object.typedArrayElementSize() == 0 or object.typedArrayKind() == 0) return null;
     return object;
-}
-
-pub fn isConstructorForArrayOf(rt: *core.JSRuntime, value: core.JSValue) !bool {
-    if (functionBytecodeFromValue(value)) |fb| {
-        return fb.hasPrototype() and fb.functionKind() == .normal;
-    }
-    if (functionObjectFromValue(value)) |function_object| {
-        if (function_object.class_id != core.class.ids.bytecode_function) return false;
-        const function_value = function_object.functionBytecode() orelse return false;
-        const fb = functionBytecodeFromValue(function_value) orelse return false;
-        return fb.hasPrototype() and fb.functionKind() == .normal;
-    }
-    const object = callableObjectFromValue(value) orelse return false;
-    if (object.class_id == core.class.ids.bound_function) {
-        const target = object.boundTarget() orelse return false;
-        return isConstructorForArrayOf(rt, target);
-    }
-    if (object.class_id == core.class.ids.c_function) {
-        const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(rt, object);
-        defer dispatch_name.deinit(rt);
-        const native_name = dispatch_name.name;
-        return isBuiltinConstructorName(native_name);
-    }
-    return object.class_id == core.class.ids.c_closure;
 }
 
 pub fn arrayMapCall(
@@ -5954,24 +5745,6 @@ pub fn isTypedArrayInternalOwnKey(rt: *core.JSRuntime, atom_id: core.Atom) bool 
         atom_id == atom_byte_offset;
 }
 
-pub fn arrayUsesDefaultIterator(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    source_value: core.JSValue,
-    source: *core.Object,
-) !bool {
-    if (!source.isArray()) return false;
-    const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
-    defer iterator_method.free(ctx.runtime);
-    if (!isCallableValue(iterator_method)) return error.TypeError;
-    const function_object = callableObjectFromValue(iterator_method) orelse return false;
-    const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(ctx.runtime, function_object);
-    defer dispatch_name.deinit(ctx.runtime);
-    const name = dispatch_name.name;
-    return std.mem.eql(u8, name, "values");
-}
-
 pub fn atomicsTypedArray(value: core.JSValue, waitable: bool) !*core.Object {
     const object = property_ops.expectObject(value) catch return error.TypeError;
     if (!core.object.isTypedArrayObject(object)) return error.TypeError;
@@ -6180,13 +5953,6 @@ pub fn uint8ArrayViewBytes(rt: *core.JSRuntime, object: *core.Object) ![]u8 {
     return buffer.byteStorage()[start..][0..length];
 }
 
-pub fn writeUint8ArrayPrefix(rt: *core.JSRuntime, object: *core.Object, bytes: []const u8) !usize {
-    const target = try uint8ArrayViewBytes(rt, object);
-    const count = @min(target.len, bytes.len);
-    if (count != 0) @memcpy(target[0..count], bytes[0..count]);
-    return count;
-}
-
 pub fn uint8ArrayCodecResult(rt: *core.JSRuntime, read: usize, written: usize) !core.JSValue {
     const object = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -6207,31 +5973,6 @@ pub fn typedArrayStaticMethodId(rt: *core.JSRuntime, function_object: *core.Obje
         .static_of => 2,
         else => null,
     };
-}
-
-pub fn atomListToMemorySlice(rt: *core.JSRuntime, atoms: *std.ArrayList(core.Atom)) ![]core.Atom {
-    if (atoms.items.len == 0) return &.{};
-    const out = try rt.memory.alloc(core.Atom, atoms.items.len);
-    @memcpy(out, atoms.items);
-    atoms.clearAndFree(rt.memory.allocator);
-    return out;
-}
-
-pub fn atomSliceContains(rt: *core.JSRuntime, names: []const core.Atom, atom_id: core.Atom) bool {
-    for (names) |name| {
-        if (atomIdOrNameEql(rt, name, atom_id)) return true;
-    }
-    return false;
-}
-
-pub fn freeAtomSlice(rt: *core.JSRuntime, atoms: []core.Atom) void {
-    for (atoms) |atom_id| rt.atoms.free(atom_id);
-    if (atoms.len != 0) rt.memory.free(core.Atom, atoms);
-}
-
-pub fn freeValueSlice(rt: *core.JSRuntime, values: []core.JSValue) void {
-    for (values) |value| value.free(rt);
-    if (values.len != 0) rt.memory.free(core.JSValue, values);
 }
 
 pub const DenseArrayElementFastResult = enum(u8) {
@@ -6360,19 +6101,14 @@ pub const ValueSliceRoot = struct {
         self.rt = rt;
         self.slices[0] = .{ .mutable = values };
         self.frame = .{
-            .previous = rt.active_value_roots,
             .slices = &self.slices,
         };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = &self.frame;
-        }
+        self.frame.activate(rt);
     }
 
     pub fn deinit(self: *ValueSliceRoot) void {
         const rt = self.rt orelse return;
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = self.frame.previous;
-        }
+        self.frame.deactivate(rt);
         self.rt = null;
     }
 };
@@ -6388,19 +6124,14 @@ pub const CellSliceRoot = struct {
         self.rt = rt;
         self.slices[0] = .{ .cells = cells };
         self.frame = .{
-            .previous = rt.active_value_roots,
             .slices = &self.slices,
         };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = &self.frame;
-        }
+        self.frame.activate(rt);
     }
 
     pub fn deinit(self: *CellSliceRoot) void {
         const rt = self.rt orelse return;
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = self.frame.previous;
-        }
+        self.frame.deactivate(rt);
         self.rt = null;
     }
 };
@@ -6656,44 +6387,6 @@ pub fn iteratorZipFlattenableRecord(
     );
 }
 
-pub fn iteratorFlattenableForIteratorFrom(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    source: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (objectFromValue(source)) |source_object| {
-        if (isDirectIteratorClass(source_object.class_id)) {
-            try cacheIteratorNextMethod(ctx, output, global, source);
-            return source.dup();
-        }
-    }
-
-    const iterator_method = try getIteratorMethod(ctx, output, global, source);
-    defer iterator_method.free(ctx.runtime);
-    if (!iterator_method.isUndefined() and !iterator_method.isNull()) {
-        if (!isCallableValue(iterator_method)) return error.TypeError;
-        const iterator = try callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
-        errdefer iterator.free(ctx.runtime);
-        _ = objectFromValue(iterator) orelse return error.TypeError;
-        try cacheIteratorNextMethod(ctx, output, global, iterator);
-        return iterator;
-    }
-
-    const iterator_object = objectFromValue(source) orelse return error.TypeError;
-    const next_key = try ctx.runtime.internAtom("next");
-    defer ctx.runtime.atoms.free(next_key);
-    const next_method = try getValueProperty(ctx, output, global, iterator_object.value(), next_key, caller_function, caller_frame);
-    defer next_method.free(ctx.runtime);
-    if (next_method.isUndefined() or next_method.isNull()) return iterator_object.value().dup();
-    if (!isCallableValue(next_method)) return error.TypeError;
-    const cached = try iterator_object.cachedIteratorNextSlot(ctx.runtime);
-    try iterator_object.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
-    return iterator_object.value().dup();
-}
-
 pub fn arrayIteratorNextFast(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, receiver: core.JSValue, function_object: *core.Object) !?core.JSValue {
     if (!function_object.isArrayIteratorNextFunction()) return null;
     return iterator_ops.arrayIteratorNext(ctx, output, global, receiver);
@@ -6713,18 +6406,11 @@ pub fn createArrayFromArgs(rt: *core.JSRuntime, global: *core.Object, args: []co
     var root_slices = [_]core.runtime.ValueRootSlice{
         rooted_args_buffer.slice(),
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const array = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &array.header);
@@ -7038,18 +6724,11 @@ pub fn objectEntryArrayValue(
         .{ .value = &entry_value },
         .{ .value = &key_value },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     value = try getValueProperty(ctx, output, global, object_value, key, caller_function, caller_frame);
 
@@ -7188,14 +6867,6 @@ pub fn arrayLengthDefineValue(
     const second_primitive = try toPrimitiveForNumber(ctx, output, global, value);
     defer second_primitive.free(ctx.runtime);
     return value_ops.toNumberValue(ctx.runtime, second_primitive);
-}
-
-pub fn popDuplicateConstructorTarget(rt: *core.JSRuntime, stack: *stack_mod.Stack, func: core.JSValue) !void {
-    const top = stack.peek() orelse return;
-    defer top.free(rt);
-    if (!sameObjectIdentity(top, func)) return;
-    const duplicate = try stack.pop();
-    duplicate.free(rt);
 }
 
 pub fn typedArrayCanonicalGet(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?core.JSValue {
@@ -7610,11 +7281,3 @@ pub const LengthIndexAtom = struct {
         if (self.owned) rt.atoms.free(self.atom);
     }
 };
-
-// Catch-marker decoding for the iterator unwind path (moved from the
-// dissolved exec/vm_utils.zig).
-fn catchTargetFromMarker(marker: core.JSValue) ?usize {
-    const previous = marker.asCatchOffset() orelse -1;
-    if (previous < 0) return null;
-    return @intCast(previous);
-}

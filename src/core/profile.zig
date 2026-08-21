@@ -154,37 +154,14 @@ fn totalCounter(counter: [max_opcode_count]u64) u64 {
 threadlocal var active_profile: ?*OpcodeProfile = null;
 threadlocal var active_opcode: ?u8 = null;
 
-pub const ActiveState = struct {
-    profile: ?*OpcodeProfile,
-    opcode: ?u8,
-};
-
 pub fn activate(profile: ?*OpcodeProfile) ?*OpcodeProfile {
     const previous = active_profile;
     active_profile = profile;
     return previous;
 }
 
-pub fn enterOpcode(opcode: u8) ActiveState {
-    const previous = ActiveState{
-        .profile = active_profile,
-        .opcode = active_opcode,
-    };
-    active_opcode = opcode;
-    return previous;
-}
-
-pub fn restoreOpcode(state: ActiveState) void {
-    active_profile = state.profile;
-    active_opcode = state.opcode;
-}
-
 pub fn active() ?*OpcodeProfile {
     return active_profile;
-}
-
-pub fn activeOpcode() ?u8 {
-    return active_opcode;
 }
 
 pub fn recordValueDup() void {

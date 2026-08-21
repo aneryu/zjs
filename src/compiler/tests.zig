@@ -166,12 +166,6 @@ fn expectResolvedLabel(
     try std.testing.expectEqual(labels.no_reloc, slot.first_reloc);
 }
 
-const Phase1Instruction = struct {
-    size: u8,
-    is_temp: bool = false,
-    has_atom: bool = false,
-};
-
 fn installedFunctionHasShortOpcode(fb: *const bytecode_mod.FunctionBytecode) !bool {
     const code = fb.byteCode();
     var pc: usize = 0;
@@ -308,23 +302,6 @@ fn expectPublishedFunctionBytecodeOwnersResolve(
         try expectPublishedFunctionBytecodeOwnersResolve(rt, child, owners);
     }
 }
-
-const AtomBalanceRow = struct {
-    atom_id: core.atom.Atom,
-    before_release: usize,
-    owned_count: usize,
-};
-
-const RootSeedKind = enum {
-    global,
-    top_level_lexical,
-    block_lexical,
-};
-
-const ExpectedChildShape = struct {
-    args: ?usize = null,
-    vars: ?usize = null,
-};
 
 /// Validate every intrusive relocation chain, including unique coverage of the
 /// complete relocation ledger, and require every parser-created label bound.

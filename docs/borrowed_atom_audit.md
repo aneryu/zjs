@@ -106,36 +106,32 @@ use interval, dup, transfer) are in git history.
   of return; it survived only because the next intern was the identical
   string popping the same LIFO slot. Fixed as `*Owned` functions (§5);
   reachability was proven first (§4).
-- **C-3 `parseDeleteSuperReference`**: C-shaped (emit after `advance()`
-  with no dup) but **unreachable** — it and `isDeleteSuperReference` have
-  no callers, and Zig does not analyze unreferenced struct methods. The
-  owner was still filled in to match the live sibling paths; deleting or
-  wiring up the dead pair is follow-up §6.5.
+- **C-3 `parseDeleteSuperReference` (retired)**: the unreachable helper and
+  its uncalled predicate were deleted. The live generic delete path parses
+  the reference normally and rewrites a trailing `get_super_value` into the
+  intended ReferenceError emission.
 
 ### 3.2 Class B (correct, but not a contract)
 
-- **B-1 `identifierLikeAtom`**: hands back the current token's atom with
-  no contract in its name or signature; every current call site happens to
-  dup before `advance()`, so it is safe by that many independent
-  conventions rather than by construction.
-- **B-2 catch binding (`parseStatementOrDeclSlow`)**: the catch binding
-  atom is borrowed and emitted after `advance()`; it stays alive only
-  because `defineVar` leaves a retain via `FunctionDef.appendVar` exactly
-  one statement earlier. Statement order is the only owner.
-- **B-3 TS `enum` name / B-4 TS `namespace` name**: same shape as B-2; the
-  owner is the var row `addScopeVar` creates. The borrowed id is also
-  parked in parser state (`s.last_declared_atom`,
-  `s.current_namespace_atom`) and read later, kept alive entirely by that
-  one var row.
-- **B-5 `State.last_class_decl_atom`**: stores the borrowed id returned by
-  `classNameAtom`; used after `parseClass` returns (`export class C {}`).
-  The liveness chain is two spliced segments — inside `parseClass` it
-  rides the local `class_name` dup, afterwards it rides the
-  class-declaration binding's `var_name` retain. The field itself is a
-  pure borrow with two unrelated owners handing off.
-- **B-6 `State.last_var_decl_atom`**: write-only field storing the id of
-  `parseVar`'s owned dup after that dup is released. Harmless today (no
-  read site) but becomes class C the moment someone adds a read.
+- **B-1 `identifierLikeAtom` (retired)**: the helper now states its
+  current-token borrow contract, while `identifierLikeAtomOwned` and
+  `labelStartAtomOwned` own names that cross `advance()`.
+- **B-2 catch binding (retired)**: the catch clause now owns its binding
+  name across `advance()` and the later bytecode emission.
+- **B-3 TS `enum` name / B-4 TS `namespace` name (retired)**: declaration
+  parsing now owns the token name locally, while `last_declared_atom` and
+  `current_namespace_atom` are owned state slots with retain-on-write and
+  release-on-overwrite/deinit contracts.
+- **B-5 `State.last_class_decl_atom` (retired)**: `parseClass` now returns
+  an owned declaration name directly, and the cross-function state field
+  was deleted. `classNameAtomOwned` establishes the owner before token
+  release for both declaration and expression paths.
+- **B-6 `State.last_var_decl_atom` (retired)**: the write-only field that
+  stored `parseVar`'s defer-freed atom was deleted; there is no longer a
+  dormant state slot that a future reader could turn into class C.
+- **B-7 direct assignment name (retired)**: the `name0`-equivalent used for
+  anonymous-function naming now has a local owner across `parseCondExpr`,
+  independent of the getter operand later transferred into `LValue`.
 
 ### 3.3 Class A (safe)
 
@@ -173,12 +169,12 @@ live in git history. What was established:
 
 ## 5. The fix (summary)
 
-Class C only: `exportDefaultFunctionName` / `exportDefaultClassName` became
+The live class C sites, `exportDefaultFunctionName` /
+`exportDefaultClassName`, became
 `*Owned` functions (dup inside the `return` expression, before the `defer`
 releases the token), matching the established `moduleImportNameAtomOwned`
 convention — the `*Owned` suffix is the "caller frees" contract. The
-unreachable C-3 site was given the same `retained_name` shape as its live
-siblings.
+unreachable C-3 pair was later deleted (§6.5).
 
 No black-box regression test accompanies the fix, because none can exist:
 under the current parse order there is no JS-source-controlled insertion
@@ -193,47 +189,59 @@ outright.
 
 ## 6. Follow-ups
 
-Class B is promoted in place only when the change is "small and obviously
-correct". The items below do not meet that bar, so they are registered as
-follow-up. Each open item has a matching allowlist entry whose
-`exit_milestone` cites the numbering below: finish an item, delete the
-matching entry; a leftover entry goes stale and turns the checker red. So
-both "fixed it and forgot to close the ledger" and "quietly added another
-same-shape site" are blocked by the gate (§8).
+Class B was promoted in place only when the change was "small and obviously
+correct". The items below were registered as follow-up and are now closed;
+the borrowed-atom allowlist is empty. Each open item had a matching allowlist
+entry whose `exit_milestone` cited the numbering below: finishing an item
+required deleting the matching entry, while a leftover entry went stale and
+turned the checker red. The gate still blocks both "fixed it and forgot to
+close the ledger" and any newly introduced same-shape site (§8).
 
-### 6.1 B-5: turn `last_class_decl_atom` into an owned field
+### 6.1 B-5: eliminate `last_class_decl_atom`
 
-Requires releasing the old value on assign and releasing a leftover in
-`State.deinit`, which touches parser-lifetime teardown. Prefer doing it
-together with "have `parseClass` return the class-name owner directly and
-drop this cross-function state field" (which also retires `classNameAtom`'s
-borrowed return).
+Closed 2026-08-20: `classNameAtomOwned` retains the current name before
+`advance()`, and class declarations transfer that owner through the
+`parseClass` return value. All callers free it locally, including the export
+path that previously read `State.last_class_decl_atom`; the state field and
+both matching allowlist entries were deleted.
 
 ### 6.2 B-6: delete `last_var_decl_atom`
 
-Write-only dead field; deleting it is cleanup, not an ownership fix. Still
-open.
+Closed 2026-08-20: the write-only field and both writes were deleted together
+with their allowlist entry. This was cleanup, not an ownership transfer.
 
 ### 6.3 B-1: make the `identifierLikeAtom` contract explicit
 
-Add an `identifierLikeAtomOwned` companion and migrate the call sites that
-keep the name past `advance()` (a bare rename to `...Borrowed` does not
-retire the allowlist entry: the checker only exempts `...Owned` or an
-explicit `// borrowed-atom:` contract). Mechanical but cleaner as its own
-cut. Also covers `labelStartAtom`, which forwards this helper's borrow.
+Closed 2026-08-20: `identifierLikeAtom` states its current-token borrow,
+`identifierLikeAtomOwned` serves parameter paths that retain the name past
+`advance()`, and `labelStartAtomOwned` transfers an owner directly to the
+label parser. The four matching allowlist entries were removed.
 
 ### 6.4 B-2 / B-3 / B-4: localize the owner
 
-Catch bindings, TS enum, and TS namespace all become "dup + defer free
-first, then `defineVar` / `addScopeVar`", so liveness is a local contract
-instead of "the downstream sink happened to dup". The two TS items also
-involve `last_declared_atom` / `current_namespace_atom`; they close only if
-changed together.
+Closed 2026-08-20: catch, for-in/of bindings, TS enum, and TS namespace now
+hold local owners across token release. `last_declared_atom` and
+`current_namespace_atom` retain borrowed inputs, release overwritten values,
+and release their final values in `State.deinit`; the phase-ledger census
+tracks both owned slots. The five matching allowlist entries were removed.
 
 ### 6.5 Dead code `isDeleteSuperReference` / `parseDeleteSuperReference`
 
-No callers, and Zig does not analyze them. Either wire them into the
-`delete` parse path or delete them. Still open.
+Closed 2026-08-20: both uncalled helpers and their two now-orphaned emission
+helpers were deleted. The live `parseDelete` path already covers
+`delete super.x` and `delete super[key]` through the trailing
+`get_super_value` rewrite in `finishDelete`. The focused test262 delete slice
+was identical before and after this cleanup (64/69): both detached HEAD and
+the candidate retain the same five `super-property*.js`
+`SyntaxError: InvalidBytecode` failures. That conformance defect remains
+separate from this no-caller cleanup.
+
+### 6.6 B-7: own the direct assignment name
+
+Closed 2026-08-20: the direct identifier name used to recognize QuickJS's
+`name0` anonymous-function naming pattern is duplicated before
+`parseCondExpr` releases the token and freed at the end of
+`parseAssignExpr2`. The final allowlist entry was removed.
 
 (The audit-time quarantine detector itself was the sixth follow-up; it
 landed as `-Dzjs_ownership_audit`, §7.)
@@ -375,8 +383,8 @@ Three sources of a **borrowed atom**:
    through them;
 2. the return value of a same-file helper that itself returns a borrowed
    atom — the helper set is computed by fixed-point iteration
-   (`identifierLikeAtom` / `classNameAtom` / `labelStartAtom` today; run
-   the checker with `--list` for the current set);
+   (`identifierLikeAtom` today; run the checker with `--list` for the current
+   set);
 3. a binding (`const` / `var`) or reassignment (`nm = ...`) of either of
    the above; `const` declarations also do one layer of local contagion
    (`const name = private_atom orelse raw_name;`). Contagion only follows

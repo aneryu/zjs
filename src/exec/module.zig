@@ -197,31 +197,6 @@ fn pendingMetadataError(err: anyerror) error{ OutOfMemory, InvalidBytecode } {
     };
 }
 
-pub fn preloadFileModuleGraph(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    context: *core.JSContext,
-    root_source: []const u8,
-    root_path: []const u8,
-    max_source_size: usize,
-) !void {
-    var seen = std.ArrayList([]const u8).empty;
-    defer {
-        for (seen.items) |path| allocator.free(path);
-        seen.deinit(allocator);
-    }
-    try preloadFileModuleGraphInner(
-        io,
-        allocator,
-        context,
-        root_source,
-        root_path,
-        max_source_size,
-        &seen,
-        null,
-    );
-}
-
 pub fn preloadFileModuleGraphWithOrder(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -425,16 +400,6 @@ pub fn linkModule(
     errdefer rollbackActiveLinkStack(&state);
     try linkModuleInner(&state, record);
     std.debug.assert(state.stack == null);
-}
-
-pub fn linkModuleByName(
-    ctx: *core.JSContext,
-    module_name: core.Atom,
-    diagnostic: ?*LinkDiagnostic,
-) !*core.module.ModuleRecord {
-    const record = ctx.modules.find(module_name) orelse return error.ModuleNotFound;
-    try linkModule(ctx, record, diagnostic);
-    return record;
 }
 
 fn linkModuleInner(state: *LinkState, record: *core.module.ModuleRecord) !void {
@@ -867,7 +832,7 @@ fn initializeCanonicalModuleNamespace(
         &visited,
         &exports,
     );
-    std.mem.sort(core.Atom, exports.items, ctx.runtime, atomLessThan);
+    std.sort.heap(core.Atom, exports.items, ctx.runtime, atomLessThan);
 
     for (exports.items) |export_name| {
         const resolution = try resolveExportChecked(ctx, record, export_name);

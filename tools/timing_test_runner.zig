@@ -88,14 +88,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         const duration = @as(u64, @intCast(start.durationTo(end).toNanoseconds()));
 
+        var outcome: enum { passed, skipped, failed } = .passed;
         if (res) |_| {
             ok_count += 1;
         } else |err| switch (err) {
             error.SkipZigTest => {
                 skip_count += 1;
+                outcome = .skipped;
             },
             else => {
                 fail_count += 1;
+                outcome = .failed;
                 std.debug.print("FAIL: {s} ({s})\n", .{ test_fn.name, @errorName(err) });
                 if (@errorReturnTrace()) |trace| {
                     std.debug.dumpErrorReturnTrace(trace);
@@ -105,7 +108,30 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
 
         std.testing.io_instance.deinit();
-        _ = std.testing.allocator_instance.deinit();
+        // A leak must FAIL the test. Discarding this Check (`_ = ...deinit()`)
+        // is the one thing the stock Zig runner does not do, and it silently
+        // disarmed leak detection for every target in build/tests.zig: the
+        // leak report still printed to stderr, but the run exited 0.
+        if (std.testing.allocator_instance.deinit() == .leak) {
+            std.debug.print("LEAK: {s}\n", .{test_fn.name});
+            switch (outcome) {
+                // Already counted as a failure; a leak on top of it is not a
+                // second failure.
+                .failed => {},
+                .passed => {
+                    ok_count -= 1;
+                    fail_count += 1;
+                },
+                // A skipped test that leaked is one test, not two: the tally
+                // has to give up the skip the same way `.passed` gives up the
+                // pass, or the totals count it twice.
+                .skipped => {
+                    skip_count -= 1;
+                    fail_count += 1;
+                },
+            }
+            if (fail_fast) break;
+        }
 
         try timings.append(allocator, .{
             .name = test_fn.name,
@@ -119,7 +145,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return a.duration_ns > b.duration_ns;
         }
     };
-    std.sort.block(Entry, timings.items, {}, sort_helper.lessThan);
+    std.sort.heap(Entry, timings.items, {}, sort_helper.lessThan);
 
     std.debug.print("\nTop 20 Slowest Test Cases:\n", .{});
     for (timings.items[0..@min(20, timings.items.len)], 0..) |entry, i| {

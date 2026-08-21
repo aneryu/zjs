@@ -11,6 +11,10 @@ const public_root = @import("root.zig");
 
 pub const public_api = public_root;
 pub const binding_root = @import("binding/root.zig");
+/// Monotonic/wall clocks. The CLI roots are their own modules and cannot
+/// reach `src/platform_clock.zig` directly, which is how `zjs.zig` ended up
+/// with an inlined copy of `monotonicNanos`.
+pub const platform_clock = @import("platform_clock.zig");
 
 pub const RuntimeError = exec.exceptions.RuntimeError;
 pub const HostError = exec.exceptions.HostError;

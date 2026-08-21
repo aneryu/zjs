@@ -433,10 +433,6 @@ pub fn compilePatternAndFlagsWithOptions(
     return .{ .bytecode = try compileWithOptions(allocator, pattern, flags_str, options) };
 }
 
-pub fn compilePatternWithFlagBits(allocator: std.mem.Allocator, pattern: []const u8, re_flags: u16) !Compiled {
-    return compilePatternWithFlagBitsAndOptions(allocator, pattern, re_flags, .{});
-}
-
 pub fn compilePatternWithFlagBitsAndOptions(
     allocator: std.mem.Allocator,
     pattern: []const u8,
@@ -462,16 +458,6 @@ pub fn execWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, input
         .out_of_range => .{ .result = .out_of_range },
         .not_available => .{ .result = .not_available },
     };
-}
-
-pub fn execIntoMatch(
-    allocator: std.mem.Allocator,
-    bytecode: []const u8,
-    input: Input,
-    start_index: usize,
-    out_match: *Match,
-) !ExecResult {
-    return execIntoMatchWithOptions(allocator, bytecode, input, start_index, .{}, out_match);
 }
 
 pub fn execIntoMatchWithOptions(
@@ -513,49 +499,6 @@ pub fn execIntoMatchTrustedWithOptions(
     if (result != .match) return result;
     writeMatch(bytecode, header.capture_count, capture_buf.slots.ptr, out_match);
     return .match;
-}
-
-pub fn execCaptureSlots(
-    allocator: std.mem.Allocator,
-    bytecode: []const u8,
-    input: Input,
-    start_index: usize,
-    capture: *[max_exec_slots]usize,
-) !ExecResult {
-    return execCaptureSlotsWithOptions(allocator, bytecode, input, start_index, .{}, capture);
-}
-
-pub fn execCaptureSlotsWithOptions(
-    allocator: std.mem.Allocator,
-    bytecode: []const u8,
-    input: Input,
-    start_index: usize,
-    options: ExecOptions,
-    capture: *[max_exec_slots]usize,
-) !ExecResult {
-    return execCaptureSlotsSliceWithOptions(allocator, bytecode, input, start_index, options, capture[0..]);
-}
-
-pub fn execCaptureSlotsSlice(
-    allocator: std.mem.Allocator,
-    bytecode: []const u8,
-    input: Input,
-    start_index: usize,
-    capture: []usize,
-) !ExecResult {
-    return execCaptureSlotsSliceWithOptions(allocator, bytecode, input, start_index, .{}, capture);
-}
-
-pub fn execCaptureSlotsSliceWithOptions(
-    allocator: std.mem.Allocator,
-    bytecode: []const u8,
-    input: Input,
-    start_index: usize,
-    options: ExecOptions,
-    capture: []usize,
-) !ExecResult {
-    const header = try parseHeader(bytecode);
-    return execCaptureSlotsParsed(.checked, allocator, bytecode, input, start_index, options, header, capture);
 }
 
 /// Trusted capture-slot execution for compiler-produced bytecode.
@@ -637,18 +580,6 @@ fn execCaptureSlotsParsed(
         .utf16_unicode => try lreExecBacktrack(safety, .utf16_unicode, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr),
     };
     return if (matched) .match else .no_match;
-}
-
-pub fn testMatch(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize) !bool {
-    return testMatchWithOptions(allocator, bytecode, input, start_index, .{});
-}
-
-pub fn testMatchWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions) !bool {
-    const header = try parseHeader(bytecode);
-    var capture_buf = CaptureSlotBuffer{};
-    try capture_buf.init(allocator, try checkedAllocCount(header));
-    defer capture_buf.deinit(allocator);
-    return (try execCaptureSlotsParsed(.checked, allocator, bytecode, input, start_index, options, header, capture_buf.slots)) == .match;
 }
 
 /// Trusted test-only execution for compiler-produced bytecode.
@@ -1739,13 +1670,6 @@ fn decodeWtf8Surrogate(bytes: []const u8, index: usize) ?DecodedWtf8 {
     return .{ .code_point = code_point, .len = 3 };
 }
 
-fn writeHeader(buf: []u8, flag_bits: u16, captures: u8, stack_size: u8, code_len: u32) void {
-    std.mem.writeInt(u16, buf[0..2], flag_bits, .little);
-    buf[re_header_capture_count] = captures;
-    buf[re_header_register_count] = stack_size;
-    std.mem.writeInt(u32, buf[re_header_bytecode_len..header_len], code_len, .little);
-}
-
 //=== Compiler =============================================================
 
 pub const CompileError = std.mem.Allocator.Error || error{
@@ -1935,10 +1859,6 @@ pub fn compileWithOptions(
     return compileWithFlagBitsAndOptions(allocator, pattern, try parseFlagBits(flags_str), options);
 }
 
-pub fn compileWithFlagBits(allocator: std.mem.Allocator, pattern: []const u8, re_flags: u16) CompileError![]u8 {
-    return compileWithFlagBitsAndOptions(allocator, pattern, re_flags, .{});
-}
-
 pub fn compileWithFlagBitsAndOptions(
     allocator: std.mem.Allocator,
     pattern: []const u8,
@@ -2118,14 +2038,14 @@ fn readUnicodeEscapeCodePoint(pattern: []const u8, index: *usize) CompileError!u
     return value;
 }
 
-fn isRegExpGroupNameStart(cp: u21) bool {
+pub fn isRegExpGroupNameStart(cp: u21) bool {
     if (cp == '$' or cp == '_') return true;
     if (unicode.isAsciiAlphaCodePoint(cp)) return true;
     if (isInvalidRegExpGroupNameStart(cp)) return false;
     return cp > 0x7f;
 }
 
-fn isRegExpGroupNameContinue(cp: u21) bool {
+pub fn isRegExpGroupNameContinue(cp: u21) bool {
     if (isInvalidRegExpGroupNameContinue(cp)) return false;
     if (cp == 0x104a4) return true;
     if (isRegExpGroupNameStart(cp)) return true;
@@ -2142,7 +2062,7 @@ fn isInvalidRegExpGroupNameStart(cp: u21) bool {
     };
 }
 
-fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
+pub fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
     if (unicode.isSurrogateCodePoint(cp)) return true;
     return switch (cp) {
         0x275e, 0x2764, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
@@ -2914,7 +2834,9 @@ const REParseState = struct {
 
         // Sort strings by descending length (stable, preserving insertion
         // order between equal lengths per spec ordering). The empty string,
-        // if present, lands last.
+        // if present, lands last. Equal-length strings are distinct and their
+        // order decides match preference, so this is one of the two sites that
+        // must keep the stable block sort rather than `std.sort.heap`.
         const items = set.strings.items;
         std.sort.block([]u21, items, {}, struct {
             fn longerFirst(_: void, lhs: []u21, rhs: []u21) bool {
@@ -4108,7 +4030,7 @@ fn isUnicodeSetsReservedClassByte(byte: u8, hyphen_is_reserved: bool) bool {
     };
 }
 
-fn isUnicodeSetsReservedDoublePunctuator(first: u8, second: u8) bool {
+pub fn isUnicodeSetsReservedDoublePunctuator(first: u8, second: u8) bool {
     if (first != second) return false;
     return switch (first) {
         '&', '!', '#', '$', '%', '*', '+', ',', '.', ':', ';', '<', '=', '>', '?', '@', '`', '~', '^' => true,

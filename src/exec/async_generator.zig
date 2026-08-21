@@ -27,6 +27,7 @@
 //! contains the qjs-shaped in-bytecode awaits (parser.zig emitYieldStarDelegation).
 
 const std = @import("std");
+const iterator_ops = @import("iterator_ops.zig");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -127,25 +128,15 @@ fn settleHead(
     // resolving function runs; root them (and the settlement value) so a
     // forced GC inside the call cannot reclaim symbol-backed values.
     var rooted_result = result_value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_result },
-        .{ .value = &req.result },
-        .{ .value = &req.promise },
-        .{ .value = &req.resolve },
-        .{ .value = &req.reject },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &rooted_result,
+        &req.result,
+        &req.promise,
+        &req.resolve,
+        &req.reject,
+    });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
     const settle_fn = if (is_reject) req.reject else req.resolve;
     const call_result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), settle_fn, &.{rooted_result}, null, null);
     call_result.free(ctx.runtime);
@@ -161,7 +152,7 @@ fn resolveHead(
     value: core.JSValue,
     done: bool,
 ) HostError!void {
-    const iterator_result = try call_runtime.createIteratorResult(ctx.runtime, global, value, done);
+    const iterator_result = try iterator_ops.createIteratorResult(ctx.runtime, global, value, done);
     defer iterator_result.free(ctx.runtime);
     try settleHead(ctx, output, global, gen, iterator_result, false);
 }

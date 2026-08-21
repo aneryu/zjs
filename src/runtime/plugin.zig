@@ -855,15 +855,9 @@ fn installDescriptorForTesting(ctx: *zjs.JSContext, target_value: core.JSValue, 
 
 const objectFromValue = core.value_semantics.objectFromValue;
 
-fn objectProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !core.JSValue {
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
-    return try object.getProperty(key);
-}
-
 fn expectErrorObjectProperty(rt: *core.JSRuntime, value: core.JSValue, property_name: []const u8, expected: []const u8) !void {
     const object = objectFromValue(value) orelse return error.TypeError;
-    const property_value = try objectProperty(rt, object, property_name);
+    const property_value = try zjs.binding.objectProperty(rt, object, property_name);
     defer property_value.free(rt);
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);

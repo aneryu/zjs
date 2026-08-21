@@ -35,21 +35,9 @@ pub fn constructWithPrototype(realm: *core.RealmContext, prototype: ?*core.Objec
 pub fn fulfilledWithPrototype(realm: *core.RealmContext, value: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rt = realm.runtime;
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const promise = try constructWithPrototype(realm, prototype);
     const object = promiseObject(promise) orelse return error.TypeError;
@@ -60,21 +48,9 @@ pub fn fulfilledWithPrototype(realm: *core.RealmContext, value: core.JSValue, pr
 pub fn rejectedWithPrototype(realm: *core.RealmContext, reason: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rt = realm.runtime;
     var rooted_reason = reason;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_reason },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_reason});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const promise = try constructWithPrototype(realm, prototype);
     const object = promiseObject(promise) orelse return error.TypeError;
@@ -209,24 +185,14 @@ pub fn withResolvers(ctx: *core.JSContext, prototype: ?*core.Object) !core.JSVal
     var resolve_val = core.JSValue.undefinedValue();
     var reject_val = core.JSValue.undefinedValue();
     var result_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &promise_val },
-        .{ .value = &resolve_val },
-        .{ .value = &reject_val },
-        .{ .value = &result_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &promise_val,
+        &resolve_val,
+        &reject_val,
+        &result_val,
+    });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     defer promise_val.free(rt);
     defer resolve_val.free(rt);
@@ -251,23 +217,9 @@ fn createResolvingFunction(ctx: *core.JSContext, promise: core.JSValue, reject: 
     var rooted_promise = promise;
     var function_val = core.JSValue.undefinedValue();
     var state_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_promise },
-        .{ .value = &function_val },
-        .{ .value = &state_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_promise, &function_val, &state_val });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     function_val = try core.function.nativeDataFunctionWithPrototype(rt, function_proto, "", 1);
     errdefer function_val.free(rt);
@@ -367,22 +319,9 @@ fn promiseAll(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Ob
 
     var out_val = core.JSValue.undefinedValue();
     var item_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &out_val },
-        .{ .value = &item_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &out_val, &item_val });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     defer out_val.free(rt);
     defer item_val.free(rt);
@@ -441,23 +380,9 @@ fn promiseAllSettled(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*
     var out_val = core.JSValue.undefinedValue();
     var item_val = core.JSValue.undefinedValue();
     var record_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &out_val },
-        .{ .value = &item_val },
-        .{ .value = &record_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &out_val, &item_val, &record_val });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     defer out_val.free(rt);
     defer item_val.free(rt);
@@ -495,23 +420,9 @@ fn promiseAny(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Ob
     var fulfillment_val = core.JSValue.undefinedValue();
     var item_val = core.JSValue.undefinedValue();
 
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &errors_val },
-        .{ .value = &fulfillment_val },
-        .{ .value = &item_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &errors_val, &fulfillment_val, &item_val });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     defer errors_val.free(rt);
     defer fulfillment_val.free(rt);
@@ -660,21 +571,9 @@ test "promise all family preserves direct symbol payload ownership" {
 
 fn settlementRecord(rt: *core.JSRuntime, item: core.JSValue) !core.JSValue {
     var rooted_item = item;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_item },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_item});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &record.header);
@@ -742,12 +641,6 @@ fn defineData(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value
     try object.defineOwnProperty(rt, atom, core.Descriptor.data(value, true, true, true));
 }
 
-fn defineHiddenData(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
-    const atom = try rt.internAtom(name);
-    defer rt.atoms.free(atom);
-    try object.defineOwnProperty(rt, atom, core.Descriptor.data(value, true, false, false));
-}
-
 fn stringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     const string = try core.string.String.createUtf8(rt, bytes);
     return string.value();
@@ -755,21 +648,9 @@ fn stringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
 
 fn aggregateErrorValue(ctx: *core.JSContext, global: ?*core.Object, errors: *core.Object) !core.JSValue {
     var errors_value = errors.value();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &errors_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&errors_value});
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     var prototype: ?*core.Object = null;
     if (global) |global_object| {

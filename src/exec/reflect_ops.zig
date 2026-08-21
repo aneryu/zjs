@@ -1,6 +1,12 @@
 //! Reflect.* and Proxy.revocable implementations: the reflective surface of the exec call machinery.
 
 const core = @import("../core/root.zig");
+const call_mod = @import("call.zig");
+const exception_ops = @import("exception_ops.zig");
+const promise_ops = @import("promise_ops.zig");
+const reflect_dispatch = core.host_function.builtin_method_ids.reflect;
+const frame_mod = @import("frame.zig");
+const bytecode = @import("../bytecode.zig");
 const std = @import("std");
 
 const array_ops = @import("array_ops.zig");
@@ -168,20 +174,6 @@ fn reflectConstructTargetName(native_ref: core.function.NativeBuiltinRef) ?[]con
     };
 }
 
-pub fn reflectApply(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 3) return error.TypeError;
-    if (!call_runtime.isCallableValue(args[0])) return error.TypeError;
-    var apply_args = ReflectConstructArguments{};
-    try apply_args.init(ctx.runtime, args[2]);
-    defer apply_args.deinit();
-    return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, args[1], args[0], apply_args.values);
-}
 const ReflectConstructArguments = struct {
     rt: ?*core.JSRuntime = null,
     values: []core.JSValue = &.{},
@@ -284,18 +276,11 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
     var root_slices = [_]core.runtime.ValueRootSlice{
         rooted_args_buffer.slice(),
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     _ = try expectObjectArg(rooted_args[0]);
     _ = try expectObjectArg(rooted_args[1]);
@@ -337,20 +322,6 @@ pub fn revokeProxy(rt: *core.JSRuntime, function_object: *core.Object) !core.JSV
     const proxy = thisObject(proxy_value) orelse return core.JSValue.undefinedValue();
     proxy.clearOptionalValueSlot(rt, proxy.proxyHandlerSlot());
     return core.JSValue.undefinedValue();
-}
-
-pub fn reflectHas(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const object = try expectObjectArg(args[0]);
-    const key = try property_ops.propertyKeyAtom(ctx.runtime, args[1]);
-    defer ctx.runtime.atoms.free(key);
-    return core.JSValue.boolean(try reflectHasProperty(ctx, output, global, globals, object, key));
 }
 
 fn reflectHasProperty(
@@ -419,62 +390,6 @@ fn typedArrayReflectHas(rt: *core.JSRuntime, object: *core.Object, atom_id: core
     }
 }
 
-pub fn reflectDefineProperty(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    if (args.len < 3) return error.TypeError;
-    const object = try expectObjectArg(args[0]);
-    const key = try property_ops.propertyKeyAtom(rt, args[1]);
-    defer rt.atoms.free(key);
-    const desc_object = try expectObjectArg(args[2]);
-    const desc = try descriptorFromObjectBare(rt, desc_object);
-    defer desc.destroy(rt);
-    if (core.object.isTypedArrayObject(object)) {
-        if (try typedArrayReflectDefineOwnProperty(rt, object, key, desc)) |ok| return core.JSValue.boolean(ok);
-    }
-    object.defineOwnProperty(rt, key, desc) catch |err| switch (err) {
-        error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return core.JSValue.boolean(false),
-        error.InvalidLength => return error.RangeError,
-        else => return err,
-    };
-    return core.JSValue.boolean(true);
-}
-
-fn typedArrayReflectDefineOwnProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, desc: core.Descriptor) !?bool {
-    return try core.typed_array.typedArrayDefineOwnProperty(rt, object, atom_id, desc);
-}
-
-pub fn reflectGet(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const object = try expectObjectArg(args[0]);
-    const key = try property_ops.propertyKeyAtom(rt, args[1]);
-    defer rt.atoms.free(key);
-    return try object.getProperty(key);
-}
-
-pub fn reflectSet(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (global) |global_object| {
-        if (try call_runtime.reflectSetCall(ctx, output, global_object, args, null, null)) |value| {
-            return value;
-        }
-    }
-    if (args.len < 1) return error.TypeError;
-    const set_value = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    const object = try expectObjectArg(args[0]);
-    const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const key = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
-    defer ctx.runtime.atoms.free(key);
-    object.setProperty(ctx.runtime, key, set_value) catch |err| switch (err) {
-        error.ReadOnly, error.AccessorWithoutSetter, error.NotExtensible, error.IncompatibleDescriptor => return core.JSValue.boolean(false),
-        error.InvalidLength => return error.RangeError,
-        else => return err,
-    };
-    return core.JSValue.boolean(true);
-}
-
 fn isBuiltinConstructorName(name: []const u8) bool {
     return std.mem.eql(u8, name, "Object") or
         std.mem.eql(u8, name, "Function") or
@@ -500,4 +415,265 @@ fn isBuiltinConstructorName(name: []const u8) bool {
         std.mem.eql(u8, name, "WeakSet") or
         std.mem.eql(u8, name, "ArrayBuffer") or
         std.mem.eql(u8, name, "DataView");
+}
+
+pub fn reflectCallForNativeRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const reflect_mod = reflect_dispatch;
+    return switch (id) {
+        @intFromEnum(reflect_mod.StaticMethod.define_property) => (try object_ops.definePropertyWithKind(ctx, output, global, args, 2, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.get_own_property_descriptor) => (try object_ops.reflectGetOwnPropertyDescriptorCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.delete_property) => (try object_ops.reflectDeletePropertyCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.get) => (try reflectGetCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.get_prototype_of) => (try object_ops.reflectGetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.set) => (try reflectSetCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.set_prototype_of) => (try object_ops.reflectSetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.is_extensible) => (try reflectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.prevent_extensions) => (try reflectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.has) => (try reflectHasCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.own_keys) => (try reflectOwnKeysCall(ctx, output, global, args)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.construct) => (try reflectConstructCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.apply) => try reflectApplyCall(ctx, output, global, args, caller_function, caller_frame),
+        else => error.TypeError,
+    };
+}
+
+pub fn reflectSetCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    if (args.len < 1) return error.TypeError;
+    const set_value = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
+    const object = property_ops.expectObject(args[0]) catch return error.TypeError;
+    const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
+    defer ctx.runtime.atoms.free(atom_id);
+    if (object.class_id == core.class.ids.module_ns) return core.JSValue.boolean(false);
+    if (!object.isArray() or atom_id != core.atom.ids.length) {
+        const receiver_value = if (args.len >= 4) args[3] else args[0];
+        if (object.proxyTarget() != null) {
+            const ok = try object_ops.proxySetValueProperty(ctx, output, global, receiver_value, object, atom_id, set_value, caller_function, caller_frame);
+            return core.JSValue.boolean(ok);
+        }
+        if (core.object.isTypedArrayObject(object)) {
+            switch (try core.object.typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
+                .none => {},
+                .invalid => {
+                    if (object_ops.sameObjectIdentity(receiver_value, args[0])) {
+                        const coerced = try array_ops.coerceTypedArrayElementInput(ctx, output, global, set_value);
+                        defer coerced.free(ctx.runtime);
+                        try core.typed_array.typedArrayCoerceElementValue(ctx.runtime, object, coerced);
+                    }
+                    return core.JSValue.boolean(true);
+                },
+                .index => |index| {
+                    if (object_ops.sameObjectIdentity(receiver_value, args[0])) {
+                        const coerced = try array_ops.coerceTypedArrayElementForSet(ctx, output, global, object, set_value);
+                        defer coerced.free(ctx.runtime);
+                        if (!try core.object.typedArrayIndexValid(ctx.runtime, object, index)) return core.JSValue.boolean(true);
+                        if (try core.object.typedArrayImmutableBuffer(ctx.runtime, object)) return core.JSValue.boolean(false);
+                        _ = try core.typed_array.typedArraySetElement(ctx.runtime, object, index, coerced);
+                        return core.JSValue.boolean(true);
+                    }
+                    if (!try core.object.typedArrayIndexValid(ctx.runtime, object, index)) return core.JSValue.boolean(true);
+                    const receiver_object = object_ops.objectFromValue(receiver_value) orelse return core.JSValue.boolean(false);
+                    const ok = try array_ops.typedArrayReflectSetReceiverOwn(ctx, output, global, receiver_value, receiver_object, atom_id, set_value, caller_function, caller_frame);
+                    return core.JSValue.boolean(ok);
+                },
+            }
+        }
+        if (object_ops.objectFromValue(receiver_value)) |receiver_object| {
+            if (try array_ops.typedArrayPrototypeSet(ctx, output, global, receiver_value, receiver_object, object.getPrototype(), atom_id, set_value, caller_function, caller_frame)) |ok| {
+                return core.JSValue.boolean(ok);
+            }
+        }
+        const ok = try call_runtime.ordinarySetWithReceiver(ctx, output, global, args[0], object, receiver_value, atom_id, set_value, caller_function, caller_frame);
+        return core.JSValue.boolean(ok);
+    }
+    // qjs JS_SetPropertyInternal: when obj != this_obj (Reflect.set receiver),
+    // `if (unlikely(p != p1)) goto retry2` (quickjs.c:9701-9702) skips the
+    // own JS_PROP_LENGTH / set_array_length arm (9714-9717) and later takes
+    // the generic receiver path (9892-9929). Only the 4-arg form can have a
+    // distinct receiver; the 3-arg path is identical to pre-X-02.
+    if (args.len >= 4 and !object_ops.sameObjectIdentity(args[3], args[0])) {
+        const ok = try call_runtime.ordinarySetWithReceiver(ctx, output, global, args[0], object, args[3], atom_id, set_value, caller_function, caller_frame);
+        return core.JSValue.boolean(ok);
+    }
+    const value_to_set = try array_ops.arrayLengthAssignmentValue(ctx, output, global, object, atom_id, set_value, caller_function, caller_frame);
+    defer if (!value_to_set.same(set_value)) value_to_set.free(ctx.runtime);
+    object.setProperty(ctx.runtime, atom_id, value_to_set) catch |err| switch (err) {
+        error.ReadOnly, error.AccessorWithoutSetter, error.NotExtensible, error.IncompatibleDescriptor => return core.JSValue.boolean(false),
+        error.InvalidLength => return error.RangeError,
+        else => return err,
+    };
+    return core.JSValue.boolean(true);
+}
+
+pub fn reflectIsExtensibleCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    if (args.len < 1) return error.TypeError;
+    if (!args[0].isObject()) return error.TypeError;
+    return object_ops.objectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame);
+}
+
+pub fn reflectPreventExtensionsCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    if (args.len < 1) return error.TypeError;
+    const object = object_ops.objectFromValue(args[0]) orelse return error.TypeError;
+    if (object.proxyTarget() != null) {
+        return core.JSValue.boolean(try object_ops.proxyAwarePreventExtensions(ctx, output, global, object, caller_function, caller_frame));
+    }
+    object.preventExtensions();
+    return core.JSValue.boolean(true);
+}
+
+pub fn reflectConstructCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    if (args.len < 2 or !(try call_runtime.isConstructorLike(ctx, args[0]))) return error.TypeError;
+    const new_target = if (args.len >= 3) args[2] else args[0];
+    if (!(try call_runtime.isConstructorLike(ctx, new_target))) return error.TypeError;
+    var construct_args = try array_ops.argsFromArrayLike(ctx, output, global, args[1], caller_function, caller_frame);
+    defer call_runtime.freeArgs(ctx.runtime, construct_args);
+    var construct_args_root = array_ops.ValueSliceRoot{};
+    construct_args_root.init(ctx.runtime, &construct_args);
+    defer construct_args_root.deinit();
+    if (object_ops.objectFromValue(args[0])) |target| {
+        if (target.proxyTarget() == null) {
+            const target_name = try call_mod.nativeFunctionNameForVm(ctx.runtime, target);
+            defer ctx.runtime.memory.allocator.free(target_name);
+            if (construct_mod.typedArrayElement(target_name) != null) {
+                try array_ops.typedArrayValidateConstructArgsPreAllocate(ctx, output, global, construct_args);
+            }
+        }
+    }
+    return try call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, args[0], construct_args, caller_function, caller_frame, new_target);
+}
+
+pub const ReflectConstructResolution = struct {
+    target: core.JSValue,
+    new_target: core.JSValue,
+    args: []const core.JSValue,
+    owned_args: []core.JSValue = &.{},
+};
+
+pub fn reflectHasCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    if (args.len < 2) return error.TypeError;
+    const object = object_ops.objectFromValue(args[0]) orelse return error.TypeError;
+    const key = try object_ops.toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
+    defer ctx.runtime.atoms.free(key);
+    const found = if (object.proxyTarget() != null)
+        try object_ops.hasValueProperty(ctx, output, global, args[0], object, key, caller_function, caller_frame)
+    else
+        try object_ops.ordinaryHasValueProperty(ctx, output, global, object, key, false, caller_function, caller_frame);
+    return core.JSValue.boolean(found);
+}
+
+pub fn reflectApplyCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (args.len < 1 or !call_runtime.isCallableValue(args[0])) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
+    if (args.len < 3) return error.TypeError;
+    var owned_args = try array_ops.ownedArgsFromArrayLike(
+        ctx,
+        output,
+        global,
+        args[2],
+        caller_function,
+        caller_frame,
+    );
+    defer owned_args.deinit();
+    var apply_args = owned_args.values;
+    if (apply_args.len == 0) {
+        return call_runtime.callValueOrBytecodeSyncInternal(ctx, output, global, args[1], args[0], &.{}, caller_function, caller_frame);
+    }
+    var apply_args_root = array_ops.ValueSliceRoot{};
+    apply_args_root.init(ctx.runtime, &apply_args);
+    defer apply_args_root.deinit();
+    return call_runtime.callOwnedArgsValueOrBytecodeSyncInternal(
+        ctx,
+        output,
+        global,
+        args[1],
+        args[0],
+        apply_args,
+        caller_function,
+        caller_frame,
+    );
+}
+
+pub fn reflectGetCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    if (args.len < 2) return error.TypeError;
+    const object = object_ops.objectFromValue(args[0]) orelse return error.TypeError;
+    const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
+    defer ctx.runtime.atoms.free(atom_id);
+    const receiver = if (args.len >= 3) args[2] else args[0];
+    return try object_ops.getValuePropertyWithReceiver(ctx, output, global, args[0], object, receiver, atom_id, caller_function, caller_frame);
+}
+
+pub fn reflectOwnKeysCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+) !?core.JSValue {
+    if (args.len < 1) return error.TypeError;
+    const object = property_ops.expectObject(args[0]) catch return error.TypeError;
+    const keys = try object_ops.objectRestOwnKeys(ctx, output, global, object);
+    defer core.Object.freeKeys(ctx.runtime, keys);
+    const out = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
+    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+    for (keys) |key| {
+        const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, key);
+        defer key_value.free(ctx.runtime);
+        try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(key_value, true, true, true));
+    }
+    return out.value();
 }

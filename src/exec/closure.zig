@@ -1,7 +1,9 @@
 const core = @import("../core/root.zig");
+const iterator_ops = @import("iterator_ops.zig");
 const bytecode = @import("../bytecode.zig");
 const globals_mod = core.global_slots;
 const value_ops = @import("value_ops.zig");
+const call_runtime = @import("call_runtime.zig");
 const std = @import("std");
 
 pub const LogMode = enum { initial, again };
@@ -233,14 +235,9 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
     }
 }
 
-pub fn closureKind(rt: *core.JSRuntime, closure_value: core.JSValue) !i32 {
+fn closureKind(rt: *core.JSRuntime, closure_value: core.JSValue) !i32 {
     const closure = try expectClosure(closure_value);
     return getIntProperty(rt, closure, "__closure_kind");
-}
-
-pub fn closureValue(rt: *core.JSRuntime, closure_value: core.JSValue) !i32 {
-    const closure = try expectClosure(closure_value);
-    return getIntProperty(rt, closure, "__closure_value");
 }
 
 pub fn appendLog(rt: *core.JSRuntime, globals: []globals_mod.Slot, mode: LogMode, a: i32, b: i32, c: i32, d: i32) !void {
@@ -359,29 +356,12 @@ fn iteratorNextDoneIfConsumed(rt: *core.JSRuntime, closure: *core.Object) !?core
     return null;
 }
 
+/// Borrowing wrapper over the single `CreateIterResultObject` owner: unlike the
+/// other wrappers, this file's callers keep their reference to `value`. The
+/// synthetic closure iterators carry no realm handle, so the result has no
+/// prototype.
 fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JSValue {
-    var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
-
-    const result = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &result.header);
-    try defineValueProperty(rt, result, "value", rooted_value);
-    try defineValueProperty(rt, result, "done", core.JSValue.boolean(done));
-    return result.value();
+    return iterator_ops.createIteratorResult(rt, null, value, done);
 }
 
 test "closure iteratorResult roots direct function bytecode value while creating result" {
@@ -752,21 +732,9 @@ fn arrayFromShape(rt: *core.JSRuntime, shape: i32) !core.JSValue {
 
 fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValue) !void {
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     if (!array.isArray()) return error.TypeError;
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(rooted_value, true, true, true));
@@ -812,23 +780,9 @@ fn appendRecordToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, n
     var rooted_value = value;
     var rooted_key = key;
     var rooted_this_arg = this_arg;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &rooted_key },
-        .{ .value = &rooted_this_arg },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_value, &rooted_key, &rooted_this_arg });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
     const record_value = record.value();
@@ -843,23 +797,9 @@ fn appendWeakMapAdderRecord(rt: *core.JSRuntime, globals: []globals_mod.Slot, ke
     var rooted_key = key;
     var rooted_value = value;
     var rooted_this_arg = this_arg;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_key },
-        .{ .value = &rooted_value },
-        .{ .value = &rooted_this_arg },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_key, &rooted_value, &rooted_this_arg });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
     const record_value = record.value();
@@ -995,22 +935,9 @@ fn removeUnindexedCollectionEntryAndDefineSize(rt: *core.JSRuntime, object: *cor
 fn appendPairToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8, key: core.JSValue, value: core.JSValue) !void {
     var rooted_key = key;
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_key },
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_key, &rooted_value });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const pair = try core.Object.createArray(rt, null);
     const pair_value = pair.value();
@@ -1022,21 +949,9 @@ fn appendPairToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, nam
 
 fn appendToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8, value: core.JSValue) !void {
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     var array_value = try globals_mod.getByName(rt, globals, name);
     if (array_value.isUndefined()) {
@@ -1069,21 +984,9 @@ fn getGlobalThisObject(rt: *core.JSRuntime, globals: []globals_mod.Slot) !*core.
 
 fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);

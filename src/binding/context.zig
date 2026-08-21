@@ -10,8 +10,6 @@ const Descriptor = core.Descriptor;
 const class = core.class;
 const atom = core.atom;
 const string = core.string;
-const runtime_mod = core.runtime;
-
 fn ensureStandardGlobalsRegistered(rt: *JSRuntime) void {
     if (rt.materialize_context_global_cb == null) {
         rt.materialize_context_global_cb = struct {
@@ -36,15 +34,6 @@ pub const ContextCreateTiming = struct {
     bootstrap_ns: u64 = 0,
 };
 
-fn elapsedNanosSince(start: u64) u64 {
-    const end = monotonicNanos();
-    return if (end > start) end - start else 0;
-}
-
-fn monotonicNanos() u64 {
-    return platform_clock.monotonicNanos();
-}
-
 fn initWithOptionsImpl(
     comptime measure: bool,
     self: *JSContext,
@@ -60,14 +49,14 @@ fn initWithOptionsImpl(
     const gc_threshold = rt.gcThreshold();
     defer rt.setGCThreshold(gc_threshold);
 
-    const raw_create_start = if (measure) monotonicNanos() else {};
+    const raw_create_start = if (measure) platform_clock.monotonicNanos() else {};
     self.* = .{ .core = try core.JSContext.createConstructingWithOptions(rt, options) };
     errdefer self.core.destroy();
-    if (measure) timing.raw_create_ns += elapsedNanosSince(raw_create_start);
+    if (measure) timing.raw_create_ns += platform_clock.elapsedNanosSince(raw_create_start);
 
-    const bootstrap_start = if (measure) monotonicNanos() else {};
+    const bootstrap_start = if (measure) platform_clock.monotonicNanos() else {};
     _ = try self.core.globalObject();
-    if (measure) timing.bootstrap_ns += elapsedNanosSince(bootstrap_start);
+    if (measure) timing.bootstrap_ns += platform_clock.elapsedNanosSince(bootstrap_start);
 }
 
 fn createWithOptionsImpl(

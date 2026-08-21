@@ -33,16 +33,6 @@ pub const CallStep = enum {
     inline_constructor,
 };
 
-pub const TailCallMethodResult = union(enum) {
-    handled,
-    return_value: core.JSValue,
-    /// Eligible bytecode method target for tail-call frame reuse; the
-    /// dispatch loop replaces the current inline frame (the receiver becomes
-    /// the reused frame's `this`) instead of recursing. The InlineCallRequest
-    /// is written through the caller's shared `req_out` slot (payload-free).
-    tail_inline,
-};
-
 pub const TailCallResult = union(enum) {
     handled,
     return_value: core.JSValue,
@@ -179,14 +169,6 @@ inline fn bytecodeStackBudgetWouldOverflow(
     return rt.checkNativeStackOverflow(accumulated);
 }
 
-pub inline fn canEnterInlineCallDepth(
-    ctx: *const core.JSContext,
-    function: *const bytecode.FunctionBytecode,
-    argc: usize,
-) bool {
-    return canEnterInlineCallDepthMode(ctx, function, argc, false);
-}
-
 pub inline fn canEnterInlineCallDepthMode(
     ctx: *const core.JSContext,
     function: *const bytecode.FunctionBytecode,
@@ -207,14 +189,6 @@ pub inline fn canEnterInlineCallDepthBytes(
     const rt = ctx.runtime;
     return rt.hot.call_depth < maxLogicalJsCallDepth(ctx) and
         !bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes);
-}
-
-pub inline fn commitInlineCallDepth(
-    ctx: *core.JSContext,
-    function: *const bytecode.FunctionBytecode,
-    argc: usize,
-) void {
-    commitInlineCallDepthMode(ctx, function, argc, false);
 }
 
 pub inline fn commitInlineCallDepthMode(
@@ -298,15 +272,6 @@ pub inline fn leaveInlineCallDepthBytesRt(
     std.debug.assert(rt.hot.active_bytecode_stack_bytes >= planned_stack_bytes);
     rt.hot.active_bytecode_stack_bytes -= planned_stack_bytes;
     rt.hot.call_depth -= 1;
-}
-
-pub inline fn leaveInlineCallDepth(
-    ctx: *core.JSContext,
-    function: *const bytecode.FunctionBytecode,
-    argc: usize,
-) void {
-    const planned_stack_bytes = bytecodeFrameAllocaSize(function, argc, false);
-    leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
 }
 
 /// Preflight for a tail-call frame replacement. QuickJS's OP_tail_call enters
@@ -765,9 +730,6 @@ pub noinline fn nativeMethodFastDispatch(
     return .hit;
 }
 
-// Root the NMFD tombstone so LTO cannot strip the in-body pad.
-export const zjs_nmfd_tombstone: *const anyopaque = @ptrCast(&nativeMethodFastDispatch);
-
 /// K1: same terminal as `callResolvedNativeMethod` without repeating the
 /// `class_id == c_function` gates inside preflight / realm switch.
 /// `noinline` keeps NativeCallEnvironment / exec_direct spills out of the
@@ -899,79 +861,6 @@ fn dropUnusedCallResult(
     frame.pc += 1;
     value.free(ctx.runtime);
     return true;
-}
-
-/// Generic tail method helper. Source-emitted `op.tail_call_method`
-/// aliases `op_call_method` (same admission, including native fast
-/// dispatch). Kept for handwritten/internal callers.
-pub noinline fn tailCallMethod(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    allow_inline: bool,
-    req_out: *call_runtime.InlineCallRequest,
-) !TailCallMethodResult {
-    const argc = readInt(u16, function.byteCode()[frame.pc..][0..2]);
-    frame.pc += 2;
-    // Same as tailCall: allow inline so JS→JS tails stay on one Machine
-    // (a4a301e0's allow_inline=false broke machine_inits). Dispatch must
-    // pushCall, not reuse (H3 TCO pit).
-    if (allow_inline) {
-        const total = @as(usize, argc) + 2;
-        if (stack.len() >= total) {
-            const region_base = stack.len() - total;
-            const receiver = stack.values[region_base];
-            const method = stack.values[region_base + 1];
-            if (inline_calls.resolveInlineTarget(ctx, global, receiver, method)) |target| {
-                req_out.* = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method };
-                return .tail_inline;
-            }
-        }
-    }
-    // Zero-copy method-call sequence (mirrors execCall + qjs OP_call_method):
-    // borrow `obj | func | args...` directly from the caller-owned operand stack
-    // instead of popping them into a duplicated staging buffer. The region stays
-    // on the stack (rooting obj/func/args for the whole call), and is popped and
-    // released only after the call completes.
-    const total: usize = @as(usize, argc) + 2;
-    if (stack.len() < total) return error.StackUnderflow;
-    const region_base = stack.len() - total;
-    const obj = stack.values[region_base];
-    const func = stack.values[region_base + 1];
-    const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
-    exception_ops.pollInterrupt(ctx, global) catch |err| {
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
-        return err;
-    };
-    const fast_result = fastNativeMethodCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
-        return err;
-    };
-    if (fast_result) |value| {
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
-        return .{ .return_value = value };
-    }
-    const maybe_array_result = array_ops.arrayMethodFastCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
-        return err;
-    };
-    const result = if (maybe_array_result) |array_result|
-        array_result
-    else
-        call_runtime.callValueOrBytecodeRootPreRootedAfterInterruptPoll(ctx, output, global, obj, func, args, function, frame) catch |err| {
-            call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
-            return err;
-        };
-    call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
-    return .{ .return_value = result };
 }
 
 inline fn fastNativeMethodCall(
@@ -1323,20 +1212,6 @@ fn maxNativeJsCallDepth(ctx: *const core.JSContext) usize {
     return @max(@as(usize, 16), ctx.stackLimit() / 16384);
 }
 
-/// Headroom (in native frames) before the recursive dispatcher must stop
-/// growing the C stack and hand the deep sub-tree to the heap-frame Machine
-/// path. The hard cap (`maxNativeJsCallDepth`, enforced by `enterCallDepth`)
-/// still guarantees no native overflow; this only decides WHEN to fall back.
-const native_depth_fallback_margin: usize = 8;
-
-/// True when native recursion is close enough to the cap that the recursive
-/// dispatcher should route the next call through the heap-frame `runWithArgsState`
-/// path (which absorbs the remaining depth on the Machine at logical depth)
-/// instead of recursing. See ARCH-RECURSIVE-REWRITE.md "S2a-v3".
-pub fn nativeDepthNearCap(ctx: *const core.JSContext) bool {
-    return ctx.runtime.hot.native_call_depth + native_depth_fallback_margin >= maxNativeJsCallDepth(ctx);
-}
-
 fn maxLogicalJsCallDepth(ctx: *const core.JSContext) usize {
     return ctx.stackLimit();
 }
@@ -1347,10 +1222,6 @@ fn maxLogicalJsCallDepth(ctx: *const core.JSContext) usize {
 /// `stackSize(self: JSRuntime)` receiver copy in unoptimized builds.
 inline fn maxLogicalJsCallDepthRt(rt: *const core.JSRuntime) usize {
     return rt.hot.stack_size;
-}
-
-fn maxJsCallDepth(ctx: *const core.JSContext) usize {
-    return maxNativeJsCallDepth(ctx);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

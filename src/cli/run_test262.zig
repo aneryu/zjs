@@ -1,5 +1,10 @@
 const std = @import("std");
+const cli_process = @import("cli_process.zig");
 const test262_root = @import("zjs");
+
+/// Message-only panics in ReleaseFast, full traces everywhere else — the
+/// `-dev` runner and the `test-runner` artifact are Debug, so they keep them.
+pub const panic = @import("panic_policy.zig").policy;
 
 // QCP-1: this root is shared by the `run-test262` / `run-test262-dev`
 // executables and by the `test-runner` scoped test artifact, so it proves the
@@ -14,18 +19,64 @@ comptime {
 const zjs = test262_root.binding_root;
 const runtime_layer = test262_root.runtime;
 const parser = test262_root.parser;
-const unicode = test262_root.libs.unicode;
 const core_runtime = test262_root.core.runtime;
+const runner_options = @import("run_test262_options.zig");
+const runner_reporter = @import("run_test262_reporter.zig");
+const runner_names = @import("run_test262_names.zig");
+const runner_metadata = @import("run_test262_metadata.zig");
+const runner_config = @import("run_test262_config.zig");
+const runner_known_errors = @import("run_test262_known_errors.zig");
+const runner_source = @import("run_test262_source.zig");
+const runner_host = @import("run_test262_host.zig");
+
+pub const Config = runner_options.Config;
+pub const FeatureOverrideKind = runner_options.FeatureOverrideKind;
+pub const FeatureOverride = runner_options.FeatureOverride;
+pub const BoundedFeatureOverrides = runner_options.BoundedFeatureOverrides;
+pub const BoundedList = runner_options.BoundedList;
+pub const parseArgs = runner_options.parse;
+pub const TestRunResult = runner_reporter.TestRunResult;
+pub const Reporter = runner_reporter.Reporter;
+pub const classifyBucket = runner_reporter.classifyBucket;
+pub const deriveDirSegment = runner_reporter.deriveDirSegment;
+const renderSortedFailureLog = runner_reporter.renderSortedFailureLog;
+const renderSkippedFeaturesJson = runner_reporter.renderSkippedFeaturesJson;
+pub const NameList = runner_names.NameList;
+pub const compareNames = runner_names.compare;
+pub const NegativeMetadata = runner_metadata.NegativeMetadata;
+pub const TestMetadata = runner_metadata.TestMetadata;
+pub const parseMetadataText = runner_metadata.parse;
+pub const LoadedConfig = runner_config.LoadedConfig;
+pub const loadConfigText = runner_config.loadText;
+pub const loadConfigFile = runner_config.loadFile;
+const applyFeatureOverrides = runner_config.applyFeatureOverrides;
+const loadKnownErrors = runner_known_errors.load;
+const parseKnownErrorsText = runner_known_errors.parseText;
+const writeKnownErrors = runner_known_errors.write;
+const mergeKnownErrorsForUpdate = runner_known_errors.mergeForUpdate;
+const renderKnownErrorsText = runner_known_errors.renderText;
+const HarnessCache = runner_source.HarnessCache;
+const makeHarnessPrelude = runner_source.makeHarnessPrelude;
+const readTestSource = runner_source.readTestSource;
+const test262Override = runner_source.test262Override;
+const test262OverridePath = runner_source.test262OverridePath;
+const test262UpstreamPath = runner_source.test262UpstreamPath;
+const test262_override_manifest = runner_source.override_manifest;
+const makeTestSourceFromBytes = runner_source.makeTestSourceFromBytes;
+const loadMetadataFromFile = runner_source.loadMetadataFromFile;
+pub const assertSameValue = runner_host.assertSameValue;
+pub const cleanupTest262Agents = runner_host.cleanupTest262Agents;
+pub const installTest262Globals = runner_host.installTest262Globals;
 
 extern "c" fn getpid() c_int;
 
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
-    const args = try argsToSlice(arena, init.minimal.args);
+    const args = try cli_process.argsToSlice(arena, init.minimal.args);
 
     var config = parseArgs(args[1..]) catch |err| {
-        try printError(io, "run-test262: {s}\n", .{@errorName(err)});
+        try cli_process.printError(io, "run-test262: {s}\n", .{@errorName(err)});
         try printUsage(io);
         std.process.exit(2);
     };
@@ -38,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var summary = runSelectedTests(init.gpa, io, config, "zig-out/bin/zjs") catch |err| {
-        try printError(io, "run-test262: unable to run tests: {s}\n", .{@errorName(err)});
+        try cli_process.printError(io, "run-test262: unable to run tests: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
     defer summary.deinit(init.gpa);
@@ -64,41 +115,8 @@ fn dumpHostDispatchStats(environ_map: *std.process.Environ.Map) void {
     host_dispatch_stats.appendToFile(&path_buf);
 }
 
-fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
-    const raw_args = try args.toSlice(arena);
-    const result = try arena.alloc([]const u8, raw_args.len);
-    for (raw_args, 0..) |arg, i| result[i] = arg;
-    return result;
-}
-
 fn printUsage(io: std.Io) !void {
-    try printError(
-        io,
-        "usage: run-test262 -c <test262.conf> [options] [test-root] [start [stop]]\n" ++
-            "  -d <dir>                 add a test directory selector\n" ++
-            "  -f <file>                add a single test file selector\n" ++
-            "  -e <file>                use a known-errors file\n" ++
-            "  -u                       update the known-errors file from failures\n" ++
-            "  -m                       run selected tests as modules\n" ++
-            "  -t <n>                   run up to <n> tests in parallel\n" ++
-            "  -T <ms>                  per-test timeout in milliseconds\n" ++
-            "  -R <dir>                 emit test262-failures.log, test262-buckets.json,\n" ++
-            "                           test262-by-dir.json, and\n" ++
-            "                           test262-skipped-features.json under <dir>\n" ++
-            "  --engine <path>          run prepared tests with an external qjs-compatible\n" ++
-            "                           binary instead of the embedded zjs engine\n" ++
-            "  --enable-feature <name> temporarily enable a config-skipped feature\n" ++
-            "  --skip-feature <name>   temporarily skip a config-enabled feature\n",
-        .{},
-    );
-}
-
-fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-    var stderr_buf: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
-    const stderr = &stderr_writer.interface;
-    try stderr.print(fmt, args);
-    try stderr.flush();
+    try cli_process.printError(io, runner_options.usage, .{});
 }
 
 fn printSummary(io: std.Io, summary: ExecutionSummary) !void {
@@ -122,245 +140,7 @@ fn printSummary(io: std.Io, summary: ExecutionSummary) !void {
     try stdout.flush();
 }
 
-const batch_worker_restart_interval = 256;
 const stderr_storage_len = 2048;
-
-pub const RunnerArgsError = error{
-    Usage,
-    MissingValue,
-    TooManyItems,
-};
-
-pub const RunnerError = error{
-    ConfigParse,
-};
-
-pub const NegativeMetadata = struct {
-    phase: ?[]const u8 = null,
-    type_name: ?[]const u8 = null,
-
-    pub fn deinit(self: *NegativeMetadata, allocator: std.mem.Allocator) void {
-        if (self.phase) |value| allocator.free(value);
-        if (self.type_name) |value| allocator.free(value);
-    }
-};
-
-pub const TestMetadata = struct {
-    includes: NameList,
-    features: NameList,
-    flags: NameList,
-    negative: ?NegativeMetadata = null,
-
-    pub fn init(allocator: std.mem.Allocator) TestMetadata {
-        return .{
-            .includes = NameList.init(allocator),
-            .features = NameList.init(allocator),
-            .flags = NameList.init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *TestMetadata, allocator: std.mem.Allocator) void {
-        self.includes.deinit();
-        self.features.deinit();
-        self.flags.deinit();
-        if (self.negative) |*negative| negative.deinit(allocator);
-    }
-
-    pub fn hasSkippedFeature(self: TestMetadata, skipped_features: NameList) bool {
-        return self.skippedFeature(skipped_features) != null;
-    }
-
-    pub fn skippedFeature(self: TestMetadata, skipped_features: NameList) ?[]const u8 {
-        for (self.features.items) |feature| {
-            if (skipped_features.contains(feature)) return feature;
-        }
-        return null;
-    }
-
-    pub fn hasFlag(self: TestMetadata, name: []const u8) bool {
-        for (self.flags.items) |flag| {
-            if (std.mem.eql(u8, flag, name)) return true;
-        }
-        return false;
-    }
-};
-
-pub const Config = struct {
-    config_path: ?[]const u8 = null,
-    test_root: ?[]const u8 = null,
-    module: bool = false,
-    verbose: u8 = 0,
-    update_errors: bool = false,
-    timeout_ms: ?u32 = null,
-    /// Zero means "auto-detect" (CPU count). Any explicit positive value
-    /// supplied with `-t` is used verbatim.
-    threads: u32 = 0,
-    known_error_file: ?[]const u8 = null,
-    reports_dir: ?[]const u8 = null,
-    /// Optional external qjs-compatible executable. When null, the runner uses
-    /// the embedded Zig engine, preserving existing test262 behavior.
-    engine_path: ?[]const u8 = null,
-    feature_overrides: BoundedFeatureOverrides = .{},
-    start_index: ?usize = null,
-    stop_index: ?usize = null,
-    files: BoundedList = .{},
-    dirs: BoundedList = .{},
-
-    pub fn selectedCount(self: Config) usize {
-        return self.files.len + self.dirs.len + @as(usize, if (self.test_root != null) 1 else 0);
-    }
-};
-
-pub const FeatureOverrideKind = enum {
-    enable,
-    skip,
-};
-
-pub const FeatureOverride = struct {
-    kind: FeatureOverrideKind,
-    name: []const u8,
-};
-
-pub const BoundedFeatureOverrides = struct {
-    items: [64]FeatureOverride = undefined,
-    len: usize = 0,
-
-    pub fn append(self: *BoundedFeatureOverrides, kind: FeatureOverrideKind, name: []const u8) RunnerArgsError!void {
-        if (self.len == self.items.len) return error.TooManyItems;
-        self.items[self.len] = .{ .kind = kind, .name = name };
-        self.len += 1;
-    }
-
-    pub fn get(self: BoundedFeatureOverrides, index: usize) FeatureOverride {
-        return self.items[index];
-    }
-};
-
-pub const BoundedList = struct {
-    items: [64][]const u8 = undefined,
-    len: usize = 0,
-
-    pub fn append(self: *BoundedList, item: []const u8) RunnerArgsError!void {
-        if (self.len == self.items.len) return error.TooManyItems;
-        self.items[self.len] = item;
-        self.len += 1;
-    }
-
-    pub fn get(self: BoundedList, index: usize) []const u8 {
-        return self.items[index];
-    }
-};
-
-pub fn parseArgs(args: []const []const u8) RunnerArgsError!Config {
-    var config = Config{};
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "-c")) {
-            config.config_path = try nextValue(args, &i);
-        } else if (std.mem.eql(u8, arg, "-d")) {
-            try config.dirs.append(try nextValue(args, &i));
-        } else if (std.mem.eql(u8, arg, "-f")) {
-            try config.files.append(try nextValue(args, &i));
-        } else if (std.mem.eql(u8, arg, "-e")) {
-            config.known_error_file = try nextValue(args, &i);
-        } else if (std.mem.eql(u8, arg, "-u")) {
-            config.update_errors = true;
-        } else if (std.mem.eql(u8, arg, "-m")) {
-            config.module = true;
-        } else if (std.mem.eql(u8, arg, "-v")) {
-            config.verbose = @max(config.verbose, 1);
-        } else if (std.mem.eql(u8, arg, "-vv")) {
-            config.verbose = 2;
-        } else if (std.mem.eql(u8, arg, "-T")) {
-            config.timeout_ms = try parseU32(try nextValue(args, &i));
-        } else if (std.mem.eql(u8, arg, "-t")) {
-            config.threads = try parseU32(try nextValue(args, &i));
-        } else if (std.mem.eql(u8, arg, "-R")) {
-            config.reports_dir = try nextValue(args, &i);
-        } else if (std.mem.eql(u8, arg, "--engine")) {
-            config.engine_path = try nextValue(args, &i);
-        } else if (std.mem.eql(u8, arg, "--enable-feature")) {
-            try config.feature_overrides.append(.enable, try nextValue(args, &i));
-        } else if (std.mem.eql(u8, arg, "--skip-feature")) {
-            try config.feature_overrides.append(.skip, try nextValue(args, &i));
-        } else if (arg.len != 0 and arg[0] == '-') {
-            return error.Usage;
-        } else if (isDecimal(arg)) {
-            const index = try parseUsize(arg);
-            if (config.start_index == null) {
-                config.start_index = index;
-            } else if (config.stop_index == null) {
-                config.stop_index = index;
-            } else {
-                return error.Usage;
-            }
-        } else if (config.test_root == null) {
-            config.test_root = arg;
-        } else {
-            return error.Usage;
-        }
-    }
-    if (config.config_path == null and config.selectedCount() == 0) return error.Usage;
-    return config;
-}
-
-fn nextValue(args: []const []const u8, index: *usize) RunnerArgsError![]const u8 {
-    index.* += 1;
-    if (index.* >= args.len) return error.MissingValue;
-    return args[index.*];
-}
-
-fn parseU32(bytes: []const u8) RunnerArgsError!u32 {
-    return std.fmt.parseInt(u32, bytes, 10) catch error.Usage;
-}
-
-fn parseUsize(bytes: []const u8) RunnerArgsError!usize {
-    return std.fmt.parseInt(usize, bytes, 10) catch error.Usage;
-}
-
-fn isDecimal(bytes: []const u8) bool {
-    if (bytes.len == 0) return false;
-    for (bytes) |byte| {
-        if (byte < '0' or byte > '9') return false;
-    }
-    return true;
-}
-
-pub const LoadedConfig = struct {
-    testdir: ?[]const u8 = null,
-    harnessdir: ?[]const u8 = null,
-    errorfile: ?[]const u8 = null,
-    excludes: NameList,
-    reincludes: NameList,
-    enabled_features: NameList,
-    skipped_features: NameList,
-
-    pub fn init(allocator: std.mem.Allocator) LoadedConfig {
-        return .{
-            .excludes = NameList.init(allocator),
-            .reincludes = NameList.init(allocator),
-            .enabled_features = NameList.init(allocator),
-            .skipped_features = NameList.init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *LoadedConfig, allocator: std.mem.Allocator) void {
-        if (self.testdir) |value| allocator.free(value);
-        if (self.harnessdir) |value| allocator.free(value);
-        if (self.errorfile) |value| allocator.free(value);
-        self.excludes.deinit();
-        self.reincludes.deinit();
-        self.enabled_features.deinit();
-        self.skipped_features.deinit();
-    }
-
-    fn excludesTest(self: LoadedConfig, path: []const u8) bool {
-        const exclude_len = self.excludes.bestMatchLen(path) orelse return false;
-        const reinclude_len = self.reincludes.bestMatchLen(path) orelse return true;
-        return exclude_len > reinclude_len;
-    }
-};
 
 pub const SelectionSummary = struct {
     total_tests: usize = 0,
@@ -401,319 +181,6 @@ pub const ExecutionSummary = struct {
     }
 };
 
-pub const TestRunResult = enum { passed, failed, skipped };
-
-/// Centralised stderr serialisation, failure-bucket aggregation, and
-/// per-directory summary for `run-test262`. Always created by
-/// `runSelectedTests`; `reports_dir` controls whether JSON reports are
-/// emitted to disk on `flush`. The mutex serialises concurrent worker
-/// writes to stderr (F0.3) and protects the failure aggregations (F0.1).
-pub const Reporter = struct {
-    pub const Bucket = enum {
-        syntax_error,
-        type_error,
-        test262_error,
-        range_error,
-        reference_error,
-        unhandled_promise_rejection,
-        other,
-        empty,
-
-        pub fn name(self: Bucket) []const u8 {
-            return switch (self) {
-                .syntax_error => "SyntaxError",
-                .type_error => "TypeError",
-                .test262_error => "Test262Error",
-                .range_error => "RangeError",
-                .reference_error => "ReferenceError",
-                .unhandled_promise_rejection => "UnhandledPromiseRejection",
-                .other => "Other",
-                .empty => "Empty",
-            };
-        }
-    };
-
-    pub const DirEntry = struct {
-        dir: []const u8,
-        passed: usize = 0,
-        failed: usize = 0,
-        known_failed: usize = 0,
-    };
-
-    pub const SkippedFeatureEntry = struct {
-        feature: []const u8,
-        skipped: usize = 0,
-    };
-
-    allocator: std.mem.Allocator,
-    mutex: std.Io.Mutex = .init,
-    reports_dir: ?[]const u8,
-    quiet: bool = false,
-    failure_log: std.ArrayList(u8) = .empty,
-    buckets: [@typeInfo(Bucket).@"enum".fields.len]usize = @splat(0),
-    by_dir: std.ArrayList(DirEntry) = .empty,
-    skipped_by_feature: std.ArrayList(SkippedFeatureEntry) = .empty,
-
-    pub fn init(allocator: std.mem.Allocator, reports_dir: ?[]const u8) Reporter {
-        return .{ .allocator = allocator, .reports_dir = reports_dir };
-    }
-
-    pub fn initQuiet(allocator: std.mem.Allocator, reports_dir: ?[]const u8) Reporter {
-        return .{ .allocator = allocator, .reports_dir = reports_dir, .quiet = true };
-    }
-
-    pub fn deinit(self: *Reporter) void {
-        self.failure_log.deinit(self.allocator);
-        for (self.by_dir.items) |entry| self.allocator.free(entry.dir);
-        self.by_dir.deinit(self.allocator);
-        for (self.skipped_by_feature.items) |entry| self.allocator.free(entry.feature);
-        self.skipped_by_feature.deinit(self.allocator);
-    }
-
-    /// Lock-protected stderr line emission. All runner-side stderr output
-    /// must go through this so multi-threaded runs do not interleave
-    /// fragments.
-    pub fn lockedPrint(self: *Reporter, io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-        if (self.quiet) return;
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        var stderr_buf: [4096]u8 = undefined;
-        var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
-        const writer = &stderr_writer.interface;
-        try writer.print(fmt, args);
-        try writer.flush();
-    }
-
-    pub fn recordResult(
-        self: *Reporter,
-        io: std.Io,
-        test_path: []const u8,
-        result: TestRunResult,
-        stderr_text: []const u8,
-        is_known: bool,
-    ) !void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        const dir = deriveDirSegment(test_path);
-        const entry = try self.findOrInsertDir(dir);
-        switch (result) {
-            .passed => entry.passed += 1,
-            .failed => {
-                if (is_known) entry.known_failed += 1 else entry.failed += 1;
-                const bucket = classifyBucket(stderr_text);
-                self.buckets[@intFromEnum(bucket)] += 1;
-                try self.appendFailureLine(test_path, bucket, stderr_text);
-            },
-            .skipped => {},
-        }
-    }
-
-    pub fn recordSkippedFeature(self: *Reporter, io: std.Io, feature: []const u8) !void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        const entry = try self.findOrInsertSkippedFeature(feature);
-        entry.skipped += 1;
-    }
-
-    fn findOrInsertDir(self: *Reporter, dir: []const u8) !*DirEntry {
-        for (self.by_dir.items) |*existing| {
-            if (std.mem.eql(u8, existing.dir, dir)) return existing;
-        }
-        const owned = try self.allocator.dupe(u8, dir);
-        errdefer self.allocator.free(owned);
-        try self.by_dir.append(self.allocator, .{ .dir = owned });
-        return &self.by_dir.items[self.by_dir.items.len - 1];
-    }
-
-    fn findOrInsertSkippedFeature(self: *Reporter, feature: []const u8) !*SkippedFeatureEntry {
-        for (self.skipped_by_feature.items) |*existing| {
-            if (std.mem.eql(u8, existing.feature, feature)) return existing;
-        }
-        const owned = try self.allocator.dupe(u8, feature);
-        errdefer self.allocator.free(owned);
-        try self.skipped_by_feature.append(self.allocator, .{ .feature = owned });
-        return &self.skipped_by_feature.items[self.skipped_by_feature.items.len - 1];
-    }
-
-    fn appendFailureLine(
-        self: *Reporter,
-        test_path: []const u8,
-        bucket: Bucket,
-        stderr_text: []const u8,
-    ) !void {
-        const trimmed = std.mem.trim(u8, stderr_text, " \t\r\n");
-        const limit = @min(trimmed.len, 240);
-        try self.failure_log.print(self.allocator, "{s}\t{s}\t", .{ test_path, bucket.name() });
-        // sanitise newlines/tabs out of the captured stderr fragment.
-        for (trimmed[0..limit]) |byte| {
-            const safe: u8 = switch (byte) {
-                '\n', '\r', '\t' => ' ',
-                else => byte,
-            };
-            try self.failure_log.append(self.allocator, safe);
-        }
-        try self.failure_log.append(self.allocator, '\n');
-    }
-
-    pub fn flush(self: *Reporter, io: std.Io) !void {
-        const dir = self.reports_dir orelse return;
-        try std.Io.Dir.cwd().createDirPath(io, dir);
-
-        var sorted_failure_log: std.ArrayList(u8) = .empty;
-        defer sorted_failure_log.deinit(self.allocator);
-        try renderSortedFailureLog(self.allocator, &sorted_failure_log, self.failure_log.items);
-        const log_path = try std.fs.path.join(self.allocator, &.{ dir, "test262-failures.log" });
-        defer self.allocator.free(log_path);
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = log_path, .data = sorted_failure_log.items });
-
-        var buckets_json: std.ArrayList(u8) = .empty;
-        defer buckets_json.deinit(self.allocator);
-        try renderBucketsJson(self.allocator, &buckets_json, &self.buckets);
-        const buckets_path = try std.fs.path.join(self.allocator, &.{ dir, "test262-buckets.json" });
-        defer self.allocator.free(buckets_path);
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = buckets_path, .data = buckets_json.items });
-
-        var by_dir_json: std.ArrayList(u8) = .empty;
-        defer by_dir_json.deinit(self.allocator);
-        try renderByDirJson(self.allocator, &by_dir_json, self.by_dir.items);
-        const by_dir_path = try std.fs.path.join(self.allocator, &.{ dir, "test262-by-dir.json" });
-        defer self.allocator.free(by_dir_path);
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = by_dir_path, .data = by_dir_json.items });
-
-        var skipped_features_json: std.ArrayList(u8) = .empty;
-        defer skipped_features_json.deinit(self.allocator);
-        try renderSkippedFeaturesJson(self.allocator, &skipped_features_json, self.skipped_by_feature.items);
-        const skipped_features_path = try std.fs.path.join(self.allocator, &.{ dir, "test262-skipped-features.json" });
-        defer self.allocator.free(skipped_features_path);
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = skipped_features_path, .data = skipped_features_json.items });
-    }
-};
-
-pub fn classifyBucket(stderr_text: []const u8) Reporter.Bucket {
-    const trimmed = std.mem.trim(u8, stderr_text, " \t\r\n");
-    if (trimmed.len == 0) return .empty;
-    if (std.mem.indexOf(u8, trimmed, "unhandled promise rejection") != null) return .unhandled_promise_rejection;
-    if (std.mem.indexOf(u8, trimmed, "Test262Error") != null) return .test262_error;
-    if (std.mem.indexOf(u8, trimmed, "SyntaxError") != null) return .syntax_error;
-    if (std.mem.indexOf(u8, trimmed, "TypeError") != null) return .type_error;
-    if (std.mem.indexOf(u8, trimmed, "RangeError") != null) return .range_error;
-    if (std.mem.indexOf(u8, trimmed, "ReferenceError") != null) return .reference_error;
-    return .other;
-}
-
-/// Returns the `language/<dir>` or `built-ins/<dir>` segment derived from
-/// `test_path` (or the first one or two path components when the
-/// `/test/` marker is absent). The returned slice points into `test_path`
-/// and is valid only as long as that buffer lives.
-pub fn deriveDirSegment(test_path: []const u8) []const u8 {
-    const marker = "/test/";
-    const start: usize = if (std.mem.indexOf(u8, test_path, marker)) |idx| idx + marker.len else 0;
-    const tail = test_path[start..];
-    return firstTwoComponents(tail);
-}
-
-fn firstTwoComponents(path: []const u8) []const u8 {
-    const first = std.mem.indexOfScalar(u8, path, '/') orelse return path;
-    const after = path[first + 1 ..];
-    const second = std.mem.indexOfScalar(u8, after, '/') orelse return path[0 .. first + 1 + after.len];
-    return path[0 .. first + 1 + second];
-}
-
-fn renderBucketsJson(
-    allocator: std.mem.Allocator,
-    buffer: *std.ArrayList(u8),
-    counts: *const [@typeInfo(Reporter.Bucket).@"enum".fields.len]usize,
-) !void {
-    var total: usize = 0;
-    for (counts) |c| total += c;
-    try buffer.print(allocator, "{{\n  \"total_failed\": {d},\n  \"buckets\": {{\n", .{total});
-    inline for (@typeInfo(Reporter.Bucket).@"enum".fields, 0..) |field, i| {
-        const tag: Reporter.Bucket = @enumFromInt(field.value);
-        const sep = if (i == @typeInfo(Reporter.Bucket).@"enum".fields.len - 1) "" else ",";
-        try buffer.print(allocator, "    \"{s}\": {d}{s}\n", .{ tag.name(), counts[i], sep });
-    }
-    try buffer.appendSlice(allocator, "  }\n}\n");
-}
-
-fn renderSortedFailureLog(
-    allocator: std.mem.Allocator,
-    buffer: *std.ArrayList(u8),
-    failure_log: []const u8,
-) !void {
-    var lines: std.ArrayList([]const u8) = .empty;
-    defer lines.deinit(allocator);
-
-    var line_iter = std.mem.splitScalar(u8, failure_log, '\n');
-    while (line_iter.next()) |line| {
-        if (line.len == 0) continue;
-        try lines.append(allocator, line);
-    }
-
-    std.mem.sort([]const u8, lines.items, {}, lessThanFailureLogLine);
-    for (lines.items) |line| {
-        try buffer.appendSlice(allocator, line);
-        try buffer.append(allocator, '\n');
-    }
-}
-
-fn renderByDirJson(
-    allocator: std.mem.Allocator,
-    buffer: *std.ArrayList(u8),
-    entries_in: []const Reporter.DirEntry,
-) !void {
-    const sorted = try allocator.dupe(Reporter.DirEntry, entries_in);
-    defer allocator.free(sorted);
-    std.mem.sort(Reporter.DirEntry, sorted, {}, lessThanDirEntry);
-
-    try buffer.appendSlice(allocator, "[\n");
-    for (sorted, 0..) |entry, i| {
-        const sep = if (i == sorted.len - 1) "" else ",";
-        try buffer.print(
-            allocator,
-            "  {{ \"dir\": \"{s}\", \"passed\": {d}, \"failed\": {d}, \"known_failed\": {d} }}{s}\n",
-            .{ entry.dir, entry.passed, entry.failed, entry.known_failed, sep },
-        );
-    }
-    try buffer.appendSlice(allocator, "]\n");
-}
-
-fn renderSkippedFeaturesJson(
-    allocator: std.mem.Allocator,
-    buffer: *std.ArrayList(u8),
-    entries_in: []const Reporter.SkippedFeatureEntry,
-) !void {
-    const sorted = try allocator.dupe(Reporter.SkippedFeatureEntry, entries_in);
-    defer allocator.free(sorted);
-    std.mem.sort(Reporter.SkippedFeatureEntry, sorted, {}, lessThanSkippedFeatureEntry);
-
-    var total: usize = 0;
-    for (sorted) |entry| total += entry.skipped;
-
-    try buffer.print(allocator, "{{\n  \"total_skipped\": {d},\n  \"features\": [\n", .{total});
-    for (sorted, 0..) |entry, i| {
-        const sep = if (i == sorted.len - 1) "" else ",";
-        try buffer.print(
-            allocator,
-            "    {{ \"feature\": \"{s}\", \"skipped\": {d} }}{s}\n",
-            .{ entry.feature, entry.skipped, sep },
-        );
-    }
-    try buffer.appendSlice(allocator, "  ]\n}\n");
-}
-
-fn lessThanDirEntry(_: void, lhs: Reporter.DirEntry, rhs: Reporter.DirEntry) bool {
-    return std.mem.lessThan(u8, lhs.dir, rhs.dir);
-}
-
-fn lessThanSkippedFeatureEntry(_: void, lhs: Reporter.SkippedFeatureEntry, rhs: Reporter.SkippedFeatureEntry) bool {
-    if (lhs.skipped != rhs.skipped) return lhs.skipped > rhs.skipped;
-    return std.mem.lessThan(u8, lhs.feature, rhs.feature);
-}
-
-fn lessThanFailureLogLine(_: void, lhs: []const u8, rhs: []const u8) bool {
-    return std.mem.lessThan(u8, lhs, rhs);
-}
-
 const WorkerResult = struct {
     passed: usize = 0,
     failed: usize = 0,
@@ -732,8 +199,10 @@ const WorkerResult = struct {
     }
 };
 
-const WorkerContext = struct {
-    allocator: std.mem.Allocator,
+/// Runner state shared by the single-worker path and every thread adapter.
+/// Cross-thread mutation stays confined to `next_index` and `reporter`, whose
+/// implementations own their synchronization.
+const WorkerShared = struct {
     io: std.Io,
     engine_path: []const u8,
     use_external_engine: bool,
@@ -742,273 +211,38 @@ const WorkerContext = struct {
     tests: []const []const u8,
     known_errors: NameList,
     skipped_features: NameList,
-    /// Shared atomic counter used by all workers to claim the next test
-    /// index. Replaces the previous stride scheme so a stride that lands on
-    /// many slow tests cannot leave other workers idle.
+    /// Shared atomic counter used by all workers to claim the next test index.
     next_index: *std.atomic.Value(usize),
     verbose: u8,
     timeout_ms: ?u32,
     global_module: bool,
     reporter: ?*Reporter,
+};
+
+/// Per-thread ownership kept separate from the shared run description.
+const WorkerThreadContext = struct {
+    allocator: std.mem.Allocator,
+    shared: *const WorkerShared,
     result: *WorkerResult,
-};
 
-const HarnessCache = struct {
-    const Entry = struct {
-        name: []const u8,
-        bytes: ?[]const u8,
-    };
-
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    harnessdir: ?[]const u8,
-    entries: []Entry = &.{},
-    capacity: usize = 0,
-
-    fn init(allocator: std.mem.Allocator, io: std.Io, harnessdir: ?[]const u8) HarnessCache {
-        return .{
-            .allocator = allocator,
-            .io = io,
-            .harnessdir = harnessdir,
+    fn run(context: *WorkerThreadContext) void {
+        var summary = ExecutionSummary{ .selection = .{} };
+        runWorkerLoop(
+            context.shared,
+            context.allocator,
+            &summary,
+            &context.result.current_failures,
+        ) catch |err| {
+            context.result.err = err;
+            return;
         };
-    }
-
-    fn deinit(self: *HarnessCache) void {
-        for (self.entries) |entry| {
-            self.allocator.free(entry.name);
-            if (entry.bytes) |bytes| self.allocator.free(bytes);
-        }
-        if (self.capacity != 0) self.allocator.free(self.entries.ptr[0..self.capacity]);
-        self.entries = &.{};
-        self.capacity = 0;
-    }
-
-    fn get(self: *HarnessCache, basename: []const u8) !?[]const u8 {
-        for (self.entries) |entry| {
-            if (std.mem.eql(u8, entry.name, basename)) return entry.bytes;
-        }
-
-        const bytes = try readHarnessFile(self.allocator, self.io, self.harnessdir, basename);
-        try self.append(.{
-            .name = try self.allocator.dupe(u8, basename),
-            .bytes = bytes,
-        });
-        return bytes;
-    }
-
-    fn append(self: *HarnessCache, entry: Entry) !void {
-        if (self.entries.len == self.capacity) {
-            const next_capacity = if (self.capacity == 0) 16 else self.capacity * 2;
-            const next = try self.allocator.alloc(Entry, next_capacity);
-            @memcpy(next[0..self.entries.len], self.entries);
-            if (self.capacity != 0) self.allocator.free(self.entries.ptr[0..self.capacity]);
-            self.entries = next[0..self.entries.len];
-            self.capacity = next_capacity;
-        }
-        const storage: []Entry = @constCast(self.entries.ptr[0..self.capacity]);
-        storage[self.entries.len] = entry;
-        self.entries = storage[0 .. self.entries.len + 1];
+        context.result.passed = summary.passed;
+        context.result.failed = summary.failed;
+        context.result.known_failures = summary.known_failures;
+        context.result.fixed = summary.fixed;
+        context.result.skipped_by_feature = summary.selection.skipped_by_feature;
     }
 };
-
-pub const NameList = struct {
-    allocator: std.mem.Allocator,
-    items: []const []const u8 = &.{},
-    capacity: usize = 0,
-
-    pub fn init(allocator: std.mem.Allocator) NameList {
-        return .{ .allocator = allocator };
-    }
-
-    pub fn deinit(self: *NameList) void {
-        for (self.items) |item| self.allocator.free(item);
-        if (self.capacity != 0) self.allocator.free(self.items.ptr[0..self.capacity]);
-        self.items = &.{};
-        self.capacity = 0;
-    }
-
-    pub fn appendOwned(self: *NameList, item: []const u8) !void {
-        if (self.items.len == self.capacity) {
-            const next_capacity = if (self.capacity == 0) 8 else self.capacity * 2;
-            const next = try self.allocator.alloc([]const u8, next_capacity);
-            @memcpy(next[0..self.items.len], self.items);
-            if (self.capacity != 0) self.allocator.free(self.items.ptr[0..self.capacity]);
-            self.items = next[0..self.items.len];
-            self.capacity = next_capacity;
-        }
-        const storage: [][]const u8 = @constCast(self.items.ptr[0..self.capacity]);
-        storage[self.items.len] = item;
-        self.items = storage[0 .. self.items.len + 1];
-    }
-
-    pub fn append(self: *NameList, item: []const u8) !void {
-        try self.appendOwned(try self.allocator.dupe(u8, item));
-    }
-
-    pub fn sortAndDedupe(self: *NameList) void {
-        if (self.items.len < 2) return;
-        const mutable: [][]const u8 = @constCast(self.items);
-        std.mem.sort([]const u8, mutable, {}, lessThanName);
-        var write: usize = 1;
-        var read: usize = 1;
-        while (read < mutable.len) : (read += 1) {
-            if (compareNames(mutable[write - 1], mutable[read]) == 0) {
-                self.allocator.free(mutable[read]);
-            } else {
-                mutable[write] = mutable[read];
-                write += 1;
-            }
-        }
-        self.items = mutable[0..write];
-    }
-
-    pub fn dedupePreserveOrder(self: *NameList) void {
-        if (self.items.len < 2) return;
-        const mutable: [][]const u8 = @constCast(self.items);
-        var write: usize = 0;
-        for (mutable) |item| {
-            var duplicate = false;
-            for (mutable[0..write]) |existing| {
-                if (std.mem.eql(u8, existing, item)) {
-                    duplicate = true;
-                    break;
-                }
-            }
-            if (duplicate) {
-                self.allocator.free(item);
-            } else {
-                mutable[write] = item;
-                write += 1;
-            }
-        }
-        self.items = mutable[0..write];
-    }
-
-    pub fn contains(self: NameList, needle: []const u8) bool {
-        return self.bestMatchLen(needle) != null;
-    }
-
-    pub fn bestMatchLen(self: NameList, needle: []const u8) ?usize {
-        var best: ?usize = null;
-        for (self.items) |item| {
-            const matches = std.mem.eql(u8, item, needle) or
-                (std.mem.endsWith(u8, item, "/") and std.mem.startsWith(u8, needle, item));
-            if (!matches) continue;
-            if (best == null or item.len > best.?) best = item.len;
-        }
-        return best;
-    }
-
-    pub fn containsExact(self: NameList, needle: []const u8) bool {
-        for (self.items) |item| {
-            if (std.mem.eql(u8, item, needle)) return true;
-        }
-        return false;
-    }
-
-    pub fn removeExact(self: *NameList, needle: []const u8) void {
-        if (self.items.len == 0) return;
-        const mutable: [][]const u8 = @constCast(self.items);
-        var write: usize = 0;
-        for (mutable) |item| {
-            if (std.mem.eql(u8, item, needle)) {
-                self.allocator.free(item);
-            } else {
-                mutable[write] = item;
-                write += 1;
-            }
-        }
-        self.items = mutable[0..write];
-    }
-
-    pub fn findSortedExact(self: NameList, needle: []const u8) ?usize {
-        var low: usize = 0;
-        var high: usize = self.items.len;
-        while (low < high) {
-            const mid = low + (high - low) / 2;
-            const cmp = compareNames(self.items[mid], needle);
-            if (cmp < 0) {
-                low = mid + 1;
-            } else if (cmp > 0) {
-                high = mid;
-            } else {
-                return mid;
-            }
-        }
-        return null;
-    }
-
-    pub fn move(self: *NameList) NameList {
-        const out = self.*;
-        self.items = &.{};
-        self.capacity = 0;
-        return out;
-    }
-};
-
-pub fn loadConfigText(allocator: std.mem.Allocator, base_dir: []const u8, text: []const u8) !LoadedConfig {
-    var loaded = LoadedConfig.init(allocator);
-    errdefer loaded.deinit(allocator);
-
-    var section: enum { none, config, features, exclude, tests } = .none;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw_line| {
-        const no_cr = std.mem.trim(u8, raw_line, "\r");
-        const line = stripComment(std.mem.trim(u8, no_cr, " \t"));
-        if (line.len == 0) continue;
-
-        if (std.mem.eql(u8, line, "[config]")) {
-            section = .config;
-            continue;
-        }
-        if (std.mem.eql(u8, line, "[features]")) {
-            section = .features;
-            continue;
-        }
-        if (std.mem.eql(u8, line, "[exclude]")) {
-            section = .exclude;
-            continue;
-        }
-        if (std.mem.eql(u8, line, "[tests]")) {
-            section = .tests;
-            continue;
-        }
-
-        switch (section) {
-            .config => try parseConfigEntry(allocator, &loaded, base_dir, line),
-            .features => try parseFeatureEntry(&loaded, line),
-            .exclude => try parseExcludeEntry(allocator, &loaded, base_dir, line),
-            .tests, .none => {},
-        }
-    }
-
-    loaded.excludes.sortAndDedupe();
-    loaded.reincludes.sortAndDedupe();
-    loaded.enabled_features.sortAndDedupe();
-    loaded.skipped_features.sortAndDedupe();
-    return loaded;
-}
-
-pub fn loadConfigFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !LoadedConfig {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 * 1024 * 1024));
-    defer allocator.free(bytes);
-    const base_dir = dirname(path);
-    return loadConfigText(allocator, base_dir, bytes);
-}
-
-pub fn collectSelection(allocator: std.mem.Allocator, io: std.Io, config: Config) !SelectionSummary {
-    var prepared = try prepareSelection(allocator, io, config);
-    defer prepared.deinit(allocator);
-    return .{
-        .total_tests = prepared.summary.total_tests,
-        .selected_tests = prepared.summary.selected_tests,
-        .excluded_tests = prepared.summary.excluded_tests,
-        .skipped_by_feature = prepared.summary.skipped_by_feature,
-        .skipped_by_index = prepared.summary.skipped_by_index,
-        .harnessdir = if (prepared.summary.harnessdir) |value| try allocator.dupe(u8, value) else null,
-        .errorfile = if (prepared.summary.errorfile) |value| try allocator.dupe(u8, value) else null,
-    };
-}
 
 pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config, zjs_path: []const u8) !ExecutionSummary {
     return runSelectedTestsWithReporterMode(allocator, io, config, zjs_path, false);
@@ -1062,22 +296,25 @@ fn runSelectedTestsWithReporterMode(
     defer _ = test_gpa.deinit();
     const test_allocator = test_gpa.allocator();
     var next_index: std.atomic.Value(usize) = .init(0);
+    const worker_shared = WorkerShared{
+        .io = io,
+        .engine_path = engine_path,
+        .use_external_engine = use_external_engine,
+        .harnessdir = summary.selection.harnessdir,
+        .harness_prelude = harness_prelude,
+        .tests = prepared.tests.items,
+        .known_errors = known_errors,
+        .skipped_features = prepared.skipped_features,
+        .next_index = &next_index,
+        .verbose = config.verbose,
+        .timeout_ms = config.timeout_ms,
+        .global_module = config.module,
+        .reporter = &reporter,
+    };
     if (worker_count == 1) {
-        try runWorkerStride(
+        try runWorkerLoop(
+            &worker_shared,
             test_allocator,
-            io,
-            engine_path,
-            use_external_engine,
-            summary.selection.harnessdir,
-            harness_prelude,
-            prepared.tests.items,
-            known_errors,
-            prepared.skipped_features,
-            &next_index,
-            config.verbose,
-            config.timeout_ms,
-            config.module,
-            &reporter,
             &summary,
             &current_failures,
         );
@@ -1095,7 +332,7 @@ fn runSelectedTestsWithReporterMode(
 
         var results = try allocator.alloc(WorkerResult, worker_count);
         defer allocator.free(results);
-        var contexts = try allocator.alloc(WorkerContext, worker_count);
+        var contexts = try allocator.alloc(WorkerThreadContext, worker_count);
         defer allocator.free(contexts);
         var threads = try allocator.alloc(std.Thread, worker_count);
         defer allocator.free(threads);
@@ -1103,30 +340,20 @@ fn runSelectedTestsWithReporterMode(
         for (results, 0..) |*result, i| result.* = WorkerResult.init(worker_gpas[i].allocator());
         defer for (results) |*result| result.deinit();
 
-        var spawned: usize = 0;
-        errdefer {
-            var i: usize = 0;
-            while (i < spawned) : (i += 1) threads[i].join();
-        }
-        while (spawned < worker_count) : (spawned += 1) {
-            contexts[spawned] = .{
-                .allocator = worker_gpas[spawned].allocator(),
-                .io = io,
-                .engine_path = engine_path,
-                .use_external_engine = use_external_engine,
-                .harnessdir = summary.selection.harnessdir,
-                .harness_prelude = harness_prelude,
-                .tests = prepared.tests.items,
-                .known_errors = known_errors,
-                .skipped_features = prepared.skipped_features,
-                .next_index = &next_index,
-                .verbose = config.verbose,
-                .timeout_ms = config.timeout_ms,
-                .global_module = config.module,
-                .reporter = &reporter,
-                .result = &results[spawned],
-            };
-            threads[spawned] = try std.Thread.spawn(.{}, runWorkerThread, .{&contexts[spawned]});
+        {
+            var spawned: usize = 0;
+            errdefer {
+                var i: usize = 0;
+                while (i < spawned) : (i += 1) threads[i].join();
+            }
+            while (spawned < worker_count) : (spawned += 1) {
+                contexts[spawned] = .{
+                    .allocator = worker_gpas[spawned].allocator(),
+                    .shared = &worker_shared,
+                    .result = &results[spawned],
+                };
+                threads[spawned] = try std.Thread.spawn(.{}, WorkerThreadContext.run, .{&contexts[spawned]});
+            }
         }
 
         for (threads) |thread| thread.join();
@@ -1155,64 +382,26 @@ fn runSelectedTestsWithReporterMode(
     return summary;
 }
 
-fn runWorkerThread(context: *WorkerContext) void {
-    var summary = ExecutionSummary{ .selection = .{} };
-    runWorkerStride(
-        context.allocator,
-        context.io,
-        context.engine_path,
-        context.use_external_engine,
-        context.harnessdir,
-        context.harness_prelude,
-        context.tests,
-        context.known_errors,
-        context.skipped_features,
-        context.next_index,
-        context.verbose,
-        context.timeout_ms,
-        context.global_module,
-        context.reporter,
-        &summary,
-        &context.result.current_failures,
-    ) catch |err| {
-        context.result.err = err;
-        return;
-    };
-    context.result.passed = summary.passed;
-    context.result.failed = summary.failed;
-    context.result.known_failures = summary.known_failures;
-    context.result.fixed = summary.fixed;
-    context.result.skipped_by_feature = summary.selection.skipped_by_feature;
-}
-
-fn runWorkerStride(
+fn runWorkerLoop(
+    shared: *const WorkerShared,
     allocator: std.mem.Allocator,
-    io: std.Io,
-    engine_path: []const u8,
-    use_external_engine: bool,
-    harnessdir: ?[]const u8,
-    harness_prelude: []const u8,
-    tests: []const []const u8,
-    known_errors: NameList,
-    skipped_features: NameList,
-    next_index: *std.atomic.Value(usize),
-    verbose: u8,
-    timeout_ms: ?u32,
-    global_module: bool,
-    reporter: ?*Reporter,
     summary: *ExecutionSummary,
     current_failures: *NameList,
 ) !void {
-    var harness_cache = HarnessCache.init(allocator, io, harnessdir);
+    var harness_cache = HarnessCache.init(allocator, shared.io, shared.harnessdir);
     defer harness_cache.deinit();
 
     while (true) {
-        const index = next_index.fetchAdd(1, .monotonic);
-        if (index >= tests.len) break;
+        const index = shared.next_index.fetchAdd(1, .monotonic);
+        if (index >= shared.tests.len) break;
         if (index > 0 and index % 1000 == 0) {
-            printError(io, "Progress: {d}/{d} tests ({d}%)\n", .{ index, tests.len, index * 100 / tests.len }) catch {};
+            if (shared.reporter) |reporter| {
+                reporter.lockedPrint(shared.io, "Progress: {d}/{d} tests ({d}%)\n", .{ index, shared.tests.len, index * 100 / shared.tests.len }) catch {};
+            } else {
+                cli_process.printError(shared.io, "Progress: {d}/{d} tests ({d}%)\n", .{ index, shared.tests.len, index * 100 / shared.tests.len }) catch {};
+            }
         }
-        const test_path = tests[index];
+        const test_path = shared.tests[index];
 
         var run_err: ?anyerror = null;
         const result, const is_known = blk: {
@@ -1224,18 +413,18 @@ fn runWorkerStride(
             var stderr_storage: [stderr_storage_len]u8 = undefined;
             const res = runOneTest(
                 arena_allocator,
-                io,
-                engine_path,
-                use_external_engine,
+                shared.io,
+                shared.engine_path,
+                shared.use_external_engine,
                 &harness_cache,
-                harness_prelude,
+                shared.harness_prelude,
                 test_path,
                 index,
-                verbose,
-                timeout_ms,
-                global_module,
-                skipped_features,
-                reporter,
+                shared.verbose,
+                shared.timeout_ms,
+                shared.global_module,
+                shared.skipped_features,
+                shared.reporter,
                 &stderr_storage,
                 &stderr_text,
             ) catch |err| {
@@ -1247,9 +436,9 @@ fn runWorkerStride(
                 break :blk .{ .skipped, false };
             }
 
-            const known = known_errors.findSortedExact(test_path) != null;
-            if (reporter) |r| {
-                r.recordResult(io, test_path, res, stderr_text, known) catch |err| {
+            const known = shared.known_errors.findSortedExact(test_path) != null;
+            if (shared.reporter) |r| {
+                r.recordResult(shared.io, test_path, res, stderr_text, known) catch |err| {
                     run_err = err;
                     break :blk .{ .skipped, false };
                 };
@@ -1258,8 +447,8 @@ fn runWorkerStride(
         };
 
         if (run_err) |err| {
-            if (reporter) |r| {
-                r.lockedPrint(io, "test262 worker error: {s}: {s}\n", .{ test_path, @errorName(err) }) catch {};
+            if (shared.reporter) |r| {
+                r.lockedPrint(shared.io, "test262 worker error: {s}: {s}\n", .{ test_path, @errorName(err) }) catch {};
             }
             return err;
         }
@@ -1347,66 +536,6 @@ pub fn prepareSelection(allocator: std.mem.Allocator, io: std.Io, config: Config
     };
 }
 
-fn parseExcludeEntry(allocator: std.mem.Allocator, loaded: *LoadedConfig, base_dir: []const u8, line: []const u8) !void {
-    if (line[0] == '!') {
-        const value = std.mem.trim(u8, line[1..], " \t");
-        if (value.len == 0) return;
-        try loaded.reincludes.appendOwned(try composePath(allocator, base_dir, value));
-        return;
-    }
-    try loaded.excludes.appendOwned(try composePath(allocator, base_dir, line));
-}
-
-fn parseConfigEntry(allocator: std.mem.Allocator, loaded: *LoadedConfig, base_dir: []const u8, line: []const u8) !void {
-    const eq_index = std.mem.indexOfScalar(u8, line, '=') orelse return;
-    const key = std.mem.trim(u8, line[0..eq_index], " \t");
-    const value = std.mem.trim(u8, line[eq_index + 1 ..], " \t");
-    if (std.mem.eql(u8, key, "testdir")) {
-        if (loaded.testdir) |old| allocator.free(old);
-        loaded.testdir = try composePath(allocator, base_dir, value);
-    } else if (std.mem.eql(u8, key, "harnessdir")) {
-        if (loaded.harnessdir) |old| allocator.free(old);
-        loaded.harnessdir = try composePath(allocator, base_dir, value);
-    } else if (std.mem.eql(u8, key, "errorfile")) {
-        if (loaded.errorfile) |old| allocator.free(old);
-        loaded.errorfile = try composePath(allocator, base_dir, value);
-    } else if (std.mem.eql(u8, key, "excludefile")) {
-        try loaded.excludes.appendOwned(try composePath(allocator, base_dir, value));
-    }
-}
-
-fn parseFeatureEntry(loaded: *LoadedConfig, line: []const u8) !void {
-    const eq_index = std.mem.indexOfScalar(u8, line, '=');
-    const name = if (eq_index) |index| std.mem.trim(u8, line[0..index], " \t") else line;
-    if (eq_index) |index| {
-        const value = std.mem.trim(u8, line[index + 1 ..], " \t");
-        if (std.mem.eql(u8, value, "skip")) {
-            try loaded.skipped_features.append(name);
-            return;
-        }
-    }
-    try loaded.enabled_features.append(name);
-}
-
-fn applyFeatureOverrides(loaded: *LoadedConfig, overrides: BoundedFeatureOverrides) !void {
-    var i: usize = 0;
-    while (i < overrides.len) : (i += 1) {
-        const override = overrides.get(i);
-        switch (override.kind) {
-            .enable => {
-                loaded.skipped_features.removeExact(override.name);
-                if (!loaded.enabled_features.containsExact(override.name)) try loaded.enabled_features.append(override.name);
-            },
-            .skip => {
-                loaded.enabled_features.removeExact(override.name);
-                if (!loaded.skipped_features.containsExact(override.name)) try loaded.skipped_features.append(override.name);
-            },
-        }
-    }
-    loaded.enabled_features.sortAndDedupe();
-    loaded.skipped_features.sortAndDedupe();
-}
-
 fn enumerateTests(allocator: std.mem.Allocator, io: std.Io, tests: *NameList, root: []const u8) !void {
     var dir = try std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true });
     defer dir.close(io);
@@ -1421,77 +550,6 @@ fn enumerateTests(allocator: std.mem.Allocator, io: std.Io, tests: *NameList, ro
         if (std.mem.endsWith(u8, entry.path, "_FIXTURE.js")) continue;
         try tests.appendOwned(try std.fs.path.join(allocator, &.{ root, entry.path }));
     }
-}
-
-fn stripComment(line: []const u8) []const u8 {
-    const hash = std.mem.indexOfScalar(u8, line, '#') orelse line.len;
-    const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
-    return std.mem.trim(u8, line[0..@min(hash, semi)], " \t");
-}
-
-fn dirname(path: []const u8) []const u8 {
-    return std.fs.path.dirname(path) orelse "";
-}
-
-fn composePath(allocator: std.mem.Allocator, base: []const u8, name: []const u8) ![]const u8 {
-    if (base.len == 0 or std.fs.path.isAbsolute(name)) return allocator.dupe(u8, name);
-    return std.fs.path.join(allocator, &.{ base, name });
-}
-
-fn lessThanName(_: void, lhs: []const u8, rhs: []const u8) bool {
-    return compareNames(lhs, rhs) < 0;
-}
-
-fn compareNames(lhs: []const u8, rhs: []const u8) i32 {
-    var i: usize = 0;
-    var j: usize = 0;
-    while (i < lhs.len and j < rhs.len) {
-        const lc = lhs[i];
-        const rc = rhs[j];
-        if (unicode.isAsciiDigitByte(lc) and unicode.isAsciiDigitByte(rc)) {
-            const lhs_start = i;
-            const rhs_start = j;
-            i = asciiDigitRunEnd(lhs, lhs_start);
-            j = asciiDigitRunEnd(rhs, rhs_start);
-            const digits_cmp = compareAsciiDigitRuns(lhs[lhs_start..i], rhs[rhs_start..j]);
-            if (digits_cmp != 0) return digits_cmp;
-            continue;
-        }
-        if (lc < rc) return -1;
-        if (lc > rc) return 1;
-        i += 1;
-        j += 1;
-    }
-    if (i < lhs.len) return 1;
-    if (j < rhs.len) return -1;
-    return 0;
-}
-
-fn asciiDigitRunEnd(bytes: []const u8, start: usize) usize {
-    var end = start;
-    while (end < bytes.len and unicode.isAsciiDigitByte(bytes[end])) : (end += 1) {}
-    return end;
-}
-
-fn compareAsciiDigitRuns(lhs: []const u8, rhs: []const u8) i32 {
-    const lhs_significant = trimLeadingAsciiZeroes(lhs);
-    const rhs_significant = trimLeadingAsciiZeroes(rhs);
-    if (lhs_significant.len < rhs_significant.len) return -1;
-    if (lhs_significant.len > rhs_significant.len) return 1;
-
-    const significant_order = std.mem.order(u8, lhs_significant, rhs_significant);
-    if (significant_order == .lt) return -1;
-    if (significant_order == .gt) return 1;
-
-    if (lhs.len < rhs.len) return -1;
-    if (lhs.len > rhs.len) return 1;
-    return 0;
-}
-
-fn trimLeadingAsciiZeroes(bytes: []const u8) []const u8 {
-    var start: usize = 0;
-    while (start < bytes.len and bytes[start] == '0') : (start += 1) {}
-    return bytes[start..];
 }
 
 fn runOneTest(
@@ -1917,388 +975,6 @@ pub fn tempTestPathShm(buffer: []u8, test_path: []const u8, test_index: usize) !
     });
 }
 
-fn makeHarnessPrelude(allocator: std.mem.Allocator, io: std.Io, harnessdir: ?[]const u8) ![]u8 {
-    const eval_script_shim =
-        "if (typeof $262 === \"object\" && typeof $262.evalScript !== \"function\") {\n" ++
-        "  $262.evalScript = function(source) { return (0, eval)(source); };\n" ++
-        "}\n";
-    const sta = try readHarnessFile(allocator, io, harnessdir, "sta.js");
-    defer if (sta) |bytes| allocator.free(bytes);
-    const assert = try readHarnessFile(allocator, io, harnessdir, "assert.js");
-    defer if (assert) |bytes| allocator.free(bytes);
-
-    const sta_len = if (sta) |bytes| bytes.len else 0;
-    const assert_len = if (assert) |bytes| bytes.len else 0;
-    const total_len = sta_len + assert_len +
-        @as(usize, if (sta != null) 1 else 0) +
-        @as(usize, if (assert != null) 1 else 0) +
-        eval_script_shim.len;
-    const out = try allocator.alloc(u8, total_len);
-    var offset: usize = 0;
-    if (sta) |bytes| {
-        @memcpy(out[offset..][0..bytes.len], bytes);
-        offset += bytes.len;
-        out[offset] = '\n';
-        offset += 1;
-    }
-    if (assert) |bytes| {
-        @memcpy(out[offset..][0..bytes.len], bytes);
-        offset += bytes.len;
-        out[offset] = '\n';
-        offset += 1;
-    }
-    @memcpy(out[offset..][0..eval_script_shim.len], eval_script_shim);
-    offset += eval_script_shim.len;
-    return out[0..offset];
-}
-
-fn makeTestSource(allocator: std.mem.Allocator, io: std.Io, harness_cache: *HarnessCache, harness_prelude: []const u8, test_path: []const u8, metadata: TestMetadata) ![]u8 {
-    const test_source = try readTestSource(allocator, io, test_path);
-    defer allocator.free(test_source);
-    return makeTestSourceFromBytes(allocator, harness_cache, harness_prelude, test_source, metadata);
-}
-
-const Test262Override = struct {
-    path: []const u8,
-    upstream_commit: []const u8,
-    upstream_sha256: []const u8,
-    reason: []const u8,
-};
-
-const test262_override_manifest = [_]Test262Override{
-    .{
-        .path = "test/built-ins/TypedArray/prototype/slice/speciesctor-return-same-buffer-with-offset.js",
-        .upstream_commit = "4249661388e5d3f92a85186213da140a6481490f",
-        .upstream_sha256 = "2136a50c608ac2dd74815ca4cb4ec6e0eb7bd54d1fc102bec5fe53b322563a6b",
-        .reason = "Exclude immutable ArrayBuffer path until upstream covers the proposal interaction.",
-    },
-    .{
-        .path = "test/built-ins/TypedArrayConstructors/internals/Set/BigInt/string-nan-tobigint.js",
-        .upstream_commit = "4249661388e5d3f92a85186213da140a6481490f",
-        .upstream_sha256 = "20bc0c56378a3c12e7fa38d920648d8f5b57c8e3ab2ea31737b7794ccce8dbfb",
-        .reason = "Exclude immutable ArrayBuffer path until upstream covers the proposal interaction.",
-    },
-    .{
-        .path = "test/staging/sm/Error/constructor-proto.js",
-        .upstream_commit = "4249661388e5d3f92a85186213da140a6481490f",
-        .upstream_sha256 = "e42a648845a28cbcf52adc3c0a437b6afe0a18d8ea0cef5821ba9dcdd3c08738",
-        .reason = "Staging SpiderMonkey test has not been updated for Error.prototype.stack accessor.",
-    },
-    .{
-        .path = "test/staging/sm/Error/prototype-properties.js",
-        .upstream_commit = "4249661388e5d3f92a85186213da140a6481490f",
-        .upstream_sha256 = "e91457931236bdc6fe42d96e96569fd9bfff1ee2c0592aca19c3dc2a4886b5b2",
-        .reason = "Staging SpiderMonkey test has not been updated for Error.prototype.stack accessor.",
-    },
-    .{
-        .path = "test/staging/sm/Error/prototype.js",
-        .upstream_commit = "4249661388e5d3f92a85186213da140a6481490f",
-        .upstream_sha256 = "ee62fb50ca1cee2a3a6de258af03b38a8750dde2e0485101f997db2bd730f770",
-        .reason = "Staging SpiderMonkey test has not been updated for Error.prototype.stack accessor.",
-    },
-};
-
-fn readTestSource(allocator: std.mem.Allocator, io: std.Io, test_path: []const u8) ![]u8 {
-    if (test262Override(test_path)) |override| {
-        try verifyTest262OverrideUpstream(allocator, io, override);
-        const override_path = try test262OverridePath(allocator, test_path);
-        defer allocator.free(override_path);
-        return std.Io.Dir.cwd().readFileAlloc(io, override_path, allocator, .limited(16 * 1024 * 1024));
-    }
-    return std.Io.Dir.cwd().readFileAlloc(io, test_path, allocator, .limited(16 * 1024 * 1024));
-}
-
-fn test262Override(test_path: []const u8) ?Test262Override {
-    const relative_path = test262RelativePath(test_path) orelse return null;
-    for (test262_override_manifest) |override| {
-        if (std.mem.eql(u8, override.path, relative_path)) return override;
-    }
-    return null;
-}
-
-fn verifyTest262OverrideUpstream(allocator: std.mem.Allocator, io: std.Io, override: Test262Override) !void {
-    const upstream_path = try test262UpstreamPath(allocator, override.path);
-    defer allocator.free(upstream_path);
-    const upstream_source = try std.Io.Dir.cwd().readFileAlloc(io, upstream_path, allocator, .limited(16 * 1024 * 1024));
-    defer allocator.free(upstream_source);
-    const actual_sha256 = computeSha256Hex(upstream_source);
-    if (!std.mem.eql(u8, override.upstream_sha256, &actual_sha256)) {
-        std.debug.print(
-            "test262 override source drifted: {s}\nexpected upstream {s} sha256 {s}\nactual sha256 {s}\nreason: {s}\n",
-            .{ upstream_path, override.upstream_commit, override.upstream_sha256, actual_sha256, override.reason },
-        );
-        return error.Test262OverrideSourceDrift;
-    }
-}
-
-fn computeSha256Hex(bytes: []const u8) [64]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(bytes);
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
-    var hex: [64]u8 = undefined;
-    const hex_chars = "0123456789abcdef";
-    for (digest, 0..) |b, i| {
-        hex[i * 2] = hex_chars[b >> 4];
-        hex[i * 2 + 1] = hex_chars[b & 0x0f];
-    }
-    return hex;
-}
-
-fn test262OverridePath(allocator: std.mem.Allocator, test_path: []const u8) ![]const u8 {
-    std.debug.assert(test262Override(test_path) != null);
-    const relative_path = test262RelativePath(test_path).?;
-    return try std.fs.path.join(allocator, &.{ "tests/fixtures/test262-overrides", relative_path });
-}
-
-fn test262UpstreamPath(allocator: std.mem.Allocator, relative_path: []const u8) ![]const u8 {
-    return try std.fs.path.join(allocator, &.{ "test262", relative_path });
-}
-
-fn test262RelativePath(test_path: []const u8) ?[]const u8 {
-    const config_prefix = "test262/";
-    if (std.mem.startsWith(u8, test_path, config_prefix)) return test_path[config_prefix.len..];
-    if (std.mem.startsWith(u8, test_path, "test/")) return test_path;
-    return null;
-}
-
-fn makeTestSourceFromBytes(allocator: std.mem.Allocator, harness_cache: *HarnessCache, harness_prelude: []const u8, test_source: []const u8, metadata: TestMetadata) ![]u8 {
-    const strict_prefix = "\"use strict\";\n";
-    const async_harness = "doneprintHandle.js";
-    const strict_len: usize = if (metadata.hasFlag("onlyStrict")) strict_prefix.len else 0;
-    if (metadata.hasFlag("raw")) {
-        const out = try allocator.alloc(u8, strict_len + test_source.len + 1);
-        var offset: usize = 0;
-        if (strict_len != 0) {
-            @memcpy(out[offset..][0..strict_prefix.len], strict_prefix);
-            offset += strict_prefix.len;
-        }
-        @memcpy(out[offset..][0..test_source.len], test_source);
-        offset += test_source.len;
-        out[offset] = '\n';
-        return out;
-    }
-
-    var includes_len: usize = 0;
-    const include_async_harness = needsAsyncHarness(metadata, test_source) and !metadata.includes.contains(async_harness);
-    if (include_async_harness) {
-        if (try harness_cache.get(async_harness)) |bytes| includes_len += bytes.len + 1;
-    }
-    for (metadata.includes.items) |include_name| {
-        if (try harness_cache.get(include_name)) |bytes| includes_len += bytes.len + 1;
-    }
-    const total_len = strict_len + harness_prelude.len + includes_len + test_source.len + 1;
-    const out = try allocator.alloc(u8, total_len);
-    var offset: usize = 0;
-    if (strict_len != 0) {
-        @memcpy(out[offset..][0..strict_prefix.len], strict_prefix);
-        offset += strict_prefix.len;
-    }
-    @memcpy(out[offset..][0..harness_prelude.len], harness_prelude);
-    offset += harness_prelude.len;
-    if (include_async_harness) {
-        if (try harness_cache.get(async_harness)) |bytes| {
-            @memcpy(out[offset..][0..bytes.len], bytes);
-            offset += bytes.len;
-            out[offset] = '\n';
-            offset += 1;
-        }
-    }
-    for (metadata.includes.items) |include_name| {
-        if (try harness_cache.get(include_name)) |bytes| {
-            @memcpy(out[offset..][0..bytes.len], bytes);
-            offset += bytes.len;
-            out[offset] = '\n';
-            offset += 1;
-        }
-    }
-    @memcpy(out[offset..][0..test_source.len], test_source);
-    offset += test_source.len;
-    out[offset] = '\n';
-    offset += 1;
-    return out[0..offset];
-}
-
-fn needsAsyncHarness(metadata: TestMetadata, test_source: []const u8) bool {
-    _ = test_source;
-    return metadata.hasFlag("async");
-}
-
-fn readHarnessFile(allocator: std.mem.Allocator, io: std.Io, harnessdir: ?[]const u8, basename: []const u8) !?[]u8 {
-    const dir = harnessdir orelse return null;
-    const path = try std.fs.path.join(allocator, &.{ dir, basename });
-    defer allocator.free(path);
-    return std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 * 1024 * 1024)) catch |err| switch (err) {
-        error.FileNotFound => null,
-        else => |e| return e,
-    };
-}
-
-fn loadMetadataFromFile(allocator: std.mem.Allocator, io: std.Io, test_path: []const u8) !TestMetadata {
-    const bytes = try readMetadataPrefix(allocator, io, test_path);
-    defer allocator.free(bytes);
-    return parseMetadataText(allocator, bytes);
-}
-
-fn readMetadataPrefix(allocator: std.mem.Allocator, io: std.Io, test_path: []const u8) ![]u8 {
-    if (test262Override(test_path) != null) return readTestSource(allocator, io, test_path);
-
-    const max_metadata_probe = 64 * 1024;
-    const file = try std.Io.Dir.cwd().openFile(io, test_path, .{});
-    defer file.close(io);
-    const buffer = try allocator.alloc(u8, max_metadata_probe);
-    errdefer allocator.free(buffer);
-    const len = try file.readPositionalAll(io, buffer, 0);
-    if (len == buffer.len) return buffer;
-    const exact = try allocator.dupe(u8, buffer[0..len]);
-    allocator.free(buffer);
-    return exact;
-}
-
-pub fn parseMetadataText(allocator: std.mem.Allocator, source: []const u8) !TestMetadata {
-    var metadata = TestMetadata.init(allocator);
-    errdefer metadata.deinit(allocator);
-
-    const start_marker = "/*---";
-    const end_marker = "---*/";
-    const start = std.mem.indexOf(u8, source, start_marker) orelse return metadata;
-    const body_start = start + start_marker.len;
-    const end = std.mem.indexOfPos(u8, source, body_start, end_marker) orelse return metadata;
-    const body = source[body_start..end];
-
-    var in_negative = false;
-    var active_list: enum { none, includes, features, flags } = .none;
-    var lines = std.mem.tokenizeAny(u8, body, "\r\n");
-    while (lines.next()) |raw_line| {
-        const line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0 or line[0] == '#') continue;
-
-        if (active_list != .none and line[0] == '-') {
-            switch (active_list) {
-                .none => unreachable,
-                .includes => try parseMetadataListItem(&metadata.includes, line[1..]),
-                .features => try parseMetadataListItem(&metadata.features, line[1..]),
-                .flags => try parseMetadataListItem(&metadata.flags, line[1..]),
-            }
-            continue;
-        }
-        active_list = .none;
-
-        if (std.mem.eql(u8, line, "negative:")) {
-            if (metadata.negative == null) metadata.negative = .{};
-            in_negative = true;
-            continue;
-        }
-        if (std.mem.indexOfScalar(u8, line, ':')) |colon| {
-            const key = std.mem.trim(u8, line[0..colon], " \t");
-            const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-            if (std.mem.eql(u8, key, "includes")) {
-                try parseMetadataList(&metadata.includes, value);
-                active_list = if (value.len == 0) .includes else .none;
-                in_negative = false;
-            } else if (std.mem.eql(u8, key, "features")) {
-                try parseMetadataList(&metadata.features, value);
-                active_list = if (value.len == 0) .features else .none;
-                in_negative = false;
-            } else if (std.mem.eql(u8, key, "flags")) {
-                try parseMetadataList(&metadata.flags, value);
-                active_list = if (value.len == 0) .flags else .none;
-                in_negative = false;
-            } else if (in_negative and std.mem.eql(u8, key, "phase")) {
-                if (metadata.negative == null) metadata.negative = .{};
-                if (metadata.negative.?.phase) |old| allocator.free(old);
-                metadata.negative.?.phase = try allocator.dupe(u8, value);
-            } else if (in_negative and std.mem.eql(u8, key, "type")) {
-                if (metadata.negative == null) metadata.negative = .{};
-                if (metadata.negative.?.type_name) |old| allocator.free(old);
-                metadata.negative.?.type_name = try allocator.dupe(u8, value);
-            } else {
-                in_negative = false;
-            }
-        }
-    }
-
-    metadata.includes.dedupePreserveOrder();
-    metadata.features.sortAndDedupe();
-    metadata.flags.sortAndDedupe();
-    return metadata;
-}
-
-fn parseMetadataList(list: *NameList, value: []const u8) !void {
-    const trimmed = std.mem.trim(u8, value, " \t");
-    if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') return;
-    var entries = std.mem.splitScalar(u8, trimmed[1 .. trimmed.len - 1], ',');
-    while (entries.next()) |entry| {
-        try parseMetadataListItem(list, entry);
-    }
-}
-
-fn parseMetadataListItem(list: *NameList, item: []const u8) !void {
-    const without_comment = if (std.mem.indexOfScalar(u8, item, '#')) |comment|
-        item[0..comment]
-    else
-        item;
-    const name = std.mem.trim(u8, without_comment, " \t\r\n\"'");
-    if (name.len != 0) try list.append(name);
-}
-
-fn loadKnownErrors(allocator: std.mem.Allocator, io: std.Io, errorfile: ?[]const u8) !NameList {
-    const path = errorfile orelse return NameList.init(allocator);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 * 1024 * 1024)) catch |err| switch (err) {
-        error.FileNotFound => return NameList.init(allocator),
-        else => return err,
-    };
-    defer allocator.free(bytes);
-    return parseKnownErrorsText(allocator, dirname(path), bytes);
-}
-
-fn parseKnownErrorsText(allocator: std.mem.Allocator, base_dir: []const u8, text: []const u8) !NameList {
-    var known = NameList.init(allocator);
-    errdefer known.deinit();
-
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        const entry = stripComment(std.mem.trim(u8, line, " \t\r"));
-        if (entry.len == 0) continue;
-        try known.appendOwned(try normalizeKnownErrorPath(allocator, base_dir, knownErrorPath(entry)));
-    }
-    known.sortAndDedupe();
-    return known;
-}
-
-fn writeKnownErrors(allocator: std.mem.Allocator, io: std.Io, errorfile: []const u8, failures: NameList) !void {
-    const rendered = try renderKnownErrorsText(allocator, failures, dirname(errorfile));
-    defer allocator.free(rendered);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = errorfile, .data = rendered });
-}
-
-fn mergeKnownErrorsForUpdate(allocator: std.mem.Allocator, known_failures: NameList, selected_tests: NameList, current_failures: NameList) !NameList {
-    var merged = NameList.init(allocator);
-    errdefer merged.deinit();
-
-    for (current_failures.items) |test_path| try merged.append(test_path);
-    for (known_failures.items) |test_path| {
-        if (!selected_tests.contains(test_path)) try merged.append(test_path);
-    }
-    merged.sortAndDedupe();
-    return merged;
-}
-
-fn renderKnownErrorsText(allocator: std.mem.Allocator, failures: NameList, base_dir: []const u8) ![]u8 {
-    var stable = NameList.init(allocator);
-    defer stable.deinit();
-    for (failures.items) |test_path| try stable.append(test_path);
-    stable.sortAndDedupe();
-
-    var buffer = std.ArrayList(u8).empty;
-    errdefer buffer.deinit(allocator);
-    for (stable.items) |test_path| {
-        try buffer.appendSlice(allocator, pathRelativeToBase(base_dir, test_path));
-        try buffer.append(allocator, '\n');
-    }
-    return buffer.toOwnedSlice(allocator);
-}
-
 fn printFailure(io: std.Io, reporter: ?*Reporter, test_path: []const u8, stderr: []const u8) !void {
     const trimmed = std.mem.trim(u8, stderr, " \t\r\n");
     const limit = @min(trimmed.len, 240);
@@ -2322,1196 +998,12 @@ fn printFailure(io: std.Io, reporter: ?*Reporter, test_path: []const u8, stderr:
     try writer.flush();
 }
 
-fn knownErrorPath(line: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, line, ':')) |colon| return std.mem.trim(u8, line[0..colon], " \t");
-    return line;
-}
-
-fn normalizeKnownErrorPath(allocator: std.mem.Allocator, base_dir: []const u8, path: []const u8) ![]const u8 {
-    if (base_dir.len == 0 or std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
-    if (std.mem.eql(u8, path, base_dir)) return allocator.dupe(u8, path);
-    if (std.mem.startsWith(u8, path, base_dir) and path.len > base_dir.len and path[base_dir.len] == '/') {
-        return allocator.dupe(u8, path);
-    }
-    return std.fs.path.join(allocator, &.{ base_dir, path });
-}
-
-fn pathRelativeToBase(base_dir: []const u8, path: []const u8) []const u8 {
-    if (base_dir.len == 0) return path;
-    if (std.mem.startsWith(u8, path, base_dir) and path.len > base_dir.len and path[base_dir.len] == '/') {
-        return path[base_dir.len + 1 ..];
-    }
-    return path;
-}
-
-pub const ErrorKind = enum {
-    test262,
-    eval,
-    reference,
-    syntax,
-    range,
-};
-
-pub fn raise(kind: ErrorKind) error{ JSException, EvalError, ReferenceError, SyntaxError, RangeError } {
-    return switch (kind) {
-        .test262 => error.JSException,
-        .eval => error.EvalError,
-        .reference => error.ReferenceError,
-        .syntax => error.SyntaxError,
-        .range => error.RangeError,
-    };
-}
-
-pub fn assertSameValue(actual: zjs.JSValue, expected: zjs.JSValue) !zjs.JSValue {
-    if (!actual.sameValue(expected)) return error.JSException;
-    return zjs.JSValue.undefinedValue();
-}
-
-pub fn test262EvalScript(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: *zjs.Object,
-    function_object: *zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    if (args.len == 0) return zjs.JSValue.undefinedValue();
-    if (!args[0].isString()) return error.TypeError;
-    const eval_global = (try ctx.functionRealmGlobal(function_object.value())) orelse global;
-    return ctx.evalScriptValue(args[0], .{
-        .output = output,
-        .realm_global = eval_global,
-        .filename = "<evalScript>",
-    });
-}
-
-pub const Test262Agent = struct {
-    source: []u8,
-    owner_runtime: *zjs.JSRuntime,
-    agent_runtime: ?*zjs.JSRuntime = null,
-    broadcast_buffer: ?zjs.SharedArrayBufferRef = null,
-    done: bool = false,
-    thread_done: bool = false,
-};
-
-pub const Test262AgentReportEntry = struct {
-    owner_runtime: *zjs.JSRuntime,
-    bytes: []u8,
-};
-
-pub const Test262AgentCoordinator = struct {
-    mutex: std.Io.Mutex = .init,
-    cond: std.Io.Condition = .init,
-    agents: []*Test262Agent = &.{},
-    agents_capacity: usize = 0,
-    reports: []Test262AgentReportEntry = &.{},
-    reports_capacity: usize = 0,
-};
-
-pub var test262_agents = Test262AgentCoordinator{};
-pub threadlocal var current_test262_agent: ?*Test262Agent = null;
-var test262_external_host_context: u8 = 0;
-
-pub var test262_gpa = std.heap.DebugAllocator(.{
-    .safety = false,
-    .stack_trace_frames = 0,
-    .thread_safe = true,
-    .retain_metadata = true,
-}){};
-
-pub fn test262PageAllocator() std.mem.Allocator {
-    return test262_gpa.allocator();
-}
-
-pub fn test262AgentIo() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
-}
-
-pub fn test262AgentAppend(agent: *Test262Agent) !void {
-    const io = test262AgentIo();
-    test262_agents.mutex.lockUncancelable(io);
-    defer test262_agents.mutex.unlock(io);
-    _ = test262AgentSweepCompletedLocked(agent.owner_runtime);
-    try test262AgentEnsureAgentCapacityLocked(test262_agents.agents.len + 1);
-    test262_agents.agents = test262_agents.agents.ptr[0 .. test262_agents.agents.len + 1];
-    test262_agents.agents[test262_agents.agents.len - 1] = agent;
-}
-
-pub fn test262AgentEnqueueReport(owner_runtime: *zjs.JSRuntime, bytes: []u8) !void {
-    const io = test262AgentIo();
-    test262_agents.mutex.lockUncancelable(io);
-    defer test262_agents.mutex.unlock(io);
-    try test262AgentEnsureReportCapacityLocked(test262_agents.reports.len + 1);
-    test262_agents.reports = test262_agents.reports.ptr[0 .. test262_agents.reports.len + 1];
-    test262_agents.reports[test262_agents.reports.len - 1] = .{ .owner_runtime = owner_runtime, .bytes = bytes };
-    test262_agents.cond.broadcast(io);
-}
-
-pub fn test262AgentDestroy(agent: *Test262Agent) void {
-    const allocator = test262PageAllocator();
-    allocator.free(agent.source);
-    if (agent.broadcast_buffer) |*buffer| {
-        buffer.release();
-        agent.broadcast_buffer = null;
-    }
-    allocator.destroy(agent);
-}
-
-pub fn test262AgentEnsureAgentCapacityLocked(min_capacity: usize) !void {
-    if (test262_agents.agents_capacity >= min_capacity) return;
-    const allocator = test262PageAllocator();
-    var next_capacity = if (test262_agents.agents_capacity == 0) @as(usize, 4) else test262_agents.agents_capacity * 2;
-    while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-    const next = try allocator.alloc(*Test262Agent, next_capacity);
-    @memcpy(next[0..test262_agents.agents.len], test262_agents.agents);
-    if (test262_agents.agents_capacity != 0) allocator.free(test262_agents.agents.ptr[0..test262_agents.agents_capacity]);
-    test262_agents.agents = next[0..test262_agents.agents.len];
-    test262_agents.agents_capacity = next_capacity;
-}
-
-pub fn test262AgentEnsureReportCapacityLocked(min_capacity: usize) !void {
-    if (test262_agents.reports_capacity >= min_capacity) return;
-    const allocator = test262PageAllocator();
-    var next_capacity = if (test262_agents.reports_capacity == 0) @as(usize, 4) else test262_agents.reports_capacity * 2;
-    while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-    const next = try allocator.alloc(Test262AgentReportEntry, next_capacity);
-    @memcpy(next[0..test262_agents.reports.len], test262_agents.reports);
-    if (test262_agents.reports_capacity != 0) allocator.free(test262_agents.reports.ptr[0..test262_agents.reports_capacity]);
-    test262_agents.reports = next[0..test262_agents.reports.len];
-    test262_agents.reports_capacity = next_capacity;
-}
-
-pub fn test262AgentRemoveAtLocked(index: usize) void {
-    std.debug.assert(index < test262_agents.agents.len);
-    const agent = test262_agents.agents[index];
-    const old_len = test262_agents.agents.len;
-    if (index + 1 < old_len) {
-        @memmove(test262_agents.agents[index .. old_len - 1], test262_agents.agents[index + 1 .. old_len]);
-    }
-    test262_agents.agents = test262_agents.agents.ptr[0 .. old_len - 1];
-    if (test262_agents.agents.len == 0 and test262_agents.agents_capacity != 0) {
-        const allocator = test262PageAllocator();
-        allocator.free(test262_agents.agents.ptr[0..test262_agents.agents_capacity]);
-        test262_agents.agents = &.{};
-        test262_agents.agents_capacity = 0;
-    }
-    test262AgentDestroy(agent);
-}
-
-pub fn test262AgentRemove(agent: *Test262Agent) void {
-    const io = test262AgentIo();
-    test262_agents.mutex.lockUncancelable(io);
-    defer test262_agents.mutex.unlock(io);
-    var index: usize = 0;
-    while (index < test262_agents.agents.len) : (index += 1) {
-        if (test262_agents.agents[index] != agent) continue;
-        test262AgentRemoveAtLocked(index);
-        return;
-    }
-}
-
-pub fn test262AgentSweepCompletedLocked(rt: *zjs.JSRuntime) usize {
-    var removed: usize = 0;
-    var index: usize = 0;
-    while (index < test262_agents.agents.len) {
-        const agent = test262_agents.agents[index];
-        if (agent.owner_runtime != rt) {
-            index += 1;
-            continue;
-        }
-        if (!agent.thread_done) {
-            index += 1;
-            continue;
-        }
-        test262AgentRemoveAtLocked(index);
-        removed += 1;
-    }
-    return removed;
-}
-
-pub fn test262AgentTakeReportLocked(rt: *zjs.JSRuntime) ?[]u8 {
-    for (test262_agents.reports, 0..) |entry, index| {
-        if (entry.owner_runtime == rt) {
-            const report = entry.bytes;
-            const old_len = test262_agents.reports.len;
-            if (old_len == 1) {
-                const allocator = test262PageAllocator();
-                allocator.free(test262_agents.reports.ptr[0..test262_agents.reports_capacity]);
-                test262_agents.reports = &.{};
-                test262_agents.reports_capacity = 0;
-                return report;
-            }
-            if (index + 1 < old_len) {
-                @memmove(test262_agents.reports[index .. old_len - 1], test262_agents.reports[index + 1 .. old_len]);
-            }
-            test262_agents.reports = test262_agents.reports.ptr[0 .. old_len - 1];
-            return report;
-        }
-    }
-    return null;
-}
-
-pub fn test262AgentSweepReportsLocked(rt: *zjs.JSRuntime) void {
-    const allocator = test262PageAllocator();
-    var index: usize = 0;
-    while (index < test262_agents.reports.len) {
-        const entry = test262_agents.reports[index];
-        if (entry.owner_runtime == rt) {
-            allocator.free(entry.bytes);
-            const old_len = test262_agents.reports.len;
-            if (old_len == 1) {
-                allocator.free(test262_agents.reports.ptr[0..test262_agents.reports_capacity]);
-                test262_agents.reports = &.{};
-                test262_agents.reports_capacity = 0;
-                break;
-            }
-            if (index + 1 < old_len) {
-                @memmove(test262_agents.reports[index .. old_len - 1], test262_agents.reports[index + 1 .. old_len]);
-            }
-            test262_agents.reports = test262_agents.reports.ptr[0 .. old_len - 1];
-        } else {
-            index += 1;
-        }
-    }
-}
-
-pub fn cleanupTest262Agents(rt: *zjs.JSRuntime) usize {
-    const io = test262AgentIo();
-
-    var agent_runtimes_buf: [16]*zjs.JSRuntime = undefined;
-    var agent_runtimes_count: usize = 0;
-
-    test262_agents.mutex.lockUncancelable(io);
-    for (test262_agents.agents) |agent| {
-        if (agent.owner_runtime == rt) {
-            agent.done = true;
-            if (agent.agent_runtime) |art| {
-                if (agent_runtimes_count < agent_runtimes_buf.len) {
-                    agent_runtimes_buf[agent_runtimes_count] = art;
-                    agent_runtimes_count += 1;
-                }
-            }
-        }
-    }
-    test262_agents.cond.broadcast(io);
-    test262_agents.mutex.unlock(io);
-
-    runtime_layer.wakeAtomicsWaitersForRuntimes(rt, agent_runtimes_buf[0..agent_runtimes_count]);
-
-    var attempts: usize = 0;
-    while (attempts < 500) : (attempts += 1) {
-        test262_agents.mutex.lockUncancelable(io);
-        var all_done = true;
-        for (test262_agents.agents) |agent| {
-            if (agent.owner_runtime == rt and !agent.thread_done) {
-                all_done = false;
-                break;
-            }
-        }
-        test262_agents.mutex.unlock(io);
-        if (all_done) break;
-        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-    }
-
-    test262_agents.mutex.lockUncancelable(io);
-    defer test262_agents.mutex.unlock(io);
-    test262AgentSweepReportsLocked(rt);
-    return test262AgentSweepCompletedLocked(rt);
-}
-
-pub fn test262AgentRecordCountForTests() usize {
-    const io = test262AgentIo();
-    test262_agents.mutex.lockUncancelable(io);
-    defer test262_agents.mutex.unlock(io);
-    return test262_agents.agents.len;
-}
-
-pub fn test262AgentInterruptHandler(rt: *zjs.JSRuntime, context: ?*anyopaque) bool {
-    _ = rt;
-    const agent: *Test262Agent = @ptrCast(@alignCast(context orelse return false));
-    return agent.done;
-}
-
-pub fn test262AgentRun(agent: *Test262Agent) void {
-    current_test262_agent = agent;
-    defer current_test262_agent = null;
-    defer {
-        const io = test262AgentIo();
-        test262_agents.mutex.lockUncancelable(io);
-        agent.done = true;
-        agent.thread_done = true;
-        if (agent.broadcast_buffer) |*buffer| {
-            buffer.release();
-            agent.broadcast_buffer = null;
-        }
-        test262_agents.cond.broadcast(io);
-        test262_agents.mutex.unlock(io);
-    }
-
-    const allocator = test262PageAllocator();
-    const rt = zjs.JSRuntime.create(allocator) catch return;
-    defer rt.destroy();
-    rt.setCanBlock(true);
-    rt.setInterruptHandler(test262AgentInterruptHandler, agent);
-
-    {
-        const io = test262AgentIo();
-        test262_agents.mutex.lockUncancelable(io);
-        agent.agent_runtime = rt;
-        test262_agents.mutex.unlock(io);
-    }
-
-    const ctx = zjs.JSContext.create(rt) catch return;
-    defer ctx.destroy();
-    var event_loop = runtime_layer.EventLoop.init(ctx, .{});
-    event_loop.install();
-    defer event_loop.deinit();
-    defer runtime_layer.cleanupAtomicsWaitersForContext(ctx);
-    const global = ctx.globalObject() catch return;
-    installTest262Globals(rt, ctx, global) catch return;
-    const result = ctx.eval(agent.source, .{
-        .mode = .script,
-        .filename = "<test262-agent>",
-        .discard_script_result = true,
-    }) catch return;
-    result.free(rt);
-    ctx.runJobs(null) catch {};
-    while (!test262AgentIsDone(agent)) {
-        std.Io.sleep(test262AgentIo(), std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-        ctx.runJobs(null) catch return;
-    }
-}
-
-pub fn test262AgentIsDone(agent: *Test262Agent) bool {
-    const io = test262AgentIo();
-    test262_agents.mutex.lockUncancelable(io);
-    defer test262_agents.mutex.unlock(io);
-    return agent.done;
-}
-
-pub fn test262AgentStart(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    if (args.len == 0) return error.TypeError;
-    const source = try test262AgentStringValue(ctx, args[0]);
-    var source_owned = true;
-    errdefer if (source_owned) test262PageAllocator().free(source);
-    const agent = try test262PageAllocator().create(Test262Agent);
-    agent.* = .{ .source = source, .owner_runtime = ctx.runtimePtr() };
-    source_owned = false;
-    var agent_owned = true;
-    var agent_registered = false;
-    errdefer if (agent_registered) {
-        test262AgentRemove(agent);
-    } else if (agent_owned) {
-        test262AgentDestroy(agent);
-    };
-    try test262AgentAppend(agent);
-    agent_registered = true;
-    const thread = try std.Thread.spawn(.{}, test262AgentRun, .{agent});
-    thread.detach();
-    agent_owned = false;
-    agent_registered = false;
-    return zjs.JSValue.undefinedValue();
-}
-
-pub fn test262AgentBroadcast(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    if (args.len == 0) return error.TypeError;
-    var shared_buffer = try ctx.retainSharedArrayBuffer(args[0]);
-    defer shared_buffer.release();
-    const io = test262AgentIo();
-    test262_agents.mutex.lockUncancelable(io);
-    defer test262_agents.mutex.unlock(io);
-    _ = test262AgentSweepCompletedLocked(ctx.runtimePtr());
-    for (test262_agents.agents) |agent| {
-        if (agent.owner_runtime != ctx.runtimePtr()) continue;
-        if (agent.done) continue;
-        if (agent.broadcast_buffer) |*old| old.release();
-        agent.broadcast_buffer = shared_buffer.retain();
-    }
-    test262_agents.cond.broadcast(io);
-    return zjs.JSValue.undefinedValue();
-}
-
-pub fn test262AgentReceiveBroadcast(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    const agent = current_test262_agent orelse return error.TypeError;
-    if (args.len == 0 or !ctx.isCallable(args[0])) return error.TypeError;
-
-    const io = test262AgentIo();
-    test262_agents.mutex.lockUncancelable(io);
-    while (agent.broadcast_buffer == null and !agent.done) {
-        test262_agents.cond.waitUncancelable(io, &test262_agents.mutex);
-    }
-    var shared_buffer = agent.broadcast_buffer orelse {
-        test262_agents.mutex.unlock(io);
-        return zjs.JSValue.undefinedValue();
-    };
-    agent.broadcast_buffer = null;
-    test262_agents.mutex.unlock(io);
-    defer shared_buffer.release();
-
-    const sab = try ctx.sharedArrayBufferFromRef(shared_buffer);
-    defer sab.free(ctx.runtimePtr());
-    const callback_result = try ctx.callFunction(args[0], &.{sab}, .{
-        .output = output,
-        .realm_global = global,
-    });
-    callback_result.free(ctx.runtimePtr());
-    return zjs.JSValue.undefinedValue();
-}
-
-pub fn test262AgentReport(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    const value = if (args.len >= 1) args[0] else zjs.JSValue.undefinedValue();
-    const bytes = try test262AgentStringValue(ctx, value);
-    errdefer test262PageAllocator().free(bytes);
-    const owner_runtime = if (current_test262_agent) |agent| agent.owner_runtime else ctx.runtimePtr();
-    try test262AgentEnqueueReport(owner_runtime, bytes);
-    return zjs.JSValue.undefinedValue();
-}
-
-pub fn test262AgentGetReport(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    _ = args;
-    const allocator = test262PageAllocator();
-    const io = test262AgentIo();
-    test262_agents.mutex.lockUncancelable(io);
-    _ = test262AgentSweepCompletedLocked(ctx.runtimePtr());
-    const report = test262AgentTakeReportLocked(ctx.runtimePtr()) orelse {
-        test262_agents.mutex.unlock(io);
-        return zjs.JSValue.nullValue();
-    };
-    test262_agents.mutex.unlock(io);
-    defer allocator.free(report);
-    return ctx.createString(report);
-}
-
-pub fn test262AgentLeaving(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = ctx;
-    _ = output;
-    _ = global;
-    _ = args;
-    if (current_test262_agent) |agent| {
-        const io = test262AgentIo();
-        test262_agents.mutex.lockUncancelable(io);
-        agent.done = true;
-        test262_agents.cond.broadcast(io);
-        test262_agents.mutex.unlock(io);
-    }
-    return zjs.JSValue.undefinedValue();
-}
-
-pub fn test262AgentSleep(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    const value = if (args.len >= 1) args[0] else zjs.JSValue.int32(0);
-    const number = value.asNumber() orelse 0;
-    if (number > 0) {
-        const ms: i64 = @intFromFloat(@min(number, 60_000));
-        std.Io.sleep(test262AgentIo(), std.Io.Duration.fromMilliseconds(ms), .awake) catch {};
-    }
-    _ = ctx;
-    return zjs.JSValue.undefinedValue();
-}
-
-pub fn test262AgentMonotonicNow(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = ctx;
-    _ = output;
-    _ = global;
-    _ = args;
-    const now = std.Io.Timestamp.now(test262AgentIo(), .awake);
-    return zjs.JSValue.float64(@as(f64, @floatFromInt(now.nanoseconds)) / std.time.ns_per_ms);
-}
-
-pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *zjs.Object) !void {
-    try defineGlobalExternalHostFunction(rt, ctx, global, "Test262Error", 1, wrapExternal(hostCallTest262Error), true);
-    try defineGlobalExternalHostFunction(rt, ctx, global, "verifyProperty", 3, wrapExternal(hostCallVerifyProperty), false);
-    try defineGlobalExternalHostFunction(rt, ctx, global, "verifyCallableProperty", 4, wrapExternal(hostCallVerifyCallableProperty), false);
-    try defineGlobalExternalHostFunction(rt, ctx, global, "verifyNotWritable", 2, wrapExternal(hostCallVerifyNotWritable), false);
-    try defineGlobalExternalHostFunction(rt, ctx, global, "verifyNotEnumerable", 2, wrapExternal(hostCallVerifyNotEnumerable), false);
-    try defineGlobalExternalHostFunction(rt, ctx, global, "verifyConfigurable", 2, wrapExternal(hostCallVerifyConfigurable), false);
-    try defineGlobalExternalHostFunction(rt, ctx, global, "isConstructor", 1, wrapExternal(hostCallIsConstructor), false);
-    try defineGlobalExternalHostFunction(rt, ctx, global, "setTimeout", 2, wrapExternal(hostCallSetTimeout), false);
-    try installAssertObject(rt, ctx, global);
-
-    const ns_val = try ctx.getProperty(global.value(), "$262");
-    defer ns_val.free(rt);
-
-    var created_ns = false;
-    const ns_target = if (ns_val.isObject()) ns_val else result: {
-        const obj_val = try ctx.createObject();
-        try ctx.defineDataProperty(global.value(), "$262", obj_val, .{ .enumerable = true });
-        created_ns = true;
-        break :result obj_val;
-    };
-    defer if (created_ns) ns_target.free(rt);
-
-    const agent_val = try ctx.createObject();
-    defer agent_val.free(rt);
-
-    const agent_methods = [_]struct {
-        name: []const u8,
-        length: i32,
-        call: zjs.ExternalHostCallFn,
-    }{
-        .{ .name = "start", .length = 1, .call = wrapExternal(test262AgentStart) },
-        .{ .name = "broadcast", .length = 1, .call = wrapExternal(test262AgentBroadcast) },
-        .{ .name = "receiveBroadcast", .length = 0, .call = wrapExternal(test262AgentReceiveBroadcast) },
-        .{ .name = "report", .length = 1, .call = wrapExternal(test262AgentReport) },
-        .{ .name = "getReport", .length = 0, .call = wrapExternal(test262AgentGetReport) },
-        .{ .name = "leaving", .length = 0, .call = wrapExternal(test262AgentLeaving) },
-        .{ .name = "sleep", .length = 1, .call = wrapExternal(test262AgentSleep) },
-        .{ .name = "monotonicNow", .length = 0, .call = wrapExternal(test262AgentMonotonicNow) },
-    };
-
-    inline for (agent_methods) |m| {
-        const func_val = try createExternalHostFunction(rt, ctx, m.name, m.length, m.call);
-        defer func_val.free(rt);
-        try ctx.defineDataProperty(agent_val, m.name, func_val, .{ .enumerable = false });
-    }
-
-    try ctx.defineDataProperty(ns_target, "agent", agent_val, .{ .enumerable = false });
-
-    // Register evalScript on $262
-    {
-        const func_val = try createExternalHostFunction(rt, ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript));
-        defer func_val.free(rt);
-        try ctx.defineDataProperty(ns_target, "evalScript", func_val, .{ .enumerable = false });
-    }
-
-    // Register IsHTMLDDA on $262
-    {
-        const func_val = try createExternalHostFunction(rt, ctx, "IsHTMLDDA", 0, wrapExternal(hostCallIsHtmlDda));
-        defer func_val.free(rt);
-        const is_html_dda_obj = test262InternalObjectFromValue(func_val).?;
-        is_html_dda_obj.flags.is_html_dda = true;
-
-        try ctx.defineDataProperty(ns_target, "IsHTMLDDA", func_val, .{ .enumerable = false });
-    }
-
-    // Register createRealm on $262
-    {
-        const func_val = try createExternalHostFunction(rt, ctx, "createRealm", 0, wrapExternal(test262CreateRealm));
-        defer func_val.free(rt);
-        try ctx.defineDataProperty(ns_target, "createRealm", func_val, .{ .enumerable = false });
-    }
-
-    // Register detachArrayBuffer on $262
-    {
-        const func_val = try createExternalHostFunction(rt, ctx, "detachArrayBuffer", 1, wrapExternal(test262DetachArrayBuffer));
-        defer func_val.free(rt);
-        try ctx.defineDataProperty(ns_target, "detachArrayBuffer", func_val, .{ .enumerable = false });
-    }
-
-    // Register gc on $262
-    {
-        const func_val = try createExternalHostFunction(rt, ctx, "gc", 0, wrapExternal(test262Gc));
-        defer func_val.free(rt);
-        try ctx.defineDataProperty(ns_target, "gc", func_val, .{ .enumerable = false });
-    }
-}
-
-fn installAssertObject(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *zjs.Object) !void {
-    const assert_val = try createExternalHostFunction(rt, ctx, "assert", 1, wrapExternal(hostCallAssertTrue));
-    defer assert_val.free(rt);
-    const methods = [_]struct {
-        name: []const u8,
-        length: i32,
-        call: zjs.ExternalHostCallFn,
-    }{
-        .{ .name = "sameValue", .length = 2, .call = wrapExternal(hostCallAssertSameValue) },
-        .{ .name = "notSameValue", .length = 2, .call = wrapExternal(hostCallAssertNotSameValue) },
-        .{ .name = "compareArray", .length = 2, .call = wrapExternal(hostCallCompareArray) },
-        .{ .name = "throws", .length = 2, .call = wrapExternal(hostCallAssertThrows) },
-    };
-    inline for (methods) |method| {
-        const method_val = try createExternalHostFunction(rt, ctx, method.name, method.length, method.call);
-        defer method_val.free(rt);
-        try ctx.defineDataProperty(assert_val, method.name, method_val, .{});
-    }
-    try ctx.defineDataProperty(global.value(), "assert", assert_val, .{});
-}
-
-fn defineGlobalExternalHostFunction(
-    rt: *zjs.JSRuntime,
-    ctx: *zjs.JSContext,
-    global: *zjs.Object,
-    name: []const u8,
-    length: i32,
-    call: zjs.ExternalHostCallFn,
-    with_prototype: bool,
-) !void {
-    const func_val = try createExternalHostFunctionWithRealm(rt, ctx, name, length, call, with_prototype, global);
-    defer func_val.free(rt);
-    try ctx.defineDataProperty(global.value(), name, func_val, .{});
-}
-
-fn hostCallTest262Error(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    const message = if (args.len > 0) try stringBytes(ctx, args[0]) else "";
-    defer if (args.len > 0) ctx.runtimePtr().memory.allocator.free(message);
-    return createTest262ErrorValue(ctx, global, message);
-}
-
-fn hostCallAssertSameValue(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = ctx;
-    _ = output;
-    _ = global;
-    return assertSameValueArgs(args);
-}
-
-fn hostCallAssertTrue(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = ctx;
-    _ = output;
-    _ = global;
-    if (args.len < 1 or args[0].asBool() != true) return error.JSException;
-    return zjs.JSValue.undefinedValue();
-}
-
-fn hostCallAssertNotSameValue(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = ctx;
-    _ = output;
-    _ = global;
-    if (args.len < 2) return error.TypeError;
-    if (args[0].sameValue(args[1])) return error.JSException;
-    return zjs.JSValue.undefinedValue();
-}
-
-fn hostCallAssertThrows(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const expected_name = try ctx.functionName(args[0], ctx.runtimePtr().memory.allocator);
-    defer ctx.runtimePtr().memory.allocator.free(expected_name);
-    const result = ctx.callFunction(args[1], &.{}, .{
-        .output = output,
-        .realm_global = global,
-    }) catch |err| {
-        if (err == error.JSException and ctx.hasException()) {
-            if (try ctx.consumePendingExceptionIfErrorName(expected_name)) {
-                return zjs.JSValue.undefinedValue();
-            }
-            return error.JSException;
-        }
-        if (ctx.runtimeErrorMatchesErrorName(err, expected_name)) {
-            ctx.clearException();
-            return zjs.JSValue.undefinedValue();
-        }
-        return error.JSException;
-    };
-    defer result.free(ctx.runtimePtr());
-    return error.JSException;
-}
-
-fn hostCallVerifyProperty(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    return hostVerifyProperty(ctx, args, false);
-}
-
-fn hostCallVerifyCallableProperty(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    return hostVerifyProperty(ctx, args, true);
-}
-
-fn hostCallIsConstructor(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    if (args.len < 1) return error.TypeError;
-    return zjs.JSValue.boolean(ctx.isConstructor(args[0]));
-}
-
-fn hostCallVerifyNotWritable(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    return hostVerifyPropertyFlag(ctx, args, .not_writable);
-}
-
-fn hostCallVerifyNotEnumerable(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    return hostVerifyPropertyFlag(ctx, args, .not_enumerable);
-}
-
-fn hostCallVerifyConfigurable(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    return hostVerifyPropertyFlag(ctx, args, .configurable);
-}
-
-fn hostCallCompareArray(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    if (args.len < 2) return error.TypeError;
-    if (!try ctx.isArray(args[0]) or !try ctx.isArray(args[1])) return error.JSException;
-    const actual_length = try ctx.arrayLength(args[0]);
-    if (actual_length != try ctx.arrayLength(args[1])) return error.JSException;
-    var index: u32 = 0;
-    while (index < actual_length) : (index += 1) {
-        const lhs = try ctx.getIndex(args[0], index);
-        defer lhs.free(ctx.runtimePtr());
-        const rhs = try ctx.getIndex(args[1], index);
-        defer rhs.free(ctx.runtimePtr());
-        if (!lhs.sameValue(rhs)) return error.JSException;
-    }
-    return zjs.JSValue.undefinedValue();
-}
-
-fn hostCallSetTimeout(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    const active_global = global orelse try ctx.globalObject();
-    const callback = if (args.len >= 1) args[0] else zjs.JSValue.undefinedValue();
-    if (!ctx.isCallable(callback)) return try ctx.throwError("TypeError", "not a function", .{ .realm_global = active_global });
-    var delay = try test262Int64Arg(ctx, args, 1);
-    if (delay < 1) delay = 1;
-    const host_event_loop = ctx.hostEventLoop() orelse return error.TypeError;
-    const id = host_event_loop.nextTimerId();
-    try host_event_loop.enqueueTimer(ctx.core, id, callback, @intCast(delay), false);
-    return int64ResultValue(id);
-}
-
-fn assertSameValueArgs(values: []const zjs.JSValue) !zjs.JSValue {
-    if (values.len < 2) return error.TypeError;
-    if (!values[0].sameValue(values[1])) return error.JSException;
-    return zjs.JSValue.undefinedValue();
-}
-
-fn hostVerifyProperty(ctx: *zjs.JSContext, values: []const zjs.JSValue, callable: bool) !zjs.JSValue {
-    const rt = ctx.runtimePtr();
-    const desc_index: usize = if (callable) 4 else 2;
-    if ((!callable and values.len <= desc_index) or (callable and values.len < 4)) return error.TypeError;
-
-    var original = (try ctx.ownPropertyDescriptor(values[0], values[1], .{})) orelse {
-        if (values[desc_index].isUndefined()) return zjs.JSValue.boolean(true);
-        return error.JSException;
-    };
-    defer original.destroy(rt);
-
-    if (callable) {
-        const actual = try ctx.getPropertyKey(values[0], values[1], .{});
-        defer actual.free(rt);
-        if (!ctx.isCallable(actual)) return error.JSException;
-        const expected_name = try stringBytes(ctx, values[2]);
-        defer rt.memory.allocator.free(expected_name);
-        const actual_name = try ctx.functionName(actual, rt.memory.allocator);
-        defer rt.memory.allocator.free(actual_name);
-        if (!std.mem.eql(u8, expected_name, actual_name)) return error.JSException;
-        const expected_length = values[3].asInt32() orelse return error.JSException;
-        const length_value = try ctx.getProperty(actual, "length");
-        defer length_value.free(rt);
-        if (length_value.asInt32() != expected_length) return error.JSException;
-        if (values.len <= desc_index or values[desc_index].isUndefined()) return zjs.JSValue.boolean(true);
-    }
-
-    try verifyDescriptorObject(ctx, original, values[desc_index]);
-    return zjs.JSValue.boolean(true);
-}
-
-const VerifyFlag = enum {
-    not_writable,
-    not_enumerable,
-    configurable,
-};
-
-fn hostVerifyPropertyFlag(ctx: *zjs.JSContext, values: []const zjs.JSValue, flag: VerifyFlag) !zjs.JSValue {
-    const rt = ctx.runtimePtr();
-    if (values.len < 2) return error.TypeError;
-    const desc = (try ctx.ownPropertyDescriptor(values[0], values[1], .{})) orelse return error.JSException;
-    defer desc.destroy(rt);
-    switch (flag) {
-        .not_writable => if (desc.kind == .data and (desc.writable orelse false)) return error.JSException,
-        .not_enumerable => if (desc.enumerable orelse false) return error.JSException,
-        .configurable => if (!(desc.configurable orelse false)) return error.JSException,
-    }
-    return zjs.JSValue.undefinedValue();
-}
-
-fn verifyDescriptorObject(ctx: *zjs.JSContext, actual: zjs.PropertyDescriptor, expected: zjs.JSValue) !void {
-    const rt = ctx.runtimePtr();
-    if (try expectedHas(ctx, expected, "value")) {
-        const expected_value = try expectedValue(ctx, expected, "value");
-        defer expected_value.free(rt);
-        if (!actual.value.sameValue(expected_value)) return error.JSException;
-    }
-    if (try expectedHas(ctx, expected, "writable")) {
-        const writable_value = try expectedValue(ctx, expected, "writable");
-        defer writable_value.free(rt);
-        const expected_writable = writable_value.asBool() orelse return error.JSException;
-        if (actual.writable != expected_writable) return error.JSException;
-    }
-    if (try expectedHas(ctx, expected, "enumerable")) {
-        const enumerable_value = try expectedValue(ctx, expected, "enumerable");
-        defer enumerable_value.free(rt);
-        const expected_enumerable = enumerable_value.asBool() orelse return error.JSException;
-        if (actual.enumerable != expected_enumerable) return error.JSException;
-    }
-    if (try expectedHas(ctx, expected, "configurable")) {
-        const configurable_value = try expectedValue(ctx, expected, "configurable");
-        defer configurable_value.free(rt);
-        const expected_configurable = configurable_value.asBool() orelse return error.JSException;
-        if (actual.configurable != expected_configurable) return error.JSException;
-    }
-    if (try expectedHas(ctx, expected, "get")) {
-        const expected_getter = try expectedValue(ctx, expected, "get");
-        defer expected_getter.free(rt);
-        if (!actual.getter.sameValue(expected_getter)) return error.JSException;
-    }
-    if (try expectedHas(ctx, expected, "set")) {
-        const expected_setter = try expectedValue(ctx, expected, "set");
-        defer expected_setter.free(rt);
-        if (!actual.setter.sameValue(expected_setter)) return error.JSException;
-    }
-}
-
-fn expectedHas(ctx: *zjs.JSContext, object: zjs.JSValue, name: []const u8) !bool {
-    return ctx.hasOwnProperty(object, name);
-}
-
-fn expectedValue(ctx: *zjs.JSContext, object: zjs.JSValue, name: []const u8) !zjs.JSValue {
-    return try ctx.getProperty(object, name);
-}
-
-fn stringBytes(ctx: *zjs.JSContext, value: zjs.JSValue) ![]u8 {
-    const string = value.asString() orelse return error.TypeError;
-    return string.toOwnedUtf8(ctx.runtimePtr().memory.allocator);
-}
-
-fn test262Int64Arg(ctx: *zjs.JSContext, args: []const zjs.JSValue, index: usize) !i64 {
-    const value = if (index < args.len) args[index] else zjs.JSValue.undefinedValue();
-    const number = try ctx.toIntegerOrInfinity(value);
-    if (!std.math.isFinite(number) or std.math.isNan(number)) return 0;
-    return @intFromFloat(number);
-}
-
-fn int64ResultValue(value: i64) zjs.JSValue {
-    return zjs.JSValue.number(@floatFromInt(value));
-}
-
-fn test262InternalObjectFromValue(value: zjs.JSValue) ?*zjs.Object {
-    const header = value.refHeader() orelse return null;
-    if (header.meta().flags.kind != .object) return null;
-    return @fieldParentPtr("header", header);
-}
-
-fn hostCallIsHtmlDda(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = ctx;
-    _ = output;
-    _ = global;
-    _ = args;
-    return zjs.JSValue.nullValue();
-}
-
-fn test262CreateRealm(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    _ = args;
-    const realm_value = try ctx.createRealm();
-    errdefer realm_value.free(ctx.runtimePtr());
-    const realm_global = try ctx.realmGlobalObject(realm_value);
-    const eval_func = try createExternalHostFunctionWithRealm(ctx.runtimePtr(), ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript), false, realm_global);
-    defer eval_func.free(ctx.runtimePtr());
-    try ctx.defineDataProperty(realm_value, "evalScript", eval_func, .{});
-    return realm_value;
-}
-
-fn test262DetachArrayBuffer(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    if (args.len < 1) return error.TypeError;
-    return try runtime_layer.detachArrayBuffer(ctx.core, args[0]);
-}
-
-fn test262Gc(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
-    args: []const zjs.JSValue,
-) !zjs.JSValue {
-    _ = output;
-    _ = global;
-    _ = args;
-    _ = ctx.runtimePtr().runObjectCycleRemoval();
-    return zjs.JSValue.undefinedValue();
-}
-
-fn wrapExternal(comptime f: anytype) zjs.ExternalHostCallFn {
-    return struct {
-        fn call(ptr: *anyopaque, c: zjs.ExternalHostCall) anyerror!zjs.JSValue {
-            _ = ptr;
-            var ctx = zjs.JSContext.borrowCore(c.realm);
-            const global = c.realm.global;
-            return f(&ctx, c.output, global, c.args) catch |err| {
-                try ensureTest262HarnessException(&ctx, global, err);
-                return err;
-            };
-        }
-    }.call;
-}
-
-fn wrapExternalWithFunc(comptime f: anytype) zjs.ExternalHostCallFn {
-    return struct {
-        fn call(ptr: *anyopaque, c: zjs.ExternalHostCall) anyerror!zjs.JSValue {
-            _ = ptr;
-            var ctx = zjs.JSContext.borrowCore(c.realm);
-            const global = c.realm.global orelse return error.TypeError;
-            return f(&ctx, c.output, global, c.func_obj, c.args) catch |err| {
-                try ensureTest262HarnessException(&ctx, global, err);
-                return err;
-            };
-        }
-    }.call;
-}
-
-fn ensureTest262HarnessException(ctx: *zjs.JSContext, global: ?*zjs.Object, err: anyerror) !void {
-    if (err != error.JSException or ctx.hasException()) return;
-    _ = throwTest262HarnessError(ctx, global, "") catch |throw_err| switch (throw_err) {
-        error.JSException => return,
-        else => return throw_err,
-    };
-}
-
-fn throwTest262HarnessError(ctx: *zjs.JSContext, global: ?*zjs.Object, message: []const u8) !zjs.JSValue {
-    return ctx.throwError("Test262Error", message, .{ .realm_global = global });
-}
-
-fn createTest262ErrorValue(ctx: *zjs.JSContext, global: ?*zjs.Object, message: []const u8) !zjs.JSValue {
-    return ctx.createError("Test262Error", message, .{ .realm_global = global });
-}
-
-fn createExternalHostFunction(
-    runtime: *zjs.JSRuntime,
-    context: *zjs.JSContext,
-    name: []const u8,
-    length: i32,
-    call: zjs.ExternalHostCallFn,
-) !zjs.JSValue {
-    return createExternalHostFunctionWithRealm(runtime, context, name, length, call, false, null);
-}
-
-fn createExternalHostFunctionWithRealm(
-    runtime: *zjs.JSRuntime,
-    context: *zjs.JSContext,
-    name: []const u8,
-    length: i32,
-    call: zjs.ExternalHostCallFn,
-    with_prototype: bool,
-    realm_global: ?*zjs.Object,
-) !zjs.JSValue {
-    std.debug.assert(runtime == context.runtimePtr());
-    return context.createExternalFunction(name, length, &test262_external_host_context, call, null, .{
-        .with_prototype = with_prototype,
-        .realm_global = realm_global,
-    });
-}
-
-pub fn test262AgentStringValue(ctx: *zjs.JSContext, value: zjs.JSValue) ![]u8 {
-    return ctx.toOwnedUtf8(value, test262PageAllocator());
-}
-
 test "test262 args parse QuickJS-shaped config and root" {
     const config = try parseArgs(&.{ "-c", "test262.conf", "-m", "-t", "1", "test262/test" });
     try std.testing.expectEqualStrings("test262.conf", config.config_path.?);
     try std.testing.expect(config.module);
     try std.testing.expectEqual(@as(u32, 1), config.threads);
     try std.testing.expectEqualStrings("test262/test", config.test_root.?);
-}
-
-test "test262 globals do not retain local namespace object reference" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
-    defer ctx.destroy();
-    const global = try ctx.globalObject();
-
-    try installTest262Globals(rt, ctx, global);
-
-    const ns_key = try rt.internAtom("$262");
-    defer rt.atoms.free(ns_key);
-    const ns_val = try global.getProperty(ns_key);
-    var weak = try rt.createWeakPersistentValue(ns_val, null, null);
-    defer weak.deinit();
-    ns_val.free(rt);
-
-    try std.testing.expect(weak.isAlive());
-    try std.testing.expect(try ctx.deleteProperty(global.value(), "$262"));
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(!weak.isAlive());
-}
-
-test "test262 evalScript uses the installed function realm" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
-    defer ctx.destroy();
-    const global = try ctx.globalObject();
-
-    const realm = try ctx.createRealm();
-    defer realm.free(rt);
-    const realm_global = try ctx.realmGlobal(realm);
-    defer realm_global.free(rt);
-    const realm_global_object = try ctx.realmGlobalObject(realm);
-    try ctx.defineDataProperty(realm_global, "realmMarker", zjs.JSValue.int32(30), .{});
-
-    const eval_func = try createExternalHostFunctionWithRealm(rt, ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript), false, realm_global_object);
-    defer eval_func.free(rt);
-
-    const source = try ctx.createString("realmMarker + 12");
-    defer source.free(rt);
-    const result = try ctx.callFunction(eval_func, &.{source}, .{ .realm_global = global });
-    defer result.free(rt);
-    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
-}
-
-test "test262 agent string conversion follows JavaScript ToString" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
-    defer ctx.destroy();
-
-    const numeric = try test262AgentStringValue(ctx, zjs.JSValue.int32(123));
-    defer test262PageAllocator().free(numeric);
-    try std.testing.expectEqualStrings("123", numeric);
-
-    const object = try ctx.eval("({ toString() { return 'agent-object-string'; } })", .{});
-    defer object.free(rt);
-    const object_text = try test262AgentStringValue(ctx, object);
-    defer test262PageAllocator().free(object_text);
-    try std.testing.expectEqualStrings("agent-object-string", object_text);
-}
-
-test "test262 timer integer conversion follows JavaScript ToNumber" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
-    defer ctx.destroy();
-
-    const object = try ctx.eval("({ valueOf() { return 7.9; } })", .{});
-    defer object.free(rt);
-
-    const converted = try test262Int64Arg(ctx, &.{ zjs.JSValue.undefinedValue(), object }, 1);
-    try std.testing.expectEqual(@as(i64, 7), converted);
 }
 
 test "test262 args parse timeout and verbose levels" {
@@ -3744,21 +1236,24 @@ test "selected known failure that now passes is counted as fixed" {
     defer current.deinit();
 
     var next_index: std.atomic.Value(usize) = .init(0);
-    try runWorkerStride(
+    const worker_shared = WorkerShared{
+        .io = std.testing.io,
+        .engine_path = "zig-out/bin/zjs",
+        .use_external_engine = false,
+        .harnessdir = null,
+        .harness_prelude = "",
+        .tests = &.{"tests/fixtures/test262/harness/asyncHelpers.js"},
+        .known_errors = known,
+        .skipped_features = skipped,
+        .next_index = &next_index,
+        .verbose = 0,
+        .timeout_ms = null,
+        .global_module = false,
+        .reporter = null,
+    };
+    try runWorkerLoop(
+        &worker_shared,
         std.testing.allocator,
-        std.testing.io,
-        "zig-out/bin/zjs",
-        false,
-        null,
-        "",
-        &.{"tests/fixtures/test262/harness/asyncHelpers.js"},
-        known,
-        skipped,
-        &next_index,
-        0,
-        null,
-        false,
-        null,
         &summary,
         &current,
     );
@@ -3767,6 +1262,18 @@ test "selected known failure that now passes is counted as fixed" {
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
     try std.testing.expectEqual(@as(usize, 1), summary.fixed);
     try std.testing.expectEqual(@as(usize, 0), current.items.len);
+}
+
+test "parallel worker errors return without rejoining finished threads" {
+    var config = Config{};
+    config.threads = 2;
+    try config.files.append("tests/fixtures/test262/missing-worker-a.js");
+    try config.files.append("tests/fixtures/test262/missing-worker-b.js");
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        runSelectedTestsQuiet(std.testing.allocator, std.testing.io, config, "zig-out/bin/zjs"),
+    );
 }
 
 test "embedded runner reports thrown proxy constructors as test failures" {

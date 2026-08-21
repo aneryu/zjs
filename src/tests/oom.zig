@@ -543,7 +543,7 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
     var ctx_owned = true;
     errdefer if (ctx_owned) ctx.destroy();
     var waiters_cleaned = false;
-    errdefer if (!waiters_cleaned) zjs.exec.call_runtime.cleanupAtomicsWaitersForContext(ctx);
+    errdefer if (!waiters_cleaned) zjs.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx);
     var wrapper = BindingContext.borrowCore(ctx);
 
     const value = wrapper.eval(snippet.source, .{
@@ -580,7 +580,7 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
         try expectStringValue(rt, post_value, snippet.post_expect);
     }
 
-    zjs.exec.call_runtime.cleanupAtomicsWaitersForContext(ctx);
+    zjs.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx);
     waiters_cleaned = true;
     ctx_owned = false;
     ctx.destroy();
@@ -1042,7 +1042,7 @@ fn runContextGlobalRetryAttempt(fail_index: usize) !bool {
         defer rt.destroy();
         const ctx = try core.JSContext.create(rt);
         defer ctx.destroy();
-        defer zjs.exec.call_runtime.cleanupAtomicsWaitersForContext(ctx);
+        defer zjs.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx);
         try std.testing.expect(ctx.isLive());
         try std.testing.expect(ctx.global == null);
 

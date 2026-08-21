@@ -7407,7 +7407,14 @@ test "Iterator.from follows QuickJS wrapper selection" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("true\n0\n1\nundefined\nfalse\nfalse\ntrue\nfalse\ntrue\ntrue\nundefined\ntrue\nundefined\ntrue\ntrue\ntrue\nfalse\ntrue\nundefined\ntrue\nfalse\nobject\nTypeError\n", stream.buffered());
+    // The first four values changed on 2026-08-21. They used to read
+    // "true, 0, undefined" — the source returned unwrapped, its `next` getter
+    // never read, and no iterator helpers on the result — and this test pinned
+    // that as QuickJS parity. It was not: the pinned QuickJS prints
+    // "false, 1, 1, function" for this exact snippet, and so does the spec.
+    // Iterator.from must test %Iterator%-instance-hood on the RESOLVED
+    // iterator, which this shape fails, so it gets a wrapper.
+    try std.testing.expectEqualStrings("false\n1\n1\nfunction\nfalse\nfalse\ntrue\nfalse\ntrue\ntrue\nundefined\ntrue\nundefined\ntrue\ntrue\ntrue\nfalse\ntrue\nundefined\ntrue\nfalse\nobject\nTypeError\n", stream.buffered());
 }
 
 test "number native builtin records cover static and prototype dispatch" {
@@ -10817,7 +10824,7 @@ test "job queue enqueue propagates allocator failure" {
     var buffer: [0]u8 = .{};
     var fixed = std.heap.FixedBufferAllocator.init(&buffer);
     var account = core.memory.MemoryAccount.init(fixed.allocator());
-    var queue = engine.exec.jobs.Queue.init(&account);
+    var queue = engine.core.jobs.Queue.init(&account);
     defer queue.deinit();
 
     const js = helpers.sharedTestEngine();
@@ -10890,8 +10897,7 @@ test "waitAsync completions enter one typed cross-realm FIFO after facade releas
     const promise_b = try core.Object.create(js.runtime, core.class.ids.promise, null);
     defer promise_b.value().free(js.runtime);
 
-    const call_runtime = engine.exec.call_runtime;
-    const waiter_a = try js.runtime.memory.create(call_runtime.AtomicsWaiter);
+    const waiter_a = try js.runtime.memory.create(engine.exec.atomics_ops.AtomicsWaiter);
     waiter_a.* = .{
         .key = .{ .offset_or_ptr = @intFromPtr(promise_a) },
         .completion = .notified,
@@ -10899,7 +10905,7 @@ test "waitAsync completions enter one typed cross-realm FIFO after facade releas
         .realm = core.RealmRef.retain(js.context),
     };
     engine.exec.promise_ops.atomicsLinkAsyncWaiter(waiter_a);
-    const waiter_b = try js.runtime.memory.create(call_runtime.AtomicsWaiter);
+    const waiter_b = try js.runtime.memory.create(engine.exec.atomics_ops.AtomicsWaiter);
     waiter_b.* = .{
         .key = .{ .offset_or_ptr = @intFromPtr(promise_b) },
         .completion = .notified,
@@ -10909,13 +10915,13 @@ test "waitAsync completions enter one typed cross-realm FIFO after facade releas
     engine.exec.promise_ops.atomicsLinkAsyncWaiter(waiter_b);
     var waiters_linked = true;
     defer if (waiters_linked) {
-        call_runtime.cleanupAtomicsWaitersForContext(js.context);
-        call_runtime.cleanupAtomicsWaitersForContext(realm_b);
+        engine.exec.atomics_ops.cleanupAtomicsWaitersForContext(js.context);
+        engine.exec.atomics_ops.cleanupAtomicsWaitersForContext(realm_b);
     };
 
     // The host realm selects the Runtime, not which RealmRef-owned completion
     // is eligible to move into its FIFO.
-    try call_runtime.processExpiredAtomicsWaiters(js.context);
+    try engine.exec.atomics_ops.processExpiredAtomicsWaiters(js.context);
     waiters_linked = false;
     try std.testing.expectEqual(@as(usize, 2), js.runtime.job_queue.jobs.len);
     try std.testing.expect(js.runtime.job_queue.jobs[0].realm.borrow() == js.context);
@@ -10947,8 +10953,7 @@ test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {
     const promise = try core.Object.create(js.runtime, core.class.ids.promise, null);
     defer promise.value().free(js.runtime);
 
-    const call_runtime = engine.exec.call_runtime;
-    const waiter = try js.runtime.memory.create(call_runtime.AtomicsWaiter);
+    const waiter = try js.runtime.memory.create(engine.exec.atomics_ops.AtomicsWaiter);
     waiter.* = .{
         .key = .{ .offset_or_ptr = @intFromPtr(promise) },
         .completion = .notified,
@@ -10957,9 +10962,9 @@ test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {
     };
     engine.exec.promise_ops.atomicsLinkAsyncWaiter(waiter);
     var waiter_linked = true;
-    defer if (waiter_linked) call_runtime.cleanupAtomicsWaitersForContext(js.context);
+    defer if (waiter_linked) engine.exec.atomics_ops.cleanupAtomicsWaitersForContext(js.context);
 
-    try call_runtime.processExpiredAtomicsWaiters(js.context);
+    try engine.exec.atomics_ops.processExpiredAtomicsWaiters(js.context);
     waiter_linked = false;
     helpers.job_counter = 0;
     try js.runtime.job_queue.enqueueFunc(js.context, countJob, &.{});
@@ -10997,7 +11002,7 @@ test "dynamic import job OOM retains its FIFO position for retry" {
         fn run(
             _: *core.JSContext,
             _: ?*std.Io.Writer,
-            _: *const engine.exec.jobs.DynamicImportPayload,
+            _: *const engine.core.jobs.DynamicImportPayload,
         ) core.context.DynamicImportError!core.JSValue {
             attempts += 1;
             if (attempts == 1) return error.OutOfMemory;
@@ -11049,7 +11054,7 @@ test "dynamic import job keeps its enqueue Realm after creator facade release" {
         fn run(
             ctx: *core.JSContext,
             _: ?*std.Io.Writer,
-            _: *const engine.exec.jobs.DynamicImportPayload,
+            _: *const engine.core.jobs.DynamicImportPayload,
         ) core.context.DynamicImportError!core.JSValue {
             seen_realm = ctx;
             seen_global = ctx.global;
@@ -11301,7 +11306,7 @@ test "job queue keeps symbol arguments rooted until release" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    var queue = engine.exec.jobs.Queue.init(&rt.memory);
+    var queue = engine.core.jobs.Queue.init(&rt.memory);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-job-queue-symbol");
     const symbol_value = try rt.symbolValue(symbol_atom);
@@ -11323,7 +11328,7 @@ test "job queue symbol roots preserve weak map values" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    var queue = engine.exec.jobs.Queue.init(&rt.memory);
+    var queue = engine.core.jobs.Queue.init(&rt.memory);
 
     const weak_map = try core.Object.create(rt, core.class.ids.weakmap, null);
     defer weak_map.value().free(rt);
@@ -18112,11 +18117,11 @@ test "iterator results use ordinary transitions without a sixth realm shape" {
 
     try std.testing.expect(!@hasField(core.RealmContext, "iterator_result_shape"));
 
-    const warm = try engine.exec.call_runtime.createIteratorResult(js.runtime, global, core.JSValue.int32(1), false);
+    const warm = try engine.exec.iterator_ops.createIteratorResult(js.runtime, global, core.JSValue.int32(1), false);
     warm.free(js.runtime);
     const alloc_calls = js.runtime.memory.alloc_calls;
     const create_calls = js.runtime.memory.create_calls;
-    const result = try engine.exec.call_runtime.createIteratorResult(js.runtime, global, core.JSValue.int32(2), true);
+    const result = try engine.exec.iterator_ops.createIteratorResult(js.runtime, global, core.JSValue.int32(2), true);
     defer result.free(js.runtime);
 
     // QuickJS's js_create_iterator_result performs the ordinary `value` then

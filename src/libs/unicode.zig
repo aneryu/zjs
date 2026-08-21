@@ -118,10 +118,6 @@ pub fn isCaseIgnorable(c: u21) bool {
     return isInTable(c, data.unicode_prop_Case_Ignorable_table[0..], data.unicode_prop_Case_Ignorable_index[0..]);
 }
 
-pub fn isWhiteSpace(c: u21) bool {
-    return isInTable(c, data.unicode_prop_White_Space_table[0..], data.unicode_prop_White_Space_index[0..]);
-}
-
 pub fn isEcmaLineTerminatorCodePoint(cp: u21) bool {
     return cp == '\n' or cp == '\r' or cp == 0x2028 or cp == 0x2029;
 }
@@ -147,14 +143,6 @@ pub fn isAsciiWhitespaceByte(byte: u8) bool {
 
 pub fn isAsciiDigitUnit(unit: u16) bool {
     return isAsciiDigitCodePoint(@intCast(unit));
-}
-
-pub fn isAsciiAlphaUnit(unit: u16) bool {
-    return isAsciiAlphaCodePoint(@intCast(unit));
-}
-
-pub fn isAsciiLowerUnit(unit: u16) bool {
-    return isAsciiLowerCodePoint(@intCast(unit));
 }
 
 pub fn isAsciiWordUnit(unit: u16) bool {
@@ -402,21 +390,6 @@ pub fn normalizeAlloc(allocator: std.mem.Allocator, src: []const u32, form: Norm
     }
     out.shrinkRetainingCapacity(out_len);
     return try out.toOwnedSlice(allocator);
-}
-
-/// Returns owned QuickJS-style boundary points: [lo, hi, lo, hi, ...].
-/// Caller must free with the same allocator.
-pub fn propertyRangePointsAlloc(
-    allocator: std.mem.Allocator,
-    expr: []const u8,
-    inverted: bool,
-) UnicodeError![]u32 {
-    var buffer = try propertyRangePoints(allocator, expr, inverted);
-    defer buffer.deinit();
-    const items = buffer.items();
-    const points = try allocator.alloc(u32, items.len);
-    @memcpy(points, items);
-    return points;
 }
 
 pub fn propertyRangePoints(

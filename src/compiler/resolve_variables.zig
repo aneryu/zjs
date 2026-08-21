@@ -162,11 +162,6 @@ fn updateLabel(product: *ResolvedProduct, label_index: u32, delta: i32) Error!u3
     return slot.ref_count;
 }
 
-const SourcePoint = struct {
-    line: i32,
-    col: i32,
-};
-
 const PendingTailRewrite = struct {
     input_offset: u32,
     emit_dup: bool,
@@ -181,10 +176,6 @@ const MakeRefFold = struct {
     get_action: rules.ScopeVarActionAlias,
     put_action: rules.ScopeVarActionAlias,
 };
-
-fn sourcePointEqual(lhs: SourcePoint, rhs: SourcePoint) bool {
-    return lhs.line == rhs.line and lhs.col == rhs.col;
-}
 
 const Resolver = struct {
     ctx: *binding_rules.JSContext,
@@ -1553,7 +1544,7 @@ const Resolver = struct {
             return false;
         }
 
-        var previous: ?SourcePoint = if (low == 0) null else .{
+        var previous: ?cfg.SourcePoint = if (low == 0) null else .{
             .line = self.input_sources[low - 1].line,
             .col = self.input_sources[low - 1].col,
         };
@@ -1561,11 +1552,11 @@ const Resolver = struct {
         while (index < self.input_sources.len and
             self.input_sources[index].temp_offset == input_pos) : (index += 1)
         {
-            const current: SourcePoint = .{
+            const current: cfg.SourcePoint = .{
                 .line = self.input_sources[index].line,
                 .col = self.input_sources[index].col,
             };
-            if (previous == null or !sourcePointEqual(current, previous.?))
+            if (previous == null or !current.eql(previous.?))
                 return true;
             previous = current;
         }
@@ -2404,7 +2395,7 @@ fn buildBindIndex(
         };
         bind_index += 1;
     }
-    std.mem.sort(BindEntry, binds, {}, cfg.bindLessThan);
+    std.sort.heap(BindEntry, binds, {}, cfg.bindLessThan);
     return binds;
 }
 

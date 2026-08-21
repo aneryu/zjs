@@ -1060,14 +1060,6 @@ fn handlerPost(comptime o: u8) Handler {
         }
     }.b);
 }
-fn handlerUpdateLocal(comptime o: u8) Handler {
-    return coldStd(struct {
-        fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-            _ = pc;
-            _ = try vm_arith.updateLocalVm(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.catch_target, o, vm.output);
-        }
-    }.b);
-}
 fn handlerAppend(comptime o: u8) Handler {
     return coldStd(struct {
         fn b(vm: *Vm, pc: [*]const u8) HostError!void {

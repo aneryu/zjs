@@ -133,20 +133,6 @@ pub fn execSetArg(
     value_slot.replaceBorrowed(ctx.runtime, &frame.args[idx], value);
 }
 
-pub fn execGetVarRef(
-    ctx: *core.JSContext,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    idx: u16,
-    consume: u8,
-    opc: u8,
-) !void {
-    frame.pc += consume;
-    _ = opc;
-    if (idx >= frame.var_refs.len) try ensureVarRefsCapacity(ctx, frame, idx);
-    try pushAdapterValue(stack, varRefSlot(frame, idx));
-}
-
 pub fn execGetVarRefMaybeTdz(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -382,13 +368,6 @@ pub fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
 /// Bounds-checked cell read: `frame.var_refs[idx]`.
 pub inline fn varRefSlotCell(frame: *const frame_mod.Frame, idx: usize) *core.VarRef {
     return frame.var_refs[idx];
-}
-
-/// Unchecked cell read: `frame.var_refs.ptr[idx]`, for hot handlers that
-/// already tested `idx < frame.var_refs.len` (qjs OP_get_var_ref reads
-/// `var_refs[idx]` with no bounds check at all, quickjs.c:18627).
-pub inline fn varRefSlotCellUnchecked(frame: *const frame_mod.Frame, idx: usize) *core.VarRef {
-    return frame.var_refs.ptr[idx];
 }
 
 /// Bounds-checked element read in JSValue form (the cell's value view).

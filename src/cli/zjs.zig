@@ -1,6 +1,13 @@
 const std = @import("std");
+const cli_process = @import("cli_process.zig");
+
 const engine = @import("zjs");
 const simple_token = engine.simple_token;
+const platform_clock = engine.platform_clock;
+
+/// Message-only panics in ReleaseFast, full traces everywhere else.
+/// See `panic_policy.zig` for why the shipped binary drops the symbolizer.
+pub const panic = @import("panic_policy.zig").policy;
 
 // QCP-1: this root is shared by `zjs` (ReleaseFast), `zjs-profile`
 // (ReleaseFast) and `zjs-dev` (Debug), so it proves the effective
@@ -159,13 +166,13 @@ fn runFileModule(
 }
 
 pub fn main(init: std.process.Init) !void {
-    const total_start = monotonicNanos();
+    const total_start = platform_clock.monotonicNanos();
     setupHostDispatchStatsExitDump(init.environ_map);
     setupV2OracleReportExitDump(init.environ_map);
     const allocator = init.gpa;
     const arena = init.arena.allocator();
     const io = init.io;
-    const args = try argsToSlice(arena, init.minimal.args);
+    const args = try cli_process.argsToSlice(arena, init.minimal.args);
 
     // QCP-1 configuration signature. Answered before any engine construction
     // so it is readable from every configuration, including instrumented
@@ -185,12 +192,12 @@ pub fn main(init: std.process.Init) !void {
     const source_text = switch (command) {
         .eval => |eval| eval.source,
         .file => |file| source: {
-            const read_start = monotonicNanos();
+            const read_start = platform_clock.monotonicNanos();
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, file.path, allocator, .limited(max_source_size)) catch |err| {
-                try printError(io, "zjs: unable to read {s}: {s}\n", .{ file.path, @errorName(err) });
+                try cli_process.printError(io, "zjs: unable to read {s}: {s}\n", .{ file.path, @errorName(err) });
                 std.process.exit(1);
             };
-            read_source_ns = elapsedNanosSince(read_start);
+            read_source_ns = platform_clock.elapsedNanosSince(read_start);
             break :source bytes;
         },
     };
@@ -204,19 +211,19 @@ pub fn main(init: std.process.Init) !void {
     var setup_ns: u64 = 0;
     var eval_ns: u64 = 0;
     var jobs_ns: u64 = 0;
-    const runtime_start = monotonicNanos();
+    const runtime_start = platform_clock.monotonicNanos();
     const rt = zjs.JSRuntime.createWithOptions(allocator, .{
         .trace_writer = if (commandRuntimeOptions(command).trace_memory) &stdout_writer.interface else null,
         .memory_limit = commandRuntimeOptions(command).memory_limit,
         .gc_threshold = zjs.default_gc_threshold,
         .stack_size = commandRuntimeOptions(command).stack_size orelse zjs.default_stack_size,
     }) catch |err| {
-        try printError(io, "zjs: engine init failed: {s}\n", .{@errorName(err)});
+        try cli_process.printError(io, "zjs: engine init failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
     errdefer rt.destroy();
     const ctx = zjs.JSContext.create(rt) catch |err| {
-        try printError(io, "zjs: context init failed: {s}\n", .{@errorName(err)});
+        try cli_process.printError(io, "zjs: context init failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
     errdefer ctx.destroy();
@@ -228,14 +235,14 @@ pub fn main(init: std.process.Init) !void {
     runtime.event_loop.install();
     errdefer runtime.event_loop.deinit();
 
-    const runtime_create_ns = elapsedNanosSince(runtime_start);
-    const setup_start = monotonicNanos();
+    const runtime_create_ns = platform_clock.elapsedNanosSince(runtime_start);
+    const setup_start = platform_clock.monotonicNanos();
     applyRuntimeOptions(&runtime, commandRuntimeOptions(command));
     runtime.context.setTrackUnhandledRejections(commandTracksUnhandledRejections(command));
     const runtime_options = commandRuntimeOptions(command);
     if (runtime_options.profile_opcodes) {
         if (!zjs.opcode_profile_build_enabled) {
-            try printError(io, "zjs: --profile-opcodes requires a profiling build; run 'zig build zjs-profile' or rebuild with -Dzjs_enable_opcode_profile=true (refusing to emit an all-zero profile)\n", .{});
+            try cli_process.printError(io, "zjs: --profile-opcodes requires a profiling build; run 'zig build zjs-profile' or rebuild with -Dzjs_enable_opcode_profile=true (refusing to emit an all-zero profile)\n", .{});
             std.process.exit(2);
         }
         runtime.runtime.setOpcodeProfile(&opcode_profile);
@@ -243,7 +250,7 @@ pub fn main(init: std.process.Init) !void {
         _ = zjs.activateOpcodeProfile(&opcode_profile);
     }
     zjs.host.defineScriptArgs(runtime.context, commandScriptArgs(command)) catch |err| {
-        try printError(io, "zjs: scriptArgs setup failed: {s}\n", .{@errorName(err)});
+        try cli_process.printError(io, "zjs: scriptArgs setup failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
     runtime.context.setPreserveUncaughtException(true);
@@ -261,7 +268,7 @@ pub fn main(init: std.process.Init) !void {
     };
     var dynamic_import_scope = engine.exec.module_graph.installDynamicImport(&dynamic_import_state);
     defer dynamic_import_scope.deinit();
-    setup_ns = elapsedNanosSince(setup_start);
+    setup_ns = platform_clock.elapsedNanosSince(setup_start);
     // NB: we intentionally do NOT `defer runtime.deinit()` on the happy path.
     // `JSRuntime.destroy` asserts that the runtime has no outstanding
     // allocations, which catches refcounting bugs in `zig build test` where
@@ -271,7 +278,7 @@ pub fn main(init: std.process.Init) !void {
     // test262 runner, where the 2s panic+backtrace path caused many
     // otherwise-passing tests to be misreported as timeouts. The historical
     // validation note is preserved in the convergence docs' git history.
-    const include_start = monotonicNanos();
+    const include_start = platform_clock.monotonicNanos();
     runIncludeFiles(&runtime, commandRuntimeOptions(command), &stdout_writer.interface, io, allocator) catch |err| {
         try exitIfRequested(&runtime, &stdout_writer.interface, err);
         if (runtime.context.hasException()) {
@@ -282,8 +289,8 @@ pub fn main(init: std.process.Init) !void {
         try printEvaluationError(io, &runtime, err);
         std.process.exit(1);
     };
-    include_ns = elapsedNanosSince(include_start);
-    const eval_start = monotonicNanos();
+    include_ns = platform_clock.elapsedNanosSince(include_start);
+    const eval_start = platform_clock.monotonicNanos();
     const value = switch (command) {
         .eval => runtime.context.eval(source_text, .{
             .mode = .script,
@@ -321,21 +328,21 @@ pub fn main(init: std.process.Init) !void {
         try printEvaluationError(io, &runtime, err);
         std.process.exit(1);
     };
-    eval_ns = elapsedNanosSince(eval_start);
+    eval_ns = platform_clock.elapsedNanosSince(eval_start);
     try stdout_writer.interface.flush();
 
     if (value.isException()) {
-        try printError(io, "zjs: uncaught exception\n", .{});
+        try cli_process.printError(io, "zjs: uncaught exception\n", .{});
         std.process.exit(1);
     }
 
-    const jobs_start = monotonicNanos();
+    const jobs_start = platform_clock.monotonicNanos();
     try dynamic_import_state.runJobs(runtime.context.core);
     // Post-eval jobs (module-mode microtasks in particular) print into the
     // buffered stdout writer; flush before any exit path so their output is
     // not dropped (qjs.c main: js_std_loop writes unbuffered per job).
     try stdout_writer.interface.flush();
-    jobs_ns = elapsedNanosSince(jobs_start);
+    jobs_ns = platform_clock.elapsedNanosSince(jobs_start);
     if (runtime.context.hasUnhandledRejection() or runtime.context.hasException()) {
         // Mirrors qjs js_std_promise_rejection_check (quickjs-libc.c:4276-4290):
         // every still-unhandled rejection is reported, in rejection order,
@@ -367,7 +374,7 @@ pub fn main(init: std.process.Init) !void {
         const active_profile: ?*const zjs.OpcodeProfile =
             if (commandRuntimeOptions(command).profile_opcodes) &opcode_profile else null;
         try dumpPerfJson(io, command, &runtime, active_profile, .{
-            .total_ns = elapsedNanosSince(total_start),
+            .total_ns = platform_clock.elapsedNanosSince(total_start),
             .read_source_ns = read_source_ns,
             .runtime_create_ns = runtime_create_ns,
             .setup_ns = setup_ns,
@@ -397,15 +404,8 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(0);
 }
 
-fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
-    const raw_args = try args.toSlice(arena);
-    const result = try arena.alloc([]const u8, raw_args.len);
-    for (raw_args, 0..) |arg, i| result[i] = arg;
-    return result;
-}
-
 fn printUsage(io: std.Io) !void {
-    try printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
+    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
 }
 
 /// Standalone query flag: it takes no script and constructs no runtime, so it
@@ -480,17 +480,6 @@ fn parseLimitKBytes(text: []const u8) !usize {
     if (text.len == 0) return error.InvalidCharacter;
     const kbytes = try std.fmt.parseInt(usize, text, 10);
     return std.math.mul(usize, kbytes, 1024) catch error.Overflow;
-}
-
-fn elapsedNanosSince(start: u64) u64 {
-    const end = monotonicNanos();
-    return if (end > start) end - start else 0;
-}
-
-fn monotonicNanos() u64 {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const nanos = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds();
-    return if (nanos <= 0) 0 else @intCast(nanos);
 }
 
 fn detectFileMode(path: []const u8, source: []const u8, explicit_mode: zjs.context.EvalMode) zjs.context.EvalMode {
@@ -612,7 +601,7 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeP
         };
         row_count += 1;
     }
-    std.mem.sort(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
+    std.sort.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
 
     try output.print("  \"opcode_profile\": {{\n", .{});
     try output.print("    \"opcodes_executed\": {d},\n", .{profile.totalOpcodeCount()});
@@ -715,7 +704,7 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         row_count += 1;
     }
 
-    std.mem.sort(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
+    std.sort.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
 
     try output.print("\nZJS opcode profile\n", .{});
     try output.print("  opcodes executed: {d}\n", .{profile.totalOpcodeCount()});
@@ -754,7 +743,7 @@ fn dumpHostDispatchStats(output: *std.Io.Writer) !void {
     const counts = host_dispatch_stats.snapshot();
     var order: [host_dispatch_stats.site_count]u16 = undefined;
     for (&order, 0..) |*slot, index| slot.* = @intCast(index);
-    std.mem.sort(u16, &order, @as([]const u64, &counts), struct {
+    std.sort.heap(u16, &order, @as([]const u64, &counts), struct {
         fn lessThan(c: []const u64, lhs: u16, rhs: u16) bool {
             if (c[lhs] != c[rhs]) return c[lhs] > c[rhs];
             return lhs < rhs;
@@ -827,14 +816,6 @@ fn takePendingRejectionOrException(runtime: *Runtime) zjs.JSValue {
     return runtime.context.takePendingException();
 }
 
-fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-    var stderr_buf: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
-    const stderr = &stderr_writer.interface;
-    try stderr.print(fmt, args);
-    try stderr.flush();
-}
-
 fn printEvaluationError(io: std.Io, runtime: *Runtime, err: anyerror) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
@@ -879,13 +860,6 @@ fn printExceptionValue(stderr: *std.Io.Writer, runtime: *Runtime, value: zjs.JSV
     return true;
 }
 
-fn printUnhandledRejection(io: std.Io, runtime: *Runtime, value: zjs.JSValue) !void {
-    var stderr_buf: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
-    const stderr = &stderr_writer.interface;
-    try printUnhandledRejectionTo(stderr, runtime, value);
-}
-
 /// Reports one rejection into a caller-owned stderr writer. Reporting loops
 /// must reuse ONE writer: each fresh File.stderr().writer() starts at its own
 /// position 0, so successive reports would overwrite each other when stderr
@@ -916,7 +890,7 @@ fn printTypeErrorNotFunction(io: std.Io, command: Command) !void {
         .file => |file| file.path,
         .eval => "<eval>",
     };
-    try printError(io, "TypeError: not a function\n    at <anonymous> ({s}:7:20)\n\n", .{path});
+    try cli_process.printError(io, "TypeError: not a function\n    at <anonymous> ({s}:7:20)\n\n", .{path});
 }
 
 test "zjs args accept eval source" {

@@ -7,7 +7,6 @@ const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
-const call_mod = @import("call.zig");
 const object_ops = @import("object_ops.zig");
 const stack_mod = @import("stack.zig");
 
@@ -108,98 +107,6 @@ pub noinline fn arrayFrom(
     try stack.pushOwned(array);
 }
 
-const DecodedFieldAtom = struct {
-    atom_id: core.Atom,
-    next_pc: usize,
-};
-
-fn decodeFieldAtom(code: []const u8, pc: usize, expected_op: u8) ?DecodedFieldAtom {
-    if (pc + 5 > code.len or code[pc] != expected_op) return null;
-    return .{
-        .atom_id = readInt(u32, code[pc + 1 ..][0..4]),
-        .next_pc = pc + 5,
-    };
-}
-
-fn canFinishWithUndefinedAt(function: *const bytecode.FunctionBytecode, pc: usize) bool {
-    if (function.isGenerator() or function.isAsync()) return false;
-    const code = function.byteCode();
-    if (pc >= code.len) return false;
-    if (code[pc] == op.return_undef) return true;
-    return pc + 2 == code.len and code[pc] == op.undefined and code[pc + 1] == op.return_async;
-}
-
-const DecodedGet = struct {
-    idx: u16,
-    next_pc: usize,
-};
-
-fn decodeLocalGet(code: []const u8, pc: usize) ?DecodedGet {
-    if (pc >= code.len) return null;
-    return switch (code[pc]) {
-        op.get_loc0 => .{ .idx = 0, .next_pc = pc + 1 },
-        op.get_loc1 => .{ .idx = 1, .next_pc = pc + 1 },
-        op.get_loc2 => .{ .idx = 2, .next_pc = pc + 1 },
-        op.get_loc3 => .{ .idx = 3, .next_pc = pc + 1 },
-        op.get_loc, op.get_loc_check => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 };
-        },
-        op.get_loc8 => blk: {
-            if (pc + 2 > code.len) return null;
-            break :blk .{ .idx = code[pc + 1], .next_pc = pc + 2 };
-        },
-        else => null,
-    };
-}
-
-fn decodeVarRefGet(code: []const u8, pc: usize) ?DecodedGet {
-    if (pc >= code.len) return null;
-    return switch (code[pc]) {
-        op.get_var_ref0 => .{ .idx = 0, .next_pc = pc + 1 },
-        op.get_var_ref1 => .{ .idx = 1, .next_pc = pc + 1 },
-        op.get_var_ref2 => .{ .idx = 2, .next_pc = pc + 1 },
-        op.get_var_ref3 => .{ .idx = 3, .next_pc = pc + 1 },
-        op.get_var_ref, op.get_var_ref_check => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 };
-        },
-        else => null,
-    };
-}
-
-const ImmediateInt32 = struct {
-    value: i32,
-    next_pc: usize,
-};
-
-fn immediateInt32Operand(code: []const u8, pc: usize) ?ImmediateInt32 {
-    if (pc >= code.len) return null;
-    return switch (code[pc]) {
-        op.push_0 => .{ .value = 0, .next_pc = pc + 1 },
-        op.push_1 => .{ .value = 1, .next_pc = pc + 1 },
-        op.push_2 => .{ .value = 2, .next_pc = pc + 1 },
-        op.push_3 => .{ .value = 3, .next_pc = pc + 1 },
-        op.push_4 => .{ .value = 4, .next_pc = pc + 1 },
-        op.push_5 => .{ .value = 5, .next_pc = pc + 1 },
-        op.push_6 => .{ .value = 6, .next_pc = pc + 1 },
-        op.push_7 => .{ .value = 7, .next_pc = pc + 1 },
-        op.push_i8 => blk: {
-            if (pc + 2 > code.len) return null;
-            break :blk .{ .value = @as(i8, @bitCast(code[pc + 1])), .next_pc = pc + 2 };
-        },
-        op.push_i16 => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .value = readInt(i16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 };
-        },
-        op.push_i32 => blk: {
-            if (pc + 5 > code.len) return null;
-            break :blk .{ .value = readInt(i32, code[pc + 1 ..][0..4]), .next_pc = pc + 5 };
-        },
-        else => null,
-    };
-}
-
 pub noinline fn defineField(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -234,22 +141,9 @@ pub noinline fn defineField(
     var rooted_value = value;
     defer value.free(ctx.runtime);
     var rooted_obj = obj;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &rooted_obj },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_value, &rooted_obj });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const target = try property_ops.expectObject(obj);
     if (target.isArray() and atom_id == core.atom.ids.length and
@@ -324,23 +218,9 @@ pub noinline fn defineArrayEl(
     var rooted_array = array_value;
     defer array_value.free(ctx.runtime);
 
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &rooted_index },
-        .{ .value = &rooted_array },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_value, &rooted_index, &rooted_array });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const object_value = property_ops.expectObject(rooted_array) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, frame, catch_target, global, err);
@@ -414,23 +294,13 @@ pub noinline fn copyDataProperties(
     var rooted_exclusion_value = exclusion_value;
     defer exclusion_value.free(rt);
 
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_target_value },
-        .{ .value = &rooted_source_value },
-        .{ .value = &rooted_exclusion_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &rooted_target_value,
+        &rooted_source_value,
+        &rooted_exclusion_value,
+    });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     // qjs JS_CopyDataProperties (quickjs.c:16912-16913) skips EVERY non-object
     // source — `{...5}`, `{...true}`, `{..."ab"}`, `{...Symbol()}` all yield no
@@ -506,18 +376,11 @@ pub noinline fn copyDataProperties(
             var value_root_values = [_]core.runtime.ValueRootValue{
                 .{ .value = &rooted_value },
             };
-            const value_root_frame = core.runtime.ValueRootFrame{
-                .previous = rt.active_value_roots,
+            var value_root_frame = core.runtime.ValueRootFrame{
                 .values = &value_root_values,
             };
-            if (comptime core.runtime.value_root_frames_enabled) {
-                rt.active_value_roots = &value_root_frame;
-            }
-            defer {
-                if (comptime core.runtime.value_root_frames_enabled) {
-                    rt.active_value_roots = value_root_frame.previous;
-                }
-            }
+            value_root_frame.activate(rt);
+            defer value_root_frame.deactivate(rt);
             property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
                 return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
         }
@@ -537,21 +400,9 @@ pub noinline fn copyDataProperties(
             return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
         var rooted_value = value;
         defer value.free(rt);
-        var value_root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &rooted_value },
-        };
-        const value_root_frame = core.runtime.ValueRootFrame{
-            .previous = rt.active_value_roots,
-            .values = &value_root_values,
-        };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = &value_root_frame;
-        }
-        defer {
-            if (comptime core.runtime.value_root_frames_enabled) {
-                rt.active_value_roots = value_root_frame.previous;
-            }
-        }
+        var value_root_frame = core.runtime.rootValues(.{&rooted_value});
+        value_root_frame.activate(rt);
+        defer value_root_frame.deactivate(rt);
         property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
             return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
     }
@@ -645,22 +496,9 @@ pub noinline fn rest(
     const object_value = try core.Object.createArray(ctx.runtime, prototype);
     var array_value = object_value.value();
     var element_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &array_value },
-        .{ .value = &element_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &array_value, &element_value });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     errdefer {
         const failed_array = array_value;

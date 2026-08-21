@@ -1,6 +1,7 @@
 //! Class construction and super helpers.
 
 const builtin_dispatch = @import("builtin_dispatch.zig");
+const function_ops = @import("function_ops.zig");
 const bytecode = @import("../bytecode.zig");
 const construct_mod = @import("construct.zig");
 const core = @import("../core/root.zig");
@@ -31,7 +32,7 @@ const string_ops = @import("string_ops.zig");
 // Helpers that remain in call_runtime.zig (generic utilities outside the class
 // initialization cluster).
 const constructCollectionWithPrototypeFromVm = object_ops.constructCollectionWithPrototypeFromVm;
-const constructDynamicFunctionFromSource = call_runtime.constructDynamicFunctionFromSource;
+const constructDynamicFunctionFromSource = function_ops.constructDynamicFunctionFromSource;
 const constructPrimitiveWrapperWithPrototype = object_ops.constructPrimitiveWrapperWithPrototype;
 const isCallableValue = call_runtime.isCallableValue;
 const isErrorConstructorName = exception_ops.isErrorConstructorName;

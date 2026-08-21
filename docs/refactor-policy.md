@@ -24,9 +24,10 @@ performance tax. The rules below are the policy.
    the merge base, medians, no regression on the composite Score.
 
    ```sh
-   flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
+   flock -x /tmp/zjs-host-heavy.lock taskset -c 5-9,15-19 \
      python3 tools/perf/bench_v8/run_benchv8_compare.py \
        --zjs <candidate> --baseline <merge-base build> \
+       --parallel-clusters 5-9 15-19 \
        --samples 8 --output /tmp/refactor-ab.json
    ```
 
@@ -35,8 +36,19 @@ performance tax. The rules below are the policy.
    so the result cannot later be misread as a QuickJS comparison. Both
    binaries must be frozen before the first sample and the measurement field
    must be clean (no orphan builds, affinity pinned as the script enforces).
-   (Amended 2026-08-19 by owner ruling: the instrument moved from the 15-item
-   zoo to bench-v8 when bench-v8 became the published metric. Amended
+
+   The A/B runs the two-cluster parallel protocol: each lane starts both
+   engines at the same instant, one per cluster, and the engine-to-cluster
+   assignment swaps every batch so per-cluster bias cancels. Rule 2 consumes
+   only the ratio, which is what makes this legal — and simultaneous execution
+   cancels host drift more directly than serial ABBA can. It costs about two
+   minutes instead of thirteen. The published `--qjs` metric is an absolute
+   score and stays serial; the tool refuses `--parallel-clusters` there.
+   (Amended 2026-08-20: the A/B adopted the two-cluster protocol the zoo has
+   run since the 2026-08-19 owner ruling — the bench-v8 runner was written
+   without it when the instrument moved, and rule 2 had inherited the serial
+   command. Amended 2026-08-19 by owner ruling: the instrument moved from the
+   15-item zoo to bench-v8 when bench-v8 became the published metric. Amended
    2026-08-18: pad 0 only; previously ≥3 layout pads.)
 3. Pure test-harness and build-graph splits have no layout risk and are
    exempt from rule 2.

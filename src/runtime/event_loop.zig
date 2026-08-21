@@ -1,4 +1,5 @@
 const std = @import("std");
+const atomics_ops = @import("../exec/atomics_ops.zig");
 const builtin = @import("builtin");
 
 const core = @import("../core/root.zig");
@@ -209,21 +210,9 @@ pub const EventLoop = struct {
             }
             var callback = timer.callback.dup();
             defer callback.free(rt);
-            var callback_root_values = [_]core.runtime.ValueRootValue{
-                .{ .value = &callback },
-            };
-            const callback_root_frame = core.runtime.ValueRootFrame{
-                .previous = rt.active_value_roots,
-                .values = &callback_root_values,
-            };
-            if (comptime core.runtime.value_root_frames_enabled) {
-                rt.active_value_roots = &callback_root_frame;
-            }
-            defer {
-                if (comptime core.runtime.value_root_frames_enabled) {
-                    rt.active_value_roots = callback_root_frame.previous;
-                }
-            }
+            var callback_root_frame = core.runtime.rootValues(.{&callback});
+            callback_root_frame.activate(rt);
+            defer callback_root_frame.deactivate(rt);
             const timer_id = timer.id;
             const repeats = timer.repeats;
             const delay = timer.delay_ms;
@@ -253,7 +242,7 @@ pub const EventLoop = struct {
             // blind timer sleep. Wait on the Runtime completion event instead
             // whenever such a node exists; the helper also shortens this wait
             // to the earliest waitAsync deadline.
-            if (exec.call_runtime.waitForAtomicsHostSignalUntil(rt, deadline, false)) return true;
+            if (exec.atomics_ops.waitForAtomicsHostSignalUntil(rt, deadline, false)) return true;
             std.Io.sleep(hostTimerIo(), std.Io.Duration.fromMilliseconds(sleep_ms), .awake) catch {};
             return true;
         }
@@ -354,7 +343,7 @@ pub const EventLoop = struct {
         const rt = ctx.runtimePtr();
         var timeout_ms: u32 = 0;
         const has_pending_jobs = rt.job_queue.jobs.len != 0;
-        const has_pending_host_completion = exec.call_runtime.atomicsRuntimeHasPendingAsyncWaiters(rt);
+        const has_pending_host_completion = exec.atomics_ops.atomicsRuntimeHasPendingAsyncWaiters(rt);
         if (!has_pending_jobs and !has_pending_host_completion) {
             timeout_ms = if (self.timers.len == 0) windows_api.infinite else blk: {
                 const now = nowMs();
@@ -394,7 +383,7 @@ pub const EventLoop = struct {
         if (count == 0) return false;
         var timeout_ms: c_int = 0;
         const has_pending_jobs = rt.job_queue.jobs.len != 0;
-        const has_pending_host_completion = exec.call_runtime.atomicsRuntimeHasPendingAsyncWaiters(rt);
+        const has_pending_host_completion = exec.atomics_ops.atomicsRuntimeHasPendingAsyncWaiters(rt);
         if (!has_pending_jobs and !has_pending_host_completion) {
             if (self.timers.len == 0) {
                 timeout_ms = -1;

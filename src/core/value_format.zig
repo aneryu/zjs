@@ -1,4 +1,5 @@
 const dtoa = @import("../libs/number_format.zig");
+const bignum = @import("../libs/bigint.zig");
 const std = @import("std");
 const BigIntObject = @import("bigint.zig").BigInt;
 const JSValue = @import("value.zig").JSValue;
@@ -6,6 +7,20 @@ const JSValue = @import("value.zig").JSValue;
 pub fn formatFiniteNumber(buffer: []u8, value: f64) ![]const u8 {
     if (formatSimpleFiniteDecimal(buffer, value)) |text| return text;
     return dtoa.formatNumber(buffer, value);
+}
+
+/// Clone a BigInt value into an owned arbitrary-precision integer. Six copies
+/// of this existed; `exec.value_ops.cloneBigIntValue` keeps the exec-facing
+/// name and forwards here, because `core` cannot import `exec`.
+pub fn cloneBigIntValue(allocator: std.mem.Allocator, value: JSValue) !bignum.BigInt {
+    if (value.asShortBigInt()) |short| return bignum.BigInt.fromIntAlloc(allocator, short);
+    if (value.isBigInt()) {
+        if (value.refHeader()) |header| {
+            const big: *BigIntObject = @alignCast(@fieldParentPtr("header", header));
+            return big.borrowedValue(allocator).cloneWithAllocator(allocator);
+        }
+    }
+    return error.TypeError;
 }
 
 pub fn appendBigIntBase10(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), value: JSValue) !void {

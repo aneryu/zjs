@@ -99,7 +99,12 @@ test "dense array writer readers retain their semantic guard class" {
         .{ .class = .create_data_property, .source = json_ops_source, .needle = ".appendDenseArrayLiteralIndex(", .count = 3 },
         .{ .class = .create_data_property, .source = string_ops_source, .needle = ".appendDenseArrayDefineIndex(rt,", .count = 1 },
         .{ .class = .create_data_property, .source = string_ops_source, .needle = ".appendDenseArrayDefineIndexOwned(rt,", .count = 1 },
-        .{ .class = .create_data_property, .source = string_ops_source, .needle = ".initDenseArrayIndexZeroAssumingEmpty(rt,", .count = 1 },
+        // Dropped to 0 on 2026-08-21: the single call site lived in
+        // `createRegExpMatchArrayNoCapturesFromValue`, which had no callers
+        // anywhere in the tree and went with the dead-code sweep. The entry
+        // stays at 0 rather than being deleted, so a reintroduction of an
+        // unguarded dense write in this file still trips the inventory.
+        .{ .class = .create_data_property, .source = string_ops_source, .needle = ".initDenseArrayIndexZeroAssumingEmpty(rt,", .count = 0 },
         .{ .class = .create_data_property, .source = vm_literal_source, .needle = ".defineDenseArrayDataProperty(ctx.runtime,", .count = 1 },
         .{ .class = .prewalk_set, .source = array_ops_source, .needle = ".appendDenseArrayIndex(rt,", .count = 2 },
         .{ .class = .prewalk_set, .source = array_ops_source, .needle = ".appendDenseArrayIndexOwned(rt,", .count = 1 },
@@ -1063,6 +1068,279 @@ test "sparse array literal length add range fast path collapses loop opcodes" {
     try std.testing.expectEqual(@as(u64, 0), profile.count[op.define_field]);
     try std.testing.expectEqual(@as(u64, 0), profile.count[op.get_length]);
     try std.testing.expectEqual(@as(u64, 0), profile.count[op.add]);
+}
+
+test "collection constructors iterate their array argument, not index it" {
+    // new Set/Map/WeakSet/WeakMap took a dense indexed read whenever the
+    // argument was an Array, keyed on isArray() alone. So an array carrying
+    // its own @@iterator, or a patched %ArrayIteratorPrototype%.next, was
+    // silently indexed — while spread, for-of, Array.from, destructuring and
+    // yield* in the SAME process honoured it. The dense read now happens only
+    // behind the guard that spread already used.
+    // A dedicated engine, not the shared one: draining a generator-backed
+    // iterable into a collection on the process-lifetime engine trips a
+    // pre-existing use-after-free in a LATER test (STATUS.md, "Known
+    // defects"). That defect is independent of what this test covers.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const a = [1, 2, 3];
+        \\a[Symbol.iterator] = function* () { yield 9; yield 8; };
+        \\print(JSON.stringify([...new Set(a)]));
+        \\const pairs = [[1, "a"]];
+        \\pairs[Symbol.iterator] = function* () { yield [7, "z"]; };
+        \\print(JSON.stringify([...new Map(pairs)]));
+        \\const AIP = Object.getPrototypeOf([].values());
+        \\const saved = AIP.next;
+        \\let n = 0;
+        \\AIP.next = function () { return n++ < 2 ? { done: false, value: 100 + n } : { done: true }; };
+        \\const patched = JSON.stringify([...new Set([1, 2, 3])]);
+        \\AIP.next = saved;
+        \\print(patched);
+        \\print(JSON.stringify([...new Set([1, 2, 2, 3])]), JSON.stringify([...new Set([1, , 3])]));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        \\[9,8]
+        \\[[7,"z"]]
+        \\[101,102]
+        \\[1,2,3] [1,null,3]
+        \\
+    , stream.buffered());
+}
+
+test "collection constructors do not bulk fill past an overridable adder" {
+    // The dense bulk fill for `new Set(array)` calls the adder once per element
+    // but advances the iterator's cursor only once, at the end, and skips
+    // IteratorClose when an adder throws. Both are observable as soon as the
+    // adder is user code: a subclass `add` that peeks at the iterator saw a
+    // cursor still at 0 (`peek 1` instead of `peek 2`, and every element rather
+    // than every other one), and a subclass `add` that throws let the error
+    // escape without running the iterator's `return`. The guard now also
+    // requires the adder to be the builtin, which is what makes a whole batch
+    // unobservable; QuickJS agrees line for line with the expectation below.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const it = [1, 2, 3][Symbol.iterator]();
+        \\let peeked = null;
+        \\const seen = [];
+        \\class Peeker extends Set {
+        \\  add(v) {
+        \\    seen.push(v);
+        \\    if (peeked === null) peeked = it.next().value;
+        \\    return super.add(v);
+        \\  }
+        \\}
+        \\new Peeker(it);
+        \\print(peeked, JSON.stringify(seen));
+        \\let closed = 0;
+        \\const it2 = [1, 2, 3][Symbol.iterator]();
+        \\it2.return = function () { closed++; return { done: true }; };
+        \\class Thrower extends Set { add() { throw new Error("boom"); } }
+        \\try { new Thrower(it2); } catch (e) {}
+        \\print(closed);
+        \\print(JSON.stringify([...new Set([1, 2, 3])]));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        \\2 [1,3]
+        \\1
+        \\[1,2,3]
+        \\
+    , stream.buffered());
+}
+
+test "builtin iterator prototypes survive replacing globalThis.Iterator" {
+    // %IteratorPrototype% is a realm intrinsic. It used to be resolved by
+    // walking the writable `globalThis.Iterator` binding and reading
+    // `.prototype`, so the first thing every Iterator-Helpers polyfill does --
+    // assign that binding -- detached every lazily-built builtin iterator
+    // prototype from it. `[...map.entries()]` threw TypeError and
+    // `Array.from(str.matchAll(re))` silently returned []. Deleting the
+    // binding was worse: two copies of the resolver invented two DIFFERENT
+    // synthetic bases, so Map and Array iterators stopped sharing one.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const saved = globalThis.Iterator;
+        \\const grandparent = (it) => Object.getPrototypeOf(Object.getPrototypeOf(it));
+        \\globalThis.Iterator = { prototype: { FAKE: 1 } };
+        \\print(JSON.stringify([...new Map([[1, 2]]).entries()]));
+        \\print(JSON.stringify([...new Set([1]).values()]), JSON.stringify([...[3, 4].values()]));
+        \\print(JSON.stringify([...("ab")[Symbol.iterator]()]), Array.from("a".matchAll(/a/g)).length);
+        \\print(grandparent(new Map().entries()) === grandparent([1].values()));
+        \\delete globalThis.Iterator;
+        \\print(JSON.stringify([...new Map([[5, 6]]).entries()]), JSON.stringify([...[9].values()]));
+        \\print(grandparent(new Set().values()) === grandparent("x"[Symbol.iterator]()));
+        \\globalThis.Iterator = saved;
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        \\[[1,2]]
+        \\[1] [3,4]
+        \\["a","b"] 1
+        \\true
+        \\[[5,6]] [9]
+        \\true
+        \\
+    , stream.buffered());
+}
+
+test "Array.of and Array.from run a Proxy constructor's construct trap" {
+    // IsConstructor(C) had two implementations in the tree. The one the
+    // Array.of / Array.from / Array.fromAsync / %TypedArray% static entries
+    // used fell off its last branch with `class_id == c_closure`, so every
+    // Proxy answered false: the trap never fired and a plain Array was
+    // fabricated instead of the constructor's result. They now share the one
+    // implementation that has a Proxy arm.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function probe(run) {
+        \\  let hits = 0;
+        \\  const P = new Proxy(function C() { this.tag = "t"; }, {
+        \\    construct(t, a, nt) { hits++; return Reflect.construct(t, a, nt); }
+        \\  });
+        \\  const r = run(P);
+        \\  return hits + ":" + r.tag + ":" + r.length;
+        \\}
+        \\print(probe((P) => Array.of.call(P, 1, 2)));
+        \\print(probe((P) => Array.from.call(P, [7, 8])));
+        \\print(Array.of.call(new Proxy(Array, {}), 1).length);
+        \\print(Array.of.call(new Proxy(() => {}, {}), 1) instanceof Array);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1:t:2\n1:t:2\n1\ntrue\n", stream.buffered());
+}
+
+test "Number.prototype.toString(radix) digits identify the double" {
+    // The digits must name the double they came from. A hand-rolled converter
+    // generated them from an approximation and lost the last significant
+    // digit: 829 of 1,000 random doubles at radices 3/5/7/11/36 decoded back
+    // to a NEIGHBOURING double. Expected strings below were computed with
+    // exact rational arithmetic and each verified to decode back to its input.
+    //
+    // The radix-2 denormal is also the crash case: routing a non-decimal
+    // radix through the shared js_dtoa port used to smash a `[9]u8` bounce
+    // buffer, which radix 3 overruns by eleven bytes.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\print((2 ** 53).toString(3));
+        \\print((1 / 3).toString(7));
+        \\print((0.1).toString(3));
+        \\print((12345.6789).toString(36));
+        \\print((1e21).toString(7));
+        \\print((0.5).toString(9));
+        \\print((255).toString(16), (255).toString(2), (255).toString(10));
+        \\print((5e-324).toString(2).length, (1.989032661366619e+244).toString(3).length);
+        \\print((-2.5).toString(3), (0).toString(7), (Infinity).toString(5), (NaN).toString(6));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        \\1121202011211211122211100012101120
+        \\0.2222222222222222222
+        \\0.0022002200220022002200220022002201
+        \\9ix.ofuravwu
+        \\5135235413265003023000000
+        \\0.444444444444444444
+        \\ff 11111111 255
+        \\1076 513
+        \\-2.111111111111111111111111111111112 0 Infinity NaN
+        \\
+    , stream.buffered());
+}
+
+test "IteratorStep reads done and value off any result object, without class dispatch" {
+    // Two non-spec class special cases used to sit in iteratorStepValue. A
+    // RegExp-classed result returned {done:false} WITHOUT reading done/value,
+    // so spreading such an iterator never terminated. A Promise-classed one
+    // was unwrapped — and a rejected one threw its reason synchronously —
+    // which observes promise internal state outside the job queue. The
+    // synchronous protocol has no class dispatch: `next()`'s return value is
+    // an ordinary object.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function iterOf(make) {
+        \\  return { [Symbol.iterator]() { let n = 0; return { next() {
+        \\    if (n >= 3) return { done: true, value: undefined };
+        \\    const r = make(); r.done = false; r.value = n++; return r;
+        \\  } }; } };
+        \\}
+        \\print(JSON.stringify([...iterOf(() => /x/)]));
+        \\print(JSON.stringify([...iterOf(() => Promise.resolve(9))]));
+        \\const rejected = () => { const p = Promise.reject(7); p.catch(() => {}); return p; };
+        \\print(JSON.stringify([...iterOf(rejected)]));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("[0,1,2]\n[0,1,2]\n[0,1,2]\n", stream.buffered());
+}
+
+test "every builtin iterator result inherits from Object.prototype" {
+    // ES CreateIterResultObject (7.4.14) is OrdinaryObjectCreate with
+    // %Object.prototype%. Four hand-written copies of that operation existed;
+    // the Map/Set and String ones built null-prototype results, so
+    // `map.entries().next().hasOwnProperty` threw TypeError. They now share
+    // one owner, and this pins every producer to the same answer.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const iterators = [
+        \\  [1].values(), [1].keys(), [1].entries(),
+        \\  new Map([[1, 2]]).entries(), new Map([[1, 2]]).keys(), new Set([1]).values(),
+        \\  "a"[Symbol.iterator](),
+        \\  (function* () { yield 1; })(),
+        \\  (function () { return arguments[Symbol.iterator](); })(1),
+        \\  new Uint8Array([1]).values(),
+        \\  "a".matchAll(/a/g),
+        \\];
+        \\let ordinary = 0;
+        \\for (const it of iterators) {
+        \\  if (Object.getPrototypeOf(it.next()) === Object.prototype) ordinary++;
+        \\}
+        \\print(ordinary, iterators.length);
+        \\print(new Map([[1, 2]]).entries().next().hasOwnProperty("value"));
+        \\print(String("a"[Symbol.iterator]().next()));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("11 11\ntrue\n[object Object]\n", stream.buffered());
 }
 
 test "array for-of fast path preserves iterator observability" {

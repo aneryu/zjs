@@ -863,10 +863,6 @@ test "Frame setLocal preserves inline locals while growing" {
 
 // Frame capacity helpers (moved from the dissolved exec/vm_utils.zig).
 
-pub fn ensureLocalsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !void {
-    try growLocalsCapacity(&ctx.runtime.memory, frame, idx);
-}
-
 pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !void {
     if (idx < frame.var_refs.len) return;
     const next_len = try std.math.add(usize, idx, 1);

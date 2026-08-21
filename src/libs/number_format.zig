@@ -34,8 +34,6 @@ pub const JSATODTempMem = extern struct {
     mem: [27]u64,
 };
 
-pub const JS_DTOA_MAX_DIGITS: i32 = 101;
-
 pub const JS_DTOA_FORMAT_FREE: i32 = 0 << 0;
 pub const JS_DTOA_FORMAT_FIXED: i32 = 1 << 0;
 pub const JS_DTOA_FORMAT_FRAC: i32 = 2 << 0;
@@ -57,12 +55,10 @@ pub const JS_ATOD_ACCEPT_UNDERSCORES: i32 = 1 << 3;
 // Internal constants
 // ============================================================
 
-const LIMB_LOG2_BITS = 5;
 const LIMB_BITS = 32;
 const limb_t = u32;
 const slimb_t = i32;
 const dlimb_t = u64;
-const LIMB_DIGITS = 9;
 const JS_RADIX_MAX = 36;
 const DBIGNUM_LEN_MAX = 52;
 const MANT_LEN_MAX = 18;
@@ -490,18 +486,6 @@ fn mpbMul1Base(r: *MpbMax, radix_base: limb_t, a: limb_t) void {
     }
 }
 
-fn mpbDump(str: []const u8, a: *const MpbMax) void {
-    std.debug.print("{s}= 0x", .{str});
-    var i: isize = @as(isize, @intCast(a.len)) - 1;
-    while (i >= 0) : (i -= 1) {
-        std.debug.print("{x:0>8}", .{a.tab[@as(usize, @intCast(i))]});
-        if (i != 0) {
-            std.debug.print("_", .{});
-        }
-    }
-    std.debug.print("\n", .{});
-}
-
 // ============================================================
 // mul_log2_radix
 // ============================================================
@@ -722,14 +706,6 @@ fn u64toaRadixImpl(buf: []u8, n: u64, radix: u32) usize {
     return len;
 }
 
-fn i64toaRadixImpl(buf: []u8, n: i64, radix: u32) usize {
-    if (n >= 0) {
-        return u64toaRadixImpl(buf, @intCast(n), radix);
-    }
-    buf[0] = '-';
-    return u64toaRadixImpl(buf[1..], @bitCast(-%@as(i64, @bitCast(n))), radix) + 1;
-}
-
 // ============================================================
 // output_digits
 // ============================================================
@@ -759,10 +735,14 @@ fn outputDigits(buf: []u8, a: *MpbMax, radix: i32, n_digits1: i32, dot_pos: i32)
             const rlen: usize = @intCast(a.len);
             const r = mpDiv1(a.tab[0..rlen], a.tab[0..rlen], radix_base_table[@intCast(radix - 2)], 0);
             mpbRenorm(a);
-            var tmp: [9]u8 = undefined;
-            limbToA(&tmp, r, radix, n);
             const offset: usize = @intCast(n_digits);
-            @memcpy(buf[offset..][0..@intCast(n)], tmp[0..@intCast(n)]);
+            // Straight into the destination, as upstream dtoa.c does. A
+            // `[9]u8` bounce buffer used to sit here, sized for the only radix
+            // that reached this branch: 10, whose `digits_per_limb` is exactly
+            // 9. Every other non-power-of-two radix overflows it — radix 3
+            // writes 20 digits — so the first caller to pass one would have
+            // smashed the stack.
+            limbToA(buf[offset..][0..@intCast(n)], r, radix, n);
         }
     }
 
@@ -1481,6 +1461,27 @@ pub fn formatDtoa(buf: []u8, value: f64, n_digits: i32, flags: i32) []const u8 {
     return buf[0..len];
 }
 
+/// Upper bound on the byte length `formatRadix` will write for these
+/// arguments, so a caller can size its buffer instead of guessing. Radix 2
+/// with `EXP_DISABLED` runs past a thousand digits on a denormal, which is why
+/// guessing does not work.
+pub fn radixMaxLen(value: f64, radix: i32, n_digits: i32, flags: i32) !usize {
+    const len_max = jsDtoaMaxLenImpl(value, radix, n_digits, flags);
+    if (len_max < 0) return error.InvalidRadix;
+    return @as(usize, @intCast(len_max)) + 1;
+}
+
+/// `Number.prototype.toString(radix)` for any radix in 2..36. The digit
+/// generation is the same faithful js_dtoa port radix 10 already used; only
+/// the wrappers had hard-coded 10.
+pub fn formatRadix(buf: []u8, value: f64, radix: i32, n_digits: i32, flags: i32) ![]const u8 {
+    if (buf.len < try radixMaxLen(value, radix, n_digits, flags)) return error.NoSpaceLeft;
+    var tmp_mem: JSDTOATempMem = undefined;
+    const len = jsDtoaImpl(buf, value, radix, n_digits, flags, &tmp_mem);
+    if (len >= buf.len) return error.NoSpaceLeft;
+    return buf[0..len];
+}
+
 pub fn formatDtoaChecked(buf: []u8, value: f64, n_digits: i32, flags: i32) ![]const u8 {
     const len_max = jsDtoaMaxLenImpl(value, 10, n_digits, flags);
     if (len_max < 0) return error.NoSpaceLeft;
@@ -1516,59 +1517,6 @@ pub export fn js_atod(str_ptr: [*]const u8, pnext: [*c][*c]const u8, radix: c_in
     return val;
 }
 
-pub export fn u32toa(buf: [*]u8, n: u32) callconv(.c) usize {
-    return u32toaImpl(buf[0..10], n);
-}
-
-pub export fn i32toa(buf: [*]u8, n: i32) callconv(.c) usize {
-    return i32toaImpl(buf[0..11], n);
-}
-
-pub export fn u64toa(buf: [*]u8, n: u64) callconv(.c) usize {
-    return u64toaImpl(buf[0..21], n);
-}
-
-pub export fn i64toa(buf: [*]u8, n: i64) callconv(.c) usize {
-    return i64toaImpl(buf[0..22], n);
-}
-
-pub export fn u64toa_radix(buf: [*]u8, n: u64, radix: c_uint) callconv(.c) usize {
-    return u64toaRadixImpl(buf[0..65], n, radix);
-}
-
-pub export fn i64toa_radix(buf: [*]u8, n: i64, radix: c_uint) callconv(.c) usize {
-    return i64toaRadixImpl(buf[0..66], n, radix);
-}
-
-pub export fn mp_add_ui(tab: [*]limb_t, b: limb_t, n: usize) callconv(.c) limb_t {
-    return mpAddUi(tab[0..n], b);
-}
-
-pub export fn mp_shr(tab_r: [*]limb_t, tab: [*]const limb_t, n: isize, shift: c_int, high: limb_t) callconv(.c) limb_t {
-    const len: usize = @intCast(n);
-    return mpShr(tab_r[0..len], tab[0..len], @intCast(shift), high);
-}
-
-pub export fn mp_shl(tab_r: [*]limb_t, tab: [*]const limb_t, n: isize, shift: c_int, low: limb_t) callconv(.c) limb_t {
-    const len: usize = @intCast(n);
-    return mpShl(tab_r[0..len], tab[0..len], @intCast(shift), low);
-}
-
-pub export fn mpb_set_u64(r: *anyopaque, m: u64) callconv(.c) void {
-    const mpb: *MpbMax = @ptrCast(@alignCast(r));
-    mpbSetU64(mpb, m);
-}
-
-pub export fn mpb_get_u64(r: *anyopaque) callconv(.c) u64 {
-    const mpb: *const MpbMax = @ptrCast(@alignCast(r));
-    return mpbGetU64(mpb);
-}
-
-pub export fn mpb_floor_log2(a: *anyopaque) callconv(.c) c_int {
-    const mpb: *const MpbMax = @ptrCast(@alignCast(a));
-    return mpbFloorLog2(mpb);
-}
-
 pub export fn mul_log2_radix(a: c_int, radix: c_int) callconv(.c) c_int {
     return mulLog2Radix(a, radix);
 }
@@ -1579,31 +1527,6 @@ pub export fn pow_ui(radix: c_int, n: c_int) callconv(.c) u64 {
 
 pub export fn pow_ui_inv(pr_inv: *u32, pshift: *c_int, radix: c_int, n: c_int) callconv(.c) void {
     _ = powUiInv(pr_inv, pshift, @intCast(radix), @intCast(n));
-}
-
-pub export fn mpb_shr_round(r: *anyopaque, shift: c_int, rnd_mode: c_int) callconv(.c) void {
-    const mpb: *MpbMax = @ptrCast(@alignCast(r));
-    mpbShrRound(mpb, shift, rnd_mode);
-}
-
-pub export fn mpb_cmp(a: *const anyopaque, b: *const anyopaque) callconv(.c) c_int {
-    const ma: *const MpbMax = @ptrCast(@alignCast(a));
-    const mb: *const MpbMax = @ptrCast(@alignCast(b));
-    return mpbCmp(ma, mb);
-}
-
-pub export fn mpb_renorm(r: *anyopaque) callconv(.c) void {
-    const mpb: *MpbMax = @ptrCast(@alignCast(r));
-    mpbRenorm(mpb);
-}
-
-pub export fn mpb_mul1_base(r: *anyopaque, radix_base: limb_t, b: limb_t) callconv(.c) void {
-    const mpb: *MpbMax = @ptrCast(@alignCast(r));
-    mpbMul1Base(mpb, radix_base, b);
-}
-
-pub export fn limb_to_a(buf: [*]u8, a: limb_t, radix: c_int, len: c_int) callconv(.c) void {
-    limbToA(buf[0..@intCast(len)], a, radix, len);
 }
 
 pub export fn output_digits(buf: [*]u8, a: *const anyopaque, radix: c_int, n_digits: c_int, dot_pos: c_int) callconv(.c) c_int {
@@ -1617,11 +1540,6 @@ pub export fn round_to_d(pe: *c_int, a: *anyopaque, e_offset: c_int, rnd_mode: c
     return roundToD(pe, mpb, e_offset, rnd_mode);
 }
 
-pub export fn mul_pow_round_to_d(pe: *c_int, a: *anyopaque, radix1: c_int, radix_shift: c_int, f: c_int, rnd_mode: c_int) callconv(.c) u64 {
-    const mpb: *MpbMax = @ptrCast(@alignCast(a));
-    return mulPowRoundToD(pe, mpb, radix1, radix_shift, f, rnd_mode);
-}
-
 pub export fn udiv1norm_init(d: limb_t) callconv(.c) limb_t {
     return udiv1normInit(d);
 }
@@ -1629,17 +1547,6 @@ pub export fn udiv1norm_init(d: limb_t) callconv(.c) limb_t {
 pub export fn mp_div1norm(tabr: [*]limb_t, taba: [*]const limb_t, n: limb_t, b: limb_t, r: limb_t, b_inv: limb_t, shift: c_int) callconv(.c) limb_t {
     const len: usize = @intCast(n);
     return mpDiv1normInternal(tabr[0..len], taba[0..len], b, r, b_inv, shift);
-}
-
-pub export fn mpb_dump(str_ptr: [*]const u8, a: *const anyopaque) callconv(.c) void {
-    const mpb: *const MpbMax = @ptrCast(@alignCast(a));
-    const s = str_ptr[0..strlen(str_ptr)];
-    mpbDump(s, mpb);
-}
-
-pub export fn mpb_get_bit(r: *const anyopaque, pos: c_int) callconv(.c) c_int {
-    const mpb: *const MpbMax = @ptrCast(@alignCast(r));
-    return mpbGetBit(mpb, pos);
 }
 
 test "dtoa functionality" {

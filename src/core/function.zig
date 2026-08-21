@@ -440,22 +440,9 @@ fn defineMethodData(
 ) !void {
     var target_value = target.value();
     var rooted_value = value;
-    var root_values = [_]runtime.ValueRootValue{
-        .{ .value = &target_value },
-        .{ .value = &rooted_value },
-    };
-    const root_frame = runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = runtime.rootValues(.{ &target_value, &rooted_value });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);

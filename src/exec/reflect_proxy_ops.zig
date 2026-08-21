@@ -75,7 +75,7 @@ fn reflectEntry(comptime name: []const u8, comptime length: u8, comptime id: u32
 /// Shared record handler for the `.reflect` domain. Mirrors the retired
 /// `call.zig` `callReflectNativeFunctionRecord`: the `Proxy.revocable` helper
 /// and its revoke closure run their exec reflect ops, while the 13 `Reflect.*`
-/// statics route through `call_runtime.reflectCallForNativeRecord`. These
+/// statics route through `reflect_ops.reflectCallForNativeRecord`. These
 /// records have no algorithmic func-object-free reuse: every entry is an
 /// observable callable and therefore requires its atomic call realm view.
 fn reflectCall(
@@ -105,7 +105,7 @@ fn reflectCall(
         // Proxy; revocable(t, h)`) work. No receiver validation.
         return reflect_ops.proxyRevocable(ctx.runtime, global, args);
     }
-    return try call_runtime.reflectCallForNativeRecord(ctx, output, global, id, args, caller_function, caller_frame);
+    return try reflect_ops.reflectCallForNativeRecord(ctx, output, global, id, args, caller_function, caller_frame);
 }
 
 pub fn ownKeys(rt: *core.JSRuntime, object: *core.Object) ![]core.Atom {

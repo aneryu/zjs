@@ -1612,7 +1612,7 @@ test "JSObject typed method errors become pending JS exceptions" {
     try expectErrorObjectProperty(ctx, syntax_exception, "message", "");
 }
 
-fn objectProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !core.JSValue {
+pub fn objectProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !core.JSValue {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     return try object.getProperty(key);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const iterator_ops = @import("iterator_ops.zig");
 const core = @import("../core/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
@@ -98,7 +99,7 @@ fn iteratorEntry(comptime name: []const u8, comptime length: u8, comptime id: u3
 
 /// Shared record handler for the `.iterator` domain. Mirrors the retired
 /// `call.zig` `callIteratorNativeFunctionRecord`: it resolves the active realm
-/// global and forwards to `call_runtime.iteratorCallForNativeRecord`, which
+/// global and forwards to `iterator_ops.iteratorCallForNativeRecord`, which
 /// dispatches the accessors, static helpers, and prototype helper methods. A
 /// null result means the id resolved to no handler, which only happens for a
 /// corrupt id, so it surfaces as a TypeError.
@@ -114,7 +115,7 @@ fn iteratorCall(
     const id: u32 = host_call.magic;
     const caller_function = builtin_dispatch.callerBytecode(host_call);
     const caller_frame = builtin_dispatch.callerFrame(host_call);
-    if (try call_runtime.iteratorCallForNativeRecord(ctx, host_call.output, realm.global, host_call.this_value, id, host_call.args, caller_function, caller_frame)) |value| return value;
+    if (try iterator_ops.iteratorCallForNativeRecord(ctx, host_call.output, realm.global, host_call.this_value, id, host_call.args, caller_function, caller_frame)) |value| return value;
     return error.TypeError;
 }
 

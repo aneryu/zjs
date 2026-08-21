@@ -5,6 +5,7 @@
 //! it in exec; callers only need the installer interface below.
 
 const core = @import("../core/root.zig");
+const atomics_ops = @import("atomics_ops.zig");
 const array_builtin = @import("array_builtin_ops.zig");
 const buffer_ops = @import("buffer_ops.zig");
 const collection_builtin = @import("collection_ops.zig");
@@ -748,11 +749,6 @@ fn createBuiltinAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.J
     return string_value.value();
 }
 
-fn constructorNameStringValueOrCreate(rt: *core.JSRuntime, ctor: *core.Object, fallback: []const u8) !core.JSValue {
-    return ctor.getOwnDataPropertyValue(core.atom.ids.name) orelse
-        try createBuiltinAsciiStringValue(rt, fallback);
-}
-
 pub fn defineData(
     rt: *core.JSRuntime,
     target: *core.Object,
@@ -783,16 +779,6 @@ pub fn defineDataAssumingNew(
     try target.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(value, flags.writable, flags.enumerable, flags.configurable));
 }
 
-pub fn defineDataAtom(
-    rt: *core.JSRuntime,
-    target: *core.Object,
-    atom_id: core.Atom,
-    value: core.JSValue,
-    flags: Flags,
-) !void {
-    try target.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, flags.writable, flags.enumerable, flags.configurable));
-}
-
 pub fn defineDataAtomAssumingNew(
     rt: *core.JSRuntime,
     target: *core.Object,
@@ -801,16 +787,6 @@ pub fn defineDataAtomAssumingNew(
     flags: Flags,
 ) !void {
     try target.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, flags.writable, flags.enumerable, flags.configurable));
-}
-
-fn defineStringConstantAtomAssumingNew(
-    rt: *core.JSRuntime,
-    target: *core.Object,
-    atom_id: core.Atom,
-    bytes: []const u8,
-    flags: Flags,
-) !void {
-    return defineStringConstantAtomAssumingNewWithRealm(rt, target, atom_id, bytes, flags, null);
 }
 
 fn defineStringConstantAtomAssumingNewWithRealm(
@@ -1067,18 +1043,6 @@ fn publishTypedArrayToStringAlias(
     if (!try function_object.addTypedArrayBuiltinMarker(rt, .prototype_method)) {
         return error.InvalidBuiltinRegistry;
     }
-}
-
-pub fn defineNamespace(rt: *core.JSRuntime, global: *core.Object, name: []const u8, methods: []const Method) !*core.Object {
-    const namespace = try createNamespaceObject(rt, global, methods, 0);
-    errdefer namespace.value().free(rt);
-    // `name` (Math/JSON/Reflect/Atomics) is added to the global once
-    // per call from `installStandardGlobals` and the names do not
-    // overlap with the constructor-spec or global-function entries
-    // installed elsewhere in that same install pass.
-    try defineDataAssumingNew(rt, global, name, namespace.value(), global_flags);
-    namespace.value().free(rt);
-    return namespace;
 }
 
 fn createNamespaceObject(rt: *core.JSRuntime, global: *core.Object, methods: []const Method, extra_property_count: usize) !*core.Object {

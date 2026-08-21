@@ -150,18 +150,6 @@ fn createDirectEvalClosureSeed(
     return .{ .values = owned, .is_arg_scope = is_arg_scope };
 }
 
-pub fn functionBytecodeHasDirectEval(fb: *const bytecode.FunctionBytecode, rt: *core.JSRuntime) bool {
-    _ = rt;
-    var pc: usize = 0;
-    while (pc < fb.byteCode().len) {
-        const opc = fb.byteCode()[pc];
-        if (opc == op.eval or opc == op.apply_eval) return true;
-        const size = bytecode.opcode.sizeOf(opc);
-        pc += if (size == 0) 1 else size;
-    }
-    return false;
-}
-
 /// The direct-eval frame's view of an outer var_ref slot. Normally the slot
 /// cell itself (rc++). For a read-only closure var whose shared cell
 /// carries no const flag — a module import slot directly aliases the
@@ -262,19 +250,6 @@ fn resolveDirectEvalClosureCell(
     );
 }
 
-pub fn functionBytecodeUsesAtom(rt: *core.JSRuntime, fb: *const bytecode.FunctionBytecode, atom_id: core.Atom) bool {
-    // Atom operands live inline in the bytecode (no side array); walk them.
-    var it = fb.atomOperandIterator();
-    while (it.next()) |operand| {
-        if (atomIdOrNameEql(rt, operand, atom_id)) return true;
-    }
-    for (fb.closureVar()) |cv| {
-        const name = cv.var_name;
-        if (atomIdOrNameEql(rt, name, atom_id)) return true;
-    }
-    return false;
-}
-
 pub const ExecEvalResult = union(enum) {
     done,
     continue_loop,
@@ -342,19 +317,12 @@ pub fn execDirectEval(
     var root_slices = [_]core.runtime.ValueRootSlice{
         .{ .mutable = &rooted_args },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const result = if (isContextIntrinsicEval(ctx, func))
         directEval(ctx, output, global, rooted_args, function, frame, eval_scope_head, caller_eval_global_var_bindings) catch |err| {
@@ -399,18 +367,11 @@ pub fn execApplyEval(
         .{ .value = &arg_array },
         .{ .value = &func },
     };
-    const value_root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
+    var value_root_frame = core.runtime.ValueRootFrame{
         .values = &value_roots,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &value_root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = value_root_frame.previous;
-        }
-    }
+    value_root_frame.activate(ctx.runtime);
+    defer value_root_frame.deactivate(ctx.runtime);
 
     var args = try argsFromArray(ctx.runtime, arg_array);
     defer freeArgs(ctx.runtime, args);
@@ -519,18 +480,11 @@ pub fn directEval(
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &eval_function_value },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const eval_function_object = objectFromValue(eval_function_value) orelse return error.InvalidBytecode;
     const function_value = eval_function_object.functionBytecode() orelse return error.InvalidBytecode;

@@ -5,12 +5,7 @@ const bignum = @import("../libs/bigint.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const std = @import("std");
 
-pub const AppendStringError = error{
-    OutOfMemory,
-    TypeError,
-    InvalidRadix,
-    NoSpaceLeft,
-} || core.context.DynamicImportError;
+pub const AppendStringError = core.value_string.AppendStringError;
 
 pub fn binary(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (op == bytecode.opcode.op.add and (a.isString() or b.isString())) return stringAdd(rt, a, b);
@@ -608,16 +603,6 @@ pub fn bigIntFromValueBorrowed(rt: *core.JSRuntime, value: core.JSValue) !bignum
     return error.TypeError;
 }
 
-pub fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
-    if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
-    if (value.isBigInt() and value.refHeader() != null) {
-        const header = value.refHeader().?;
-        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return big.borrowedValue(rt.memory.allocator).cloneWithAllocator(rt.memory.allocator);
-    }
-    return error.TypeError;
-}
-
 pub fn isTruthy(value: core.JSValue) bool {
     return core.value_semantics.toBoolean(value);
 }
@@ -674,101 +659,15 @@ pub fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bo
 /// MUST NOT be appended raw: every consumer treats the buffer as UTF-8
 /// (createStringValue re-decode, atom interning, host/FS boundaries), and
 /// raw 0x80-0xFF bytes are invalid UTF-8 lead/continuation bytes.
+/// Published under this name in the embedding API (`src/root.zig`); the
+/// implementation is `core.string.appendValueUtf8`, which the whole tree
+/// shares.
 pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const string_value = value.asStringBody() orelse return;
-    try string_value.ensureFlat(rt);
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| {
-            if (core.string.isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
-            for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);
-        },
-        .utf16 => |units| try appendUtf16AsUtf8(rt, buffer, units),
-    }
-}
-
-pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
-    if (value.asSymbolAtom()) |atom_id| {
-        const description = core.symbol.description(&rt.atoms, atom_id) orelse "";
-        try buffer.appendSlice(rt.memory.allocator, "Symbol(");
-        try buffer.appendSlice(rt.memory.allocator, description);
-        try buffer.append(rt.memory.allocator, ')');
-    } else if (value.asInt32()) |int_value| {
-        var int_buf: [32]u8 = undefined;
-        const printed = dtoa.formatInt32(&int_buf, int_value);
-        try buffer.appendSlice(rt.memory.allocator, printed);
-    } else if (value.asFloat64()) |float_value| {
-        if (std.math.isNan(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "NaN");
-        } else if (std.math.isPositiveInf(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "Infinity");
-        } else if (std.math.isNegativeInf(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "-Infinity");
-        } else if (std.math.isNegativeZero(float_value)) {
-            try buffer.append(rt.memory.allocator, '0');
-        } else {
-            var float_buf: [64]u8 = undefined;
-            const printed = try formatFiniteNumber(&float_buf, float_value);
-            try buffer.appendSlice(rt.memory.allocator, printed);
-        }
-    } else if (value.isBigInt()) {
-        try core.value_format.appendBigIntBase10(rt.memory.allocator, buffer, value);
-    } else if (value.asBool()) |bool_value| {
-        try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
-    } else if (value.isUndefined()) {
-        try buffer.appendSlice(rt.memory.allocator, "undefined");
-    } else if (value.isNull()) {
-        try buffer.appendSlice(rt.memory.allocator, "null");
-    } else if (value.isString()) {
-        const string_value = value.asStringBody() orelse return;
-        try string_value.ensureFlat(rt);
-        switch (string_value.resolveData()) {
-            .latin1 => |bytes| {
-                for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);
-            },
-            .utf16 => |units| try appendUtf16AsUtf8(rt, buffer, units),
-        }
-    } else if (value.isObject()) {
-        const header = value.refHeader() orelse return;
-        const object_value: *core.Object = @fieldParentPtr("header", header);
-        if (object_value.class_id == core.class.ids.string) {
-            const data = object_value.objectData() orelse return error.TypeError;
-            try appendValueString(rt, buffer, data);
-        } else if (object_value.class_id == core.class.ids.array_buffer) {
-            try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
-        } else if (object_value.class_id == core.class.ids.promise) {
-            try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.isArray()) {
-            try appendArrayString(rt, buffer, object_value);
-        } else {
-            try buffer.appendSlice(rt.memory.allocator, "[object Object]");
-        }
-    } else {
-        try buffer.appendSlice(rt.memory.allocator, "[object Object]");
-    }
+    return core.string.appendValueUtf8(rt, buffer, value);
 }
 
 pub fn formatFiniteNumber(buffer: []u8, value: f64) ![]const u8 {
     return core.value_format.formatFiniteNumber(buffer, value);
-}
-
-fn normalizeExponentSign(buffer: []u8, len: usize) []const u8 {
-    const text = buffer[0..len];
-    const exp_index = std.mem.indexOfScalar(u8, text, 'e') orelse return text;
-    if (exp_index + 1 >= text.len or text[exp_index + 1] == '-' or text[exp_index + 1] == '+') return text;
-    var tail_index = len;
-    while (tail_index > exp_index + 1) : (tail_index -= 1) {
-        buffer[tail_index] = buffer[tail_index - 1];
-    }
-    buffer[exp_index + 1] = '+';
-    return buffer[0 .. len + 1];
-}
-
-fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
-    return unicode_lib.appendUtf8CodePoint(rt.memory.allocator, buffer, cp);
-}
-
-fn appendUtf16AsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
-    return unicode_lib.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units);
 }
 
 fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
@@ -1167,14 +1066,6 @@ fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
     return core.string.String.createBalancedRopeOwned(rt, a, b);
 }
 
-fn concatFlatStringValues(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
-    const a_string = a.asStringBodyRaw() orelse return error.TypeError;
-    const b_string = b.asStringBodyRaw() orelse return error.TypeError;
-    a_string.retain();
-    b_string.retain();
-    return concatFlatStringBodiesOwned(rt, a_string, b_string);
-}
-
 fn concatFlatStringBodiesOwned(
     rt: *core.JSRuntime,
     a_string: *core.string.String,
@@ -1235,10 +1126,6 @@ pub fn tryAppendStringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.
     return appendRopeTailValue(rt, node, rhs, max_ref_count);
 }
 
-pub fn tryAppendLatin1StringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue, max_ref_count: usize) !bool {
-    return tryAppendStringInPlace(rt, lhs, rhs, max_ref_count);
-}
-
 /// Fused-accumulator helper for `s = s + x` (OP_add_loc). A FLAT `lhs` has no
 /// spare capacity to append into — qjs grows the accumulator in place using the
 /// allocator's malloc slack (`JS_ConcatStringInPlace`), but zjs's flat `String`
@@ -1258,36 +1145,6 @@ pub fn startAccumulatorRope(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JS
     if (core.string.stringValueLen(rhs) == 0) return null; // x + "" -> stringAddStrings returns x
     const rope = try core.string.String.createAccumulatorRope(rt, lhs, rhs);
     return rope.value();
-}
-
-pub fn tryAppendLatin1AtomRepeatedInPlace(rt: *core.JSRuntime, lhs: core.JSValue, atom_id: core.Atom, repeat_count: usize, max_ref_count: usize) !bool {
-    // Flat strings store their characters inline in a fixed-size allocation
-    // (QuickJS `JSString` FAM), so there is no spare capacity to extend into
-    // in place. Callers fall back to `latin1AtomRepeatedConcatValue`, which
-    // copies into a fresh string.
-    _ = rt;
-    _ = lhs;
-    _ = atom_id;
-    _ = repeat_count;
-    _ = max_ref_count;
-    return false;
-}
-
-pub fn latin1AtomRepeatedConcatValue(rt: *core.JSRuntime, lhs: core.JSValue, atom_id: core.Atom, repeat_count: usize) !?core.JSValue {
-    const lhs_string = stringObject(lhs) orelse return null;
-    try lhs_string.ensureFlat(rt);
-    const lhs_bytes = switch (lhs_string.resolveData()) {
-        .latin1 => |bytes| bytes,
-        .utf16 => return null,
-    };
-    if (rt.atoms.kind(atom_id) != .string) return null;
-    const suffix = rt.atoms.name(atom_id) orelse return null;
-    for (suffix) |byte| {
-        if (byte > 0x7f) return null;
-    }
-    if (suffix.len == 0 or repeat_count == 0) return lhs.dup();
-    const out = try core.string.String.createLatin1RepeatedConcatWithSeed(rt, lhs_bytes, suffix, repeat_count, 0);
-    return out.value();
 }
 
 fn percentHexConcat(rt: *core.JSRuntime, a: []const u8, b: []const u8) !?core.JSValue {
@@ -1310,25 +1167,6 @@ fn upperHexValue(byte: u8) ?u8 {
 
 fn stringObject(value: core.JSValue) ?*core.string.String {
     return value.asStringBody();
-}
-
-fn appendStringLatin1Units(rt: *core.JSRuntime, out: *std.ArrayList(u8), string: *const core.string.String) !void {
-    switch (string.resolveData()) {
-        .latin1 => |bytes| try out.appendSlice(rt.memory.allocator, bytes),
-        .utf16 => |units| try appendUtf16AsUtf8(rt, out, units),
-    }
-}
-
-fn stringLatin1IsAscii(string: *const core.string.String) bool {
-    switch (string.resolveData()) {
-        .latin1 => |bytes| {
-            for (bytes) |byte| {
-                if (byte > 0x7f) return false;
-            }
-            return true;
-        },
-        .utf16 => return false,
-    }
 }
 
 fn appendStringUtf16Units(rt: *core.JSRuntime, out: *std.ArrayList(u16), string: *const core.string.String) !void {
@@ -1363,16 +1201,6 @@ fn shiftBigInt(allocator: std.mem.Allocator, lhs: bignum.BigInt, rhs: bignum.Big
 
 fn parseJsNumber(bytes: []const u8) f64 {
     return core.value_format.parseJsNumber(bytes);
-}
-
-fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
-    var index: u32 = 0;
-    while (index < object.arrayLength()) : (index += 1) {
-        if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = try object.getProperty(core.atom.atomFromUInt32(index));
-        defer value.free(rt);
-        if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
-    }
 }
 
 fn valuesEqual(a: core.JSValue, b: core.JSValue) bool {
@@ -1439,37 +1267,6 @@ pub fn isHTMLDDA(value: core.JSValue) bool {
     return core.value_semantics.isHTMLDDA(value);
 }
 
-fn sameAbstractEqualityType(a: core.JSValue, b: core.JSValue) bool {
-    if (a.isNumber() and b.isNumber()) return true;
-    if (a.isBigInt() and b.isBigInt()) return true;
-    if (a.isString() and b.isString()) return true;
-    if (a.isBool() and b.isBool()) return true;
-    if (a.isSymbol() and b.isSymbol()) return true;
-    if (a.isObject() and b.isObject()) return true;
-    if (a.isFunctionBytecode() and b.isFunctionBytecode()) return true;
-    return a.tagOf() == b.tagOf();
-}
-
-fn numberLikeInt(value: core.JSValue) ?i32 {
-    if (value.asInt32()) |int_value| return int_value;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isString()) {
-        const string_value = value.asStringBody() orelse return null;
-        return switch (string_value.resolveData()) {
-            .latin1 => |bytes| parseIntString(bytes),
-            .utf16 => null,
-        };
-    }
-    return null;
-}
-
-fn parseIntString(bytes: []const u8) ?i32 {
-    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-    if (trimmed.len == 0) return 0;
-    return std.fmt.parseInt(i32, trimmed, 10) catch null;
-}
-
 fn compareStringValues(a: core.JSValue, b: core.JSValue, eq_only: bool) ?i32 {
     return core.string.compareStringValues(a, b, eq_only);
 }
@@ -1512,4 +1309,15 @@ pub fn valuesStrictEqual(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
         return std.mem.eql(u8, a_bytes.items, b_bytes.items);
     }
     return a.same(b);
+}
+
+/// Published under this name for exec callers; the implementation is
+/// `core.value_format.cloneBigIntValue`.
+pub fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
+    return core.value_format.cloneBigIntValue(rt.memory.allocator, value);
+}
+
+/// This file's policy for the shared bare-runtime ToString owner.
+pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
+    return core.value_string.appendValueString(rt, buffer, value, .{ .symbol = .describe });
 }

@@ -4,6 +4,7 @@ const internal = @import("internal_root.zig");
 
 pub const public_api = internal.public_api;
 pub const binding_root = internal.binding_root;
+pub const platform_clock = internal.platform_clock;
 pub const core = internal.core;
 pub const parser = internal.parser;
 pub const simple_token = internal.simple_token;

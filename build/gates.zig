@@ -99,6 +99,13 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     checkpoint_gate_step.dependOn(&run_architecture_oom_panics.step);
     checkpoint_gate_step.dependOn(&run_architecture_borrowed_atoms.step);
     checkpoint_gate_step.dependOn(&run_architecture_stage_source.step);
+    // The public-API surface snapshot. It used to fire only on the production
+    // gate, which is why four commits on 2026-08-20 grew `JSValue`'s public
+    // decl count past its pin and none of them noticed: `checkpoint-gate` is
+    // what a code-bearing change is actually handed off behind. The test is a
+    // Debug source-shape check, so it costs the gate nothing it was not
+    // already paying.
+    checkpoint_gate_step.dependOn(embedding_step);
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");
     engine_production_gate_step.dependOn(test_step);

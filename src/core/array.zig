@@ -135,18 +135,11 @@ pub fn constructLiteralWithPrototype(rt: *JSRuntime, values: []const JSValue, pr
     var root_slices = [_]runtime.ValueRootSlice{
         .{ .mutable = &values_root },
     };
-    const root_frame = runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = runtime.ValueRootFrame{
         .slices = &root_slices,
     };
-    if (comptime runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const object = try Object.createArray(rt, prototype);
     errdefer Object.destroyFromHeader(rt, &object.header);

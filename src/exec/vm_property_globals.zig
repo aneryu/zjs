@@ -3,9 +3,6 @@
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
-const method_ids = core.host_function.builtin_method_ids;
-const dtoa = @import("../libs/number_format.zig");
-const unicode_lib = @import("../libs/unicode.zig");
 const frame_mod = @import("frame.zig");
 const property_direct = @import("property_direct.zig");
 const property_ops = @import("property_ops.zig");
@@ -15,7 +12,6 @@ const value_ops = @import("value_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const builtin_glue = @import("builtin_glue.zig");
-const call_mod = @import("call.zig");
 const exception_ops = @import("exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
@@ -88,11 +84,6 @@ const setGlobalDataPropertyForFastPath = property_direct.setGlobalDataPropertyFo
 const setGlobalWritableDataStoreForFastPathOwned = property_direct.setGlobalWritableDataStoreForFastPathOwned;
 
 const op = bytecode.opcode.op;
-const atom_date = core.atom.predefinedId("Date", .string).?;
-const atom_number = core.atom.predefinedId("Number", .string).?;
-const atom_print = core.atom.predefinedId("print", .string).?;
-const atom_string = core.atom.predefinedId("String", .string).?;
-
 inline fn closureVarAt(function: *const bytecode.FunctionBytecode, idx: u16) ?bytecode.function_bytecode.BytecodeClosureVar {
     if (idx >= function.closureVar().len) return null;
     return function.closureVar()[idx];
@@ -267,67 +258,6 @@ pub noinline fn getVar(
     return .done;
 }
 
-fn decodeTypedArrayLengthPrintStore(code: []const u8, pc: usize) ?TypedArrayLengthPrintStore {
-    if (pc >= code.len) return null;
-    return switch (code[pc]) {
-        op.put_loc0 => .{ .local_index = 0, .next_pc = pc + 1 },
-        op.put_loc1 => .{ .local_index = 1, .next_pc = pc + 1 },
-        op.put_loc2 => .{ .local_index = 2, .next_pc = pc + 1 },
-        op.put_loc3 => .{ .local_index = 3, .next_pc = pc + 1 },
-        op.put_loc, op.put_loc_check, op.put_loc_check_init => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .local_index = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 };
-        },
-        op.put_loc8 => blk: {
-            if (pc + 2 > code.len) return null;
-            break :blk .{ .local_index = code[pc + 1], .next_pc = pc + 2 };
-        },
-        op.put_var_ref0 => .{ .local_index = 0, .next_pc = pc + 1 },
-        op.put_var_ref1 => .{ .local_index = 1, .next_pc = pc + 1 },
-        op.put_var_ref2 => .{ .local_index = 2, .next_pc = pc + 1 },
-        op.put_var_ref3 => .{ .local_index = 3, .next_pc = pc + 1 },
-        op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .local_index = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 };
-        },
-        else => null,
-    };
-}
-
-fn printHostOutputAtomLiteral(rt: *core.JSRuntime, output: ?*std.Io.Writer, atom_id: core.Atom) !void {
-    const writer = output orelse return;
-    if (core.atom.isTaggedInt(atom_id)) {
-        try writer.print("{d}\n", .{core.atom.atomToUInt32(atom_id)});
-        return;
-    }
-    try writer.writeAll(rt.atoms.name(atom_id) orelse "");
-    try writer.writeByte('\n');
-}
-
-fn globalDataOrAutoInitValueForReadFastPath(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    atom_id: core.Atom,
-) ?FastGlobalReadValue {
-    if (globalDataPropertyValueForFastPath(rt, global, function, site_pc, atom_id)) |value| {
-        return .{ .value = value, .owned = false };
-    }
-    if (global.hasExoticMethods()) return null;
-    for (global.shapeProps(), 0..) |prop, property_index| {
-        const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.isAccessor()) return null;
-        return switch (global.propKindAt(property_index)) {
-            .data => .{ .value = global.prop_values[property_index].slot.data, .owned = false },
-            .auto_init => .{ .value = try global.getProperty(atom_id), .owned = true },
-            .var_ref, .accessor => null,
-        };
-    }
-    return null;
-}
-
 fn useFastGlobalDataValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -355,119 +285,6 @@ fn useFastGlobalDataValue(
     return .done;
 }
 
-fn stringNumberConstArgAt(function: *const bytecode.FunctionBytecode, pc: usize) ?StringNumberConstArg {
-    const code = function.byteCode();
-    if (pc >= code.len) return null;
-    if (immediateInt32Operand(code, pc)) |immediate| {
-        if (immediate.next_pc >= code.len or code[immediate.next_pc] != op.call1) return null;
-        return .{ .value = core.JSValue.int32(immediate.value), .next_pc = immediate.next_pc + 1 };
-    }
-    const const_index: usize, const call_pc: usize = switch (code[pc]) {
-        op.push_const8 => blk: {
-            if (pc + 2 > code.len) return null;
-            break :blk .{ code[pc + 1], pc + 2 };
-        },
-        op.push_const => blk: {
-            if (pc + 5 > code.len) return null;
-            break :blk .{ readInt(u32, code[pc + 1 ..][0..4]), pc + 5 };
-        },
-        else => return null,
-    };
-    if (call_pc >= code.len or code[call_pc] != op.call1) return null;
-    if (const_index >= function.cpoolSlice().len) return null;
-    const input = function.cpoolSlice()[const_index];
-    if (input.asInt32() == null and input.asFloat64() == null) return null;
-    return .{ .value = input, .next_pc = call_pc + 1 };
-}
-
-fn printHostOutputStringifiedNumber(output: ?*std.Io.Writer, value: core.JSValue) !void {
-    const writer = output orelse return;
-    if (value.asInt32()) |int_value| {
-        var buffer: [32]u8 = undefined;
-        try writer.writeAll(dtoa.formatInt32(&buffer, int_value));
-        try writer.writeByte('\n');
-        return;
-    }
-    const float_value = value.asFloat64() orelse return;
-    if (std.math.isNan(float_value)) {
-        try writer.writeAll("NaN\n");
-        return;
-    }
-    if (std.math.isPositiveInf(float_value)) {
-        try writer.writeAll("Infinity\n");
-        return;
-    }
-    if (std.math.isNegativeInf(float_value)) {
-        try writer.writeAll("-Infinity\n");
-        return;
-    }
-    if (float_value == 0 and std.math.isNegativeInf(1.0 / float_value)) {
-        try writer.writeAll("0\n");
-        return;
-    }
-    var buffer: [64]u8 = undefined;
-    try writer.writeAll(try value_ops.formatFiniteNumber(&buffer, float_value));
-    try writer.writeByte('\n');
-}
-
-fn stringNumberConstCall1At(rt: *core.JSRuntime, function: *const bytecode.FunctionBytecode, pc: usize) ?StringNumberConstCall {
-    const code = function.byteCode();
-    if (pc >= code.len) return null;
-    if (immediateInt32Operand(code, pc)) |immediate| {
-        if (immediate.next_pc >= code.len or code[immediate.next_pc] != op.call1) return null;
-        const input = core.JSValue.int32(immediate.value);
-        const value = value_ops.toStringValue(rt, input) catch return null;
-        return .{ .value = value, .next_pc = immediate.next_pc + 1 };
-    }
-    const const_index: usize, const call_pc: usize = switch (code[pc]) {
-        op.push_const8 => blk: {
-            if (pc + 2 > code.len) return null;
-            break :blk .{ code[pc + 1], pc + 2 };
-        },
-        op.push_const => blk: {
-            if (pc + 5 > code.len) return null;
-            break :blk .{ readInt(u32, code[pc + 1 ..][0..4]), pc + 5 };
-        },
-        else => return null,
-    };
-    if (call_pc >= code.len or code[call_pc] != op.call1) return null;
-
-    const input = function.constantAt(const_index) orelse return null;
-    defer input.free(rt);
-    if (input.isObject() or input.isSymbol()) return null;
-    if (input.asInt32() == null and input.asFloat64() == null) return null;
-
-    const value = value_ops.toStringValue(rt, input) catch return null;
-    return .{ .value = value, .next_pc = call_pc + 1 };
-}
-
-fn isStringConstructorValue(value: core.JSValue) bool {
-    const object = objectFromValue(value) orelse return false;
-    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionId()) orelse return false;
-    return native_ref.domain == .string and native_ref.id == @intFromEnum(method_ids.string.ConstructorMethod.call);
-}
-
-fn nextOpIsPostUpdate(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame) bool {
-    if (frame.pc >= function.byteCode().len) return false;
-    return function.byteCode()[frame.pc] == op.post_inc or function.byteCode()[frame.pc] == op.post_dec;
-}
-
-fn fastGlobalDataValueForAtomAtPcNoProfile(
-    ctx: *core.JSContext,
-    function: *const bytecode.FunctionBytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    site_pc: usize,
-    atom_id: core.Atom,
-) ?core.JSValue {
-    if (!canUseFastGlobalVarLookup(function, atom_id, frame)) return null;
-    if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
-        lexical_value.free(ctx.runtime);
-        return null;
-    }
-    return globalDataPropertyValueForFastPathNoProfile(ctx.runtime, global, function, site_pc, atom_id);
-}
-
 fn nextOpCanStartGlobalUriCall1(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame) bool {
     if (frame.pc >= function.byteCode().len) return false;
     const code = function.byteCode();
@@ -477,82 +294,6 @@ fn nextOpCanStartGlobalUriCall1(function: *const bytecode.FunctionBytecode, fram
         op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3 => frame.pc + 1 <= code.len and code[frame.pc + 1] == op.call1,
         op.get_var, op.get_var_undef => frame.pc + 4 <= code.len and code[frame.pc + 3] == op.call1,
         else => false,
-    };
-}
-
-fn int32ImmediateCompare(lhs: i32, cmp_op: u8, rhs: i32) ?bool {
-    return switch (cmp_op) {
-        op.lt => lhs < rhs,
-        op.lte => lhs <= rhs,
-        op.gt => lhs > rhs,
-        op.gte => lhs >= rhs,
-        else => null,
-    };
-}
-
-fn tryFoldImmediateInt32At(code: []const u8, pc: *usize, current: *const i32) ?core.JSValue {
-    const immediate = immediateInt32Operand(code, pc.*) orelse return null;
-    if (immediate.next_pc >= code.len) return null;
-    const result = fastInt32ImmediateBinary(code[immediate.next_pc], current.*, immediate.value) orelse return null;
-    pc.* = immediate.next_pc + 1;
-    return result;
-}
-
-fn tryFoldFollowingImmediateInt32Term(code: []const u8, pc: *usize, current: *const i32) ?core.JSValue {
-    const rhs = immediateInt32Operand(code, pc.*) orelse return null;
-    var rhs_value = rhs.value;
-    var rhs_pc = rhs.next_pc;
-    while (tryFoldImmediateInt32At(code, &rhs_pc, &rhs_value)) |rhs_result| {
-        rhs_value = rhs_result.asInt32() orelse return null;
-    }
-    if (rhs_pc >= code.len) return null;
-    const result = fastInt32ImmediateBinary(code[rhs_pc], current.*, rhs_value) orelse return null;
-    pc.* = rhs_pc + 1;
-    return result;
-}
-
-fn tryFoldFollowingGlobalInt32Term(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    pc: *usize,
-    current: *const i32,
-) ?core.JSValue {
-    const get = decodeGlobalDataGet(function, pc.*) orelse return null;
-    const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc.*, get.atom) orelse return null;
-    var rhs_value = value.asInt32() orelse return null;
-    var rhs_pc = get.next_pc;
-    while (tryFoldImmediateInt32At(function.byteCode(), &rhs_pc, &rhs_value)) |rhs_result| {
-        rhs_value = rhs_result.asInt32() orelse return null;
-    }
-    if (rhs_pc >= function.byteCode().len) return null;
-    const result = fastInt32ImmediateBinary(function.byteCode()[rhs_pc], current.*, rhs_value) orelse return null;
-    pc.* = rhs_pc + 1;
-    return result;
-}
-
-fn expectOp(code: []const u8, pc: usize, expected: u8) ?usize {
-    if (pc >= code.len or code[pc] != expected) return null;
-    return pc + 1;
-}
-
-fn expectImmediateInt32(code: []const u8, pc: usize, expected: i32) ?usize {
-    const immediate = immediateInt32Operand(code, pc) orelse return null;
-    if (immediate.value != expected) return null;
-    return immediate.next_pc;
-}
-
-fn fastInt32ImmediateBinary(opcode_id: u8, lhs: i32, rhs: i32) ?core.JSValue {
-    return switch (opcode_id) {
-        op.add => checkedInt32Add(lhs, rhs),
-        op.sub => checkedInt32Sub(lhs, rhs),
-        op.mul => checkedInt32Mul(lhs, rhs),
-        op.sar => core.JSValue.int32(lhs >> @intCast(rhs & 31)),
-        op.@"and" => core.JSValue.int32(lhs & rhs),
-        op.@"or" => core.JSValue.int32(lhs | rhs),
-        op.xor => core.JSValue.int32(lhs ^ rhs),
-        else => null,
     };
 }
 
@@ -707,46 +448,6 @@ fn globalWritableDataWriteFastOwned(ctx: *core.JSContext, global: *core.Object, 
     return setGlobalWritableDataStoreForFastPathOwned(rt, ctx.lexicals, global, function, site_pc, atom_id, value);
 }
 
-fn numberStaticLiteralResultAt(
-    rt: *core.JSRuntime,
-    function: *const bytecode.FunctionBytecode,
-    native_id: u32,
-    pc: usize,
-) ?NumberStaticLiteralResult {
-    const code = function.byteCode();
-    const number_static = method_ids.number.StaticMethod;
-    const number_parse = core.number;
-    return switch (native_id) {
-        @intFromEnum(number_static.parse_int) => blk: {
-            if (pc + 5 > code.len or code[pc] != op.push_atom_value) return null;
-            const string_atom = readInt(u32, code[pc + 1 ..][0..4]);
-            var atom_buf: [10]u8 = undefined;
-            const text = atomAsciiText(rt, string_atom, &atom_buf) orelse return null;
-            const radix_operand = immediateInt32Operand(code, pc + 5) orelse return null;
-            if (radix_operand.next_pc + 3 > code.len or code[radix_operand.next_pc] != op.call_method) return null;
-            if (readInt(u16, code[radix_operand.next_pc + 1 ..][0..2]) != 2) return null;
-            break :blk .{
-                .number = number_parse.parseIntLatin1Bytes(text, radix_operand.value),
-                .next_pc = radix_operand.next_pc + 3,
-            };
-        },
-        @intFromEnum(number_static.parse_float) => blk: {
-            if (pc + 8 > code.len or code[pc] != op.push_atom_value) return null;
-            const string_atom = readInt(u32, code[pc + 1 ..][0..4]);
-            var atom_buf: [10]u8 = undefined;
-            const text = atomAsciiText(rt, string_atom, &atom_buf) orelse return null;
-            const call_pc = pc + 5;
-            if (code[call_pc] != op.call_method) return null;
-            if (readInt(u16, code[call_pc + 1 ..][0..2]) != 1) return null;
-            break :blk .{
-                .number = number_parse.parseFloatLatin1Bytes(text),
-                .next_pc = call_pc + 3,
-            };
-        },
-        else => null,
-    };
-}
-
 fn canUseFastGlobalVarWrite(
     ctx: *core.JSContext,
     function: *const bytecode.FunctionBytecode,
@@ -890,25 +591,6 @@ pub fn instantiateGlobalVarDeclarationCells(
             _ = try call_runtime.defineGlobalDeclVarCell(ctx, global, function, frame, ref_idx, cv.var_name, is_eval_code, globalDeclIsFunction(cv));
         }
     }
-}
-
-fn fastLengthValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
-    if (value.isString()) {
-        const string_value = value.asStringBody() orelse return error.TypeError;
-        return core.JSValue.int32(@intCast(string_value.len()));
-    }
-    const object = objectFromValue(value) orelse return error.TypeError;
-    if (object.proxyTarget() != null) return error.TypeError;
-    if (object.isArray()) {
-        if (object.arrayLength() <= @as(u32, @intCast(std.math.maxInt(i32)))) {
-            return core.JSValue.int32(@intCast(object.arrayLength()));
-        }
-        return core.JSValue.float64(@floatFromInt(object.arrayLength()));
-    }
-    if (core.object.isTypedArrayObject(object)) {
-        return core.JSValue.int32(@intCast(try core.object.typedArrayLength(rt, object)));
-    }
-    return error.TypeError;
 }
 
 pub noinline fn globalDefinition(

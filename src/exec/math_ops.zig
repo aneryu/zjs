@@ -4,6 +4,7 @@
 //! `internal_entries` directly from exec.
 
 const core = @import("../core/root.zig");
+const iterator_ops = @import("iterator_ops.zig");
 const std = @import("std");
 const bignum = @import("../libs/bigint.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -430,7 +431,7 @@ pub fn mathSumPrecise(
     caller_frame: ?*builtin_dispatch.Frame,
 ) HostError!core.JSValue {
     if (args.len < 1) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot read property 'Symbol.iterator' of undefined");
-    const iterator_value = try call_runtime.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
+    const iterator_value = try iterator_ops.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
 
     var finite_values = std.ArrayList(f64).empty;
@@ -442,11 +443,11 @@ pub fn mathSumPrecise(
     var saw_negative_zero = false;
 
     while (true) {
-        const step = try call_runtime.iteratorStepValue(ctx, output, global, iterator_value);
+        const step = try iterator_ops.iteratorStepValue(ctx, output, global, iterator_value);
         defer step.value.free(ctx.runtime);
         if (step.done) break;
         const number = value_ops.numberValue(step.value) orelse {
-            try call_runtime.iteratorCloseValue(ctx, output, global, iterator_value, caller_function, caller_frame);
+            try iterator_ops.iteratorCloseValue(ctx, output, global, iterator_value, caller_function, caller_frame);
             return exception_ops.throwTypeErrorMessage(ctx, global, "not a number");
         };
         if (std.math.isNan(number)) {

@@ -43,10 +43,6 @@ pub fn pushI8Operand(stack: *stack_mod.Stack, function: *const bytecode.Function
     try pushImmediateInt32MaybeFuse(stack, function, frame, value);
 }
 
-pub fn pushSmallInt(stack: *stack_mod.Stack, value: i32) !void {
-    try stack.pushOwned(core.JSValue.int32(value));
-}
-
 pub fn pushSmallIntMaybeFuse(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, value: i32) !void {
     try pushImmediateInt32MaybeFuse(stack, function, frame, value);
 }
@@ -249,7 +245,7 @@ pub noinline fn drop(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
             value.free(rt);
             return .value;
         }
-        const target = catchTargetFromMarker(value);
+        const target = value.catchTarget();
         return .{ .catch_target = target };
     }
     value.free(rt);
@@ -266,7 +262,7 @@ pub noinline fn nipCatch(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResu
                 (value.asCatchOffset() orelse -1) == 0)
                 .value
             else
-                .{ .catch_target = catchTargetFromMarker(value) };
+                .{ .catch_target = value.catchTarget() };
             value.free(rt);
             stack.pushOwned(ret_value) catch |err| {
                 ret_value.free(rt);
@@ -563,12 +559,6 @@ fn proxyTargetIsCallable(value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
     const target = object.proxyTarget() orelse return false;
     return target.isFunctionBytecode() or functionObjectFromValue(target) != null or callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
-}
-
-fn catchTargetFromMarker(marker: core.JSValue) ?usize {
-    const previous = marker.asCatchOffset() orelse -1;
-    if (previous < 0) return null;
-    return @intCast(previous);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

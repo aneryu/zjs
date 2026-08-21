@@ -7,16 +7,10 @@
 //! `src/exec/number_ops.zig`.
 
 const core = @import("root.zig");
-const bignum = @import("../libs/bigint.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 
-const AppendStringError = error{
-    OutOfMemory,
-    TypeError,
-    InvalidRadix,
-    NoSpaceLeft,
-} || core.context.DynamicImportError;
+const AppendStringError = core.value_string.AppendStringError;
 
 fn stringFromValue(value: core.JSValue) ?*core.string.String {
     return value.asStringBody();
@@ -187,100 +181,6 @@ fn parseSimpleDecimalFloat(text: []const u8) ?f64 {
     return signed;
 }
 
-fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
-    if (value.asInt32()) |int_value| {
-        var int_buf: [32]u8 = undefined;
-        const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
-        try buffer.appendSlice(rt.memory.allocator, printed);
-    } else if (value.asFloat64()) |float_value| {
-        if (std.math.isNan(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "NaN");
-        } else if (std.math.isPositiveInf(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "Infinity");
-        } else if (std.math.isNegativeInf(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "-Infinity");
-        } else if (std.math.isNegativeZero(float_value)) {
-            try buffer.append(rt.memory.allocator, '0');
-        } else {
-            var float_buf: [64]u8 = undefined;
-            const printed = try std.fmt.bufPrint(&float_buf, "{d}", .{float_value});
-            try buffer.appendSlice(rt.memory.allocator, printed);
-        }
-    } else if (value.isBigInt()) {
-        var big = try cloneBigIntValue(rt, value);
-        defer big.deinit();
-        const printed = try big.formatBase10Alloc(rt.memory.allocator);
-        defer rt.memory.allocator.free(printed);
-        try buffer.appendSlice(rt.memory.allocator, printed);
-    } else if (value.asBool()) |bool_value| {
-        try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
-    } else if (value.isUndefined()) {
-        try buffer.appendSlice(rt.memory.allocator, "undefined");
-    } else if (value.isNull()) {
-        try buffer.appendSlice(rt.memory.allocator, "null");
-    } else if (value.isString()) {
-        try appendRawString(rt, buffer, value);
-    } else if (value.isObject()) {
-        const header = value.refHeader() orelse return;
-        const object_value: *core.Object = @fieldParentPtr("header", header);
-        if (object_value.class_id == core.class.ids.string) {
-            const data = object_value.objectData() orelse return error.TypeError;
-            try appendValueString(rt, buffer, data);
-        } else if (object_value.class_id == core.class.ids.number or object_value.class_id == core.class.ids.boolean or
-            object_value.class_id == core.class.ids.big_int or object_value.class_id == core.class.ids.symbol)
-        {
-            const primitive = (object_value.objectData() orelse return error.TypeError).dup();
-            defer primitive.free(rt);
-            try appendValueString(rt, buffer, primitive);
-        } else if (object_value.class_id == core.class.ids.array_buffer) {
-            try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
-        } else if (object_value.class_id == core.class.ids.promise) {
-            try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.isArray()) {
-            try appendArrayString(rt, buffer, object_value);
-        } else {
-            try buffer.appendSlice(rt.memory.allocator, "[object Object]");
-        }
-    } else {
-        try buffer.appendSlice(rt.memory.allocator, "[object Object]");
-    }
-}
-
-fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    // Width-aware UTF-8 like exec.value_ops.appendRawString (qjs
-    // JS_ToCStringLen2, quickjs.c:4458); the ToNumber trimmer consumes the
-    // buffer as UTF-8, so latin1 0x80-0xFF must widen rather than land raw.
-    const string_value = value.asStringBody() orelse return;
-    try string_value.ensureFlat(rt);
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| {
-            if (core.string.isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
-            for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);
-        },
-        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
-    }
-}
-
-fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
-    var index: u32 = 0;
-    while (index < object.arrayLength()) : (index += 1) {
-        if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = try object.getProperty(core.atom.atomFromUInt32(index));
-        defer value.free(rt);
-        if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
-    }
-}
-
-fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
-    if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
-    if (value.isBigInt() and value.refHeader() != null) {
-        const header = value.refHeader().?;
-        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return big.borrowedValue(rt.memory.allocator).cloneWithAllocator(rt.memory.allocator);
-    }
-    return error.TypeError;
-}
-
 pub fn numberValue(value: core.JSValue) ?f64 {
     if (value.asInt32()) |v| return @floatFromInt(v);
     if (value.asFloat64()) |v| return v;
@@ -334,6 +234,7 @@ fn trimLeadingJsWhitespace(source: []const u8) []const u8 {
     return source[index..];
 }
 
-fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
-    return unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, cp);
+/// This file's policy for the shared bare-runtime ToString owner.
+fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
+    return core.value_string.appendValueString(rt, buffer, value, .{ .unwrap_wrappers = true });
 }

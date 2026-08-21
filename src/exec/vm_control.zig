@@ -244,12 +244,6 @@ fn relativePc(operand_pc: usize, diff: anytype) usize {
     return @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
 }
 
-fn catchTargetFromMarker(marker: core.JSValue) ?usize {
-    const previous = marker.asCatchOffset() orelse -1;
-    if (previous < 0) return null;
-    return @intCast(previous);
-}
-
 fn adapterValueDup(slot: core.JSValue) core.JSValue {
     return adapterValueBorrow(slot).dup();
 }

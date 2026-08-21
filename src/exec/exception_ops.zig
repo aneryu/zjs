@@ -26,38 +26,15 @@ pub fn createNamedError(ctx: *core.JSContext, global: *core.Object, name: []cons
     return error_value;
 }
 
-/// `createNamedError` for a directly supplied constructor value (used for
-/// realm-specific intrinsic constructors); also captures `.stack` at
-/// construction. `global` only drives the stack capture policy
-/// (`Error.stackTraceLimit` and the CallSite array prototype).
-pub fn createNamedErrorWithConstructor(ctx: *core.JSContext, global: *core.Object, ctor_value: core.JSValue, name: []const u8, message: []const u8) !core.JSValue {
-    const error_value = try buildNamedErrorObject(ctx.runtime, ctor_value, name, message);
-    errdefer error_value.free(ctx.runtime);
-    try error_stack_ops.attachStackToErrorValue(ctx, global, error_value);
-    return error_value;
-}
-
 /// Construct a named error directly on a realm-owned native-error prototype.
 /// This is the QuickJS `ctx->native_error_proto[]` path: mutable constructor
 /// bindings and receiver objects do not participate in Realm selection.
 pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object, prototype: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
     var rooted_prototype = prototype.value().dup();
     defer rooted_prototype.free(ctx.runtime);
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_prototype },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_prototype});
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const rooted_object = property_ops.expectObject(rooted_prototype) catch return error.InvalidBuiltinRegistry;
     const object = try core.Object.create(ctx.runtime, core.class.ids.error_, rooted_object);
@@ -106,21 +83,9 @@ pub fn createPreallocatedOutOfMemoryError(rt: *core.JSRuntime, global: *core.Obj
 
 fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []const u8, message: []const u8) !core.JSValue {
     var rooted_ctor_value = ctor_value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_ctor_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_ctor_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, core.class.ids.error_, null);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -457,16 +422,6 @@ pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, curr
     return ctx.runtime.atoms.internString(bytes.items);
 }
 
-/// Resolve the display name of a backtrace frame, caching the result in
-/// place. Frames pushed with a lazy function value defer the `name` property
-/// read and atom interning to the first materialization, keeping the per-call
-/// hot path free of property lookups and interning.
-/// Returns a borrowed atom valid while the frame entry is alive.
-pub fn resolvedBacktraceFunctionNameAt(ctx: *core.JSContext, index: usize) core.Atom {
-    const frame = &ctx.runtime.backtrace_frames[index];
-    return resolveBacktraceFunctionName(ctx, frame);
-}
-
 pub fn resolveBacktraceFunctionName(ctx: *core.JSContext, frame: *core.BacktraceFrame) core.Atom {
     const function_value = frame.function_value;
     if (function_value.isUndefined()) return frame.function_name;
@@ -668,12 +623,6 @@ fn sourceLocationFromPc2Line(function: *const bytecode.FunctionBytecode, target_
 }
 
 const objectFromValue = core.value_semantics.objectFromValue;
-
-fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
-}
 
 /// JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE (non-enumerable) data property —
 /// the attribute set qjs uses for every own property it defines on error

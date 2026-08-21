@@ -165,22 +165,9 @@ pub fn createAsyncFromSyncIterator(
     var rooted_sync_iterator = sync_iterator;
     var rooted_next_method = core.JSValue.undefinedValue();
     var owns_next_method = false;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_sync_iterator },
-        .{ .value = &rooted_next_method },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_sync_iterator, &rooted_next_method });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     rooted_next_method = try iteratorNextMethod(ctx, output, global, rooted_sync_iterator, function, frame, getValueProperty);
     owns_next_method = true;
@@ -1026,21 +1013,9 @@ fn forInPrepareProtoChainEnum(
     // "check if there are enumerable properties in the prototype chain (fast
     // path)" (quickjs.c:16353-16377): walk the chain with the ENUM_ONLY probe.
     var obj1_val = try object_ops.objectGetPrototypeOfValue(ctx, output, global, root, null, null);
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &obj1_val },
-    };
-    const value_root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &value_root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = value_root_frame.previous;
-        }
-    }
+    var value_root_frame = core.runtime.rootValues(.{&obj1_val});
+    value_root_frame.activate(rt);
+    defer value_root_frame.deactivate(rt);
     defer obj1_val.free(rt);
 
     var has_enumerable = false;
@@ -1188,21 +1163,9 @@ pub fn arrayIteratorMethod(
     var rooted_object = if (receiver.isObject()) receiver.dup() else try object_ops.primitiveObjectForAccess(ctx.runtime, global, receiver);
     errdefer rooted_object.free(ctx.runtime);
 
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_object },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_object});
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const object = try property_ops.expectObject(rooted_object);
     if (array_ops.isTypedArrayPrototypeMethod(ctx.runtime, function_object)) {
@@ -1228,7 +1191,7 @@ pub fn arrayIteratorNext(
 ) !?core.JSValue {
     const iterator = property_ops.expectObject(receiver) catch return error.TypeError;
     if (iterator.class_id != core.class.ids.array_iterator) return error.TypeError;
-    const target_value = (iterator.iteratorTargetSlot().*) orelse return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+    const target_value = (iterator.iteratorTargetSlot().*) orelse return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     const target = property_ops.expectObject(target_value) catch return error.TypeError;
     const length = if (core.object.isTypedArrayObject(target)) blk: {
         if (try core.object.typedArrayDetached(target)) return error.TypeError;
@@ -1240,7 +1203,7 @@ pub fn arrayIteratorNext(
         break :blk @min(try coercion_ops.toLengthIndex(ctx, output, global, length_value), std.math.maxInt(u32));
     };
     if ((iterator.iteratorIndexSlot().*) >= length) {
-        const done_result = try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+        const done_result = try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
         iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
         return done_result;
     }
@@ -1248,7 +1211,7 @@ pub fn arrayIteratorNext(
     iterator.iteratorIndexSlot().* += 1;
     const value = try arrayIteratorValue(ctx, output, global, target, index, (iterator.iteratorKindSlot().*), object_ops.getValueProperty);
     defer value.free(ctx.runtime);
-    return try call_runtime.createIteratorResult(ctx.runtime, global, value, false);
+    return try createIteratorResult(ctx.runtime, global, value, false);
 }
 
 pub fn arrayIteratorValue(
@@ -1269,22 +1232,9 @@ pub fn arrayIteratorValue(
         3 => blk: {
             var pair_value = core.JSValue.undefinedValue();
             var value = core.JSValue.undefinedValue();
-            var root_values = [_]core.runtime.ValueRootValue{
-                .{ .value = &pair_value },
-                .{ .value = &value },
-            };
-            const root_frame = core.runtime.ValueRootFrame{
-                .previous = ctx.runtime.active_value_roots,
-                .values = &root_values,
-            };
-            if (comptime core.runtime.value_root_frames_enabled) {
-                ctx.runtime.active_value_roots = &root_frame;
-            }
-            defer {
-                if (comptime core.runtime.value_root_frames_enabled) {
-                    ctx.runtime.active_value_roots = root_frame.previous;
-                }
-            }
+            var root_frame = core.runtime.rootValues(.{ &pair_value, &value });
+            root_frame.activate(ctx.runtime);
+            defer root_frame.deactivate(ctx.runtime);
             defer value.free(ctx.runtime);
 
             const pair = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
@@ -1362,8 +1312,26 @@ test "arrayIteratorValue roots entry value while creating pair array" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
+/// The realm's %IteratorPrototype%.
+///
+/// Cache first, exactly as `object_ops.objectPrototypeFromGlobal` does for
+/// %Object.prototype%: this is an intrinsic fixed at realm construction, not
+/// the current value of the writable `Iterator` global. Resolving it by
+/// walking `globalThis.Iterator.prototype` meant that
+/// `globalThis.Iterator = polyfill` — what every Iterator-Helpers shim does,
+/// before application code runs — detached every lazily-built builtin
+/// iterator prototype from it.
+///
+/// The global walk survives as the fallback for the bare-runtime tiers, which
+/// have no realm cache to seed.
 pub fn iteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
-    _ = rt;
+    // The realm registers `Iterator` as a standard constructor, so its
+    // prototype is already in the realm's class-prototype table. Reading it
+    // there costs no new state — an extra `cached_values` slot would have
+    // grown JSContext and shifted every field after it.
+    if (rt.contextForGlobalIncludingConstructing(global)) |realm| {
+        if (realm.classPrototypeObject(core.class.ids.iterator)) |proto| return proto;
+    }
     const iterator_key = core.atom.predefinedId("Iterator", .string) orelse return null;
     const iterator = global.getOwnDataObjectBorrowed(iterator_key) orelse return null;
     return iterator.getOwnDataObjectBorrowed(core.atom.ids.prototype);
@@ -1470,7 +1438,7 @@ pub fn iteratorFromCall(
     if (source.isNull() or source.isUndefined()) return error.TypeError;
     if (!source.isString() and (property_ops.expectObject(source) catch null) == null) return error.TypeError;
 
-    const result = try call_runtime.iteratorFromSourceForIteratorFrom(ctx, output, global, source, caller_function, caller_frame);
+    const result = try iteratorFromSourceForIteratorFrom(ctx, output, global, source, caller_function, caller_frame);
     if (!result.wrap) {
         if (result.next_method) |next_method| next_method.free(ctx.runtime);
         return result.iterator;
@@ -1555,42 +1523,17 @@ pub fn iteratorConcatCall(
     errdefer core.Object.destroyFromHeader(ctx.runtime, &records.header);
 
     var rooted_records = records.value();
-    var records_root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_records },
-    };
-    const records_root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &records_root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &records_root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = records_root_frame.previous;
-        }
-    }
+    var records_root_frame = core.runtime.rootValues(.{&rooted_records});
+    records_root_frame.activate(ctx.runtime);
+    defer records_root_frame.deactivate(ctx.runtime);
 
     for (args, 0..) |item, index| {
         var rooted_item = item;
         var rooted_iterator_method = core.JSValue.undefinedValue();
         var owns_iterator_method = false;
-        var loop_root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &rooted_item },
-            .{ .value = &rooted_iterator_method },
-        };
-        const loop_root_frame = core.runtime.ValueRootFrame{
-            .previous = ctx.runtime.active_value_roots,
-            .values = &loop_root_values,
-        };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = &loop_root_frame;
-        }
-        defer {
-            if (comptime core.runtime.value_root_frames_enabled) {
-                ctx.runtime.active_value_roots = loop_root_frame.previous;
-            }
-        }
+        var loop_root_frame = core.runtime.rootValues(.{ &rooted_item, &rooted_iterator_method });
+        loop_root_frame.activate(ctx.runtime);
+        defer loop_root_frame.deactivate(ctx.runtime);
 
         _ = property_ops.expectObject(rooted_item) catch return error.TypeError;
         rooted_iterator_method = try getIteratorMethod(ctx, output, global, rooted_item);
@@ -1789,19 +1732,12 @@ pub fn iteratorZipCall(
     var root_slices = [_]core.runtime.ValueRootSlice{
         rooted_args_buffer.slice(),
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     if (rooted_args.len < 1) return error.TypeError;
     const iterables = rooted_args[0];
@@ -1845,7 +1781,7 @@ pub fn iteratorZipCall(
     };
 
     const count = if (!keyed) blk: {
-        var iterables_iterator = call_runtime.iteratorForValue(ctx, output, global, iterables, caller_function, caller_frame) catch |err| return err;
+        var iterables_iterator = iteratorForValue(ctx, output, global, iterables, caller_function, caller_frame) catch |err| return err;
         defer if (!iterables_iterator.isUndefined()) iterables_iterator.free(rt);
         const iterables_next = try iteratorZipNextMethod(ctx, output, global, iterables_iterator, caller_function, caller_frame);
         defer iterables_next.free(rt);
@@ -1949,7 +1885,7 @@ pub fn iteratorZipCollectIndexed(
 
     if (mode == .longest) {
         if (!padding.isUndefined() and !padding.isNull()) {
-            var padding_iterator = call_runtime.iteratorForValue(ctx, output, global, padding, caller_function, caller_frame) catch |err| {
+            var padding_iterator = iteratorForValue(ctx, output, global, padding, caller_function, caller_frame) catch |err| {
                 return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
             };
             defer if (!padding_iterator.isUndefined()) padding_iterator.free(ctx.runtime);
@@ -2146,18 +2082,11 @@ pub fn iteratorZipCreateHelper(
         .{ .value = &pads_value },
         .{ .value = &keys_value },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const prototype = try iteratorHelperPrototype(rt, global);
     const helper = try core.Object.create(rt, core.class.ids.iterator_helper, prototype);
@@ -2185,21 +2114,9 @@ pub fn iteratorZipCreateHelper(
 
 pub fn iteratorZipStoreIndex(rt: *core.JSRuntime, object: *core.Object, index: usize, value: core.JSValue) !void {
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(index)), core.Descriptor.data(rooted_value, true, true, true));
 }
@@ -2280,21 +2197,9 @@ pub fn iteratorZipGetIndex(object: *core.Object, index: usize) core.JSValue {
 
 pub fn iteratorZipSetIndex(rt: *core.JSRuntime, object: *core.Object, index: usize, value: core.JSValue) !void {
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     try object.setProperty(rt, core.atom.atomFromUInt32(@intCast(index)), rooted_value);
 }
@@ -2413,7 +2318,7 @@ pub const IteratorHelperKind = enum(u8) {
     zip_keyed = 8,
 };
 
-fn iteratorCloseWithCompletionAndPropagate(
+pub fn iteratorCloseWithCompletionAndPropagate(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2798,23 +2703,13 @@ fn iteratorCreateHelper(
     var rooted_callback = callback;
     var rooted_next_method = core.JSValue.undefinedValue();
     var owns_next_method = false;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_receiver },
-        .{ .value = &rooted_callback },
-        .{ .value = &rooted_next_method },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &rooted_receiver,
+        &rooted_callback,
+        &rooted_next_method,
+    });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const iterator = objectFromValue(rooted_receiver) orelse return error.TypeError;
     const next_key = try ctx.runtime.internAtom("next");
@@ -2963,11 +2858,11 @@ fn iteratorZipHelperNext(
     switch (state) {
         0, 1 => helper.iteratorZipStateSlot().* = 2,
         2 => return error.TypeError,
-        3 => return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true),
+        3 => return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true),
         else => return error.TypeError,
     }
 
-    const iterator_value = (helper.iteratorTargetSlot().*) orelse return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+    const iterator_value = (helper.iteratorTargetSlot().*) orelse return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     const iters = objectFromValue(iterator_value) orelse return error.TypeError;
     const nexts_value = helper.iteratorZipNexts() orelse return error.TypeError;
     const nexts = objectFromValue(nexts_value) orelse return error.TypeError;
@@ -3046,13 +2941,13 @@ fn iteratorZipHelperNext(
                     completion.restore(ctx);
                     return err;
                 }
-                return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+                return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             },
             .longest => {
                 if (alive < 1) {
                     try iteratorHelperClear(ctx.runtime, helper);
                     helper.iteratorZipStateSlot().* = 3;
-                    return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+                    return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
                 const pad = iteratorZipGetIndex(pads, index);
                 defer pad.free(ctx.runtime);
@@ -3069,12 +2964,12 @@ fn iteratorZipHelperNext(
     if (values == 0) {
         try iteratorHelperClear(ctx.runtime, helper);
         helper.iteratorZipStateSlot().* = 3;
-        return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+        return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
 
     if (keys == null) results.setArrayLength(@intCast(count));
     helper.iteratorZipStateSlot().* = 1;
-    return try call_runtime.createIteratorResult(ctx.runtime, global, results_value, false);
+    return try createIteratorResult(ctx.runtime, global, results_value, false);
 }
 
 fn iteratorZipHelperReturn(
@@ -3090,7 +2985,7 @@ fn iteratorZipHelperReturn(
         0 => helper.iteratorZipStateSlot().* = 3,
         1 => helper.iteratorZipStateSlot().* = 2,
         2 => return error.TypeError,
-        3 => return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true),
+        3 => return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true),
         else => return error.TypeError,
     }
 
@@ -3105,11 +3000,11 @@ fn iteratorZipHelperReturn(
             completion.restore(ctx);
             return err;
         }
-        return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+        return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
     try iteratorHelperClear(ctx.runtime, helper);
     helper.iteratorZipStateSlot().* = 3;
-    return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+    return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
 }
 
 pub fn iteratorHelperNext(
@@ -3127,7 +3022,7 @@ pub fn iteratorHelperNext(
     if (helper.generatorExecuting()) return error.TypeError;
     helper.generatorExecutingSlot().* = true;
     defer helper.generatorExecutingSlot().* = false;
-    const iterator = (helper.iteratorTargetSlot().*) orelse return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+    const iterator = (helper.iteratorTargetSlot().*) orelse return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     const kind: IteratorHelperKind = @enumFromInt((helper.iteratorKindSlot().*));
 
     switch (kind) {
@@ -3138,14 +3033,14 @@ pub fn iteratorHelperNext(
                     const inner_next = helper.iteratorInnerNext() orelse return error.TypeError;
                     const inner_step = try iteratorStepWithSyncValues(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame);
                     defer inner_step.value.free(ctx.runtime);
-                    if (!inner_step.done) return try call_runtime.createIteratorResult(ctx.runtime, global, inner_step.value, false);
+                    if (!inner_step.done) return try createIteratorResult(ctx.runtime, global, inner_step.value, false);
                     try iteratorHelperClearInner(ctx.runtime, helper);
                 }
 
                 const records = objectFromValue(iterator) orelse return error.TypeError;
                 if ((helper.iteratorIndexSlot().*) >= records.arrayLength() / 2) {
                     try iteratorHelperClear(ctx.runtime, helper);
-                    return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+                    return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
                 const item_index: u32 = @intCast((helper.iteratorIndexSlot().*) * 2);
                 helper.iteratorIndexSlot().* += 1;
@@ -3163,16 +3058,16 @@ pub fn iteratorHelperNext(
             var next_call = SyncInternalCallSite.init(ctx, output, global, iterator, next_method, caller_function, caller_frame);
             if ((helper.iteratorIndexSlot().*) == 0) {
                 try iteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame);
-                return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+                return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             }
             helper.iteratorIndexSlot().* -= 1;
             const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
             defer step.value.free(ctx.runtime);
             if (step.done) {
                 try iteratorHelperClear(ctx.runtime, helper);
-                return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+                return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             }
-            return try call_runtime.createIteratorResult(ctx.runtime, global, step.value, false);
+            return try createIteratorResult(ctx.runtime, global, step.value, false);
         },
         .drop => {
             const next_method = helper.iteratorNext() orelse return error.TypeError;
@@ -3182,16 +3077,16 @@ pub fn iteratorHelperNext(
                 defer skipped.value.free(ctx.runtime);
                 if (skipped.done) {
                     try iteratorHelperClear(ctx.runtime, helper);
-                    return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+                    return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
             }
             const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
             defer step.value.free(ctx.runtime);
             if (step.done) {
                 try iteratorHelperClear(ctx.runtime, helper);
-                return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+                return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             }
-            return try call_runtime.createIteratorResult(ctx.runtime, global, step.value, false);
+            return try createIteratorResult(ctx.runtime, global, step.value, false);
         },
         .map, .filter, .flatMap => {
             const next_method = helper.iteratorNext() orelse return error.TypeError;
@@ -3212,7 +3107,7 @@ pub fn iteratorHelperNext(
                         const inner_next = helper.iteratorInnerNext() orelse return error.TypeError;
                         const inner_step = try iteratorStepWithSyncValues(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame);
                         defer inner_step.value.free(ctx.runtime);
-                        if (!inner_step.done) return try call_runtime.createIteratorResult(ctx.runtime, global, inner_step.value, false);
+                        if (!inner_step.done) return try createIteratorResult(ctx.runtime, global, inner_step.value, false);
                         try iteratorHelperClearInner(ctx.runtime, helper);
                     }
                 }
@@ -3220,7 +3115,7 @@ pub fn iteratorHelperNext(
                 defer step.value.free(ctx.runtime);
                 if (step.done) {
                     try iteratorHelperClear(ctx.runtime, helper);
-                    return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+                    return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
                 const index = (helper.iteratorIndexSlot().*);
                 helper.iteratorIndexSlot().* += 1;
@@ -3228,12 +3123,12 @@ pub fn iteratorHelperNext(
                     return iteratorHelperCloseWithCompletionAndPropagate(ctx, output, global, helper, err, caller_function, caller_frame);
                 };
                 defer mapped.free(ctx.runtime);
-                if (kind == .map) return try call_runtime.createIteratorResult(ctx.runtime, global, mapped, false);
+                if (kind == .map) return try createIteratorResult(ctx.runtime, global, mapped, false);
                 if (kind == .flatMap) {
                     try iteratorHelperSetInner(ctx, output, global, helper, mapped, caller_function, caller_frame);
                     continue;
                 }
-                if (coercion_ops.valueTruthy(mapped)) return try call_runtime.createIteratorResult(ctx.runtime, global, step.value, false);
+                if (coercion_ops.valueTruthy(mapped)) return try createIteratorResult(ctx.runtime, global, step.value, false);
             }
         },
     }
@@ -3314,7 +3209,7 @@ pub fn iteratorHelperReturn(
     helper.generatorExecutingSlot().* = true;
     defer helper.generatorExecutingSlot().* = false;
     try iteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame);
-    return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+    return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
 }
 
 fn iteratorHelperClose(
@@ -3331,7 +3226,7 @@ fn iteratorHelperClose(
         return;
     }
     const iterator = (helper.iteratorTargetSlot().*) orelse return;
-    call_runtime.iteratorCloseValue(ctx, output, global, iterator, caller_function, caller_frame) catch |err| {
+    iteratorCloseValue(ctx, output, global, iterator, caller_function, caller_frame) catch |err| {
         try iteratorHelperClear(ctx.runtime, helper);
         return err;
     };
@@ -3357,7 +3252,7 @@ fn iteratorHelperCloseInner(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const inner_iterator = helper.iteratorData() orelse return;
-    call_runtime.iteratorCloseValue(ctx, output, global, inner_iterator, caller_function, caller_frame) catch |err| {
+    iteratorCloseValue(ctx, output, global, inner_iterator, caller_function, caller_frame) catch |err| {
         try iteratorHelperClearInner(ctx.runtime, helper);
         return err;
     };
@@ -3385,4 +3280,328 @@ fn testIteratorGetValuePropertyOptional(
     _ = caller_frame;
     const object = property_ops.expectObject(value) catch return error.TypeError;
     return try object.getProperty(key);
+}
+
+pub fn iteratorCloseValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    iterator_value: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const return_key = try ctx.runtime.internAtom("return");
+    defer ctx.runtime.atoms.free(return_key);
+    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, caller_function, caller_frame);
+    defer return_method.free(ctx.runtime);
+    if (return_method.isUndefined() or return_method.isNull()) return;
+    if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
+    const result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, caller_function, caller_frame);
+    result.free(ctx.runtime);
+}
+
+pub fn iteratorForValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    source_value: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (source_value.isString()) return core.object.stringIterator(ctx, source_value);
+    const source_object = property_ops.expectObject(source_value) catch null;
+    if (source_object != null and source_object.?.class_id == core.class.ids.string) return core.object.stringIterator(ctx, source_value);
+    if (source_object != null and
+        (source_object.?.class_id == core.class.ids.array_iterator or
+            source_object.?.class_id == core.class.ids.string_iterator or
+            source_object.?.class_id == core.class.ids.generator or
+            source_object.?.class_id == core.class.ids.async_generator))
+    {
+        return source_value.dup();
+    }
+    const iterator_method = try call_runtime.getIteratorMethod(ctx, output, global, source_value);
+    defer iterator_method.free(ctx.runtime);
+    if (!call_runtime.isCallableValue(iterator_method)) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
+    const iterator_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, caller_function, caller_frame);
+    errdefer iterator_value.free(ctx.runtime);
+    _ = property_ops.expectObject(iterator_value) catch return error.TypeError;
+    try call_runtime.cacheIteratorNextMethod(ctx, output, global, iterator_value);
+    return iterator_value;
+}
+
+pub const IteratorStepResult = struct {
+    result: core.JSValue,
+    value: core.JSValue,
+    done: bool,
+};
+
+pub const IteratorValueDone = struct {
+    value: core.JSValue,
+    done: bool,
+};
+
+pub fn iteratorStepValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    iterator_value: core.JSValue,
+) !IteratorValueDone {
+    const iterator = try property_ops.expectObject(iterator_value);
+    const next_method = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored.dup() else blk: {
+        const next_key = try ctx.runtime.internAtom("next");
+        defer ctx.runtime.atoms.free(next_key);
+        break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
+    };
+    defer next_method.free(ctx.runtime);
+    if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
+    const next_result_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, null, null);
+    defer next_result_value.free(ctx.runtime);
+    // IteratorStep (ES 7.4.6) reads `done` and `value` off whatever object
+    // `next()` returned. There is no class-based dispatch here: a Promise is
+    // an ordinary object to the SYNCHRONOUS protocol (unwrapping one would
+    // observe its internal state outside the job queue), and a RegExp is too.
+    const next_result = property_ops.expectObject(next_result_value) catch return error.TypeError;
+    const done_key = core.atom.predefinedId("done", .string).?;
+    const done = try object_ops.getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
+    defer done.free(ctx.runtime);
+    if (value_ops.isTruthy(done)) return .{ .value = core.JSValue.undefinedValue(), .done = true };
+    const value_key = core.atom.predefinedId("value", .string).?;
+    return .{ .value = try object_ops.getValueProperty(ctx, output, global, next_result.value(), value_key, null, null), .done = false };
+}
+
+pub fn iteratorStepResult(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    iterator_value: core.JSValue,
+    next_arg: core.JSValue,
+) !IteratorStepResult {
+    const iterator = try property_ops.expectObject(iterator_value);
+    const next_method = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored.dup() else blk: {
+        const next_key = try ctx.runtime.internAtom("next");
+        defer ctx.runtime.atoms.free(next_key);
+        break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
+    };
+    defer next_method.free(ctx.runtime);
+    if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
+    const next_result_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{next_arg}, null, null);
+    errdefer next_result_value.free(ctx.runtime);
+    const next_result = property_ops.expectObject(next_result_value) catch return error.TypeError;
+    const done_key = core.atom.predefinedId("done", .string).?;
+    const done = try object_ops.getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
+    defer done.free(ctx.runtime);
+    const is_done = coercion_ops.valueTruthy(done);
+    const value = if (is_done) blk: {
+        const value_key = core.atom.predefinedId("value", .string).?;
+        break :blk try object_ops.getValueProperty(ctx, output, global, next_result.value(), value_key, null, null);
+    } else core.JSValue.undefinedValue();
+    errdefer value.free(ctx.runtime);
+    return .{ .result = next_result_value, .value = value, .done = is_done };
+}
+
+pub fn iteratorCallForNativeRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    const IntrinsicMethod = method_ids.iterator.IntrinsicMethod;
+    switch (id) {
+        @intFromEnum(IntrinsicMethod.array_iterator_next) => return try arrayIteratorNext(ctx, output, global, receiver),
+        @intFromEnum(IntrinsicMethod.generator_next) => return (try call_runtime.generatorNext(ctx, output, global, receiver, args)) orelse error.TypeError,
+        @intFromEnum(IntrinsicMethod.generator_return) => return (try call_runtime.generatorReturn(ctx, output, global, receiver, args)) orelse error.TypeError,
+        @intFromEnum(IntrinsicMethod.generator_throw) => return (try call_runtime.generatorThrow(ctx, output, global, receiver, args)) orelse error.TypeError,
+        else => {},
+    }
+    switch (id) {
+        @intFromEnum(method_ids.iterator.AccessorMethod.constructor_getter),
+        @intFromEnum(method_ids.iterator.AccessorMethod.constructor_setter),
+        @intFromEnum(method_ids.iterator.AccessorMethod.to_string_tag_getter),
+        @intFromEnum(method_ids.iterator.AccessorMethod.to_string_tag_setter),
+        => return @as(?core.JSValue, try object_ops.iteratorPrototypeAccessor(ctx, global, receiver, args, id)),
+        else => {},
+    }
+    if (try iteratorStaticCall(ctx, output, global, args, id, caller_function, caller_frame)) |value| return value;
+    return object_ops.iteratorPrototypeMethodCall(ctx, output, global, receiver, args, id, caller_function, caller_frame);
+}
+
+pub fn iteratorStaticCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    method_id: u32,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    return switch (method_id) {
+        @intFromEnum(method_ids.iterator.StaticMethod.from) => try iteratorFromCall(ctx, output, global, args, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.StaticMethod.concat) => try string_ops.iteratorConcatCall(ctx, output, global, args),
+        @intFromEnum(method_ids.iterator.StaticMethod.zip) => try iteratorZipCall(ctx, output, global, args, false, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.StaticMethod.zip_keyed) => try iteratorZipCall(ctx, output, global, args, true, caller_function, caller_frame),
+        else => null,
+    };
+}
+
+pub fn iteratorFromSourceForIteratorFrom(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    source: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !IteratorFromResult {
+    // Iterator.from is two steps, in this order (ES Iterator.from):
+    //   1. GetIteratorFlattenable(O, iterate-string-primitives) — resolve the
+    //      source to an iterator, through @@iterator when it has one.
+    //   2. OrdinaryHasInstance(%Iterator%, the RESOLVED iterator) — wrap
+    //      unless the resolved iterator is already an %Iterator%.
+    //
+    // Both parts used to be wrong here: the instance test ran against the
+    // SOURCE rather than the resolved iterator, and only the branch where the
+    // source had no @@iterator could produce a wrapper. So a class that is
+    // iterable, returns itself from @@iterator, and is not an %Iterator% —
+    // the exact shape of test262 sm/Iterator/from/
+    // return-wrapper-if-not-iterator-instance — came back unwrapped, and none
+    // of the iterator helpers were reachable on it.
+    const resolved = blk: {
+        const iterator_method = try call_runtime.getIteratorMethod(ctx, output, global, source);
+        defer iterator_method.free(ctx.runtime);
+        if (source.isString()) {
+            break :blk try call_runtime.callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
+        }
+        const source_object = object_ops.objectFromValue(source) orelse return error.TypeError;
+        if (iterator_method.isUndefined() or iterator_method.isNull()) {
+            break :blk source_object.value().dup();
+        }
+        if (!call_runtime.isCallableValue(iterator_method)) return error.TypeError;
+        const iterator = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
+        errdefer iterator.free(ctx.runtime);
+        _ = object_ops.objectFromValue(iterator) orelse return error.TypeError;
+        break :blk iterator;
+    };
+    errdefer resolved.free(ctx.runtime);
+
+    if (object_ops.iteratorIsOnIteratorPrototypeChain(ctx.runtime, global, resolved)) {
+        return .{ .iterator = resolved };
+    }
+
+    const next_key = try ctx.runtime.internAtom("next");
+    defer ctx.runtime.atoms.free(next_key);
+    const next_method = try object_ops.getValueProperty(ctx, output, global, resolved, next_key, caller_function, caller_frame);
+    errdefer next_method.free(ctx.runtime);
+    return .{ .iterator = resolved, .next_method = next_method, .wrap = true };
+}
+
+pub fn iteratorWrapNext(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    function_object: *core.Object,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    if (function_object.functionIteratorWrapMethod() != 1) return null;
+    const wrapper = object_ops.objectFromValue(receiver) orelse return error.TypeError;
+    if (wrapper.class_id != core.class.ids.iterator_wrap) return error.TypeError;
+    const iterator = (wrapper.iteratorTargetSlot().*) orelse return error.TypeError;
+    const next_method = if (wrapper.iteratorNext()) |stored| stored.dup() else blk: {
+        const next_key = try ctx.runtime.internAtom("next");
+        defer ctx.runtime.atoms.free(next_key);
+        const method = try object_ops.getValueProperty(ctx, output, global, iterator, next_key, caller_function, caller_frame);
+        errdefer method.free(ctx.runtime);
+        if (!call_runtime.isCallableValue(method)) return error.TypeError;
+        break :blk method;
+    };
+    defer next_method.free(ctx.runtime);
+    const result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator, next_method, &.{}, caller_function, caller_frame);
+    errdefer result.free(ctx.runtime);
+    _ = object_ops.objectFromValue(result) orelse return error.TypeError;
+    return result;
+}
+
+pub fn iteratorWrapReturn(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    function_object: *core.Object,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    if (function_object.functionIteratorWrapMethod() != 2) return null;
+    const wrapper = object_ops.objectFromValue(receiver) orelse return error.TypeError;
+    if (wrapper.class_id != core.class.ids.iterator_wrap) return error.TypeError;
+    const iterator = (wrapper.iteratorTargetSlot().*) orelse return error.TypeError;
+    const return_key = try ctx.runtime.internAtom("return");
+    defer ctx.runtime.atoms.free(return_key);
+    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator, return_key, caller_function, caller_frame);
+    defer return_method.free(ctx.runtime);
+    if (return_method.isUndefined() or return_method.isNull()) {
+        return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+    }
+    if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
+    const result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator, return_method, &.{}, caller_function, caller_frame);
+    errdefer result.free(ctx.runtime);
+    _ = object_ops.objectFromValue(result) orelse return error.TypeError;
+    return result;
+}
+
+/// The single owner of ES `CreateIterResultObject` (7.4.14). `value` stays a
+/// borrow: the installed slot takes its own reference.
+///
+/// `global` is optional because the bare-runtime iterator paths have no realm
+/// to resolve `%Object.prototype%` from. Passing null yields a null-prototype
+/// result, which is a deviation — spelled out at those call sites rather than
+/// reached by accident. Four hand-written copies of this operation used to
+/// exist; two of them (Map/Set and String iterators) shipped null-prototype
+/// results for years, so `.hasOwnProperty` on an iterator result threw.
+pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue, done: bool) !core.JSValue {
+    var rooted_value = value;
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    // QuickJS's js_create_iterator_result uses an ordinary object followed by
+    // the `value` and `done` transitions; iterator results are not one of the
+    // five initial Shapes owned by JSContext.
+    const object = try core.Object.createWithOwnPropertyCapacity(
+        rt,
+        core.class.ids.object,
+        if (global) |realm| object_ops.objectPrototypeFromGlobal(rt, realm) else null,
+        2,
+    );
+    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    try object.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.value,
+        core.Descriptor.data(rooted_value, true, true, true),
+    );
+    try object.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.done,
+        core.Descriptor.data(core.JSValue.boolean(done), true, true, true),
+    );
+    return object.value();
+}
+
+pub fn closeIteratorForFromEntriesAbrupt(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    iterator_value: core.JSValue,
+) !void {
+    const return_key = try ctx.runtime.internAtom("return");
+    defer ctx.runtime.atoms.free(return_key);
+    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
+    defer return_method.free(ctx.runtime);
+    if (return_method.isUndefined() or return_method.isNull()) return;
+    if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
+    const out = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
+    out.free(ctx.runtime);
 }

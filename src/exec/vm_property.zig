@@ -79,11 +79,6 @@ const LocalGet = struct {
     checked: bool,
 };
 
-const ArgGet = struct {
-    idx: u16,
-    next_pc: usize,
-};
-
 pub const LocalPut = struct {
     idx: u16,
     operand_pc: usize,
@@ -158,32 +153,12 @@ pub fn decodeLocalGet(code: []const u8, pc: usize) ?LocalGet {
     };
 }
 
-fn decodeArgGet(code: []const u8, pc: usize) ?ArgGet {
-    if (pc >= code.len) return null;
-    return switch (code[pc]) {
-        op.get_arg0 => .{ .idx = 0, .next_pc = pc + 1 },
-        op.get_arg1 => .{ .idx = 1, .next_pc = pc + 1 },
-        op.get_arg2 => .{ .idx = 2, .next_pc = pc + 1 },
-        op.get_arg3 => .{ .idx = 3, .next_pc = pc + 1 },
-        op.get_arg => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 };
-        },
-        else => null,
-    };
-}
-
 pub fn localReadableBorrowed(frame: *const frame_mod.Frame, idx: u16, checked: bool) ?core.JSValue {
     if (idx >= frame.locals.len) return null;
     if (checked and frame.locals[idx].isUninitialized()) return null;
     const value = frame.locals[idx];
     if (value.isUninitialized()) return null;
     return value;
-}
-
-fn argReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSValue {
-    if (idx >= frame.args.len) return null;
-    return frame.args[idx];
 }
 
 pub fn decodeFieldAtom(code: []const u8, pc: usize, expected_op: u8) ?FieldAtom {
@@ -257,26 +232,6 @@ pub fn decodeGotoTarget(code: []const u8, goto_pc: usize) ?usize {
         },
         else => null,
     };
-}
-
-fn decodeSimpleLoopOperandEnd(code: []const u8, pc: usize) ?usize {
-    if (decodeBindingGet(code, pc)) |get| return get.next_pc;
-    if (immediateInt32Operand(code, pc)) |immediate| return immediate.next_pc;
-    if (pc >= code.len) return null;
-    return switch (code[pc]) {
-        op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 => pc + 1,
-        op.get_arg => if (pc + 3 <= code.len) pc + 3 else null,
-        else => null,
-    };
-}
-
-fn decodeLoopFalsePcForBody(code: []const u8, condition_pc: usize, body_field_pc: usize) ?usize {
-    var pc = decodeSimpleLoopOperandEnd(code, condition_pc) orelse return null;
-    pc = decodeSimpleLoopOperandEnd(code, pc) orelse return null;
-    if (pc >= code.len or code[pc] != op.lt) return null;
-    const branch = decodeFalseBranch(code, pc + 1) orelse return null;
-    if (branch.true_pc > body_field_pc or body_field_pc - branch.true_pc > 8) return null;
-    return branch.false_pc;
 }
 
 pub fn decodeLoopLimitGet(code: []const u8, pc: usize) ?struct { limit: LoopLimitGet, next_pc: usize } {
@@ -358,17 +313,6 @@ pub fn storeLocalCompletionBorrowedValue(
     if (completion_put) |completion| {
         value_slot.replaceBorrowed(ctx.runtime, &frame.locals[completion.idx], value);
     }
-}
-
-fn varRefGlobalLexicalWritable(
-    ctx: *core.JSContext,
-    function: *const bytecode.FunctionBytecode,
-    var_ref_idx: u16,
-) !bool {
-    if (var_ref_idx >= function.varRefNamesLen()) return false;
-    const env = call_runtime.existingGlobalLexicalEnv(ctx) orelse return false;
-    const desc = (try env.getOwnProperty(ctx.runtime, function.varRefName(var_ref_idx))) orelse return false;
-    return desc.kind == .data and (desc.writable orelse false);
 }
 
 pub fn decodeVarRefPut(code: []const u8, pc: usize) ?VarRefPut {

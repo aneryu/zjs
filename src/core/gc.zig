@@ -149,14 +149,6 @@ pub const RefKind = enum(u3) {
 };
 
 pub const GcKind = RefKind;
-pub const ObjectKind = enum(u8) {
-    object = 0,
-    function_bytecode = 1,
-    module = 2,
-    shape = 3,
-    string = 4,
-};
-
 pub const Phase = enum {
     none,
     decref,
@@ -172,17 +164,6 @@ pub const MajorPhase = enum(u8) {
     weak_fixpoint,
     finalize_mark,
     sweep,
-};
-
-pub const PageState = enum(u8) {
-    allocating,
-    full,
-    marking,
-    needs_sweep,
-    sweeping,
-    swept,
-    empty,
-    decommitted,
 };
 
 pub const SchedulerPoint = enum(u8) {
@@ -631,7 +612,7 @@ const PauseSamples = struct {
         if (self.len == 0) return 0;
         var scratch = self.values;
         const samples = scratch[0..self.len];
-        std.mem.sort(u64, samples, {}, u64LessThan);
+        std.sort.heap(u64, samples, {}, u64LessThan);
         const clamped = @min(per_mille, @as(usize, 1000));
         const rank = @max(@as(usize, 1), (clamped * self.len + 999) / 1000);
         return samples[@min(rank - 1, self.len - 1)];
@@ -1933,26 +1914,6 @@ pub const Registry = struct {
         return false;
     }
 };
-
-/// 6.3 Header 反查与转换辅助
-pub inline fn headerFromPayload(ptr: *anyopaque) *BlockHeader {
-    const addr = @intFromPtr(ptr);
-    return @ptrFromInt(addr - @sizeOf(BlockHeader));
-}
-
-pub inline fn checkedHeaderFromPayload(rt: anytype, ptr: *anyopaque) *BlockHeader {
-    _ = rt;
-    const h = headerFromPayload(ptr);
-    if (builtin.mode == .Debug) {
-        std.debug.assert(h.meta().rc >= 0);
-    }
-    return h;
-}
-
-pub inline fn payloadFromHeader(h: *BlockHeader) *anyopaque {
-    const addr = @intFromPtr(h);
-    return @ptrFromInt(addr + @sizeOf(BlockHeader));
-}
 
 /// 9.1 统一的非原子 retain/release/dup/free 路径
 pub inline fn retain(header: anytype) void {

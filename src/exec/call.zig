@@ -40,7 +40,7 @@ fn hostResult(result: anytype) HostError!switch (@typeInfo(@TypeOf(result))) {
     return result catch |err| return @errorCast(err);
 }
 
-fn restoreEvalGlobalLexicals(
+pub fn restoreEvalGlobalLexicals(
     ctx: *core.JSContext,
     global: *core.Object,
     saved_lexicals: ?*core.Object,
@@ -49,10 +49,6 @@ fn restoreEvalGlobalLexicals(
     const active_lexicals = ctx.lexicals;
     try global.setGlobalLexicals(ctx.runtime, active_lexicals);
     ctx.lexicals = if (keep_active_lexicals) active_lexicals else saved_lexicals;
-}
-
-pub fn returnThis(this_value: core.JSValue) core.JSValue {
-    return this_value.dup();
 }
 
 /// QuickJS source map: JS_CallInternal() dispatches callable objects after the
@@ -101,16 +97,6 @@ pub fn callValue(
     args: []const core.JSValue,
 ) HostError!core.JSValue {
     return callValueWithThisAndGlobals(ctx, output, &.{}, core.JSValue.undefinedValue(), callee, args);
-}
-
-pub fn callValueWithGlobals(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    globals: []globals_mod.Slot,
-    callee: core.JSValue,
-    args: []const core.JSValue,
-) !core.JSValue {
-    return callValueWithThisAndGlobals(ctx, output, globals, core.JSValue.undefinedValue(), callee, args);
 }
 
 pub fn callValueWithThis(
@@ -163,19 +149,12 @@ pub fn callValueWithThisGlobalsAndGlobal(
     var root_slices = [_]core.runtime.ValueRootSlice{
         .{ .mutable = &args },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     if (thisObject(callee)) |proxy| {
         if (proxy.proxyTarget() != null and object_ops.proxyTargetIsCallable(callee)) {
@@ -204,11 +183,6 @@ pub fn callValueWithThisGlobalsAndGlobal(
         return call_runtime.callValueOrBytecodeRoot(ctx, output, global orelse return error.TypeError, this_value, callee, args, null, null);
     }
     if (object.class_id == core.class.ids.c_closure) {
-        const closure_kind = closure_mod.closureKind(ctx.runtime, callee) catch 0;
-        if (closure_kind == 51) {
-            const encoded = try closure_mod.closureValue(ctx.runtime, callee);
-            return construct_mod.constructCollectionClosure(ctx, encoded, globals);
-        }
         return closure_mod.callWithThis(ctx.runtime, callee, this_value, args, globals) catch |err| switch (err) {
             else => err,
         };
@@ -409,131 +383,6 @@ fn externalHostErrorInfo(err: anyerror) struct { name: []const u8, message: []co
     return .{ .name = "Error", .message = name };
 }
 
-fn externalHostError(err: anyerror) HostError {
-    return switch (err) {
-        error.AccessorWithoutSetter => error.AccessorWithoutSetter,
-        error.AmbiguousExport => error.AmbiguousExport,
-        error.AwaitOutsideAsyncFunction => error.AwaitOutsideAsyncFunction,
-        error.BigIntTooLarge => error.BigIntTooLarge,
-        error.BytecodeCorrupt => error.BytecodeCorrupt,
-        error.BytecodeOverflow => error.BytecodeOverflow,
-        error.ClosureVarNotFound => error.ClosureVarNotFound,
-        error.CodepointTooLarge => error.CodepointTooLarge,
-        error.DivisionByZero => error.DivisionByZero,
-        error.DuplicateClass => error.DuplicateClass,
-        error.EvalError => error.EvalError,
-        error.IncompatibleDescriptor => error.IncompatibleDescriptor,
-        error.Interrupted => error.Interrupted,
-        error.InvalidAssignmentTarget => error.InvalidAssignmentTarget,
-        error.InvalidAtom => error.InvalidAtom,
-        error.InvalidBytecode => error.InvalidBytecode,
-        error.InvalidBuiltinRegistry => error.InvalidBuiltinRegistry,
-        error.InvalidCharacter => error.InvalidCharacter,
-        error.InvalidCharacterError => error.InvalidCharacterError,
-        error.InvalidClassId => error.InvalidClassId,
-        error.InvalidEscape => error.InvalidEscape,
-        error.InvalidIdentifier => error.InvalidIdentifier,
-        error.InvalidLength => error.InvalidLength,
-        error.InvalidLhs => error.InvalidLhs,
-        error.InvalidNumber => error.InvalidNumber,
-        error.InvalidNumberLiteral => error.InvalidNumberLiteral,
-        error.InvalidOpcode => error.InvalidOpcode,
-        error.InvalidPattern => error.InvalidPattern,
-        error.InvalidPrivateName => error.InvalidPrivateName,
-        error.InvalidRadix => error.InvalidRadix,
-        error.InvalidRegExp => error.InvalidRegExp,
-        error.InvalidUnicodeEscape => error.InvalidUnicodeEscape,
-        error.InvalidUtf8 => error.InvalidUtf8,
-        error.LegacyOctalInStrictMode => error.LegacyOctalInStrictMode,
-        error.MissingExport => error.MissingExport,
-        error.ModuleLinkFailed => error.ModuleLinkFailed,
-        error.ModuleNotFound => error.ModuleNotFound,
-        error.NegativeExponent => error.NegativeExponent,
-        error.NotExtensible => error.NotExtensible,
-        error.NotRegExpLiteral => error.NotRegExpLiteral,
-        error.OutOfMemory => error.OutOfMemory,
-        error.Overflow => error.Overflow,
-        error.Pc2LineOverflow => error.Pc2LineOverflow,
-        error.Pc2LineTruncated => error.Pc2LineTruncated,
-        error.ProcessExit => error.ProcessExit,
-        error.PrototypeCycle => error.PrototypeCycle,
-        error.RangeError => error.RangeError,
-        error.ReadOnly => error.ReadOnly,
-        error.ReferenceError => error.ReferenceError,
-        error.StackMismatch => error.StackMismatch,
-        error.StackOverflow => error.StackOverflow,
-        error.StackUnderflow => error.StackUnderflow,
-        error.SyntaxError => error.SyntaxError,
-        error.SystemError => error.SystemError,
-        error.JSException => error.JSException,
-        error.Timeout => error.Timeout,
-        error.TooManyJobArgs => error.TooManyJobArgs,
-        error.TypeError => error.TypeError,
-        error.URIError => error.URIError,
-        error.UnhandledPromiseRejection => error.UnhandledPromiseRejection,
-        error.UnterminatedComment => error.UnterminatedComment,
-        error.UnterminatedRegExp => error.UnterminatedRegExp,
-        error.UnterminatedString => error.UnterminatedString,
-        error.UnterminatedTemplate => error.UnterminatedTemplate,
-        error.UnexpectedEof => error.UnexpectedEof,
-        error.UnexpectedToken => error.UnexpectedToken,
-        error.UnsupportedSimpleJson => error.UnsupportedSimpleJson,
-        error.Utf8CannotEncodeSurrogateHalf => error.Utf8CannotEncodeSurrogateHalf,
-        error.Utf8EncodesSurrogateHalf => error.Utf8EncodesSurrogateHalf,
-        error.YieldOutsideGenerator => error.YieldOutsideGenerator,
-        error.HtmlCommentInModule => error.HtmlCommentInModule,
-        error.AccessDenied => error.AccessDenied,
-        error.AntivirusInterference => error.AntivirusInterference,
-        error.BadPathName => error.BadPathName,
-        error.BrokenPipe => error.BrokenPipe,
-        error.Canceled => error.Canceled,
-        error.ConnectionRefused => error.ConnectionRefused,
-        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
-        error.CurrentDirUnlinked => error.CurrentDirUnlinked,
-        error.DeviceBusy => error.DeviceBusy,
-        error.DiskQuota => error.DiskQuota,
-        error.FileBusy => error.FileBusy,
-        error.FileNotFound => error.FileNotFound,
-        error.FileLocksUnsupported => error.FileLocksUnsupported,
-        error.FileSystem => error.FileSystem,
-        error.FileTooBig => error.FileTooBig,
-        error.InputOutput => error.InputOutput,
-        error.InvalidHandle => error.InvalidHandle,
-        error.InvalidName => error.InvalidName,
-        error.InvalidPath => error.InvalidPath,
-        error.InvalidWtf8 => error.InvalidWtf8,
-        error.IsDir => error.IsDir,
-        error.LockViolation => error.LockViolation,
-        error.LockedMemoryLimitExceeded => error.LockedMemoryLimitExceeded,
-        error.NameTooLong => error.NameTooLong,
-        error.NetworkNotFound => error.NetworkNotFound,
-        error.NoDevice => error.NoDevice,
-        error.NoSpaceLeft => error.NoSpaceLeft,
-        error.NotDir => error.NotDir,
-        error.NotOpenForReading => error.NotOpenForReading,
-        error.NotOpenForWriting => error.NotOpenForWriting,
-        error.OperationUnsupported => error.OperationUnsupported,
-        error.PathAlreadyExists => error.PathAlreadyExists,
-        error.PermissionDenied => error.PermissionDenied,
-        error.PipeBusy => error.PipeBusy,
-        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
-        error.ProcessNotFound => error.ProcessNotFound,
-        error.ReadOnlyFileSystem => error.ReadOnlyFileSystem,
-        error.SharingViolation => error.SharingViolation,
-        error.SocketNotConnected => error.SocketNotConnected,
-        error.SocketUnconnected => error.SocketUnconnected,
-        error.StreamTooLong => error.StreamTooLong,
-        error.SymLinkLoop => error.SymLinkLoop,
-        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
-        error.SystemResources => error.SystemResources,
-        error.ThreadQuotaExceeded => error.ThreadQuotaExceeded,
-        error.Unexpected => error.Unexpected,
-        error.WouldBlock => error.WouldBlock,
-        error.WriteFailed => error.WriteFailed,
-        else => error.TypeError,
-    };
-}
-
 pub fn callHostFunctionObjectForVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -598,20 +447,10 @@ pub fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []cons
     try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), true, true, true));
 }
 
-fn defineConstantProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, false, false, false));
-}
-
 fn defineConstantPropertyAssumingNew(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(value, false, false, false));
-}
-
-fn defineNumberConstantProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: f64) !void {
-    try defineConstantProperty(rt, object, name, value_ops.numberToValue(value));
 }
 
 fn defineNumberConstantPropertyAssumingNew(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: f64) !void {
@@ -766,13 +605,6 @@ const PromiseIterator = struct {
     }
 };
 
-const PromiseCombinatorMode = enum {
-    all,
-    race,
-    all_settled,
-    any,
-};
-
 pub fn activeGlobalObject(rt: *core.JSRuntime, global: ?*core.Object, globals: []globals_mod.Slot) !?*core.Object {
     if (global) |global_object| return global_object;
     const global_value = try globals_mod.getByName(rt, globals, "globalThis");
@@ -807,18 +639,11 @@ fn createPromiseCapability(
         .{ .value = &capability_slot_val },
         .{ .value = &executor_val },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     defer promise_val.free(ctx.runtime);
     defer resolve_val.free(ctx.runtime);
@@ -988,143 +813,6 @@ fn hasOwnPropertyProxyAware(
     return object.hasOwnProperty(key);
 }
 
-fn getPromiseIterator(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    iterable: core.JSValue,
-) !PromiseIterator {
-    if (iterable.isString()) {
-        const iterator = try core.object.stringIterator(ctx, iterable);
-        errdefer iterator.free(ctx.runtime);
-        const next_key = try ctx.runtime.internAtom("next");
-        defer ctx.runtime.atoms.free(next_key);
-        const next_method = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, iterator, next_key);
-        errdefer next_method.free(ctx.runtime);
-        if (!isCallableObjectValue(next_method)) return error.TypeError;
-        return .{ .iterator = iterator, .next_method = next_method };
-    }
-    if (thisObject(iterable)) |iterable_object| {
-        if (iterable_object.class_id == core.class.ids.string) {
-            const iterator = try core.object.stringIterator(ctx, iterable);
-            errdefer iterator.free(ctx.runtime);
-            const next_key = try ctx.runtime.internAtom("next");
-            defer ctx.runtime.atoms.free(next_key);
-            const next_method = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, iterator, next_key);
-            errdefer next_method.free(ctx.runtime);
-            if (!isCallableObjectValue(next_method)) return error.TypeError;
-            return .{ .iterator = iterator, .next_method = next_method };
-        }
-    }
-
-    const iterator_key = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
-    const iterator_method = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, iterable, iterator_key);
-    defer iterator_method.free(ctx.runtime);
-    if (!isCallableObjectValue(iterator_method)) return error.TypeError;
-    const iterator = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, iterable, iterator_method, &.{});
-    errdefer iterator.free(ctx.runtime);
-    _ = try expectObjectArg(iterator);
-    const next_key = try ctx.runtime.internAtom("next");
-    defer ctx.runtime.atoms.free(next_key);
-    const next_method = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, iterator, next_key);
-    errdefer next_method.free(ctx.runtime);
-    if (!isCallableObjectValue(next_method)) return error.TypeError;
-    return .{ .iterator = iterator, .next_method = next_method };
-}
-
-fn promiseIteratorStepValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    iterator: *PromiseIterator,
-) !?core.JSValue {
-    const next_result = callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, iterator.iterator, iterator.next_method, &.{}) catch |err| {
-        iterator.done = true;
-        return err;
-    };
-    errdefer next_result.free(ctx.runtime);
-    const next_object = expectObjectArg(next_result) catch {
-        iterator.done = true;
-        return error.TypeError;
-    };
-    const done_key = core.atom.predefinedId("done", .string) orelse return error.TypeError;
-    const done_value = getValuePropertyViaGlobalSlots(ctx, output, global, globals, next_result, done_key) catch |err| {
-        iterator.done = true;
-        return err;
-    };
-    defer done_value.free(ctx.runtime);
-    if (value_ops.isTruthy(done_value)) {
-        iterator.done = true;
-        next_result.free(ctx.runtime);
-        return null;
-    }
-    _ = next_object;
-    const value_key = core.atom.predefinedId("value", .string) orelse return error.TypeError;
-    const value = getValuePropertyViaGlobalSlots(ctx, output, global, globals, next_result, value_key) catch |err| {
-        iterator.done = true;
-        return err;
-    };
-    next_result.free(ctx.runtime);
-    return value;
-}
-
-fn promiseIteratorClose(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    iterator: core.JSValue,
-) !void {
-    const return_key = try ctx.runtime.internAtom("return");
-    defer ctx.runtime.atoms.free(return_key);
-    const return_method = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, iterator, return_key);
-    defer return_method.free(ctx.runtime);
-    if (return_method.isUndefined() or return_method.isNull()) return;
-    if (!isCallableObjectValue(return_method)) return error.TypeError;
-    const result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, iterator, return_method, &.{});
-    result.free(ctx.runtime);
-}
-
-fn promiseErrorValue(ctx: *core.JSContext, global: ?*core.Object, err: anytype) !core.JSValue {
-    if (ctx.hasException()) return ctx.takeException();
-    const name = runtimeErrorName(err);
-    if (global) |global_object| {
-        const ctor_key = try ctx.runtime.internAtom(name);
-        defer ctx.runtime.atoms.free(ctor_key);
-        const ctor_value = try global_object.getProperty(ctor_key);
-        defer ctor_value.free(ctx.runtime);
-        const ctor_object = thisObject(ctor_value) orelse return constructSimpleError(ctx.runtime, null, name, "");
-        return construct_mod.constructErrorObject(ctx.runtime, name, ctor_object.value(), constructorPrototype(ctx.runtime, ctor_object), &.{});
-    }
-    return constructSimpleError(ctx.runtime, null, name, "");
-}
-
-fn constructSimpleError(rt: *core.JSRuntime, prototype: ?*core.Object, name: []const u8, message: []const u8) !core.JSValue {
-    const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &instance.header);
-    const name_value = try value_ops.createStringValue(rt, name);
-    defer name_value.free(rt);
-    const message_value = try value_ops.createStringValue(rt, message);
-    defer message_value.free(rt);
-    try defineObjectProperty(rt, instance, "name", name_value);
-    if (message.len != 0) try defineObjectProperty(rt, instance, "message", message_value);
-    return instance.value();
-}
-
-fn rejectPromiseCapability(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    reject_value: core.JSValue,
-    reason: core.JSValue,
-) !void {
-    const result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), reject_value, &.{reason});
-    result.free(ctx.runtime);
-}
-
 fn setArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, true, true, true));
     if (array.arrayLength() <= index) array.setArrayLength(index + 1);
@@ -1132,21 +820,9 @@ fn setArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: co
 
 fn createPromiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: core.JSValue) !core.JSValue {
     var rooted_payload = payload;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_payload },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_payload});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &record.header);
@@ -1217,23 +893,9 @@ fn createPromiseCombinatorState(
     var rooted_resolve = resolve_value;
     var rooted_reject = reject_value;
     var rooted_values = values.value();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_resolve },
-        .{ .value = &rooted_reject },
-        .{ .value = &rooted_values },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_resolve, &rooted_reject, &rooted_values });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const state = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &state.header);
@@ -1281,168 +943,6 @@ test "createPromiseCombinatorState roots direct function bytecode resolve while 
     resolve_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
-
-fn createPromiseCombinatorCallback(
-    rt: *core.JSRuntime,
-    global: ?*core.Object,
-    mode: PromiseCombinatorCallbackMode,
-    state: *core.Object,
-    index: u32,
-) !core.JSValue {
-    const callback = try createPromiseBuiltinFunction(rt, global, "", 1);
-    errdefer callback.free(rt);
-    const callback_object = thisObject(callback) orelse return error.TypeError;
-    try callback_object.setInternalCallableTag(rt, .promise_combinator_element);
-    (try callback_object.functionPromiseCombinatorModeSlot(rt)).* = @intFromEnum(mode);
-    try callback_object.setFunctionPromiseCombinatorState(rt, state.value().dup());
-    (try callback_object.functionPromiseCombinatorIndexSlot(rt)).* = index;
-    (try callback_object.functionPromiseCombinatorCalledSlot(rt)).* = false;
-    return callback;
-}
-
-fn promiseCombinatorCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    constructor_value: core.JSValue,
-    constructor_object: *core.Object,
-    args: []const core.JSValue,
-    mode: PromiseCombinatorMode,
-) !core.JSValue {
-    var capability = try createPromiseCapability(ctx, output, global, globals, constructor_value, constructor_object);
-    errdefer capability.deinit(ctx.runtime);
-
-    const active_global = try activeGlobalObject(ctx.runtime, global, globals);
-    const resolve_key = try ctx.runtime.internAtom("resolve");
-    defer ctx.runtime.atoms.free(resolve_key);
-    const promise_resolve = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, constructor_value, resolve_key);
-    defer promise_resolve.free(ctx.runtime);
-    if (!isCallableObjectValue(promise_resolve)) {
-        const reason = try promiseErrorValue(ctx, active_global, error.TypeError);
-        defer reason.free(ctx.runtime);
-        try rejectPromiseCapability(ctx, output, global, globals, capability.reject, reason);
-        return capability.releaseCallbacks(ctx.runtime);
-    }
-
-    const iterable = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    var iterator = getPromiseIterator(ctx, output, global, globals, iterable) catch |err| {
-        const reason = try promiseErrorValue(ctx, active_global, err);
-        defer reason.free(ctx.runtime);
-        try rejectPromiseCapability(ctx, output, global, globals, capability.reject, reason);
-        return capability.releaseCallbacks(ctx.runtime);
-    };
-    defer iterator.deinit(ctx.runtime);
-
-    const values = if (mode != .race) try core.Object.createArray(ctx.runtime, null) else null;
-    const values_value = if (values) |array| array.value() else null;
-    defer if (values_value) |value| value.free(ctx.runtime);
-    const state = if (values) |array| try createPromiseCombinatorState(ctx.runtime, capability.resolve, capability.reject, array) else null;
-    const state_value = if (state) |state_object| state_object.value() else null;
-    defer if (state_value) |value| value.free(ctx.runtime);
-
-    var index: u32 = 0;
-    while (true) {
-        const next_value = promiseIteratorStepValue(ctx, output, global, globals, &iterator) catch |err| {
-            const reason = try promiseErrorValue(ctx, active_global, err);
-            defer reason.free(ctx.runtime);
-            try rejectPromiseCapability(ctx, output, global, globals, capability.reject, reason);
-            return capability.releaseCallbacks(ctx.runtime);
-        };
-        if (next_value == null) break;
-        defer next_value.?.free(ctx.runtime);
-
-        if (state) |state_object| {
-            const remaining = state_object.promiseCombinatorRemaining();
-            (try state_object.promiseCombinatorRemainingSlot(ctx.runtime)).* = remaining + 1;
-            const array_object = values.?;
-            try setArrayIndex(ctx.runtime, array_object, index, core.JSValue.undefinedValue());
-        }
-
-        const next_promise = callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, constructor_value, promise_resolve, &.{next_value.?}) catch |err| {
-            if (!iterator.done) {
-                promiseIteratorClose(ctx, output, global, globals, iterator.iterator) catch {};
-            }
-            const reason = try promiseErrorValue(ctx, active_global, err);
-            defer reason.free(ctx.runtime);
-            try rejectPromiseCapability(ctx, output, global, globals, capability.reject, reason);
-            return capability.releaseCallbacks(ctx.runtime);
-        };
-        defer next_promise.free(ctx.runtime);
-
-        const then_key = try ctx.runtime.internAtom("then");
-        defer ctx.runtime.atoms.free(then_key);
-        const then_value = getValuePropertyViaGlobalSlots(ctx, output, global, globals, next_promise, then_key) catch |err| {
-            if (!iterator.done) {
-                promiseIteratorClose(ctx, output, global, globals, iterator.iterator) catch {};
-            }
-            const reason = try promiseErrorValue(ctx, active_global, err);
-            defer reason.free(ctx.runtime);
-            try rejectPromiseCapability(ctx, output, global, globals, capability.reject, reason);
-            return capability.releaseCallbacks(ctx.runtime);
-        };
-        defer then_value.free(ctx.runtime);
-        if (!isCallableObjectValue(then_value)) {
-            if (!iterator.done) {
-                promiseIteratorClose(ctx, output, global, globals, iterator.iterator) catch {};
-            }
-            const reason = try promiseErrorValue(ctx, active_global, error.TypeError);
-            defer reason.free(ctx.runtime);
-            try rejectPromiseCapability(ctx, output, global, globals, capability.reject, reason);
-            return capability.releaseCallbacks(ctx.runtime);
-        }
-
-        const on_fulfilled = switch (mode) {
-            .all => try createPromiseCombinatorCallback(ctx.runtime, active_global, .all_resolve, state.?, index),
-            .all_settled => try createPromiseCombinatorCallback(ctx.runtime, active_global, .all_settled_fulfill, state.?, index),
-            .any => capability.resolve.dup(),
-            .race => capability.resolve.dup(),
-        };
-        defer on_fulfilled.free(ctx.runtime);
-        const on_rejected = switch (mode) {
-            .all => capability.reject.dup(),
-            .all_settled => try createPromiseCombinatorCallback(ctx.runtime, active_global, .all_settled_reject, state.?, index),
-            .any => try createPromiseCombinatorCallback(ctx.runtime, active_global, .any_reject, state.?, index),
-            .race => capability.reject.dup(),
-        };
-        defer on_rejected.free(ctx.runtime);
-
-        const then_args = [_]core.JSValue{ on_fulfilled, on_rejected };
-        const then_result = callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, next_promise, then_value, &then_args) catch |err| {
-            if (!iterator.done) {
-                promiseIteratorClose(ctx, output, global, globals, iterator.iterator) catch {};
-            }
-            const reason = try promiseErrorValue(ctx, active_global, err);
-            defer reason.free(ctx.runtime);
-            try rejectPromiseCapability(ctx, output, global, globals, capability.reject, reason);
-            return capability.releaseCallbacks(ctx.runtime);
-        };
-        then_result.free(ctx.runtime);
-        index += 1;
-    }
-
-    if (state) |state_object| {
-        const remaining = state_object.promiseCombinatorRemaining();
-        const next_remaining = remaining - 1;
-        (try state_object.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
-        if (next_remaining == 0) {
-            switch (mode) {
-                .all, .all_settled => {
-                    const result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), capability.resolve, &.{values.?.value()});
-                    result.free(ctx.runtime);
-                },
-                .any => {
-                    const aggregate_error = try createPromiseAggregateError(ctx.runtime, active_global, values.?);
-                    defer aggregate_error.free(ctx.runtime);
-                    const result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), capability.reject, &.{aggregate_error});
-                    result.free(ctx.runtime);
-                },
-                .race => unreachable,
-            }
-        }
-    }
-    return capability.releaseCallbacks(ctx.runtime);
 }
 
 fn callNativeBuiltin(
@@ -1709,7 +1209,7 @@ pub fn callObjectStatic(
         errdefer core.Object.destroyFromHeader(rt, &out.header);
         var out_index: u32 = 0;
         for (keys) |key| {
-            const name_value = try atomToStringValue(rt, key);
+            const name_value = try rt.atoms.toStringValue(rt, key);
             defer name_value.free(rt);
             try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(name_value, true, true, true));
             out_index += 1;
@@ -2095,21 +1595,9 @@ pub fn primitiveWrapper(ctx: *core.JSContext, class_id: core.class.ClassId, prim
         return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, string_construct_ref, prototype, &.{primitive}, null, null)) orelse error.TypeError;
     }
     var rooted_primitive = primitive;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_primitive },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_primitive});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, class_id, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -2216,19 +1704,12 @@ fn createBoundFunction(
     var root_slices = [_]core.runtime.ValueRootSlice{
         rooted_bound_args_buffer.slice(),
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
         .slices = &root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const target_object = thisObject(rooted_target) orelse return error.TypeError;
     const length_value = if (try hasOwnPropertyProxyAware(ctx, output, global, globals, target_object, core.atom.ids.length)) blk: {
@@ -2445,16 +1926,6 @@ fn objectToString(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
         return value_ops.createStringValue(rt, out.items);
     }
     return value_ops.createStringValue(rt, defaultObjectTag(object));
-}
-
-fn finalizationRegistryAppendCell(
-    rt: *core.JSRuntime,
-    receiver: *core.Object,
-    target: core.JSValue,
-    held_value: core.JSValue,
-    unregister_token: core.JSValue,
-) !void {
-    try receiver.appendFinalizationRegistryCell(rt, target, held_value, unregister_token);
 }
 
 fn defaultObjectTag(object: *core.Object) []const u8 {
@@ -2838,10 +2309,6 @@ pub fn runNextOsSignalHandler(ctx: *core.JSContext, output: ?*std.Io.Writer, glo
     return false;
 }
 
-fn hostIo() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
-}
-
 fn globalBtoa(ctx: *core.JSContext, global: ?*core.Object, args: []const core.JSValue) !core.JSValue {
     const input_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try value_ops.toStringValue(ctx.runtime, input_value);
@@ -3008,18 +2475,11 @@ fn descriptorObject(rt: *core.JSRuntime, desc: core.Descriptor) !core.JSValue {
         .{ .value = &desc_getter },
         .{ .value = &desc_setter },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -3110,10 +2570,6 @@ fn atomFromPropertyKey(rt: *core.JSRuntime, value: core.JSValue) HostError!core.
     return try hostResult(property_ops.propertyKeyAtom(rt, value));
 }
 
-fn atomToStringValue(rt: *core.JSRuntime, atom_id: core.Atom) !core.JSValue {
-    return rt.atoms.toStringValue(rt, atom_id);
-}
-
 fn defineBoolProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: bool) !void {
     try defineObjectProperty(rt, object, name, core.JSValue.boolean(value));
 }
@@ -3131,16 +2587,6 @@ fn errorNameMatchesConstructor(err: anytype, constructor_name: []const u8) bool 
         (std.mem.eql(u8, err_name, "RangeError") and std.mem.eql(u8, constructor_name, "RangeError")) or
         (std.mem.eql(u8, err_name, "EvalError") and std.mem.eql(u8, constructor_name, "EvalError")) or
         (std.mem.eql(u8, err_name, "ReferenceError") and std.mem.eql(u8, constructor_name, "ReferenceError"));
-}
-
-fn runtimeErrorName(err: anytype) []const u8 {
-    const name = @errorName(err);
-    if (std.mem.eql(u8, name, "TypeError")) return "TypeError";
-    if (std.mem.eql(u8, name, "RangeError")) return "RangeError";
-    if (std.mem.eql(u8, name, "ReferenceError")) return "ReferenceError";
-    if (std.mem.eql(u8, name, "SyntaxError")) return "SyntaxError";
-    if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return "URIError";
-    return "Error";
 }
 
 fn printArray(rt: *core.JSRuntime, writer: *std.Io.Writer, object: *core.Object) PrintError!void {
@@ -3284,18 +2730,11 @@ pub fn evalGlobalScriptSource(
         var root_values = [_]core.runtime.ValueRootValue{
             .{ .value = &root_function_value },
         };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = ctx.runtime.active_value_roots,
+        var root_frame = core.runtime.ValueRootFrame{
             .values = &root_values,
         };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = &root_frame;
-        }
-        defer {
-            if (comptime core.runtime.value_root_frames_enabled) {
-                ctx.runtime.active_value_roots = root_frame.previous;
-            }
-        }
+        root_frame.activate(ctx.runtime);
+        defer root_frame.deactivate(ctx.runtime);
         const root_function_object = object_ops.functionObjectFromValue(root_function_value) orelse break :blk error.InvalidBytecode;
         const root_bytecode_value = root_function_object.functionBytecode() orelse break :blk error.InvalidBytecode;
         const function = call_runtime.functionBytecodeFromValue(root_bytecode_value) orelse break :blk error.InvalidBytecode;
@@ -3322,21 +2761,9 @@ pub fn evalGlobalScriptSource(
             return err;
         };
         errdefer rooted_result.free(ctx.runtime);
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &rooted_result },
-        };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = ctx.runtime.active_value_roots,
-            .values = &root_values,
-        };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = &root_frame;
-        }
-        defer {
-            if (comptime core.runtime.value_root_frames_enabled) {
-                ctx.runtime.active_value_roots = root_frame.previous;
-            }
-        }
+        var root_frame = core.runtime.rootValues(.{&rooted_result});
+        root_frame.activate(ctx.runtime);
+        defer root_frame.deactivate(ctx.runtime);
         try restoreEvalGlobalLexicals(ctx, global, saved_lexicals, keep_active_lexicals);
         return rooted_result;
     }

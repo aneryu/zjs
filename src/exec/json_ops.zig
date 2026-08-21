@@ -151,23 +151,9 @@ pub fn stringify(rt: *core.JSRuntime, value: core.JSValue, replacer: core.JSValu
     var rooted_value = value;
     var rooted_replacer = replacer;
     var rooted_space = space;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &rooted_replacer },
-        .{ .value = &rooted_space },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_value, &rooted_replacer, &rooted_space });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     if (rooted_value.isUndefined()) return core.JSValue.undefinedValue();
 
@@ -189,21 +175,9 @@ pub fn stringify(rt: *core.JSRuntime, value: core.JSValue, replacer: core.JSValu
 
 pub fn parse(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue) !core.JSValue {
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
@@ -241,21 +215,9 @@ pub const JsonParseWithRecord = struct {
 /// tree; the value must be freed separately).
 pub fn parseWithRecord(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue) !JsonParseWithRecord {
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     if (rooted_value.asStringBody()) |body| {
         try body.ensureFlat(rt);
@@ -527,15 +489,9 @@ fn JsonUnitParser(comptime T: type) type {
             const object = try core.Object.create(self.rt, core.class.ids.object, objectPrototypeFromGlobal(self.rt, self.global));
             var object_value = object.value();
             var root_values = [_]core.runtime.ValueRootValue{.{ .value = &object_value }};
-            const root_frame = core.runtime.ValueRootFrame{ .previous = self.rt.active_value_roots, .values = &root_values };
-            if (comptime core.runtime.value_root_frames_enabled) {
-                self.rt.active_value_roots = &root_frame;
-            }
-            defer {
-                if (comptime core.runtime.value_root_frames_enabled) {
-                    self.rt.active_value_roots = root_frame.previous;
-                }
-            }
+            var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
+            root_frame.activate(self.rt);
+            defer root_frame.deactivate(self.rt);
             errdefer {
                 const failed = object_value;
                 object_value = core.JSValue.undefinedValue();
@@ -598,15 +554,9 @@ fn JsonUnitParser(comptime T: type) type {
             const object = try core.Object.createArray(self.rt, arrayPrototypeFromGlobal(self.rt, self.global));
             var object_value = object.value();
             var root_values = [_]core.runtime.ValueRootValue{.{ .value = &object_value }};
-            const root_frame = core.runtime.ValueRootFrame{ .previous = self.rt.active_value_roots, .values = &root_values };
-            if (comptime core.runtime.value_root_frames_enabled) {
-                self.rt.active_value_roots = &root_frame;
-            }
-            defer {
-                if (comptime core.runtime.value_root_frames_enabled) {
-                    self.rt.active_value_roots = root_frame.previous;
-                }
-            }
+            var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
+            root_frame.activate(self.rt);
+            defer root_frame.deactivate(self.rt);
             errdefer {
                 const failed = object_value;
                 object_value = core.JSValue.undefinedValue();
@@ -826,18 +776,11 @@ pub fn rawJSON(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
         .{ .value = &object_value },
         .{ .value = &text },
     };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
+    var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
@@ -885,10 +828,6 @@ pub fn isRawJSON(value: core.JSValue) bool {
     return object.class_id == core.class.ids.raw_json;
 }
 
-pub fn stringifyInt(buf: []u8, value: i32) ![]const u8 {
-    return std.fmt.bufPrint(buf, "{d}", .{value});
-}
-
 pub fn parseInt(bytes: []const u8) !i32 {
     return std.fmt.parseInt(i32, bytes, 10);
 }
@@ -902,23 +841,9 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
     var rooted_value = value;
     var raw = core.JSValue.undefinedValue();
     var primitive = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &raw },
-        .{ .value = &primitive },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_value, &raw, &primitive });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     if (rooted_value.isUndefined()) {
         try buffer.appendSlice(rt.memory.allocator, if (array_slot) "null" else "");
@@ -952,7 +877,7 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
         if (object_value.class_id == core.class.ids.raw_json) {
             raw = try object_value.getProperty(core.atom.ids.rawJSON);
             defer raw.free(rt);
-            try appendRawString(rt, buffer, raw);
+            try core.string.appendValueUtf8(rt, buffer, raw);
         } else if (isCallableJsonOmittedObject(object_value)) {
             try buffer.appendSlice(rt.memory.allocator, if (array_slot) "null" else "");
         } else if (object_value.class_id == core.class.ids.number or object_value.class_id == core.class.ids.string or object_value.class_id == core.class.ids.boolean) {
@@ -985,21 +910,9 @@ fn appendJsonArray(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *cor
         const value = try object.getDenseArrayElementValue(index) orelse object.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(rt);
         var rooted_value = value;
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &rooted_value },
-        };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = rt.active_value_roots,
-            .values = &root_values,
-        };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = &root_frame;
-        }
-        defer {
-            if (comptime core.runtime.value_root_frames_enabled) {
-                rt.active_value_roots = root_frame.previous;
-            }
-        }
+        var root_frame = core.runtime.rootValues(.{&rooted_value});
+        root_frame.activate(rt);
+        defer root_frame.deactivate(rt);
         try appendJsonValue(rt, buffer, rooted_value, true, stack, options, depth + 1);
     }
     if (options.gap.len != 0 and object.arrayLength() != 0) {
@@ -1024,21 +937,9 @@ fn appendJsonObject(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *co
         const value = try object.getOwnDataPropertyValue(key) orelse object.getProperty(key);
         defer value.free(rt);
         var rooted_value = value;
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &rooted_value },
-        };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = rt.active_value_roots,
-            .values = &root_values,
-        };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = &root_frame;
-        }
-        defer {
-            if (comptime core.runtime.value_root_frames_enabled) {
-                rt.active_value_roots = root_frame.previous;
-            }
-        }
+        var root_frame = core.runtime.rootValues(.{&rooted_value});
+        root_frame.activate(rt);
+        defer root_frame.deactivate(rt);
         if (rooted_value.isUndefined() or rooted_value.isSymbol()) continue;
         if (rooted_value.isObject()) {
             const header = rooted_value.refHeader() orelse continue;
@@ -1115,18 +1016,11 @@ const SimpleJsonParser = struct {
         var root_values = [_]core.runtime.ValueRootValue{
             .{ .value = &object_value },
         };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = self.rt.active_value_roots,
+        var root_frame = core.runtime.ValueRootFrame{
             .values = &root_values,
         };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            self.rt.active_value_roots = &root_frame;
-        }
-        defer {
-            if (comptime core.runtime.value_root_frames_enabled) {
-                self.rt.active_value_roots = root_frame.previous;
-            }
-        }
+        root_frame.activate(self.rt);
+        defer root_frame.deactivate(self.rt);
         errdefer {
             const failed_object = object_value;
             object_value = core.JSValue.undefinedValue();
@@ -1148,18 +1042,11 @@ const SimpleJsonParser = struct {
             var item_roots = [_]core.runtime.ValueRootValue{
                 .{ .value = &root_item },
             };
-            const item_root_frame = core.runtime.ValueRootFrame{
-                .previous = self.rt.active_value_roots,
+            var item_root_frame = core.runtime.ValueRootFrame{
                 .values = &item_roots,
             };
-            if (comptime core.runtime.value_root_frames_enabled) {
-                self.rt.active_value_roots = &item_root_frame;
-            }
-            defer {
-                if (comptime core.runtime.value_root_frames_enabled) {
-                    self.rt.active_value_roots = item_root_frame.previous;
-                }
-            }
+            item_root_frame.activate(self.rt);
+            defer item_root_frame.deactivate(self.rt);
             try object.defineJsonParseDataProperty(self.rt, key, item_value);
             self.skipWhitespace();
             if (self.consumeByte('}')) return object_value;
@@ -1171,21 +1058,9 @@ const SimpleJsonParser = struct {
         self.expectByte('[') catch return error.UnsupportedSimpleJson;
         const object = try core.Object.createArray(self.rt, arrayPrototypeFromGlobal(self.rt, self.global));
         var object_value = object.value();
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &object_value },
-        };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = self.rt.active_value_roots,
-            .values = &root_values,
-        };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            self.rt.active_value_roots = &root_frame;
-        }
-        defer {
-            if (comptime core.runtime.value_root_frames_enabled) {
-                self.rt.active_value_roots = root_frame.previous;
-            }
-        }
+        var root_frame = core.runtime.rootValues(.{&object_value});
+        root_frame.activate(self.rt);
+        defer root_frame.deactivate(self.rt);
         errdefer {
             const failed_object = object_value;
             object_value = core.JSValue.undefinedValue();
@@ -1199,21 +1074,9 @@ const SimpleJsonParser = struct {
             var item_value = try self.parseValue();
             defer item_value.free(self.rt);
             var root_item = item_value;
-            var item_roots = [_]core.runtime.ValueRootValue{
-                .{ .value = &root_item },
-            };
-            const item_root_frame = core.runtime.ValueRootFrame{
-                .previous = self.rt.active_value_roots,
-                .values = &item_roots,
-            };
-            if (comptime core.runtime.value_root_frames_enabled) {
-                self.rt.active_value_roots = &item_root_frame;
-            }
-            defer {
-                if (comptime core.runtime.value_root_frames_enabled) {
-                    self.rt.active_value_roots = item_root_frame.previous;
-                }
-            }
+            var item_root_frame = core.runtime.rootValues(.{&root_item});
+            item_root_frame.activate(self.rt);
+            defer item_root_frame.deactivate(self.rt);
             if (!(try object.appendDenseArrayLiteralIndex(self.rt, index, item_value))) {
                 // The parser owns this fresh array, so this fallback cannot
                 // encounter an AUTOINIT property whose builder widens the
@@ -1333,18 +1196,11 @@ fn valueFromStdJson(rt: *core.JSRuntime, global: ?*core.Object, value: std.json.
             var root_values = [_]core.runtime.ValueRootValue{
                 .{ .value = &object_value },
             };
-            const root_frame = core.runtime.ValueRootFrame{
-                .previous = rt.active_value_roots,
+            var root_frame = core.runtime.ValueRootFrame{
                 .values = &root_values,
             };
-            if (comptime core.runtime.value_root_frames_enabled) {
-                rt.active_value_roots = &root_frame;
-            }
-            defer {
-                if (comptime core.runtime.value_root_frames_enabled) {
-                    rt.active_value_roots = root_frame.previous;
-                }
-            }
+            root_frame.activate(rt);
+            defer root_frame.deactivate(rt);
             errdefer {
                 const failed_object = object_value;
                 object_value = core.JSValue.undefinedValue();
@@ -1358,18 +1214,11 @@ fn valueFromStdJson(rt: *core.JSRuntime, global: ?*core.Object, value: std.json.
                 var item_roots = [_]core.runtime.ValueRootValue{
                     .{ .value = &rooted_item },
                 };
-                const item_root_frame = core.runtime.ValueRootFrame{
-                    .previous = rt.active_value_roots,
+                var item_root_frame = core.runtime.ValueRootFrame{
                     .values = &item_roots,
                 };
-                if (comptime core.runtime.value_root_frames_enabled) {
-                    rt.active_value_roots = &item_root_frame;
-                }
-                defer {
-                    if (comptime core.runtime.value_root_frames_enabled) {
-                        rt.active_value_roots = item_root_frame.previous;
-                    }
-                }
+                item_root_frame.activate(rt);
+                defer item_root_frame.deactivate(rt);
                 if (try object.appendDenseArrayLiteralIndex(rt, @intCast(index), item_value)) continue;
                 try object.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(index)), core.Descriptor.data(item_value, true, true, true));
             }
@@ -1378,21 +1227,9 @@ fn valueFromStdJson(rt: *core.JSRuntime, global: ?*core.Object, value: std.json.
         .object => |object_map| blk: {
             const object = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
             var object_value = object.value();
-            var root_values = [_]core.runtime.ValueRootValue{
-                .{ .value = &object_value },
-            };
-            const root_frame = core.runtime.ValueRootFrame{
-                .previous = rt.active_value_roots,
-                .values = &root_values,
-            };
-            if (comptime core.runtime.value_root_frames_enabled) {
-                rt.active_value_roots = &root_frame;
-            }
-            defer {
-                if (comptime core.runtime.value_root_frames_enabled) {
-                    rt.active_value_roots = root_frame.previous;
-                }
-            }
+            var root_frame = core.runtime.rootValues(.{&object_value});
+            root_frame.activate(rt);
+            defer root_frame.deactivate(rt);
             errdefer {
                 const failed_object = object_value;
                 object_value = core.JSValue.undefinedValue();
@@ -1406,21 +1243,9 @@ fn valueFromStdJson(rt: *core.JSRuntime, global: ?*core.Object, value: std.json.
                 const item_value = try valueFromStdJson(rt, global, entry.value_ptr.*);
                 defer item_value.free(rt);
                 var rooted_item = item_value;
-                var item_roots = [_]core.runtime.ValueRootValue{
-                    .{ .value = &rooted_item },
-                };
-                const item_root_frame = core.runtime.ValueRootFrame{
-                    .previous = rt.active_value_roots,
-                    .values = &item_roots,
-                };
-                if (comptime core.runtime.value_root_frames_enabled) {
-                    rt.active_value_roots = &item_root_frame;
-                }
-                defer {
-                    if (comptime core.runtime.value_root_frames_enabled) {
-                        rt.active_value_roots = item_root_frame.previous;
-                    }
-                }
+                var item_root_frame = core.runtime.rootValues(.{&rooted_item});
+                item_root_frame.activate(rt);
+                defer item_root_frame.deactivate(rt);
                 try object.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(item_value, true, true, true));
             }
             break :blk object_value;
@@ -1501,21 +1326,9 @@ fn isArrayObject(value: core.JSValue) bool {
 
 fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.Atom {
     var rooted_replacer = replacer;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_replacer },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_replacer});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const header = rooted_replacer.refHeader() orelse return &.{};
     if (!rooted_replacer.isObject()) return &.{};
@@ -1532,21 +1345,9 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
         const item = try object.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         var rooted_item = item;
-        var item_roots = [_]core.runtime.ValueRootValue{
-            .{ .value = &rooted_item },
-        };
-        const item_root_frame = core.runtime.ValueRootFrame{
-            .previous = rt.active_value_roots,
-            .values = &item_roots,
-        };
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = &item_root_frame;
-        }
-        defer {
-            if (comptime core.runtime.value_root_frames_enabled) {
-                rt.active_value_roots = item_root_frame.previous;
-            }
-        }
+        var item_root_frame = core.runtime.rootValues(.{&rooted_item});
+        item_root_frame.activate(rt);
+        defer item_root_frame.deactivate(rt);
         const atom = try stringifyPropertyListAtom(rt, rooted_item) orelse continue;
         if (atomListContains(list.items, atom)) {
             rt.atoms.free(atom);
@@ -1561,22 +1362,9 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
 fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.Atom {
     var rooted_value = value;
     var primitive = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &primitive },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_value, &primitive });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     if (rooted_value.isString()) {
         const string_object = rooted_value.asStringBody().?;
@@ -1613,22 +1401,9 @@ fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.At
 fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
     var rooted_space = space;
     var primitive = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_space },
-        .{ .value = &primitive },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_space, &primitive });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     var out = std.ArrayList(u8).empty;
     const number = if (rooted_space.asInt32()) |int_value|
@@ -1653,14 +1428,14 @@ fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
     }
 
     if (rooted_space.isString()) {
-        try appendRawString(rt, &out, rooted_space);
+        try core.string.appendValueUtf8(rt, &out, rooted_space);
     } else if (rooted_space.isObject()) {
         const header = rooted_space.refHeader() orelse return out;
         const object: *core.Object = @fieldParentPtr("header", header);
         if (object.class_id == core.class.ids.string) {
             primitive = try primitiveValue(rt, object) orelse return out;
             defer primitive.free(rt);
-            try appendRawString(rt, &out, primitive);
+            try core.string.appendValueUtf8(rt, &out, primitive);
         }
     }
     if (out.items.len > 10) out.items = out.items[0..10];
@@ -1702,22 +1477,9 @@ fn appendIndent(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), gap: []const u8
 fn defineData(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue, enumerable: bool) !void {
     var object_value = object.value();
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &object_value },
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &object_value, &rooted_value });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(rooted_value, false, enumerable, false));
 }
@@ -1725,24 +1487,11 @@ fn defineData(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, val
 fn appendJsonInputString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     var rooted_value = value;
     var primitive = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &primitive },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_value, &primitive });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
-    if (rooted_value.isString()) return appendRawString(rt, buffer, rooted_value);
+    if (rooted_value.isString()) return core.string.appendValueUtf8(rt, buffer, rooted_value);
     if (rooted_value.isSymbol()) return error.TypeError;
     if (rooted_value.isNull()) return buffer.appendSlice(rt.memory.allocator, "null");
     if (rooted_value.isUndefined()) return buffer.appendSlice(rt.memory.allocator, "undefined");
@@ -1777,38 +1526,6 @@ pub const createJsonStringValue = core.json.createJsonStringValue;
 pub const appendJsonStringValue = core.json.appendJsonStringValue;
 pub const appendJsonAtomName = core.json.appendJsonAtomName;
 pub const appendEscapedJsonString = core.json.appendEscapedJsonString;
-
-fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
-
-    const string_value = rooted_value.asStringBody() orelse return;
-    try string_value.ensureFlat(rt);
-    switch (string_value.resolveData()) {
-        // Width-aware like value_ops.appendRawString (qjs JS_ToCStringLen2,
-        // quickjs.c:4458): the stringify buffer is re-decoded as UTF-8, so
-        // latin1 0x80-0xFF must widen instead of landing as raw bytes.
-        .latin1 => |bytes| {
-            if (core.string.isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
-            for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, byte);
-        },
-        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
-    }
-}
 
 // --- VM-coercing JSON.parse/JSON.stringify (moved from exec/json_ops.zig) ----
 
@@ -1861,25 +1578,9 @@ pub fn jsonParseCall(
     var text = core.JSValue.undefinedValue();
     var parsed = core.JSValue.undefinedValue();
     var holder_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &input },
-        .{ .value = &reviver },
-        .{ .value = &text },
-        .{ .value = &parsed },
-        .{ .value = &holder_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &input, &reviver, &text, &parsed, &holder_value });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     text = try string_ops.toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
     defer {
@@ -1918,18 +1619,11 @@ pub fn jsonParseCall(
     var record_root_slices = [_]core.runtime.ValueRootSlice{
         .{ .mutable = &record_values.items },
     };
-    const record_root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
+    var record_root_frame = core.runtime.ValueRootFrame{
         .slices = &record_root_slices,
     };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &record_root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = record_root_frame.previous;
-        }
-    }
+    record_root_frame.activate(ctx.runtime);
+    defer record_root_frame.deactivate(ctx.runtime);
 
     const holder = try core.Object.create(ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(ctx.runtime, global));
     holder_value = holder.value();
@@ -2017,25 +1711,15 @@ pub fn jsonInternalizeProperty(
     var value = core.JSValue.undefinedValue();
     var key_value = core.JSValue.undefinedValue();
     var context_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_holder_value },
-        .{ .value = &rooted_reviver },
-        .{ .value = &value },
-        .{ .value = &key_value },
-        .{ .value = &context_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &rooted_holder_value,
+        &rooted_reviver,
+        &value,
+        &key_value,
+        &context_value,
+    });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     // ONE [[Get]] per property (val = JS_GetProperty(holder, name),
     // quickjs.c:49722).
@@ -2138,23 +1822,9 @@ pub fn jsonInternalizeChild(
     var rooted_holder_value = holder_value;
     var rooted_reviver = reviver;
     var revived = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_holder_value },
-        .{ .value = &rooted_reviver },
-        .{ .value = &revived },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_holder_value, &rooted_reviver, &revived });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     revived = try jsonInternalizeProperty(ctx, output, global, rooted_holder_value, key, rooted_reviver, reviver_call, record, caller_function, caller_frame);
     defer {
@@ -2176,22 +1846,9 @@ pub fn jsonInternalizeChild(
 fn jsonReviverContext(rt: *core.JSRuntime, global: *core.Object, record: ?*const JsonParseRecord) !core.JSValue {
     var object_value = core.JSValue.undefinedValue();
     var source_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &object_value },
-        .{ .value = &source_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        rt.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            rt.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &object_value, &source_value });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, core.class.ids.object, object_ops.objectPrototypeFromGlobal(rt, global));
     object_value = object.value();
@@ -2230,22 +1887,9 @@ pub fn jsonCreateDataProperty(
 ) HostError!void {
     var rooted_holder_value = holder_value;
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_holder_value },
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_holder_value, &rooted_value });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     if (holder.proxyTarget() != null) {
         object_ops.createDataPropertyOrThrow(ctx, output, global, rooted_holder_value, holder, key, rooted_value, caller_function, caller_frame) catch |err| switch (err) {
@@ -2272,24 +1916,9 @@ pub fn jsonStringifyCall(
     var replacer = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     var space = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
     var holder_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &value },
-        .{ .value = &replacer },
-        .{ .value = &space },
-        .{ .value = &holder_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &value, &replacer, &space, &holder_value });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     if (replacer.isUndefined() and space.isUndefined()) {
         if (try jsonStringifySimpleNoOptions(ctx.runtime, global, value)) |fast| return fast;
@@ -2376,7 +2005,7 @@ test "JSON.stringify roots direct function bytecode value while creating holder"
     defer result.free(rt);
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
-    try value_ops.appendRawString(rt, &bytes, result);
+    try core.string.appendValueUtf8(rt, &bytes, result);
     try std.testing.expectEqualStrings("null", bytes.items);
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
@@ -2574,22 +2203,9 @@ pub fn jsonStringifyPropertyList(
 ) !JsonStringifyPropertyList {
     var rooted_replacer = replacer;
     var item = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_replacer },
-        .{ .value = &item },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_replacer, &item });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     if (!try core.array.isArrayValue(rooted_replacer)) return .{};
 
@@ -2638,22 +2254,9 @@ fn jsonStringifyPropertyListAtom(
 ) !?core.Atom {
     var rooted_value = value;
     var string_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &string_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{ &rooted_value, &string_value });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     const needs_string = rooted_value.isString() or
         value_ops.numberValue(rooted_value) != null or
@@ -2694,24 +2297,14 @@ pub fn jsonStringifyGap(
     var primitive = core.JSValue.undefinedValue();
     var number_value = core.JSValue.undefinedValue();
     var string_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_space },
-        .{ .value = &primitive },
-        .{ .value = &number_value },
-        .{ .value = &string_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &rooted_space,
+        &primitive,
+        &number_value,
+        &string_value,
+    });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     var out = std.ArrayList(u8).empty;
     if (rooted_space.isObject()) {
@@ -2822,25 +2415,15 @@ pub fn jsonSerializeProperty(
     var value = core.JSValue.undefinedValue();
     var key_value = core.JSValue.undefinedValue();
     var to_json = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_holder_value },
-        .{ .value = &rooted_replacer },
-        .{ .value = &value },
-        .{ .value = &key_value },
-        .{ .value = &to_json },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &rooted_holder_value,
+        &rooted_replacer,
+        &value,
+        &key_value,
+        &to_json,
+    });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     value = try object_ops.getValueProperty(ctx, output, global, rooted_holder_value, key, caller_function, caller_frame);
     defer {
@@ -2899,25 +2482,15 @@ pub fn jsonAppendValue(
     var primitive = core.JSValue.undefinedValue();
     var number_value = core.JSValue.undefinedValue();
     var string_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &raw },
-        .{ .value = &primitive },
-        .{ .value = &number_value },
-        .{ .value = &string_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{
+        &rooted_value,
+        &raw,
+        &primitive,
+        &number_value,
+        &string_value,
+    });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     if (rooted_value.isUndefined() or rooted_value.isSymbol()) {
         try buffer.appendSlice(ctx.runtime.memory.allocator, if (array_slot) "null" else "");
@@ -2949,7 +2522,7 @@ pub fn jsonAppendValue(
             }
             var raw_bytes = std.ArrayList(u8).empty;
             defer raw_bytes.deinit(ctx.runtime.memory.allocator);
-            try value_ops.appendRawString(ctx.runtime, &raw_bytes, raw);
+            try core.string.appendValueUtf8(ctx.runtime, &raw_bytes, raw);
             try buffer.appendSlice(ctx.runtime.memory.allocator, raw_bytes.items);
         } else if (call_runtime.isCallableValue(rooted_value)) {
             try buffer.appendSlice(ctx.runtime.memory.allocator, if (array_slot) "null" else "");
@@ -3015,21 +2588,9 @@ pub fn jsonAppendArray(
     caller_frame: ?*Frame,
 ) !void {
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     if (jsonObjectInStack(stack.items, object)) return error.TypeError;
     try stack.append(ctx.runtime.memory.allocator, object);
@@ -3070,21 +2631,9 @@ pub fn jsonAppendObject(
     caller_frame: ?*Frame,
 ) !void {
     var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    if (comptime core.runtime.value_root_frames_enabled) {
-        ctx.runtime.active_value_roots = &root_frame;
-    }
-    defer {
-        if (comptime core.runtime.value_root_frames_enabled) {
-            ctx.runtime.active_value_roots = root_frame.previous;
-        }
-    }
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
 
     if (jsonObjectInStack(stack.items, object)) return error.TypeError;
     try stack.append(ctx.runtime.memory.allocator, object);

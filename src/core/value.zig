@@ -365,6 +365,15 @@ pub const JSValue = extern struct {
         return null;
     }
 
+    /// The catch-handler bytecode offset a catch marker carries, or null when
+    /// the marker is the "no handler" sentinel. Three dispatch files spelled
+    /// this decode out; it belongs next to the encoding it decodes.
+    pub fn catchTarget(self: JSValue) ?usize {
+        const offset = self.asCatchOffset() orelse -1;
+        if (offset < 0) return null;
+        return @intCast(offset);
+    }
+
     pub fn asString(self: JSValue) ?String {
         return String.fromValue(self);
     }
