@@ -1,7 +1,7 @@
+//! Configuration-file loading and selector resolution for run-test262.
 const std = @import("std");
 const NameList = @import("run_test262_names.zig").NameList;
 const BoundedFeatureOverrides = @import("run_test262_options.zig").BoundedFeatureOverrides;
-
 pub const Error = error{
     ConfigParse,
 };

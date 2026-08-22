@@ -1,12 +1,21 @@
+//! Exercises core value, object, GC, memory, and runtime primitives.
 const std = @import("std");
 const builtin = @import("builtin");
 const zjs = @import("zjs");
 const engine = zjs;
-
 const core = zjs.core;
 const helpers = @import("helpers.zig");
 
 test "host transports and core operation errors keep independent narrow sets" {
+    const CallbackTransport = error{
+        JSException,
+        OutOfMemory,
+        Interrupted,
+        ProcessExit,
+        StackOverflow,
+        Timeout,
+        UnhandledPromiseRejection,
+    };
     const DynamicImportTransport = core.errors.RuntimeError || error{
         AccessDenied,
         PermissionDenied,
@@ -17,8 +26,12 @@ test "host transports and core operation errors keep independent narrow sets" {
     const InstallGlobalsError = @typeInfo(@typeInfo(@TypeOf(core.JSRuntime.installStandardGlobals)).@"fn".return_type.?).error_union.error_set;
     const DynamicImportJobError = @typeInfo(@typeInfo(@typeInfo(core.jobs.DynamicImportPayload.Runner).pointer.child).@"fn".return_type.?).error_union.error_set;
     const AtomicsWaiterJobError = @typeInfo(@typeInfo(@typeInfo(core.jobs.AtomicsWaiterPayload.Runner).pointer.child).@"fn".return_type.?).error_union.error_set;
+    const NativeGenericError = @typeInfo(@typeInfo(@typeInfo(core.host_function.NativeGenericFn).pointer.child).@"fn".return_type.?).error_union.error_set;
 
     try std.testing.expect(core.errors.HostError == core.errors.RuntimeError);
+    try std.testing.expect(core.host_function.CallbackError == CallbackTransport);
+    const CallbackFn = @typeInfo(core.host_function.CallbackCallFn).pointer.child;
+    try std.testing.expect(@typeInfo(CallbackFn).@"fn".params[0].type.? == *core.JSContext);
     try std.testing.expect(core.context.DynamicImportError == DynamicImportTransport);
     try std.testing.expect(OwnPropertyReadError == core.errors.RuntimeError);
     try std.testing.expect(PropertyReadError == core.errors.RuntimeError);
@@ -26,6 +39,7 @@ test "host transports and core operation errors keep independent narrow sets" {
     try std.testing.expect(InstallGlobalsError == core.errors.RuntimeError);
     try std.testing.expect(DynamicImportJobError == core.errors.RuntimeError);
     try std.testing.expect(AtomicsWaiterJobError == core.errors.RuntimeError);
+    try std.testing.expect(NativeGenericError == core.errors.HostError);
 }
 
 extern "c" fn tmpfile() ?*std.c.FILE;

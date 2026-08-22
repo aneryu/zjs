@@ -257,7 +257,7 @@ fn collectionCall(
             }
             return methodCallObjectWithGlobal(ctx, active_global, receiver, id, args, globals);
         }
-        return methodCallWithCallbackHost(ctx.runtime, this_value, id, args, collection_adapter.host(globals));
+        return methodCallWithCallbackHost(ctx.runtime, this_value, id, args, collection_adapter.host(ctx, globals));
     };
     const active_global = callable_global orelse return error.InvalidBuiltinRegistry;
     if (try collectionNativeRecord(ctx, output, active_global, this_value, function_object, id, args, caller_function, caller_frame)) |value| return value;
@@ -291,7 +291,7 @@ fn collectionGroupByRecord(
         prototype = object_ops.constructorPrototypeObject(ctx.runtime, this_value) catch null;
     }
     const prototype_object = if (prototype) |owned| owned.object() else null;
-    return groupByWithCallbackHost(ctx.runtime, args, prototype_object, collection_adapter.host(globals)) catch |err| switch (err) {
+    return groupByWithCallbackHost(ctx.runtime, args, prototype_object, collection_adapter.host(ctx, globals)) catch |err| switch (err) {
         error.TypeError => error.TypeError,
         else => err,
     };
@@ -512,12 +512,12 @@ pub fn methodCallDroppedResult(rt: *core.JSRuntime, object: *core.Object, method
 }
 
 pub fn groupBy(
-    rt: *core.JSRuntime,
+    ctx: *core.JSContext,
     args: []const core.JSValue,
     globals: []globals_mod.Slot,
     prototype: ?*core.Object,
 ) !core.JSValue {
-    return groupByWithCallbackHost(rt, args, prototype, .{ .globals = globals });
+    return groupByWithCallbackHost(ctx.runtime, args, prototype, collection_adapter.host(ctx, globals));
 }
 
 pub fn groupByWithCallbackHost(
@@ -868,7 +868,10 @@ test "Map groupBy roots direct symbol key while creating group array" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    try addGroupedItem(rt, map, callback, testCallbackHost(), item, 0);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    try addGroupedItem(rt, map, callback, testCallbackHost(ctx), item, 0);
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     try std.testing.expectEqual(@as(usize, 1), map.collectionEntries().len);
     try std.testing.expect(map.collectionEntries()[0].key.same(item));
@@ -880,22 +883,22 @@ test "Map groupBy roots direct symbol key while creating group array" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn testCallbackHost() CallbackHost {
-    return .{ .call = testCallbackCallWithThis };
+fn testCallbackHost(ctx: *core.JSContext) CallbackHost {
+    return .{ .ctx = ctx, .call = testCallbackCallWithThis };
 }
 
 fn testCallbackCallWithThis(
-    rt: *core.JSRuntime,
+    ctx: *core.JSContext,
     callback: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
     globals: []globals_mod.Slot,
 ) CallbackError!core.JSValue {
-    _ = rt;
+    _ = ctx;
     _ = callback;
     _ = this_value;
     _ = globals;
-    if (args.len < 1) return error.TypeError;
+    std.debug.assert(args.len >= 1);
     return args[0].dup();
 }
 
@@ -931,7 +934,7 @@ fn collectionForEach(
         const value = if (object.class_id == core.class.ids.set) key.dup() else entry.value.dup();
         defer value.free(rt);
         var callback_args = [_]core.JSValue{ value, key, object.value() };
-        const result = try host.callWithThis(rt, args[0], this_arg, &callback_args);
+        const result = try host.callWithThis(args[0], this_arg, &callback_args);
         result.free(rt);
     }
     return core.JSValue.undefinedValue();
@@ -968,7 +971,7 @@ fn mapGetOrInsertComputed(
         const key_identity = (try weakKeyIdentityRegister(rt, key)) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().*[index].value.dup();
         var callback_args = [_]core.JSValue{key};
-        const value = try host.callValue(rt, callback, &callback_args);
+        const value = try host.callValue(callback, &callback_args);
         errdefer value.free(rt);
         // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206):
         // map_delete_record + map_add_record after the callback, so a record
@@ -985,7 +988,7 @@ fn mapGetOrInsertComputed(
     defer canonical_key.free(rt);
     if (findStrongEntry(object, canonical_key)) |index| return object.collectionEntriesSlot().*[index].value.dup();
     var callback_args = [_]core.JSValue{canonical_key};
-    const value = try host.callValue(rt, callback, &callback_args);
+    const value = try host.callValue(callback, &callback_args);
     errdefer value.free(rt);
     // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206):
     // map_delete_record + map_add_record after the callback, so a record the
@@ -1289,7 +1292,7 @@ fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, hos
     defer has_value.free(rt);
     if (!isCallableClosure(has_value)) return error.TypeError;
     var has_args = [_]core.JSValue{key};
-    const out = try host.callWithThis(rt, has_value, object.value(), &has_args);
+    const out = try host.callWithThis(has_value, object.value(), &has_args);
     defer out.free(rt);
     return out.asBool() orelse false;
 }
@@ -1311,7 +1314,7 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
     const keys_value = try object.getProperty(keys_key);
     defer keys_value.free(rt);
     if (!isCallableClosure(keys_value)) return error.TypeError;
-    const iterable_value = try host.callWithThis(rt, keys_value, object.value(), &.{});
+    const iterable_value = try host.callWithThis(keys_value, object.value(), &.{});
     defer iterable_value.free(rt);
     const iterable = try expectObject(iterable_value);
     if (iterable.isArray()) {
@@ -1448,7 +1451,7 @@ fn addGroupedItem(
 
     const index_value = core.JSValue.int32(@intCast(index));
     var callback_args = [_]core.JSValue{ rooted_item, index_value };
-    key = try host.callValue(rt, callback, &callback_args);
+    key = try host.callValue(callback, &callback_args);
     defer key.free(rt);
 
     existing = try mapGet(rt, map, key);

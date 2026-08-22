@@ -1,3 +1,12 @@
+//! Shared object-property wrappers, property-key conversion, and object checks.
+//!
+//! Object/value inputs are borrowed; getters and value-based reads return one
+//! owned JSValue, while successful definitions duplicate or transfer only as
+//! the core Object contract states. Property-key conversion owns its temporary
+//! atom and byte buffer locally. Observable VM/proxy dispatch remains in the
+//! higher property modules; these helpers map to QuickJS's generic property
+//! operations around quickjs.c:8210-9172 and 9663 onward.
+
 const std = @import("std");
 const core = @import("../core/root.zig");
 const value_ops = @import("value_ops.zig");

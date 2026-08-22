@@ -1,5 +1,5 @@
+//! Public embedding-surface test root.
 const std = @import("std");
-
 // Unique exception: this shell does not attest. It is rooted on the public
 // `zjs` module (`src/root.zig`), which intentionally does not export
 // `config_signature` — the same choice as the runtime plugin fixtures.

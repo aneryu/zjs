@@ -1,5 +1,5 @@
+//! Unified test root that exposes engine subsystems and imports every test family.
 const std = @import("std");
-
 const internal = @import("internal_root.zig");
 
 pub const public_api = internal.public_api;

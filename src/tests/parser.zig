@@ -1,7 +1,7 @@
+//! Exercises lexer/parser semantics and emitted bytecode invariants.
 const std = @import("std");
 const zjs = @import("zjs");
 const engine = zjs;
-
 const core = zjs.core;
 const parser = zjs.parser;
 const function_def = zjs.bytecode.function_def;
@@ -9809,6 +9809,62 @@ test "parser error long tail names the unexpected source token" {
         defer parsed.deinit();
         const syntax_error = parsed.syntax_error orelse return error.TestExpectedEqual;
         try std.testing.expectEqualStrings(case.message, syntax_error.message);
+    }
+}
+
+test "parser error long tail names binding pattern and module tokens" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_]struct {
+        source: []const u8,
+        mode: parser.Mode,
+        message: []const u8,
+    }{
+        .{ .source = "let 5;", .mode = .script, .message = "expected binding name, got number" },
+        .{ .source = "let [...rest, tail] = [];", .mode = .script, .message = "expected ']', got ','" },
+        .{ .source = "import { value as 5 } from 'dep';", .mode = .module, .message = "expected binding name, got number" },
+        .{ .source = "export { value as ; };", .mode = .module, .message = "expected export name, got ';'" },
+    };
+
+    for (cases) |case| {
+        var parsed = try compileForTest(rt, case.source, .{
+            .mode = case.mode,
+            .filename = "long-tail-batch-2.js",
+        });
+        defer parsed.deinit();
+        const syntax_error = parsed.syntax_error orelse return error.TestExpectedEqual;
+        try std.testing.expectEqualStrings(case.message, syntax_error.message);
+    }
+}
+
+test "parser error long tail closes semantic and lookahead diagnostics" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_]struct {
+        source: []const u8,
+        mode: parser.Mode,
+        message: []const u8,
+        column: u32,
+    }{
+        .{ .source = "1 2;", .mode = .script, .message = "expected ';', got number", .column = 3 },
+        .{ .source = "let value; let value;", .mode = .script, .message = "expected non-conflicting declaration, got ';'", .column = 21 },
+        .{ .source = "new import('dep');", .mode = .script, .message = "expected '.', got '('", .column = 11 },
+        .{ .source = "let [value} = [];", .mode = .script, .message = "expected ']', got '}'", .column = 11 },
+        .{ .source = "class C { #x; method() { delete this.#x; } }", .mode = .script, .message = "private fields cannot be deleted", .column = 26 },
+        .{ .source = "export { missing };", .mode = .module, .message = "expected local export binding, got end of input", .column = 20 },
+    };
+
+    for (cases) |case| {
+        var parsed = try compileForTest(rt, case.source, .{
+            .mode = case.mode,
+            .filename = "long-tail-batch-3.js",
+        });
+        defer parsed.deinit();
+        const syntax_error = parsed.syntax_error orelse return error.TestExpectedEqual;
+        try std.testing.expectEqualStrings(case.message, syntax_error.message);
+        try std.testing.expectEqual(case.column, syntax_error.position.column);
     }
 }
 

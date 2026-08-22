@@ -1,5 +1,5 @@
+//! Cross-platform monotonic-clock helpers for diagnostics and timing.
 const std = @import("std");
-
 fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }

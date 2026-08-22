@@ -1,7 +1,7 @@
+//! Exercises VM execution, calls, jobs, control flow, and runtime semantics.
 const std = @import("std");
 const zjs = @import("zjs");
 const engine = zjs;
-
 const core = zjs.core;
 const QjsLexer = zjs.parser.Lexer;
 const parser_core = zjs.parser.Parser;
@@ -70,7 +70,7 @@ const NativeRecordStackProbe = struct {
         .native_function = .{ .generic = call },
     };
 
-    fn call(ctx: *core.JSContext, _: core.JSValue, _: []const core.JSValue) anyerror!core.JSValue {
+    fn call(ctx: *core.JSContext, _: core.JSValue, _: []const core.JSValue) core.errors.HostError!core.JSValue {
         calls += 1;
         if (!recurse or calls >= 256) return core.JSValue.int32(7);
         return engine.exec.call.callValue(ctx, null, callable, &.{});

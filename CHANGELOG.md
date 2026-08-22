@@ -7,6 +7,18 @@ breaking public-API cleanup is approved for this cycle; hot-path structural
 refactors are deferred to `docs/maintainability-backlog.md` and land only
 under the refactor-policy gates.
 
+- **Breaking (0.2.0-dev): collection callback and native-record error ABIs are
+  now explicit.** `CallbackCallFn` receives the authoritative `*JSContext`
+  instead of a bare `*JSRuntime`; migrate callback implementations to read the
+  runtime through `ctx.runtime` and set `CallbackHost.ctx` beside `.call`.
+  `CallbackError` now contains only the seven hard/control outcomes
+  (`JSException`, OOM, interrupt, process exit, stack overflow, timeout, and
+  unhandled rejection); ordinary runtime failures are materialized as pending
+  JavaScript exceptions in that context before crossing the seam. Internal
+  native-record function pointers likewise declare `HostError` instead of
+  `anyerror`, eliminating all fourteen dispatch-side `@errorCast` narrowings.
+  This completes Q16's staged host-error boundary cleanup.
+
 - **Breaking (0.2.0-dev): host and operation error types now describe their
   real transport boundaries.** `HostError` is now an alias of `RuntimeError`,
   removing all 48 raw std/backend members after Stage 1 converted module I/O
@@ -21,8 +33,9 @@ under the refactor-policy gates.
   the boundary and return the runtime transport; dynamic-import callbacks must
   use the new three-member host extension. Fixed-capacity number/date/JSON and
   name formatters now discharge impossible capacity errors locally instead of
-  polluting engine signatures. `CallbackError` and the native record casts are
-  intentionally unchanged until Q16 Stages 3 and 4.
+  polluting engine signatures. That Stage 2 commit deliberately left
+  `CallbackError` and the native-record casts for the separately gated Stages
+  3 and 4 recorded above.
 
 - **Host I/O errors now become named JavaScript errors at their producer
   seams.** The exec-owned mapping is exhaustive over Zig's concrete module
@@ -35,6 +48,29 @@ under the refactor-policy gates.
   instead of leaking `OperationUnsupported` to the embedder. Native dispatch
   also fails closed: it never returns the exception sentinel without first
   installing a pending exception (docs/impl-quality-backlog.md, Q16 Stage 1).
+
+- **Engine-internal parser invariant failures no longer masquerade as user
+  syntax errors.** A dedicated `ParserInvariant` error routes them through
+  the internal-compiler-error report instead of `SyntaxError:
+  UnexpectedToken`; 59 sites converted in the first batch with per-family
+  fault-injection proof of the routing, verdict- and emission-neutral for
+  well-formed and malformed source alike.
+
+- **The parser's remaining convertible error sites now report real
+  found/expected diagnostics** — batch 3 converts the 25 deferred generic
+  sites and 8 of 10 lookahead sites (the two holdouts are template-token
+  internal invariants, reclassified into Q5d). Bare direct sites are down
+  to 145, of which 137 are internal-invariant masks queued for Q5d
+  conversion; a five-family pilot routes them through the existing
+  internal-compiler-error arm.
+
+- **The parser's binding, destructuring, class, and module-clause errors now
+  name what they expected** ("expected binding name, got number", "expected
+  export name, got ';'") — a second 101-site batch through the Q5 recorder,
+  verdict-neutral (five-corpora emission byte-identical, test262 delta 0).
+  Cumulative: 201 of 377 bare sites converted; the largest remaining class
+  (140 sites) is internal invariants returning `UnexpectedToken`, now
+  queued separately as Q5d.
 
 - **A first 100 of the parser's 377 bare `UnexpectedToken` sites now report
   what they saw** ("unexpected '('", "expected X, got Y") through the Q5

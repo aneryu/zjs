@@ -1,3 +1,12 @@
+//! Error-object native records and their realm-aware dispatch seam.
+//!
+//! This module owns the Error prototype/static record ids and forwards stack
+//! access, captureStackTrace, and `toString` to their implementation owners.
+//! Receiver and arguments are borrowed; returned JSValues are owned. Callable
+//! realm selection stays atomic through `builtin_dispatch`, matching the
+//! QuickJS Error prototype table and `js_error_toString` at
+//! quickjs.c:41515-41548.
+
 const core = @import("../core/root.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");

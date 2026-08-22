@@ -1,7 +1,7 @@
+//! Validates public embedding examples against the shipped API.
 const std = @import("std");
 const build_options = @import("build_options");
 const zjs = @import("zjs");
-
 const HostState = struct {
     value: i32,
 

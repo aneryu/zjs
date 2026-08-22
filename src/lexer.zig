@@ -1,3 +1,4 @@
+//! QuickJS-aligned lexer namespace, parameterized by the token representation.
 pub fn namespace(comptime token: type) type {
     return struct {
         //! QuickJS-aligned lexer.
@@ -6,7 +7,6 @@ pub fn namespace(comptime token: type) type {
         //! `js_parse_regexp`, and the helpers around them in
         //! QuickJS `quickjs.c:21794..23200`.
         //!
-
         const std = @import("std");
         const atom_module = @import("core/atom.zig");
         const memory = @import("core/memory.zig");

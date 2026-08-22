@@ -1,7 +1,7 @@
+//! Exercises built-in objects, native handlers, and observable realm semantics.
 const std = @import("std");
 const zjs = @import("zjs");
 const engine = zjs;
-
 const core = zjs.core;
 const op = zjs.bytecode.opcode.op;
 
@@ -3110,6 +3110,38 @@ test "native builtin records use callee realm for errors and created objects" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "collection callback adapter materializes errors in its explicit realm" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const caller = try core.JSContext.create(rt);
+    defer caller.destroy();
+    const caller_global = try engine.exec.zjs_vm.contextGlobal(caller);
+    const callback_realm = try core.JSContext.create(rt);
+    defer callback_realm.destroy();
+    const callback_global = try engine.exec.zjs_vm.contextGlobal(callback_realm);
+
+    const callback = try engine.exec.closure.create(rt, 7, 0, 0, 0);
+    defer callback.free(rt);
+
+    const callback_host = engine.exec.collection_adapter.host(callback_realm, &.{});
+    try std.testing.expectError(
+        error.JSException,
+        callback_host.callWithThis(callback, core.JSValue.undefinedValue(), &.{}),
+    );
+    try std.testing.expect(callback_realm.hasException());
+
+    const error_value = callback_realm.takeException();
+    defer error_value.free(rt);
+    const error_object = try core.Object.expect(error_value);
+    const caller_type_error = engine.exec.object_ops.constructorPrototypeFromGlobal(rt, caller_global, "TypeError") orelse
+        return error.TestUnexpectedResult;
+    const callback_type_error = engine.exec.object_ops.constructorPrototypeFromGlobal(rt, callback_global, "TypeError") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(callback_type_error, error_object.getPrototype().?);
+    try std.testing.expect(caller_type_error != callback_type_error);
+}
+
 test "constructor static prototype and accessor handlers keep their callee realm" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -5072,7 +5104,7 @@ test "host WeakMap mutation closure links entries into existing weak index" {
 // ["x","b","c","c"]. The set-like object itself is a plain object carrying
 // real `size`/`has`/`keys` properties.
 fn symmetricDifferenceMutatingKeysHost(
-    rt: *core.JSRuntime,
+    ctx: *core.JSContext,
     callback: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
@@ -5080,7 +5112,22 @@ fn symmetricDifferenceMutatingKeysHost(
 ) core.host_function.CallbackError!core.JSValue {
     _ = callback;
     _ = this_value;
-    return symmetricDifferenceMutatingKeysImpl(rt, args, globals) catch |err| return @errorCast(err);
+    return symmetricDifferenceMutatingKeysImpl(ctx.runtime, args, globals) catch |err| switch (@as(anyerror, err)) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Interrupted => error.Interrupted,
+        error.ProcessExit => error.ProcessExit,
+        error.StackOverflow => error.StackOverflow,
+        error.Timeout => error.Timeout,
+        error.UnhandledPromiseRejection => error.UnhandledPromiseRejection,
+        error.JSException => if (ctx.hasException()) error.JSException else blk: {
+            _ = engine.exec.builtin_dispatch.nativeFromHostError(ctx, ctx.global, err);
+            break :blk error.JSException;
+        },
+        else => blk: {
+            _ = engine.exec.builtin_dispatch.nativeFromHostError(ctx, ctx.global, err);
+            break :blk error.JSException;
+        },
+    };
 }
 
 fn symmetricDifferenceMutatingKeysImpl(
@@ -5186,6 +5233,10 @@ test "Set.prototype.symmetricDifference tracks receiver mutations from a set-lik
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
+    const callback_ctx = try core.JSContext.create(rt);
+    defer callback_ctx.destroy();
+    _ = try engine.exec.zjs_vm.contextGlobal(callback_ctx);
+
     const base_set_value = try engine.exec.collection_ops.constructBare(rt, 2);
     defer base_set_value.free(rt);
     const base_set = objectFromValue(base_set_value);
@@ -5224,6 +5275,7 @@ test "Set.prototype.symmetricDifference tracks receiver mutations from a set-lik
     defer globals[0].value.free(rt);
 
     const host = core.host_function.CallbackHost{
+        .ctx = callback_ctx,
         .globals = globals[0..],
         .call = &symmetricDifferenceMutatingKeysHost,
     };

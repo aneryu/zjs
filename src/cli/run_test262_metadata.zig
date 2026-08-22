@@ -1,6 +1,6 @@
+//! Test262 frontmatter parsing and owned metadata representation.
 const std = @import("std");
 const NameList = @import("run_test262_names.zig").NameList;
-
 pub const NegativeMetadata = struct {
     phase: ?[]const u8 = null,
     type_name: ?[]const u8 = null,

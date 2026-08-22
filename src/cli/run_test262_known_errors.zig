@@ -1,7 +1,7 @@
+//! Known-error file loading, path resolution, and serialization for run-test262.
 const std = @import("std");
 const runner_config = @import("run_test262_config.zig");
 const NameList = @import("run_test262_names.zig").NameList;
-
 pub fn load(allocator: std.mem.Allocator, io: std.Io, errorfile: ?[]const u8) !NameList {
     const path = errorfile orelse return NameList.init(allocator);
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 * 1024 * 1024)) catch |err| switch (err) {

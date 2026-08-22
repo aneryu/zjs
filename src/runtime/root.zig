@@ -1,6 +1,6 @@
+//! Runtime integration for the event loop, native plugins, and host wakeups.
 const std = @import("std");
 const atomics_ops = @import("../exec/atomics_ops.zig");
-
 const core = @import("../core/root.zig");
 const exec = @import("../exec/root.zig");
 const zjs = @import("../binding/root.zig");

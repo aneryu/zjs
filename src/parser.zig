@@ -1,5 +1,5 @@
+//! Owns parser diagnostics, token-to-bytecode lowering, and module syntax.
 pub const subsystem_name = "parser";
-
 pub const diagnostics = struct {
     const atom = @import("core/atom.zig");
     const memory = @import("core/memory.zig");
@@ -495,6 +495,10 @@ pub const parser_core = struct {
         AwaitOutsideAsyncFunction,
         SyntaxError,
         BytecodeOverflow,
+        /// Parser-owned state, builder, and lowering invariants failed. This
+        /// is never a source-program verdict and is reported through Q5b's
+        /// internal-compiler-error boundary.
+        ParserInvariant,
         // Native recursion-descent guard (QuickJS next_token
         // `js_check_stack_overflow` -> js_parse_error "stack overflow",
         // quickjs.c:22836). Surfaced by `compile` as a catchable SyntaxError.
@@ -1683,12 +1687,14 @@ pub const parser_core = struct {
                                 const sloppy_function_redefinition = !fd.is_strict_mode and
                                     var_def_type == .function_decl and
                                     existing.var_kind == .function_decl;
-                                if (!sloppy_function_redefinition) return Error.UnexpectedToken;
+                                if (!sloppy_function_redefinition)
+                                    return self.failExpectedDescription("non-conflicting declaration");
                             } else if (existing.var_kind == .catch_ and existing.scope_level + 2 == self.scope_level) {
-                                return Error.UnexpectedToken;
+                                return self.failExpectedDescription("non-conflicting declaration");
                             }
                         },
-                        .global => if (self.atFunctionBodyScope()) return Error.UnexpectedToken,
+                        .global => if (self.atFunctionBodyScope())
+                            return self.failExpectedDescription("non-conflicting declaration"),
                     };
 
                     if (var_def_type != .function_decl and
@@ -1696,16 +1702,16 @@ pub const parser_core = struct {
                         self.atFunctionBodyScope() and
                         fd.findArg(name) >= 0)
                     {
-                        return Error.UnexpectedToken;
+                        return self.failExpectedDescription("non-conflicting declaration");
                     }
                     if (try self.findFunctionVarInChildScope(name, self.scope_level) != null) {
-                        return Error.UnexpectedToken;
+                        return self.failExpectedDescription("non-conflicting declaration");
                     }
                     if (fd.is_global_var) {
                         if (self.firstGlobalVarIndex(name)) |global_idx| {
                             const gv = fd.global_vars[global_idx];
                             if (self.isChildScope(gv.scope_level, self.scope_level)) {
-                                return Error.UnexpectedToken;
+                                return self.failExpectedDescription("non-conflicting declaration");
                             }
                         }
                     }
@@ -1739,7 +1745,7 @@ pub const parser_core = struct {
                 },
                 .var_ => {
                     if (try self.findLexicalDeclaration(name, false) != null) {
-                        return Error.UnexpectedToken;
+                        return self.failExpectedDescription("non-conflicting declaration");
                     }
                     if (fd.is_global_var) {
                         if (self.firstGlobalVarIndex(name)) |global_idx| {
@@ -1748,7 +1754,7 @@ pub const parser_core = struct {
                                 gv.scope_level == self.scope_level and
                                 fd.is_module)
                             {
-                                return Error.UnexpectedToken;
+                                return self.failExpectedDescription("non-conflicting declaration");
                             }
                         }
                         try self.addGlobalVar(name, false, false);
@@ -2092,17 +2098,38 @@ pub const parser_core = struct {
 
         fn failExpectedToken(self: *State, expected: tok.TokenKind) Error {
             var expected_buffer: [8]u8 = undefined;
-            var actual_buffer: [16]u8 = undefined;
             const expected_name = self.tokenKindLabel(expected, &expected_buffer);
+            return self.failExpectedDescription(expected_name);
+        }
+
+        fn failExpectedDescription(self: *State, expected: []const u8) Error {
+            var actual_buffer: [16]u8 = undefined;
             const actual_name = self.currentTokenKindLabel(&actual_buffer);
             var message_buffer: [PendingDiagnostic.message_capacity]u8 = undefined;
             const message = std.fmt.bufPrint(
                 &message_buffer,
                 "expected {s}, got {s}",
-                .{ expected_name, actual_name },
+                .{ expected, actual_name },
             ) catch "UnexpectedToken";
             self.setPendingDiagnostic(error.UnexpectedToken, self.currentDiagnosticPosition(), message);
             return error.UnexpectedToken;
+        }
+
+        fn failExpectedDescriptionAt(
+            self: *State,
+            expected: []const u8,
+            actual: tok.TokenKind,
+            position: diagnostics.Position,
+        ) Error {
+            var actual_buffer: [16]u8 = undefined;
+            const actual_name = self.tokenKindLabel(actual, &actual_buffer);
+            var message_buffer: [PendingDiagnostic.message_capacity]u8 = undefined;
+            const message = std.fmt.bufPrint(
+                &message_buffer,
+                "expected {s}, got {s}",
+                .{ expected, actual_name },
+            ) catch "UnexpectedToken";
+            return self.failWithMessage(position, message);
         }
 
         fn failUnexpectedToken(self: *State) Error {
@@ -2115,6 +2142,11 @@ pub const parser_core = struct {
                 .{actual_name},
             ) catch "UnexpectedToken";
             self.setPendingDiagnostic(error.UnexpectedToken, self.currentDiagnosticPosition(), message);
+            return error.UnexpectedToken;
+        }
+
+        fn failWithMessage(self: *State, position: ?diagnostics.Position, message: []const u8) Error {
+            self.setPendingDiagnostic(error.UnexpectedToken, position orelse self.currentDiagnosticPosition(), message);
             return error.UnexpectedToken;
         }
 
@@ -2373,7 +2405,7 @@ pub const parser_core = struct {
             if (s.gotLineTerminator() or s.peekKind() == tok.TOK_EOF or s.isPunct('}')) {
                 return true;
             }
-            return Error.UnexpectedToken;
+            return s.failExpectedToken(';');
         }
 
         /// Expect a specific token kind.
@@ -3064,7 +3096,7 @@ pub const parser_core = struct {
         fn closeScopes(self: *State, start_scope: i32, scope_stop: i32) Error!void {
             var scope = start_scope;
             while (scope > scope_stop) {
-                if (@as(usize, @intCast(scope)) >= self.curFunc().scopes.len) return Error.UnexpectedToken;
+                if (@as(usize, @intCast(scope)) >= self.curFunc().scopes.len) return error.ParserInvariant;
                 try self.emitLeaveScope(scope);
                 scope = self.curFunc().scopes[@intCast(scope)].parent;
             }
@@ -3545,7 +3577,7 @@ pub const parser_core = struct {
                 var var_idx = parent.scopes[@intCast(scope_idx)].first;
                 while (var_idx >= 0) {
                     const idx: usize = @intCast(var_idx);
-                    if (idx >= parent.vars.len) return Error.UnexpectedToken;
+                    if (idx >= parent.vars.len) return Error.ParserInvariant;
                     const vd = parent.vars[idx];
                     if (vd.scope_level != scope_idx) break;
                     if (vd.var_name == atom_id) return var_idx;
@@ -3602,7 +3634,7 @@ pub const parser_core = struct {
                     .is_lexical = source.isLexical(),
                     .is_const = source.isConst(),
                     .var_kind = source.varKind(),
-                    .var_idx = parent_ref_idx orelse return Error.UnexpectedToken,
+                    .var_idx = parent_ref_idx orelse return Error.ParserInvariant,
                     .var_name = source.var_name,
                 });
                 var existing: ?u16 = null;
@@ -3654,7 +3686,7 @@ pub const parser_core = struct {
                 .var_idx = 0,
                 .var_name = atom_id,
             }) catch return Error.OutOfMemory;
-            if (idx < 0 or idx > std.math.maxInt(u16)) return Error.UnexpectedToken;
+            if (idx < 0 or idx > std.math.maxInt(u16)) return Error.ParserInvariant;
             return @intCast(idx);
         }
 
@@ -3815,7 +3847,7 @@ pub const parser_core = struct {
             // a symbolized trace and a declared one is accounted, instead of a
             // bare assert that can only report the first offender.
             var code = self.currentCode();
-            if (operand_offset + 4 > code.len) return Error.UnexpectedToken;
+            if (operand_offset + 4 > code.len) return Error.ParserInvariant;
             const ft = self.flowTail();
             if (ft.valid) {
                 const old = std.mem.readInt(u32, code[operand_offset..][0..4], .little);
@@ -4266,11 +4298,45 @@ pub const parser_core = struct {
         };
     }
 
-    fn mapLookaheadLexerError(err: lexer_mod.Error) Error {
+    const DiagnosticToken = struct {
+        kind: tok.TokenKind,
+        position: diagnostics.Position,
+    };
+
+    fn diagnosticTokenFromToken(s: *const State, found_token: *const tok.Token) DiagnosticToken {
+        const source_start = @intFromPtr(s.lex.source.ptr);
+        const token_start = @intFromPtr(found_token.ptr);
+        return .{
+            .kind = found_token.val,
+            .position = .{
+                .offset = if (token_start <= source_start)
+                    0
+                else
+                    @min(token_start - source_start, s.lex.source.len),
+                .line = found_token.line_num,
+                .column = found_token.col_num,
+            },
+        };
+    }
+
+    fn mapLookaheadLexerError(s: *State, err: lexer_mod.Error) Error {
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            else => error.UnexpectedToken,
+            else => s.failWithMessage(.{
+                .offset = s.lex.mark_pos,
+                .line = s.lex.mark_line,
+                .column = s.lex.mark_col,
+            }, @errorName(err)),
         };
+    }
+
+    fn peekNextDiagnosticToken(s: *State) Error!DiagnosticToken {
+        const snapshot = takeLexerCursorSnapshot(s);
+        defer restoreLexerCursorSnapshot(s, snapshot);
+        var next: tok.Token = undefined;
+        s.lex.nextInto(&next) catch |err| return mapLookaheadLexerError(s, err);
+        defer s.lex.freeToken(&next);
+        return diagnosticTokenFromToken(s, &next);
     }
 
     /// QuickJS `js_parse_skip_parens_token` keeps one `JSToken` in parse state
@@ -4280,7 +4346,7 @@ pub const parser_core = struct {
     /// a long parenthesized lookahead.
     fn nextRegexpAwareLookaheadKind(s: *State, previous_token_kind: ?tok.TokenKind) Error!tok.TokenKind {
         var lookahead_token: tok.Token = undefined;
-        s.lex.nextInto(&lookahead_token) catch |err| return mapLookaheadLexerError(err);
+        s.lex.nextInto(&lookahead_token) catch |err| return mapLookaheadLexerError(s, err);
         defer s.lex.freeToken(&lookahead_token);
         try rescanLookaheadTokenIfRegexp(s, &lookahead_token, previous_token_kind);
         return lookahead_token.val;
@@ -4292,7 +4358,7 @@ pub const parser_core = struct {
 
         const slash_offset = s.lex.mark_pos;
         s.lex.freeToken(lookahead_token);
-        s.lex.rescanRegexpInto(lookahead_token, slash_offset) catch |err| return mapLookaheadLexerError(err);
+        s.lex.rescanRegexpInto(lookahead_token, slash_offset) catch |err| return mapLookaheadLexerError(s, err);
     }
 
     /// QuickJS tests arrow cover forms at the assignment-expression boundary,
@@ -4894,7 +4960,7 @@ pub const parser_core = struct {
             .private_field => if (!s.emit_phase1_temp or !lvalue.owns_name) return Error.InvalidAssignmentTarget,
             .ref_value => {
                 if (!lvalue.owns_name) return Error.InvalidAssignmentTarget;
-                if (lvalue.ref_label == null) return Error.UnexpectedToken;
+                if (lvalue.ref_label == null) return Error.ParserInvariant;
             },
             .array_element, .super_value => {},
         }
@@ -5288,8 +5354,9 @@ pub const parser_core = struct {
             return;
         }
         if (k == tok.TOK_DELETE) {
+            const delete_position = s.currentDiagnosticPosition();
             try s.advance();
-            return parseDelete(s, flags);
+            return parseDelete(s, flags, delete_position);
         }
         if (k == tok.TOK_INC or k == tok.TOK_DEC) {
             const update_op: u8 = if (k == tok.TOK_INC) opcode.op.inc else opcode.op.dec;
@@ -5544,10 +5611,10 @@ pub const parser_core = struct {
 
     fn discardTrailingGetSuper(s: *State) Error!void {
         const builder = s.activeBuilder();
-        if (builder.last_opcode_pos < 0) return Error.UnexpectedToken;
+        if (builder.last_opcode_pos < 0) return Error.ParserInvariant;
         const pos: u32 = @intCast(builder.last_opcode_pos);
         if (pos + 1 != builder.code_len or builder.code[pos] != opcode.op.get_super)
-            return Error.UnexpectedToken;
+            return Error.ParserInvariant;
         builder.truncateLastOpcodePreserveSources(pos) catch |err| return mapBuilderError(err);
     }
 
@@ -5569,9 +5636,9 @@ pub const parser_core = struct {
     /// `delete a.b[i]`, etc.) because the rewrite touches only the final
     /// access. Optional-chain and `super` references have dedicated trailing
     /// opcode rewrites; private references are rejected.
-    fn parseDelete(s: *State, flags: ParseFlags) Error!void {
+    fn parseDelete(s: *State, flags: ParseFlags, delete_position: diagnostics.Position) Error!void {
         try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted });
-        return finishDelete(s);
+        return finishDelete(s, delete_position);
     }
 
     /// Compact a replacement appended after `snapshot.code_len` over a
@@ -5587,7 +5654,7 @@ pub const parser_core = struct {
     ) Error!void {
         const v2b = s.activeBuilder();
         if (remove_start >= snapshot.code_len or snapshot.code_len > v2b.code_len) {
-            return Error.UnexpectedToken;
+            return error.ParserInvariant;
         }
         const removed_len = snapshot.code_len - remove_start;
         const appended_len = v2b.code_len - snapshot.code_len;
@@ -5596,12 +5663,12 @@ pub const parser_core = struct {
         while (reloc_index < snapshot.reloc_len) : (reloc_index += 1) {
             const operand_offset = v2b.relocs[reloc_index].operand_offset;
             if (operand_offset >= remove_start and operand_offset < snapshot.code_len) {
-                return Error.UnexpectedToken;
+                return Error.ParserInvariant;
             }
         }
         while (reloc_index < v2b.reloc_len) : (reloc_index += 1) {
             if (v2b.relocs[reloc_index].operand_offset < snapshot.code_len) {
-                return Error.UnexpectedToken;
+                return Error.ParserInvariant;
             }
         }
 
@@ -5611,13 +5678,13 @@ pub const parser_core = struct {
             if (slot.flags.bound and slot.bound_offset > remove_start and
                 slot.bound_offset < snapshot.code_len)
             {
-                return Error.UnexpectedToken;
+                return Error.ParserInvariant;
             }
         }
         while (label_index < v2b.label_len) : (label_index += 1) {
             const slot = v2b.label_slots[label_index];
             if (slot.flags.bound and slot.bound_offset < snapshot.code_len) {
-                return Error.UnexpectedToken;
+                return Error.ParserInvariant;
             }
         }
 
@@ -5630,13 +5697,13 @@ pub const parser_core = struct {
         var source_index = snapshot.source_len;
         while (source_index < v2b.source_len) : (source_index += 1) {
             if (v2b.source_slots[source_index].temp_offset < snapshot.code_len) {
-                return Error.UnexpectedToken;
+                return Error.ParserInvariant;
             }
         }
         if (v2b.last_opcode_pos >= 0 and
             @as(u64, @intCast(v2b.last_opcode_pos)) < snapshot.code_len)
         {
-            return Error.UnexpectedToken;
+            return Error.ParserInvariant;
         }
 
         const old_code_len = v2b.code_len;
@@ -5684,7 +5751,7 @@ pub const parser_core = struct {
             var walked: u32 = 0;
             while (reloc_index != compiler.labels.no_reloc) {
                 if (reloc_index >= v2b.reloc_len or walked >= v2b.reloc_len) {
-                    return Error.UnexpectedToken;
+                    return Error.ParserInvariant;
                 }
                 const reloc = v2b.relocs[reloc_index];
                 if (reloc.kind == .jump32 and reloc.operand_offset > 0 and
@@ -5698,7 +5765,7 @@ pub const parser_core = struct {
                 walked += 1;
             }
             if (!has_chain_goto) continue;
-            if (found != null) return Error.UnexpectedToken;
+            if (found != null) return Error.ParserInvariant;
             found = @enumFromInt(label_index);
         }
         return found orelse Error.UnexpectedToken;
@@ -5716,35 +5783,36 @@ pub const parser_core = struct {
     /// field/scope rewrites retain their atom-ledger entries; truncated
     /// atom-less getters are replaced transactionally by appending first and
     /// compacting only after every allocation succeeds.
-    fn finishDelete(s: *State) Error!void {
+    fn finishDelete(s: *State, delete_position: diagnostics.Position) Error!void {
         const v2b = s.activeBuilder();
         if (v2b.last_opcode_pos < 0) return emitDeleteNonReference(s);
         const pos: u32 = @intCast(v2b.last_opcode_pos);
-        if (pos >= v2b.code_len) return Error.UnexpectedToken;
+        if (pos >= v2b.code_len) return Error.ParserInvariant;
 
         switch (v2b.code[pos]) {
             opcode.op.get_field_opt_chain,
             opcode.op.get_array_el_opt_chain,
             => return rewriteOptionalChainDeleteBuilder(s, pos),
             opcode.op.get_field => {
-                if (pos + 5 != v2b.code_len or v2b.atom_len == 0) return Error.UnexpectedToken;
+                if (pos + 5 != v2b.code_len or v2b.atom_len == 0) return Error.ParserInvariant;
                 const atom_id = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
-                if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.UnexpectedToken;
-                if (atomNameIsPrivate(s, atom_id)) return Error.UnexpectedToken;
+                if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.ParserInvariant;
+                if (atomNameIsPrivate(s, atom_id))
+                    return s.failWithMessage(delete_position, "private fields cannot be deleted");
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
                 try emitterOp(s, opcode.op.delete);
                 v2b.code[pos] = opcode.op.push_atom_value;
             },
             opcode.op.get_array_el => {
-                if (pos + 1 != v2b.code_len) return Error.UnexpectedToken;
+                if (pos + 1 != v2b.code_len) return Error.ParserInvariant;
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
                 try emitterOp(s, opcode.op.delete);
                 try compactAppendedTailReplacement(s, snapshot, pos);
             },
             opcode.op.get_length => {
-                if (pos + 1 != v2b.code_len) return Error.UnexpectedToken;
+                if (pos + 1 != v2b.code_len) return Error.ParserInvariant;
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
                 try emitterAtomOpOwned(s, opcode.op.push_atom_value, s.function.atoms.dup(atom_module.ids.length));
@@ -5753,19 +5821,20 @@ pub const parser_core = struct {
             },
             opcode.op.scope_get_var => {
                 if (!s.emit_phase1_temp or pos + 7 != v2b.code_len or v2b.atom_len == 0) {
-                    return Error.UnexpectedToken;
+                    return Error.ParserInvariant;
                 }
                 const name = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
-                if (v2b.atom_operands[v2b.atom_len - 1] != name) return Error.UnexpectedToken;
+                if (v2b.atom_operands[v2b.atom_len - 1] != name) return Error.ParserInvariant;
                 if (name == atom_this or name == atom_new_target) {
                     return emitDeleteNonReference(s);
                 }
-                if (s.is_strict or s.curFunc().is_strict_mode) return Error.UnexpectedToken;
+                if (s.is_strict or s.curFunc().is_strict_mode)
+                    return s.failWithMessage(delete_position, "unqualified identifiers cannot be deleted in strict mode");
                 v2b.code[pos] = opcode.op.scope_delete_var;
             },
-            opcode.op.scope_get_private_field => return Error.UnexpectedToken,
+            opcode.op.scope_get_private_field => return s.failWithMessage(delete_position, "private fields cannot be deleted"),
             opcode.op.get_super_value => {
-                if (pos + 1 != v2b.code_len) return Error.UnexpectedToken;
+                if (pos + 1 != v2b.code_len) return Error.ParserInvariant;
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
                 try emitterAtomOpU8Owned(s, opcode.op.throw_error, s.function.atoms.dup(atom_module.null_atom), 3);
@@ -6234,7 +6303,10 @@ pub const parser_core = struct {
             // before the outer `new` applies.
             try parseNewCalleeMemberAccess(s, flags);
         } else if (s.peekKind() == tok.TOK_IMPORT) {
-            if (s.peekNextKind() != @as(tok.TokenKind, @intCast('.'))) return Error.UnexpectedToken;
+            const following = try peekNextDiagnosticToken(s);
+            if (following.kind != @as(tok.TokenKind, @intCast('.'))) {
+                return s.failExpectedDescriptionAt("'.'", following.kind, following.position);
+            }
             try parsePrimary(s, flags);
             try parseNewCalleeMemberAccess(s, flags);
         } else {
@@ -7476,8 +7548,7 @@ pub const parser_core = struct {
 
     fn rejectInvalidStrictParameterName(s: *State, first: ?diagnostics.Position) Error!void {
         const position = first orelse return;
-        s.setPendingDiagnostic(error.UnexpectedToken, position, @errorName(error.UnexpectedToken));
-        return error.UnexpectedToken;
+        return s.failWithMessage(position, "invalid binding name in strict parameter list");
     }
 
     fn canUseAwaitAsIdentifier(s: *State) bool {
@@ -7753,7 +7824,7 @@ pub const parser_core = struct {
     }
 
     fn expectPunct(s: *State, ch: u8) Error!void {
-        if (!s.isPunct(ch)) return Error.UnexpectedToken;
+        if (!s.isPunct(ch)) return s.failExpectedToken(ch);
         try s.advance();
     }
 
@@ -7899,7 +7970,7 @@ pub const parser_core = struct {
             error.BytecodeOverflow => Error.BytecodeOverflow,
             // Builder fail-closed invariants (double bind, foreign label) surface
             // the same way other parser-internal fail-closed checks do.
-            error.InvalidBytecode => Error.UnexpectedToken,
+            error.InvalidBytecode => Error.ParserInvariant,
         };
     }
 
@@ -8147,7 +8218,7 @@ pub const parser_core = struct {
     }
 
     fn emitParserLabelJump(s: *State, op_id: u8, label: ParserLabelRef) Error!void {
-        if (opcode.formatOf(op_id) != .label or op_id == opcode.op.label) return Error.UnexpectedToken;
+        if (opcode.formatOf(op_id) != .label or op_id == opcode.op.label) return Error.ParserInvariant;
         var bytes: [5]u8 = undefined;
         bytes[0] = op_id;
         std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
@@ -8156,7 +8227,7 @@ pub const parser_core = struct {
     }
 
     fn emitParserLabelJumpNoSource(s: *State, op_id: u8, label: ParserLabelRef) Error!void {
-        if (opcode.formatOf(op_id) != .label or op_id == opcode.op.label) return Error.UnexpectedToken;
+        if (opcode.formatOf(op_id) != .label or op_id == opcode.op.label) return Error.ParserInvariant;
         var bytes: [5]u8 = undefined;
         bytes[0] = op_id;
         std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
@@ -8309,7 +8380,7 @@ pub const parser_core = struct {
     }
 
     fn validateMovedBytecodeLabels(code: []const u8, atoms: []const Atom, old_base: usize, new_base: usize) Error!void {
-        if (old_base > std.math.maxInt(usize) - code.len) return Error.UnexpectedToken;
+        if (old_base > std.math.maxInt(usize) - code.len) return Error.ParserInvariant;
         const old_end = old_base + code.len;
         const delta = @as(i128, @intCast(new_base)) - @as(i128, @intCast(old_base));
         var pc: usize = 0;
@@ -8318,25 +8389,25 @@ pub const parser_core = struct {
             const op_id = code[pc];
             const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
             const size = instr.size;
-            if (size == 0 or pc + size > code.len) return Error.UnexpectedToken;
+            if (size == 0 or pc + size > code.len) return Error.ParserInvariant;
 
             const label_offset = parserPhaseLabelOperandOffset(op_id, pc, instr.is_temp);
             if (label_offset) |offset| {
-                if (offset > code.len or code.len - offset < 4) return Error.UnexpectedToken;
+                if (offset > code.len or code.len - offset < 4) return Error.ParserInvariant;
                 const target = std.mem.readInt(u32, code[offset..][0..4], .little);
                 if (target >= old_base and target <= old_end) {
                     const rebased = @as(i128, @intCast(target)) + delta;
-                    if (rebased < 0 or rebased > std.math.maxInt(u32)) return Error.UnexpectedToken;
+                    if (rebased < 0 or rebased > std.math.maxInt(u32)) return Error.ParserInvariant;
                 }
             }
 
             if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) {
-                if (atom_index >= atoms.len) return Error.UnexpectedToken;
+                if (atom_index >= atoms.len) return Error.ParserInvariant;
                 atom_index += 1;
             }
             pc += size;
         }
-        if (atom_index != atoms.len) return Error.UnexpectedToken;
+        if (atom_index != atoms.len) return Error.ParserInvariant;
     }
 
     fn rebaseMovedBytecodeLabelsAssumeValidated(code: []u8, atoms: []const Atom, old_base: usize, new_base: usize) void {
@@ -8773,12 +8844,12 @@ pub const parser_core = struct {
     }
 
     fn patchContinueFrame(s: *State) Error!void {
-        if (s.continue_frame_labels.items.len == 0) return Error.UnexpectedToken;
+        if (s.continue_frame_labels.items.len == 0) return Error.ParserInvariant;
         try emitterBindLabel(s, s.continue_frame_labels.getLast());
     }
 
     fn popBreakFrameAndPatch(s: *State) Error!void {
-        if (s.break_frame_lens.items.len == 0 or s.continue_frame_lens.items.len == 0) return Error.UnexpectedToken;
+        if (s.break_frame_lens.items.len == 0 or s.continue_frame_lens.items.len == 0) return Error.ParserInvariant;
         _ = s.continue_frame_lens.pop().?;
         _ = s.continue_frame_break_frame_indices.pop().?;
         _ = s.continue_frame_catch_marker_depths.pop().?;
@@ -8788,19 +8859,19 @@ pub const parser_core = struct {
         _ = s.break_frame_cleanup_drops.pop().?;
         _ = s.break_frame_cross_cleanup_drops.pop().?;
         // The continue label was bound by patchContinueFrame; only pop it.
-        _ = s.continue_frame_labels.pop() orelse return Error.UnexpectedToken;
-        const break_label = s.break_frame_labels.pop() orelse return Error.UnexpectedToken;
+        _ = s.continue_frame_labels.pop() orelse return Error.ParserInvariant;
+        const break_label = s.break_frame_labels.pop() orelse return Error.ParserInvariant;
         try emitterBindLabel(s, break_label);
         std.debug.assert(s.break_fixups.items.len == start);
     }
 
     fn popBreakOnlyFrameAndPatch(s: *State) Error!void {
-        if (s.break_frame_lens.items.len == 0) return Error.UnexpectedToken;
+        if (s.break_frame_lens.items.len == 0) return Error.ParserInvariant;
         const start = s.break_frame_lens.pop().?;
         _ = s.break_frame_catch_marker_depths.pop().?;
         _ = s.break_frame_cleanup_drops.pop().?;
         _ = s.break_frame_cross_cleanup_drops.pop().?;
-        const break_label = s.break_frame_labels.pop() orelse return Error.UnexpectedToken;
+        const break_label = s.break_frame_labels.pop() orelse return Error.ParserInvariant;
         try emitterBindLabel(s, break_label);
         std.debug.assert(s.break_fixups.items.len == start);
     }
@@ -8837,7 +8908,7 @@ pub const parser_core = struct {
     }
 
     fn skipTemplateInPredeclareScan(s: *State, first: tok.Token) Error!void {
-        const first_part = first.payload.str.template orelse return Error.UnexpectedToken;
+        const first_part = first.payload.str.template orelse return Error.ParserInvariant;
         switch (first_part) {
             .no_substitution, .tail => return,
             .head, .middle => {},
@@ -8883,7 +8954,7 @@ pub const parser_core = struct {
             var next_part: tok.Token = undefined;
             try s.lex.nextTemplatePartAfterBraceInto(&next_part);
             defer s.lex.freeToken(&next_part);
-            const part = next_part.payload.str.template orelse return Error.UnexpectedToken;
+            const part = next_part.payload.str.template orelse return Error.ParserInvariant;
             switch (part) {
                 .tail, .no_substitution => return,
                 .head, .middle => continue,
@@ -9106,7 +9177,7 @@ pub const parser_core = struct {
     }
 
     fn armCurrentUsingBlockFrame(s: *State) Error!u16 {
-        if (s.using_block_frames.items.len == 0) return Error.UnexpectedToken;
+        if (s.using_block_frames.items.len == 0) return error.ParserInvariant;
         const frame_index = s.using_block_frames.items.len - 1;
         if (s.using_block_frames.items[frame_index].stack_loc) |stack_loc| return stack_loc;
 
@@ -9126,27 +9197,27 @@ pub const parser_core = struct {
     }
 
     fn noteUsingResourceHint(s: *State, hint: DisposalHint) Error!void {
-        if (s.using_block_frames.items.len == 0) return Error.UnexpectedToken;
+        if (s.using_block_frames.items.len == 0) return Error.ParserInvariant;
         if (hint == .async) {
             s.using_block_frames.items[s.using_block_frames.items.len - 1].seen_async_hint = true;
         }
     }
 
     fn finalizeCurrentUsingBlockFrame(s: *State) Error!void {
-        if (s.using_block_frames.items.len == 0) return Error.UnexpectedToken;
+        if (s.using_block_frames.items.len == 0) return Error.ParserInvariant;
         const frame = s.using_block_frames.items[s.using_block_frames.items.len - 1];
         const stack_loc = frame.stack_loc orelse {
             _ = s.using_block_frames.pop();
             return;
         };
         if (frame.catch_marker_depth != s.active_catch_marker_depth or s.active_catch_marker_depth == 0) {
-            return Error.UnexpectedToken;
+            return Error.ParserInvariant;
         }
 
         s.active_catch_marker_depth -= 1;
         // zjs-only explicit-resource-management lowering: normal and
         // throw completions converge through real catch/end LabelIds.
-        const catch_label = frame.catch_label orelse return Error.UnexpectedToken;
+        const catch_label = frame.catch_label orelse return Error.ParserInvariant;
         try emitterOp(s, opcode.op.drop);
         try emitUsingDisposeStack(s, stack_loc, frame.seen_async_hint);
         try s.emitCloseLoc(stack_loc);
@@ -9404,8 +9475,10 @@ pub const parser_core = struct {
             if (s.peekKind() == '=') {
                 try s.advance();
                 if (s.peekKind() == tok.TOK_STRING) {
-                    const is_simple = s.peekNextKind() == ',' or s.peekNextKind() == '}';
-                    if (!is_simple) return Error.UnexpectedToken;
+                    const following = try peekNextDiagnosticToken(s);
+                    if (following.kind != ',' and following.kind != '}') {
+                        return s.failExpectedDescriptionAt("',' or '}'", following.kind, following.position);
+                    }
                     is_string_init = true;
                     // String initializer: emit Enum.Member = "string"
                     try s.emitScopeGetVar(enum_atom);
@@ -9416,15 +9489,19 @@ pub const parser_core = struct {
                     var has_explicit = false;
                     var val: i32 = 0;
                     if (s.peekKind() == tok.TOK_NUMBER) {
-                        const is_simple = s.peekNextKind() == ',' or s.peekNextKind() == '}';
-                        if (!is_simple) return Error.UnexpectedToken;
+                        const following = try peekNextDiagnosticToken(s);
+                        if (following.kind != ',' and following.kind != '}') {
+                            return s.failExpectedDescriptionAt("',' or '}'", following.kind, following.position);
+                        }
                         has_explicit = true;
                         val = @intFromFloat(s.token.payload.num.value);
                         try parseAssignExpr(s);
                     } else if (s.peekKind() == '-' and s.peekNextKind() == tok.TOK_NUMBER) {
                         try s.advance(); // consume '-'
-                        const is_simple = s.peekNextKind() == ',' or s.peekNextKind() == '}';
-                        if (!is_simple) return Error.UnexpectedToken;
+                        const following = try peekNextDiagnosticToken(s);
+                        if (following.kind != ',' and following.kind != '}') {
+                            return s.failExpectedDescriptionAt("',' or '}'", following.kind, following.position);
+                        }
                         has_explicit = true;
                         val = -@as(i32, @intFromFloat(s.token.payload.num.value));
                         try Emitter.opI32(s, opcode.op.push_i32, val);
@@ -10705,6 +10782,18 @@ pub const parser_core = struct {
             .col_num = s.token.col_num,
         });
         try parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = keep_completion });
+        // A leading sloppy-mode `let` is parsed as an IdentifierReference when
+        // the following token cannot begin a lexical declaration. If that
+        // expression leaves another same-line token behind, ASI cannot finish
+        // the statement: the useful grammar expectation is the binding that a
+        // lexical declaration would require, not the generic parser sentinel.
+        if (!s.isPunct(';') and
+            !s.gotLineTerminator() and
+            s.peekKind() != tok.TOK_EOF and
+            !s.isPunct('}'))
+        {
+            return s.failExpectedDescription("binding name");
+        }
         _ = try s.expectSemicolon();
         if (keep_completion) {
             try s.emitEvalRetPut();
@@ -10718,7 +10807,7 @@ pub const parser_core = struct {
         finally_label: FinallyLabel,
         catch_marker_depth: u32,
     ) Error!usize {
-        if (catch_marker_depth > s.active_catch_marker_depth) return Error.UnexpectedToken;
+        if (catch_marker_depth > s.active_catch_marker_depth) return error.ParserInvariant;
         try s.return_finally_frames.append(s.function.memory.allocator, .{
             .finally_label = finally_label,
             .scope_level = s.scope_level,
@@ -11412,7 +11501,7 @@ pub const parser_core = struct {
                 );
                 if (!has_initializer) return s.failExpectedToken('=');
             } else {
-                return s.failUnexpectedToken();
+                return s.failExpectedDescription("binding name");
             }
 
             // Check for comma (multiple declarations)
@@ -11510,22 +11599,22 @@ pub const parser_core = struct {
             }
             try s.advance();
             if (!isIdentifierLikeToken(s) or identifierLikeHasInvalidEscapeForBinding(s)) {
-                return Error.UnexpectedToken;
+                return s.failExpectedDescription("binding name");
             }
             const atom_id = identifierLikeAtomOwned(s);
             target_atom_owner = atom_id;
-            if (atomNameEquals(s, atom_id, "let")) return Error.UnexpectedToken;
+            if (atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
             if ((s.is_strict or s.curFunc().is_strict_mode) and
                 (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
             {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
             _ = try s.defineVar(atom_id, .const_);
             target_atom = atom_id;
             target_is_lexical_decl = true;
             target_is_using_decl = true;
             try s.advance();
-            if (s.peekKind() == @as(tok.TokenKind, @intCast('='))) return Error.UnexpectedToken;
+            if (s.peekKind() == @as(tok.TokenKind, @intCast('='))) return s.failUnexpectedToken();
 
             const value_loc = try appendAnonymousTempLocal(s);
             iteration_using_value_loc = value_loc;
@@ -11567,15 +11656,15 @@ pub const parser_core = struct {
                     !(s.is_strict or s.curFunc().is_strict_mode) and
                     !(s.peekKind() == tok.TOK_YIELD and s.in_generator) and
                     !(s.peekKind() == tok.TOK_AWAIT and !canUseAwaitAsIdentifier(s));
-                if (!isIdentifierLikeToken(s) and !sloppy_keyword_var) return Error.UnexpectedToken;
-                if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
+                if (!isIdentifierLikeToken(s) and !sloppy_keyword_var) return s.failExpectedDescription("binding name");
+                if (identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
                 const atom_id = identifierLikeAtomOwned(s);
                 target_atom_owner = atom_id;
-                if (is_lexical and atomNameEquals(s, atom_id, "let")) return Error.UnexpectedToken;
+                if (is_lexical and atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
                 if ((s.is_strict or s.curFunc().is_strict_mode) and
                     (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
                 {
-                    return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
                 }
                 if (is_lexical) {
                     _ = try s.defineVar(atom_id, if (is_const) .const_ else .let_);
@@ -11597,7 +11686,7 @@ pub const parser_core = struct {
                 atomNameEquals(s, s.token.payload.ident.atom, "async") and
                 s.peekNextIsOfToken())
             {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
 
             const is_pattern = if (var_tok == @as(tok.TokenKind, @intCast('[')) or
@@ -11655,7 +11744,7 @@ pub const parser_core = struct {
             if (target_var_initializer_atom == null or target_is_pattern or
                 target_is_lexical_decl or s.is_strict or s.curFunc().is_strict_mode)
             {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
             has_var_initializer = true;
             try s.advance();
@@ -11665,10 +11754,10 @@ pub const parser_core = struct {
 
         const in_of_tok = s.peekKind();
         const is_for_of = s.isOfToken();
-        if (in_of_tok != tok.TOK_IN and !is_for_of) return Error.UnexpectedToken;
-        if (target_is_using_decl and !is_for_of) return Error.UnexpectedToken;
-        if (has_var_initializer and is_for_of) return Error.UnexpectedToken;
-        if (is_for_await and !is_for_of) return Error.UnexpectedToken;
+        if (in_of_tok != tok.TOK_IN and !is_for_of) return s.failExpectedDescription("'in' or 'of'");
+        if (target_is_using_decl and !is_for_of) return s.failUnexpectedToken();
+        if (has_var_initializer and is_for_of) return s.failUnexpectedToken();
+        if (is_for_await and !is_for_of) return s.failUnexpectedToken();
         try s.advance();
 
         if (is_for_of) {
@@ -11806,7 +11895,7 @@ pub const parser_core = struct {
         var depth: usize = 0;
         while (true) {
             const k = s.peekKind();
-            if (k == tok.TOK_EOF) return Error.UnexpectedToken;
+            if (k == tok.TOK_EOF) return s.failUnexpectedToken();
             if (depth == 0 and k == ']') return false;
             if (depth == 0 and (k == '[' or k == '{')) return true;
             if (depth == 0 and k == tok.TOK_ELLIPSIS) {
@@ -11855,7 +11944,7 @@ pub const parser_core = struct {
             }
             if (s.peekKind() == ',') try s.advance();
         }
-        if (s.peekKind() == tok.TOK_EOF) return Error.UnexpectedToken;
+        if (s.peekKind() == tok.TOK_EOF) return s.failUnexpectedToken();
         return false;
     }
 
@@ -11863,7 +11952,7 @@ pub const parser_core = struct {
         var depth: usize = 0;
         while (true) {
             const k = s.peekKind();
-            if (k == tok.TOK_EOF) return Error.UnexpectedToken;
+            if (k == tok.TOK_EOF) return s.failUnexpectedToken();
             if (k == '[' or k == '{' or k == '(') depth += 1;
             if (k == ']' or k == '}' or k == ')') {
                 if (depth == 0) return;
@@ -11880,7 +11969,7 @@ pub const parser_core = struct {
         var depth: usize = 0;
         while (true) {
             const k = s.peekKind();
-            if (k == tok.TOK_EOF) return Error.UnexpectedToken;
+            if (k == tok.TOK_EOF) return s.failUnexpectedToken();
             if (depth == 0 and (k == ',' or k == ']' or k == '}')) return;
             if (k == '[' or k == '{' or k == '(') depth += 1;
             if (k == ']' or k == '}' or k == ')') {
@@ -11930,7 +12019,7 @@ pub const parser_core = struct {
         defer s.function.atoms.free(name_atom);
         s.setLastDeclaredAtom(name_atom);
         if (s.lex.is_module and s.atProgramBodyScope() and hasKnownBinding(s, name_atom)) {
-            return Error.UnexpectedToken;
+            return s.failUnexpectedToken();
         }
         try s.advance();
 
@@ -11985,12 +12074,12 @@ pub const parser_core = struct {
             // across next_token (quickjs.c:36551-36556).
             const name_atom = s.function.atoms.dup(identifierLikeAtom(s));
             owned_name = name_atom;
-            if (is_generator and atomNameEquals(s, name_atom, "yield")) return Error.UnexpectedToken;
-            if (func_kind == .async and is_generator and atomNameEquals(s, name_atom, "await")) return Error.UnexpectedToken;
+            if (is_generator and atomNameEquals(s, name_atom, "yield")) return s.failUnexpectedToken();
+            if (func_kind == .async and is_generator and atomNameEquals(s, name_atom, "await")) return s.failUnexpectedToken();
             if ((s.is_strict or s.curFunc().is_strict_mode) and
                 (atomNameEquals(s, name_atom, "eval") or atomNameEquals(s, name_atom, "arguments")))
             {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
             try s.advance();
         }
@@ -12160,17 +12249,17 @@ pub const parser_core = struct {
                     if (func_kind == .set and strict_params and
                         (atomNameEquals(s, param_atom, "eval") or atomNameEquals(s, param_atom, "arguments")))
                     {
-                        return Error.UnexpectedToken;
+                        return s.failUnexpectedToken();
                     }
                     for (parameters.simple_names.items) |existing| {
                         if (existing == param_atom) {
                             parameters.has_duplicate_simple = true;
-                            if (strict_params) return Error.UnexpectedToken;
+                            if (strict_params) return s.failUnexpectedToken();
                             break;
                         }
                     }
                     for (s.curFunc().vars) |existing| {
-                        if (existing.var_name == param_atom) return Error.UnexpectedToken;
+                        if (existing.var_name == param_atom) return s.failUnexpectedToken();
                     }
                     try appendOwnedParserAtom(s, &parameters.simple_names, param_atom);
                     if (capture_child) {
@@ -12250,14 +12339,14 @@ pub const parser_core = struct {
                     try s.advance();
                     has_rest_parameter = true;
                     if (isIdentifierLikeToken(s)) {
-                        if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
+                        if (identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
                         const rest_atom = identifierLikeAtom(s);
                         recordInvalidStrictParameterName(s, &parameters.invalid_strict_name_position, rest_atom);
                         for (parameters.simple_names.items) |existing| {
-                            if (existing == rest_atom) return Error.UnexpectedToken;
+                            if (existing == rest_atom) return s.failUnexpectedToken();
                         }
                         for (s.curFunc().vars) |existing| {
-                            if (existing.var_name == rest_atom) return Error.UnexpectedToken;
+                            if (existing.var_name == rest_atom) return s.failUnexpectedToken();
                         }
                         try appendOwnedParserAtom(s, &parameters.simple_names, rest_atom);
                         if (capture_child) {
@@ -12311,17 +12400,17 @@ pub const parser_core = struct {
                             false,
                         )) return Error.UnexpectedToken;
                     } else {
-                        return Error.UnexpectedToken;
+                        return s.failExpectedDescription("binding name or binding pattern");
                     }
                     break;
                 } else {
-                    return Error.UnexpectedToken;
+                    return s.failExpectedDescription("binding name or binding pattern");
                 }
 
                 if (s.peekKind() == ',') {
                     try s.advance();
                 } else if (s.peekKind() != ')') {
-                    return Error.UnexpectedToken;
+                    return s.failExpectedToken(')');
                 }
             }
 
@@ -12329,8 +12418,10 @@ pub const parser_core = struct {
             if (parameter_scope) |scope| try leaveParameterExpressionScope(s, scope);
         }
 
-        if (func_kind == .get and (param_count != 0 or has_rest_parameter)) return Error.UnexpectedToken;
-        if (func_kind == .set and (param_count != 1 or has_rest_parameter)) return Error.UnexpectedToken;
+        if (func_kind == .get and (param_count != 0 or has_rest_parameter))
+            return s.failWithMessage(null, "getter parameter list must be empty");
+        if (func_kind == .set and (param_count != 1 or has_rest_parameter))
+            return s.failWithMessage(null, "setter parameter list must contain exactly one non-rest parameter");
         if (capture_child) s.curFunc().has_simple_parameter_list = parameters.has_simple_list;
         if (capture_child) {
             if (first_default_param) |defined_count| {
@@ -12772,11 +12863,13 @@ pub const parser_core = struct {
         try parseFunctionBodyBlock(s);
         if (s.is_strict) s.curFunc().is_strict_mode = true;
         if (s.curFunc().is_strict_mode) {
-            if (s.curFunc().has_use_strict and !parameters.has_simple_list) return Error.UnexpectedToken;
+            if (s.curFunc().has_use_strict and !parameters.has_simple_list)
+                return s.failWithMessage(null, "use strict directive is not allowed with non-simple parameters");
             switch (func_kind) {
                 .normal, .async, .generator, .async_generator => {
                     if (function_pending_name) |name| {
-                        if (isInvalidStrictFunctionBindingName(s, name)) return Error.UnexpectedToken;
+                        if (isInvalidStrictFunctionBindingName(s, name))
+                            return s.failExpectedDescription("valid strict-mode function name");
                     }
                 },
                 else => {},
@@ -12794,7 +12887,7 @@ pub const parser_core = struct {
                 func_kind == .arrow or
                 func_kind == .class_constructor or func_kind == .derived_class_constructor or
                 !parameters.has_simple_list or s.is_strict or s.curFunc().is_strict_mode))
-            return Error.UnexpectedToken;
+            return s.failWithMessage(null, "duplicate parameters are not allowed in this function");
         s.leaveControlBoundary(saved_control_frames);
         control_boundary_active = false;
         if (capture_child) {
@@ -12863,7 +12956,7 @@ pub const parser_core = struct {
                         .argument => |arg_idx| parent_fd.args[arg_idx].func_pool_idx = @intCast(child_cpool_idx),
                         .local => |var_idx| parent_fd.vars[var_idx].func_pool_idx = @intCast(child_cpool_idx),
                         .global => {
-                            if (parent_fd.global_vars.len == 0) return Error.UnexpectedToken;
+                            if (parent_fd.global_vars.len == 0) return Error.ParserInvariant;
                             parent_fd.global_vars[parent_fd.global_vars.len - 1].cpool_idx = @intCast(child_cpool_idx);
                         },
                     }
@@ -12871,7 +12964,7 @@ pub const parser_core = struct {
                     function_decl_plan.scope_entry_init)
                 {
                     const var_idx: usize = @intCast(function_decl_plan.lexical_var_idx);
-                    if (var_idx >= parent_fd.vars.len) return Error.UnexpectedToken;
+                    if (var_idx >= parent_fd.vars.len) return Error.ParserInvariant;
                     parent_fd.vars[var_idx].func_pool_idx = @intCast(child_cpool_idx);
                 }
 
@@ -13068,7 +13161,7 @@ pub const parser_core = struct {
         var invalid_strict_name_position: ?diagnostics.Position = null;
         if (isIdentifierLikeToken(s)) {
             // Single bare identifier parameter.
-            if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
+            if (identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
             const param_atom = identifierLikeAtom(s);
             recordInvalidStrictParameterName(s, &invalid_strict_name_position, param_atom);
             if (s.is_strict or s.curFunc().is_strict_mode) {
@@ -13099,13 +13192,13 @@ pub const parser_core = struct {
             defer deinitOwnedParserAtoms(s, &param_names);
             while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
                 if (isIdentifierLikeToken(s)) {
-                    if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
+                    if (identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
                     const param_atom = identifierLikeAtomOwned(s);
                     defer s.function.atoms.free(param_atom);
                     recordInvalidStrictParameterName(s, &invalid_strict_name_position, param_atom);
                     try appendArrowParamBindingName(s, &param_names, param_atom);
                     for (s.curFunc().vars) |existing| {
-                        if (existing.var_name == param_atom) return Error.UnexpectedToken;
+                        if (existing.var_name == param_atom) return s.failUnexpectedToken();
                     }
                     const arg_index = param_count;
                     if (capture_child) {
@@ -13185,12 +13278,12 @@ pub const parser_core = struct {
                     const arg_index = param_count;
                     try s.advance();
                     if (isIdentifierLikeToken(s)) {
-                        if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
+                        if (identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
                         const param_atom = identifierLikeAtom(s);
                         recordInvalidStrictParameterName(s, &invalid_strict_name_position, param_atom);
                         try appendArrowParamBindingName(s, &param_names, param_atom);
                         for (s.curFunc().vars) |existing| {
-                            if (existing.var_name == param_atom) return Error.UnexpectedToken;
+                            if (existing.var_name == param_atom) return s.failUnexpectedToken();
                         }
                         if (capture_child) {
                             if (parameter_scope != null) {
@@ -13243,17 +13336,17 @@ pub const parser_core = struct {
                             false,
                         )) return Error.UnexpectedToken;
                     } else {
-                        return Error.UnexpectedToken;
+                        return s.failExpectedDescription("binding name or binding pattern");
                     }
                     break;
                 } else {
-                    return Error.UnexpectedToken;
+                    return s.failExpectedDescription("binding name or binding pattern");
                 }
 
                 if (s.peekKind() == ',') {
                     try s.advance();
                 } else if (s.peekKind() != ')') {
-                    return Error.UnexpectedToken;
+                    return s.failExpectedToken(')');
                 }
             }
 
@@ -13274,7 +13367,7 @@ pub const parser_core = struct {
         }
 
         // Expect =>
-        if (s.lex.got_lf) return Error.UnexpectedToken;
+        if (s.lex.got_lf) return s.failUnexpectedToken();
         try s.expectToken(tok.TOK_ARROW);
         s.in_async = is_async;
 
@@ -13297,7 +13390,8 @@ pub const parser_core = struct {
                 if (!capture_child) s.return_depth -= 1;
             }
             try parseFunctionBodyBlock(s);
-            if (has_non_simple_params and s.curFunc().has_use_strict) return Error.UnexpectedToken;
+            if (has_non_simple_params and s.curFunc().has_use_strict)
+                return s.failWithMessage(null, "use strict directive is not allowed with non-simple parameters");
             if (s.is_strict or s.curFunc().is_strict_mode) {
                 try rejectInvalidStrictParameterName(s, invalid_strict_name_position);
             }
@@ -13424,11 +13518,20 @@ pub const parser_core = struct {
         if (s.peekKind() != @as(tok.TokenKind, @intCast('[')) and
             s.peekKind() != @as(tok.TokenKind, @intCast('{')))
         {
-            return Error.UnexpectedToken;
+            return s.failExpectedDescription("binding pattern");
         }
 
+        const expected_close: tok.TokenKind = if (s.peekKind() == '[') ']' else '}';
         const balanced = try scanBalancedToken(s, false);
-        if (!balanced.closed) return Error.UnexpectedToken;
+        if (!balanced.closed) {
+            const failure = balanced.failure orelse return s.failExpectedToken(expected_close);
+            var expected_buffer: [8]u8 = undefined;
+            return s.failExpectedDescriptionAt(
+                s.tokenKindLabel(expected_close, &expected_buffer),
+                failure.kind,
+                failure.position,
+            );
+        }
         return .{
             .following = balanced.following,
             .has_top_level_rest = balanced.has_top_level_ellipsis,
@@ -13449,10 +13552,10 @@ pub const parser_core = struct {
 
     fn checkPatternParameterDuplicate(s: *State, name: Atom) Error!void {
         for (s.curFunc().args) |arg| {
-            if (arg.var_name == name) return Error.UnexpectedToken;
+            if (arg.var_name == name) return s.failExpectedDescription("unique parameter binding");
         }
         for (s.curFunc().vars) |variable| {
-            if (variable.var_name == name) return Error.UnexpectedToken;
+            if (variable.var_name == name) return s.failExpectedDescription("unique parameter binding");
         }
     }
 
@@ -13460,12 +13563,12 @@ pub const parser_core = struct {
         if ((s.is_strict or s.curFunc().is_strict_mode) and
             (atomNameEquals(s, name, "eval") or atomNameEquals(s, name, "arguments")))
         {
-            return Error.UnexpectedToken;
+            return s.failExpectedDescription("valid strict-mode binding name");
         }
         if ((binding.define_type == .let_ or binding.define_type == .const_) and
             atomNameEquals(s, name, "let"))
         {
-            return Error.UnexpectedToken;
+            return s.failExpectedDescription("valid lexical binding name");
         }
         if (binding.is_parameter) try checkPatternParameterDuplicate(s, name);
 
@@ -13476,7 +13579,7 @@ pub const parser_core = struct {
             s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and
             hasKnownBinding(s, name))
         {
-            return Error.UnexpectedToken;
+            return s.failExpectedDescription("non-conflicting binding");
         }
 
         const defined = try s.defineVar(name, binding.define_type);
@@ -13506,7 +13609,7 @@ pub const parser_core = struct {
 
     fn parsePatternBindingTarget(s: *State, binding: PatternBindingMode) Error!PatternTarget {
         if (!isIdentifierLikeToken(s) or identifierLikeHasInvalidEscapeForBinding(s)) {
-            return Error.UnexpectedToken;
+            return s.failExpectedDescription("binding name");
         }
         const name = identifierLikeAtom(s);
         var target = try definePatternBindingAtom(s, binding, name);
@@ -13533,7 +13636,7 @@ pub const parser_core = struct {
         if (!property.allow_shorthand or
             (property.has_escape and escapedIdentifierIsReservedWordForBinding(s, property.atom, true)))
         {
-            return Error.UnexpectedToken;
+            return s.failExpectedDescription("binding shorthand");
         }
         return switch (mode) {
             .binding => |binding| try definePatternBindingAtom(s, binding, property.atom),
@@ -13766,7 +13869,7 @@ pub const parser_core = struct {
         defer if (block_active) popPatternIteratorBlock(s, &block);
 
         while (s.peekKind() != @as(tok.TokenKind, @intCast(']'))) {
-            if (s.peekKind() == tok.TOK_EOF) return Error.UnexpectedToken;
+            if (s.peekKind() == tok.TOK_EOF) return s.failExpectedToken(']');
 
             var is_rest = false;
             if (s.peekKind() == tok.TOK_ELLIPSIS) {
@@ -13776,7 +13879,7 @@ pub const parser_core = struct {
                 if (s.peekKind() == @as(tok.TokenKind, @intCast(',')) or
                     s.peekKind() == @as(tok.TokenKind, @intCast(']')))
                 {
-                    return Error.UnexpectedToken;
+                    return s.failExpectedDescription("binding target");
                 }
             }
 
@@ -13798,7 +13901,7 @@ pub const parser_core = struct {
                 var target = try parsePatternTarget(s, mode);
                 defer target.deinit(s);
                 if (is_rest) {
-                    if (s.peekKind() == @as(tok.TokenKind, @intCast('='))) return Error.UnexpectedToken;
+                    if (s.peekKind() == @as(tok.TokenKind, @intCast('='))) return s.failUnexpectedToken();
                     try emitArrayPatternRest(s, target.depth());
                 } else {
                     try Emitter.opU8(s, opcode.op.for_of_next, target.depth());
@@ -13809,7 +13912,7 @@ pub const parser_core = struct {
             }
 
             if (s.peekKind() == @as(tok.TokenKind, @intCast(']'))) break;
-            if (is_rest) return Error.UnexpectedToken;
+            if (is_rest) return s.failExpectedToken(']');
             try s.expectToken(',');
         }
 
@@ -13828,14 +13931,14 @@ pub const parser_core = struct {
         }
 
         while (s.peekKind() != @as(tok.TokenKind, @intCast('}'))) {
-            if (s.peekKind() == tok.TOK_EOF) return Error.UnexpectedToken;
+            if (s.peekKind() == tok.TOK_EOF) return s.failExpectedToken('}');
             if (s.peekKind() == tok.TOK_ELLIPSIS) {
                 if (!has_rest) return Error.UnexpectedToken;
                 s.features.insert(.spread_rest);
                 try s.advance();
                 var target = try parsePatternTarget(s, mode);
                 defer target.deinit(s);
-                if (s.peekKind() != @as(tok.TokenKind, @intCast('}'))) return Error.UnexpectedToken;
+                if (s.peekKind() != @as(tok.TokenKind, @intCast('}'))) return s.failExpectedToken('}');
                 const depth = target.depth();
                 const mask = try objectRestCopyMask(depth);
                 try Emitter.op(s, opcode.op.object);
@@ -13852,7 +13955,7 @@ pub const parser_core = struct {
                 try parseAssignExpr(s);
                 try s.expectToken(']');
             } else {
-                property_info = (try parseObjectPropertyName(s)) orelse return Error.UnexpectedToken;
+                property_info = (try parseObjectPropertyName(s)) orelse return s.failExpectedDescription("property name");
             }
             defer if (property_info) |property| {
                 if (property.retained) s.function.atoms.free(property.atom);
@@ -13860,7 +13963,7 @@ pub const parser_core = struct {
 
             const explicit_target = s.peekKind() == @as(tok.TokenKind, @intCast(':'));
             if (explicit_target) try s.advance();
-            if (computed and !explicit_target) return Error.UnexpectedToken;
+            if (computed and !explicit_target) return s.failExpectedToken(':');
 
             if (explicit_target and try tokenStartsNestedPattern(s, @as(tok.TokenKind, @intCast('}')))) {
                 if (computed) {
@@ -13945,7 +14048,8 @@ pub const parser_core = struct {
         const topology = try scanPatternTopology(s);
         const has_initializer = allow_outer_initializer and
             topology.following == @as(tok.TokenKind, @intCast('='));
-        if (!has_value and !has_initializer) return Error.UnexpectedToken;
+        if (!has_value and !has_initializer)
+            return s.failWithMessage(null, "destructuring declaration requires an initializer");
 
         var parse_label: compiler.LabelId = undefined;
         var assign_label: compiler.LabelId = undefined;
@@ -13985,7 +14089,7 @@ pub const parser_core = struct {
 
     fn appendArrowParamBindingName(s: *State, names: *std.ArrayList(Atom), atom_id: Atom) Error!void {
         for (names.items) |existing| {
-            if (existing == atom_id) return Error.UnexpectedToken;
+            if (existing == atom_id) return s.failUnexpectedToken();
         }
         try appendOwnedParserAtom(s, names, atom_id);
     }
@@ -14096,6 +14200,7 @@ pub const parser_core = struct {
         has_top_level_semicolon: bool = false,
         has_top_level_ellipsis: bool = false,
         has_assignment: bool = false,
+        failure: ?DiagnosticToken = null,
     };
 
     /// QuickJS-shaped balanced-token scan. The parser's current token stays
@@ -14114,10 +14219,11 @@ pub const parser_core = struct {
 
         while (level > 1) {
             var scratch: tok.Token = undefined;
-            s.lex.nextInto(&scratch) catch |err| return mapLookaheadLexerError(err);
+            s.lex.nextInto(&scratch) catch |err| return mapLookaheadLexerError(s, err);
             defer s.lex.freeToken(&scratch);
 
             try rescanLookaheadTokenIfRegexp(s, &scratch, previous_token_kind);
+            const diagnostic_token = diagnosticTokenFromToken(s, &scratch);
             if (scratch.val == tok.TOK_TEMPLATE) {
                 // Treat the complete template as one balanced item. The helper
                 // consumes all `${ ... }` parts while the head token remains alive.
@@ -14137,12 +14243,18 @@ pub const parser_core = struct {
 
             switch (kind) {
                 '(', '[', '{' => {
-                    if (level >= delimiters.len) return result;
+                    if (level >= delimiters.len) {
+                        result.failure = diagnostic_token;
+                        return result;
+                    }
                     delimiters[level] = @intCast(kind);
                     level += 1;
                 },
                 ')', ']', '}' => {
-                    if (level <= 1) return result;
+                    if (level <= 1) {
+                        result.failure = diagnostic_token;
+                        return result;
+                    }
                     const expected: u8 = switch (kind) {
                         ')' => '(',
                         ']' => '[',
@@ -14150,9 +14262,15 @@ pub const parser_core = struct {
                         else => unreachable,
                     };
                     level -= 1;
-                    if (delimiters[level] != expected) return result;
+                    if (delimiters[level] != expected) {
+                        result.failure = diagnostic_token;
+                        return result;
+                    }
                 },
-                tok.TOK_EOF => return result,
+                tok.TOK_EOF => {
+                    result.failure = diagnostic_token;
+                    return result;
+                },
                 ';' => if (level == 2) {
                     result.has_top_level_semicolon = true;
                 },
@@ -14173,7 +14291,7 @@ pub const parser_core = struct {
         }
 
         var following: tok.Token = undefined;
-        s.lex.nextInto(&following) catch |err| return mapLookaheadLexerError(err);
+        s.lex.nextInto(&following) catch |err| return mapLookaheadLexerError(s, err);
         defer s.lex.freeToken(&following);
         result.following = if (no_line_terminator and s.lex.got_lf)
             @as(tok.TokenKind, @intCast('\n'))
@@ -14188,7 +14306,7 @@ pub const parser_core = struct {
             opening != @as(tok.TokenKind, @intCast('[')) and
             opening != @as(tok.TokenKind, @intCast('{')))
         {
-            return Error.UnexpectedToken;
+            return s.failExpectedDescription("opening delimiter");
         }
 
         // The parser only consumes topology from this speculative walk. Keep
@@ -14214,13 +14332,15 @@ pub const parser_core = struct {
                     .line_terminator => @intCast('\n'),
                     .other, .eof => tok.TOK_EOF,
                 };
-                return .{
-                    .following = following,
-                    .closed = simple.closed,
-                    .has_top_level_semicolon = simple.has_top_level_semicolon,
-                    .has_top_level_ellipsis = simple.has_top_level_ellipsis,
-                    .has_assignment = simple.has_assignment,
-                };
+                if (simple.closed) {
+                    return .{
+                        .following = following,
+                        .closed = true,
+                        .has_top_level_semicolon = simple.has_top_level_semicolon,
+                        .has_top_level_ellipsis = simple.has_top_level_ellipsis,
+                        .has_assignment = simple.has_assignment,
+                    };
+                }
             }
         }
 
@@ -14290,10 +14410,10 @@ pub const parser_core = struct {
         var visited: usize = 0;
         while (var_index >= 0 and visited <= fd.vars.len) : (visited += 1) {
             const idx: usize = @intCast(var_index);
-            if (idx >= fd.vars.len) return Error.UnexpectedToken;
+            if (idx >= fd.vars.len) return Error.ParserInvariant;
             const vd = fd.vars[idx];
             const next = vd.scope_next;
-            if (vd.scope_level != parameter_scope) return Error.UnexpectedToken;
+            if (vd.scope_level != parameter_scope) return Error.ParserInvariant;
             var_index = next;
             if (fd.findArg(vd.var_name) >= 0 or s.findFunctionScopeVar(vd.var_name) != null) continue;
 
@@ -14374,19 +14494,19 @@ pub const parser_core = struct {
         builder: *compiler.Builder,
         marker_pos: u32,
     ) Error!ClassNamePatch {
-        const patch = s.last_class_name_patch orelse return Error.UnexpectedToken;
+        const patch = s.last_class_name_patch orelse return error.ParserInvariant;
         if (patch.builder != builder or patch.marker_pos != marker_pos or
             marker_pos > builder.code_len or builder.code_len - marker_pos != 5)
         {
-            return Error.UnexpectedToken;
+            return Error.ParserInvariant;
         }
         const marker_index: usize = @intCast(marker_pos);
         const distance = std.mem.readInt(u32, builder.code[marker_index + 1 ..][0..4], .little);
-        const marker_after = std.math.add(u32, marker_pos, 1) catch return Error.UnexpectedToken;
+        const marker_after = std.math.add(u32, marker_pos, 1) catch return Error.ParserInvariant;
         if (distance == 0 or distance > marker_after or
             marker_after - distance != patch.define_class_pos)
         {
-            return Error.UnexpectedToken;
+            return Error.ParserInvariant;
         }
         const define_index: usize = @intCast(patch.define_class_pos);
         const atom_index: usize = @intCast(patch.atom_index);
@@ -14397,7 +14517,7 @@ pub const parser_core = struct {
             std.mem.readInt(u32, builder.code[define_index + 1 ..][0..4], .little) != atom_module.ids.empty_string or
             builder.atom_operands[atom_index] != atom_module.ids.empty_string)
         {
-            return Error.UnexpectedToken;
+            return Error.ParserInvariant;
         }
         return patch;
     }
@@ -14411,12 +14531,12 @@ pub const parser_core = struct {
         if (builder.last_opcode_pos < 0) return;
         const opcode_pos: u32 = @intCast(builder.last_opcode_pos);
         const opcode_index: usize = @intCast(opcode_pos);
-        if (opcode_index >= @as(usize, @intCast(builder.code_len))) return Error.UnexpectedToken;
+        if (opcode_index >= @as(usize, @intCast(builder.code_len))) return Error.ParserInvariant;
 
         switch (builder.code[opcode_index]) {
             opcode.op.set_name => {
                 if (opcode_pos > builder.code_len or builder.code_len - opcode_pos != 5 or builder.atom_len == 0)
-                    return Error.UnexpectedToken;
+                    return Error.ParserInvariant;
                 const placeholder = std.mem.readInt(u32, builder.code[opcode_index + 1 ..][0..4], .little);
                 if (placeholder != atom_module.null_atom) return;
                 builder.replaceAtomOperand(
@@ -14452,11 +14572,11 @@ pub const parser_core = struct {
         if (builder.last_opcode_pos < 0) return;
         const opcode_pos: u32 = @intCast(builder.last_opcode_pos);
         const opcode_index: usize = @intCast(opcode_pos);
-        if (opcode_index >= @as(usize, @intCast(builder.code_len))) return Error.UnexpectedToken;
+        if (opcode_index >= @as(usize, @intCast(builder.code_len))) return Error.ParserInvariant;
 
         switch (builder.code[opcode_index]) {
             opcode.op.set_name => {
-                if (opcode_pos > builder.code_len or builder.code_len - opcode_pos != 5) return Error.UnexpectedToken;
+                if (opcode_pos > builder.code_len or builder.code_len - opcode_pos != 5) return Error.ParserInvariant;
                 const placeholder = std.mem.readInt(u32, builder.code[opcode_index + 1 ..][0..4], .little);
                 if (placeholder != atom_module.null_atom) return;
                 builder.rewriteTrailingAtomOpAsPlain(
@@ -14491,7 +14611,7 @@ pub const parser_core = struct {
             if ((try checkArrowHead(s)) or
                 (s.isAsyncIdentifier() and (try checkAsyncArrowHeadAfterAsync(s))))
             {
-                return Error.UnexpectedToken;
+                return s.failWithMessage(null, "class heritage must be a left-hand-side expression");
             }
             try parseLhsExpr(s, ParseFlags.default);
         }
@@ -14531,7 +14651,8 @@ pub const parser_core = struct {
             s.peekNextKind() != @as(tok.TokenKind, @intCast('}')))
         {
             try s.advance();
-            if (s.gotLineTerminator()) return Error.UnexpectedToken;
+            if (s.gotLineTerminator())
+                return s.failWithMessage(null, "line terminator is not allowed after async in a class element");
             if (s.peekKind() == @as(tok.TokenKind, @intCast('*'))) {
                 try s.advance();
                 method_kind_override = .async_generator;
@@ -14553,12 +14674,12 @@ pub const parser_core = struct {
             if (s.peekKind() == tok.TOK_PRIVATE_NAME) {
                 const private_atom = try privateNameAtom(s, s.token.payload.ident.atom);
                 defer s.function.atoms.free(private_atom);
-                if (atomNameEquals(s, private_atom, "#constructor")) return Error.UnexpectedToken;
+                if (atomNameEquals(s, private_atom, "#constructor")) return s.failUnexpectedToken();
                 try registerClassPrivateElement(s, private_atom, if (is_getter) .getter else .setter);
                 try preparePrivateAccessorBinding(s, private_atom, is_getter);
                 try s.advance();
                 if (s.peekKind() != '(') {
-                    return Error.UnexpectedToken;
+                    return s.failExpectedToken('(');
                 }
                 // Parse parameters with proper function kind for private getter/setter
                 const kind: ParseFunctionKind = if (is_getter) .get else .set;
@@ -14589,13 +14710,13 @@ pub const parser_core = struct {
                 try emitClassComputedMethod(s, if (is_getter) .get else .set, if (is_getter) 1 else 2, element_source_start);
             } else {
                 // Regular getter/setter - parse property name (identifier, string, or number)
-                const prop_name = (try parseObjectPropertyName(s)) orelse return Error.UnexpectedToken;
+                const prop_name = (try parseObjectPropertyName(s)) orelse return s.failExpectedDescription("property name");
                 const prop_atom = prop_name.atom;
                 defer if (prop_name.retained) s.function.atoms.free(prop_atom);
-                if (!s.is_static and prop_atom == atom_module.ids.constructor) return Error.UnexpectedToken;
-                if (s.is_static and prop_atom == atom_module.ids.prototype) return Error.UnexpectedToken;
+                if (!s.is_static and prop_atom == atom_module.ids.constructor) return s.failUnexpectedToken();
+                if (s.is_static and prop_atom == atom_module.ids.prototype) return s.failUnexpectedToken();
                 if (s.peekKind() != '(') {
-                    return Error.UnexpectedToken;
+                    return s.failExpectedToken('(');
                 }
                 // Parse parameters with proper function kind for getter/setter
                 const kind: ParseFunctionKind = if (is_getter) .get else .set;
@@ -14621,7 +14742,7 @@ pub const parser_core = struct {
         if (s.peekKind() == tok.TOK_PRIVATE_NAME) {
             const private_atom = try privateNameAtom(s, s.token.payload.ident.atom);
             defer s.function.atoms.free(private_atom);
-            if (atomNameEquals(s, private_atom, "#constructor")) return Error.UnexpectedToken;
+            if (atomNameEquals(s, private_atom, "#constructor")) return s.failUnexpectedToken();
             try s.advance();
             if (s.peekKind() == '(') {
                 // Private method
@@ -14687,12 +14808,12 @@ pub const parser_core = struct {
             defer if (prop_name.retained) s.function.atoms.free(prop_atom);
             const has_line_terminator_after_name = s.gotLineTerminator();
             const is_constructor = !s.is_static and prop_atom == atom_module.ids.constructor;
-            if (s.is_static and prop_atom == atom_module.ids.prototype and s.peekKind() == '(') return Error.UnexpectedToken;
-            if (is_constructor and method_kind_override != null) return Error.UnexpectedToken;
+            if (s.is_static and prop_atom == atom_module.ids.prototype and s.peekKind() == '(') return s.failUnexpectedToken();
+            if (is_constructor and method_kind_override != null) return s.failUnexpectedToken();
             if (s.peekKind() == '(') {
                 // Method or constructor
                 if (is_constructor) {
-                    if (s.class_constructor_cpool_idx != null) return Error.UnexpectedToken;
+                    if (s.class_constructor_cpool_idx != null) return s.failUnexpectedToken();
                     s.in_constructor = true;
                 }
                 var ctor_snap: compiler.builder.Snapshot = undefined;
@@ -14736,7 +14857,7 @@ pub const parser_core = struct {
                 if (s.peekKind() == ';') try s.advance();
             } else if (s.peekKind() == '=') {
                 // Field with initializer
-                if (isForbiddenPublicFieldName(s, prop_atom)) return Error.UnexpectedToken;
+                if (isForbiddenPublicFieldName(s, prop_atom)) return s.failUnexpectedToken();
                 try s.advance();
                 if (s.is_static) {
                     try emitStaticFieldInitializer(s, prop_atom, false, false, true);
@@ -14746,26 +14867,26 @@ pub const parser_core = struct {
                 _ = try s.expectSemicolon();
             } else if (s.peekKind() == ';') {
                 // Field without initializer, with semicolon
-                if (isForbiddenPublicFieldName(s, prop_atom)) return Error.UnexpectedToken;
+                if (isForbiddenPublicFieldName(s, prop_atom)) return s.failUnexpectedToken();
                 try emitPublicFieldNoInitializer(s, prop_atom);
                 try s.advance();
             } else {
-                if (isForbiddenPublicFieldName(s, prop_atom)) return Error.UnexpectedToken;
+                if (isForbiddenPublicFieldName(s, prop_atom)) return s.failUnexpectedToken();
                 try emitPublicFieldNoInitializer(s, prop_atom);
                 if (s.peekKind() == ';') {
                     try s.advance();
                 } else if (!(has_line_terminator_after_name or s.peekKind() == tok.TOK_EOF or s.isPunct('}'))) {
-                    return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
                 }
             }
         } else if (s.peekKind() == '{') {
             // Static block — parseBlock consumes its own opening '{'.
             if (!s.is_static) {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
             try emitClassStaticBlock(s);
         } else {
-            return Error.UnexpectedToken;
+            return s.failUnexpectedToken();
         }
 
         s.is_static = saved_static;
@@ -14792,7 +14913,7 @@ pub const parser_core = struct {
         for (s.class_private_elements.items) |entry| {
             if (entry.atom != atom_id) continue;
             if (classPrivateElementsConflict(entry, kind, s.is_static)) {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
         }
         const retained = s.function.atoms.dup(atom_id);
@@ -14809,7 +14930,7 @@ pub const parser_core = struct {
     /// discriminator used to validate getter/setter pairing.
     fn addPrivateClassBinding(s: *State, atom_id: Atom, kind: function_def_mod.VarKind) Error!u16 {
         const idx = try s.addScopeVar(atom_id, kind, true, true);
-        if (idx < 0 or @as(usize, @intCast(idx)) >= s.curFunc().vars.len) return Error.UnexpectedToken;
+        if (idx < 0 or @as(usize, @intCast(idx)) >= s.curFunc().vars.len) return Error.ParserInvariant;
         s.curFunc().vars[@intCast(idx)].is_static_private = s.is_static;
         return @intCast(idx);
     }
@@ -14825,9 +14946,9 @@ pub const parser_core = struct {
     fn preparePrivateAccessorBinding(s: *State, atom_id: Atom, is_getter: bool) Error!void {
         if (findCurrentScopeVar(s, atom_id)) |idx| {
             const vd = &s.curFunc().vars[idx];
-            if (vd.is_static_private != s.is_static) return Error.UnexpectedToken;
+            if (vd.is_static_private != s.is_static) return s.failUnexpectedToken();
             const expected: function_def_mod.VarKind = if (is_getter) .private_setter else .private_getter;
-            if (vd.var_kind != expected) return Error.UnexpectedToken;
+            if (vd.var_kind != expected) return s.failUnexpectedToken();
             vd.var_kind = .private_getter_setter;
             return;
         }
@@ -14852,7 +14973,7 @@ pub const parser_core = struct {
         s.class_instance_private_brand_needed = true;
         const child_index = try ensureClassFieldsInitFunction(s);
         const parent = s.curFunc();
-        if (child_index >= parent.child_list.len) return Error.UnexpectedToken;
+        if (child_index >= parent.child_list.len) return Error.ParserInvariant;
         const init_fd = parent.child_list[child_index];
         // qjs js_parse_class: enable the dormant instance-brand prologue
         // after the first private method or accessor requires it.
@@ -15396,7 +15517,7 @@ pub const parser_core = struct {
             try Emitter.op(s, opcode.op.swap);
         }
         try parseClassComputedName(s);
-        if (s.peekKind() != '(') return Error.UnexpectedToken;
+        if (s.peekKind() != '(') return s.failExpectedToken('(');
         try parseClassElementFunction(s, kind, source_start);
         // qjs js_parse_class: define the computed getter/setter with its
         // method-kind flag.
@@ -15601,7 +15722,7 @@ pub const parser_core = struct {
         var class_name: ?Atom = null;
         defer if (class_name) |name_atom| s.function.atoms.free(name_atom);
         if (is_decl) {
-            class_name = classNameAtomOwned(s) orelse return Error.UnexpectedToken;
+            class_name = classNameAtomOwned(s) orelse return s.failExpectedDescription("class name");
             try s.advance();
         } else {
             if (classNameAtomOwned(s)) |name_atom| {
@@ -16068,12 +16189,12 @@ pub const parser_core = struct {
             try s.advance();
             // Expect 'as'
             if (!s.isIdent("as")) {
-                return Error.UnexpectedToken;
+                return s.failExpectedDescription("'as'");
             }
             try s.advance();
             // Expect namespace identifier
             if (s.peekKind() != tok.TOK_IDENT) {
-                return Error.UnexpectedToken;
+                return s.failExpectedDescription("binding name");
             }
             const local_name = s.function.atoms.dup(s.token.payload.ident.atom);
             defer s.function.atoms.free(local_name);
@@ -16096,7 +16217,7 @@ pub const parser_core = struct {
             while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
                 // Import name (identifier or string)
                 if (!isModuleNameToken(s.peekKind())) {
-                    return Error.UnexpectedToken;
+                    return s.failExpectedDescription("import name");
                 }
                 const import_name_was_string = s.peekKind() == tok.TOK_STRING;
                 const import_name_owned = try moduleImportNameAtomOwned(s);
@@ -16111,14 +16232,14 @@ pub const parser_core = struct {
                 if (s.isIdent("as")) {
                     try s.advance();
                     if (s.peekKind() != tok.TOK_IDENT) {
-                        return Error.UnexpectedToken;
+                        return s.failExpectedDescription("binding name");
                     }
                     local_name_owned = s.function.atoms.dup(s.token.payload.ident.atom);
                     local_name_live = true;
                     try validateModuleImportBindingName(s, local_name_owned);
                     try s.advance();
                 } else if (import_name_was_string) {
-                    return Error.UnexpectedToken;
+                    return s.failExpectedDescription("'as'");
                 } else {
                     local_name_owned = s.function.atoms.dup(import_name_owned);
                     local_name_live = true;
@@ -16147,12 +16268,12 @@ pub const parser_core = struct {
             return;
         }
 
-        return Error.UnexpectedToken;
+        return s.failExpectedDescription("import clause");
     }
 
     fn validateModuleImportBindingName(s: *State, atom_id: Atom) Error!void {
         if (isInvalidStrictFunctionBindingName(s, atom_id)) {
-            return Error.UnexpectedToken;
+            return s.failUnexpectedToken();
         }
     }
 
@@ -16171,21 +16292,22 @@ pub const parser_core = struct {
 
     fn addModuleExportName(s: *State, export_name: Atom, local_name: Atom) Error!void {
         const record = s.function.ensureModule();
-        if (moduleHasExportName(record, export_name)) return Error.UnexpectedToken;
+        if (moduleHasExportName(record, export_name)) return s.failExpectedDescription("unique export name");
         record.addExport(export_name, local_name) catch return error.OutOfMemory;
     }
 
     pub fn validateModuleLocalExports(s: *State) Error!void {
         const record = s.function.module_record orelse return;
         for (record.exports) |entry| {
-            if (!hasKnownBinding(s, entry.local_name)) return Error.UnexpectedToken;
+            if (!hasKnownBinding(s, entry.local_name)) return s.failExpectedDescription("local export binding");
         }
     }
 
     fn addModuleImportAttribute(s: *State, request_index: u32, key: Atom, value: Atom) Error!void {
         const record = s.function.ensureModule();
         for (record.import_attributes) |entry| {
-            if (entry.request_index == request_index and entry.key == key) return Error.UnexpectedToken;
+            if (entry.request_index == request_index and entry.key == key)
+                return s.failExpectedDescription("unique import attribute key");
         }
         record.addImportAttribute(request_index, key, value) catch return error.OutOfMemory;
     }
@@ -16197,7 +16319,7 @@ pub const parser_core = struct {
         local_name: Atom,
         is_namespace: bool,
     ) Error!void {
-        if (hasKnownBinding(s, local_name)) return Error.UnexpectedToken;
+        if (hasKnownBinding(s, local_name)) return s.failExpectedDescription("available local import binding");
         if (s.curFunc().closure_var.len > std.math.maxInt(u16)) return error.BytecodeOverflow;
         const raw_var_idx = try s.curFunc().addClosureVar(.{
             // qjs add_import: namespace imports own a MODULE_DECL slot that
@@ -16236,13 +16358,14 @@ pub const parser_core = struct {
         is_namespace: bool,
     ) Error!void {
         const record = s.function.ensureModule();
-        if (moduleHasExportName(record, export_name)) return Error.UnexpectedToken;
+        if (moduleHasExportName(record, export_name)) return s.failExpectedDescription("unique export name");
         record.addIndirectExport(request_index, export_name, import_name, is_namespace) catch return error.OutOfMemory;
     }
 
     fn addModuleStarExport(s: *State, request_index: u32, export_name: Atom) Error!void {
         const record = s.function.ensureModule();
-        if (export_name != atom_star and moduleHasExportName(record, export_name)) return Error.UnexpectedToken;
+        if (export_name != atom_star and moduleHasExportName(record, export_name))
+            return s.failExpectedDescription("unique export name");
         record.addStarExport(request_index, export_name) catch return error.OutOfMemory;
     }
 
@@ -16254,7 +16377,7 @@ pub const parser_core = struct {
     }
 
     fn moduleStringAtom(s: *State) Error!Atom {
-        if (s.peekKind() != tok.TOK_STRING) return Error.UnexpectedToken;
+        if (s.peekKind() != tok.TOK_STRING) return s.failExpectedDescription("module string");
         return s.function.atoms.internString(s.token.payload.str.bytes) catch return error.OutOfMemory;
     }
 
@@ -16372,11 +16495,11 @@ pub const parser_core = struct {
             while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
                 // Export name (identifier or string)
                 if (!isModuleNameToken(s.peekKind())) {
-                    return Error.UnexpectedToken;
+                    return s.failExpectedDescription("export name");
                 }
                 const local_name_was_string = s.peekKind() == tok.TOK_STRING;
                 if (local_name_was_string and !isWellFormedModuleString(s.token.payload.str.bytes)) {
-                    return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
                 }
                 const local_name_owned = try moduleImportNameAtomOwned(s);
                 var local_name_live = true;
@@ -16390,10 +16513,10 @@ pub const parser_core = struct {
                 if (s.isIdent("as")) {
                     try s.advance();
                     if (!isModuleNameToken(s.peekKind())) {
-                        return Error.UnexpectedToken;
+                        return s.failExpectedDescription("export name");
                     }
                     if (s.peekKind() == tok.TOK_STRING and !isWellFormedModuleString(s.token.payload.str.bytes)) {
-                        return Error.UnexpectedToken;
+                        return s.failUnexpectedToken();
                     }
                     s.function.atoms.free(export_name_owned);
                     export_name_live = false;
@@ -16423,7 +16546,7 @@ pub const parser_core = struct {
                 }
             } else {
                 for (export_specs.items) |entry| {
-                    if (entry.import_name_is_string) return Error.UnexpectedToken;
+                    if (entry.import_name_is_string) return s.failExpectedDescription("'from'");
                     try addModuleExportName(s, entry.export_name, entry.import_name);
                 }
             }
@@ -16442,9 +16565,9 @@ pub const parser_core = struct {
                 is_namespace = true;
                 try s.advance();
                 if (!isModuleNameToken(s.peekKind())) {
-                    return Error.UnexpectedToken;
+                    return s.failExpectedDescription("export name");
                 }
-                if (s.peekKind() == tok.TOK_STRING and !isWellFormedModuleString(s.token.payload.str.bytes)) return Error.UnexpectedToken;
+                if (s.peekKind() == tok.TOK_STRING and !isWellFormedModuleString(s.token.payload.str.bytes)) return s.failUnexpectedToken();
                 export_name = try moduleImportNameAtomOwned(s);
                 export_name_owned = true;
                 try s.advance();
@@ -16508,7 +16631,7 @@ pub const parser_core = struct {
             }
         }
 
-        return Error.UnexpectedToken;
+        return s.failExpectedDescription("export declaration");
     }
 
     /// Return one owned retain for the declaration name that follows the
@@ -16560,13 +16683,13 @@ pub const parser_core = struct {
     fn parseFromClause(s: *State) Error!u32 {
         // Expect 'from' keyword
         if (!s.isIdent("from")) {
-            return Error.UnexpectedToken;
+            return s.failExpectedDescription("'from'");
         }
         try s.advance();
 
         // Expect string literal for module name
         if (s.peekKind() != tok.TOK_STRING) {
-            return Error.UnexpectedToken;
+            return s.failExpectedDescription("module string");
         }
         const request_index = try addModuleRequestFromCurrentString(s);
         try s.advance();
@@ -16587,7 +16710,7 @@ pub const parser_core = struct {
         while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
             // Key (identifier or string)
             if (s.peekKind() != tok.TOK_IDENT and s.peekKind() != tok.TOK_STRING) {
-                return Error.UnexpectedToken;
+                return s.failExpectedDescription("import attribute key");
             }
             const key_atom = if (s.peekKind() == tok.TOK_IDENT)
                 s.function.atoms.dup(s.token.payload.ident.atom)
@@ -16600,7 +16723,7 @@ pub const parser_core = struct {
 
             // JSValue (string)
             if (s.peekKind() != tok.TOK_STRING) {
-                return Error.UnexpectedToken;
+                return s.failExpectedDescription("string attribute value");
             }
             const value_atom = try moduleStringAtom(s);
             defer s.function.atoms.free(value_atom);
@@ -16619,7 +16742,7 @@ pub const parser_core = struct {
         _ = fd.ensureArgumentsBinding() catch return error.OutOfMemory;
         fd.ensureArgumentsArgumentBinding() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidScope => return error.UnexpectedToken,
+            error.InvalidScope => return error.ParserInvariant,
         };
     }
 
@@ -17242,9 +17365,15 @@ pub const compile_entry = struct {
             error.ClosureVarNotFound,
             error.Pc2LineTruncated,
             error.Pc2LineOverflow,
+            error.ParserInvariant,
             => true,
             else => false,
         };
+    }
+
+    comptime {
+        if (!isInternalCompilerError(error.ParserInvariant))
+            @compileError("ParserInvariant must use the internal compiler error reporting arm");
     }
 
     fn setInternalCompilerError(
@@ -17258,7 +17387,7 @@ pub const compile_entry = struct {
             &message_buffer,
             "internal compiler error: {s}",
             .{@errorName(err)},
-        ) catch unreachable;
+        ) catch "internal compiler error";
         result.syntax_error = try diagnostics_mod.SyntaxError.create(
             &rt.memory,
             &rt.atoms,

@@ -52,6 +52,7 @@ pub const RuntimeError = error{
     NotRegExpLiteral,
     OutOfMemory,
     Overflow,
+    ParserInvariant,
     Pc2LineOverflow,
     Pc2LineTruncated,
     ProcessExit,

@@ -1,5 +1,5 @@
+//! Public embedding surface for the zjs engine and runtime.
 const std = @import("std");
-
 const zjs_binding = @import("binding/root.zig");
 pub const runtime = @import("runtime/public.zig");
 const zjs_core = @import("core/root.zig");

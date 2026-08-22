@@ -4,7 +4,6 @@ const JSValue = @import("value.zig").JSValue;
 const context = @import("context.zig");
 const JSContext = context.JSContext;
 const RealmContext = context.RealmContext;
-const JSRuntime = @import("runtime.zig").JSRuntime;
 const global_slots = @import("global_slots.zig");
 const class = @import("class.zig");
 const errors = @import("errors.zig");
@@ -83,13 +82,21 @@ pub const ExternalRecord = struct {
 // implementation that routes into the VM, and `exec/collection_ops.zig`
 // re-exports these names so its method bodies keep using them unchanged.
 
-/// Error set surfaced by collection callbacks. A callback re-enters the engine
-/// and may write to the host's output, so it can fail with anything in the host
-/// error surface -- exactly what `closure.callWithThis` returns.
-pub const CallbackError = errors.HostError;
+/// Hard/control errors allowed to cross the collection callback boundary.
+/// Ordinary engine failures are materialized as a realm-correct pending JS
+/// exception by the exec adapter and cross this seam only as `JSException`.
+pub const CallbackError = error{
+    JSException,
+    OutOfMemory,
+    Interrupted,
+    ProcessExit,
+    StackOverflow,
+    Timeout,
+    UnhandledPromiseRejection,
+};
 
 pub const CallbackCallFn = *const fn (
-    rt: *JSRuntime,
+    ctx: *JSContext,
     callback: JSValue,
     this_value: JSValue,
     args: []const JSValue,
@@ -97,16 +104,20 @@ pub const CallbackCallFn = *const fn (
 ) CallbackError!JSValue;
 
 pub const CallbackHost = struct {
+    /// Explicit realm authority for error materialization. Never recover this
+    /// through runtime-global "current context" state.
+    ctx: ?*JSContext = null,
     globals: []global_slots.Slot = &.{},
     call: ?CallbackCallFn = null,
 
-    pub fn callWithThis(self: CallbackHost, rt: *JSRuntime, callback: JSValue, this_value: JSValue, args: []const JSValue) !JSValue {
+    pub fn callWithThis(self: CallbackHost, callback: JSValue, this_value: JSValue, args: []const JSValue) !JSValue {
         const call_fn = self.call orelse return error.TypeError;
-        return call_fn(rt, callback, this_value, args, self.globals);
+        const ctx = self.ctx orelse return error.TypeError;
+        return call_fn(ctx, callback, this_value, args, self.globals);
     }
 
-    pub fn callValue(self: CallbackHost, rt: *JSRuntime, callback: JSValue, args: []const JSValue) !JSValue {
-        return self.callWithThis(rt, callback, JSValue.undefinedValue(), args);
+    pub fn callValue(self: CallbackHost, callback: JSValue, args: []const JSValue) !JSValue {
+        return self.callWithThis(callback, JSValue.undefinedValue(), args);
     }
 };
 
@@ -139,19 +150,19 @@ pub const NativeGenericFn = *const fn (
     ctx: *JSContext,
     this_value: JSValue,
     args: []const JSValue,
-) anyerror!JSValue;
+) errors.HostError!JSValue;
 
 pub const NativeGenericMagicFn = *const fn (
     ctx: *JSContext,
     this_value: JSValue,
     args: []const JSValue,
     magic: i32,
-) anyerror!JSValue;
+) errors.HostError!JSValue;
 
-pub const NativeGetterFn = *const fn (ctx: *JSContext, this_value: JSValue) anyerror!JSValue;
-pub const NativeSetterFn = *const fn (ctx: *JSContext, this_value: JSValue, value: JSValue) anyerror!JSValue;
-pub const NativeGetterMagicFn = *const fn (ctx: *JSContext, this_value: JSValue, magic: i32) anyerror!JSValue;
-pub const NativeSetterMagicFn = *const fn (ctx: *JSContext, this_value: JSValue, value: JSValue, magic: i32) anyerror!JSValue;
+pub const NativeGetterFn = *const fn (ctx: *JSContext, this_value: JSValue) errors.HostError!JSValue;
+pub const NativeSetterFn = *const fn (ctx: *JSContext, this_value: JSValue, value: JSValue) errors.HostError!JSValue;
+pub const NativeGetterMagicFn = *const fn (ctx: *JSContext, this_value: JSValue, magic: i32) errors.HostError!JSValue;
+pub const NativeSetterMagicFn = *const fn (ctx: *JSContext, this_value: JSValue, value: JSValue, magic: i32) errors.HostError!JSValue;
 pub const NativeF64Fn = *const fn (value: f64) f64;
 pub const NativeF64F64Fn = *const fn (lhs: f64, rhs: f64) f64;
 

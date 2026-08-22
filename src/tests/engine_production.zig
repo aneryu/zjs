@@ -1,7 +1,7 @@
+//! Exercises production engine boundaries, resource limits, and host integration.
 const std = @import("std");
 const zjs = @import("zjs");
 const public_zjs = @import("../root.zig");
-
 const InterruptState = struct {
     hits: usize = 0,
 

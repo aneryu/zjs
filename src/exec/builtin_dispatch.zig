@@ -407,7 +407,7 @@ noinline fn throwCFunctionStackOverflow(
 ) HostError!void {
     const global = caller_global orelse caller_ctx.global orelse return error.InvalidBuiltinRegistry;
     _ = exception_ops.throwInternalErrorMessage(caller_ctx, global, "stack overflow") catch |err| {
-        return @as(HostError, @errorCast(err));
+        return err;
     };
     return error.StackOverflow;
 }
@@ -443,7 +443,7 @@ pub fn materializeRuntimeError(ctx: *core.JSContext, global: ?*core.Object, err:
             _ = ctx.throwValue(fallback);
             ctx.markExceptionOutOfMemory();
         }
-        return @as(HostError, @errorCast(create_err));
+        return create_err;
     };
     if (ctx.hasException()) ctx.clearException();
     _ = ctx.throwValue(error_value);
@@ -701,47 +701,47 @@ noinline fn callTypedInternalRecordDirect(
     switch (record.cproto) {
         .generic => {
             const native_fn = native.generic;
-            return native_fn(ctx, this_value, args) catch |err| return @as(HostError, @errorCast(err));
+            return native_fn(ctx, this_value, args);
         },
         .constructor => {
             const env = activeNativeEnvironment(ctx) orelse return error.TypeError;
             if (!env.is_constructor) return error.TypeError;
             const native_fn = native.constructor;
-            return native_fn(ctx, this_value, args) catch |err| return @as(HostError, @errorCast(err));
+            return native_fn(ctx, this_value, args);
         },
         .constructor_or_func => {
             const native_fn = native.constructor_or_func;
-            return native_fn(ctx, this_value, args) catch |err| return @as(HostError, @errorCast(err));
+            return native_fn(ctx, this_value, args);
         },
         .generic_magic => {
             const native_fn = native.generic_magic;
-            return native_fn(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
+            return native_fn(ctx, this_value, args, record.magic);
         },
         .constructor_magic => {
             const env = activeNativeEnvironment(ctx) orelse return error.TypeError;
             if (!env.is_constructor) return error.TypeError;
             const native_fn = native.constructor_magic;
-            return native_fn(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
+            return native_fn(ctx, this_value, args, record.magic);
         },
         .constructor_or_func_magic => {
             const native_fn = native.constructor_or_func_magic;
-            return native_fn(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
+            return native_fn(ctx, this_value, args, record.magic);
         },
         .getter => {
             const native_fn = native.getter;
-            return native_fn(ctx, this_value) catch |err| return @as(HostError, @errorCast(err));
+            return native_fn(ctx, this_value);
         },
         .setter => {
             const native_fn = native.setter;
-            return native_fn(ctx, this_value, if (args.len == 0) core.JSValue.undefinedValue() else args[0]) catch |err| return @as(HostError, @errorCast(err));
+            return native_fn(ctx, this_value, if (args.len == 0) core.JSValue.undefinedValue() else args[0]);
         },
         .getter_magic => {
             const native_fn = native.getter_magic;
-            return native_fn(ctx, this_value, record.magic) catch |err| return @as(HostError, @errorCast(err));
+            return native_fn(ctx, this_value, record.magic);
         },
         .setter_magic => {
             const native_fn = native.setter_magic;
-            return native_fn(ctx, this_value, if (args.len == 0) core.JSValue.undefinedValue() else args[0], record.magic) catch |err| return @as(HostError, @errorCast(err));
+            return native_fn(ctx, this_value, if (args.len == 0) core.JSValue.undefinedValue() else args[0], record.magic);
         },
         .f_f => {
             const native_fn = native.f_f;
@@ -781,7 +781,7 @@ noinline fn callInternalRecordFallback(
     args: []const core.JSValue,
 ) HostError!core.JSValue {
     const fallback = record.fallback_function orelse return error.TypeError;
-    return fallback(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
+    return fallback(ctx, this_value, args, record.magic);
 }
 
 /// Probe the internal-builtin table for `native_ref` and invoke the record on
@@ -874,9 +874,8 @@ fn callConstructRecordImpl(
     defer view.ctx.runtime.active_native_call = previous_native_call;
 
     return invokeResolvedInternalRecord(view.ctx, core.JSValue.undefinedValue(), record, args) catch |err| {
-        const host_err = @as(HostError, @errorCast(err));
-        try materializeRuntimeError(view.ctx, view.global, host_err);
-        return host_err;
+        try materializeRuntimeError(view.ctx, view.global, err);
+        return err;
     };
 }
 

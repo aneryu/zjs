@@ -1,6 +1,6 @@
+//! Unicode property expressions and lookup operations used by regexp compilation.
 const data = @import("data.zig");
 const names = @import("names.zig");
-
 pub const CASE_U = 1 << 0;
 pub const CASE_L = 1 << 1;
 pub const CASE_F = 1 << 2;

@@ -1,7 +1,7 @@
+//! Exercises bytecode carriers, label resolution, and constant-pool ownership.
 const std = @import("std");
 const zjs = @import("zjs");
 const engine = zjs;
-
 const bytecode = zjs.bytecode;
 const core = zjs.core;
 const compiler = zjs.compiler;

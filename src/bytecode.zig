@@ -1,5 +1,5 @@
+//! Defines opcode metadata and the bytecode, module, and function carriers.
 pub const subsystem_name = "bytecode";
-
 const core_context = @import("core/context.zig");
 
 pub const opcode = struct {

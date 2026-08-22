@@ -199,6 +199,60 @@ this entry is its durable residue):
   sites whose current token is lookahead rather than the actual found
   token, and internal structural invariants. Verdict drift zero: emission
   byte-identical on the five corpora, parser 500/500, test262 delta 0.
+  **Q5c batch 2 done 2026-08-22** (`a2769c63`, diag lane): 101 more
+  (binding/for-in-of, function/arrow params, destructuring, class,
+  import/export; `let 5` now says "expected binding name, got number").
+  Cumulative 201/377. Remainder taxonomy: **140 internal-invariant masks
+  (spun off as Q5d below)**, 25 semantic/generic deferred, 10 lookahead
+  sites with no reliable found-position, 1 base helper, 2 helper exits.
+
+**Q5c batch 3 done 2026-08-22** (`bb920165`, diag lane): 25/25
+semantic/generic + 8/10 lookahead converted; the two holdouts
+(parser.zig template-token payload invariants, :8910/:8956 at review
+time) are internal invariants and fold into Q5d. Bare direct sites
+178 → 145 (= 137 Q5d masks + 2 template sites + 3 helpers + pilot
+residue). Q5c's user-facing surface is now **fully converted**.
+
+**Q5d. 140 parser sites return `Error.UnexpectedToken` for internal
+invariant failures** (builder tail rewrites, label/control/finally
+plumbing, scope/closure state, class child/cpool/init/patch) — an engine
+bug would surface as a user syntax error, the same mask Q5b removed at
+the reporting boundary. Direction: route them to the internal-error arm
+(existing internal set or a dedicated `ParserInvariant` error), which
+changes verdicts only on engine-bug paths. Pilot first: mechanism on ~5
+representative sites per family, then a driver ruling before mass
+conversion. Gate: suite + emission identity (cold error paths).
+  **Pilot done 2026-08-22** (`d3dae20d`, diag lane): one site in each of
+  five families (builder tail replacement, return-finally frames, scope
+  close, class-name patch, using-block frames) routed through the
+  existing Q5b internal-compiler-error arm via `error.InvalidBytecode`;
+  emission cmp=0, parser 502/502. A dedicated `ParserInvariant` prototype
+  was withdrawn only because core/errors.zig was out of the lane's zone.
+  **Ruling (driver): mass conversion approved with the dedicated
+  `ParserInvariant` member** — one-line addition to `RuntimeError` plus
+  the internal-arm predicate (narrow carve-out granted; no lane
+  collision), re-pointing the five pilot sites. 137 sites in 3-5
+  per-family batches; each batch proves arm routing with a temporary
+  fault hook (the @panic-probe discipline applied to error paths), and
+  the 71-site `mapBuilderError` fanout gets a static census first.
+  **Q15 allowed-domain closure** (`5a0897c0`): the lexer.zig drift was
+  re-verified three-way same-lineage byte-identical — ruled a
+  non-stable cache basin, header landed under identity after all;
+  all 21 allowed-domain files done. Remaining headerless: core + binding
+  (implq's rounds).
+  **Batch 1 done 2026-08-22** (`bc146436` + `6cb90fb1`, diag lane):
+  `ParserInvariant` landed in `RuntimeError` (the single-line carve-out)
+  and the Q5b predicate; the `mapBuilderError` census settled the risky
+  boundary — of 71 calls, 36 can actually produce the invariant error
+  (all controlled label/control/atom-ledger/tail-shape conditions), 35
+  only share the wide set for OOM/BytecodeOverflow, and **zero** are
+  malformed-source diagnostics, so the whole fanout re-routes safely.
+  59 masks removed (five families + map helper + the two template
+  sites). Routing proven by 7/7 temporary fault injections printing
+  "internal compiler error: ParserInvariant" (not UnexpectedToken, no
+  0:0), hooks fully removed after. Emission cmp=0 on five corpora,
+  suite 2330/1/0, test262 delta 0. Bare count 145 → 81 (78 Q5d masks
+  remain + 3 recorder helpers).
 - **Q5a.** Every syntax error's line/column points at **EOF**, not the error
   site (verified by running the shipped binary: error on line 3 of a 4-line
   file reports `5:1`). Cause: `setFallbackSyntaxError` (`parser.zig:20357`)
@@ -448,7 +502,11 @@ ECMA-262/test262 as the semantic authority)
   files; identity cmp=0, and the recurring first-read −972 B was proven
   to be a same-source cache-basin switch. exec is at 76/81; the last
   five (collection_adapter, error_ops, exceptions, property_ops,
-  vm_regexp) ride the Q16 Stage 3 round. The standard is `src/lexer.zig`:
+  vm_regexp) ride the Q16 Stage 3 round.
+  **Batch 6 done 2026-08-22** (`abb6fbfc` pre-rebase): the last five —
+  **exec is 81/81**. Also fixed en route: `compile_entry`'s
+  internal-error `bufPrint(...) catch unreachable` (UB on an
+  over-long `anyerror` name) now falls back to a fixed literal. The standard is `src/lexer.zig`:
 state what the module owns, the ownership/lifetime contracts a reader cannot
 infer from signatures, and reference coordinates where they exist. The worst
 offender is `promise_ops.zig` (4,755 lines, zero header, name undersells the
@@ -523,6 +581,25 @@ window, (4) delete the `@errorCast` adapters. Gate: suite + test262;
   the combined-tree batch gate (both lanes' work together) after rebase:
   suite + test262 green. CallbackError and the 14 casts intentionally
   untouched (Stages 3-4).
+  **Stages 3+4 done 2026-08-22 (`8660029b` pre-rebase) — Q16 CLOSED.**
+  `CallbackCallFn` takes an explicit `*JSContext` (doc comment forbids
+  runtime-global current-context recovery, honoring Q12); ordinary
+  failures materialize as a realm-correct pending exception inside
+  `collection_adapter` before crossing the seam; `CallbackError` is
+  exactly the seven hard/control members; `Native*Fn` narrowed from
+  `anyerror` to `HostError`; **builtin_dispatch `@errorCast` 14 → 0**.
+  Red-first: the cross-realm test failed on
+  `callback_realm.hasException()` pre-fix, and post-fix the thrown
+  TypeError carries the callback realm's prototype, not the caller's.
+  Gates: suite 2328/1/0, test262 delta 0, checkpoint 26/26, rule-2 A/B
+  **1.0012** (in band; Crypto +1.57% positive excursion — second
+  consecutive positive Crypto outlier across the Stage 2 and Stage 3/4
+  measurements, possibly a real error-path win; field had immovable
+  co-tenant fun processes pinned 0-19, noted). Residual out of scope:
+  ~21 pre-existing `@errorCast` in other files (string_builtin_ops 13,
+  object.zig 3, ...) — a separate, older population.
+  The invariant now holds by type: no std/backend error name can cross
+  the callback boundary, and a sentinel always has a pending exception.
 
 **Q17. Unreachability without evidence.**
   **Done 2026-08-22** (`7ff86866`): all three site families got invariant

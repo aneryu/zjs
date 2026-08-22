@@ -1,6 +1,6 @@
+//! Runs executable smoke tests for CLI behavior and profiling artifacts.
 const std = @import("std");
 const build_options = @import("build_options");
-
 const ProfileCase = struct {
     name: []const u8,
     source: []const u8,

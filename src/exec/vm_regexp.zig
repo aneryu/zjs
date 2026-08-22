@@ -1,3 +1,11 @@
+//! VM adapter for compiled RegExp literal creation.
+//!
+//! The operand stack transfers owned pattern/bytecode constants into this
+//! helper; locals release them after construction, and `pushOwned` transfers
+//! the fresh RegExp result back to the stack. The active global selects the
+//! realm's fixed RegExp shape without consulting the mutable constructor
+//! binding, matching QuickJS `OP_regexp` at quickjs.c:18426.
+
 const core = @import("../core/root.zig");
 const stack_mod = @import("stack.zig");
 

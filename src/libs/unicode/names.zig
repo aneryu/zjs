@@ -1,6 +1,6 @@
+//! Resolves canonical Unicode property and class names from generated tables.
 const std = @import("std");
 const data = @import("data.zig");
-
 const MapEntry = struct { []const u8, usize };
 
 fn parseNameTableComptime(comptime table: []const u8) []const MapEntry {

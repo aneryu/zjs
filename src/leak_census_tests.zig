@@ -1,7 +1,7 @@
+//! Leak-census test root for execution and builtin ownership checks.
 const std = @import("std");
 const exec_tests = @import("tests/exec.zig");
 const builtins_tests = @import("tests/builtins.zig");
-
 comptime {
     @import("zjs").config_signature.attest("test-leak-census");
 }

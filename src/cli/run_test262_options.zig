@@ -1,5 +1,5 @@
+//! Command-line option parsing and bounded feature overrides for run-test262.
 const std = @import("std");
-
 pub const usage =
     "usage: run-test262 -c <test262.conf> [options] [test-root] [start [stop]]\n" ++
     "  -d <dir>                 add a test directory selector\n" ++

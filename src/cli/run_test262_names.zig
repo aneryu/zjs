@@ -1,5 +1,5 @@
+//! Owned-name storage shared by the test262 runner configuration modules.
 const std = @import("std");
-
 /// Owned names used by the test262 runner. This type owns both its strings and
 /// backing storage; callers may move ownership explicitly with `move`.
 pub const NameList = struct {

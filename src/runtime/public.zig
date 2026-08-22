@@ -1,5 +1,5 @@
+//! Public runtime facade for event-loop, plugin, module, and ArrayBuffer APIs.
 const runtime = @import("root.zig");
-
 pub const EventLoop = runtime.EventLoop;
 pub const EventLoopOptions = runtime.EventLoopOptions;
 pub const EventLoopRunResult = runtime.EventLoopRunResult;
