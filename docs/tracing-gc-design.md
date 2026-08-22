@@ -255,9 +255,23 @@ are missing root sets, the third is a seam that exists but is unused:
    suspended execution state currently own references rather than register as
    tracing roots.
 3. `JSRuntime.pollGC` takes a `roots: ?*const ValueRootFrame` parameter and
-   discards it (`_ = roots;`), starting cycle removal with `null`. The
-   scheduler/root boundary is already shaped correctly; nothing consumes it.
-   This one costs no design work, only a consumer.
+   discards it (`_ = roots;`), and so does
+   `destroyRuntimeCyclesWithValueRoots` (`object_gc.zig`). `active_value_roots`
+   is maintained by activate/deactivate and read by nobody.
+   **Corrected 2026-08-23**: an earlier draft called this "no design work,
+   only a consumer". That is wrong, and the reason matters for scoping Stage
+   1. The current collector is QuickJS trial deletion: it iterates the whole
+   heap, decrements trial refcounts across child edges, and derives liveness
+   from the counts that survive. It never marks from a root set, so there is
+   no place to plug a consumer into — writing one means building
+   mark-from-roots, which is Stage 3's reclamation algorithm, not a parameter
+   fix. The parameter and the frame list are a seam prepared for tracing, and
+   they stay unused until tracing exists.
+
+   Practical consequence: **root completeness cannot be validated by the
+   current collector at all.** It must be validated by the shadow tracer,
+   which is exactly why Stage 1 pairs production roots with the shadow tracer
+   rather than landing them separately.
 
 Gaps 1 and 2 are the load-bearing ones: until they close, the reachable set a
 tracer computes is a strict subset of the truth, and every measurement taken
