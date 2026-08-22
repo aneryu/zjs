@@ -47,6 +47,11 @@ pub const context = @import("context.zig");
 pub const exception = @import("exception.zig");
 pub const memory = @import("memory.zig");
 pub const profile = @import("profile.zig");
+/// Imported only when `-Dzjs_gc=shadow`. Default `rc` builds see an empty
+/// namespace so the observer is not part of the production compile.
+pub const gc_shadow = if (gc.shadow_tracer_enabled) @import("gc_shadow.zig") else struct {
+    pub const enabled = false;
+};
 
 pub const JSValue = value.JSValue;
 pub const JSString = JSValue.String;

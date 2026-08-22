@@ -111,6 +111,10 @@ pub const EngineOptionInputs = struct {
     force_gc: bool,
     ownership_audit: bool,
     dossier_layout_pad: usize,
+    /// Collector Implementation. `rc` is the production default and must not
+    /// change generated machine code. `shadow` additionally compiles the
+    /// non-reclaiming observer in `src/core/gc_shadow.zig`.
+    zjs_gc: []const u8,
 
     pub fn withExpect(self: EngineOptionInputs, expect_config: []const u8) EngineOptionInputs {
         var out = self;
@@ -128,6 +132,7 @@ pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.O
     options.addOption(bool, "zjs_force_gc", in.force_gc);
     options.addOption(bool, "zjs_ownership_audit", in.ownership_audit);
     options.addOption(usize, "zjs_dossier_layout_pad", in.dossier_layout_pad);
+    options.addOption([]const u8, "zjs_gc", in.zjs_gc);
     return options;
 }
 

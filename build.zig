@@ -47,6 +47,15 @@ pub fn build(b: *std.Build) void {
     // `zig build test -Dzjs_ownership_audit=true`; see
     // docs/borrowed_atom_audit.md §6.
     const zjs_ownership_audit = b.option(bool, "zjs_ownership_audit", "Quarantine one just-freed atom slot so borrowed-atom use-after-free trips an assertion instead of being masked by slot reuse (audit tier; never ReleaseFast)") orelse false;
+    // Collector Implementation. `rc` is the shipped default and is compiled
+    // out of the shadow observer so the production `.text` stays identical.
+    // `shadow` adds a non-reclaiming reachability tracer over the current
+    // intrusive registry (docs/tracing-gc-design.md §13 Stage 1).
+    const zjs_gc = b.option([]const u8, "zjs_gc", "collector: rc (default) or shadow (non-reclaiming observer)") orelse "rc";
+    if (!std.mem.eql(u8, zjs_gc, "rc") and !std.mem.eql(u8, zjs_gc, "shadow")) {
+        std.debug.print("error: invalid -Dzjs_gc value '{s}': expected rc or shadow\n", .{zjs_gc});
+        std.process.exit(1);
+    }
 
     // ===== QCP-1 configuration signature =====
     // The defect class this closes is "a gate reports green about a
@@ -133,6 +142,7 @@ pub fn build(b: *std.Build) void {
         .force_gc = zjs_force_gc,
         .ownership_audit = zjs_ownership_audit,
         .dossier_layout_pad = zjs_dossier_layout_pad,
+        .zjs_gc = zjs_gc,
     };
     // Follows -Doptimize: the public engine module and the OOM corpus engine.
     const engine_options = config.addEngineOptions(b, engine_option_inputs);

@@ -6977,6 +6977,84 @@ test "fallible GC API reports reclaimed objects and no failure" {
     try std.testing.expectEqual(core.gc.FailureKind.none, rt.gc.stats.last_failure);
 }
 
+test "shadow tracer never frees and classifies a Zig-local object as unexplained" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try core.JSContext.create(rt);
+        defer ctx.destroy();
+
+        const orphan = try core.Object.create(rt, core.class.ids.object, null);
+        const live_before = rt.gc.liveCount();
+        core.gc_shadow.quiesce(rt);
+        try std.testing.expectEqual(live_before, rt.gc.liveCount());
+
+        const report = try core.gc_shadow.run(rt);
+        try std.testing.expectEqual(live_before, rt.gc.liveCount());
+        try std.testing.expect(report.allocated >= 1);
+        try std.testing.expect(report.reachable >= 1);
+        try std.testing.expect(report.unexplained >= 1);
+
+        var saw_orphan = false;
+        for (report.sample()) |item| {
+            if (item.header == &orphan.header) {
+                saw_orphan = true;
+                try std.testing.expectEqual(core.gc_shadow.UnexplainedClass.unexplained, item.class);
+            }
+        }
+        try std.testing.expect(saw_orphan or report.unexplained > report.sample_len);
+
+        var rooted = orphan.value();
+        var root_values = [_]core.runtime.ValueRootValue{.{ .value = &rooted }};
+        var frame = core.runtime.ValueRootFrame{ .values = &root_values };
+        frame.activate(rt);
+        defer frame.deactivate(rt);
+
+        const rooted_report = try core.gc_shadow.run(rt);
+        try std.testing.expectEqual(live_before, rt.gc.liveCount());
+        var still_unexplained = false;
+        for (rooted_report.sample()) |item| {
+            if (item.header == &orphan.header) still_unexplained = true;
+        }
+        try std.testing.expect(!still_unexplained);
+
+        std.debug.print(
+            \\
+            \\shadow report after quiesce (Zig-local object unexplained):
+            \\  allocated={d} reachable={d} unexplained={d} known_semantic={d}
+            \\
+        , .{
+            report.allocated,
+            report.reachable,
+            report.unexplained,
+            report.known_current_collector_semantic,
+        });
+    }
+}
+
+test "shadow tracer reports a live realm as reachable" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try core.JSContext.create(rt);
+        defer ctx.destroy();
+
+        core.gc_shadow.quiesce(rt);
+        const report = try core.gc_shadow.run(rt);
+        try std.testing.expect(report.allocated_by_kind.realm_context >= 1);
+        try std.testing.expect(report.reachable_by_kind.realm_context >= 1);
+        try std.testing.expectEqual(@as(usize, 0), report.allocated_by_kind.string);
+        try std.testing.expectEqual(@as(usize, 0), report.allocated_by_kind.big_int);
+
+        var buf: [2048]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try report.format(&w);
+        std.debug.print("\n{s}\n", .{w.buffered()});
+    }
+}
+
 test "pollGC runs pending collection and clears pending flag" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

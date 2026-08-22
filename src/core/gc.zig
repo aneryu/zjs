@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const memory = @import("memory.zig");
 const bigint = @import("bigint.zig");
 const object = @import("object.zig");
@@ -17,6 +18,11 @@ const shape = @import("shape.zig");
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
+
+/// `-Dzjs_gc=shadow` compiles the non-reclaiming observer in `gc_shadow.zig`.
+/// Default `rc` keeps this false so the observer is not imported and the
+/// production collector's machine code is unchanged.
+pub const shadow_tracer_enabled: bool = std.mem.eql(u8, build_options.zjs_gc, "shadow");
 
 pub const Mode = enum {
     balanced,
