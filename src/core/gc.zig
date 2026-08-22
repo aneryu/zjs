@@ -516,6 +516,21 @@ pub const InvariantError = error{
 };
 
 /// 19. GE Stats
+/// Retained collection-round durations. Sized so a benchmark-scale run (the
+/// V8 suite does ~880 rounds) keeps its whole history rather than a tail.
+pub const pause_sample_capacity: usize = 1024;
+
+/// Pause percentiles over the retained window. Absent when no round has
+/// completed — an empty distribution is reported as null rather than as zeros,
+/// so a caller cannot mistake "never collected" for "collected instantly".
+pub const PauseDistribution = struct {
+    samples: usize,
+    p50_ns: u64,
+    p95_ns: u64,
+    p99_ns: u64,
+    max_ns: u64,
+};
+
 /// Counters the collector actually maintains. Every field here has a write
 /// site in `recordSuccess` / `recordFailure` / the zero-ref drain; refcount
 /// traffic is deliberately uninstrumented because a counter on that path is
@@ -529,6 +544,16 @@ pub const GeStats = struct {
     failed_collections: usize = 0,
     last_failure: FailureKind = .none,
     last_collection_time_ns: u64 = 0,
+
+    /// Round durations retained for percentile reporting. A collection round
+    /// is orders of magnitude more expensive than one array store, so keeping
+    /// its duration costs nothing measurable; the cap bounds the memory and
+    /// keeps the most recent rounds, which is what pause work asks about.
+    /// `pause_sample_count` saturates so a long-lived runtime still reports
+    /// how many rounds the retained window represents.
+    pause_samples: [pause_sample_capacity]u64 = @splat(0),
+    pause_sample_cursor: usize = 0,
+    pause_sample_count: usize = 0,
 
     /// Cycle-collection entry count, bumped by
     /// `object_gc.destroyRuntimeCyclesWithValueRoots`. Distinct from
@@ -1014,6 +1039,31 @@ pub const Registry = struct {
 
     pub fn resetAllocationDebt(self: *Registry) void {
         self.stats.allocation_debt = 0;
+    }
+
+    /// Percentiles over the retained round durations, or null if no round has
+    /// completed. Sorts a stack copy: this is a diagnostic call, not a hot
+    /// path, and sorting in place would reorder the live ring.
+    pub fn pauseDistribution(self: *const Registry) ?PauseDistribution {
+        const retained = @min(self.stats.pause_sample_count, pause_sample_capacity);
+        if (retained == 0) return null;
+        var scratch: [pause_sample_capacity]u64 = undefined;
+        @memcpy(scratch[0..retained], self.stats.pause_samples[0..retained]);
+        const window = scratch[0..retained];
+        std.mem.sort(u64, window, {}, std.sort.asc(u64));
+        return .{
+            .samples = self.stats.pause_sample_count,
+            .p50_ns = window[percentileIndex(retained, 50)],
+            .p95_ns = window[percentileIndex(retained, 95)],
+            .p99_ns = window[percentileIndex(retained, 99)],
+            .max_ns = window[retained - 1],
+        };
+    }
+
+    /// Nearest-rank index: the smallest sample at or above the percentile.
+    fn percentileIndex(len: usize, percentile: usize) usize {
+        const rank = (len * percentile + 99) / 100;
+        return @min(if (rank == 0) 0 else rank - 1, len - 1);
     }
 
     pub fn statsSnapshot(self: *const Registry, rt: anytype) Stats {
@@ -1520,6 +1570,9 @@ pub const Registry = struct {
         self.stats.cycle_gc_count +|= 1;
         self.stats.cycle_gc_time_ns +|= result.duration_ns;
         self.stats.freed_objects +|= result.freed_objects;
+        self.stats.pause_samples[self.stats.pause_sample_cursor] = result.duration_ns;
+        self.stats.pause_sample_cursor = (self.stats.pause_sample_cursor + 1) % pause_sample_capacity;
+        self.stats.pause_sample_count +|= 1;
     }
 
     pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {

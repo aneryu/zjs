@@ -2708,6 +2708,14 @@ pub const JSRuntime = struct {
         return self.gc.stats.allocation_debt;
     }
 
+    /// Pause percentiles over the collector's retained round window, or null
+    /// if no collection has completed. Separate from `gcStats` because it
+    /// sorts a scratch copy; callers that only want counters should not pay
+    /// for it.
+    pub fn gcPauseDistribution(self: *const JSRuntime) ?gc.PauseDistribution {
+        return self.gc.pauseDistribution();
+    }
+
     pub fn gcStats(self: *const JSRuntime) gc.Stats {
         var stats = self.gc.statsSnapshot(self);
         stats.weak_ref_count = self.weakReferenceCount();

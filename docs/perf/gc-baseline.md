@@ -62,6 +62,27 @@ identical every time.
   usable regression check on its own: a refactor that changes it has changed
   what survives.
 
+## Pause distribution (added 2026-08-23)
+
+The cumulative and last-round figures above understate how the collector
+behaves. Percentiles over the same suite run:
+
+| p50 | p95 | p99 | max | rounds |
+|---:|---:|---:|---:|---:|
+| 0.71 ms | 0.86 ms | 2.45 ms | 46.6 ms | 844 |
+
+This reframes the target. "A single round reaches 39-51 ms" reads like a
+uniformly slow collector; the distribution says the opposite — half the rounds
+finish inside 0.71 ms and 95% inside 0.86 ms, while the tail runs to 46.6 ms,
+65× the median. The problem to solve is the tail, not the average, and a change
+that improves mean collection time while leaving the tail intact has not moved
+the number that matters for interactive work.
+
+For reference, the tracing-GC design's provisional gate is p99 below 2 ms for a
+major stop-the-world pause. The current collector reads 2.45 ms, so it does not
+meet that bar today — which is worth knowing before attributing any of it to
+the refactor.
+
 ## The panel distinguishes the two reclamation paths
 
 A cycle-only workload — 50,000 self-referencing objects, which refcounting

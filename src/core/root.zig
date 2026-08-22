@@ -82,6 +82,7 @@ pub const DynamicImportCallback = context.DynamicImportCallback;
 pub const ContextOptions = context.ContextOptions;
 pub const GCPolicy = gc.Policy;
 pub const GCStats = gc.Stats;
+pub const GCPauseDistribution = gc.PauseDistribution;
 pub const EvalMode = context.EvalMode;
 pub const EvalOptions = context.ContextEvalOptions;
 pub const EvalTiming = context.ContextEvalTiming;

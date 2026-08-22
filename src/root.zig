@@ -8,6 +8,7 @@ const CoreObject = zjs_binding.Object;
 
 pub const JSRuntime = zjs_binding.JSRuntime;
 pub const GCStats = zjs_binding.GCStats;
+pub const GCPauseDistribution = zjs_binding.GCPauseDistribution;
 pub const JSContext = zjs_binding.JSContext;
 pub const ffi = zjs_binding.ffi;
 pub const JSValue = zjs_binding.JSValue;

@@ -560,6 +560,7 @@ const public_root_decls = [_][]const u8{
     "RuntimeOptions",
     "RuntimeMemoryUsage",
     "GCStats",
+    "GCPauseDistribution",
     "OpcodeProfile",
     "default_stack_size",
     "default_gc_threshold",
@@ -808,5 +809,5 @@ test "public API surface snapshot matches the checked-in name lists" {
     // surface. Pin its declaration count so additions and removals require an
     // explicit contract update instead of passing silently.
     const jsruntime_decl_count = @typeInfo(zjs.JSRuntime).@"struct".decls.len;
-    try std.testing.expectEqual(@as(usize, 167), jsruntime_decl_count);
+    try std.testing.expectEqual(@as(usize, 168), jsruntime_decl_count);
 }

@@ -377,6 +377,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (commandRuntimeOptions(command).gc_stats) {
         try dumpGcStats(&stdout_writer.interface, runtime.runtime.gcStats());
+        try dumpGcPauses(&stdout_writer.interface, runtime.runtime.gcPauseDistribution());
         try stdout_writer.interface.flush();
     }
     if (commandRuntimeOptions(command).perf_json) {
@@ -760,6 +761,23 @@ fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats) !void {
     try writer.print("gc: weak refs {d}, finalizer queue {d}\n", .{
         stats.weak_ref_count,
         stats.finalizer_queue_length,
+    });
+}
+
+/// Pause percentiles, or an explicit "no rounds" line. Never print zeros for
+/// an empty distribution: a run that never collected must not read like a run
+/// that collected instantly.
+fn dumpGcPauses(writer: *std.Io.Writer, distribution: ?zjs.GCPauseDistribution) !void {
+    const d = distribution orelse {
+        try writer.print("gc: pauses none (no collection completed)\n", .{});
+        return;
+    };
+    try writer.print("gc: pause p50 {d} ns, p95 {d} ns, p99 {d} ns, max {d} ns over {d} rounds\n", .{
+        d.p50_ns,
+        d.p95_ns,
+        d.p99_ns,
+        d.max_ns,
+        d.samples,
     });
 }
 
