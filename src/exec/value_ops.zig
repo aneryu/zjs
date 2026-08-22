@@ -388,7 +388,7 @@ fn primitiveToStringValueFast(rt: *core.JSRuntime, value: core.JSValue) !?core.J
         if (std.math.isNegativeInf(float_value)) return try createAsciiStringValue(rt, "-Infinity");
         if (std.math.isNegativeZero(float_value)) return try createAsciiStringValue(rt, "0");
         var float_buf: [64]u8 = undefined;
-        return try createAsciiStringValue(rt, try formatFiniteNumber(&float_buf, float_value));
+        return try createAsciiStringValue(rt, formatFiniteNumberAssumeCapacity(&float_buf, float_value));
     }
     if (value.asShortBigInt()) |bigint_value| {
         var bigint_buf: [32]u8 = undefined;
@@ -678,6 +678,10 @@ pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: c
 
 pub fn formatFiniteNumber(buffer: []u8, value: f64) ![]const u8 {
     return core.value_format.formatFiniteNumber(buffer, value);
+}
+
+pub fn formatFiniteNumberAssumeCapacity(buffer: []u8, value: f64) []const u8 {
+    return core.value_format.formatFiniteNumberAssumeCapacity(buffer, value);
 }
 
 fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {

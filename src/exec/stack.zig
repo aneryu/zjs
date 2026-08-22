@@ -1,3 +1,9 @@
+//! Operand-stack storage and ownership for ordinary, arena, and resident VMs.
+//!
+//! The live prefix owns its JSValues. Arena windows borrow backing storage,
+//! resident windows retain it, and generator suspension uses the explicit
+//! install/clear seam to transfer backing ownership without duplicating values.
+
 const std = @import("std");
 
 const memory = @import("../core/memory.zig");

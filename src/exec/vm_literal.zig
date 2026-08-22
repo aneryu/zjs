@@ -1,3 +1,12 @@
+//! Object, array, spread, rest, and special-object literal opcode adapters.
+//!
+//! Popped stack values are owned locally; successful property insertion or
+//! stack push transfers them, while guarded fast probes remain borrow-until-
+//! commit. Observable iterator and property work stays on the explicit call
+//! environment. The opcode bodies follow QuickJS object/field creation at
+//! quickjs.c:17961 and quickjs.c:19269, spread copying at quickjs.c:16814-16920,
+//! and rest-array construction at quickjs.c:18017.
+
 const std = @import("std");
 const builtin = @import("builtin");
 

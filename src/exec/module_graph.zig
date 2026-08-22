@@ -627,7 +627,7 @@ fn dynamicImportJobRun(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     payload: *const jobs_mod.DynamicImportPayload,
-) core.context.DynamicImportError!core.JSValue {
+) core.errors.RuntimeError!core.JSValue {
     const rt = ctx.runtime;
     const global = ctx.global orelse return error.TypeError;
     const resolve_value = payload.resolve;
@@ -663,7 +663,7 @@ fn dynamicImportJobRun(
         r.state.pending_import_type = r.prev;
     };
 
-    const load_result: core.context.DynamicImportError!core.JSValue = blk: {
+    const load_result: (core.context.DynamicImportError || error{OperationUnsupported})!core.JSValue = blk: {
         const callback = loader.callback orelse break :blk error.OperationUnsupported;
         break :blk callback(loader.userdata, ctx, output, global, basename_bytes.items, specifier_bytes.items);
     };
@@ -692,7 +692,12 @@ fn dynamicImportJobRun(
         const settle = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{namespace}, null, null);
         settle.free(rt);
     } else |err| {
-        if (err == error.OutOfMemory or err == error.ProcessExit or err == error.StackOverflow) return err;
+        switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ProcessExit => return error.ProcessExit,
+            error.StackOverflow => return error.StackOverflow,
+            else => {},
+        }
         const reason = try dynamicImportRejectionValue(ctx, global, err, specifier_bytes.items);
         defer reason.free(rt);
         const settle = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, null, null);
@@ -721,8 +726,10 @@ fn dynamicImportRejectionValue(
             return exec.exception_ops.createNamedError(ctx, global, "ReferenceError", msg_buf.items);
         },
         else => {
-            const info = exec.exception_ops.promiseErrorInfo(err);
-            return exec.exception_ops.createNamedError(ctx, global, info.name, info.message);
+            if (exec.exception_ops.runtimeErrorInfo(err)) |info| {
+                return exec.exception_ops.createNamedError(ctx, global, info.name, info.message);
+            }
+            return exec.exception_ops.createNamedError(ctx, global, "Error", @errorName(err));
         },
     }
 }
@@ -936,7 +943,20 @@ fn initializeSyntheticFileModules(
         if (record.synthetic_kind == .none) continue;
         const path = runtime.atoms.name(record.module_name) orelse return error.InvalidAtom;
         const source_path = exec.module.syntheticModuleFilePath(path);
-        const module_source = try std.Io.Dir.cwd().readFileAlloc(io, source_path, allocator, .limited(max_source_size));
+        const module_source = std.Io.Dir.cwd().readFileAlloc(io, source_path, allocator, .limited(max_source_size)) catch |err| switch (err) {
+            error.FileNotFound => {
+                try exec.module.throwCouldNotLoadModule(context, source_path);
+                return error.JSException;
+            },
+            else => |load_error| {
+                _ = try exec.exception_ops.throwHostError(
+                    context,
+                    global_object,
+                    load_error,
+                );
+                unreachable;
+            },
+        };
         defer allocator.free(module_source);
         _ = try exec.module.initializeSyntheticFileModule(context, global_object, record.module_name, module_source);
     }
@@ -1138,7 +1158,13 @@ fn drainModuleContinuations(
     errdefer if (has_kept_result) kept_result.free(runtime);
     while (continuations.items.len != 0) {
         switch (try drainOneScheduledModuleWork(runtime, context, output, allocator, continuations)) {
-            .stalled => if (!try drainOneModuleHostEvent(context, output)) return error.OperationUnsupported,
+            .stalled => if (!try drainOneModuleHostEvent(context, output)) {
+                _ = try exec.exception_ops.throwModuleHostStall(
+                    context,
+                    try exec.zjs_vm.contextGlobal(context),
+                );
+                unreachable;
+            },
             .progressed => {},
             .value => |value| {
                 if (has_kept_result) kept_result.free(runtime);
@@ -1161,7 +1187,13 @@ fn drainModuleContinuationsForDependencies(
 ) !void {
     while (try hasActiveAsyncDependency(context, continuations, filename)) {
         switch (try drainOneScheduledModuleWork(runtime, context, output, allocator, continuations)) {
-            .stalled => if (!try drainOneModuleHostEvent(context, output)) return error.OperationUnsupported,
+            .stalled => if (!try drainOneModuleHostEvent(context, output)) {
+                _ = try exec.exception_ops.throwModuleHostStall(
+                    context,
+                    try exec.zjs_vm.contextGlobal(context),
+                );
+                unreachable;
+            },
             .progressed => {},
             .value => |value| value.free(runtime),
         }
@@ -1477,7 +1509,13 @@ fn drainOneModuleContinuation(
     const continuation = current.continuation;
     const promise = try exec.property_ops.expectObject(awaited_promise);
     if (promise.class_id != core.class.ids.promise) return error.TypeError;
-    const resume_value = if (promise.promiseResult()) |stored| stored.dup() else return error.OperationUnsupported;
+    const resume_value = if (promise.promiseResult()) |stored| stored.dup() else {
+        _ = try exec.exception_ops.throwModuleHostStall(
+            context,
+            try exec.zjs_vm.contextGlobal(context),
+        );
+        unreachable;
+    };
     defer resume_value.free(runtime);
     const continuation_object = try exec.property_ops.expectObject(continuation);
     try exec.call_runtime.setGeneratorResumeCompletionType(runtime, continuation_object, if (promise.promiseIsRejected()) 2 else 0);
@@ -1653,7 +1691,13 @@ fn evalDynamicImportModule(
                     try exec.module.throwCouldNotLoadModule(context, target_path);
                     return error.JSException;
                 },
-                else => |e| return e,
+                else => |load_error| {
+                    if (load_error == error.OutOfMemory) return error.OutOfMemory;
+                    const global = try exec.zjs_vm.contextGlobal(context);
+                    const reason = try exec.exception_ops.hostErrorValue(context, global, load_error);
+                    _ = context.throwValue(reason);
+                    return error.JSException;
+                },
             };
             defer allocator.free(source);
             // skip-existing preload: records already in the registry keep
@@ -1689,7 +1733,13 @@ fn evalDynamicImportModule(
                 try exec.module.throwCouldNotLoadModule(context, target_path_base);
                 return error.JSException;
             },
-            else => |e| return e,
+            else => |load_error| {
+                if (load_error == error.OutOfMemory) return error.OutOfMemory;
+                const global = try exec.zjs_vm.contextGlobal(context);
+                const reason = try exec.exception_ops.hostErrorValue(context, global, load_error);
+                _ = context.throwValue(reason);
+                return error.JSException;
+            },
         };
         defer allocator.free(module_source);
         const global_object = try exec.zjs_vm.contextGlobal(context);
@@ -2206,7 +2256,7 @@ fn wrapSourceByKind(
             for (source, 0..) |b, i| {
                 if (i > 0) try bytes_list.appendSlice(allocator, ",");
                 var buf: [16]u8 = undefined;
-                const slice = try std.fmt.bufPrint(&buf, "{d}", .{b});
+                const slice = std.fmt.bufPrint(&buf, "{d}", .{b}) catch unreachable;
                 try bytes_list.appendSlice(allocator, slice);
             }
             try bytes_list.appendSlice(allocator, "]);\nconst module = new WebAssembly.Module(bytes);\nconst instance = new WebAssembly.Instance(module);\nexport default instance.exports;\n");

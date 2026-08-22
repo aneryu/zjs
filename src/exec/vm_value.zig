@@ -1,3 +1,12 @@
+//! Value, constant, stack-shuffle, `typeof`, and return opcode adapters.
+//!
+//! Operand-stack slots are owned; borrowed frame bindings and constant-pool
+//! values are duplicated before they are pushed, while explicit pop/drop paths
+//! release their slots. Private symbols and completion values transfer only at
+//! their named handoff points. These cold adapters mirror the standalone
+//! QuickJS opcode cases beginning at quickjs.c:17879-17910; fused hot dispatch
+//! remains outside this module.
+
 const std = @import("std");
 const builtin = @import("builtin");
 

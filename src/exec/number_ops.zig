@@ -1,3 +1,10 @@
+//! Number builtin records, realm-aware coercion, and ECMAScript formatting.
+//!
+//! Pure parsers are re-exported from `core.number`; this file owns the native
+//! dispatch table and VM-facing `Number.prototype` methods corresponding to
+//! QuickJS's number builtin functions. Receiver/argument values are borrowed,
+//! and every returned JS string/value is owned.
+
 const core = @import("../core/root.zig");
 const dtoa = @import("../libs/number_format.zig");
 const std = @import("std");
@@ -247,7 +254,7 @@ pub fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const
 
     if (radix == 10 or !std.math.isFinite(number) or std.math.isNan(number)) {
         var buffer: [64]u8 = undefined;
-        const text = try toString(&buffer, number);
+        const text = toString(&buffer, number) catch unreachable;
         const string = try core.string.String.createAscii(rt, text);
         return string.value();
     }
@@ -264,21 +271,21 @@ pub fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const
     var out = std.ArrayList(u8).empty;
     defer out.deinit(rt.memory.allocator);
     try out.resize(rt.memory.allocator, needed);
-    const text = try dtoa.formatRadix(out.items, number, @intCast(radix), 0, flags);
+    const text = dtoa.formatRadix(out.items, number, @intCast(radix), 0, flags) catch unreachable;
     const string = try core.string.String.createAscii(rt, text);
     return string.value();
 }
 
 fn numberStringValue(rt: *core.JSRuntime, number: f64) !core.JSValue {
     var buffer: [64]u8 = undefined;
-    const text = try toString(&buffer, number);
+    const text = toString(&buffer, number) catch unreachable;
     const string = try core.string.String.createAscii(rt, text);
     return string.value();
 }
 
 fn dtoaStringValue(rt: *core.JSRuntime, number: f64, n_digits: i32, flags: i32) !core.JSValue {
     var buffer: [768]u8 = undefined;
-    const text = try dtoa.formatDtoaChecked(&buffer, number, n_digits, flags);
+    const text = dtoa.formatDtoaChecked(&buffer, number, n_digits, flags) catch unreachable;
     const string = try core.string.String.createAscii(rt, text);
     return string.value();
 }

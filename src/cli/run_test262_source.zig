@@ -1,3 +1,10 @@
+//! test262 source, metadata, harness, and local-override assembly.
+//! `HarnessCache` owns duplicated names and optional file contents until
+//! `deinit`; assembled test sources are allocator-owned by the caller. Local
+//! overrides are accepted only after the pinned upstream source hash matches,
+//! so fixtures cannot silently mask upstream drift. Metadata reads use a
+//! bounded prefix unless an override requires the verified full source.
+
 const std = @import("std");
 const runner_metadata = @import("run_test262_metadata.zig");
 const TestMetadata = runner_metadata.TestMetadata;

@@ -83,7 +83,7 @@ pub const DynamicImportPayload = struct {
         context: *core.JSContext,
         output: ?*std.Io.Writer,
         payload: *const DynamicImportPayload,
-    ) core.context.DynamicImportError!core.JSValue;
+    ) core.errors.RuntimeError!core.JSValue;
 
     runner: Runner,
     resolve: core.JSValue,
@@ -100,7 +100,7 @@ pub const AtomicsWaiterPayload = struct {
     pub const Runner = *const fn (
         context: *core.JSContext,
         payload: *const AtomicsWaiterPayload,
-    ) core.context.DynamicImportError!void;
+    ) core.errors.RuntimeError!void;
     pub const Destroyer = *const fn (waiter: *anyopaque) void;
 
     runner: Runner,

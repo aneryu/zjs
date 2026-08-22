@@ -1,3 +1,10 @@
+//! Reflect builtin records and the Proxy.revocable dispatch bridge.
+//!
+//! Registry ids and native call decoding live here; reflective internal
+//! operations, proxy traps, and ownership of revocable targets/revoke closures
+//! remain in `reflect_ops` and the object model. Call inputs are borrowed and
+//! returned values are owned.
+
 const core = @import("../core/root.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");

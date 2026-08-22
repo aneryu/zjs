@@ -1,10 +1,10 @@
 //! The engine's error-set authority.
 //!
-//! `RuntimeError` is every failure the engine itself can raise; `HostError` adds
-//! the embedder-side I/O failures a host callback may surface. Both live in core
-//! because core-level surfaces need them (`host_function.CallbackError`,
-//! `context.DynamicImportError`) and core cannot import exec. `exec.exceptions`
-//! re-exports them under their historical names.
+//! `RuntimeError` is every failure the engine itself can raise. `HostError` is
+//! the historical transport name for that same set: producer-specific I/O is
+//! converted to JavaScript errors before reaching it. Both live in core because
+//! core-level callback surfaces need them and core cannot import exec.
+//! `exec.exceptions` re-exports them under their historical names.
 
 pub const RuntimeError = error{
     AccessorWithoutSetter,
@@ -84,54 +84,4 @@ pub const RuntimeError = error{
     HtmlCommentInModule,
 };
 
-pub const HostError = RuntimeError || error{
-    AccessDenied,
-    AntivirusInterference,
-    BadPathName,
-    BrokenPipe,
-    Canceled,
-    ConnectionRefused,
-    ConnectionResetByPeer,
-    CurrentDirUnlinked,
-    DeviceBusy,
-    DiskQuota,
-    FileBusy,
-    FileNotFound,
-    FileLocksUnsupported,
-    FileSystem,
-    FileTooBig,
-    InputOutput,
-    InvalidHandle,
-    InvalidName,
-    InvalidPath,
-    InvalidUtf8,
-    InvalidWtf8,
-    IsDir,
-    LockViolation,
-    LockedMemoryLimitExceeded,
-    NameTooLong,
-    NetworkNotFound,
-    NoDevice,
-    NoSpaceLeft,
-    NotDir,
-    NotOpenForReading,
-    NotOpenForWriting,
-    OperationUnsupported,
-    PathAlreadyExists,
-    PermissionDenied,
-    PipeBusy,
-    ProcessFdQuotaExceeded,
-    ProcessNotFound,
-    ReadOnlyFileSystem,
-    SharingViolation,
-    SocketNotConnected,
-    SocketUnconnected,
-    StreamTooLong,
-    SymLinkLoop,
-    SystemFdQuotaExceeded,
-    SystemResources,
-    ThreadQuotaExceeded,
-    Unexpected,
-    WouldBlock,
-    WriteFailed,
-};
+pub const HostError = RuntimeError;

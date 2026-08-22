@@ -1,3 +1,10 @@
+//! Public script/module evaluation entry and its realm-bound execution setup.
+//!
+//! Compiled roots and temporary module names are owned locally; the returned
+//! completion is owned by the caller. This is the exec-side analogue of
+//! QuickJS `JS_EvalInternal`, including outermost stack-base refresh and job
+//! draining, while parser/compiler policy stays in their own modules.
+
 const std = @import("std");
 const atomics_ops = @import("atomics_ops.zig");
 
@@ -43,7 +50,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     var module_name_buf: [64]u8 = undefined;
     const module_name: core.Atom = if (options.mode == .module) blk: {
         const module_name_bytes = if (std.mem.eql(u8, options.filename, "<eval>"))
-            try std.fmt.bufPrint(&module_name_buf, "<eval>#{d}", .{ctx.modules.count})
+            std.fmt.bufPrint(&module_name_buf, "<eval>#{d}", .{ctx.modules.count}) catch unreachable
         else
             options.filename;
         break :blk try rt.internAtom(module_name_bytes);
@@ -319,12 +326,18 @@ fn waitForModuleAwaitReaction(
                 ),
             }
         };
-        if (!progressed) return error.OperationUnsupported;
+        if (!progressed) {
+            _ = try exception_ops.throwModuleHostStall(ctx, global);
+            unreachable;
+        }
     }
 
     const rejected = reaction.promiseIsRejected();
     if (rejected) core.promise.markHandled(ctx, reaction);
-    const settled = reaction.promiseResult() orelse return error.OperationUnsupported;
+    const settled = reaction.promiseResult() orelse {
+        _ = try exception_ops.throwModuleHostStall(ctx, global);
+        unreachable;
+    };
     return .{
         .value = settled.dup(),
         .rejected = rejected,

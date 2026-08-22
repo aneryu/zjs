@@ -1,3 +1,11 @@
+//! Guarded property and global fast probes that cannot invoke user code.
+//!
+//! Result types state whether a returned JSValue is borrowed; helpers named
+//! `Owned` consume their input only after the guarded slot write commits. The
+//! probes validate class, shape, flags, atom kind, and exotic/proxy exclusions
+//! before raw storage access. Observable getters, proxies, coercion, and generic
+//! property semantics remain in `property_ops.zig` and `vm_property.zig`.
+
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");

@@ -56,5 +56,5 @@ test "PropNameID interns and releases a static property name" {
         else => false,
     });
     try std.testing.expectEqualStrings("bindingName", name.debugName(rt).?);
-    try std.testing.expect(GetPropertyError == core.context.DynamicImportError);
+    try std.testing.expect(GetPropertyError == core.errors.RuntimeError);
 }

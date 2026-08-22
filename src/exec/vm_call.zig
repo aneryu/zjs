@@ -1,3 +1,13 @@
+//! Bytecode call, construct, and tail-call adapters plus call-depth accounting.
+//!
+//! Operand-stack values enter as owned slots; frame setup borrows, duplicates,
+//! or transfers arguments and VarRef cells according to `Frame`'s explicit
+//! dispositions. `CallDepthGuard` balances logical, native, and byte budgets.
+//! Inline requests use caller-owned request storage to avoid an sret; hot native
+//! dispatch remains separate from generic fallback. This follows
+//! `JS_CallInternal` frame entry at quickjs.c:17828-17866 and class-call
+//! dispatch at quickjs.c:17746-17791.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");

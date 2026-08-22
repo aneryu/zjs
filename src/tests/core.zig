@@ -6,6 +6,28 @@ const engine = zjs;
 const core = zjs.core;
 const helpers = @import("helpers.zig");
 
+test "host transports and core operation errors keep independent narrow sets" {
+    const DynamicImportTransport = core.errors.RuntimeError || error{
+        AccessDenied,
+        PermissionDenied,
+        Unexpected,
+    };
+    const OwnPropertyReadError = @typeInfo(@typeInfo(@TypeOf(core.Object.getOwnProperty)).@"fn".return_type.?).error_union.error_set;
+    const PropertyReadError = @typeInfo(@typeInfo(@TypeOf(core.Object.getProperty)).@"fn".return_type.?).error_union.error_set;
+    const InstallGlobalsError = @typeInfo(@typeInfo(@TypeOf(core.JSRuntime.installStandardGlobals)).@"fn".return_type.?).error_union.error_set;
+    const DynamicImportJobError = @typeInfo(@typeInfo(@typeInfo(core.jobs.DynamicImportPayload.Runner).pointer.child).@"fn".return_type.?).error_union.error_set;
+    const AtomicsWaiterJobError = @typeInfo(@typeInfo(@typeInfo(core.jobs.AtomicsWaiterPayload.Runner).pointer.child).@"fn".return_type.?).error_union.error_set;
+
+    try std.testing.expect(core.errors.HostError == core.errors.RuntimeError);
+    try std.testing.expect(core.context.DynamicImportError == DynamicImportTransport);
+    try std.testing.expect(OwnPropertyReadError == core.errors.RuntimeError);
+    try std.testing.expect(PropertyReadError == core.errors.RuntimeError);
+    try std.testing.expect(core.value_string.AppendStringError == core.errors.RuntimeError);
+    try std.testing.expect(InstallGlobalsError == core.errors.RuntimeError);
+    try std.testing.expect(DynamicImportJobError == core.errors.RuntimeError);
+    try std.testing.expect(AtomicsWaiterJobError == core.errors.RuntimeError);
+}
+
 extern "c" fn tmpfile() ?*std.c.FILE;
 
 const ModuleAutoInitFixture = struct {

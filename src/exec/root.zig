@@ -1,3 +1,9 @@
+//! Exec subsystem namespace and the small embedding-facing `Vm` facade.
+//!
+//! This file re-exports execution domains without merging their ownership
+//! seams. `Vm` owns its operand stack, borrows its context/output/global view,
+//! and delegates compilation/evaluation to the same public exec entry points.
+
 const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");
@@ -17,6 +23,7 @@ pub const construct = @import("construct.zig");
 pub const property_ops = @import("property_ops.zig");
 pub const exceptions = @import("exceptions.zig");
 pub const exception_ops = @import("exception_ops.zig");
+pub const builtin_dispatch = @import("builtin_dispatch.zig");
 pub const iterator_builtin_ops = @import("iterator_builtin_ops.zig");
 pub const eval_entry = @import("eval_entry.zig");
 pub const module = @import("module.zig");

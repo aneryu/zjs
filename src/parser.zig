@@ -2105,6 +2105,19 @@ pub const parser_core = struct {
             return error.UnexpectedToken;
         }
 
+        fn failUnexpectedToken(self: *State) Error {
+            var actual_buffer: [16]u8 = undefined;
+            const actual_name = self.currentTokenKindLabel(&actual_buffer);
+            var message_buffer: [PendingDiagnostic.message_capacity]u8 = undefined;
+            const message = std.fmt.bufPrint(
+                &message_buffer,
+                "unexpected {s}",
+                .{actual_name},
+            ) catch "UnexpectedToken";
+            self.setPendingDiagnostic(error.UnexpectedToken, self.currentDiagnosticPosition(), message);
+            return error.UnexpectedToken;
+        }
+
         pub fn peekKind(self: *const State) tok.TokenKind {
             return self.token.val;
         }
@@ -5127,7 +5140,7 @@ pub const parser_core = struct {
                     try Emitter.opNoSource(s, opcode.op.drop);
                     try parseLogicalAndOr(s, tok.TOK_LAND, forceResultNeeded(flags));
                     if (s.peekKind() != tok.TOK_LOR and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                        return Error.UnexpectedToken;
+                        return s.failUnexpectedToken();
                     }
                 }
                 try Emitter.bindPhys(s, &end_label);
@@ -5147,7 +5160,7 @@ pub const parser_core = struct {
                     try Emitter.opNoSource(s, opcode.op.drop);
                     try parseExprBinary(s, 8, forceResultNeeded(flags));
                     if (s.peekKind() != tok.TOK_LAND and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                        return Error.UnexpectedToken;
+                        return s.failUnexpectedToken();
                     }
                 }
                 try Emitter.bindPhys(s, &end_label);
@@ -5168,7 +5181,7 @@ pub const parser_core = struct {
         }
         if (level == 4 and flags.in_accepted and s.peekKind() == tok.TOK_PRIVATE_NAME and s.peekNextKind() == tok.TOK_IN) {
             s.features.insert(.private_name);
-            const private_atom = findClassPrivateBoundName(s, s.token.payload.ident.atom, 0) orelse return Error.UnexpectedToken;
+            const private_atom = findClassPrivateBoundName(s, s.token.payload.ident.atom, 0) orelse return s.failUnexpectedToken();
             const retained_private_atom = s.function.atoms.dup(private_atom);
             defer s.function.atoms.free(retained_private_atom);
             try s.advance();
@@ -5176,7 +5189,7 @@ pub const parser_core = struct {
             if ((try checkArrowHead(s)) or
                 (s.isAsyncIdentifier() and (try checkAsyncArrowHeadAfterAsync(s))))
             {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
             try parseExprBinary(s, level - 1, flags);
             try Emitter.opAtomU16(s, opcode.op.scope_in_private_field, retained_private_atom, @intCast(s.scope_level));
@@ -5191,7 +5204,7 @@ pub const parser_core = struct {
                 .col_num = s.token.col_num,
             };
             try s.advance();
-            if (s.in_generator and s.peekKind() == tok.TOK_YIELD) return Error.UnexpectedToken;
+            if (s.in_generator and s.peekKind() == tok.TOK_YIELD) return s.failUnexpectedToken();
             try parseExprBinary(s, level - 1, flags);
             // qjs js_parse_expr_binary pins the selected operator to its token
             // after parsing the RHS (quickjs.c:27889-27894).
@@ -5311,11 +5324,11 @@ pub const parser_core = struct {
         }
         // Handle yield expressions in generator functions.
         if (s.in_class_static_block and (k == tok.TOK_AWAIT or k == tok.TOK_YIELD)) {
-            return Error.UnexpectedToken;
+            return s.failUnexpectedToken();
         }
         if (k == tok.TOK_YIELD) {
-            if (flags.yield_forbidden) return Error.UnexpectedToken;
-            if (s.in_parameter_initializer and s.in_generator) return Error.UnexpectedToken;
+            if (flags.yield_forbidden) return s.failUnexpectedToken();
+            if (s.in_parameter_initializer and s.in_generator) return s.failUnexpectedToken();
             if (!s.in_generator) {
                 if (s.is_strict or s.curFunc().is_strict_mode) return Error.YieldOutsideGenerator;
                 var next_has_line_terminator = false;
@@ -5334,7 +5347,7 @@ pub const parser_core = struct {
             // Check for yield*. A line terminator after `yield` ends the
             // YieldExpression before any following operand.
             const has_line_terminator = s.lex.got_lf;
-            if (has_line_terminator and s.peekKind() == '*') return Error.UnexpectedToken;
+            if (has_line_terminator and s.peekKind() == '*') return s.failUnexpectedToken();
             const is_yield_star = !has_line_terminator and s.peekKind() == '*';
             if (is_yield_star) {
                 try s.advance();
@@ -5374,7 +5387,7 @@ pub const parser_core = struct {
             // not every lexical `await` token in the initializer: IdentifierName
             // uses such as `({ await: 1 }).await` remain valid.
             if (s.in_parameter_initializer and s.reject_await_in_parameter_initializer) {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
             const top_level_module_await = s.lex.is_module and s.cur_func_stack.len == 0;
             if (!s.in_async and !top_level_module_await) {
@@ -6096,7 +6109,7 @@ pub const parser_core = struct {
         }
         // Handle super() constructor calls after member chain.
         if (was_super and optional_chain_label == null and s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
-            if (!s.allow_super_call) return Error.UnexpectedToken;
+            if (!s.allow_super_call) return s.failUnexpectedToken();
             const call_source = SourceLoc{ .line = s.token.line_num, .col = s.token.col_num };
             const active_func_idx = s.curFunc().this_active_func_var_idx;
             const new_target_idx = s.curFunc().new_target_var_idx;
@@ -6200,9 +6213,9 @@ pub const parser_core = struct {
                 s.token.payload.ident.has_escape or
                 s.token.payload.ident.atom != atom_module.ids.target)
             {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
-            if (!s.new_target_allowed) return Error.UnexpectedToken;
+            if (!s.new_target_allowed) return s.failUnexpectedToken();
             try s.advance();
             if (s.emit_to_function_def) {
                 try s.emitScopeGetVar(atom_new_target);
@@ -6276,12 +6289,12 @@ pub const parser_core = struct {
                 else if (s.peekKind() == tok.TOK_CATCH)
                     @as(Atom, 25)
                 else
-                    return Error.UnexpectedToken;
-                if (private_name and !s.in_class) return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
+                if (private_name and !s.in_class) return s.failUnexpectedToken();
                 const private_atom = if (private_name) try privateNameAtom(s, raw_name) else null;
                 defer if (private_atom) |atom_id| s.function.atoms.free(atom_id);
                 if (private_atom) |atom_id| {
-                    if (!classPrivateNameIsBound(s, atom_id)) return Error.UnexpectedToken;
+                    if (!classPrivateNameIsBound(s, atom_id)) return s.failUnexpectedToken();
                 }
                 const name = private_atom orelse raw_name;
                 try emitGrammarSource(s, access_source);
@@ -6333,12 +6346,12 @@ pub const parser_core = struct {
                 else if (s.peekKind() == tok.TOK_CATCH)
                     @as(Atom, 25)
                 else
-                    return Error.UnexpectedToken;
-                if (private_name and !s.in_class) return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
+                if (private_name and !s.in_class) return s.failUnexpectedToken();
                 const private_atom = if (private_name) try privateNameAtom(s, raw_name) else null;
                 defer if (private_atom) |atom_id| s.function.atoms.free(atom_id);
                 if (private_atom) |atom_id| {
-                    if (s.last_was_super or !classPrivateNameIsBound(s, atom_id)) return Error.UnexpectedToken;
+                    if (s.last_was_super or !classPrivateNameIsBound(s, atom_id)) return s.failUnexpectedToken();
                 }
                 const name = private_atom orelse raw_name;
                 const was_super = s.last_was_super;
@@ -6361,7 +6374,7 @@ pub const parser_core = struct {
                 // next_token owns the release; no parser-local retain exists.
                 try s.advance();
             } else if (k == tok.TOK_QUESTION_MARK_DOT) {
-                if (s.last_was_super) return Error.UnexpectedToken;
+                if (s.last_was_super) return s.failUnexpectedToken();
                 const optional_source = SourcePosition{
                     .line_num = s.token.line_num,
                     .col_num = s.token.col_num,
@@ -6398,11 +6411,11 @@ pub const parser_core = struct {
                         @as(Atom, 25)
                     else
                         unreachable;
-                    if (private_name and !s.in_class) return Error.UnexpectedToken;
+                    if (private_name and !s.in_class) return s.failUnexpectedToken();
                     const private_atom = if (private_name) try privateNameAtom(s, raw_name) else null;
                     defer if (private_atom) |atom_id| s.function.atoms.free(atom_id);
                     if (private_atom) |atom_id| {
-                        if (!classPrivateNameIsBound(s, atom_id)) return Error.UnexpectedToken;
+                        if (!classPrivateNameIsBound(s, atom_id)) return s.failUnexpectedToken();
                     }
                     const name = private_atom orelse raw_name;
                     if (private_name) {
@@ -6412,7 +6425,7 @@ pub const parser_core = struct {
                     }
                     try s.advance();
                 } else {
-                    return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
                 }
             } else if (k == @as(tok.TokenKind, @intCast('['))) {
                 const access_source = SourcePosition{
@@ -6440,7 +6453,7 @@ pub const parser_core = struct {
                 const callee_col = s.token.col_num;
                 const was_super = s.last_was_super;
                 s.last_was_super = false;
-                if (was_super and !s.allow_super_call) return Error.UnexpectedToken;
+                if (was_super and !s.allow_super_call) return s.failUnexpectedToken();
                 if (was_super) {
                     const active_func_idx = s.curFunc().this_active_func_var_idx;
                     const new_target_idx = s.curFunc().new_target_var_idx;
@@ -6467,7 +6480,7 @@ pub const parser_core = struct {
                 const shape = try parseCallArgs(s, flags);
                 try emitPreparedCall(s, prepared, shape, callee_line, callee_col);
             } else if (k == tok.TOK_TEMPLATE) {
-                if (optional_chain_label.* != null) return Error.UnexpectedToken;
+                if (optional_chain_label.* != null) return s.failUnexpectedToken();
                 try parseTaggedTemplateInvocation(s);
             } else {
                 break;
@@ -6480,7 +6493,7 @@ pub const parser_core = struct {
         const call_col = s.token.col_num;
         const prepared = try prepareCallReference(s, .template, false);
 
-        const first_part = s.token.payload.str.template orelse return Error.UnexpectedToken;
+        const first_part = s.token.payload.str.template orelse return s.failUnexpectedToken();
         if (first_part == .no_substitution) {
             if (s.runtime) |rt| {
                 var builder = try TaggedTemplateObjectBuilder.init(rt);
@@ -6510,7 +6523,7 @@ pub const parser_core = struct {
         }
         var argc: u16 = 1; // template object counts as the first arg
         while (true) {
-            const part = s.token.payload.str.template orelse return Error.UnexpectedToken;
+            const part = s.token.payload.str.template orelse return s.failUnexpectedToken();
             if (template_builder) |*builder| {
                 try builder.addPart(s.token.payload.str.bytes, s.token.payload.str.raw_bytes, s.token.payload.str.cooked_invalid);
             }
@@ -6521,7 +6534,7 @@ pub const parser_core = struct {
             try s.advance();
             try parseExpr(s);
             argc += 1;
-            if (s.peekKind() != @as(tok.TokenKind, @intCast('}'))) return Error.UnexpectedToken;
+            if (s.peekKind() != @as(tok.TokenKind, @intCast('}'))) return s.failExpectedToken('}');
             s.lex.freeToken(&s.token);
             try s.lex.nextTemplatePartAfterBraceInto(&s.token);
         }
@@ -6733,7 +6746,7 @@ pub const parser_core = struct {
                 s.last_was_super = false;
             },
             tok.TOK_SUPER => {
-                if (!s.allow_super) return Error.UnexpectedToken;
+                if (!s.allow_super) return s.failUnexpectedToken();
                 // Emit get_super; runtime semantics depend on constructor context.
                 try Emitter.op(s, opcode.op.get_super);
                 try s.advance();
@@ -6741,14 +6754,14 @@ pub const parser_core = struct {
             },
             tok.TOK_IMPORT => {
                 if (s.peekNextKind() == @as(tok.TokenKind, @intCast('.'))) {
-                    if (!s.lex.is_module or s.is_eval) return Error.UnexpectedToken;
+                    if (!s.lex.is_module or s.is_eval) return s.failUnexpectedToken();
                     try s.advance();
                     try s.advance();
                     if (s.peekKind() != tok.TOK_IDENT or
                         s.token.payload.ident.has_escape or
                         !atomNameEquals(s, s.token.payload.ident.atom, "meta"))
                     {
-                        return Error.UnexpectedToken;
+                        return s.failUnexpectedToken();
                     }
                     try s.advance();
                     // qjs import.meta lowering publishes the module's
@@ -6786,27 +6799,27 @@ pub const parser_core = struct {
             tok.TOK_PROTECTED,
             tok.TOK_PUBLIC,
             => {
-                if (!isIdentifierLikeToken(s)) return Error.UnexpectedToken;
+                if (!isIdentifierLikeToken(s)) return s.failUnexpectedToken();
                 if (s.peekKind() == tok.TOK_AWAIT and !canUseAwaitAsIdentifier(s)) return Error.AwaitOutsideAsyncFunction;
                 if (s.peekKind() == tok.TOK_YIELD and (s.in_generator or s.is_strict or s.curFunc().is_strict_mode)) return Error.YieldOutsideGenerator;
                 if (s.peekKind() == tok.TOK_IDENT and
                     escapedIdentifierIsReservedWordForCurrentContext(s, s.token.payload.ident.atom, s.token.payload.ident.has_escape))
                 {
-                    return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
                 }
                 if (s.peekKind() == tok.TOK_IDENT and
                     s.token.payload.ident.has_escape and
                     atomNameEquals(s, s.token.payload.ident.atom, "import") and
                     s.peekNextKind() == @as(tok.TokenKind, @intCast('(')))
                 {
-                    return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
                 }
                 if (s.peekKind() == tok.TOK_IDENT and
                     s.token.payload.ident.has_escape and
                     atomNameEquals(s, s.token.payload.ident.atom, "import") and
                     s.peekNextKind() == @as(tok.TokenKind, @intCast('.')))
                 {
-                    return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
                 }
                 const is_async_identifier = s.isAsyncIdentifier();
                 if (is_async_identifier) {
@@ -6822,7 +6835,7 @@ pub const parser_core = struct {
                 }
                 const ident = identifierLikeAtom(s);
                 if (ident == atom_module.ids.arguments and argumentsIdentifierIsForbidden(s)) {
-                    return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
                 }
                 // Identifier production is independent of its consumer.
                 // Assignment and call sites rewrite this exact last opcode
@@ -6836,7 +6849,7 @@ pub const parser_core = struct {
                 s.last_was_super = false;
             },
             tok.TOK_LET => {
-                if (s.is_strict or s.curFunc().is_strict_mode) return Error.UnexpectedToken;
+                if (s.is_strict or s.curFunc().is_strict_mode) return s.failUnexpectedToken();
                 try emitGrammarSource(s, .{
                     .line_num = s.token.line_num,
                     .col_num = s.token.col_num,
@@ -6863,7 +6876,7 @@ pub const parser_core = struct {
                 if (k == @as(tok.TokenKind, @intCast('{'))) {
                     return parseObjectLiteral(s, flags);
                 }
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             },
         }
     }
@@ -6912,7 +6925,7 @@ pub const parser_core = struct {
         while (s.peekKind() == tok.TOK_TEMPLATE) {
             const part_payload = s.token.payload.str;
             const bytes = part_payload.bytes;
-            const part = part_payload.template orelse return Error.UnexpectedToken;
+            const part = part_payload.template orelse return s.failUnexpectedToken();
             if (part_payload.cooked_invalid) return Error.InvalidEscape;
 
             if (bytes.len != 0 or depth == 0) {
@@ -6941,14 +6954,14 @@ pub const parser_core = struct {
             try s.advance(); // consume head/middle TOK_TEMPLATE
             try parseExpr(s);
             depth += 1;
-            if (s.peekKind() != @as(tok.TokenKind, @intCast('}'))) return Error.UnexpectedToken;
+            if (s.peekKind() != @as(tok.TokenKind, @intCast('}'))) return s.failExpectedToken('}');
             // The lookahead `}` has already moved lex.pos one byte past it;
             // free the token and ask the lexer for the next template part
             // (middle or tail) without re-bumping.
             s.lex.freeToken(&s.token);
             try s.lex.nextTemplatePartAfterBraceInto(&s.token);
         }
-        return Error.UnexpectedToken;
+        return s.failUnexpectedToken();
     }
 
     fn emitTaggedTemplateSingletonObject(s: *State, bytes: []const u8, raw_bytes: []const u8) Error!void {
@@ -7180,15 +7193,15 @@ pub const parser_core = struct {
                 try s.advance();
                 try parseAssignExpr2(s, computed_flags);
                 try expectPunct(s, ']');
-                if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return Error.UnexpectedToken;
+                if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
                 try emitObjectMethodFunction(s, null, .generator, property_source_start);
                 try Emitter.opU8(s, opcode.op.define_method_computed, 4);
                 return;
             }
-            const name_info = (try parseObjectPropertyName(s)) orelse return Error.UnexpectedToken;
+            const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
             const name = name_info.atom;
             defer if (name_info.retained) s.function.atoms.free(name);
-            if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return Error.UnexpectedToken;
+            if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
             try emitObjectMethodFunction(s, null, .generator, property_source_start);
             try Emitter.opAtomU8(s, opcode.op.define_method, name, 4);
             return;
@@ -7201,7 +7214,7 @@ pub const parser_core = struct {
             s.peekNextKind() != @as(tok.TokenKind, @intCast('}')))
         {
             try s.advance();
-            if (s.gotLineTerminator()) return Error.UnexpectedToken;
+            if (s.gotLineTerminator()) return s.failUnexpectedToken();
             const func_kind: ParseFunctionKind = if (s.peekKind() == @as(tok.TokenKind, @intCast('*'))) blk: {
                 try s.advance();
                 break :blk .async_generator;
@@ -7210,15 +7223,15 @@ pub const parser_core = struct {
                 try s.advance();
                 try parseAssignExpr2(s, computed_flags);
                 try expectPunct(s, ']');
-                if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return Error.UnexpectedToken;
+                if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
                 try emitObjectMethodFunction(s, null, func_kind, property_source_start);
                 try Emitter.opU8(s, opcode.op.define_method_computed, 4);
                 return;
             }
-            const name_info = (try parseObjectPropertyName(s)) orelse return Error.UnexpectedToken;
+            const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
             const name = name_info.atom;
             defer if (name_info.retained) s.function.atoms.free(name);
-            if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return Error.UnexpectedToken;
+            if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
             try emitObjectMethodFunction(s, null, func_kind, property_source_start);
             try Emitter.opAtomU8(s, opcode.op.define_method, name, 4);
             return;
@@ -7262,7 +7275,7 @@ pub const parser_core = struct {
                 try s.advance();
                 try parseAssignExpr2(s, ParseFlags.default);
                 if (name_info.is_proto) {
-                    if (proto_field_seen.*) return Error.UnexpectedToken;
+                    if (proto_field_seen.*) return s.failUnexpectedToken();
                     proto_field_seen.* = true;
                     try Emitter.op(s, opcode.op.set_proto);
                 } else {
@@ -7279,11 +7292,11 @@ pub const parser_core = struct {
                 try s.emitScopeGetVar(name);
                 try Emitter.opAtom(s, opcode.op.define_field, name);
             } else {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
             return;
         }
-        return Error.UnexpectedToken;
+        return s.failUnexpectedToken();
     }
 
     fn parseObjectAccessorProperty(
@@ -7297,16 +7310,16 @@ pub const parser_core = struct {
             try s.advance();
             try parseAssignExpr2(s, flags);
             try expectPunct(s, ']');
-            if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return Error.UnexpectedToken;
+            if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
             try emitObjectMethodFunction(s, null, func_kind, source_start);
             try Emitter.opU8(s, opcode.op.define_method_computed, define_flags | 4);
             return;
         }
 
-        const name_info = (try parseObjectPropertyName(s)) orelse return Error.UnexpectedToken;
+        const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
         const name = name_info.atom;
         defer if (name_info.retained) s.function.atoms.free(name);
-        if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return Error.UnexpectedToken;
+        if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
         try emitObjectMethodFunction(s, null, func_kind, source_start);
         try Emitter.opAtomU8(s, opcode.op.define_method, name, define_flags | 4);
     }
@@ -9231,7 +9244,7 @@ pub const parser_core = struct {
                 str_payload.bytes.len == 10 and
                 std.mem.eql(u8, str_payload.bytes, "use strict"))
             {
-                if (directive_contains_legacy_escape or str_payload.contains_legacy_escape) return Error.UnexpectedToken;
+                if (directive_contains_legacy_escape or str_payload.contains_legacy_escape) return s.failUnexpectedToken();
                 s.curFunc().has_use_strict = true;
                 s.is_strict = true;
                 s.curFunc().is_strict_mode = true;
@@ -9350,7 +9363,7 @@ pub const parser_core = struct {
 
     fn parseEnumDeclaration(s: *State) Error!void {
         try s.expectToken(tok.TOK_ENUM);
-        if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
+        if (s.peekKind() != tok.TOK_IDENT) return s.failExpectedToken(tok.TOK_IDENT);
         const enum_atom = identifierLikeAtomOwned(s);
         defer s.function.atoms.free(enum_atom);
 
@@ -9377,7 +9390,7 @@ pub const parser_core = struct {
 
         var counter: i32 = 0;
         while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
-            if (!isIdentifierLikeToken(s)) return Error.UnexpectedToken;
+            if (!isIdentifierLikeToken(s)) return s.failUnexpectedToken();
             // Member names are not declaration rows, so retain them explicitly
             // across advance until every atom-bearing emission has duplicated
             // its own owner.
@@ -9417,7 +9430,7 @@ pub const parser_core = struct {
                         try Emitter.opI32(s, opcode.op.push_i32, val);
                         try s.advance(); // consume the number
                     } else {
-                        return Error.UnexpectedToken;
+                        return s.failUnexpectedToken();
                     }
                     if (has_explicit) {
                         counter = val;
@@ -9444,7 +9457,7 @@ pub const parser_core = struct {
             if (s.peekKind() == ',') {
                 try s.advance();
             } else if (s.peekKind() != '}') {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
         }
 
@@ -9466,7 +9479,7 @@ pub const parser_core = struct {
     }
 
     fn parseNamespaceDeclarationWithIdent(s: *State) Error!void {
-        if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
+        if (s.peekKind() != tok.TOK_IDENT) return s.failExpectedToken(tok.TOK_IDENT);
         const ns_atom = identifierLikeAtomOwned(s);
         defer s.function.atoms.free(ns_atom);
 
@@ -9581,7 +9594,7 @@ pub const parser_core = struct {
         // dispatcher. Debug codegen otherwise retains storage for every switch
         // arm across every nested body and exhausts the native stack budget.
         if (tok_kind == tok.TOK_FUNCTION) {
-            if (!decl_mask.func and !decl_mask.func_with_label) return Error.UnexpectedToken;
+            if (!decl_mask.func and !decl_mask.func_with_label) return s.failUnexpectedToken();
             const source_start = s.currentFunctionSourceStart();
             parseFunctionDecl(s, .normal, source_start) catch |err| return s.propagateFailureHere(err);
             return;
@@ -9590,7 +9603,7 @@ pub const parser_core = struct {
             s.isIdent("async") and
             s.peekNextKindNoLineTerminator(tok.TOK_FUNCTION))
         {
-            if (!decl_mask.func and !decl_mask.func_with_label) return Error.UnexpectedToken;
+            if (!decl_mask.func and !decl_mask.func_with_label) return s.failUnexpectedToken();
             const source_start = s.currentFunctionSourceStart();
             try s.advance();
             parseFunctionDecl(s, .async, source_start) catch |err| return s.propagateFailureHere(err);
@@ -9607,8 +9620,8 @@ pub const parser_core = struct {
             // LabelFrame deliberately does not own atoms, so this local owner
             // spans `advance()` and the complete labelled statement.
             defer s.function.atoms.free(label_atom);
-            if (s.isReservedLabelIdentifier(label_atom)) return Error.UnexpectedToken;
-            if (s.hasActiveLabel(label_atom)) return Error.UnexpectedToken;
+            if (s.isReservedLabelIdentifier(label_atom)) return s.failUnexpectedToken();
+            if (s.hasActiveLabel(label_atom)) return s.failUnexpectedToken();
 
             try s.advance();
             try s.expectToken(':');
@@ -9632,7 +9645,7 @@ pub const parser_core = struct {
                 (labelled_kind == tok.TOK_FUNCTION and s.peekNextKind() == @as(tok.TokenKind, @intCast('*'))) or
                 (labelled_kind == tok.TOK_IDENT and s.isIdent("async") and s.peekNextKind() == tok.TOK_FUNCTION))
             {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
             const mask = if (!s.curFunc().is_strict_mode and decl_mask.func_with_label)
                 DeclMask{ .func = true, .func_with_label = true }
@@ -9694,13 +9707,13 @@ pub const parser_core = struct {
 
     fn parseEnumStatement(s: *State) Error!void {
         if (!s.lex.is_typescript) {
-            return Error.UnexpectedToken;
+            return s.failUnexpectedToken();
         }
         try parseEnumDeclaration(s);
     }
 
     fn parseReturnStatement(s: *State) Error!void {
-        if (s.is_eval or s.return_depth == 0) return Error.UnexpectedToken;
+        if (s.is_eval or s.return_depth == 0) return s.failUnexpectedToken();
         const statement_source = SourcePosition{
             .line_num = s.token.line_num,
             .col_num = s.token.col_num,
@@ -9725,7 +9738,7 @@ pub const parser_core = struct {
             .col_num = s.token.col_num,
         };
         try s.advance();
-        if (s.gotLineTerminator()) return Error.UnexpectedToken;
+        if (s.gotLineTerminator()) return s.failUnexpectedToken();
         try parseExpr(s);
         const throw_snapshot = s.takeEmissionSnapshot();
         errdefer s.rollbackEmission(throw_snapshot);
@@ -9747,7 +9760,7 @@ pub const parser_core = struct {
             return;
         }
         if (!decl_mask.other and (tok_kind == tok.TOK_LET or tok_kind == tok.TOK_CONST)) {
-            return Error.UnexpectedToken;
+            return s.failUnexpectedToken();
         }
         const var_tok = tok_kind;
         try s.advance();
@@ -9757,7 +9770,7 @@ pub const parser_core = struct {
 
     fn parseFunctionDeclarationStatement(s: *State, decl_mask: DeclMask) Error!void {
         if (!decl_mask.func and !decl_mask.func_with_label) {
-            return Error.UnexpectedToken;
+            return s.failUnexpectedToken();
         }
         // Check for async function
         const is_async = s.isIdent("async");
@@ -9771,9 +9784,9 @@ pub const parser_core = struct {
 
     fn parseClassDeclarationStatement(s: *State, decl_mask: DeclMask) Error!void {
         if (!decl_mask.func) {
-            return Error.UnexpectedToken;
+            return s.failUnexpectedToken();
         }
-        const name_atom = (try parseClass(s, true)) orelse return Error.UnexpectedToken;
+        const name_atom = (try parseClass(s, true)) orelse return s.failUnexpectedToken();
         defer s.function.atoms.free(name_atom);
     }
 
@@ -9783,7 +9796,7 @@ pub const parser_core = struct {
             return;
         }
         if (usingDeclarationStart(s)) {
-            if (!decl_mask.other) return Error.UnexpectedToken;
+            if (!decl_mask.other) return s.failUnexpectedToken();
             try parseUsingDeclaration(s, .sync);
             _ = try s.expectSemicolon();
             return;
@@ -9791,7 +9804,7 @@ pub const parser_core = struct {
         // Check for async function declaration (async is a contextual keyword)
         if (s.isIdent("async") and s.peekNextKindNoLineTerminator(tok.TOK_FUNCTION)) {
             if (!decl_mask.func and !decl_mask.func_with_label) {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
             const source_start = s.currentFunctionSourceStart();
             try s.advance(); // consume async
@@ -9818,7 +9831,7 @@ pub const parser_core = struct {
 
     fn parseAwaitStatement(s: *State, decl_mask: DeclMask) Error!void {
         if (awaitUsingDeclarationStart(s)) {
-            if (!decl_mask.other) return Error.UnexpectedToken;
+            if (!decl_mask.other) return s.failUnexpectedToken();
             try parseUsingDeclaration(s, .async);
             _ = try s.expectSemicolon();
             return;
@@ -9855,14 +9868,14 @@ pub const parser_core = struct {
             return;
         }
         if (!decl_mask.other or !canParseModuleDeclarationHere(s)) {
-            return Error.UnexpectedToken;
+            return s.failUnexpectedToken();
         }
         try parseImport(s);
     }
 
     fn parseExportStatement(s: *State, decl_mask: DeclMask) Error!void {
         if (!decl_mask.other or !canParseModuleDeclarationHere(s)) {
-            return Error.UnexpectedToken;
+            return s.failUnexpectedToken();
         }
         try parseExport(s);
     }
@@ -10189,7 +10202,7 @@ pub const parser_core = struct {
             // lookup key until the labelled jump has been emitted.
             const atom_id = s.function.atoms.dup(identifierLikeAtom(s));
             label_atom = atom_id;
-            if (s.peekKind() == tok.TOK_IDENT and escapedIdentifierIsReservedWordForCurrentContext(s, atom_id, s.token.payload.ident.has_escape)) return Error.UnexpectedToken;
+            if (s.peekKind() == tok.TOK_IDENT and escapedIdentifierIsReservedWordForCurrentContext(s, atom_id, s.token.payload.ident.has_escape)) return s.failUnexpectedToken();
             try s.advance(); // consume the label name
         }
         _ = try s.expectSemicolon();
@@ -10202,10 +10215,10 @@ pub const parser_core = struct {
             return;
         }
         if (is_break) {
-            if (s.break_frame_lens.items.len == 0) return Error.UnexpectedToken;
+            if (s.break_frame_lens.items.len == 0) return s.failUnexpectedToken();
             try emitUnlabelledBreak(s);
         } else {
-            if (s.continue_frame_lens.items.len == 0) return Error.UnexpectedToken;
+            if (s.continue_frame_lens.items.len == 0) return s.failUnexpectedToken();
             try emitUnlabelledContinue(s);
         }
     }
@@ -10315,7 +10328,7 @@ pub const parser_core = struct {
                     fallthrough_label = clause_fallthrough_label;
                 }
             } else if (s.peekKind() == tok.TOK_DEFAULT) {
-                if (has_default) return Error.UnexpectedToken;
+                if (has_default) return s.failUnexpectedToken();
                 try s.advance();
                 try s.expectToken(':');
                 if (no_match_jumps_count == 0) {
@@ -10360,7 +10373,7 @@ pub const parser_core = struct {
                     fallthrough_label = clause_fallthrough_label;
                 }
             } else {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
         }
         try s.expectToken('}');
@@ -10476,13 +10489,13 @@ pub const parser_core = struct {
                         ParseFlags.default,
                     );
                 } else {
-                    if (!isIdentifierLikeToken(s)) return Error.UnexpectedToken;
+                    if (!isIdentifierLikeToken(s)) return s.failUnexpectedToken();
                     const catch_atom = identifierLikeAtomOwned(s);
                     defer s.function.atoms.free(catch_atom);
                     if ((s.is_strict or s.curFunc().is_strict_mode) and
                         (atomNameEquals(s, catch_atom, "eval") or atomNameEquals(s, catch_atom, "arguments")))
                     {
-                        return Error.UnexpectedToken;
+                        return s.failUnexpectedToken();
                     }
                     _ = try s.defineVar(catch_atom, .catch_);
                     try s.advance();
@@ -10538,7 +10551,7 @@ pub const parser_core = struct {
             try emitterJumpNoSource(s, opcode.op.gosub, label_finally);
             try emitterOpNoSource(s, opcode.op.throw);
         } else {
-            return Error.UnexpectedToken;
+            return s.failUnexpectedToken();
         }
 
         // qjs TOK_TRY finally entry (quickjs.c:29503): bind label_finally.
@@ -10597,21 +10610,21 @@ pub const parser_core = struct {
         try s.advance(); // consume `using`
 
         while (true) {
-            if (!isIdentifierLikeToken(s)) return Error.UnexpectedToken;
-            if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
+            if (!isIdentifierLikeToken(s)) return s.failUnexpectedToken();
+            if (identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
             const atom_id = s.function.atoms.dup(identifierLikeAtom(s));
             defer s.function.atoms.free(atom_id);
-            if (atomNameEquals(s, atom_id, "let")) return Error.UnexpectedToken;
+            if (atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
             if ((s.is_strict or s.curFunc().is_strict_mode) and
                 (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
             {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
-            if (module_top_level and hasKnownBinding(s, atom_id)) return Error.UnexpectedToken;
+            if (module_top_level and hasKnownBinding(s, atom_id)) return s.failUnexpectedToken();
             _ = try s.defineVar(atom_id, .const_);
             try s.advance();
 
-            if (s.peekKind() != '=') return Error.UnexpectedToken;
+            if (s.peekKind() != '=') return s.failExpectedToken('=');
             try s.advance();
             const stack_loc = try armCurrentUsingBlockFrame(s);
             try parseAssignExpr(s);
@@ -11263,13 +11276,13 @@ pub const parser_core = struct {
                 if (binding_identifier and s.peekKind() == tok.TOK_IDENT and
                     escapedIdentifierIsReservedWordForBinding(s, atom_id, s.token.payload.ident.has_escape))
                 {
-                    return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
                 }
-                if (is_lexical and atomNameEquals(s, atom_id, "let")) return Error.UnexpectedToken;
+                if (is_lexical and atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
                 if ((s.is_strict or s.curFunc().is_strict_mode) and
                     (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
                 {
-                    return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
                 }
                 var local_lexical_idx: ?u16 = null;
                 try s.advance();
@@ -11279,7 +11292,7 @@ pub const parser_core = struct {
                 // QJS module-name collision at the token wrapper boundary;
                 // all ordinary declaration collisions are owned by defineVar.
                 if (is_lexical and s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and hasKnownBinding(s, atom_id)) {
-                    return Error.UnexpectedToken;
+                    return s.failUnexpectedToken();
                 }
 
                 var hoisted_arguments_var_idx: ?i32 = null;
@@ -11361,7 +11374,7 @@ pub const parser_core = struct {
                 } else {
                     // const requires initializer
                     if (var_tok == tok.TOK_CONST) {
-                        return Error.UnexpectedToken;
+                        return s.failExpectedToken('=');
                     }
                     // `let x;` (no initializer) implicitly initialises to
                     // undefined. We emit `undefined; scope_put_var_init`
@@ -11397,9 +11410,9 @@ pub const parser_core = struct {
                     true,
                     parse_flags,
                 );
-                if (!has_initializer) return Error.UnexpectedToken;
+                if (!has_initializer) return s.failExpectedToken('=');
             } else {
-                return Error.UnexpectedToken;
+                return s.failUnexpectedToken();
             }
 
             // Check for comma (multiple declarations)
@@ -11409,7 +11422,7 @@ pub const parser_core = struct {
     }
 
     fn parseWith(s: *State) Error!void {
-        if (s.is_strict or s.curFunc().is_strict_mode) return Error.UnexpectedToken;
+        if (s.is_strict or s.curFunc().is_strict_mode) return s.failUnexpectedToken();
         try s.advance();
         try s.expectToken('(');
         try parseExpr(s);
@@ -11909,7 +11922,7 @@ pub const parser_core = struct {
             (s.peekKind() == tok.TOK_AWAIT and canUseAwaitAsIdentifier(s)) or
             (s.peekKind() == tok.TOK_YIELD and !(s.is_strict or s.curFunc().is_strict_mode));
         if (!has_decl_name) {
-            return Error.UnexpectedToken;
+            return s.failUnexpectedToken();
         }
         // qjs js_parse_function_decl2 retains the identifier before
         // next_token releases the token (quickjs.c:36551-36556).
@@ -17241,11 +17254,11 @@ pub const compile_entry = struct {
         err: anyerror,
     ) !void {
         var message_buffer: [96]u8 = undefined;
-        const message = try std.fmt.bufPrint(
+        const message = std.fmt.bufPrint(
             &message_buffer,
             "internal compiler error: {s}",
             .{@errorName(err)},
-        );
+        ) catch unreachable;
         result.syntax_error = try diagnostics_mod.SyntaxError.create(
             &rt.memory,
             &rt.atoms,

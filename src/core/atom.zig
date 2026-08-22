@@ -1466,7 +1466,7 @@ pub const AtomTable = struct {
     pub fn toStringValue(self: *AtomTable, rt: anytype, atom_id: Atom) !JSValue {
         if (isTaggedInt(atom_id)) {
             var buf: [10]u8 = undefined;
-            const text = try std.fmt.bufPrint(&buf, "{d}", .{atomToUInt32(atom_id)});
+            const text = std.fmt.bufPrint(&buf, "{d}", .{atomToUInt32(atom_id)}) catch unreachable;
             if (text.len == 1 and text[0] <= 0x7f) {
                 const cached = (try rt.singleByteString(text[0])).?;
                 return cached.value().dup();

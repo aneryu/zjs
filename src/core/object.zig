@@ -9,6 +9,7 @@ const array = @import("array.zig");
 const atom = @import("atom.zig");
 const class = @import("class.zig");
 const context_mod = @import("context.zig");
+const errors = @import("errors.zig");
 const value_format = @import("value_format.zig");
 const descriptor = @import("descriptor.zig");
 const function = @import("function.zig");
@@ -36,6 +37,7 @@ const ObjectVisitSet = std.AutoHashMap(usize, void);
 const ObjectIncomingMap = std.AutoHashMap(usize, usize);
 const ObjectGraphError = std.mem.Allocator.Error || error{PayloadMarkFailed};
 const OwnKeysError = std.mem.Allocator.Error;
+const PropertyReadError = errors.RuntimeError;
 
 // ===== Object-model support and re-exported payload types =====
 
@@ -7236,7 +7238,7 @@ pub const Object = extern struct {
         return self.flags.immutable_prototype;
     }
 
-    pub fn getOwnProperty(self: *const Object, rt: *JSRuntime, atom_id: atom.Atom) context_mod.DynamicImportError!?descriptor.Descriptor {
+    pub fn getOwnProperty(self: *const Object, rt: *JSRuntime, atom_id: atom.Atom) PropertyReadError!?descriptor.Descriptor {
         if (self.exoticMethods(rt)) |methods| {
             if (methods.get_own_property) |hook| {
                 if (hook(@constCast(self), atom_id)) |desc| return desc;
@@ -7428,7 +7430,7 @@ pub const Object = extern struct {
     /// Ordinary property read. AUTOINIT construction failures are observable
     /// and leave the placeholder intact for an explicit retry; no generic read
     /// path converts them to `undefined`.
-    pub fn getProperty(self: *const Object, atom_id: atom.Atom) context_mod.DynamicImportError!JSValue {
+    pub fn getProperty(self: *const Object, atom_id: atom.Atom) PropertyReadError!JSValue {
         profile.recordPropLookup(self.isGlobal());
         if (self.isArray() and atom_id == atom.ids.length) return arrayLengthValue(self.arrayLength());
         if (self.mappedArgumentsTaggedBindingIndex(atom_id)) |mapped_index| {
@@ -7456,7 +7458,7 @@ pub const Object = extern struct {
     /// builder. Any failure leaves the placeholder and its Realm owner intact;
     /// successful commit is infallible and releases that slot owner exactly
     /// once while the produced C function (if any) keeps its own RealmRef.
-    fn materializeAutoInit(self: *Object, index: usize) context_mod.DynamicImportError!JSValue {
+    fn materializeAutoInit(self: *Object, index: usize) PropertyReadError!JSValue {
         if (index >= self.shape_ref.prop_count or !self.isAutoInitAt(index)) return error.IncompatibleDescriptor;
 
         const expected_atom = self.propAtomAt(index);
@@ -7499,7 +7501,7 @@ pub const Object = extern struct {
         realm: *context_mod.RealmContext,
         owner: *const property.AutoInitModuleOwner,
         atom_id: atom.Atom,
-    ) context_mod.DynamicImportError!property.AutoInitMaterialization {
+    ) PropertyReadError!property.AutoInitMaterialization {
         return owner.resolve(owner, &realm.header, atom_id) catch |err| return @errorCast(err);
     }
 
@@ -7560,7 +7562,7 @@ pub const Object = extern struct {
         return !flags.deleted and flags.kind == .accessor;
     }
 
-    fn materializePropAutoInit(realm: *context_mod.RealmContext, info: *const property.AutoInit) context_mod.DynamicImportError!JSValue {
+    fn materializePropAutoInit(realm: *context_mod.RealmContext, info: *const property.AutoInit) PropertyReadError!JSValue {
         if (info.kind == .console) return materializeConsoleAutoInit(realm, info);
         if (info.kind == .math_namespace or
             info.kind == .json_namespace or
@@ -7606,7 +7608,7 @@ pub const Object = extern struct {
         rt: *JSRuntime,
         info: *const property.AutoInit,
         function_value: JSValue,
-    ) context_mod.DynamicImportError!void {
+    ) PropertyReadError!void {
         if (info.native_builtin_id != 0) {
             if (function_value.refHeader()) |header| {
                 const obj: *Object = @fieldParentPtr("header", header);
@@ -7705,7 +7707,7 @@ pub const Object = extern struct {
         return function_value;
     }
 
-    fn materializeBuiltinNamespaceAutoInit(realm: *context_mod.RealmContext, info: *const property.AutoInit) context_mod.DynamicImportError!JSValue {
+    fn materializeBuiltinNamespaceAutoInit(realm: *context_mod.RealmContext, info: *const property.AutoInit) PropertyReadError!JSValue {
         const global = realm.global orelse return error.InvalidBuiltinRegistry;
         const cb = realm.runtime.materialize_builtin_namespace_cb orelse return error.InvalidBuiltinRegistry;
         const materialized_value = cb(realm.runtime, global, info.kind) catch |err| return @errorCast(err);
@@ -10787,7 +10789,7 @@ pub fn typedArrayCanonicalNumericIndex(rt: *JSRuntime, atom_id: atom.Atom) !Type
     else if (std.math.isNegativeInf(number))
         "-Infinity"
     else
-        try value_format.formatFiniteNumber(&buf, number);
+        value_format.formatFiniteNumberAssumeCapacity(&buf, number);
     if (!std.mem.eql(u8, name, printed)) return .none;
     if (!std.math.isFinite(number) or @trunc(number) != number or number < 0 or number > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return .invalid;
     return .{ .index = @intFromFloat(number) };

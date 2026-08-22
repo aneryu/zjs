@@ -1,3 +1,12 @@
+//! JavaScript Error construction, stack capture, and native-error conversion.
+//!
+//! Error values returned by constructors are owned; throw helpers transfer one
+//! owned value into the runtime's pending-exception slot, while promise-facing
+//! conversion can build the same named value without mutating that slot. Only
+//! preallocated or explicitly stackless paths omit capture. This centralizes
+//! parser, host-I/O, promise, and runtime error policy around QuickJS
+//! `JS_ThrowError2` and stack setup at quickjs.c:7553-7658.
+
 const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");
@@ -593,6 +602,97 @@ pub fn promiseErrorInfo(err: anytype) ErrorInfo {
         error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
         else => .{ .name = "Error", .message = "" },
     };
+}
+
+/// Concrete host-I/O producer surface. Keep this exact rather than accepting
+/// `anyerror`: a Zig stdlib change must make this switch fail to compile until
+/// the JS conversion policy is reviewed.
+pub const HostIoError = std.Io.Dir.ReadFileAllocError || std.Io.Writer.Error;
+
+pub fn hostIoErrorInfo(err: HostIoError) ErrorInfo {
+    return switch (err) {
+        error.OutOfMemory => .{ .name = "InternalError", .message = "out of memory" },
+        error.AccessDenied,
+        error.AntivirusInterference,
+        error.BadPathName,
+        error.Canceled,
+        error.ConnectionResetByPeer,
+        error.DeviceBusy,
+        error.FileBusy,
+        error.FileLocksUnsupported,
+        error.FileNotFound,
+        error.FileTooBig,
+        error.InputOutput,
+        error.IsDir,
+        error.LockViolation,
+        error.NameTooLong,
+        error.NetworkNotFound,
+        error.NoDevice,
+        error.NoSpaceLeft,
+        error.NotDir,
+        error.NotOpenForReading,
+        error.PathAlreadyExists,
+        error.PermissionDenied,
+        error.PipeBusy,
+        error.ProcessFdQuotaExceeded,
+        error.ReadOnlyFileSystem,
+        error.SocketUnconnected,
+        error.StreamTooLong,
+        error.SymLinkLoop,
+        error.SystemFdQuotaExceeded,
+        error.SystemResources,
+        error.Unexpected,
+        error.WouldBlock,
+        error.WriteFailed,
+        => .{ .name = "Error", .message = @errorName(err) },
+    };
+}
+
+/// Build an owned rejection reason without using the pending-exception slot as
+/// temporary transport.
+pub fn hostErrorValue(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    err: HostIoError,
+) exceptions.HostError!core.JSValue {
+    const info = hostIoErrorInfo(err);
+    return createNamedError(ctx, global, info.name, info.message) catch |create_err|
+        return @errorCast(create_err);
+}
+
+/// Convert a synchronous host-I/O failure at its producer seam. Until Q16
+/// Stage 2 narrows `HostError`'s type, this dynamically returns only the hard
+/// OOM control or the ordinary JS-exception transport.
+pub fn throwHostError(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    err: HostIoError,
+) exceptions.HostError!core.JSValue {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    if (ctx.hasException()) return error.JSException;
+    const error_value = try hostErrorValue(ctx, global, err);
+    _ = ctx.throwValue(error_value);
+    return error.JSException;
+}
+
+pub const module_host_stall_message = "module host made no progress";
+
+/// A host scheduler that cannot advance a pending module evaluation is an
+/// engine/host integration failure, not the dynamic-import "unsupported"
+/// sentinel. Materialize it before it leaves eval.
+pub fn throwModuleHostStall(
+    ctx: *core.JSContext,
+    global: *core.Object,
+) exceptions.HostError!core.JSValue {
+    if (ctx.hasException()) return error.JSException;
+    const error_value = try createNamedError(
+        ctx,
+        global,
+        "InternalError",
+        module_host_stall_message,
+    );
+    _ = ctx.throwValue(error_value);
+    return error.JSException;
 }
 
 fn errorNameForRuntimeError(err: anytype) ?[]const u8 {

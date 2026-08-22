@@ -53,6 +53,12 @@ const HostBacktraceErrorProbe = struct {
     }
 };
 
+const ExternalNamedErrorProbe = struct {
+    fn call(_: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
+        return error.HostProbeFailure;
+    }
+};
+
 const NativeRecordStackProbe = struct {
     var callable: core.JSValue = core.JSValue.undefinedValue();
     var calls: usize = 0;
@@ -11118,7 +11124,7 @@ test "dynamic import job OOM retains its FIFO position for retry" {
             _: *core.JSContext,
             _: ?*std.Io.Writer,
             _: *const engine.core.jobs.DynamicImportPayload,
-        ) core.context.DynamicImportError!core.JSValue {
+        ) core.errors.RuntimeError!core.JSValue {
             attempts += 1;
             if (attempts == 1) return error.OutOfMemory;
             return core.JSValue.undefinedValue();
@@ -11170,7 +11176,7 @@ test "dynamic import job keeps its enqueue Realm after creator facade release" {
             ctx: *core.JSContext,
             _: ?*std.Io.Writer,
             _: *const engine.core.jobs.DynamicImportPayload,
-        ) core.context.DynamicImportError!core.JSValue {
+        ) core.errors.RuntimeError!core.JSValue {
             seen_realm = ctx;
             seen_global = ctx.global;
             return core.JSValue.undefinedValue();
@@ -18126,6 +18132,58 @@ test "true C function without its RealmRef fails the final-arm invariant" {
     );
 }
 
+test "legacy output writer failure is a catchable named Error" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    const function_value = try core.function.nativeFunction(js.context, "legacyPrint", 1);
+    defer function_value.free(js.runtime);
+    const function_object = try core.Object.expect(function_value);
+    function_object.hostFunctionKindSlot().* = core.host_function.ids.output;
+    const name = try js.runtime.internAtom("legacyPrint");
+    defer js.runtime.atoms.free(name);
+    try global.defineOwnProperty(
+        js.runtime,
+        name,
+        core.Descriptor.data(function_value, true, true, true),
+    );
+
+    var output_buffer: [0]u8 = .{};
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOptions(
+        "globalThis.__legacyOutputError = 'not caught'; try { legacyPrint('full'); } catch (error) { globalThis.__legacyOutputError = error.name + ':' + error.message; }",
+        .{ .output = &output },
+    );
+    defer result.free(js.runtime);
+    const caught_name = try js.runtime.internAtom("__legacyOutputError");
+    defer js.runtime.atoms.free(caught_name);
+    const caught = try global.getProperty(caught_name);
+    defer caught.free(js.runtime);
+    try helpers.expectStringValueBytes(caught, "Error:WriteFailed");
+}
+
+test "native host error sentinel always has a pending named JS exception" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    const result = engine.exec.builtin_dispatch.nativeFromBits(
+        engine.exec.builtin_dispatch.nativeFromHostError(
+            js.context,
+            global,
+            error.WriteFailed,
+        ),
+    );
+    try std.testing.expect(result.isException());
+    try std.testing.expect(js.context.hasException());
+    var exception = try js.takeExceptionInfo();
+    defer exception.deinit();
+    const message = try exception.getMessage(std.testing.allocator);
+    defer std.testing.allocator.free(message);
+    try std.testing.expectEqualStrings("Error: WriteFailed", message);
+}
+
 test "generator creation avoids a second payload copy of rooted input slices" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -18409,6 +18467,167 @@ test "Engine runJobs preserves pending JS exceptions for callers" {
 
     var exception = try js.takeExceptionInfo();
     defer exception.deinit();
+}
+
+test "external host arbitrary errors retain their Zig error name" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var probe: u8 = 0;
+    try js.defineGlobalExternalHostFunction(
+        "hostNamedError",
+        0,
+        &probe,
+        ExternalNamedErrorProbe.call,
+        null,
+    );
+
+    const result = try js.eval(
+        "try { hostNamedError(); } catch (error) { globalThis.__hostNamedError = error.name + ':' + error.message; }",
+    );
+    defer result.free(js.runtime);
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const result_name = try js.runtime.internAtom("__hostNamedError");
+    defer js.runtime.atoms.free(result_name);
+    const caught = try global.getProperty(result_name);
+    defer caught.free(js.runtime);
+    try helpers.expectStringValueBytes(caught, "Error:HostProbeFailure");
+}
+
+test "dynamic import failures preserve unsupported not-found and host I/O mappings" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    const unsupported_specifier = try engine.exec.value_ops.createStringValue(js.runtime, "./unsupported.mjs");
+    defer unsupported_specifier.free(js.runtime);
+    const unsupported = try engine.exec.module_graph.enqueueDynamicImportJob(
+        js.context,
+        global,
+        null,
+        "/fixture/main.mjs",
+        unsupported_specifier,
+    );
+    defer unsupported.free(js.runtime);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try expectRejectedPromiseNamedError(&js, unsupported, "TypeError", "dynamic import is not supported");
+
+    const dir = ".zig-cache/q16-host-errors";
+    const main_path = dir ++ "/main.mjs";
+    const large_path = dir ++ "/large.mjs";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = large_path,
+        .data = "export const value = 123;",
+    });
+
+    var state = engine.exec.module_graph.DynamicImportState{
+        .runtime = js.runtime,
+        .output = null,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .max_source_size = 8,
+    };
+    defer state.deinit();
+    var loader_scope = engine.exec.module_graph.installDynamicImport(&state);
+    defer loader_scope.deinit();
+
+    const missing_specifier = try engine.exec.value_ops.createStringValue(js.runtime, "./missing.mjs");
+    defer missing_specifier.free(js.runtime);
+    const missing = try engine.exec.module_graph.enqueueDynamicImportJob(
+        js.context,
+        global,
+        null,
+        main_path,
+        missing_specifier,
+    );
+    defer missing.free(js.runtime);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    const missing_path = try std.fs.path.resolve(std.testing.allocator, &.{ dir, "missing.mjs" });
+    defer std.testing.allocator.free(missing_path);
+    const missing_message = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "could not load module filename '{s}'",
+        .{missing_path},
+    );
+    defer std.testing.allocator.free(missing_message);
+    try expectRejectedPromiseNamedError(&js, missing, "ReferenceError", missing_message);
+
+    const large_specifier = try engine.exec.value_ops.createStringValue(js.runtime, "./large.mjs");
+    defer large_specifier.free(js.runtime);
+    const too_large = try engine.exec.module_graph.enqueueDynamicImportJob(
+        js.context,
+        global,
+        null,
+        main_path,
+        large_specifier,
+    );
+    defer too_large.free(js.runtime);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try expectRejectedPromiseNamedError(&js, too_large, "Error", "StreamTooLong");
+}
+
+test "static module read failures are named JS exceptions" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const dir = ".zig-cache/q16-static-host-error";
+    const main_path = dir ++ "/main.mjs";
+    const large_path = dir ++ "/large.mjs";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = large_path,
+        .data = "export const value = 123;",
+    });
+    var output_buffer: [1]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    try std.testing.expectError(
+        error.JSException,
+        js.evalFileModuleGraphWithOutput(
+            "import './large.mjs';",
+            &output,
+            main_path,
+            std.testing.io,
+            std.testing.allocator,
+            8,
+        ),
+    );
+    try std.testing.expect(js.context.hasException());
+    var exception = try js.takeExceptionInfo();
+    defer exception.deinit();
+    const message = try exception.getMessage(std.testing.allocator);
+    defer std.testing.allocator.free(message);
+    try std.testing.expectEqualStrings("Error: StreamTooLong", message);
+}
+
+test "stalled module host progress is a named InternalError" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var output_buffer: [1]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    try std.testing.expectError(
+        error.JSException,
+        js.evalFileModuleGraphWithOutput(
+            "await new Promise(() => {});",
+            &output,
+            "q16-stalled-module.mjs",
+            std.testing.io,
+            std.testing.allocator,
+            1024,
+        ),
+    );
+    try std.testing.expect(js.context.hasException());
+    var exception = try js.takeExceptionInfo();
+    defer exception.deinit();
+    const message = try exception.getMessage(std.testing.allocator);
+    defer std.testing.allocator.free(message);
+    try std.testing.expectEqualStrings(
+        "InternalError: module host made no progress",
+        message,
+    );
 }
 
 test "host module graph syntax diagnostics do not write to program output" {
@@ -19577,6 +19796,29 @@ const HostFixture = struct {
         return null;
     }
 };
+
+fn expectRejectedPromiseNamedError(
+    js: *helpers.TestEngine,
+    promise_value: core.JSValue,
+    expected_name: []const u8,
+    expected_message: []const u8,
+) !void {
+    const promise = try core.Object.expect(promise_value);
+    try std.testing.expect(promise.promiseIsRejected());
+    core.promise.markHandled(js.context, promise);
+    const reason = promise.promiseResult() orelse return error.TestUnexpectedResult;
+    const reason_object = try core.Object.expect(reason);
+    const name_atom = try js.runtime.internAtom("name");
+    defer js.runtime.atoms.free(name_atom);
+    const message_atom = try js.runtime.internAtom("message");
+    defer js.runtime.atoms.free(message_atom);
+    const name = try reason_object.getProperty(name_atom);
+    defer name.free(js.runtime);
+    const message = try reason_object.getProperty(message_atom);
+    defer message.free(js.runtime);
+    try helpers.expectStringValueBytes(name, expected_name);
+    try helpers.expectStringValueBytes(message, expected_message);
+}
 
 fn hostHooks(host: *const HostFixture) helpers.TestEngine.HostHooks {
     return .{

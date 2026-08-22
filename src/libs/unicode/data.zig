@@ -1,5 +1,5 @@
-// Compressed Unicode tables translated from QuickJS libunicode-table.h.
-// Automatically generated for the Zig Unicode port; keep semantic changes in unicode.zig.
+//! Immutable generated Unicode tables translated from QuickJS `libunicode-table.h`.
+//! This module is data-only; decoding and semantic changes belong in `unicode.zig`.
 
 pub const case_conv_table1 = [_]u32{
     0x00209a30, 0x00309a00, 0x005a8173, 0x00601730, 0x006c0730, 0x006f81b3, 0x00701700, 0x007c0700,

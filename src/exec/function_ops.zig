@@ -1,3 +1,12 @@
+//! Function builtin records, dynamic-function construction, and source metadata.
+//!
+//! Call receivers and arguments are borrowed; created functions, compiled roots,
+//! and returned completion values carry owned references and are explicitly
+//! rooted across observable prototype work. Generic call/apply execution remains
+//! in `call_runtime.zig`; this module owns the Function-domain record seam and
+//! dynamic source compilation. The builtin table maps to QuickJS
+//! `js_function_proto_funcs` at quickjs.c:41390.
+
 const std = @import("std");
 const zjs_vm = @import("zjs_vm.zig");
 const runWithCallEnv = zjs_vm.runWithCallEnv;

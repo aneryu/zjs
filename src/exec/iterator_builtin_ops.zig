@@ -1,3 +1,10 @@
+//! Iterator builtin declaration table and native-record dispatch seam.
+//!
+//! Domain-local ids cover Iterator statics, helpers, accessors, disposal, and
+//! intrinsic iterator/generator methods. Algorithms and iterator-close
+//! ownership live in `iterator_ops`; this file preserves the registry identity
+//! and forwards the active realm/caller context.
+
 const std = @import("std");
 const iterator_ops = @import("iterator_ops.zig");
 const core = @import("../core/root.zig");

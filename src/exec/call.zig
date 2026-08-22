@@ -33,7 +33,7 @@ const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const exceptions = @import("exceptions.zig");
 const HostError = exceptions.HostError;
-const PrintError = HostError || error{InvalidRadix};
+const PrintError = HostError || std.Io.Writer.Error;
 
 // Construct ref for the String wrapper boxing path (`primitiveWrapper`). The
 // String constructor record's construct branch forwards `args`/`new_target` to
@@ -221,7 +221,7 @@ pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSVal
             try writer.writeAll("0");
         } else {
             var float_buf: [64]u8 = undefined;
-            try writer.writeAll(try value_ops.formatFiniteNumber(&float_buf, float_value));
+            try writer.writeAll(value_ops.formatFiniteNumberAssumeCapacity(&float_buf, float_value));
         }
     } else if (value.asShortBigInt()) |bigint_value| {
         var bigint_buf: [32]u8 = undefined;
@@ -2269,14 +2269,25 @@ pub fn constructorPrototype(rt: *core.JSRuntime, object: *core.Object) ?*core.Ob
     return object.getOwnDataObjectBorrowed(core.atom.ids.prototype);
 }
 
-fn hostOutputValues(rt: *core.JSRuntime, output: ?*std.Io.Writer, values: []const core.JSValue) HostError!core.JSValue {
+fn hostOutputValues(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    output: ?*std.Io.Writer,
+    values: []const core.JSValue,
+) HostError!core.JSValue {
+    const rt = ctx.runtime;
     if (output) |writer| {
         var i: usize = 0;
         while (i < values.len) : (i += 1) {
-            if (i != 0) try writer.writeByte(' ');
-            try hostResult(printValue(rt, writer, values[i]));
+            if (i != 0) writer.writeByte(' ') catch |err|
+                return exception_ops.throwHostError(ctx, global, err);
+            printValue(rt, writer, values[i]) catch |err| switch (err) {
+                error.WriteFailed => return exception_ops.throwHostError(ctx, global, error.WriteFailed),
+                else => |other| return other,
+            };
         }
-        try writer.writeByte('\n');
+        writer.writeByte('\n') catch |err|
+            return exception_ops.throwHostError(ctx, global, err);
     }
     return core.JSValue.undefinedValue();
 }
@@ -2306,11 +2317,12 @@ pub fn isOutputExternalHostFunctionId(rt: *core.JSRuntime, id: u32) bool {
 }
 
 fn externalHostOutput(_: *anyopaque, call: core.host_function.ExternalCall) anyerror!core.JSValue {
-    return hostOutputValues(call.realm.runtime, call.output, call.args);
+    const global = call.realm.global orelse return error.InvalidBuiltinRegistry;
+    return hostOutputValues(call.realm, global, call.output, call.args);
 }
 
 fn hostCallOutput(call: HostCall) HostError!core.JSValue {
-    return hostOutputValues(call.realm.realm.runtime, call.output, call.args);
+    return hostOutputValues(call.realm.realm, call.realm.global, call.output, call.args);
 }
 
 pub fn runNextOsSignalHandler(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) HostError!bool {

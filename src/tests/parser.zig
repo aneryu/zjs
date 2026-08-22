@@ -9786,6 +9786,32 @@ test "expectToken syntax errors name the expected and actual token kinds" {
     try std.testing.expectEqualStrings("expected ')', got '{'", syntax_error.message);
 }
 
+test "parser error long tail names the unexpected source token" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_]struct {
+        source: []const u8,
+        message: []const u8,
+    }{
+        .{ .source = "return 1;", .message = "unexpected return" },
+        .{ .source = "throw\n1;", .message = "unexpected number" },
+        .{ .source = "new.target;", .message = "unexpected identifier" },
+        .{ .source = "object.#missing;", .message = "unexpected private name" },
+        .{ .source = "{ using resource; }", .message = "expected '=', got ';'" },
+    };
+
+    for (cases) |case| {
+        var parsed = try compileForTest(rt, case.source, .{
+            .mode = .script,
+            .filename = "long-tail-message.js",
+        });
+        defer parsed.deinit();
+        const syntax_error = parsed.syntax_error orelse return error.TestExpectedEqual;
+        try std.testing.expectEqualStrings(case.message, syntax_error.message);
+    }
+}
+
 test "lexer syntax errors retain the failing token position" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

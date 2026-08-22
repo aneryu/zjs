@@ -1,10 +1,10 @@
-// RegExp Unicode property lookup.
+//! Zero-allocation per-code-point RegExp property lookup over borrowed QuickJS-format Unicode tables.
+//! General categories, derived properties, scripts, and script extensions use fixed stack state; range building stays in `unicode.zig`.
 const std = @import("std");
 const data = @import("data.zig");
 const names = @import("names.zig");
 const properties = @import("properties.zig");
 const max_code_point: u21 = 0x10ffff;
-
 // --- Runtime Zero-Allocation Evaluators ---
 
 const RUN_TYPE_U = 0;

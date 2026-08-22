@@ -1,5 +1,5 @@
+//! Allocator-owned sign-magnitude 64-bit-limb arithmetic, capped at QuickJS's `JS_BIGINT_MAX_SIZE`; operations borrow inputs and return deinitialized owned results.
 const std = @import("std");
-
 const limb_bits = 64;
 pub const Limb = u64;
 const DoubleLimb = u128;
@@ -122,10 +122,12 @@ pub const BigInt = struct {
                 index -= 1;
                 var buf: [24]u8 = undefined;
                 if (index == chunks.items.len - 1) {
-                    const text = try std.fmt.bufPrint(&buf, "{d}", .{chunks.items[index]});
+                    // A u64 needs at most 20 decimal bytes; this buffer cannot
+                    // exhaust, so NoSpaceLeft must not escape the formatter.
+                    const text = std.fmt.bufPrint(&buf, "{d}", .{chunks.items[index]}) catch unreachable;
                     try out.appendSlice(allocator, text);
                 } else {
-                    const text = try std.fmt.bufPrint(&buf, "{d:0>19}", .{chunks.items[index]});
+                    const text = std.fmt.bufPrint(&buf, "{d:0>19}", .{chunks.items[index]}) catch unreachable;
                     try out.appendSlice(allocator, text);
                 }
             }

@@ -1,9 +1,9 @@
+//! Unicode classification, conversion, normalization, encoding, and QuickJS-format property-range construction.
+//! Scalar lookups borrow tables; allocating APIs return caller-owned buffers or explicitly deinitialized ranges.
 const std = @import("std");
-
 const data = @import("unicode/data.zig");
 const names = @import("unicode/names.zig");
 const properties = @import("unicode/properties.zig");
-
 pub const regexp_properties = @import("unicode/regexp_properties.zig");
 
 pub const Category = enum {

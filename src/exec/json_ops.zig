@@ -20,7 +20,6 @@ const HostError = exceptions.HostError;
 
 const JsonStringifyError = std.mem.Allocator.Error || error{
     InvalidAtom,
-    NoSpaceLeft,
     TypeError,
     StackOverflow,
 };
@@ -853,7 +852,7 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
         try buffer.appendSlice(rt.memory.allocator, if (array_slot) "null" else "");
     } else if (rooted_value.asInt32()) |int_value| {
         var int_buf: [64]u8 = undefined;
-        const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
+        const printed = std.fmt.bufPrint(&int_buf, "{d}", .{int_value}) catch unreachable;
         try buffer.appendSlice(rt.memory.allocator, printed);
     } else if (rooted_value.asFloat64()) |float_value| {
         if (!std.math.isFinite(float_value)) {
@@ -862,7 +861,7 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
             try buffer.append(rt.memory.allocator, '0');
         } else {
             var number_buf: [128]u8 = undefined;
-            const printed = try value_ops.formatFiniteNumber(&number_buf, float_value);
+            const printed = value_ops.formatFiniteNumberAssumeCapacity(&number_buf, float_value);
             try buffer.appendSlice(rt.memory.allocator, printed);
         }
     } else if (rooted_value.asBool()) |bool_value| {
@@ -1372,7 +1371,7 @@ fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.At
     }
     if (rooted_value.asInt32()) |int_value| {
         var buf: [64]u8 = undefined;
-        const text = try std.fmt.bufPrint(&buf, "{d}", .{int_value});
+        const text = std.fmt.bufPrint(&buf, "{d}", .{int_value}) catch unreachable;
         return try rt.internAtom(text);
     }
     if (rooted_value.asFloat64()) |float_value| {
@@ -1386,7 +1385,7 @@ fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.At
         else if (float_value == 0)
             "0"
         else
-            try value_ops.formatFiniteNumber(&buf, float_value);
+            value_ops.formatFiniteNumberAssumeCapacity(&buf, float_value);
         return try rt.internAtom(text);
     }
     const header = rooted_value.refHeader() orelse return null;
@@ -1498,13 +1497,13 @@ fn appendJsonInputString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
     if (rooted_value.asBool()) |bool_value| return buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
     if (rooted_value.asInt32()) |int_value| {
         var int_buf: [64]u8 = undefined;
-        const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
+        const printed = std.fmt.bufPrint(&int_buf, "{d}", .{int_value}) catch unreachable;
         return buffer.appendSlice(rt.memory.allocator, printed);
     }
     if (rooted_value.asFloat64()) |float_value| {
         if (float_value == 0) return buffer.append(rt.memory.allocator, '0');
         var float_buf: [128]u8 = undefined;
-        const printed = try value_ops.formatFiniteNumber(&float_buf, float_value);
+        const printed = value_ops.formatFiniteNumberAssumeCapacity(&float_buf, float_value);
         return buffer.appendSlice(rt.memory.allocator, printed);
     }
     if (rooted_value.isBigInt()) return core.value_format.appendBigIntBase10(rt.memory.allocator, buffer, rooted_value);
@@ -1531,7 +1530,6 @@ pub const appendEscapedJsonString = core.json.appendEscapedJsonString;
 
 const SimpleJsonStringifyError = std.mem.Allocator.Error || error{
     InvalidUtf8,
-    NoSpaceLeft,
     TypeError,
     StackOverflow,
     StringTooLong,
@@ -2061,7 +2059,7 @@ fn jsonAppendSimpleValue(
     }
     if (value.asInt32()) |int_value| {
         var int_buf: [64]u8 = undefined;
-        const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
+        const printed = std.fmt.bufPrint(&int_buf, "{d}", .{int_value}) catch unreachable;
         try buffer.appendSlice(rt.memory.allocator, printed);
         return .appended;
     }
@@ -2072,7 +2070,7 @@ fn jsonAppendSimpleValue(
             try buffer.append(rt.memory.allocator, '0');
         } else {
             var number_buf: [128]u8 = undefined;
-            const printed = try value_ops.formatFiniteNumber(&number_buf, number);
+            const printed = value_ops.formatFiniteNumberAssumeCapacity(&number_buf, number);
             try buffer.appendSlice(rt.memory.allocator, printed);
         }
         return .appended;
@@ -2507,7 +2505,7 @@ pub fn jsonAppendValue(
             try buffer.append(ctx.runtime.memory.allocator, '0');
         } else {
             var number_buf: [128]u8 = undefined;
-            const printed = try value_ops.formatFiniteNumber(&number_buf, number);
+            const printed = value_ops.formatFiniteNumberAssumeCapacity(&number_buf, number);
             try buffer.appendSlice(ctx.runtime.memory.allocator, printed);
         }
     } else if (rooted_value.isBigInt()) {

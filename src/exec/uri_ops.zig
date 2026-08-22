@@ -1,3 +1,12 @@
+//! Global URI encode/decode and Annex B escape/unescape builtin records.
+//!
+//! Arguments are borrowed; coercion strings and temporary byte buffers are
+//! owned locally, and returned JSValues carry one owned reference. Realm-aware
+//! paths perform observable ToString and create named URI errors, while the
+//! narrow primitive helpers remain usable without a realm. The algorithms map
+//! to QuickJS URIError/decoder/encoder code at quickjs.c:54734,
+//! quickjs.c:54755, and quickjs.c:54887.
+
 const core = @import("../core/root.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");

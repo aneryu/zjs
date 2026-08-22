@@ -1,10 +1,10 @@
+//! CLI boundary for script/module evaluation, host loading, job draining, and exception/rejection reporting.
+//! Source buffers live through evaluation; `--leak-check` selects explicit event-loop, context, and runtime teardown.
 const std = @import("std");
 const cli_process = @import("cli_process.zig");
-
 const engine = @import("zjs");
 const simple_token = engine.simple_token;
 const platform_clock = engine.platform_clock;
-
 /// Message-only panics in ReleaseFast, full traces everywhere else.
 /// See `panic_policy.zig` for why the shipped binary drops the symbolizer.
 pub const panic = @import("panic_policy.zig").policy;

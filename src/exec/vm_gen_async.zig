@@ -1,3 +1,12 @@
+//! Generator, async-function, `yield`, and `await` opcode state transitions.
+//!
+//! Parking transfers frame and operand-stack backing into
+//! `GeneratorExecutionState`; open VarRefs attach to that owner and live VM
+//! views are cleared so resume or teardown releases each value exactly once.
+//! Await paths distinguish raw suspension from settled completion, including
+//! top-level module evaluation. The transition shape follows QuickJS's async
+//! opcode handling around quickjs.c:20592.
+
 const std = @import("std");
 const iterator_ops = @import("iterator_ops.zig");
 

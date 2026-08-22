@@ -53,7 +53,7 @@ pub fn appendJsonStringValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), va
 pub fn appendJsonAtomName(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), atom_id: core.Atom) !void {
     if (core.atom.isTaggedInt(atom_id)) {
         var int_buf: [10]u8 = undefined;
-        const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{core.atom.atomToUInt32(atom_id)});
+        const printed = std.fmt.bufPrint(&int_buf, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch unreachable;
         return appendEscapedJsonString(rt, buffer, printed);
     }
     const name = rt.atoms.name(atom_id) orelse "";
@@ -143,7 +143,7 @@ fn appendEscapedJsonByte(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), byte: 
 
 fn appendEscapedJsonUnit(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: anytype) !void {
     var escaped: [6]u8 = undefined;
-    const text = try std.fmt.bufPrint(&escaped, "\\u{x:0>4}", .{unit});
+    const text = std.fmt.bufPrint(&escaped, "\\u{x:0>4}", .{unit}) catch unreachable;
     try buffer.appendSlice(rt.memory.allocator, text);
 }
 

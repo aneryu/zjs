@@ -7,6 +7,41 @@ breaking public-API cleanup is approved for this cycle; hot-path structural
 refactors are deferred to `docs/maintainability-backlog.md` and land only
 under the refactor-policy gates.
 
+- **Breaking (0.2.0-dev): host and operation error types now describe their
+  real transport boundaries.** `HostError` is now an alias of `RuntimeError`,
+  removing all 48 raw std/backend members after Stage 1 converted module I/O
+  and writer failures to JavaScript errors at their producer seams.
+  `DynamicImportError` retains the runtime set plus only `AccessDenied`,
+  `PermissionDenied`, and the host-hook fallback `Unexpected`; the settled-job
+  and Atomics queue runners now use `RuntimeError`. Object property reads,
+  `JSRuntime.installStandardGlobals`, `AppendStringError`, and the binding
+  `GetPropertyError` inference no longer borrow the dynamic-import type.
+  Embedders returning domain errors from ordinary external functions remain
+  source-compatible: convert producer-specific failures to a JS exception at
+  the boundary and return the runtime transport; dynamic-import callbacks must
+  use the new three-member host extension. Fixed-capacity number/date/JSON and
+  name formatters now discharge impossible capacity errors locally instead of
+  polluting engine signatures. `CallbackError` and the native record casts are
+  intentionally unchanged until Q16 Stages 3 and 4.
+
+- **Host I/O errors now become named JavaScript errors at their producer
+  seams.** The exec-owned mapping is exhaustive over Zig's concrete module
+  reader and output-writer error sets, so a stdlib change now fails to compile
+  until its JS policy is reviewed. Both output implementations turn
+  `WriteFailed` into a catchable `Error`; dynamic imports preserve the
+  contextual not-found `ReferenceError`, missing-loader `TypeError`, and other
+  I/O names; static module reads throw explicitly. A module host that cannot
+  advance TLA work now reports `InternalError: module host made no progress`
+  instead of leaking `OperationUnsupported` to the embedder. Native dispatch
+  also fails closed: it never returns the exception sentinel without first
+  installing a pending exception (docs/impl-quality-backlog.md, Q16 Stage 1).
+
+- **A first 100 of the parser's 377 bare `UnexpectedToken` sites now report
+  what they saw** ("unexpected '('", "expected X, got Y") through the Q5
+  pending-diagnostic recorder, with rejection conditions untouched —
+  verdict parity is emission-byte-identical on the five reference corpora
+  and test262 is delta 0. 277 sites remain queued (Q5c).
+
 - **IteratorClose now follows ECMA-262 for Set relation methods and Promise
   combinators.** An abrupt `next()` call or iterator-result validation no
   longer calls `return()`; Promise combinators preserve the original

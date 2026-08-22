@@ -1,3 +1,10 @@
+//! Native record tables and dispatch for primitive wrappers and Symbol helpers.
+//!
+//! Boolean, BigInt, String, Number valueOf, and Symbol records share this
+//! domain because they converge on the same wrapper/coercion machinery; Number
+//! formatting stays in `number_ops`. Call inputs are borrowed and returned
+//! values are owned.
+
 const core = @import("../core/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const builtin_glue = @import("builtin_glue.zig");

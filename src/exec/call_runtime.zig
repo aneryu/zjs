@@ -5312,7 +5312,7 @@ pub fn functionNameValueFromAtom(rt: *core.JSRuntime, atom_id: core.Atom, prefix
     }
     if (core.atom.isTaggedInt(atom_id)) {
         var buf: [10]u8 = undefined;
-        const text = try std.fmt.bufPrint(&buf, "{d}", .{core.atom.atomToUInt32(atom_id)});
+        const text = std.fmt.bufPrint(&buf, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch unreachable;
         try bytes.appendSlice(rt.memory.allocator, text);
         return value_ops.createStringValue(rt, bytes.items);
     }

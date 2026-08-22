@@ -1,3 +1,9 @@
+//! VM opcode helpers for direct eval, apply-eval, and dynamic import.
+//!
+//! The active frame supplies lexical/caller authority, while module jobs and
+//! promise settlement stay in their owning modules. Stack operands are moved
+//! or released here before control returns to the dispatch loop.
+
 const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");

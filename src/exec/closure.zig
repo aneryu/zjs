@@ -1,3 +1,12 @@
+//! Synthetic `c_closure` callback bodies used by collection adapters and tests.
+//!
+//! Each object owns its numeric `__closure_*` state as ordinary properties;
+//! call arguments and global slots are borrowed, while returned heap values
+//! carry an owned reference. This is not bytecode closure construction, which
+//! remains in the core function representation and VM call machinery. The
+//! numeric fixture cases stay local to this module and are dispatched through
+//! `call.zig` and `collection_adapter.zig`.
+
 const core = @import("../core/root.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const bytecode = @import("../bytecode.zig");
@@ -764,7 +773,7 @@ fn setGlobalMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, key_int:
 
 fn setGlobalWeakMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, map_object: *core.Object, key_int: i32, bytes: []const u8) !void {
     var key_name_buf: [32]u8 = undefined;
-    const key_name = try std.fmt.bufPrint(&key_name_buf, "obj{d}", .{key_int});
+    const key_name = std.fmt.bufPrint(&key_name_buf, "obj{d}", .{key_int}) catch unreachable;
     var key_value = try globals_mod.getByName(rt, globals, key_name);
     if (key_value.isUndefined()) {
         key_value.free(rt);
@@ -1001,7 +1010,7 @@ fn stringFromValue(value: core.JSValue) ?*core.string.String {
 
 fn appendIntField(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), label: []const u8, value: i32) !void {
     var int_buf: [32]u8 = undefined;
-    const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{value});
+    const printed = std.fmt.bufPrint(&int_buf, "{d}", .{value}) catch unreachable;
     try buffer.appendSlice(rt.memory.allocator, label);
     try buffer.appendSlice(rt.memory.allocator, printed);
     try buffer.append(rt.memory.allocator, ',');

@@ -1,3 +1,10 @@
+//! Compiler contract tests spanning IR construction, label and variable
+//! resolution, packed bytecode, the production short layout, and execution in
+//! the VM. `V2Parse` and `V2Exec` are stack-local harnesses whose explicit
+//! teardown releases runtime, atom, lexer, bytecode, and context state in
+//! reverse ownership order. These tests are the structural oracle for emitted
+//! instructions as well as an end-to-end parser-to-execution check.
+
 const std = @import("std");
 const build_options = @import("build_options");
 const config_signature = @import("../config_signature.zig");

@@ -15,6 +15,7 @@ const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
 const core = @import("../core/root.zig");
+const exception_ops = @import("exception_ops.zig");
 const module_auto_init = @import("../core/module_auto_init.zig");
 const property_ops = @import("property_ops.zig");
 const array_ops = @import("array_ops.zig");
@@ -1028,7 +1029,6 @@ fn preloadFileModuleGraphInnerMode(
         );
         defer parsed.deinit();
         if (parsed.syntax_error) |err| {
-            const exception_ops = @import("exception_ops.zig");
             const global_object = try @import("zjs_vm.zig").contextGlobal(context);
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(runtime.memory.allocator);
@@ -1086,9 +1086,14 @@ fn preloadFileModuleGraphInnerMode(
             ) catch |err| switch (err) {
                 error.FileNotFound => {
                     try throwCouldNotLoadModule(context, dependency_name);
-                    return error.ModuleNotFound;
+                    return error.JSException;
                 },
-                else => |load_error| return load_error,
+                else => |load_error| {
+                    const global = context.global orelse
+                        try @import("zjs_vm.zig").contextGlobal(context);
+                    _ = try exception_ops.throwHostError(context, global, load_error);
+                    unreachable;
+                },
             };
             defer allocator.free(dependency_source);
             try preloadFileModuleGraphInnerMode(
@@ -1121,7 +1126,6 @@ fn preloadFileModuleGraphInnerMode(
 /// `ReferenceError: could not load module filename '<name>'` (mirrors
 /// js_module_loader quickjs-libc.c:699).
 pub fn throwCouldNotLoadModule(ctx: *core.JSContext, filename: []const u8) !void {
-    const exception_ops = @import("exception_ops.zig");
     const global_object = try @import("zjs_vm.zig").contextGlobal(ctx);
     var msg_buf = std.ArrayList(u8).empty;
     defer msg_buf.deinit(ctx.runtime.memory.allocator);

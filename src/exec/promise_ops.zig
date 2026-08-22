@@ -3203,7 +3203,7 @@ pub fn atomicsDestroyAsyncWaiterOpaque(raw_waiter: *anyopaque) void {
 pub fn atomicsRunAsyncWaiterCompletion(
     ctx: *core.JSContext,
     payload: *const jobs_mod.AtomicsWaiterPayload,
-) core.context.DynamicImportError!void {
+) core.errors.RuntimeError!void {
     const waiter: *AtomicsWaiter = @ptrCast(@alignCast(payload.waiter));
     std.debug.assert(waiter.realm.borrow() == ctx);
     ctx.runtime.assertOwnerThread();
@@ -4627,7 +4627,7 @@ pub fn drainOnePendingJob(
                     std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                     ctx.runtime.job_queue.prependReserved(entry);
                     entry_owned = false;
-                    return err;
+                    return error.OutOfMemory;
                 }
                 ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
                 if (job_ctx.hasException()) return .exception;

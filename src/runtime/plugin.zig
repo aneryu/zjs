@@ -1,12 +1,12 @@
+//! Native plugin loading, installation, and owner-thread lifetime coordination.
+//! Installation transfers path and library ownership; references and execution pins defer unregister and close.
 const std = @import("std");
 const builtin = @import("builtin");
-
 const build_options = @import("build_options");
 const core = @import("../core/root.zig");
 const exec = @import("../exec/root.zig");
 const ffi = @import("../binding/ffi.zig");
 const zjs = @import("../binding/root.zig");
-
 pub const InstallOptions = struct {
     overwrite: bool = false,
 };

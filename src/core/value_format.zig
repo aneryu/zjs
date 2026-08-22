@@ -9,6 +9,14 @@ pub fn formatFiniteNumber(buffer: []u8, value: f64) ![]const u8 {
     return dtoa.formatNumber(buffer, value);
 }
 
+/// ECMAScript's finite Number string fits in 64 bytes. Engine callers with at
+/// least that much fixed storage use this form so the caller-sized-buffer
+/// `NoSpaceLeft` error cannot pollute the runtime transport surface.
+pub fn formatFiniteNumberAssumeCapacity(buffer: []u8, value: f64) []const u8 {
+    std.debug.assert(buffer.len >= 64);
+    return formatFiniteNumber(buffer, value) catch unreachable;
+}
+
 /// Clone a BigInt value into an owned arbitrary-precision integer. Six copies
 /// of this existed; `exec.value_ops.cloneBigIntValue` keeps the exec-facing
 /// name and forwards here, because `core` cannot import `exec`.

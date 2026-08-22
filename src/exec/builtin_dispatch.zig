@@ -55,7 +55,33 @@ pub inline fn nativeIsExc(ctx: *core.JSContext, v: NativeValue) bool {
 /// noinline: keep materialize / Error construction out of the assume prologue.
 pub noinline fn nativeFromHostError(ctx: *core.JSContext, global: ?*core.Object, err: anytype) NativeBits {
     materializeRuntimeError(ctx, global, err) catch {};
+    if (!ctx.hasException()) {
+        if (global orelse ctx.global) |error_global| {
+            const error_value = exception_ops.createNamedError(
+                ctx,
+                error_global,
+                "Error",
+                @errorName(err),
+            ) catch {
+                installNativeExceptionFallback(ctx);
+                return nativeToBits(nativeExc());
+            };
+            _ = ctx.throwValue(error_value);
+        } else {
+            installNativeExceptionFallback(ctx);
+        }
+    }
+    std.debug.assert(ctx.hasException());
     return nativeToBits(nativeExc());
+}
+
+fn installNativeExceptionFallback(ctx: *core.JSContext) void {
+    if (ctx.hasException()) return;
+    const fallback = if (ctx.preallocated_oom_error) |preallocated|
+        preallocated.dup()
+    else
+        core.JSValue.nullValue();
+    _ = ctx.throwValue(fallback);
 }
 
 /// Reconstruct the host sentinel at a !JSValue receive. Uncatchable interrupt

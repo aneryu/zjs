@@ -1,3 +1,11 @@
+//! test262 runner orchestration and engine execution boundary.
+//! This module selects tests, builds harness sources, runs in-process or
+//! external engines across workers, and aggregates results through the shared
+//! reporter. Workers claim tests through an atomic index; reporter mutation is
+//! mutex-protected, while each worker's allocator and per-test arena remain
+//! thread-local. Owned selection, harness, and result storage is explicitly
+//! released by the runner lifecycle.
+
 const std = @import("std");
 const cli_process = @import("cli_process.zig");
 const test262_root = @import("zjs");

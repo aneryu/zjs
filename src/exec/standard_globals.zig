@@ -912,7 +912,8 @@ fn defineLazyNativeAccessorPairAtom(
 
     if (!std.mem.startsWith(u8, getter_name, "get ")) return error.InvalidBuiltinRegistry;
     var setter_name_buf: [128]u8 = undefined;
-    const setter_name = try std.fmt.bufPrint(&setter_name_buf, "set {s}", .{getter_name["get ".len..]});
+    const setter_name = std.fmt.bufPrint(&setter_name_buf, "set {s}", .{getter_name["get ".len..]}) catch
+        return error.InvalidBuiltinRegistry;
     const setter = try core.function.nativeFunction(realm, setter_name, setter_length);
     defer setter.free(rt);
     if (setter_native_builtin_id != 0) expectObjectAssumeBootstrap(setter).setNativeBuiltinIdAndRecord(rt, setter_native_builtin_id);

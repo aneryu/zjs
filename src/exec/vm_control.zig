@@ -1,3 +1,9 @@
+//! VM control-transfer helpers: return, jump, throw, catch, and iterator close.
+//!
+//! Stack pops are ownership moves, matching QuickJS opcode semantics; handled
+//! throws install or route the pending exception before execution resumes.
+//! Hot dispatch remains outside this file and calls these focused helpers.
+
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -166,7 +172,7 @@ fn createThrowErrorValue(ctx: *core.JSContext, global: *core.Object, atom_id: u3
         5 => exception_ops.createNamedError(ctx, global, "ReferenceError", "invalid assignment target"),
         else => blk: {
             var message_buffer: [64]u8 = undefined;
-            const message = try std.fmt.bufPrint(&message_buffer, "invalid throw var type {d}", .{error_type});
+            const message = std.fmt.bufPrint(&message_buffer, "invalid throw var type {d}", .{error_type}) catch unreachable;
             break :blk exception_ops.createNamedError(ctx, global, "InternalError", message);
         },
     };

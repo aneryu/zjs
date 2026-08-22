@@ -1,3 +1,12 @@
+//! VM frame storage, call-binding layout, and explicit value/cell ownership.
+//!
+//! A frame may borrow caller storage or own a slab/heap allocation; teardown
+//! releases argument, local, stack, VarRef, and `new.target` cells only as their
+//! recorded dispositions require. Open VarRefs retain their frame backing until
+//! closure or generator transfer completes. The layout follows QuickJS frame
+//! allocation at quickjs.c:17834-17866 and VarRef closure at
+//! quickjs.c:17297-17331.
+
 const std = @import("std");
 const builtin = @import("builtin");
 

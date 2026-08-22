@@ -1,3 +1,9 @@
+//! Bytecode handlers for explicit-resource-management (`using`) operations.
+//!
+//! These handlers own and pop VM operands, delegate resource lifetime to
+//! `disposable_ops`, and route synchronous/async disposal failures through the
+//! active catch target. Promise scheduling remains in `promise_ops`.
+
 const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");

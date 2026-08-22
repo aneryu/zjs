@@ -20,8 +20,9 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+//! Binary64 parsing and decimal/radix formatting ported from QuickJS `dtoa.c`/`dtoa.h`.
+//! Public operations use caller-provided buffers and fixed temporary arenas rather than a heap allocator.
 const std = @import("std");
-
 // ============================================================
 // Public types and constants (match dtoa.h)
 // ============================================================

@@ -27,7 +27,7 @@ const std = @import("std");
 const dtoa = @import("../libs/number_format.zig");
 const atom = @import("atom.zig");
 const class = @import("class.zig");
-const context = @import("context.zig");
+const errors = @import("errors.zig");
 const object = @import("object.zig");
 const runtime = @import("runtime.zig");
 const string = @import("string.zig");
@@ -41,12 +41,7 @@ const Object = object.Object;
 
 /// The error set every bare-runtime ToString site shares. Seven files each
 /// declared this same union; they now alias it.
-pub const AppendStringError = error{
-    OutOfMemory,
-    TypeError,
-    InvalidRadix,
-    NoSpaceLeft,
-} || context.DynamicImportError;
+pub const AppendStringError = errors.RuntimeError;
 
 pub const Policy = struct {
     /// A Symbol has no `ToString` form. `.describe` writes `Symbol(<desc>)`,
@@ -100,7 +95,7 @@ fn appendFloat(rt: *JSRuntime, buffer: *std.ArrayList(u8), float_value: f64) App
     // ToString(-0) is "0", not "-0" (ES Number::toString step 2).
     if (std.math.isNegativeZero(float_value)) return buffer.append(rt.memory.allocator, '0');
     var float_buf: [64]u8 = undefined;
-    const printed = try value_format.formatFiniteNumber(&float_buf, float_value);
+    const printed = value_format.formatFiniteNumberAssumeCapacity(&float_buf, float_value);
     return buffer.appendSlice(rt.memory.allocator, printed);
 }
 

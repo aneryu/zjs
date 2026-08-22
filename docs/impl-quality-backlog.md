@@ -193,6 +193,12 @@ this entry is its durable residue):
   emission byte-identical on five corpora. Gate: A/B 0.9983 + pad lineage
   sign-flip (RegExp 0.9769/0.9893/1.0276) = LAYOUT; test262 delta 0. The
   377-site message long tail remains open (mechanical, incremental).
+  **Q5c batch 1 done 2026-08-22** (`c9bb6278`, diag lane): 100 of 377
+  converted (87 found-token, 13 expected/got); 277 remain — deferred
+  families: class/module/parameter/destructuring/binding/lowering, plus
+  sites whose current token is lookahead rather than the actual found
+  token, and internal structural invariants. Verdict drift zero: emission
+  byte-identical on the five corpora, parser 500/500, test262 delta 0.
 - **Q5a.** Every syntax error's line/column points at **EOF**, not the error
   site (verified by running the shipped binary: error on line 3 of a 4-line
   file reports `5:1`). Cause: `setFallbackSyntaxError` (`parser.zig:20357`)
@@ -428,7 +434,21 @@ ECMA-262/test262 as the semantic authority)
   **Batch 2 done 2026-08-22** (`829d0232`): eleven more files (ten exec +
   `runtime/event_loop.zig`, which also gained the `_FORTIFY_SOURCE`
   translate-c and capacity-slice teardown point comments). Identity cmp=0
-  same-lineage; ~21 exec files + the rest of the tree remain. The standard is `src/lexer.zig`:
+  same-lineage; ~21 exec files + the rest of the tree remain.
+  **Batch 3 done 2026-08-22** (`db275749`): twelve more exec files (+108
+  lines). Identity cmp=0 same-lineage (first read against a stale cache
+  differed 972 B and was re-verified per the Q7 lineage rule). ~10 exec
+  files + the rest of the tree remain.
+  **Non-exec batch done 2026-08-22** (`233719b6`, diag lane): twelve files
+  across libs/cli/runtime/compiler-tests (regexp, unicode data/algorithms,
+  number_format, bigint, the test262 runner family, plugin, zjs CLI).
+  Identity cmp=0 same-lineage for both the main `.text` and the
+  op_handlers section.
+  **Batch 5 done 2026-08-22** (`f7d2f3f2` pre-rebase): twelve more exec
+  files; identity cmp=0, and the recurring first-read −972 B was proven
+  to be a same-source cache-basin switch. exec is at 76/81; the last
+  five (collection_adapter, error_ops, exceptions, property_ops,
+  vm_regexp) ride the Q16 Stage 3 round. The standard is `src/lexer.zig`:
 state what the module owns, the ownership/lifetime contracts a reader cannot
 infer from signatures, and reference coordinates where they exist. The worst
 offender is `promise_ops.zig` (4,755 lines, zero header, name undersells the
@@ -476,6 +496,33 @@ window, (4) delete the `@errorCast` adapters. Gate: suite + test262;
   Invariant throughout: every exception sentinel has a pending JS
   exception, and no std/backend error name crosses an engine boundary
   unconverted. Gates: stages 1-2 suite + test262; stages 3-4 add **AB**.
+  **Stage 1 done 2026-08-22** (`f1c3c655`): exhaustive `HostIoError`
+  conversion authority in exception_ops (concrete producer sets, so a
+  stdlib change fails to compile); both output arms and all four module
+  read sites convert at the seam; stalls become
+  `InternalError: module host made no progress`; `nativeFromHostError`
+  fails closed with a terminal assert that the sentinel has a pending
+  exception. Red-first evidence: the legacy WriteFailed arm and an
+  arbitrary host error previously **panicked with 'invalid error code'**
+  — worse than the inventory's predicted inconsistency. Suite 2325/1/0,
+  test262 delta 0; driver re-probed import mappings on the shipped
+  binary (missing file keeps the pathful ReferenceError, a directory now
+  yields `Error: IsDir` instead of an empty message).
+  **Stage 2 done 2026-08-22** (`2279e4e3` pre-rebase, landed via rebase):
+  `HostError` = `RuntimeError` (48 std/backend members deleted);
+  `DynamicImportError` = runtime set + AccessDenied/PermissionDenied/
+  Unexpected; the four contaminated signatures repaired; fixed-capacity
+  formatters discharge capacity errors locally. Red type-test first
+  (HostError equality), then green. Gates: suite 2326/1/0, test262 delta
+  0, checkpoint 26/26, borrowed atoms 0. `.text` moved −1,052 B so the
+  lane escalated to rule-2 A/B on its own: composite **1.0033** = PASS
+  (in the [0.995,1.005] band); Crypto +1.78% exceeded the generic ±1.5%
+  per-suite envelope in the positive direction with a co-tenant-loaded
+  field (zig + fun builds) — accepted as a positive-direction anomaly,
+  clean-field measurement requested for the Stage 3/4 A/B. Driver ran
+  the combined-tree batch gate (both lanes' work together) after rebase:
+  suite + test262 green. CallbackError and the 14 casts intentionally
+  untouched (Stages 3-4).
 
 **Q17. Unreachability without evidence.**
   **Done 2026-08-22** (`7ff86866`): all three site families got invariant

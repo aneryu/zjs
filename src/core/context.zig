@@ -104,9 +104,15 @@ pub const BacktraceLocation = struct {
 
 pub const BacktraceLocationResolver = *const fn (?*const anyopaque, usize) BacktraceLocation;
 
-/// Dynamic `import()` runs arbitrary engine work and arbitrary host I/O, so it
-/// can fail with anything in the host error surface.
-pub const DynamicImportError = errors.HostError;
+/// Errors the installed dynamic-import callback may return after its host I/O
+/// has been converted at the producer seam. Host-hook adapters preserve the
+/// two access-denial classes and collapse every other unknown host error to
+/// `Unexpected`; engine failures retain their ordinary runtime identity.
+pub const DynamicImportError = errors.RuntimeError || error{
+    AccessDenied,
+    PermissionDenied,
+    Unexpected,
+};
 
 pub const DynamicImportCallback = *const fn (
     userdata: ?*anyopaque,

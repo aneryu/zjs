@@ -1,3 +1,10 @@
+//! DisposableStack resource registration, disposal, and suppressed errors.
+//!
+//! Payloads own registered resource values until this module moves or releases
+//! them. Calls into user dispose callbacks keep realm/output/caller authority
+//! explicit; `using_ops` supplies the bytecode-facing orchestration and shares
+//! these same disposal primitives.
+
 const std = @import("std");
 const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode.zig");

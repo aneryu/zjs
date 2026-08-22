@@ -21,6 +21,7 @@ const Object = object_mod.Object;
 const profile = @import("profile.zig");
 const property = @import("property.zig");
 const context_mod = @import("context.zig");
+const errors = @import("errors.zig");
 
 extern "c" fn pclose(stream: *std.c.FILE) c_int;
 
@@ -3052,10 +3053,9 @@ pub const JSRuntime = struct {
     ///
     /// The installer callback is typed `anyerror` so core need not name the
     /// exec's error set, but the install only ever produces engine errors;
-    /// narrow the result back to the engine-wide `DynamicImportError` set so the
-    /// bounded-error callers of `installHostGlobals`/`contextGlobal` (notably the
-    /// `DynamicImportCallback` host hook) keep a concrete error set.
-    pub fn installStandardGlobals(self: *JSRuntime, global: *Object) context_mod.DynamicImportError!void {
+    /// narrow the result back to the engine runtime-error set so bounded-error
+    /// bootstrap callers keep a concrete operation-specific surface.
+    pub fn installStandardGlobals(self: *JSRuntime, global: *Object) errors.RuntimeError!void {
         const installer = self.install_standard_globals_cb orelse return error.InvalidBuiltinRegistry;
         var adopted_context: ?*context_mod.JSContext = null;
         if (self.contextForGlobalIncludingConstructing(global) == null) {

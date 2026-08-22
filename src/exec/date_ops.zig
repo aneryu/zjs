@@ -1231,21 +1231,45 @@ fn getDateStringValue(rt: *core.JSRuntime, ms: f64, magic: u32) !core.JSValue {
     const s: u32 = @intFromFloat(fields[5]);
     const msec: u32 = @intFromFloat(fields[6]);
     const wd: usize = @intFromFloat(fields[7]);
-    var tz: i64 = @intFromFloat(fields[8]);
+    const tz: i64 = @intFromFloat(fields[8]);
 
     var buffer: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&buffer);
+
+    writeDateString(&w, fmt, part, y, mon, d, h, m, s, msec, wd, tz) catch unreachable;
+    const str = try core.string.String.createUtf8(rt, w.buffered());
+    return str.value();
+}
+
+/// Every Date string form is shorter than the fixed 64-byte caller buffer, so
+/// the writer's capacity error is a local invariant rather than an engine
+/// transport error.
+fn writeDateString(
+    w: *std.Io.Writer,
+    fmt: u32,
+    part: u32,
+    y: i64,
+    mon: usize,
+    d: u32,
+    h: u32,
+    m: u32,
+    s: u32,
+    msec: u32,
+    wd: usize,
+    initial_tz: i64,
+) std.Io.Writer.Error!void {
+    var tz = initial_tz;
 
     if (part & 1 != 0) { // date part
         switch (fmt) {
             0 => {
                 try w.print("{s}, {d:0>2} {s} ", .{ dayName(wd), d, monthName(mon) });
-                try writeYearPadded4(&w, y);
+                try writeYearPadded4(w, y);
                 try w.writeByte(' ');
             },
             1 => {
                 try w.print("{s} {s} {d:0>2} ", .{ dayName(wd), monthName(mon), d });
-                try writeYearPadded4(&w, y);
+                try writeYearPadded4(w, y);
                 if (part == 3) try w.writeByte(' ');
             },
             2 => {
@@ -1260,7 +1284,7 @@ fn getDateStringValue(rt: *core.JSRuntime, ms: f64, magic: u32) !core.JSValue {
             },
             3 => {
                 try w.print("{d:0>2}/{d:0>2}/", .{ mon + 1, d });
-                try writeYearPadded4(&w, y);
+                try writeYearPadded4(w, y);
                 if (part == 3) try w.writeAll(", ");
             },
             else => {},
@@ -1286,8 +1310,6 @@ fn getDateStringValue(rt: *core.JSRuntime, ms: f64, magic: u32) !core.JSValue {
             else => {},
         }
     }
-    const str = try core.string.String.createUtf8(rt, w.buffered());
-    return str.value();
 }
 
 // --- Date string parsing (mirrors quickjs.c js_Date_parse:55907) ------------

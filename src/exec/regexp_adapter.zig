@@ -1,3 +1,9 @@
+//! Runtime-aware adapter over the allocation-only regular-expression library.
+//!
+//! It bridges flat JS string storage, runtime stack-overflow/timeout checks,
+//! capture slots, and canonical flags to `libs/regexp.zig`. Compiled handles
+//! and caller-provided capture buffers retain their existing library ownership.
+
 const core = @import("../core/root.zig");
 const regexp_lib = @import("../libs/regexp.zig");
 const regexp_bytecode = regexp_lib;

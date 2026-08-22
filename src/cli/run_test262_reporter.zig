@@ -1,3 +1,10 @@
+//! Thread-safe test262 result aggregation and deterministic report emission.
+//! A single mutex serializes stderr and protects failure buckets, per-directory
+//! counts, skipped-feature counts, and the failure log shared by runner
+//! workers. The reporter owns duplicated keys and aggregation buffers until
+//! `deinit`; `flush` renders sorted logs and JSON artifacts without exposing
+//! mutable internal storage.
+
 const std = @import("std");
 
 pub const TestRunResult = enum { passed, failed, skipped };

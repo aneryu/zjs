@@ -1,3 +1,12 @@
+//! Arithmetic, comparison, and update opcode adapters for the VM cold path.
+//!
+//! Popped operands are owned here until consumed or freed; pushed results carry
+//! one owned reference. Observable coercion may re-enter JavaScript and therefore
+//! keeps the explicit call environment. Register-resident integer and short-
+//! BigInt hot paths stay in the dispatch layer. The generic arithmetic shape
+//! follows QuickJS's operator helpers and opcode cases at
+//! quickjs.c:14905-15098 and quickjs.c:20268-20330.
+
 const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");

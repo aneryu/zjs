@@ -1,5 +1,5 @@
-//=== Public API & types ====================================================
-
+//! ECMAScript regular-expression compiler and QuickJS `libregexp.c`-style backtracking bytecode executor.
+//! Patterns and inputs are borrowed; `Compiled` owns bytecode, and scratch storage owns only inline-buffer overflow.
 const std = @import("std");
 const unicode = @import("unicode.zig");
 const regexp_properties = @import("unicode/regexp_properties.zig");

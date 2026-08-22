@@ -1,3 +1,12 @@
+//! Buffer builtin records, method-id mapping, and exec/core compatibility seams.
+//!
+//! Native-call receivers and arguments are borrowed; returned JSValues are
+//! owned. Core owns ArrayBuffer, SharedArrayBuffer, DataView, and TypedArray
+//! storage mechanics; option-reading constructors and record dispatch remain in
+//! exec because they can invoke user code. The tables map to QuickJS's buffer and
+//! DataView builtin families, including codecs at quickjs.c:59812-59820 and
+//! constructors at quickjs.c:61036-61046.
+
 const core = @import("../core/root.zig");
 const std = @import("std");
 const array_ops = @import("array_ops.zig");
