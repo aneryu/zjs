@@ -1,3 +1,12 @@
+//! Generic borrowed JS string views and explicitly-owned UTF-8/CESU-8 projections.
+//!
+//! `JSString(Value)` retains no extra reference: callers keep the source Value
+//! alive while reading flat units. ASCII UTF-8 views may borrow those units;
+//! transcoded views record their allocator and must be deinitialized. The
+//! generic Value seam avoids a core import cycle and adds no runtime layout.
+//! QuickJS map: `JS_ToCStringLen2` and CESU-8 conversion near quickjs.c:1727.
+//! This core helper may import core/libs only, never higher engine layers.
+
 const std = @import("std");
 const unicode = @import("../libs/unicode.zig");
 const string_mod = @import("string.zig");

@@ -1,3 +1,13 @@
+//! JavaScript class identities, runtime-local definitions, and builtin taxonomy.
+//!
+//! Class ids are process-global stable tokens allocated through caller-owned
+//! `ClassIdSlot`s; each Runtime independently owns the definition registered
+//! at that id. Finalizer/mark callbacks therefore receive runtime-owned
+//! objects but do not own the id itself. The builtin id matrix and payload-kind
+//! mapping are load-bearing for ObjectStorage dispatch. This is core metadata:
+//! exec/binding register and consume classes through it, while it must not
+//! import either higher layer.
+
 const std = @import("std");
 const atom = @import("atom.zig");
 const memory = @import("memory.zig");

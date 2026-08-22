@@ -1,3 +1,12 @@
+//! Public Zig embedding facade and stable aliases for core/binding APIs.
+//!
+//! Re-exports preserve the underlying JSRuntime, JSContext, JSValue, handle,
+//! string, byte, option, and plugin lifetimes; this root adds no wrapper
+//! ownership of its own. Embedders should enter through this module rather than
+//! internal core/exec files. It is the binding layer's aggregation boundary,
+//! permitted to expose core and binding declarations but forbidden to depend
+//! on CLI.
+
 const core = @import("../core/root.zig");
 
 pub const JSRuntime = core.JSRuntime;

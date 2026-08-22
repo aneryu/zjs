@@ -1,3 +1,12 @@
+//! Ownership-neutral predicates and conversions over the tagged JSValue model.
+//!
+//! These helpers neither retain nor release inputs. Checked object conversion
+//! rejects VarRef cell wrappers that share the object tag; the trusted
+//! expression form relies on compiler stack discipline and keeps that proof as
+//! a Debug assertion. QuickJS analogue: `JS_VALUE_GET_OBJ` and ToBoolean paths
+//! around quickjs.c:19123. This core leaf may import core only and never any
+//! parser/exec/runtime/binding layer.
+
 const std = @import("std");
 const builtin = @import("builtin");
 

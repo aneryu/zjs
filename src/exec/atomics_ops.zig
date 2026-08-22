@@ -1,14 +1,17 @@
-//! The Atomics domain: the QuickJS-style declaration table that binds the
-//! namespace to the native-call ABI, and the method bodies behind it.
+//! The Atomics domain: namespace registration, typed memory operations, and
+//! synchronous/Promise-backed waiter lifecycle.
 //!
 //! The bodies lived in `call_runtime.zig` until 2026-08-20 (backlog H1): a
 //! thousand lines of a self-contained domain -- waiter registry, typed
 //! read-modify-write, the `*ForAtomics` coercions -- in the file that owns the
-//! call chain. `atomics_wait.zig` still owns the cross-thread wait primitives
-//! and the method-id enum; `promise_ops.zig` owns the `waitAsync` settlement.
+//! call chain. `atomics_wait.zig` owns the platform wait primitives and
+//! method-id enum; Promise construction/settlement is borrowed through the
+//! narrow compatibility seam in `promise_ops.zig`.
 
 const std = @import("std");
+const atomics_ops = @This();
 const core = @import("../core/root.zig");
+const jobs_mod = core.jobs;
 const atomics_wait = @import("atomics_wait.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
@@ -21,6 +24,12 @@ const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const value_ops = @import("value_ops.zig");
 const HostError = @import("exceptions.zig").HostError;
+const atomicsBufferObject = object_ops.atomicsBufferObject;
+const atomicsTypedArray = array_ops.atomicsTypedArray;
+const atomicsTypedArrayIsBigInt = array_ops.atomicsTypedArrayIsBigInt;
+const defineValueProperty = object_ops.defineValueProperty;
+const objectFromValue = object_ops.objectFromValue;
+const promisePrototypeFromGlobal = promise_ops.promisePrototypeFromGlobal;
 
 pub const StaticMethod = atomics_wait.StaticMethod;
 
@@ -1096,4 +1105,219 @@ pub fn bigintBitsForAtomics(rt: *core.JSRuntime, value: core.JSValue) !u64 {
     if (big.limbs.len >= 1) low |= big.limbs[0];
     if (big.limbs.len >= 2) low |= @as(u64, big.limbs[1]) << 32;
     return if (big.negative) 0 -% low else low;
+}
+
+pub fn atomicsDestroyAsyncWaiter(waiter: *AtomicsWaiter) void {
+    const ctx = waiter.realm.borrow().?;
+    const rt = ctx.runtime;
+    rt.assertOwnerThread();
+    if (waiter.promise) |promise| promise.free(rt);
+    atomicsReleaseWaiterKey(&waiter.key);
+    waiter.realm.deinit();
+    rt.memory.destroy(AtomicsWaiter, waiter);
+}
+
+pub fn atomicsDestroyAsyncWaiterOpaque(raw_waiter: *anyopaque) void {
+    const waiter: *AtomicsWaiter = @ptrCast(@alignCast(raw_waiter));
+    atomicsDestroyAsyncWaiter(waiter);
+}
+
+/// Run one owner-thread waitAsync completion. `drainOnePendingJob` reserves the
+/// unlinked entry's queue slot before calling this function. Every failure is
+/// before Promise publication and leaves that reservation untouched so the
+/// typed completion can be restored at the FIFO head. Success consumes the
+/// reservation with the follow-up Promise job as its final no-fail step.
+pub fn atomicsRunAsyncWaiterCompletion(
+    ctx: *core.JSContext,
+    payload: *const jobs_mod.AtomicsWaiterPayload,
+) core.errors.RuntimeError!void {
+    const waiter: *AtomicsWaiter = @ptrCast(@alignCast(payload.waiter));
+    std.debug.assert(waiter.realm.borrow() == ctx);
+    ctx.runtime.assertOwnerThread();
+    const promise = payload.promise;
+    const promise_object = objectFromValue(promise) orelse return error.TypeError;
+    if (promise_object.class_id != core.class.ids.promise) return error.TypeError;
+    if (promise_object.promiseResultSlot().* != null) {
+        ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+        return;
+    }
+    const result = if (waiter.completion == .notified) "ok" else "timed-out";
+    const result_value = try value_ops.createStringValue(ctx.runtime, result);
+    var result_value_owned = true;
+    errdefer if (result_value_owned) result_value.free(ctx.runtime);
+    var prepared_job = jobs_mod.Job.initPromise(ctx, promise);
+    var prepared_job_owned = true;
+    errdefer if (prepared_job_owned) prepared_job.deinit();
+
+    const result_slot = promise_object.promiseResultSlot();
+
+    var reaction_arg_value: ?core.JSValue = null;
+    errdefer if (reaction_arg_value) |value| value.free(ctx.runtime);
+    const reaction_arg_slot = promise_object.promiseReactionArgSlot();
+    const needs_reaction_arg = promise_object.promiseReactionCallback() != null and promise_object.promiseReactionArg() == null;
+    if (needs_reaction_arg) {
+        reaction_arg_value = result_value.dup();
+    }
+
+    if (promise_object.promiseReactionCallback() != null) {
+        // A .then/await already installed the lazy single reaction callback.
+        // Leave the promise result unset: settlePendingPromiseReaction runs that
+        // callback and then fires this promise's reaction list (which settles the
+        // chained .then promise). Pre-setting the result here would make that
+        // drain early-return (promiseResult != null) and drop the chain after the
+        // first reaction. The callback receives the settle value via the reaction
+        // arg below; free the now-unused result_value.
+        result_value.free(ctx.runtime);
+        result_value_owned = false;
+    } else {
+        const old_result = result_slot.*;
+        result_slot.* = result_value;
+        result_value_owned = false;
+        promise_object.promiseIsRejectedSlot().* = false;
+        if (old_result) |stored| stored.free(ctx.runtime);
+    }
+    if (reaction_arg_value) |value| {
+        const old_reaction_arg = reaction_arg_slot.*;
+        reaction_arg_slot.* = value;
+        reaction_arg_value = null;
+        if (old_reaction_arg) |stored| stored.free(ctx.runtime);
+    }
+    ctx.runtime.job_queue.enqueueUnlinkedEntrySlot(prepared_job);
+    prepared_job_owned = false;
+}
+
+pub fn atomicsWaitAsync(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const view = try atomicsTypedArray(view_value, true);
+    if ((try atomicsBufferObject(view)).class_id != core.class.ids.shared_array_buffer) return error.TypeError;
+    const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const index = try atomicsValidateAccess(ctx, output, global, view, index_value, caller_function, caller_frame);
+    const expected_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
+    const expected = if (atomicsTypedArrayIsBigInt(view))
+        try toBigIntBitsForAtomics(ctx, output, global, expected_arg, caller_function, caller_frame)
+    else
+        try toInt32BitsForAtomics(ctx, output, global, expected_arg, caller_function, caller_frame);
+    const timeout_arg = if (args.len >= 4) args[3] else core.JSValue.float64(std.math.nan(f64));
+    const timeout = try toNumberForAtomics(ctx, output, global, timeout_arg, caller_function, caller_frame);
+    try atomicsValidateIndex(ctx.runtime, view, index);
+    const bytes = try atomicsElementBytes(view, index);
+    const current = atomicsReadBits(view, bytes);
+    if (current != atomicsMaskBits(view, expected)) {
+        const result = try value_ops.createStringValue(ctx.runtime, "not-equal");
+        defer result.free(ctx.runtime);
+        return atomicsWaitAsyncResult(ctx, false, result);
+    }
+    if (timeout <= 0 and !std.math.isNan(timeout)) {
+        const result = try value_ops.createStringValue(ctx.runtime, "timed-out");
+        defer result.free(ctx.runtime);
+        return atomicsWaitAsyncResult(ctx, false, result);
+    }
+
+    const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
+    defer promise.free(ctx.runtime);
+    if (objectFromValue(promise)) |promise_object| {
+        promise_object.promiseAtomicsWaitAsyncSlot().* = true;
+    }
+    const deadline = if (atomicsWaitTimeoutMilliseconds(timeout)) |timeout_ms|
+        std.Io.Timestamp.now(atomicsWaiterIo(), .awake).addDuration(std.Io.Duration.fromMilliseconds(timeout_ms))
+    else
+        null;
+    const key = try atomicsWaiterKey(view, bytes);
+    const waiter = try ctx.runtime.memory.create(AtomicsWaiter);
+    atomicsRetainWaiterKey(key);
+    waiter.* = .{
+        .key = key,
+        .promise = promise.dup(),
+        .realm = core.RealmRef.retain(ctx),
+        .deadline = deadline,
+    };
+    var waiter_owned = true;
+    errdefer if (waiter_owned) atomicsDestroyAsyncWaiter(waiter);
+
+    // The result wrapper is observable publication of this wait. Finish every
+    // fallible allocation before linking the node into the cross-runtime
+    // waiter registry; otherwise an OOM here leaves an unreachable Promise and
+    // RealmRef behind until context teardown.
+    const result = try atomicsWaitAsyncResult(ctx, true, promise);
+    atomicsLinkAsyncWaiter(waiter);
+    waiter_owned = false;
+    return result;
+}
+
+pub fn atomicsLinkAsyncWaiter(waiter: *AtomicsWaiter) void {
+    const ctx = waiter.realm.borrow().?;
+    ctx.runtime.assertOwnerThread();
+    const io = atomicsWaiterIo();
+    atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
+    defer atomics_ops.atomics_waiter_mutex.unlock(io);
+    atomicsLinkWaiter(waiter);
+}
+
+pub fn atomicsWaitAsyncResult(ctx: *core.JSContext, is_async: bool, value: core.JSValue) !core.JSValue {
+    var rooted_value = value;
+    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
+
+    const result = try core.Object.create(ctx.runtime, core.class.ids.object, null);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, &result.header);
+    try defineValueProperty(ctx.runtime, result, "async", core.JSValue.boolean(is_async));
+    try defineValueProperty(ctx.runtime, result, "value", rooted_value);
+    return result.value();
+}
+
+test "atomicsWaitAsyncResult roots direct function bytecode value while creating result object" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-atomics-wait-async-result-bytecode-symbol");
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
+
+    var result_payload = core.JSValue.functionBytecode(&fb.header);
+    var payload_alive = true;
+    defer if (payload_alive) result_payload.free(rt);
+
+    const old_threshold = rt.gcThreshold();
+    rt.setGCThreshold(0);
+    defer rt.setGCThreshold(old_threshold);
+
+    const result_value = try atomicsWaitAsyncResult(ctx, true, result_payload);
+    var result_alive = true;
+    defer if (result_alive) result_value.free(rt);
+    const result = objectFromValue(result_value) orelse return error.TypeError;
+
+    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    const value_key = try rt.internAtom("value");
+    defer rt.atoms.free(value_key);
+    {
+        const stored = try result.getProperty(value_key);
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(result_payload));
+    }
+
+    result_value.free(rt);
+    result_alive = false;
+    result_payload.free(rt);
+    payload_alive = false;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+}
+
+pub fn atomicsWaitAsyncPromise(rt: *core.JSRuntime, promise: *core.Object) bool {
+    _ = rt;
+    return promise.promiseAtomicsWaitAsync();
 }

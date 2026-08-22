@@ -1,3 +1,12 @@
+//! ECMAScript property descriptors at the Object internal-method boundary.
+//!
+//! Direct constructors store caller-supplied JSValues without retaining them;
+//! `fromSlot` instead returns owned duplicates, and `destroy` releases all
+//! present value/getter/setter fields. Presence bits distinguish absent from
+//! explicit `undefined`, matching QuickJS `JSPropertyDescriptor` near
+//! quickjs.c:1014. This compact core value type may be imported by higher
+//! layers but depends only on core property/value representations.
+
 const property = @import("property.zig");
 const JSValue = @import("value.zig").JSValue;
 

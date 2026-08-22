@@ -1,3 +1,13 @@
+//! Module-record graph, live-binding cells, linking, and async-evaluation state.
+//!
+//! A RealmContext module registry owns each `ModuleRecord` and its atoms,
+//! namespace/meta/exception values, closure cells, and dependency arrays.
+//! Request edges borrow records from that same registry; retained VarRefs and
+//! JSValues document the edges that keep bindings/results alive and are traced
+//! by core GC. QuickJS source map: `JSModuleDef` at quickjs.c:888-936. This is
+//! realm-core state used by parser/compiler/exec orchestration; it must not
+//! import exec or binding.
+
 const std = @import("std");
 
 const atom = @import("atom.zig");

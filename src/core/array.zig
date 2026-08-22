@@ -1,3 +1,12 @@
+//! Core array-index classification, Array identity checks, and literal construction.
+//!
+//! Index helpers are pure. Literal constructors either duplicate borrowed
+//! values or explicitly consume already-owned operand values, as their names
+//! and comments specify; temporary root slices cover allocating borrowed paths.
+//! QuickJS map: `JS_AtomIsArrayIndex` at quickjs.c:3634 and `OP_array_from`
+//! near quickjs.c:18239. Exec owns Array builtins, while this lower-layer seam
+//! may import core/libs only and never parser/exec/runtime/binding.
+
 const atom = @import("atom.zig");
 const JSValue = @import("value.zig").JSValue;
 const Object = @import("object.zig").Object;

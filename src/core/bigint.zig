@@ -1,3 +1,12 @@
+//! GC-managed BigInt storage bridging JSValue and the allocation-free bigint library.
+//!
+//! A `BigInt` owns either an external limb allocation or the inline FAM tail of
+//! its own GC block; borrowed library views must never deinit or realloc those
+//! limbs. Header offset, total size, alignment, and limb geometry are comptime
+//! pins used by JSValue decoding and GC accounting. QuickJS map: `JSBigInt` and
+//! its limb tail around quickjs.c:611-617. Core and higher layers may import
+//! this module; it depends only on core/libs, never exec/runtime/binding.
+
 const std = @import("std");
 const gc = @import("gc.zig");
 const libs = @import("../libs/root.zig");

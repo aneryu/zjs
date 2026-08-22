@@ -1,3 +1,12 @@
+//! Optional thread-local opcode and engine-operation profiling counters.
+//!
+//! Callers own `OpcodeProfile`; `activate` only publishes a borrowed pointer
+//! for the current thread and returns the previous one for lexical restoration.
+//! Fixed 256-entry arrays mirror the byte-sized opcode namespace and are a
+//! diagnostic ABI/layout surface, not GC state. This zjs-only instrumentation
+//! has no QuickJS ownership counterpart and may be consumed by exec/binding;
+//! as core it cannot import parser/exec/runtime/binding.
+
 const std = @import("std");
 const platform_clock = @import("../platform_clock.zig");
 

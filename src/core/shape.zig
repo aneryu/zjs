@@ -1,3 +1,13 @@
+//! Refcounted object shapes, property metadata, hash chains, and transitions.
+//!
+//! Objects retain a `Shape`; the Runtime shape registry owns hashed transition
+//! identities and clones shared shapes before mutation. The extern header and
+//! inline FAM order (properties before buckets) are codegen- and GC-load-
+//! bearing; deletion compaction preserves insertion order. QuickJS source map:
+//! `JSShapeProperty`/`JSShape` at quickjs.c:968-987 and FAM sizing near
+//! quickjs.c:5121. This core object-layout authority may be imported by exec,
+//! never the reverse.
+
 const atom = @import("atom.zig");
 const gc = @import("gc.zig");
 const memory = @import("memory.zig");

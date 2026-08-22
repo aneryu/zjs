@@ -253,6 +253,31 @@ conversion. Gate: suite + emission identity (cold error paths).
   0:0), hooks fully removed after. Emission cmp=0 on five corpora,
   suite 2330/1/0, test262 delta 0. Bare count 145 → 81 (78 Q5d masks
   remain + 3 recorder helpers).
+  **Batch 2 done 2026-08-22 (`eb627efe`) — Q5d CLOSED.** 73 of the 78
+  converted; four newly-touched families proven by fault injection
+  (4/4 "internal compiler error: ParserInvariant", hooks removed).
+  The safety boundary caught **five sites that are actually
+  malformed-source-reachable** (script top-level `using`, missing
+  break/continue label, continue to a non-loop label,
+  `const [...[a] = []]`, duplicate module class binding) — each proven
+  by CLI rc=1 + breakpoint on the bare exit; they were correctly NOT
+  converted and instead return to Q5c as a final message micro-batch.
+  End state: 8 bare sites = 3 recorder helpers + those five.
+  Side observation for the core zone: `zig fmt --check` fails on
+  pre-existing `src/core/gc.zig` formatting (untouched; fix rides the
+  next implq core round).
+  **Final micro-batch done 2026-08-22 (`1fbb4fe9`) — the Q5 arc
+  (Q5a/b/c/d) is CLOSED.** The five reclassified sites got real
+  diagnostics ("using declaration is not allowed at the top level of a
+  script" — checked against the test262 Early Error, "undefined label
+  'x'" with the name, "continue must target a loop label", "rest
+  element may not have an initializer", declaration-conflict family
+  reuse), each red-first. Terminal state verified: the only bare
+  `UnexpectedToken` returns in the tree are the three recorder-helper
+  exits themselves. From the 2026-08-21 baseline "every syntax error
+  says UnexpectedToken at EOF" to: exact positions everywhere, real
+  messages at every user-reachable site, and internal invariants
+  reporting as internal compiler errors.
 - **Q5a.** Every syntax error's line/column points at **EOF**, not the error
   site (verified by running the shipped binary: error on line 3 of a 4-line
   file reports `5:1`). Cause: `setFallbackSyntaxError` (`parser.zig:20357`)
@@ -506,7 +531,17 @@ ECMA-262/test262 as the semantic authority)
   **Batch 6 done 2026-08-22** (`abb6fbfc` pre-rebase): the last five —
   **exec is 81/81**. Also fixed en route: `compile_entry`'s
   internal-error `bufPrint(...) catch unreachable` (UB on an
-  over-long `anyerror` name) now falls back to a fixed literal. The standard is `src/lexer.zig`:
+  over-long `anyerror` name) now falls back to a fixed literal.
+  **Core batch 1 done 2026-08-22** (`487ab3c6`): twelve largest core
+  files documented (ownership, GC/layout pins, layer boundaries).
+  Identity closed under bistable-basin set membership: base and
+  candidate both produce the same two-member `.text` set, each pair
+  cmp=0 — the gates-audit "set membership, not single comparison"
+  rule applied. 13 core + 5 binding files remain tree-wide.
+  **Tree-wide closure 2026-08-22 (`0adf2b9b` post-rebase) — Q15 CLOSED
+  at 196/196** (semantic census; `libs/number_format.zig` keeps its
+  license block first with `//!` at line 23). Started 2026-08-22 at
+  76/196. The standard is `src/lexer.zig`:
 state what the module owns, the ownership/lifetime contracts a reader cannot
 infer from signatures, and reference coordinates where they exist. The worst
 offender is `promise_ops.zig` (4,755 lines, zero header, name undersells the
@@ -621,6 +656,15 @@ pair (`shape.zig`, `core/object.zig` — state why the fallible authority
 cannot fail on that path). Gate: identity (asserts Debug-only; use the Q7
 pattern).
 
+**Q18 — done 2026-08-22** (`040f2c43`, post-rebase): promise_ops
+4,766 → 4,103. Atomics waitAsync (214 lines) joined `atomics_ops`;
+sync/async explicit-resource-management (458 lines) joined
+`disposable_ops`; Reflect turned out to be already fully extracted —
+only a stale private back-reference remained, deleted. 32 compat
+aliases, zero external call-site churn, moved bodies md5-verified
+verbatim. Headers updated to match reality on both ends. `.text`
++608 B ruled the known anonymous-symbol bistable basin by follow-up
+same-source sampling. Original item:
 **Q18. `promise_ops.zig` is four modules wearing one name.** Promise
 combinators + Atomics + Reflect glue + Disposable share the file plus a
 68-line re-export alias wall. Cold split candidate (same shape as Q11 T1:

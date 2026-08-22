@@ -9868,6 +9868,53 @@ test "parser error long tail closes semantic and lookahead diagnostics" {
     }
 }
 
+test "parser source-reachable invariant masks carry specific diagnostics" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_]struct {
+        source: []const u8,
+        mode: parser.Mode,
+        message: []const u8,
+    }{
+        .{
+            .source = "using resource = null;",
+            .mode = .script,
+            .message = "using declaration is not allowed at the top level of a script",
+        },
+        .{
+            .source = "break missing;",
+            .mode = .script,
+            .message = "undefined label 'missing'",
+        },
+        .{
+            .source = "label: { continue label; }",
+            .mode = .script,
+            .message = "continue must target a loop label",
+        },
+        .{
+            .source = "const [...[value] = []] = [];",
+            .mode = .script,
+            .message = "rest element may not have an initializer",
+        },
+        .{
+            .source = "class Duplicate {} class Duplicate {}",
+            .mode = .module,
+            .message = "expected non-conflicting declaration, got end of input",
+        },
+    };
+
+    for (cases) |case| {
+        var parsed = try compileForTest(rt, case.source, .{
+            .mode = case.mode,
+            .filename = "source-reachable-diagnostic.js",
+        });
+        defer parsed.deinit();
+        const syntax_error = parsed.syntax_error orelse return error.TestExpectedEqual;
+        try std.testing.expectEqualStrings(case.message, syntax_error.message);
+    }
+}
+
 test "lexer syntax errors retain the failing token position" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

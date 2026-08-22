@@ -1,3 +1,12 @@
+//! Allocation-bounded ECMAScript Number/BigInt parsing and formatting helpers.
+//!
+//! Fixed-buffer Number paths borrow caller storage; BigInt clone/format paths
+//! return or temporarily allocate explicitly-owned library values. JSValue
+//! inputs remain borrowed throughout. The routines centralize QuickJS-compatible
+//! `ToNumber` whitespace/radix rules and dtoa output (`js_atof`/`js_dtoa`,
+//! quickjs.c:12987 and dtoa.c). This core conversion leaf may import core/libs,
+//! never parser/exec/runtime/binding.
+
 const dtoa = @import("../libs/number_format.zig");
 const bignum = @import("../libs/bigint.zig");
 const std = @import("std");

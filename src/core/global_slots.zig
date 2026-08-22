@@ -1,3 +1,12 @@
+//! Name-based access to caller-owned arrays of global-style atom/value slots.
+//!
+//! The containing realm/runtime structure owns slot-name atoms and stored
+//! JSValues. Reads return a retained value; replacement retains the new value
+//! before releasing the old one and never takes ownership of the lookup name.
+//! This mirrors QuickJS global variable cells (`JSVarRef`/global var table)
+//! without owning the table itself. Higher layers may use this core helper;
+//! it imports core only and never parser/exec/runtime/binding.
+
 const atom = @import("atom.zig");
 const runtime = @import("runtime.zig");
 const value = @import("value.zig");

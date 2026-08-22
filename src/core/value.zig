@@ -1,3 +1,14 @@
+//! The engine's 16-byte tagged JSValue representation and refcount operations.
+//!
+//! Immediate values are copied freely; object/string/symbol/bytecode/module
+//! values own one reference per JSValue and `dup`/`free` must balance against
+//! the originating Runtime. Borrowed views never extend that lifetime. The
+//! extern `Repr` field order, 8-byte tag, tag numbers, and alignment are
+//! compiler/plugin ABI and dispatch-codegen pins. QuickJS source map: JSValue
+//! tag/payload accessors in quickjs.h and the pointer decoders at
+//! quickjs.c:224-231. This core leaf is consumed throughout the engine and
+//! cannot depend on exec or binding.
+
 const std = @import("std");
 
 const bignum = @import("../libs/bigint.zig");

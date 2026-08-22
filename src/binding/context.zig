@@ -1,3 +1,12 @@
+//! Public embedding context facade over a core realm and exec semantics.
+//!
+//! A heap-created `JSContext` owns the initial reference to its stable core
+//! realm until `deinit`/`destroy`; `borrowCore` is explicitly non-owning.
+//! Evaluation, calls, conversion, properties, and exception APIs translate the
+//! core ownership rules into embedder-visible operations while lazily ensuring
+//! standard globals are installed. This binding seam may bridge core and exec
+//! (the QuickJS `JSContext` API role) but must never import CLI.
+
 const std = @import("std");
 const core = @import("../core/root.zig");
 const exec = @import("../exec/root.zig");

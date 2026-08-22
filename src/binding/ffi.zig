@@ -1,3 +1,12 @@
+//! Versioned C ABI descriptors and loader validation for native zjs plugins.
+//!
+//! Extern structs, enum values, magic/version fields, and the JSValue layout
+//! hash are ABI pins checked before a plugin callback can run. Slice views are
+//! borrowed for a call unless their descriptor supplies an explicit owner and
+//! deinitializer; opaque host objects likewise declare host-versus-JS lifetime
+//! and trace/finalize obligations. This is the embedder-facing FFI boundary: it
+//! may consume core/platform facilities but must not depend on CLI.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("../core/root.zig");

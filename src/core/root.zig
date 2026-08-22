@@ -1,3 +1,12 @@
+//! Internal aggregation root for the engine's dependency-low core layer.
+//!
+//! This file re-exports core identities and embedding option types without
+//! adding ownership: lifetime contracts remain with their defining modules.
+//! It is the sanctioned import surface for exec/runtime/binding and the public
+//! facade, while check_deps forbids core implementations from depending back
+//! on parser, exec, runtime, binding, builtins, or CLI. QuickJS has no matching
+//! translation unit; this is zjs's layer boundary.
+
 pub const subsystem_name = "core_runtime";
 
 pub const value = @import("value.zig");

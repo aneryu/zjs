@@ -1,3 +1,12 @@
+//! Embedder-facing stable property-name ids backed by Runtime atoms.
+//!
+//! `internStatic` returns one owned atom reference and the binding state must
+//! call `release` against the same Runtime. Property operations borrow the id;
+//! reads return the Object getter's owned JSValue result. The extern 32-bit
+//! representation is part of the plugin ABI and deliberately exposes no core
+//! Atom type. This binding helper may import core but, like all binding code,
+//! must not import CLI.
+
 const std = @import("std");
 const core = @import("../core/root.zig");
 

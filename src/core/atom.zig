@@ -1,3 +1,13 @@
+//! Runtime-owned atom interning, predefined ids, and symbol identity.
+//!
+//! Atom ids are table handles: interning returns an owned reference unless an
+//! API explicitly says borrowed, and every owned dynamic id must be released
+//! through its originating Runtime's `AtomTable`. Value-symbol atoms also root
+//! their refcounted name storage. Predefined ids are process-stable and need no
+//! release. QuickJS source map: the shared JSString/JSAtom representation at
+//! quickjs.c:583-599 and atom-table operations nearby. This core module may be
+//! consumed by higher layers but never imports exec or binding.
+
 const build_options = @import("build_options");
 const gc = @import("gc.zig");
 const memory = @import("memory.zig");

@@ -1,3 +1,13 @@
+//! Runtime-wide ownership, allocation, GC scheduling, roots, and host policy.
+//!
+//! `JSRuntime` owns the atom/class/shape registries, memory account, job FIFO,
+//! contexts, deferred native cleanup, and persistent handles. It is
+//! owner-thread confined except at the explicitly synchronized host seams;
+//! handles and root frames keep values alive but never transfer Runtime
+//! ownership. QuickJS source map: `JSRuntime` and its registries at
+//! quickjs.c:319-396. This is core infrastructure: exec/runtime/binding may
+//! import it, while this module must not import those higher layers.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const platform_clock = @import("../platform_clock.zig");

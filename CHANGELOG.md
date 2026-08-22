@@ -49,6 +49,20 @@ under the refactor-policy gates.
   also fails closed: it never returns the exception sentinel without first
   installing a pending exception (docs/impl-quality-backlog.md, Q16 Stage 1).
 
+- **Parser diagnostics arc complete.** The last five user-reachable bare
+  sites now explain themselves ("using declaration is not allowed at the
+  top level of a script", "undefined label 'x'", "continue must target a
+  loop label", "rest element may not have an initializer"); the only
+  remaining bare `UnexpectedToken` returns are the three recorder
+  helpers. Combined with the earlier batches, every syntax error now
+  carries an exact position and a real message.
+
+- **Q5d complete: every engine-internal parser invariant now reports as an
+  internal compiler error** (132 sites total across both batches). A
+  census-enforced safety boundary kept five genuinely user-reachable
+  syntax-error sites out of the conversion; their messages get the final
+  Q5c treatment instead.
+
 - **Engine-internal parser invariant failures no longer masquerade as user
   syntax errors.** A dedicated `ParserInvariant` error routes them through
   the internal-compiler-error report instead of `SyntaxError:

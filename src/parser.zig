@@ -2150,6 +2150,17 @@ pub const parser_core = struct {
             return error.UnexpectedToken;
         }
 
+        fn failUndefinedLabel(self: *State, atom_id: Atom) Error {
+            const label_name = self.function.atoms.name(atom_id) orelse return error.ParserInvariant;
+            var message_buffer: [PendingDiagnostic.message_capacity]u8 = undefined;
+            const message = std.fmt.bufPrint(
+                &message_buffer,
+                "undefined label '{s}'",
+                .{label_name},
+            ) catch "undefined label";
+            return self.failWithMessage(null, message);
+        }
+
         pub fn peekKind(self: *const State) tok.TokenKind {
             return self.token.val;
         }
@@ -3136,7 +3147,7 @@ pub const parser_core = struct {
         }
 
         fn takeLastAtomOperand(self: *State) Error!Atom {
-            if (self.currentAtomOperandLen() == 0) return Error.UnexpectedToken;
+            if (self.currentAtomOperandLen() == 0) return Error.ParserInvariant;
             return if (self.emit_to_function_def)
                 self.curFunc().takeLastAtomOperand()
             else
@@ -5500,8 +5511,8 @@ pub const parser_core = struct {
     /// LabelId-native mirror of QuickJS yield-star delegation
     /// (quickjs.c:28038-28131); no absolute parser PC enters the v2 stream.
     fn emitYieldStarDelegation(s: *State, is_async: bool) Error!void {
-        const done_atom = atom_module.predefinedId("done", .string) orelse return Error.UnexpectedToken;
-        const value_atom = atom_module.predefinedId("value", .string) orelse return Error.UnexpectedToken;
+        const done_atom = atom_module.predefinedId("done", .string) orelse return Error.ParserInvariant;
+        const value_atom = atom_module.predefinedId("value", .string) orelse return Error.ParserInvariant;
 
         try emitterOp(s, if (is_async) opcode.op.for_await_of_start else opcode.op.for_of_start);
         try emitterOp(s, opcode.op.drop);
@@ -5851,13 +5862,13 @@ pub const parser_core = struct {
         const v2b = s.activeBuilder();
         const field_form = v2b.code[pos] == opcode.op.get_field_opt_chain;
         const getter_size: u32 = if (field_form) 5 else 1;
-        if (pos + getter_size != v2b.code_len) return Error.UnexpectedToken;
+        if (pos + getter_size != v2b.code_len) return Error.ParserInvariant;
         const optional_label = try optionalChainExitAtEnd(s);
 
         if (field_form) {
-            if (v2b.atom_len == 0) return Error.UnexpectedToken;
+            if (v2b.atom_len == 0) return Error.ParserInvariant;
             const atom_id = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
-            if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.UnexpectedToken;
+            if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.ParserInvariant;
             if (atomNameIsPrivate(s, atom_id)) {
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
@@ -5906,12 +5917,12 @@ pub const parser_core = struct {
         const getter_size: usize = if (field_form) 5 else 1;
         const raw_label_pos = pos + getter_size;
         if (raw_label_pos + 5 != code.len or code[raw_label_pos] != opcode.op.label) {
-            return Error.UnexpectedToken;
+            return Error.ParserInvariant;
         }
         const optional_label = ParserLabelRef{
             .id = std.mem.readInt(u32, code[raw_label_pos + 1 ..][0..4], .little),
         };
-        if (optional_label.id == 0 or optional_label.id >= opcode.op.parser_label_tag) return Error.UnexpectedToken;
+        if (optional_label.id == 0 or optional_label.id >= opcode.op.parser_label_tag) return Error.ParserInvariant;
 
         if (field_form) {
             const atom_id: Atom = std.mem.readInt(u32, code[pos + 1 ..][0..4], .little);
@@ -5982,7 +5993,7 @@ pub const parser_core = struct {
         if (v2b.last_opcode_pos < 0)
             return .{ .kind = .plain, .optional_drop_count = 1 };
         const pos: u32 = @intCast(v2b.last_opcode_pos);
-        if (pos >= v2b.code_len) return Error.UnexpectedToken;
+        if (pos >= v2b.code_len) return Error.ParserInvariant;
 
         switch (v2b.code[pos]) {
             opcode.op.get_field_opt_chain,
@@ -5990,12 +6001,12 @@ pub const parser_core = struct {
             => {
                 const field_form = v2b.code[pos] == opcode.op.get_field_opt_chain;
                 const getter_size: u32 = if (field_form) 5 else 1;
-                if (pos + getter_size != v2b.code_len) return Error.UnexpectedToken;
+                if (pos + getter_size != v2b.code_len) return Error.ParserInvariant;
                 const optional_label = try optionalChainExitAtEnd(s);
                 if (field_form) {
-                    if (v2b.atom_len == 0) return Error.UnexpectedToken;
+                    if (v2b.atom_len == 0) return Error.ParserInvariant;
                     const atom_id = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
-                    if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.UnexpectedToken;
+                    if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.ParserInvariant;
                 }
 
                 // qjs js_parse_postfix_expr (quickjs.c:26771-26790): a
@@ -7084,7 +7095,7 @@ pub const parser_core = struct {
             const raw_value = raw_array.value();
             const raw_atom = try rt.internAtom("raw");
             defer rt.atoms.free(raw_atom);
-            template_object.defineOwnProperty(rt, raw_atom, core.Descriptor.data(raw_value, false, false, false)) catch return Error.UnexpectedToken;
+            template_object.defineOwnProperty(rt, raw_atom, core.Descriptor.data(raw_value, false, false, false)) catch return Error.ParserInvariant;
             return .{
                 .rt = rt,
                 .template_value = template_object.value(),
@@ -7114,7 +7125,7 @@ pub const parser_core = struct {
                 self.rt,
                 core.atom.atomFromUInt32(self.depth),
                 core.Descriptor.data(cooked_value, true, true, true),
-            ) catch return Error.UnexpectedToken;
+            ) catch return Error.ParserInvariant;
 
             const raw = core.string.String.createUtf8(self.rt, raw_bytes) catch return Error.InvalidUtf8;
             const raw_value = raw.value();
@@ -7123,7 +7134,7 @@ pub const parser_core = struct {
                 self.rt,
                 core.atom.atomFromUInt32(self.depth),
                 core.Descriptor.data(raw_value, true, true, true),
-            ) catch return Error.UnexpectedToken;
+            ) catch return Error.ParserInvariant;
             self.depth += 1;
         }
 
@@ -7188,7 +7199,7 @@ pub const parser_core = struct {
                     try Emitter.op(s, opcode.op.inc);
                 } else if (sparse_active) {
                     var index_buf: [16]u8 = undefined;
-                    const index_name = std.fmt.bufPrint(&index_buf, "{d}", .{sparse_index}) catch return Error.UnexpectedToken;
+                    const index_name = std.fmt.bufPrint(&index_buf, "{d}", .{sparse_index}) catch return Error.ParserInvariant;
                     const index_atom = try s.function.atoms.internString(index_name);
                     defer s.function.atoms.free(index_atom);
                     try Emitter.opAtom(s, opcode.op.define_field, index_atom);
@@ -8524,7 +8535,7 @@ pub const parser_core = struct {
     }
 
     fn emitCatchMarkerDropsFromDepth(s: *State, current_depth: *u32, target_depth: u32) Error!void {
-        if (current_depth.* < target_depth) return Error.UnexpectedToken;
+        if (current_depth.* < target_depth) return Error.ParserInvariant;
         while (current_depth.* > target_depth) {
             // qjs abrupt cleanup (quickjs.c:28371-28377): drop each crossed catch-marker slot without a source marker.
             try Emitter.opNoSource(s, opcode.op.drop);
@@ -10362,7 +10373,7 @@ pub const parser_core = struct {
                 try Emitter.op(s, opcode.op.strict_eq);
                 const next_case_label = try emitterNewLabel(s);
                 try emitterJump(s, opcode.op.if_false, next_case_label);
-                if (no_match_jumps_count >= no_match_labels.len) return Error.UnexpectedToken;
+                if (no_match_jumps_count >= no_match_labels.len) return Error.ParserInvariant;
                 no_match_labels[no_match_jumps_count] = next_case_label;
                 no_match_jumps_count += 1;
                 if (fallthrough_label) |label| {
@@ -10409,7 +10420,7 @@ pub const parser_core = struct {
                 try s.advance();
                 try s.expectToken(':');
                 if (no_match_jumps_count == 0) {
-                    if (no_match_jumps_count >= no_match_labels.len) return Error.UnexpectedToken;
+                    if (no_match_jumps_count >= no_match_labels.len) return Error.ParserInvariant;
                     const no_match_label = try emitterNewLabel(s);
                     try emitterJump(s, opcode.op.goto, no_match_label);
                     no_match_labels[no_match_jumps_count] = no_match_label;
@@ -10682,7 +10693,10 @@ pub const parser_core = struct {
             s.top_level_lexical_as_module_ref and
             s.atProgramBodyScope();
         if (kind == .async and !s.in_async and !module_top_level) return Error.AwaitOutsideAsyncFunction;
-        if ((!module_top_level and s.atProgramBodyScope()) or s.using_block_frames.items.len == 0) return Error.UnexpectedToken;
+        if (!module_top_level and s.atProgramBodyScope()) {
+            return s.failWithMessage(null, "using declaration is not allowed at the top level of a script");
+        }
+        if (s.using_block_frames.items.len == 0) return Error.ParserInvariant;
         if (kind == .async) try s.advance(); // consume `await`
         try s.advance(); // consume `using`
 
@@ -10845,9 +10859,9 @@ pub const parser_core = struct {
     fn controlTargetCrossesFinallyFrame(s: *State, target: FinallyControlTarget, frame_index: usize) Error!bool {
         const frame = s.return_finally_frames.items[frame_index];
         if (target.label_atom) |atom_id| {
-            const label_frame_index = s.findLabelFrame(atom_id) orelse return Error.UnexpectedToken;
+            const label_frame_index = s.findLabelFrame(atom_id) orelse return Error.ParserInvariant;
             if (target.kind == .@"continue" and !s.label_frames.items[label_frame_index].allow_continue) {
-                return Error.UnexpectedToken;
+                return Error.ParserInvariant;
             }
             return label_frame_index < frame.label_depth;
         }
@@ -10860,9 +10874,9 @@ pub const parser_core = struct {
     fn controlTargetCrossesFinallyBody(s: *State, target: FinallyControlTarget, frame_index: usize) Error!bool {
         const frame = s.finally_body_control_frames.items[frame_index];
         if (target.label_atom) |atom_id| {
-            const label_frame_index = s.findLabelFrame(atom_id) orelse return Error.UnexpectedToken;
+            const label_frame_index = s.findLabelFrame(atom_id) orelse return Error.ParserInvariant;
             if (target.kind == .@"continue" and !s.label_frames.items[label_frame_index].allow_continue) {
-                return Error.UnexpectedToken;
+                return Error.ParserInvariant;
             }
             return label_frame_index < frame.label_depth;
         }
@@ -11001,7 +11015,7 @@ pub const parser_core = struct {
         const builder = s.activeBuilder();
         if (builder.last_opcode_pos < 0) return null;
         const pc: u32 = @intCast(builder.last_opcode_pos);
-        if (pc >= builder.code_len) return Error.UnexpectedToken;
+        if (pc >= builder.code_len) return Error.ParserInvariant;
         const op_id = builder.code[pc];
         if (op_id != opcode.op.call and op_id != opcode.op.call_method) return null;
 
@@ -11024,7 +11038,7 @@ pub const parser_core = struct {
         if (builder.source_len != 0 and
             builder.source_slots[builder.source_len - 1].temp_offset > pc)
         {
-            return Error.UnexpectedToken;
+            return Error.ParserInvariant;
         }
         builder.addSourceMarker(@intCast(source.line_num), @intCast(source.col_num)) catch |err|
             return mapBuilderError(err);
@@ -11112,7 +11126,7 @@ pub const parser_core = struct {
 
     fn resolveFinallyControlTarget(s: *State, target: FinallyControlTarget) Error!ResolvedFinallyControlTarget {
         if (target.label_atom) |atom_id| {
-            const label_index = s.findLabelFrame(atom_id) orelse return Error.UnexpectedToken;
+            const label_index = s.findLabelFrame(atom_id) orelse return s.failUndefinedLabel(atom_id);
             const label_frame = s.label_frames.items[label_index];
             return switch (target.kind) {
                 .@"break" => .{
@@ -11126,7 +11140,7 @@ pub const parser_core = struct {
                 },
                 .@"continue" => blk: {
                     if (!label_frame.allow_continue or label_frame.control_frame_depth == 0) {
-                        return Error.UnexpectedToken;
+                        return s.failWithMessage(null, "continue must target a loop label");
                     }
                     break :blk .{
                         .depth = label_frame.control_frame_depth,
@@ -11140,7 +11154,7 @@ pub const parser_core = struct {
 
         return switch (target.kind) {
             .@"break" => blk: {
-                if (s.break_frame_lens.items.len == 0) return Error.UnexpectedToken;
+                if (s.break_frame_lens.items.len == 0) return Error.ParserInvariant;
                 break :blk .{
                     .depth = s.break_frame_lens.items.len,
                     .catch_marker_depth = s.break_frame_catch_marker_depths.getLast(),
@@ -11149,7 +11163,7 @@ pub const parser_core = struct {
                 };
             },
             .@"continue" => blk: {
-                if (s.continue_frame_lens.items.len == 0) return Error.UnexpectedToken;
+                if (s.continue_frame_lens.items.len == 0) return Error.ParserInvariant;
                 break :blk .{
                     .depth = s.continue_frame_lens.items.len,
                     .catch_marker_depth = s.continue_frame_catch_marker_depths.getLast(),
@@ -11193,7 +11207,7 @@ pub const parser_core = struct {
                 break :blk s.continue_frame_labels.items[resolved.depth - 1];
             },
         };
-        const label_id = label orelse return Error.UnexpectedToken;
+        const label_id = label orelse return Error.ParserInvariant;
         try emitterJumpNoSource(s, opcode.op.goto, label_id);
     }
 
@@ -11244,7 +11258,7 @@ pub const parser_core = struct {
             try emitCrossedControlBlockCleanup(s, current);
             block_cursor.* = current.prev;
         }
-        if (boundary != null) return Error.UnexpectedToken;
+        if (boundary != null) return Error.ParserInvariant;
         return false;
     }
 
@@ -11290,7 +11304,7 @@ pub const parser_core = struct {
             &scope_cursor,
             &catch_marker_depth,
         )) return;
-        return Error.UnexpectedToken;
+        return Error.ParserInvariant;
     }
 
     fn patchJumpTarget(s: *State, operand_offset: usize, target: u32) Error!void {
@@ -11817,8 +11831,8 @@ pub const parser_core = struct {
             iteration_using_frame_active = true;
             const stack_loc = try armCurrentUsingBlockFrame(s);
 
-            const atom_id = target_atom orelse return Error.UnexpectedToken;
-            const value_loc = iteration_using_value_loc orelse return Error.UnexpectedToken;
+            const atom_id = target_atom orelse return Error.ParserInvariant;
+            const value_loc = iteration_using_value_loc orelse return Error.ParserInvariant;
             // zjs-only `for (using ... of ...)` lowering: mirror the
             // legacy iteration-value load and duplicate exactly.
             try Emitter.opU16(s, opcode.op.get_loc, value_loc);
@@ -12360,7 +12374,7 @@ pub const parser_core = struct {
                                 .is_const = false,
                                 .var_kind = .normal,
                             });
-                            if (idx != @as(i32, @intCast(arg_index))) return Error.UnexpectedToken;
+                            if (idx != @as(i32, @intCast(arg_index))) return Error.ParserInvariant;
                             try Emitter.opU16(s, opcode.op.rest, @intCast(arg_index));
                             try Emitter.opU16(s, opcode.op.put_arg, @intCast(arg_index));
                             s.curFunc().defined_arg_count = @intCast(arg_index);
@@ -12383,7 +12397,7 @@ pub const parser_core = struct {
                             parameter_scope != null,
                             true,
                             false,
-                        )) return Error.UnexpectedToken;
+                        )) return Error.ParserInvariant;
                     } else if (s.peekKind() == '{') {
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
@@ -12398,7 +12412,7 @@ pub const parser_core = struct {
                             parameter_scope != null,
                             true,
                             false,
-                        )) return Error.UnexpectedToken;
+                        )) return Error.ParserInvariant;
                     } else {
                         return s.failExpectedDescription("binding name or binding pattern");
                     }
@@ -13296,7 +13310,7 @@ pub const parser_core = struct {
                                 .is_const = false,
                                 .var_kind = .normal,
                             });
-                            if (idx != @as(i32, @intCast(arg_index))) return Error.UnexpectedToken;
+                            if (idx != @as(i32, @intCast(arg_index))) return Error.ParserInvariant;
                             try Emitter.opU16(s, opcode.op.rest, @intCast(arg_index));
                             try Emitter.opU16(s, opcode.op.put_arg, @intCast(arg_index));
                             s.curFunc().defined_arg_count = @intCast(arg_index);
@@ -13319,7 +13333,7 @@ pub const parser_core = struct {
                             parameter_scope != null,
                             true,
                             false,
-                        )) return Error.UnexpectedToken;
+                        )) return Error.ParserInvariant;
                     } else if (s.peekKind() == '{') {
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
@@ -13334,7 +13348,7 @@ pub const parser_core = struct {
                             parameter_scope != null,
                             true,
                             false,
-                        )) return Error.UnexpectedToken;
+                        )) return Error.ParserInvariant;
                     } else {
                         return s.failExpectedDescription("binding name or binding pattern");
                     }
@@ -13779,7 +13793,7 @@ pub const parser_core = struct {
     /// `nip_catch` is required because a suspended yield may have expression
     /// operands between the marker and the injected return value.
     fn emitStackTopCatchMarkerDropsToDepth(s: *State, current_depth: *u32, target_depth: u32) Error!void {
-        if (current_depth.* < target_depth) return Error.UnexpectedToken;
+        if (current_depth.* < target_depth) return Error.ParserInvariant;
         while (current_depth.* > target_depth) {
             // qjs emit_return (quickjs.c:28415-28419): preserve TOS while removing a catch record.
             try Emitter.op(s, opcode.op.nip_catch);
@@ -13799,7 +13813,7 @@ pub const parser_core = struct {
     ) Error!void {
         const async_generator = s.in_async and s.in_generator;
         const return_atom = if (async_generator)
-            atom_module.predefinedId("return", .string) orelse return Error.UnexpectedToken
+            atom_module.predefinedId("return", .string) orelse return Error.ParserInvariant
         else
             atom_module.null_atom;
         while (block_cursor.*) |current| {
@@ -13856,7 +13870,7 @@ pub const parser_core = struct {
                 }
             }
         }
-        if (boundary != null) return Error.UnexpectedToken;
+        if (boundary != null) return Error.ParserInvariant;
     }
 
     fn parseArrayPatternBody(s: *State, mode: PatternMode) Error!void {
@@ -13890,7 +13904,9 @@ pub const parser_core = struct {
             } else if (try tokenStartsNestedPattern(s, @as(tok.TokenKind, @intCast(']')))) {
                 if (is_rest) {
                     const topology = try scanPatternTopology(s);
-                    if (topology.following == @as(tok.TokenKind, @intCast('='))) return Error.UnexpectedToken;
+                    if (topology.following == @as(tok.TokenKind, @intCast('='))) {
+                        return s.failWithMessage(null, "rest element may not have an initializer");
+                    }
                     try emitArrayPatternRest(s, 0);
                 } else {
                     try Emitter.opU8(s, opcode.op.for_of_next, 0);
@@ -13933,7 +13949,7 @@ pub const parser_core = struct {
         while (s.peekKind() != @as(tok.TokenKind, @intCast('}'))) {
             if (s.peekKind() == tok.TOK_EOF) return s.failExpectedToken('}');
             if (s.peekKind() == tok.TOK_ELLIPSIS) {
-                if (!has_rest) return Error.UnexpectedToken;
+                if (!has_rest) return Error.ParserInvariant;
                 s.features.insert(.spread_rest);
                 try s.advance();
                 var target = try parsePatternTarget(s, mode);
@@ -13974,17 +13990,17 @@ pub const parser_core = struct {
                     }
                     try Emitter.op(s, opcode.op.get_array_el2);
                 } else {
-                    const property = property_info orelse return Error.UnexpectedToken;
+                    const property = property_info orelse return Error.ParserInvariant;
                     if (has_rest) try addNamedObjectRestExclusion(s, property.atom);
                     try Emitter.opAtom(s, opcode.op.get_field2, property.atom);
                 }
                 _ = try parseDestructuringElement(s, mode, true, true, ParseFlags.default);
             } else if (!computed and !explicit_target and shorthandPatternCanUseGetField2(s, mode)) {
-                const property = property_info orelse return Error.UnexpectedToken;
+                const property = property_info orelse return Error.ParserInvariant;
                 if (has_rest) try addNamedObjectRestExclusion(s, property.atom);
                 var target = try shorthandPatternTarget(s, mode, property);
                 defer target.deinit(s);
-                if (target.depth() != 0) return Error.UnexpectedToken;
+                if (target.depth() != 0) return Error.ParserInvariant;
                 // QuickJS's direct shorthand-binding arm keeps the source and
                 // fetches the value in one opcode. Reference-producing `var`
                 // bindings and assignment patterns stay on the depth-aware
@@ -14001,7 +14017,7 @@ pub const parser_core = struct {
                     }
                     try Emitter.opU8(s, opcode.op.using, opcode.using_sub.dup1);
                 } else {
-                    const property = property_info orelse return Error.UnexpectedToken;
+                    const property = property_info orelse return Error.ParserInvariant;
                     if (has_rest) try addNamedObjectRestExclusion(s, property.atom);
                     try Emitter.op(s, opcode.op.dup);
                 }
@@ -14009,7 +14025,7 @@ pub const parser_core = struct {
                 var target = if (explicit_target)
                     try parsePatternTarget(s, mode)
                 else
-                    try shorthandPatternTarget(s, mode, property_info orelse return Error.UnexpectedToken);
+                    try shorthandPatternTarget(s, mode, property_info orelse return Error.ParserInvariant);
                 defer target.deinit(s);
 
                 if (computed) {
@@ -14071,7 +14087,7 @@ pub const parser_core = struct {
         switch (s.peekKind()) {
             @as(tok.TokenKind, @intCast('[')) => try parseArrayPatternBody(s, mode),
             @as(tok.TokenKind, @intCast('{')) => try parseObjectPatternBody(s, mode, topology.has_top_level_rest),
-            else => return Error.UnexpectedToken,
+            else => return Error.ParserInvariant,
         }
 
         if (has_initializer) {
@@ -14834,7 +14850,7 @@ pub const parser_core = struct {
                         // ordinary fclosure expression from the parent.
                         s.activeBuilder().rollback(ctor_snap);
                         const cpool_idx = s.curFunc().child_list[child_index].parent_cpool_idx;
-                        if (cpool_idx < 0 or cpool_idx > std.math.maxInt(u16)) return Error.UnexpectedToken;
+                        if (cpool_idx < 0 or cpool_idx > std.math.maxInt(u16)) return Error.ParserInvariant;
                         s.class_constructor_cpool_idx = @intCast(cpool_idx);
                     }
                     s.in_constructor = saved_in_constructor;
@@ -14977,12 +14993,12 @@ pub const parser_core = struct {
         const init_fd = parent.child_list[child_index];
         // qjs js_parse_class: enable the dormant instance-brand prologue
         // after the first private method or accessor requires it.
-        const v2b = init_fd.v2_builder orelse return Error.UnexpectedToken;
-        if (v2b.code_len == 0) return Error.UnexpectedToken;
+        const v2b = init_fd.v2_builder orelse return Error.ParserInvariant;
+        if (v2b.code_len == 0) return Error.ParserInvariant;
         switch (v2b.code[0]) {
             opcode.op.push_false => v2b.code[0] = opcode.op.push_true,
             opcode.op.push_true => {},
-            else => return Error.UnexpectedToken,
+            else => return Error.ParserInvariant,
         }
     }
 
@@ -15112,7 +15128,7 @@ pub const parser_core = struct {
     ) Error!void {
         const child_index = try ensureClassStaticInitFunction(s);
         const parent_fd = s.curFunc();
-        if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
+        if (child_index >= parent_fd.child_list.len) return Error.ParserInvariant;
         const init_fd = parent_fd.child_list[child_index];
 
         const saved_ctx = try enterFieldInitFunction(s, init_fd);
@@ -15171,7 +15187,7 @@ pub const parser_core = struct {
     ) Error!void {
         const child_index = try ensureClassFieldsInitFunction(s);
         const parent_fd = s.curFunc();
-        if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
+        if (child_index >= parent_fd.child_list.len) return Error.ParserInvariant;
         const init_fd = parent_fd.child_list[child_index];
 
         const saved_ctx = try enterFieldInitFunction(s, init_fd);
@@ -15279,11 +15295,11 @@ pub const parser_core = struct {
 
     fn finishClassInitFunction(s: *State, child_index: usize) Error!void {
         const parent_fd = s.curFunc();
-        if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
+        if (child_index >= parent_fd.child_list.len) return Error.ParserInvariant;
         const init_fd = parent_fd.child_list[child_index];
         // qjs js_is_live_code shape over the child's temp stream: get_prev_opcode
         // is Builder.last_opcode_pos (an invalidated merge answers live).
-        const v2b = init_fd.v2_builder orelse return Error.UnexpectedToken;
+        const v2b = init_fd.v2_builder orelse return Error.ParserInvariant;
         const needs_return = if (v2b.last_opcode_pos < 0)
             true
         else switch (v2b.code[@intCast(v2b.last_opcode_pos)]) {
@@ -15438,7 +15454,7 @@ pub const parser_core = struct {
             try Emitter.op(s, opcode.op.swap);
             return;
         }
-        if (kind != .method) return Error.UnexpectedToken;
+        if (kind != .method) return Error.ParserInvariant;
 
         const key_atom = try classComputedFieldTempAtom(s);
         defer s.function.atoms.free(key_atom);
@@ -15460,7 +15476,7 @@ pub const parser_core = struct {
     fn emitInstanceComputedPublicFieldInitializer(s: *State, key_atom: Atom, has_initializer: bool) Error!void {
         const child_index = try ensureClassFieldsInitFunction(s);
         const parent_fd = s.curFunc();
-        if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
+        if (child_index >= parent_fd.child_list.len) return Error.ParserInvariant;
         const init_fd = parent_fd.child_list[child_index];
 
         const saved_ctx = try enterFieldInitFunction(s, init_fd);
@@ -15494,7 +15510,7 @@ pub const parser_core = struct {
             try Emitter.opU8(s, opcode.op.define_method_computed, 0);
             return;
         }
-        if (kind != .method) return Error.UnexpectedToken;
+        if (kind != .method) return Error.ParserInvariant;
 
         const key_atom = try classComputedFieldTempAtom(s);
         defer s.function.atoms.free(key_atom);
@@ -15532,7 +15548,7 @@ pub const parser_core = struct {
     fn emitClassStaticBlock(s: *State) Error!void {
         const child_index = try ensureClassStaticInitFunction(s);
         const parent_fd = s.curFunc();
-        if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
+        if (child_index >= parent_fd.child_list.len) return Error.ParserInvariant;
         const init_fd = parent_fd.child_list[child_index];
 
         const saved_ctx = try enterStaticBlockFunction(s, init_fd);
@@ -15639,9 +15655,9 @@ pub const parser_core = struct {
     fn emitClassFieldsInitValue(s: *State, class_fields_init_child_index: ?u16) Error!void {
         if (class_fields_init_child_index) |child_index| {
             const parent_fd = s.curFunc();
-            if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
+            if (child_index >= parent_fd.child_list.len) return Error.ParserInvariant;
             const cpool_idx = parent_fd.child_list[child_index].parent_cpool_idx;
-            if (cpool_idx < 0) return Error.UnexpectedToken;
+            if (cpool_idx < 0) return Error.ParserInvariant;
             try s.emitFClosure(@intCast(cpool_idx));
             // qjs emit_class_init_end: bind the initializer closure to the
             // class home object.
@@ -15663,9 +15679,9 @@ pub const parser_core = struct {
     fn emitClassStaticInitCall(s: *State, class_static_init_child_index: ?u16) Error!void {
         const child_index = class_static_init_child_index orelse return;
         const parent_fd = s.curFunc();
-        if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
+        if (child_index >= parent_fd.child_list.len) return Error.ParserInvariant;
         const cpool_idx = parent_fd.child_list[child_index].parent_cpool_idx;
-        if (cpool_idx < 0) return Error.UnexpectedToken;
+        if (cpool_idx < 0) return Error.ParserInvariant;
 
         // The class constructor is the sole stack value here. Duplicate it as
         // the call receiver/home object, then invoke the lexical static
@@ -15864,9 +15880,9 @@ pub const parser_core = struct {
             // the binding visible from heritage/body code; final scope-entry
             // lowering still establishes the outer LET's TDZ before runtime
             // evaluation starts.
-            const declaration_atom = class_name orelse return Error.UnexpectedToken;
+            const declaration_atom = class_name orelse return Error.ParserInvariant;
             if (s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and hasKnownBinding(s, declaration_atom)) {
-                return Error.UnexpectedToken;
+                return s.failExpectedDescription("non-conflicting declaration");
             }
             switch (try s.defineVar(declaration_atom, .let_)) {
                 .local => |idx| class_decl_local_idx = idx,
@@ -15895,7 +15911,7 @@ pub const parser_core = struct {
             // still in TDZ (`class C { [C](){} }` must throw). Initialize the
             // name only after those keys (and method definitions) have run.
             if (class_name_local_idx) |local_idx| try emitClassLocalInitFromClassStack(s, local_idx);
-            const fields_idx = class_fields_init_local_idx orelse return Error.UnexpectedToken;
+            const fields_idx = class_fields_init_local_idx orelse return Error.ParserInvariant;
             try emitClassFieldsInitLocalInitFromClassStack(s, fields_idx, parsed_class_fields_init_child_index);
             // qjs js_parse_class: drop the prototype after installing the
             // fields initializer.
@@ -15913,7 +15929,7 @@ pub const parser_core = struct {
                 // containing declaration binding while retaining the value.
                 try Emitter.opU16(s, opcode.op.set_loc, local_idx);
             } else if (!top_level_class_binding) {
-                return Error.UnexpectedToken;
+                return Error.ParserInvariant;
             }
             if (top_level_class_binding) {
                 try s.emitScopePutVarInit(name_atom);
@@ -15979,7 +15995,7 @@ pub const parser_core = struct {
                 // the marker either way.
                 const marker_pos = define_builder.code_len;
                 const marker_after_opcode = std.math.add(u32, marker_pos, 1) catch return Error.BytecodeOverflow;
-                if (marker_after_opcode <= define_class_pos) return Error.UnexpectedToken;
+                if (marker_after_opcode <= define_class_pos) return Error.ParserInvariant;
                 try Emitter.opU32(s, opcode.op.set_class_name, marker_after_opcode - define_class_pos);
                 s.last_class_name_patch = .{
                     .builder = define_builder,
@@ -15991,7 +16007,7 @@ pub const parser_core = struct {
         }
 
         if (is_decl) {
-            const declaration_name_atom = class_name orelse return Error.UnexpectedToken;
+            const declaration_name_atom = class_name orelse return Error.ParserInvariant;
             class_name = null;
             return declaration_name_atom;
         }
@@ -16098,7 +16114,7 @@ pub const parser_core = struct {
         // body scope through the child builder without a source marker.
         v2b.emitOpU16(opcode.op.enter_scope, @intCast(body_scope)) catch |err| return mapBuilderError(err);
         const this_idx_i32 = child_fd.ensureThisBinding() catch return error.OutOfMemory;
-        if (this_idx_i32 < 0 or this_idx_i32 > std.math.maxInt(u16)) return Error.UnexpectedToken;
+        if (this_idx_i32 < 0 or this_idx_i32 > std.math.maxInt(u16)) return Error.ParserInvariant;
         const this_idx: u16 = @intCast(this_idx_i32);
         if (s.class_has_extends) {
             // qjs js_parse_class_default_ctor (quickjs.c:25109): initialize
@@ -16346,7 +16362,7 @@ pub const parser_core = struct {
     fn ensureModuleDefaultExportBinding(s: *State) Error!void {
         switch (try s.defineVar(atom_star_default, .let_)) {
             .global => {},
-            .local, .argument => return Error.UnexpectedToken,
+            .local, .argument => return Error.ParserInvariant,
         }
     }
 
@@ -16441,7 +16457,7 @@ pub const parser_core = struct {
             try s.advance();
             if (s.peekKind() == tok.TOK_CLASS) {
                 if (hasExportDefaultClassName(s)) {
-                    const name_atom = (try parseClass(s, true)) orelse return Error.UnexpectedToken;
+                    const name_atom = (try parseClass(s, true)) orelse return Error.ParserInvariant;
                     defer s.function.atoms.free(name_atom);
                     try addModuleExportName(s, atom_default, name_atom);
                 } else {
@@ -16610,7 +16626,7 @@ pub const parser_core = struct {
 
         // export class
         if (next_tok == tok.TOK_CLASS) {
-            const name_atom = (try parseClass(s, true)) orelse return Error.UnexpectedToken;
+            const name_atom = (try parseClass(s, true)) orelse return Error.ParserInvariant;
             defer s.function.atoms.free(name_atom);
             try addModuleExportName(s, name_atom, name_atom);
             return;

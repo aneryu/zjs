@@ -1,3 +1,14 @@
+//! Runtime memory accounting, small-object slabs, and allocation entry points.
+//!
+//! `MemoryAccount` owns every allocation made through it and couples byte/
+//! allocation counters to the GC registry; callers must free through the same
+//! account and with the matching type/alignment/FAM size. Production GC
+//! threshold checks intentionally occur at the object boundary, while OOM and
+//! accounting probes are comptime diagnostic tiers. QuickJS source map:
+//! `JSMallocState` at quickjs.c:314 and the allocator family around
+//! quickjs.c:1566-1826. This leaf core allocator must not depend on exec or
+//! binding.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");

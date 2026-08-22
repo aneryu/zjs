@@ -1,3 +1,12 @@
+//! Typed Zig embedder bindings for host objects, methods, and static properties.
+//!
+//! `JSObject` turns a comptime payload specification into realm-local class
+//! installation and typed call adapters. Storage policy states whether JS or
+//! the host owns external payloads; GC-visible payload fields require explicit
+//! trace hooks, and JS-owned storage also requires deinit. Returned Binding
+//! views borrow their Realm unless explicitly retained. This public adapter may
+//! bridge core and exec, but the binding layer must never import CLI.
+
 const std = @import("std");
 const core = @import("../core/root.zig");
 const JSBytes = core.JSValue.Bytes;

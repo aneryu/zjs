@@ -1,3 +1,13 @@
+//! Refcounted flat strings, deferred ropes, and code-unit operations.
+//!
+//! A string JSValue owns one reference to either a flat `String` or a
+//! `StringRope`; rope nodes own both children and materialize a stable flat
+//! body on first borrowed-content read. Allocation and release always go
+//! through the originating Runtime. Layout and the four-byte RC prefix are
+//! load-bearing for JSValue decoding and GC accounting. QuickJS source map:
+//! `JSString`/`JSStringRope` at quickjs.c:583-609. Core and higher layers may
+//! import this module; it has no exec/binding dependency.
+
 const atom_mod = @import("atom.zig");
 const gc = @import("gc.zig");
 const unicode = @import("../libs/unicode.zig");

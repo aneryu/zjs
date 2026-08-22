@@ -1,3 +1,13 @@
+//! Borrowed byte views and embedder-owned backing stores for binary JS objects.
+//!
+//! `JSBytes(Value)` projects ArrayBuffer, DataView, and TypedArray storage
+//! without retaining the source value: callers must keep that value alive and
+//! revalidate detachment/bounds before reuse. A `Store`, by contrast, carries
+//! its explicit deinitializer and owns or shares the backing bytes according
+//! to its constructor. The generic Value parameter avoids a core import cycle
+//! and exposes this type as `JSValue.Bytes` to higher layers. QuickJS source
+//! map: `JSArrayBuffer`/`JSTypedArray` at quickjs.c:760-778.
+
 const std = @import("std");
 
 pub fn JSBytes(comptime Value: type) type {

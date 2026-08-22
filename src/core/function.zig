@@ -1,3 +1,13 @@
+//! Core function records, native-builtin identities, and function-object creation.
+//!
+//! `FunctionRecord` owns its name atom and the active payload's bytecode,
+//! constants, bound values, arguments, and home-object reference; `destroy`
+//! releases that complete set through the originating Runtime account. Encoded
+//! builtin domains are stable dispatch metadata shared with exec, not VM state.
+//! QuickJS map: `JSFunctionBytecode` and function object data around
+//! quickjs.c:619-713. Higher layers may consume this core module; it may not
+//! import parser/exec/runtime/binding.
+
 const atom = @import("atom.zig");
 const memory = @import("memory.zig");
 const JSValue = @import("value.zig").JSValue;

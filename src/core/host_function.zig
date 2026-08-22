@@ -1,3 +1,13 @@
+//! Realm-neutral host-function ABI records and builtin dispatch metadata.
+//!
+//! This module defines ids, callable tags, callback records, and the narrow
+//! protocol structs shared across the core/exec boundary. Call arguments,
+//! receiver, realm, and output are borrowed for the call; records state
+//! explicitly when userdata or returned JSValues are owned. Keep these types
+//! free of VM implementation dependencies: exec supplies adapters, while core
+//! object storage and binding clients consume the protocol. The comptime
+//! record shapes are part of builtin/plugin ABI dispatch and are layout-pinned.
+
 const std = @import("std");
 const Object = @import("object.zig").Object;
 const JSValue = @import("value.zig").JSValue;

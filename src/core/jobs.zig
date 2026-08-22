@@ -1,3 +1,13 @@
+//! Runtime-owned typed FIFO entries for Promise, module, Atomics, and GC jobs.
+//!
+//! Every queued `Job` retains its execution `RealmRef` and owns the JSValues
+//! in its active payload until the entry runs or deinitializes. Runner
+//! callbacks receive the borrowed realm selected by the entry, not by the host
+//! context draining the queue; retry phases preserve single invocation and
+//! publication. This core representation contains no VM calls: exec installs
+//! and consumes runners. QuickJS analogue: the Runtime job list and
+//! `JS_EnqueueJob`/`JS_ExecutePendingJob` machinery.
+
 const memory = @import("memory.zig");
 const core = @import("root.zig");
 

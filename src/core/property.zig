@@ -1,3 +1,12 @@
+//! Property metadata and the storage variants carried by an Object's shape slots.
+//!
+//! Shape flags select exactly one `Slot` arm; Object owns, traces, and destroys
+//! that arm's JSValue/object/VarRef edge, while auto-init descriptors are stable
+//! Runtime-owned interned records. Packed flags and extern auto-init layouts are
+//! compile-time pinned because object lookup and GC dispatch read them directly.
+//! QuickJS map: `JSShapeProperty`/`JSProperty` around quickjs.c:944-952. This
+//! core representation may import core/libs only, never parser/exec/runtime/binding.
+
 const class = @import("class.zig");
 const gc = @import("gc.zig");
 const JSValue = @import("value.zig").JSValue;

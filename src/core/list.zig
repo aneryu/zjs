@@ -1,3 +1,11 @@
+//! Allocation-free intrusive doubly-linked list primitives.
+//!
+//! The embedding owner supplies every `Node` and must keep it alive while
+//! linked; `List` owns no nodes and performs no allocation. Removal clears both
+//! links so destruction and re-insertion are explicit, while Debug rejects
+//! double insertion. This is a zjs core utility with no QuickJS-specific
+//! payload or GC tracing; any layer may consume it, and it imports only `std`.
+
 pub const Node = struct {
     prev: ?*Node = null,
     next: ?*Node = null,

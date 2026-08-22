@@ -1,9 +1,9 @@
 //! Promise jobs, capabilities, reactions, combinators, and async-function glue.
 //!
-//! This historical file also houses Atomics, Reflect glue, and Disposable
-//! algorithms: four domains sharing one namespace until the Q18 split. The
-//! alias wall preserves the ownership seams and names established by earlier
-//! extractions; it is not an invitation to merge their implementations back.
+//! Atomics waiters live with the rest of Atomics in `atomics_ops.zig`; sync and
+//! async explicit-resource-management algorithms live in `disposable_ops.zig`.
+//! Compatibility aliases below preserve the historical `promise_ops` names
+//! without moving their implementations back into this module.
 //! Call inputs are borrowed, returned values are owned, and values retained by
 //! promise/job payloads must be duplicated. Keep the measured
 //! `ctx`/`output`/`global`/caller-function/caller-frame ABI explicit, and never
@@ -12,7 +12,6 @@
 
 const std = @import("std");
 const function_ops = @import("function_ops.zig");
-const reflect_ops = @import("reflect_ops.zig");
 const atomics_ops = @import("atomics_ops.zig");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -58,23 +57,7 @@ const forof_ops = @import("forof_ops.zig");
 const object_ops = @import("object_ops.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const string_ops = @import("string_ops.zig");
-const AtomicsWaiter = atomics_ops.AtomicsWaiter;
-const ReflectConstructResolution = reflect_ops.ReflectConstructResolution;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
-const atomicsBufferObject = object_ops.atomicsBufferObject;
-const atomicsElementBytes = atomics_ops.atomicsElementBytes;
-const atomicsLinkWaiter = atomics_ops.atomicsLinkWaiter;
-const atomicsMaskBits = atomics_ops.atomicsMaskBits;
-const atomicsReadBits = atomics_ops.atomicsReadBits;
-const atomicsReleaseWaiterKey = atomics_ops.atomicsReleaseWaiterKey;
-const atomicsRetainWaiterKey = atomics_ops.atomicsRetainWaiterKey;
-const atomicsTypedArray = array_ops.atomicsTypedArray;
-const atomicsTypedArrayIsBigInt = array_ops.atomicsTypedArrayIsBigInt;
-const atomicsValidateAccess = atomics_ops.atomicsValidateAccess;
-const atomicsValidateIndex = atomics_ops.atomicsValidateIndex;
-const atomicsWaitTimeoutMilliseconds = atomics_ops.atomicsWaitTimeoutMilliseconds;
-const atomicsWaiterIo = atomics_ops.atomicsWaiterIo;
-const atomicsWaiterKey = atomics_ops.atomicsWaiterKey;
 const boundFunctionArgs = call_runtime.boundFunctionArgs;
 const cachedRealmObject = object_ops.cachedRealmObject;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
@@ -84,7 +67,6 @@ const closeIteratorFromVm = forof_ops.closeIteratorFromVm;
 const closeIteratorFromVmImpl = forof_ops.closeIteratorFromVmImpl;
 const constructDynamicFunctionFromSource = function_ops.constructDynamicFunctionFromSource;
 const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
-const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
 const constructorPrototypeObject = object_ops.constructorPrototypeObject;
 const createGeneratorObject = object_ops.createGeneratorObject;
 const createIteratorResult = iterator_ops.createIteratorResult;
@@ -109,18 +91,47 @@ const proxyAwareOwnPropertyDescriptor = object_ops.proxyAwareOwnPropertyDescript
 const proxyTrapKeyValue = object_ops.proxyTrapKeyValue;
 const createBuiltinFunction = builtin_glue.createBuiltinFunction;
 const defineToStringTag = iterator_ops.defineToStringTag;
-const suppressedErrorForDispose = disposable_ops.suppressedErrorForDispose;
 const runNextAtomicsHostCompletion = atomics_ops.runNextAtomicsHostCompletion;
 const runNextOsRwHandler = call_runtime.runNextOsRwHandler;
 const runNextOsTimer = call_runtime.runNextOsTimer;
-const runtimeErrorValueForDisposableDispose = disposable_ops.runtimeErrorValueForDisposableDispose;
 const setGeneratorResumeCompletionType = call_runtime.setGeneratorResumeCompletionType;
 const storeRealmValue = builtin_glue.storeRealmValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
-const toBigIntBitsForAtomics = atomics_ops.toBigIntBitsForAtomics;
-const toInt32BitsForAtomics = atomics_ops.toInt32BitsForAtomics;
-const toNumberForAtomics = atomics_ops.toNumberForAtomics;
 const valueTruthy = coercion_ops.valueTruthy;
+
+// Historical namespace compatibility for the two domains extracted by Q18.
+pub const usingCreateAsyncDisposableStack = disposable_ops.usingCreateAsyncDisposableStack;
+pub const usingAddAsyncResource = disposable_ops.usingAddAsyncResource;
+pub const usingDisposeAsyncStack = disposable_ops.usingDisposeAsyncStack;
+pub const usingDisposeAsyncStackForThrow = disposable_ops.usingDisposeAsyncStackForThrow;
+pub const AsyncDisposableStackMethod = disposable_ops.AsyncDisposableStackMethod;
+pub const asyncDisposableStackMethodFromMarker = disposable_ops.asyncDisposableStackMethodFromMarker;
+pub const asyncDisposableStackConstructWithPrototype = disposable_ops.asyncDisposableStackConstructWithPrototype;
+pub const asyncDisposableStackReceiver = disposable_ops.asyncDisposableStackReceiver;
+pub const asyncDisposableStackMethodCall = disposable_ops.asyncDisposableStackMethodCall;
+pub const asyncDisposableStackUse = disposable_ops.asyncDisposableStackUse;
+pub const asyncDisposableStackAdopt = disposable_ops.asyncDisposableStackAdopt;
+pub const asyncDisposableStackDefer = disposable_ops.asyncDisposableStackDefer;
+pub const asyncDisposableStackMove = disposable_ops.asyncDisposableStackMove;
+pub const asyncDisposableStackStoreCapability = disposable_ops.asyncDisposableStackStoreCapability;
+pub const asyncDisposableStackDisposeAsync = disposable_ops.asyncDisposableStackDisposeAsync;
+pub const asyncDisposableStackContinuation = disposable_ops.asyncDisposableStackContinuation;
+pub const asyncDisposableStackContinuationCall = disposable_ops.asyncDisposableStackContinuationCall;
+pub const asyncDisposableStackContinueOrReject = disposable_ops.asyncDisposableStackContinueOrReject;
+pub const asyncDisposableStackContinue = disposable_ops.asyncDisposableStackContinue;
+pub const asyncDisposeResource = disposable_ops.asyncDisposeResource;
+pub const asyncDisposableStackAwaitValue = disposable_ops.asyncDisposableStackAwaitValue;
+pub const asyncDisposableStackRecordError = disposable_ops.asyncDisposableStackRecordError;
+pub const asyncDisposableStackResolveStored = disposable_ops.asyncDisposableStackResolveStored;
+pub const asyncDisposableStackRejectStored = disposable_ops.asyncDisposableStackRejectStored;
+pub const asyncIteratorAsyncDispose = disposable_ops.asyncIteratorAsyncDispose;
+pub const atomicsDestroyAsyncWaiter = atomics_ops.atomicsDestroyAsyncWaiter;
+pub const atomicsDestroyAsyncWaiterOpaque = atomics_ops.atomicsDestroyAsyncWaiterOpaque;
+pub const atomicsRunAsyncWaiterCompletion = atomics_ops.atomicsRunAsyncWaiterCompletion;
+pub const atomicsWaitAsync = atomics_ops.atomicsWaitAsync;
+pub const atomicsLinkAsyncWaiter = atomics_ops.atomicsLinkAsyncWaiter;
+pub const atomicsWaitAsyncResult = atomics_ops.atomicsWaitAsyncResult;
+pub const atomicsWaitAsyncPromise = atomics_ops.atomicsWaitAsyncPromise;
 
 pub fn promisePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
     if (global.cachedPromiseProto(rt)) |prototype| return prototype;
@@ -236,193 +247,6 @@ pub fn asyncGeneratorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *c
     return object;
 }
 
-pub fn usingCreateAsyncDisposableStack(
-    ctx: *core.JSContext,
-    global: *core.Object,
-) !core.JSValue {
-    // Parser disposal capabilities are internal records, not observable
-    // `AsyncDisposableStack` constructions. Keep the class payload/continuation
-    // machinery while avoiding user-mutated constructor/prototype lookup.
-    return asyncDisposableStackConstructWithPrototype(ctx, global, null);
-}
-
-pub fn usingAddAsyncResource(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const stack = try asyncDisposableStackReceiver(args[0]);
-    return asyncDisposableStackUse(ctx, output, global, stack, args[1..2], null, null);
-}
-
-pub fn usingDisposeAsyncStack(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    _ = try asyncDisposableStackReceiver(args[0]);
-    return asyncDisposableStackDisposeAsync(ctx, output, global, args[0], null, null);
-}
-
-pub fn usingDisposeAsyncStackForThrow(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    var capability = try defaultPromiseCapability(ctx, output, global, null, null);
-    errdefer capability.deinit(ctx.runtime);
-
-    const stack = try asyncDisposableStackReceiver(args[0]);
-    if (stack.disposableStackDisposed()) {
-        try promiseRejectCapability(ctx, output, global, capability.reject, args[1], null, null);
-        return capability.releaseCallbacks(ctx.runtime);
-    }
-
-    stack.disposableStackDisposedSlot().* = true;
-    try asyncDisposableStackStoreCapability(stack, ctx.runtime, capability);
-    try asyncDisposableStackContinueOrReject(ctx, output, global, stack, args[1], null, null);
-    return capability.releaseCallbacks(ctx.runtime);
-}
-
-pub const AsyncDisposableStackMethod = enum(u8) {
-    use = 1,
-    adopt = 2,
-    defer_ = 3,
-    dispose_async = 4,
-    move = 5,
-    disposed_get = 6,
-};
-
-pub fn asyncDisposableStackMethodFromMarker(marker: u8) ?AsyncDisposableStackMethod {
-    return switch (marker) {
-        @intFromEnum(AsyncDisposableStackMethod.use) => .use,
-        @intFromEnum(AsyncDisposableStackMethod.adopt) => .adopt,
-        @intFromEnum(AsyncDisposableStackMethod.defer_) => .defer_,
-        @intFromEnum(AsyncDisposableStackMethod.dispose_async) => .dispose_async,
-        @intFromEnum(AsyncDisposableStackMethod.move) => .move,
-        @intFromEnum(AsyncDisposableStackMethod.disposed_get) => .disposed_get,
-        else => null,
-    };
-}
-
-pub fn asyncDisposableStackConstructWithPrototype(
-    ctx: *core.JSContext,
-    _: *core.Object,
-    prototype: ?*core.Object,
-) !core.JSValue {
-    const stack = try core.Object.create(ctx.runtime, core.class.ids.async_disposable_stack, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &stack.header);
-    return stack.value();
-}
-
-pub fn asyncDisposableStackReceiver(receiver: core.JSValue) !*core.Object {
-    const object = objectFromValue(receiver) orelse return error.TypeError;
-    if (object.class_id != core.class.ids.async_disposable_stack) return error.TypeError;
-    return object;
-}
-
-pub fn asyncDisposableStackMethodCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    function_object: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const marker = function_object.asyncDisposableStackMethod();
-    if (marker == 0) return null;
-    const method = asyncDisposableStackMethodFromMarker(marker) orelse return error.TypeError;
-    if (method == .dispose_async) return try asyncDisposableStackDisposeAsync(ctx, output, global, receiver, caller_function, caller_frame);
-    const stack = try asyncDisposableStackReceiver(receiver);
-    return switch (method) {
-        .use => try asyncDisposableStackUse(ctx, output, global, stack, args, caller_function, caller_frame),
-        .adopt => try asyncDisposableStackAdopt(ctx.runtime, stack, args),
-        .defer_ => try asyncDisposableStackDefer(ctx.runtime, stack, args),
-        .move => try asyncDisposableStackMove(ctx, global, stack),
-        .disposed_get => core.JSValue.boolean(stack.disposableStackDisposed()),
-        .dispose_async => unreachable,
-    };
-}
-
-pub fn asyncDisposableStackUse(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (stack.disposableStackDisposed()) return error.ReferenceError;
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (value.isNull() or value.isUndefined()) {
-        try stack.appendDisposableResource(ctx.runtime, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), .use, .async, .direct);
-        return value.dup();
-    }
-    if (!value.isObject()) return error.TypeError;
-
-    const async_dispose_method = try getValueProperty(ctx, output, global, value, core.atom.ids.Symbol_asyncDispose, caller_function, caller_frame);
-    defer async_dispose_method.free(ctx.runtime);
-    if (!async_dispose_method.isNull() and !async_dispose_method.isUndefined()) {
-        if (!isCallableValue(async_dispose_method)) return error.TypeError;
-        try stack.appendDisposableResource(ctx.runtime, value, async_dispose_method, .use, .async, .direct);
-        return value.dup();
-    }
-
-    const dispose_method = try getValueProperty(ctx, output, global, value, core.atom.ids.Symbol_dispose, caller_function, caller_frame);
-    defer dispose_method.free(ctx.runtime);
-    if (dispose_method.isNull() or dispose_method.isUndefined() or !isCallableValue(dispose_method)) return error.TypeError;
-    try stack.appendDisposableResource(ctx.runtime, value, dispose_method, .use, .async, .async_from_sync);
-    return value.dup();
-}
-
-pub fn asyncDisposableStackAdopt(
-    rt: *core.JSRuntime,
-    stack: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (stack.disposableStackDisposed()) return error.ReferenceError;
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const on_dispose = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    if (!isCallableValue(on_dispose)) return error.TypeError;
-    try stack.appendDisposableResource(rt, value, on_dispose, .adopt, .async, .direct);
-    return value.dup();
-}
-
-pub fn asyncDisposableStackDefer(
-    rt: *core.JSRuntime,
-    stack: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (stack.disposableStackDisposed()) return error.ReferenceError;
-    const on_dispose = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (!isCallableValue(on_dispose)) return error.TypeError;
-    try stack.appendDisposableResource(rt, core.JSValue.undefinedValue(), on_dispose, .defer_, .async, .direct);
-    return core.JSValue.undefinedValue();
-}
-
-pub fn asyncDisposableStackMove(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    stack: *core.Object,
-) !core.JSValue {
-    if (stack.disposableStackDisposed()) return error.ReferenceError;
-    const prototype = constructorPrototypeFromGlobal(ctx.runtime, global, "AsyncDisposableStack");
-    const moved = try core.Object.create(ctx.runtime, core.class.ids.async_disposable_stack, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &moved.header);
-    try stack.moveDisposableResourcesTo(ctx.runtime, moved);
-    stack.disposableStackDisposedSlot().* = true;
-    return moved.value();
-}
-
 pub fn defaultPromiseCapability(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -446,232 +270,6 @@ pub fn promiseResolveCapability(
 ) !void {
     const result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{value}, caller_function, caller_frame);
     result.free(ctx.runtime);
-}
-
-pub fn asyncDisposableStackStoreCapability(stack: *core.Object, rt: *core.JSRuntime, capability: PromiseCapabilityVm) !void {
-    const resolve = capability.resolve.dup();
-    var resolve_owned = true;
-    errdefer if (resolve_owned) resolve.free(rt);
-    const reject = capability.reject.dup();
-    var reject_owned = true;
-    errdefer if (reject_owned) reject.free(rt);
-
-    const resolve_slot = stack.disposableStackAsyncResolveSlot();
-    const reject_slot = stack.disposableStackAsyncRejectSlot();
-
-    stack.clearDisposableStackAsyncCapability(rt);
-    resolve_slot.* = resolve;
-    resolve_owned = false;
-    reject_slot.* = reject;
-    reject_owned = false;
-}
-
-pub fn asyncDisposableStackDisposeAsync(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    var capability = try defaultPromiseCapability(ctx, output, global, caller_function, caller_frame);
-    errdefer capability.deinit(ctx.runtime);
-
-    const stack = asyncDisposableStackReceiver(receiver) catch {
-        const reason = try promiseErrorValue(ctx, global, error.TypeError);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
-    };
-    if (stack.disposableStackDisposed()) {
-        try promiseResolveCapability(ctx, output, global, capability.resolve, core.JSValue.undefinedValue(), caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
-    }
-
-    stack.disposableStackDisposedSlot().* = true;
-    try asyncDisposableStackStoreCapability(stack, ctx.runtime, capability);
-    try asyncDisposableStackContinueOrReject(ctx, output, global, stack, null, caller_function, caller_frame);
-    return capability.releaseCallbacks(ctx.runtime);
-}
-
-pub fn asyncDisposableStackContinuation(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    stack: *core.Object,
-    rejected: bool,
-) !core.JSValue {
-    const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    errdefer callback.free(rt);
-    const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    try callback_object.setInternalCallableTag(rt, .async_disposable_stack_continuation);
-    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncDisposeStackSlot(rt), stack.value().dup());
-    (try callback_object.functionAsyncDisposeRejectedSlot(rt)).* = rejected;
-    return callback;
-}
-
-pub fn asyncDisposableStackContinuationCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    function_object: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const stack_value = function_object.functionAsyncDisposeStack() orelse return null;
-    const stack = objectFromValue(stack_value) orelse return error.TypeError;
-    if (stack.class_id != core.class.ids.async_disposable_stack) return error.TypeError;
-    const rejected = function_object.functionAsyncDisposeRejected();
-    const rejection = if (rejected) (if (args.len >= 1) args[0] else core.JSValue.undefinedValue()) else null;
-    try asyncDisposableStackContinueOrReject(ctx, output, global, stack, rejection, caller_function, caller_frame);
-    return core.JSValue.undefinedValue();
-}
-
-pub fn asyncDisposableStackContinueOrReject(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *core.Object,
-    awaited_rejection: ?core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !void {
-    asyncDisposableStackContinue(ctx, output, global, stack, awaited_rejection, caller_function, caller_frame) catch |err| {
-        const reason = try promiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
-        try asyncDisposableStackRejectStored(ctx, output, global, stack, reason, caller_function, caller_frame);
-    };
-}
-
-pub fn asyncDisposableStackContinue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *core.Object,
-    awaited_rejection: ?core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !void {
-    if (awaited_rejection) |reason| {
-        try asyncDisposableStackRecordError(ctx, output, global, stack, reason, caller_function, caller_frame);
-    }
-
-    while (stack.popDisposableResource()) |resource| {
-        defer resource.destroy(ctx.runtime);
-        const result = asyncDisposeResource(ctx, output, global, resource, caller_function, caller_frame) catch |err| {
-            const thrown = try runtimeErrorValueForDisposableDispose(ctx, global, err);
-            defer thrown.free(ctx.runtime);
-            try asyncDisposableStackRecordError(ctx, output, global, stack, thrown, caller_function, caller_frame);
-            continue;
-        };
-        defer result.free(ctx.runtime);
-        if (resource.hint == .async) {
-            try asyncDisposableStackAwaitValue(ctx, output, global, stack, result, caller_function, caller_frame);
-            return;
-        }
-    }
-
-    const pending_error_slot = stack.disposableStackAsyncErrorSlot();
-    if (pending_error_slot.*) |reason| {
-        try asyncDisposableStackRejectStored(ctx, output, global, stack, reason, caller_function, caller_frame);
-        return;
-    }
-    try asyncDisposableStackResolveStored(ctx, output, global, stack, core.JSValue.undefinedValue(), caller_function, caller_frame);
-}
-
-pub fn asyncDisposeResource(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    resource: core.object.DisposableResource,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (resource.method.isUndefined()) return core.JSValue.undefinedValue();
-    const result = switch (resource.kind) {
-        .use => try callValueOrBytecodeRoot(ctx, output, global, resource.value, resource.method, &.{}, caller_function, caller_frame),
-        .adopt => try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{resource.value}, caller_function, caller_frame),
-        .defer_ => try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{}, caller_function, caller_frame),
-    };
-    if (resource.method_kind == .async_from_sync) {
-        result.free(ctx.runtime);
-        return core.JSValue.undefinedValue();
-    }
-    return result;
-}
-
-pub fn asyncDisposableStackAwaitValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *core.Object,
-    value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !void {
-    const promise_constructor = try promiseDefaultConstructor(ctx, global);
-    defer promise_constructor.free(ctx.runtime);
-    const awaited = try promiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, caller_function, caller_frame);
-    defer awaited.free(ctx.runtime);
-
-    const on_fulfilled = try asyncDisposableStackContinuation(ctx.runtime, global, stack, false);
-    defer on_fulfilled.free(ctx.runtime);
-    const on_rejected = try asyncDisposableStackContinuation(ctx.runtime, global, stack, true);
-    defer on_rejected.free(ctx.runtime);
-
-    // Same await-shaped internal attach as qjs js_async_function_resume
-    // (quickjs.c:21268-21290): perform_promise_then, never a .then read.
-    try performPromiseThen(ctx, output, global, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
-}
-
-pub fn asyncDisposableStackRecordError(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *core.Object,
-    error_value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !void {
-    const slot = stack.disposableStackAsyncErrorSlot();
-    if (slot.*) |suppressed| {
-        const combined = try suppressedErrorForDispose(ctx, output, global, error_value, suppressed, caller_function, caller_frame);
-        try stack.setOptionalValueSlot(ctx.runtime, slot, combined);
-    } else {
-        try stack.setOptionalValueSlot(ctx.runtime, slot, error_value.dup());
-    }
-}
-
-pub fn asyncDisposableStackResolveStored(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *core.Object,
-    value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !void {
-    const resolve_value = (stack.disposableStackAsyncResolveSlot().*) orelse return;
-    const resolve = resolve_value.dup();
-    defer resolve.free(ctx.runtime);
-    try promiseResolveCapability(ctx, output, global, resolve, value, caller_function, caller_frame);
-    stack.clearDisposableStackAsyncCapability(ctx.runtime);
-}
-
-pub fn asyncDisposableStackRejectStored(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *core.Object,
-    reason: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !void {
-    const reject_value = (stack.disposableStackAsyncRejectSlot().*) orelse return;
-    const reject = reject_value.dup();
-    defer reject.free(ctx.runtime);
-    try promiseRejectCapability(ctx, output, global, reject, reason, caller_function, caller_frame);
-    stack.clearDisposableStackAsyncCapability(ctx.runtime);
 }
 
 pub fn promiseConstruct(
@@ -3180,216 +2778,6 @@ pub fn constructAsyncGeneratorFunctionFromSource(
     return constructDynamicFunctionFromSource(ctx, output, global, constructor, constructor, args, .async_generator, caller_function, caller_frame);
 }
 
-pub fn atomicsDestroyAsyncWaiter(waiter: *AtomicsWaiter) void {
-    const ctx = waiter.realm.borrow().?;
-    const rt = ctx.runtime;
-    rt.assertOwnerThread();
-    if (waiter.promise) |promise| promise.free(rt);
-    atomicsReleaseWaiterKey(&waiter.key);
-    waiter.realm.deinit();
-    rt.memory.destroy(AtomicsWaiter, waiter);
-}
-
-pub fn atomicsDestroyAsyncWaiterOpaque(raw_waiter: *anyopaque) void {
-    const waiter: *AtomicsWaiter = @ptrCast(@alignCast(raw_waiter));
-    atomicsDestroyAsyncWaiter(waiter);
-}
-
-/// Run one owner-thread waitAsync completion. `drainOnePendingJob` reserves the
-/// unlinked entry's queue slot before calling this function. Every failure is
-/// before Promise publication and leaves that reservation untouched so the
-/// typed completion can be restored at the FIFO head. Success consumes the
-/// reservation with the follow-up Promise job as its final no-fail step.
-pub fn atomicsRunAsyncWaiterCompletion(
-    ctx: *core.JSContext,
-    payload: *const jobs_mod.AtomicsWaiterPayload,
-) core.errors.RuntimeError!void {
-    const waiter: *AtomicsWaiter = @ptrCast(@alignCast(payload.waiter));
-    std.debug.assert(waiter.realm.borrow() == ctx);
-    ctx.runtime.assertOwnerThread();
-    const promise = payload.promise;
-    const promise_object = objectFromValue(promise) orelse return error.TypeError;
-    if (promise_object.class_id != core.class.ids.promise) return error.TypeError;
-    if (promise_object.promiseResultSlot().* != null) {
-        ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
-        return;
-    }
-    const result = if (waiter.completion == .notified) "ok" else "timed-out";
-    const result_value = try value_ops.createStringValue(ctx.runtime, result);
-    var result_value_owned = true;
-    errdefer if (result_value_owned) result_value.free(ctx.runtime);
-    var prepared_job = jobs_mod.Job.initPromise(ctx, promise);
-    var prepared_job_owned = true;
-    errdefer if (prepared_job_owned) prepared_job.deinit();
-
-    const result_slot = promise_object.promiseResultSlot();
-
-    var reaction_arg_value: ?core.JSValue = null;
-    errdefer if (reaction_arg_value) |value| value.free(ctx.runtime);
-    const reaction_arg_slot = promise_object.promiseReactionArgSlot();
-    const needs_reaction_arg = promise_object.promiseReactionCallback() != null and promise_object.promiseReactionArg() == null;
-    if (needs_reaction_arg) {
-        reaction_arg_value = result_value.dup();
-    }
-
-    if (promise_object.promiseReactionCallback() != null) {
-        // A .then/await already installed the lazy single reaction callback.
-        // Leave the promise result unset: settlePendingPromiseReaction runs that
-        // callback and then fires this promise's reaction list (which settles the
-        // chained .then promise). Pre-setting the result here would make that
-        // drain early-return (promiseResult != null) and drop the chain after the
-        // first reaction. The callback receives the settle value via the reaction
-        // arg below; free the now-unused result_value.
-        result_value.free(ctx.runtime);
-        result_value_owned = false;
-    } else {
-        const old_result = result_slot.*;
-        result_slot.* = result_value;
-        result_value_owned = false;
-        promise_object.promiseIsRejectedSlot().* = false;
-        if (old_result) |stored| stored.free(ctx.runtime);
-    }
-    if (reaction_arg_value) |value| {
-        const old_reaction_arg = reaction_arg_slot.*;
-        reaction_arg_slot.* = value;
-        reaction_arg_value = null;
-        if (old_reaction_arg) |stored| stored.free(ctx.runtime);
-    }
-    ctx.runtime.job_queue.enqueueUnlinkedEntrySlot(prepared_job);
-    prepared_job_owned = false;
-}
-
-pub fn atomicsWaitAsync(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const view = try atomicsTypedArray(view_value, true);
-    if ((try atomicsBufferObject(view)).class_id != core.class.ids.shared_array_buffer) return error.TypeError;
-    const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const index = try atomicsValidateAccess(ctx, output, global, view, index_value, caller_function, caller_frame);
-    const expected_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    const expected = if (atomicsTypedArrayIsBigInt(view))
-        try toBigIntBitsForAtomics(ctx, output, global, expected_arg, caller_function, caller_frame)
-    else
-        try toInt32BitsForAtomics(ctx, output, global, expected_arg, caller_function, caller_frame);
-    const timeout_arg = if (args.len >= 4) args[3] else core.JSValue.float64(std.math.nan(f64));
-    const timeout = try toNumberForAtomics(ctx, output, global, timeout_arg, caller_function, caller_frame);
-    try atomicsValidateIndex(ctx.runtime, view, index);
-    const bytes = try atomicsElementBytes(view, index);
-    const current = atomicsReadBits(view, bytes);
-    if (current != atomicsMaskBits(view, expected)) {
-        const result = try value_ops.createStringValue(ctx.runtime, "not-equal");
-        defer result.free(ctx.runtime);
-        return atomicsWaitAsyncResult(ctx, false, result);
-    }
-    if (timeout <= 0 and !std.math.isNan(timeout)) {
-        const result = try value_ops.createStringValue(ctx.runtime, "timed-out");
-        defer result.free(ctx.runtime);
-        return atomicsWaitAsyncResult(ctx, false, result);
-    }
-
-    const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
-    defer promise.free(ctx.runtime);
-    if (objectFromValue(promise)) |promise_object| {
-        promise_object.promiseAtomicsWaitAsyncSlot().* = true;
-    }
-    const deadline = if (atomicsWaitTimeoutMilliseconds(timeout)) |timeout_ms|
-        std.Io.Timestamp.now(atomicsWaiterIo(), .awake).addDuration(std.Io.Duration.fromMilliseconds(timeout_ms))
-    else
-        null;
-    const key = try atomicsWaiterKey(view, bytes);
-    const waiter = try ctx.runtime.memory.create(AtomicsWaiter);
-    atomicsRetainWaiterKey(key);
-    waiter.* = .{
-        .key = key,
-        .promise = promise.dup(),
-        .realm = core.RealmRef.retain(ctx),
-        .deadline = deadline,
-    };
-    var waiter_owned = true;
-    errdefer if (waiter_owned) atomicsDestroyAsyncWaiter(waiter);
-
-    // The result wrapper is observable publication of this wait. Finish every
-    // fallible allocation before linking the node into the cross-runtime
-    // waiter registry; otherwise an OOM here leaves an unreachable Promise and
-    // RealmRef behind until context teardown.
-    const result = try atomicsWaitAsyncResult(ctx, true, promise);
-    atomicsLinkAsyncWaiter(waiter);
-    waiter_owned = false;
-    return result;
-}
-
-pub fn atomicsLinkAsyncWaiter(waiter: *AtomicsWaiter) void {
-    const ctx = waiter.realm.borrow().?;
-    ctx.runtime.assertOwnerThread();
-    const io = atomicsWaiterIo();
-    atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
-    defer atomics_ops.atomics_waiter_mutex.unlock(io);
-    atomicsLinkWaiter(waiter);
-}
-
-pub fn atomicsWaitAsyncResult(ctx: *core.JSContext, is_async: bool, value: core.JSValue) !core.JSValue {
-    var rooted_value = value;
-    var root_frame = core.runtime.rootValues(.{&rooted_value});
-    root_frame.activate(ctx.runtime);
-    defer root_frame.deactivate(ctx.runtime);
-
-    const result = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &result.header);
-    try defineValueProperty(ctx.runtime, result, "async", core.JSValue.boolean(is_async));
-    try defineValueProperty(ctx.runtime, result, "value", rooted_value);
-    return result.value();
-}
-
-test "atomicsWaitAsyncResult roots direct function bytecode value while creating result object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-atomics-wait-async-result-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
-
-    var result_payload = core.JSValue.functionBytecode(&fb.header);
-    var payload_alive = true;
-    defer if (payload_alive) result_payload.free(rt);
-
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    const result_value = try atomicsWaitAsyncResult(ctx, true, result_payload);
-    var result_alive = true;
-    defer if (result_alive) result_value.free(rt);
-    const result = objectFromValue(result_value) orelse return error.TypeError;
-
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const value_key = try rt.internAtom("value");
-    defer rt.atoms.free(value_key);
-    {
-        const stored = try result.getProperty(value_key);
-        defer stored.free(rt);
-        try std.testing.expect(stored.same(result_payload));
-    }
-
-    result_value.free(rt);
-    result_alive = false;
-    result_payload.free(rt);
-    payload_alive = false;
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
-
 pub fn asyncFunctionStart(
     ctx: *core.JSContext,
     func: core.JSValue,
@@ -3667,52 +3055,6 @@ pub fn isAsyncGeneratorReceiver(value: core.JSValue) bool {
 
 pub fn asyncGeneratorRejectedTypeError(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
     return rejectedPromiseForRuntimeError(ctx, global, error.TypeError, promisePrototypeFromGlobal(ctx.runtime, global));
-}
-
-pub fn asyncIteratorAsyncDispose(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    function_object: *core.Object,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (!function_object.isAsyncIteratorAsyncDisposeFunction()) return null;
-
-    const return_key = try ctx.runtime.internAtom("return");
-    defer ctx.runtime.atoms.free(return_key);
-    const return_method = getValueProperty(ctx, output, global, receiver, return_key, caller_function, caller_frame) catch |err| {
-        return try rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
-    };
-    defer return_method.free(ctx.runtime);
-    if (return_method.isUndefined() or return_method.isNull()) {
-        return try core.promise.fulfilledWithPrototype(ctx, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
-    }
-    if (!isCallableValue(return_method)) {
-        return try rejectedPromiseForRuntimeError(ctx, global, error.TypeError, promisePrototypeFromGlobal(ctx.runtime, global));
-    }
-
-    const result = callValueOrBytecodeRoot(ctx, output, global, receiver, return_method, &.{core.JSValue.undefinedValue()}, caller_function, caller_frame) catch |err| {
-        return try rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
-    };
-    defer result.free(ctx.runtime);
-    const result_object = objectFromValue(result) orelse {
-        return try rejectedPromiseForRuntimeError(ctx, global, error.TypeError, promisePrototypeFromGlobal(ctx.runtime, global));
-    };
-    if (result_object.class_id == core.class.ids.promise) {
-        // Adopt the (possibly pending) inner promise through a real reaction —
-        // the dispose promise settles only when `.return()`'s promise does
-        // (no in-VM draining/sleeping; jobs are host-pumped).
-        const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
-        errdefer promise.free(ctx.runtime);
-        const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise);
-        defer resolving.resolve.free(ctx.runtime);
-        defer resolving.reject.free(ctx.runtime);
-        try performPromiseThen(ctx, output, global, result, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), resolving.resolve, resolving.reject);
-        return promise;
-    }
-    return try core.promise.fulfilledWithPrototype(ctx, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
 }
 
 pub fn asyncFromSyncIteratorMethodCall(
@@ -4148,11 +3490,6 @@ pub fn promiseFinally(
     defer then_value.free(ctx.runtime);
     if (!isCallableValue(then_value)) return error.TypeError;
     return callValueOrBytecodeRoot(ctx, output, global, receiver, then_value, &.{ then_fulfilled, then_rejected }, caller_function, caller_frame);
-}
-
-pub fn atomicsWaitAsyncPromise(rt: *core.JSRuntime, promise: *core.Object) bool {
-    _ = rt;
-    return promise.promiseAtomicsWaitAsync();
 }
 
 pub fn performPromiseThen(

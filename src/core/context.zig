@@ -1,3 +1,13 @@
+//! Realm context state: globals, modules, exceptions, backtraces, and hooks.
+//!
+//! A `JSContext` is a GC node owned by one Runtime. Its global object, module
+//! registry, lexical state, pending exception, and class prototypes form one
+//! realm and must be read together; `RealmRef` is the retained cross-job/
+//! callback handle, while raw context pointers are borrowed. QuickJS source
+//! map: `JSContext` realm fields at quickjs.c:500-557. Core owns this type;
+//! exec/runtime/binding may consume it, but context must not import those
+//! higher layers.
+
 const std = @import("std");
 
 const atom = @import("atom.zig");
