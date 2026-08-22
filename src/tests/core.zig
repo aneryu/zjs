@@ -7033,6 +7033,120 @@ test "shadow tracer never frees and classifies a Zig-local object as unexplained
     }
 }
 
+test "container ValueRootFrame explains heap JSValue windows; scalar skip does not" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try core.JSContext.create(rt);
+        defer ctx.destroy();
+
+        const a = try core.Object.create(rt, core.class.ids.object, null);
+        const b = try core.Object.create(rt, core.class.ids.object, null);
+        const source = [_]core.JSValue{ a.value(), b.value() };
+        var buffer = try core.runtime.ValueRootBuffer.initCopy(rt, &source);
+        defer buffer.deinit(rt);
+        source[0].free(rt);
+        source[1].free(rt);
+
+        const live = rt.gc.liveCount();
+        const before = try core.gc_shadow.run(rt);
+        try std.testing.expectEqual(live, rt.gc.liveCount());
+        try std.testing.expect(before.unexplained >= 2);
+
+        var slices = [_]core.runtime.ValueRootSlice{buffer.slice()};
+        var container = core.runtime.ValueRootFrame{ .slices = &slices };
+        container.activate(rt);
+
+        const after = try core.gc_shadow.run(rt);
+        try std.testing.expectEqual(live, rt.gc.liveCount());
+        var still_unexplained: usize = 0;
+        for (after.sample()) |item| {
+            if (item.header == &a.header or item.header == &b.header) still_unexplained += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 0), still_unexplained);
+        try std.testing.expect(after.unexplained < before.unexplained);
+
+        std.debug.print(
+            \\
+            \\container window: unexplained {d} -> {d} (liveCount={d})
+            \\
+        , .{ before.unexplained, after.unexplained, live });
+        container.deactivate(rt);
+
+        const orphan = try core.Object.create(rt, core.class.ids.object, null);
+        var rooted = orphan.value();
+        var root_values = [_]core.runtime.ValueRootValue{.{ .value = &rooted }};
+        var scalar = core.runtime.ValueRootFrame{ .values = &root_values };
+        core.runtime.value_root_frame_stats.reset();
+        scalar.activateContainersOnly(rt);
+        try std.testing.expectEqual(@as(usize, 1), core.runtime.value_root_frame_stats.scalar_skipped);
+        const scalar_skip = try core.gc_shadow.run(rt);
+        var orphan_still = false;
+        for (scalar_skip.sample()) |item| {
+            if (item.header == &orphan.header) orphan_still = true;
+        }
+        try std.testing.expect(orphan_still);
+        rooted.free(rt);
+    }
+}
+
+test "ValueRootFrame link splice cost and eval mix" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+
+        const iterations: usize = 200_000;
+        var empty: []core.JSValue = &.{};
+        var slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &empty }};
+        var container = core.runtime.ValueRootFrame{ .slices = &slices };
+        const container_start = zjs.platform_clock.monotonicNanos();
+        var i: usize = 0;
+        while (i < iterations) : (i += 1) {
+            container.activate(rt);
+            container.deactivate(rt);
+        }
+        const container_ns = zjs.platform_clock.elapsedNanosSince(container_start);
+
+        var slot = core.JSValue.undefinedValue();
+        var root_values = [_]core.runtime.ValueRootValue{.{ .value = &slot }};
+        var scalar = core.runtime.ValueRootFrame{ .values = &root_values };
+        const scalar_start = zjs.platform_clock.monotonicNanos();
+        i = 0;
+        while (i < iterations) : (i += 1) {
+            scalar.activate(rt);
+            scalar.deactivate(rt);
+        }
+        const scalar_ns = zjs.platform_clock.elapsedNanosSince(scalar_start);
+
+        var harness = try helpers.TestEngine.init(std.testing.allocator);
+        defer harness.deinit();
+        core.runtime.value_root_frame_stats.reset();
+        const result = try harness.eval("JSON.parse('[1,2,3,{\"a\":[4,5]}]'); new Array(1,2,3,4,5); [1,2,3].concat([4,5,6]);");
+        result.free(harness.runtime);
+        const mix = core.runtime.value_root_frame_stats;
+
+        std.debug.print(
+            \\
+            \\root-frame link cost ({d} iters): container={d} ns/op scalar={d} ns/op
+            \\eval mix: calls={d} linked={d} container={d} scalar={d} skipped={d}
+            \\
+        , .{
+            iterations,
+            container_ns / iterations,
+            scalar_ns / iterations,
+            mix.activate_calls,
+            mix.linked,
+            mix.container_linked,
+            mix.scalar_linked,
+            mix.scalar_skipped,
+        });
+        try std.testing.expect(mix.activate_calls > 0);
+        try std.testing.expect(mix.linked == mix.container_linked + mix.scalar_linked);
+    }
+}
+
 test "shadow tracer reports a live realm as reachable" {
     if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
     if (comptime core.gc.shadow_tracer_enabled) {

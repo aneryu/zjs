@@ -450,9 +450,31 @@ pub const ObjectRootValue = struct {
     object: *?*Object,
 };
 
-/// Precise ValueRootFrame linking is test-only. Production trial-deletion
-/// GC does not consume the chain; native locals already hold refcounts.
-pub const value_root_frames_enabled = builtin.is_test;
+/// Precise ValueRootFrame linking. Default `rc` production keeps this false
+/// so activate/deactivate erase at comptime (identity). Tests keep all-on
+/// because there is no conservative scanner yet. Shadow CLI (`-Dzjs_gc=shadow`
+/// and not `is_test`) links only container/window frames (design §7.1).
+pub const value_root_frames_enabled = builtin.is_test or gc.shadow_tracer_enabled;
+
+/// Shadow production (non-test) does not list-link scalar Zig locals; those
+/// wait for conservative stack/register capture. Tests link every activate.
+pub const value_root_link_containers_only = gc.shadow_tracer_enabled and !builtin.is_test;
+
+pub const ValueRootFrameStats = struct {
+    activate_calls: usize = 0,
+    linked: usize = 0,
+    container_linked: usize = 0,
+    scalar_linked: usize = 0,
+    scalar_skipped: usize = 0,
+
+    pub fn reset(self: *@This()) void {
+        self.* = .{};
+    }
+};
+
+/// Observer counters for shadow/test builds. Default `rc` never increments
+/// them: the stores sit inside the comptime-erased activate body.
+pub threadlocal var value_root_frame_stats: ValueRootFrameStats = .{};
 
 pub const ValueRootFrame = struct {
     previous: ?*const ValueRootFrame = null,
@@ -460,27 +482,76 @@ pub const ValueRootFrame = struct {
     values: []const ValueRootValue = &.{},
     objects: []const ObjectRootValue = &.{},
 
+    /// True when this frame roots a native JSValue/cell array or window.
+    /// Conservative scanning of the C stack sees the backing pointer, not the
+    /// values stored behind it, so these must stay precise-rooted. Scalar
+    /// `.values` / `.objects` slots that point at Zig locals can wait for a
+    /// register/stack scanner (design §7.1).
+    ///
+    /// Heap-backed `.values` arrays (`RootedValueCopies`, 3 call sites) stay on
+    /// `.values`. They are not a root gap: that helper builds one
+    /// `ValueRootValue` per element, so every value already has its own exact
+    /// root pointer and `traceValueRootFrames` visits each one. `.slices`
+    /// would describe the same window in one descriptor instead of N pointers
+    /// — an efficiency change, not a correctness one — and it moves production
+    /// codegen, so it stays unconverted until something needs the density.
+    pub inline fn hasNativeWindow(self: *const ValueRootFrame) bool {
+        return self.slices.len != 0;
+    }
+
     /// Activate this frame at its final stack address. The matching
     /// `deactivate` must run before the frame or any referenced root storage
-    /// leaves scope. Production builds erase both operations at compile time.
+    /// leaves scope. Default `rc` production erases both operations at
+    /// compile time. Shadow CLI skips scalar frames; tests link every frame.
     pub inline fn activate(self: *ValueRootFrame, rt: *JSRuntime) void {
         if (comptime value_root_frames_enabled) {
+            const container = self.hasNativeWindow();
+            value_root_frame_stats.activate_calls += 1;
+            if (comptime value_root_link_containers_only) {
+                if (!container) {
+                    value_root_frame_stats.scalar_skipped += 1;
+                    return;
+                }
+            }
             std.debug.assert(rt.active_value_roots != self);
             self.previous = rt.active_value_roots;
             rt.active_value_roots = self;
+            value_root_frame_stats.linked += 1;
+            if (container) {
+                value_root_frame_stats.container_linked += 1;
+            } else {
+                value_root_frame_stats.scalar_linked += 1;
+            }
         }
     }
 
     /// Restore the frame that was active before `activate`. Root frames are a
     /// strict LIFO stack; the assertion localizes mismatched scope teardown at
-    /// the registration seam instead of leaving a stale stack pointer in the
-    /// runtime.
+    /// the registration seam. Shadow CLI may skip scalar activates, so a
+    /// skipped frame is not the current head and deactivate is a no-op.
     pub inline fn deactivate(self: *ValueRootFrame, rt: *JSRuntime) void {
         if (comptime value_root_frames_enabled) {
-            std.debug.assert(rt.active_value_roots == self);
+            if (comptime value_root_link_containers_only) {
+                if (rt.active_value_roots != self) return;
+            } else {
+                std.debug.assert(rt.active_value_roots == self);
+            }
             rt.active_value_roots = self.previous;
             self.previous = null;
         }
+    }
+
+    /// Test/measurement helper: link only if this is a container/window,
+    /// regardless of the compile-time policy. Used to quantify all-on vs
+    /// containers-only against the same frame set.
+    pub fn activateContainersOnly(self: *ValueRootFrame, rt: *JSRuntime) void {
+        if (comptime !value_root_frames_enabled) return;
+        if (!self.hasNativeWindow()) {
+            value_root_frame_stats.activate_calls += 1;
+            value_root_frame_stats.scalar_skipped += 1;
+            return;
+        }
+        self.activate(rt);
     }
 };
 

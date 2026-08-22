@@ -242,12 +242,34 @@ is a correctness bug, not a style miss (design §2.1).
 ### 3.1 `value_root_frames_enabled`
 
 ```zig
-pub const value_root_frames_enabled = builtin.is_test; // src/core/runtime.zig
+pub const value_root_frames_enabled = builtin.is_test or gc.shadow_tracer_enabled;
+pub const value_root_link_containers_only = gc.shadow_tracer_enabled and !builtin.is_test;
 ```
 
-Production builds erase `ValueRootFrame.activate` / `deactivate` and
-`rootValues` storage fill at comptime. Native locals survive today because
-their `JSValue`s own reference counts. This is design §2.2 gap 1.
+Default `rc` production still erases activate/deactivate at compile time. Tests
+link every frame (no conservative scanner yet). Shadow CLI links only frames
+with `slices.len != 0` — native JSValue/cell arrays and windows (design §7.1).
+Scalar Zig locals stay unlinked there and wait for stack/register capture.
+
+### 3.1.1 Activate-site census (177 engine sites, tests/ excluded)
+
+Method: `rg '\.activate\((rt|ctx|&rt|ctx\.runtime)' src` excluding `src/tests`,
+then classify by the frame the activate closes over.
+
+| Class | Count | What it is | Production shadow |
+|---|---:|---|---|
+| `rootValues` scalar | 127 | pointers at Zig `JSValue` locals | skip (conservative) |
+| manual scalar `.values` | 24 | same, spelled by hand | skip (conservative) |
+| container `.slices` | 26 | mutable/borrowed/cells windows, including `ValueSliceRoot` / `CellSliceRoot` / `ValueListRoot` / array literals | **link** |
+| `RootedValueCopies` | 3 | heap copy of a `[]JSValue` (Array/Object builtins) | still `.values`; converting to `.slices` is a production codegen change (deferred) |
+
+`call.zig` / `eval_ops.zig` mixed frames (scalar locals plus an args window)
+count as container because of the window. Empty test frames in
+`runtime.zig` are test-only LIFO checks.
+
+Do not promote a scalar frame to a container to make the unexplained set
+look smaller: that would retain objects a tracing collector should not keep
+once conservative scanning exists.
 
 ### 3.2 `RootProvider` registration
 
