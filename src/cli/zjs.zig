@@ -53,6 +53,7 @@ pub const RuntimeOptions = struct {
     dump_memory: bool = false,
     trace_memory: bool = false,
     profile_opcodes: bool = false,
+    gc_stats: bool = false,
     perf_json: bool = false,
     leak_check: bool = false,
     include_paths: [max_include_paths][]const u8 = @splat(""),
@@ -97,6 +98,11 @@ pub fn parseArgs(args: []const []const u8) CliError!Command {
         }
         if (std.mem.eql(u8, rest[0], "-T") or std.mem.eql(u8, rest[0], "--trace")) {
             options.trace_memory = true;
+            rest = rest[1..];
+            continue;
+        }
+        if (std.mem.eql(u8, rest[0], "--gc-stats")) {
+            options.gc_stats = true;
             rest = rest[1..];
             continue;
         }
@@ -369,6 +375,10 @@ pub fn main(init: std.process.Init) !void {
         try dumpOpcodeProfile(&stdout_writer.interface, runtime.runtime.opcode_profile.?);
         try stdout_writer.interface.flush();
     }
+    if (commandRuntimeOptions(command).gc_stats) {
+        try dumpGcStats(&stdout_writer.interface, runtime.runtime.gcStats());
+        try stdout_writer.interface.flush();
+    }
     if (commandRuntimeOptions(command).perf_json) {
         opcode_profile.flushPendingDispatch();
         const active_profile: ?*const zjs.OpcodeProfile =
@@ -405,7 +415,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
+    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
 }
 
 /// Standalone query flag: it takes no script and constructs no runtime, so it
@@ -724,6 +734,34 @@ const OpcodeProfileRow = struct {
     count: u64,
     nanos: u64,
 };
+
+/// Post-run GC counters. Every line here has a maintained write site in the
+/// collector; fields the engine does not instrument are simply absent rather
+/// than printed as zero.
+fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats) !void {
+    try writer.print("gc: collection entries {d}, completed rounds {d}, failed {d}\n", .{
+        stats.collections,
+        stats.major_gc_count,
+        stats.failed_collections,
+    });
+    try writer.print("gc: objects freed {d}, zero-ref drains {d}\n", .{
+        stats.freed_objects,
+        stats.zero_ref_drains,
+    });
+    try writer.print("gc: collection time total {d} ns, last {d} ns\n", .{
+        stats.major_gc_time_ns,
+        stats.last_collection_time_ns,
+    });
+    try writer.print("gc: live {d} bytes, peak {d} bytes, allocated {d} bytes\n", .{
+        stats.heap_live_bytes,
+        stats.peak_allocated_bytes,
+        stats.total_allocated_bytes,
+    });
+    try writer.print("gc: weak refs {d}, finalizer queue {d}\n", .{
+        stats.weak_ref_count,
+        stats.finalizer_queue_length,
+    });
+}
 
 fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
     ensureOpcodeProfileNames();

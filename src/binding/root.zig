@@ -10,6 +10,8 @@
 const core = @import("../core/root.zig");
 
 pub const JSRuntime = core.JSRuntime;
+/// Read-only GC counter snapshot, as returned by `JSRuntime.gcStats()`.
+pub const GCStats = core.GCStats;
 pub const context_mod = @import("context.zig");
 pub const JSContext = context_mod.JSContext;
 pub const JSValue = core.JSValue;

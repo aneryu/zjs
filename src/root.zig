@@ -7,6 +7,7 @@ const zjs_exec = @import("exec/root.zig");
 const CoreObject = zjs_binding.Object;
 
 pub const JSRuntime = zjs_binding.JSRuntime;
+pub const GCStats = zjs_binding.GCStats;
 pub const JSContext = zjs_binding.JSContext;
 pub const ffi = zjs_binding.ffi;
 pub const JSValue = zjs_binding.JSValue;

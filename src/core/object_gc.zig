@@ -707,3 +707,94 @@ fn functionBytecodeFromGcHeader(header: *gc.GCObjectHeader) ?*const FunctionByte
     if (header.meta().flags.kind != .function_bytecode) return null;
     return @alignCast(@fieldParentPtr("header", header));
 }
+
+/// Dual of `Object.ordinary_object_cycle_hot_edges`: the specialized
+/// `markOrdinaryObjectHot` arm covers these kinds. Runtime presence of any
+/// kind still depends on the live object (empty props, absent iterator cache).
+pub const ordinary_object_cycle_hot_edges = [_]Object.CycleHotEdgeKind{
+    .shape,
+    .property_slots,
+    .iterator_next_cache,
+};
+
+/// Dual of `Object.fast_array_cycle_hot_edges` for `markFastArrayHot`.
+pub const fast_array_cycle_hot_edges = [_]Object.CycleHotEdgeKind{
+    .shape,
+    .property_slots,
+    .array_elements,
+    .iterator_next_cache,
+};
+
+/// Dual of `Object.shape_cycle_hot_edges` for `markShapeHot`.
+pub const shape_cycle_hot_edges = [_]Object.CycleHotEdgeKind{.proto};
+
+comptime {
+    std.debug.assert(std.mem.eql(
+        u8,
+        std.mem.asBytes(&ordinary_object_cycle_hot_edges),
+        std.mem.asBytes(&Object.ordinary_object_cycle_hot_edges),
+    ));
+    std.debug.assert(std.mem.eql(
+        u8,
+        std.mem.asBytes(&fast_array_cycle_hot_edges),
+        std.mem.asBytes(&Object.fast_array_cycle_hot_edges),
+    ));
+    std.debug.assert(std.mem.eql(
+        u8,
+        std.mem.asBytes(&shape_cycle_hot_edges),
+        std.mem.asBytes(&Object.shape_cycle_hot_edges),
+    ));
+}
+
+pub const CycleMarkPathForTest = enum { mark_one, children_cold };
+
+/// Test-only: run a production mark walk (`markOne` or `markChildrenCold`) in
+/// the decref phase and return the child GC headers whose RC dropped. Callers
+/// must hang unique children (a header visited twice can hit RC 0). Restores
+/// every listed header's RC before returning. Does not change the specialized
+/// hot-arm production copies.
+pub fn collectCycleMarkChildHeadersForTest(
+    rt: *JSRuntime,
+    header: *gc.Header,
+    path: CycleMarkPathForTest,
+    allocator: std.mem.Allocator,
+) ![]usize {
+    const rc_pad: i32 = 16;
+    var snap = std.AutoHashMap(usize, i32).init(allocator);
+    defer snap.deinit();
+    var iterator = rt.gc.objectIterator();
+    while (iterator.next()) |h| {
+        try snap.put(@intFromPtr(h), h.meta().rc);
+        h.meta().rc += rc_pad;
+    }
+
+    switch (path) {
+        .mark_one => markOne(rt, header, .decref),
+        .children_cold => markChildrenCold(rt, header, gcDecrefChild),
+    }
+
+    var set = ObjectVisitSet.init(allocator);
+    defer set.deinit();
+    var restore = rt.gc.objectIterator();
+    while (restore.next()) |h| {
+        const ptr = @intFromPtr(h);
+        const orig = snap.get(ptr) orelse {
+            h.meta().rc += rc_pad;
+            continue;
+        };
+        if (h.meta().rc < orig + rc_pad) {
+            try set.put(ptr, {});
+        }
+        h.meta().rc = orig;
+    }
+
+    const keys = try allocator.alloc(usize, set.count());
+    var index: usize = 0;
+    var key_iterator = set.keyIterator();
+    while (key_iterator.next()) |key| {
+        keys[index] = key.*;
+        index += 1;
+    }
+    std.mem.sort(usize, keys, {}, std.sort.asc(usize));
+    return keys;
+}

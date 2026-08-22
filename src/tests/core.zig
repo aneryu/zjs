@@ -6468,6 +6468,357 @@ test "fast array iterator-next cache cycle is released by runtime cycle removal"
     try expectClosedPropertyCycleReclaimed(rt, rt.runObjectCycleRemoval());
 }
 
+const CycleMarkParity = struct {
+    fn recordHeader(set: *std.AutoHashMap(usize, void), header: *core.gc.Header) void {
+        set.put(@intFromPtr(header), {}) catch unreachable;
+    }
+
+    const AuthorityVisitor = struct {
+        set: *std.AutoHashMap(usize, void),
+
+        pub fn visitValue(self: AuthorityVisitor, val: *core.JSValue) void {
+            if (val.cycleMarkHeader()) |header| recordHeader(self.set, header);
+        }
+
+        pub fn visitObject(self: AuthorityVisitor, obj_ptr: *?*core.Object) void {
+            if (obj_ptr.*) |obj| {
+                if (@intFromPtr(obj) == 0) return;
+                recordHeader(self.set, &obj.header);
+            }
+        }
+
+        pub fn visitShape(self: AuthorityVisitor, shape_ref: *core.Shape) void {
+            recordHeader(self.set, &shape_ref.header);
+        }
+
+        pub fn visitRealm(self: AuthorityVisitor, ctx_ptr: *?*core.context.RealmContext) void {
+            if (ctx_ptr.*) |ctx| recordHeader(self.set, &ctx.header);
+        }
+
+        pub fn visitModule(self: AuthorityVisitor, record: *core.ModuleRecord) void {
+            recordHeader(self.set, &record.header);
+        }
+
+        pub fn visitWeakCollectionEntry(_: AuthorityVisitor, _: *core.object.WeakCollectionEntry) void {}
+
+        pub fn visitFinalizationCell(self: AuthorityVisitor, entry: *core.object.FinalizationRegistryCell) void {
+            if (entry.keepsHeldValuesAlive()) self.visitValue(&entry.held_value);
+        }
+    };
+
+    fn collectAuthority(rt: *core.JSRuntime, header: *core.gc.Header, allocator: std.mem.Allocator) ![]usize {
+        var set = std.AutoHashMap(usize, void).init(allocator);
+        defer set.deinit();
+        const visitor = AuthorityVisitor{ .set = &set };
+        switch (header.meta().flags.kind) {
+            .object => {
+                const obj: *core.Object = @alignCast(@fieldParentPtr("header", header));
+                obj.traceChildEdgesNoFail(rt, visitor);
+            },
+            .function_bytecode => {
+                const fb: *engine.bytecode.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
+                var realm = fb.realm.ptr;
+                visitor.visitRealm(&realm);
+                fb.realm.ptr = realm;
+                for (fb.cpoolSlice()) |*stored| visitor.visitValue(stored);
+            },
+            .var_ref => {
+                const ref: *core.VarRef = @alignCast(@fieldParentPtr("header", header));
+                visitor.visitValue(&ref.value);
+            },
+            .shape => {
+                const shape_ref: *core.Shape = @alignCast(@fieldParentPtr("header", header));
+                shape_ref.traceChildEdgesNoFail(rt, visitor);
+            },
+            .realm_context => {
+                const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", header));
+                ctx.traceChildEdgesNoFail(visitor);
+            },
+            .module => {
+                const record: *core.ModuleRecord = @alignCast(@fieldParentPtr("header", header));
+                record.traceChildEdgesNoFail(rt, visitor);
+            },
+            .string, .big_int => {},
+        }
+        return sortedKeys(&set, allocator);
+    }
+
+    fn collectMarkOne(rt: *core.JSRuntime, header: *core.gc.Header, allocator: std.mem.Allocator) ![]usize {
+        return core.Object.collectCycleMarkChildHeadersForTest(rt, header, .mark_one, allocator);
+    }
+
+    fn collectCold(rt: *core.JSRuntime, header: *core.gc.Header, allocator: std.mem.Allocator) ![]usize {
+        return core.Object.collectCycleMarkChildHeadersForTest(rt, header, .children_cold, allocator);
+    }
+
+    fn sortedKeys(set: *std.AutoHashMap(usize, void), allocator: std.mem.Allocator) ![]usize {
+        const keys = try allocator.alloc(usize, set.count());
+        var index: usize = 0;
+        var iterator = set.keyIterator();
+        while (iterator.next()) |key| {
+            keys[index] = key.*;
+            index += 1;
+        }
+        std.mem.sort(usize, keys, {}, std.sort.asc(usize));
+        return keys;
+    }
+
+    fn expectSameHeaders(rt: *core.JSRuntime, mark_headers: []const usize, authority_headers: []const usize) !void {
+        errdefer {
+            std.debug.print("mark-one headers ({d}):", .{mark_headers.len});
+            for (mark_headers) |ptr| std.debug.print(" {x}", .{ptr});
+            std.debug.print("\nauthority headers ({d}):", .{authority_headers.len});
+            for (authority_headers) |ptr| std.debug.print(" {x}", .{ptr});
+            std.debug.print("\nlive={d}\n", .{rt.gc.liveCount()});
+        }
+        try std.testing.expectEqualSlices(usize, authority_headers, mark_headers);
+    }
+
+    fn expectContains(headers: []const usize, header: *core.gc.Header) !void {
+        const ptr = @intFromPtr(header);
+        for (headers) |item| {
+            if (item == ptr) return;
+        }
+        return error.TestUnexpectedResult;
+    }
+
+    fn hangIteratorNext(rt: *core.JSRuntime, owner: *core.Object) !*core.Object {
+        const cached = try core.Object.create(rt, core.class.ids.object, null);
+        const slot = try owner.cachedIteratorNextSlot(rt);
+        slot.* = cached.value().dup();
+        return cached;
+    }
+};
+
+test "ordinary object cycle-mark hot arm matches authority child headers" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const proto = try core.Object.create(rt, core.class.ids.object, null);
+    defer proto.value().free(rt);
+    const obj = try core.Object.create(rt, core.class.ids.object, proto);
+    defer obj.value().free(rt);
+    const data_child = try core.Object.create(rt, core.class.ids.object, null);
+    defer data_child.value().free(rt);
+    const getter = try core.Object.create(rt, core.class.ids.object, null);
+    defer getter.value().free(rt);
+    const setter = try core.Object.create(rt, core.class.ids.object, null);
+    defer setter.value().free(rt);
+    const cached = try CycleMarkParity.hangIteratorNext(rt, obj);
+    defer cached.value().free(rt);
+
+    const data_key = try rt.internAtom("data");
+    defer rt.atoms.free(data_key);
+    const acc_key = try rt.internAtom("acc");
+    defer rt.atoms.free(acc_key);
+    try obj.defineOwnProperty(rt, data_key, core.Descriptor.data(data_child.value(), true, true, true));
+    try obj.defineOwnProperty(rt, acc_key, core.Descriptor.accessor(getter.value(), setter.value(), true, true));
+
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    const lazy_key = try rt.internAtom("lazy");
+    defer rt.atoms.free(lazy_key);
+    try obj.defineAutoInitPropertyWithRealmAndNative(
+        rt,
+        lazy_key,
+        "lazy",
+        0,
+        core.property.Flags.data(true, false, true),
+        global,
+        0,
+    );
+
+    const mark_headers = try CycleMarkParity.collectMarkOne(rt, &obj.header, std.testing.allocator);
+    defer std.testing.allocator.free(mark_headers);
+    const authority_headers = try CycleMarkParity.collectAuthority(rt, &obj.header, std.testing.allocator);
+    defer std.testing.allocator.free(authority_headers);
+    try CycleMarkParity.expectSameHeaders(rt, mark_headers, authority_headers);
+    try CycleMarkParity.expectContains(mark_headers, &obj.shape_ref.header);
+    try CycleMarkParity.expectContains(mark_headers, &data_child.header);
+    try CycleMarkParity.expectContains(mark_headers, &getter.header);
+    try CycleMarkParity.expectContains(mark_headers, &setter.header);
+    try CycleMarkParity.expectContains(mark_headers, &cached.header);
+    try CycleMarkParity.expectContains(mark_headers, &ctx.header);
+}
+
+test "fast array cycle-mark hot arm matches authority child headers" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const array = try core.Object.createArray(rt, null);
+    defer array.value().free(rt);
+    std.debug.assert(array.flags.fast_array);
+    const element = try core.Object.create(rt, core.class.ids.object, null);
+    defer element.value().free(rt);
+    const named = try core.Object.create(rt, core.class.ids.object, null);
+    defer named.value().free(rt);
+    const cached = try CycleMarkParity.hangIteratorNext(rt, array);
+    defer cached.value().free(rt);
+
+    try std.testing.expect(try array.defineDenseArrayDataProperty(rt, 0, element.value()));
+    const named_key = try rt.internAtom("named");
+    defer rt.atoms.free(named_key);
+    try array.defineOwnProperty(rt, named_key, core.Descriptor.data(named.value(), true, true, true));
+
+    const mark_headers = try CycleMarkParity.collectMarkOne(rt, &array.header, std.testing.allocator);
+    defer std.testing.allocator.free(mark_headers);
+    const authority_headers = try CycleMarkParity.collectAuthority(rt, &array.header, std.testing.allocator);
+    defer std.testing.allocator.free(authority_headers);
+    try CycleMarkParity.expectSameHeaders(rt, mark_headers, authority_headers);
+    try CycleMarkParity.expectContains(mark_headers, &array.shape_ref.header);
+    try CycleMarkParity.expectContains(mark_headers, &element.header);
+    try CycleMarkParity.expectContains(mark_headers, &named.header);
+    try CycleMarkParity.expectContains(mark_headers, &cached.header);
+}
+
+test "shape cycle-mark hot arm matches authority proto edge" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const proto = try core.Object.create(rt, core.class.ids.object, null);
+    defer proto.value().free(rt);
+    const obj = try core.Object.create(rt, core.class.ids.object, proto);
+    defer obj.value().free(rt);
+
+    const mark_headers = try CycleMarkParity.collectMarkOne(rt, &obj.shape_ref.header, std.testing.allocator);
+    defer std.testing.allocator.free(mark_headers);
+    const authority_headers = try CycleMarkParity.collectAuthority(rt, &obj.shape_ref.header, std.testing.allocator);
+    defer std.testing.allocator.free(authority_headers);
+    const cold_headers = try CycleMarkParity.collectCold(rt, &obj.shape_ref.header, std.testing.allocator);
+    defer std.testing.allocator.free(cold_headers);
+    try CycleMarkParity.expectSameHeaders(rt, mark_headers, authority_headers);
+    try CycleMarkParity.expectSameHeaders(rt, cold_headers, authority_headers);
+    try CycleMarkParity.expectContains(mark_headers, &proto.header);
+}
+
+test "markChildrenCold object arm matches authority on a non-ordinary Map" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const map = try core.Object.create(rt, core.class.ids.map, null);
+    defer map.value().free(rt);
+    const key = try core.Object.create(rt, core.class.ids.object, null);
+    defer key.value().free(rt);
+    const value = try core.Object.create(rt, core.class.ids.object, null);
+    defer value.value().free(rt);
+    const cached = try CycleMarkParity.hangIteratorNext(rt, map);
+    defer cached.value().free(rt);
+
+    const entries = try rt.memory.alloc(core.object.CollectionEntry, 1);
+    entries[0] = .{ .key = key.value().dup(), .value = value.value().dup() };
+    map.collectionEntriesSlot().* = entries;
+
+    const mark_headers = try CycleMarkParity.collectMarkOne(rt, &map.header, std.testing.allocator);
+    defer std.testing.allocator.free(mark_headers);
+    const authority_headers = try CycleMarkParity.collectAuthority(rt, &map.header, std.testing.allocator);
+    defer std.testing.allocator.free(authority_headers);
+    const cold_headers = try CycleMarkParity.collectCold(rt, &map.header, std.testing.allocator);
+    defer std.testing.allocator.free(cold_headers);
+    try CycleMarkParity.expectSameHeaders(rt, mark_headers, authority_headers);
+    try CycleMarkParity.expectSameHeaders(rt, cold_headers, authority_headers);
+    try CycleMarkParity.expectContains(mark_headers, &key.header);
+    try CycleMarkParity.expectContains(mark_headers, &value.header);
+    try CycleMarkParity.expectContains(mark_headers, &cached.header);
+}
+
+test "function_bytecode cycle-mark visits realm and cpool like the cold walk" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
+        .realm = ctx,
+        .cpool_count = 1,
+    });
+    var published = false;
+    errdefer if (!published) fb.destroyUnpublishedFixture(rt);
+    const cpool_child = try core.Object.create(rt, core.class.ids.object, null);
+    defer cpool_child.value().free(rt);
+    fb.cpoolSlice()[0] = cpool_child.value().dup();
+    fb.publishFixtureNoFail(rt);
+    published = true;
+    defer core.JSValue.functionBytecode(&fb.header).free(rt);
+
+    const mark_headers = try CycleMarkParity.collectMarkOne(rt, &fb.header, std.testing.allocator);
+    defer std.testing.allocator.free(mark_headers);
+    const authority_headers = try CycleMarkParity.collectAuthority(rt, &fb.header, std.testing.allocator);
+    defer std.testing.allocator.free(authority_headers);
+    try CycleMarkParity.expectSameHeaders(rt, mark_headers, authority_headers);
+    try CycleMarkParity.expectContains(mark_headers, &ctx.header);
+    try CycleMarkParity.expectContains(mark_headers, &cpool_child.header);
+}
+
+test "var_ref cycle-mark visits the closed binding value" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const bound = try core.Object.create(rt, core.class.ids.object, null);
+    defer bound.value().free(rt);
+    const cell = try core.VarRef.createClosed(rt, bound.value().dup());
+    defer cell.freeCell(rt);
+
+    const mark_headers = try CycleMarkParity.collectMarkOne(rt, &cell.header, std.testing.allocator);
+    defer std.testing.allocator.free(mark_headers);
+    const authority_headers = try CycleMarkParity.collectAuthority(rt, &cell.header, std.testing.allocator);
+    defer std.testing.allocator.free(authority_headers);
+    try CycleMarkParity.expectSameHeaders(rt, mark_headers, authority_headers);
+    try CycleMarkParity.expectContains(mark_headers, &bound.header);
+}
+
+test "realm_context cycle-mark matches authority child headers" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+
+    const mark_headers = try CycleMarkParity.collectMarkOne(rt, &ctx.header, std.testing.allocator);
+    defer std.testing.allocator.free(mark_headers);
+    const authority_headers = try CycleMarkParity.collectAuthority(rt, &ctx.header, std.testing.allocator);
+    defer std.testing.allocator.free(authority_headers);
+    try CycleMarkParity.expectSameHeaders(rt, mark_headers, authority_headers);
+    try CycleMarkParity.expectContains(mark_headers, &global.header);
+}
+
+test "module cycle-mark matches authority child headers" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const module_name = try rt.internAtom("cycle-mark-parity.mjs");
+    defer rt.atoms.free(module_name);
+    const record = try publishEmptyModule(rt, &ctx.modules, module_name);
+    const func_obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer func_obj.value().free(rt);
+    const ns = try core.Object.create(rt, core.class.ids.module_ns, null);
+    defer ns.value().free(rt);
+    const meta = try core.Object.create(rt, core.class.ids.object, null);
+    defer meta.value().free(rt);
+    const thrown = try core.Object.create(rt, core.class.ids.object, null);
+    defer thrown.value().free(rt);
+    record.func_obj = func_obj.value().dup();
+    record.module_ns = ns.value().dup();
+    record.import_meta = meta.value().dup();
+    record.eval_exception = thrown.value().dup();
+
+    const mark_headers = try CycleMarkParity.collectMarkOne(rt, &record.header, std.testing.allocator);
+    defer std.testing.allocator.free(mark_headers);
+    const authority_headers = try CycleMarkParity.collectAuthority(rt, &record.header, std.testing.allocator);
+    defer std.testing.allocator.free(authority_headers);
+    try CycleMarkParity.expectSameHeaders(rt, mark_headers, authority_headers);
+    try CycleMarkParity.expectContains(mark_headers, &func_obj.header);
+    try CycleMarkParity.expectContains(mark_headers, &ns.header);
+    try CycleMarkParity.expectContains(mark_headers, &meta.header);
+    try CycleMarkParity.expectContains(mark_headers, &thrown.header);
+}
+
 test "strong Map and Set entry cycles are released by runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

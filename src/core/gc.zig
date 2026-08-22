@@ -573,8 +573,13 @@ pub const Stats = struct {
     external_invalid_release_count: usize = 0,
     allocation_debt: usize = 0,
 
+    /// Cycle-collection entries (`collections`) and completed rounds
+    /// (`major_gc_count`); a gap between them is aborted rounds.
+    collections: usize = 0,
     major_gc_count: usize = 0,
     major_gc_time_ns: u64 = 0,
+    last_collection_time_ns: u64 = 0,
+    zero_ref_drains: usize = 0,
     major_phase: MajorPhase = .idle,
     failed_collections: usize = 0,
     last_failure: FailureKind = .none,
@@ -1051,8 +1056,11 @@ pub const Registry = struct {
             .external_token_bytes = snapshot.externalTokenBytes(),
             .external_invalid_release_count = snapshot.stats.external_invalid_release_count,
             .allocation_debt = snapshot.stats.allocation_debt,
+            .collections = snapshot.stats.collections,
             .major_gc_count = snapshot.stats.cycle_gc_count,
             .major_gc_time_ns = snapshot.stats.cycle_gc_time_ns,
+            .last_collection_time_ns = snapshot.stats.last_collection_time_ns,
+            .zero_ref_drains = snapshot.stats.zero_ref_drains,
             .major_phase = snapshot.major_phase,
             .failed_collections = snapshot.stats.failed_collections,
             .last_failure = snapshot.stats.last_failure,

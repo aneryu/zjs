@@ -559,6 +559,7 @@ const public_root_decls = [_][]const u8{
     "JSValue",
     "RuntimeOptions",
     "RuntimeMemoryUsage",
+    "GCStats",
     "OpcodeProfile",
     "default_stack_size",
     "default_gc_threshold",

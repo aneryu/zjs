@@ -793,6 +793,38 @@ means writing a Zig test instead of running the shipped binary. Direction:
 a `--gc-stats` flag that prints the honest subset (collections, completed
 rounds, elapsed, freed objects, failures, live/peak bytes) after execution.
 Gate: suite; CLI smoke; no new pub API surface expected.
+  **Done 2026-08-23**: `--gc-stats` prints entries / completed rounds /
+  failures / objects freed / zero-ref drains / elapsed / live-peak-allocated
+  bytes / weak refs / finalizer queue. Three counters the engine maintained
+  but never surfaced (`collections`, `last_collection_time_ns`,
+  `zero_ref_drains`) are now mapped into the public `Stats`. The prediction
+  "no new pub surface" was wrong — `GCStats` had to be re-exported, and the
+  public-name snapshot correctly failed until it was registered; that gate
+  is doing its job.
+
+**G5. Pre-refactor behaviour baseline — done 2026-08-23**
+([gc-baseline.md](perf/gc-baseline.md)). The whole V8 suite in one process
+with `--gc-stats`, three runs: 877/879/880 cycle-collection entries, all
+completed, zero failures; 13.4 M objects freed against 13.49 M zero-ref
+drains; **0.67 s total collection time with a single round reaching
+39-51 ms**; live bytes at exit byte-identical across runs. Reading: the
+long pole for anything interactive is that per-round pause, not throughput;
+most reclamation is ordinary refcounting, so a faster cycle collector is
+optimising the smaller half; and the failure paths are unexercised by this
+workload, so the refactor cannot cite this baseline about them. The
+identical live-byte figure doubles as a regression check.
+
+**G6. Invariant contract — done 2026-08-23**
+([gc-invariants.md](gc-invariants.md)). The rules a refactor must preserve
+or consciously replace, each cited to where it lives in the code: edge
+enumeration stays on `Object` while the collector owns the phase driver;
+hot arms are copies and the parity guards are what keep them honest; exactly
+one fallible step per round and it runs first; trial refcounts must balance
+(over-trace = UAF, under-trace = leak, and every historical discrepancy was
+in the leak direction); the two-pass free with its deferred-finalizer hold;
+destroy-side pairing; and an explicit statement that suite-green is not
+evidence about the collector, since it has shipped green over real defects
+twice. Representation changes stay out of scope.
 
 **G3. Hot mark arms and the authority trace have no consistency guard.**
 `markOrdinaryObjectHot` / `markFastArrayHot` (`object_gc.zig`) hand-enumerate
@@ -803,6 +835,22 @@ only catches destroy-side misses). The fix added two lines and left no
 mechanism. In flight on the proto-a lane: a deterministic edge-coverage
 guard comparing the arms against the authority, proven by deletion probes.
 
+**G4 — done 2026-08-23** (`a837a17e`, proto-a lane): sixteen payload
+families plus `FunctionPayload.traceNativeRealm` now carry their trace arm
+next to `destroy`, with the authority switch forwarding;
+`FunctionRarePayload`'s two copies collapse to one method. WeakRef, Buffer,
+RegExp and StdFile got explicit no-op traces documenting *why* they have no
+strong cycle edges (verified: the removed authority arms contained no trace
+statements for them, so nothing was dropped). Object-level arms
+(shape/properties/iterator-next, dense elements, bytecode-function captures,
+mapped arguments, host adaptor) stay on `Object` — several have early
+returns or visitor rewrites that do not survive extraction. No missing pair
+found. Gates: suite 2352/1/0, test262 delta 0, leak census 1538, A/B 1.0033
+then 0.9986; G3's parity guards and Q2's cycle-release tests green
+throughout. **The G5 baseline earned its keep here**: re-measurement showed
+reclamation down a stable 2.5% with live bytes byte-identical — invisible to
+the A/B, and the unchanged survivor set is what rules out a dropped edge.
+Original item:
 **G4 (parked from Q11 T2). Move each payload's trace arm beside its destroy
 method** so a missing pair is visible while writing the code rather than
 after a leak report. Hot file, so it lands under **AB** + pad lineage; it

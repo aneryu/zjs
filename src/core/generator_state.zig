@@ -8,7 +8,9 @@ const JSValue = @import("value.zig").JSValue;
 const std = @import("std");
 
 const closeOpenVarRefCellSlots = payloads.closeOpenVarRefCellSlots;
+const callVisitValue = payloads.callVisitValue;
 const destroyOptionalValue = payloads.destroyOptionalValue;
+const traceOptValue = payloads.traceOptValue;
 const destroyOwnedValue = payloads.destroyOwnedValue;
 const destroyValueSlice = payloads.destroyValueSlice;
 const destroyValueSliceValuesOnly = payloads.destroyValueSliceValuesOnly;
@@ -497,5 +499,38 @@ pub const GeneratorPayload = struct {
         self.async_queue = &.{};
         self.async_queue_capacity = 0;
         self.* = .{};
+    }
+
+    pub fn traceChildEdges(self: *GeneratorPayload, visitor: anytype) !void {
+        if (self.execution) |execution| {
+            try callVisitValue(visitor, &execution.this_value);
+            if (!execution.suspended.running_aliases) {
+                for (execution.suspended.storage.stack.values) |*stored| try callVisitValue(visitor, stored);
+                for (execution.suspended.storage.frame.locals) |*stored| try callVisitValue(visitor, stored);
+                for (execution.suspended.storage.frame.args) |*stored| try callVisitValue(visitor, stored);
+                // qjs marks the resident JSAsyncFunctionState frame's var_refs;
+                // there is no second generator-payload capture array.
+                for (execution.suspended.storage.frame.var_refs) |cell| {
+                    var cell_value = cell.valueRef();
+                    try callVisitValue(visitor, &cell_value);
+                }
+                for (execution.suspended.storage.frame.open_var_refs) |maybe_cell| {
+                    const cell = maybe_cell orelse continue;
+                    var cell_value = cell.valueRef();
+                    try callVisitValue(visitor, &cell_value);
+                }
+            }
+            try callVisitValue(visitor, &execution.current_function);
+            try callVisitValue(visitor, &execution.yield_star_iterator);
+        }
+        try traceOptValue(visitor, &self.async_promise);
+        // Async-generator request queue values (mirrors
+        // js_async_generator_mark, quickjs.c:21400-21418).
+        for (self.async_queue) |*req| {
+            try callVisitValue(visitor, &req.result);
+            try callVisitValue(visitor, &req.promise);
+            try callVisitValue(visitor, &req.resolve);
+            try callVisitValue(visitor, &req.reject);
+        }
     }
 };

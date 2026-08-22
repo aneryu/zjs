@@ -7,6 +7,22 @@ breaking public-API cleanup is approved for this cycle; hot-path structural
 refactors are deferred to `docs/maintainability-backlog.md` and land only
 under the refactor-policy gates.
 
+- **Each out-of-line payload now keeps its cycle-trace arm beside its
+  destroy method.** `OrdinaryPayload`, `IteratorPayload`, `CollectionPayload`,
+  `TypedArrayPayload`, `BoundFunctionPayload`, `ProxyPayload`,
+  `ArgumentsPayload`, `ObjectDataPayload`, `VarRefPayload`,
+  `FinalizationRegistryPayload`, `DisposableStackPayload`, `GlobalPayload`,
+  `RealmRecordPayload`, `PromisePayload`, `FunctionRarePayload`,
+  `GeneratorPayload`, and the native-function realm walk live next to
+  teardown in `object_payloads.zig` / `generator_state.zig`.
+  `Object.traceChildEdgesFallible` forwards to those methods. WeakRef /
+  Buffer / RegExp / StdFile keep an explicit no-op trace documenting why
+  they have no strong cycle edges. Object-level arms (shape, properties,
+  iterator-next cache, dense elements, bytecode-function captures, mapped
+  arguments, host class payloads) stay on `Object` because they share
+  early-return / rewrite state. The G3 header-set guards and Q2 cycle-
+  release tests stay green (docs/impl-quality-backlog.md, G4).
+
 - **Fixed: replacing or deleting standard constructors still mutated result
   prototypes of several builtins.** After the Set combinators / `Map.groupBy`
   fix, remaining `constructorPrototypeFromGlobal` consumers were re-probed
@@ -64,6 +80,13 @@ under the refactor-policy gates.
   instead of leaking `OperationUnsupported` to the embedder. Native dispatch
   also fails closed: it never returns the exception sentinel without first
   installing a pending exception (docs/impl-quality-backlog.md, Q16 Stage 1).
+
+- **`zjs --gc-stats` prints the collector's counters after a run**, and the
+  public `GCStats` snapshot now carries the three honest counters that were
+  previously visible only inside the engine: cycle-collection *entries*
+  (distinct from completed rounds — the gap is aborted rounds), the last
+  round's elapsed time, and zero-ref drains. Tuning a collector previously
+  meant writing a Zig test; it can now be done against a real script.
 
 - **The GC statistics struct no longer advertises numbers it does not keep.**
   `GeStats.cycles_collected` was assigned the *object* count on every

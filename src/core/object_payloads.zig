@@ -75,6 +75,91 @@ pub const FinalizationRegistryCell = struct {
     }
 };
 
+/// Generic visitor dispatch used by payload `traceChildEdges` (paired with
+/// the destroy helpers above). Copied from `Object.traceChildEdgesFallible`'s
+/// local Helper so each payload can sit beside its destroy method.
+pub inline fn callVisitObject(vis: anytype, obj_ptr: anytype) !void {
+    const VisType = @TypeOf(vis);
+    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
+    if (comptime @hasDecl(CleanType, "visitObject")) {
+        const ReturnType = @typeInfo(@TypeOf(CleanType.visitObject)).@"fn".return_type.?;
+        if (comptime @typeInfo(ReturnType) == .error_union) {
+            try vis.visitObject(obj_ptr);
+        } else {
+            vis.visitObject(obj_ptr);
+        }
+    }
+}
+
+pub inline fn callVisitValue(vis: anytype, val_ptr: anytype) !void {
+    const VisType = @TypeOf(vis);
+    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
+    if (comptime @hasDecl(CleanType, "visitValue")) {
+        const ReturnType = @typeInfo(@TypeOf(CleanType.visitValue)).@"fn".return_type.?;
+        if (comptime @typeInfo(ReturnType) == .error_union) {
+            try vis.visitValue(val_ptr);
+        } else {
+            vis.visitValue(val_ptr);
+        }
+    }
+}
+
+pub inline fn callVisitShape(vis: anytype, shape_ref: anytype) !void {
+    const VisType = @TypeOf(vis);
+    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
+    if (comptime @hasDecl(CleanType, "visitShape")) {
+        const ReturnType = @typeInfo(@TypeOf(CleanType.visitShape)).@"fn".return_type.?;
+        if (comptime @typeInfo(ReturnType) == .error_union) {
+            try vis.visitShape(shape_ref);
+        } else {
+            vis.visitShape(shape_ref);
+        }
+    }
+}
+
+pub inline fn callVisitRealm(vis: anytype, ctx_ptr: anytype) !void {
+    const VisType = @TypeOf(vis);
+    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
+    if (comptime @hasDecl(CleanType, "visitRealm")) {
+        const ReturnType = @typeInfo(@TypeOf(CleanType.visitRealm)).@"fn".return_type.?;
+        if (comptime @typeInfo(ReturnType) == .error_union) {
+            try vis.visitRealm(ctx_ptr);
+        } else {
+            vis.visitRealm(ctx_ptr);
+        }
+    }
+}
+
+pub inline fn traceOptValue(vis: anytype, opt_val: anytype) !void {
+    if (opt_val.*) |*stored| try callVisitValue(vis, stored);
+}
+
+pub inline fn callVisitWeakCollectionEntry(vis: anytype, entry: anytype) !void {
+    const VisType = @TypeOf(vis);
+    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
+    if (comptime @hasDecl(CleanType, "visitWeakCollectionEntry")) {
+        const ReturnType = @typeInfo(@TypeOf(CleanType.visitWeakCollectionEntry)).@"fn".return_type.?;
+        if (comptime @typeInfo(ReturnType) == .error_union) {
+            try vis.visitWeakCollectionEntry(entry);
+        } else {
+            vis.visitWeakCollectionEntry(entry);
+        }
+    }
+}
+
+pub inline fn callVisitFinalizationCell(vis: anytype, entry: anytype) !void {
+    const VisType = @TypeOf(vis);
+    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
+    if (comptime @hasDecl(CleanType, "visitFinalizationCell")) {
+        const ReturnType = @typeInfo(@TypeOf(CleanType.visitFinalizationCell)).@"fn".return_type.?;
+        if (comptime @typeInfo(ReturnType) == .error_union) {
+            try vis.visitFinalizationCell(entry);
+        } else {
+            vis.visitFinalizationCell(entry);
+        }
+    }
+}
+
 pub fn destroyOptionalValue(rt: *JSRuntime, slot: *?JSValue) void {
     const old_value = slot.*;
     slot.* = null;
@@ -214,6 +299,23 @@ pub const OrdinaryPayload = struct {
         destroyOptionalValue(rt, &self.error_stack_sites);
         self.* = .{};
     }
+
+    pub fn traceChildEdges(self: *OrdinaryPayload, visitor: anytype) !void {
+        try traceOptValue(visitor, &self.callsite_file);
+        try traceOptValue(visitor, &self.callsite_function);
+        try traceOptValue(visitor, &self.promise_reaction_on_fulfilled);
+        try traceOptValue(visitor, &self.promise_reaction_on_rejected);
+        try traceOptValue(visitor, &self.promise_reaction_resolve);
+        try traceOptValue(visitor, &self.promise_reaction_reject);
+        try traceOptValue(visitor, &self.promise_capability_resolve);
+        try traceOptValue(visitor, &self.promise_capability_reject);
+        try traceOptValue(visitor, &self.promise_combinator_resolve);
+        try traceOptValue(visitor, &self.promise_combinator_reject);
+        try traceOptValue(visitor, &self.promise_combinator_values);
+        try traceOptValue(visitor, &self.promise_combinator_keys);
+        try traceOptValue(visitor, &self.error_stack);
+        try traceOptValue(visitor, &self.error_stack_sites);
+    }
 };
 
 pub const IteratorPayload = struct {
@@ -251,6 +353,18 @@ pub const IteratorPayload = struct {
         destroyOptionalValue(rt, &self.zip_pads);
         destroyOptionalValue(rt, &self.zip_keys);
         destroyAtomSlice(rt, &self.atom_keys);
+    }
+
+    pub fn traceChildEdges(self: *IteratorPayload, visitor: anytype) !void {
+        try traceOptValue(visitor, &self.target);
+        try traceOptValue(visitor, &self.data);
+        try traceOptValue(visitor, &self.next);
+        try traceOptValue(visitor, &self.callback);
+        try traceOptValue(visitor, &self.inner_next);
+        try traceOptValue(visitor, &self.zip_nexts);
+        try traceOptValue(visitor, &self.zip_pads);
+        try traceOptValue(visitor, &self.zip_keys);
+        // atom_keys live on the atom RC table, not the cycle graph.
     }
 };
 
@@ -322,6 +436,16 @@ pub const CollectionPayload = struct {
             rt.memory.free(WeakCollectionEntry, old_weak_entries.ptr[0..old_weak_entries_capacity]);
         } else if (old_weak_entries.len != 0) {
             rt.memory.free(WeakCollectionEntry, old_weak_entries);
+        }
+    }
+
+    pub fn traceChildEdges(self: *CollectionPayload, visitor: anytype) !void {
+        for (self.entries) |*entry| {
+            try callVisitValue(visitor, &entry.key);
+            try callVisitValue(visitor, &entry.value);
+        }
+        for (self.weak_entries) |*entry| {
+            try callVisitWeakCollectionEntry(visitor, entry);
         }
     }
 };
@@ -417,6 +541,14 @@ pub const BufferPayload = struct {
         // first so a later view finalizer never dereferences this payload.
         self.unlinkAllViews();
         self.releaseStorage(rt);
+    }
+
+    pub fn traceChildEdges(self: *const BufferPayload, visitor: anytype) !void {
+        _ = self;
+        _ = visitor;
+        // Byte storage and first_view are not strong cycle-GC edges: bytes are
+        // external/inline memory, and views hold the buffer rather than the
+        // reverse.
     }
 
     pub fn releaseStorage(self: *BufferPayload, rt: *JSRuntime) void {
@@ -516,6 +648,10 @@ pub const TypedArrayPayload = struct {
         destroyOptionalValue(rt, &self.buffer);
     }
 
+    pub fn traceChildEdges(self: *TypedArrayPayload, visitor: anytype) !void {
+        try traceOptValue(visitor, &self.buffer);
+    }
+
     fn clearLiveState(self: *TypedArrayPayload) void {
         self.live_length = 0;
         self.data = null;
@@ -584,6 +720,13 @@ pub const RegExpPayload = extern struct {
         if (old_bytecode) |stored_string| stored_string.value().free(rt);
     }
 
+    pub fn traceChildEdges(self: *const RegExpPayload, visitor: anytype) !void {
+        _ = self;
+        _ = visitor;
+        // source / compiled_bytecode are JSString leaves, excluded from
+        // cycleMarkHeader (JS_MarkValue drops strings).
+    }
+
     comptime {
         std.debug.assert(@sizeOf(@This()) == 2 * @sizeOf(?*string.String));
     }
@@ -599,6 +742,12 @@ pub const BoundFunctionPayload = struct {
         destroyOptionalValue(rt, &self.this_value);
         destroyValueSlice(rt, &self.args);
     }
+
+    pub fn traceChildEdges(self: *BoundFunctionPayload, visitor: anytype) !void {
+        try traceOptValue(visitor, &self.target);
+        try traceOptValue(visitor, &self.this_value);
+        for (self.args) |*stored| try callVisitValue(visitor, stored);
+    }
 };
 
 pub const ProxyPayload = struct {
@@ -609,6 +758,11 @@ pub const ProxyPayload = struct {
         destroyOptionalValue(rt, &self.target);
         destroyOptionalValue(rt, &self.handler);
     }
+
+    pub fn traceChildEdges(self: *ProxyPayload, visitor: anytype) !void {
+        try traceOptValue(visitor, &self.target);
+        try traceOptValue(visitor, &self.handler);
+    }
 };
 
 pub const ArgumentsPayload = struct {
@@ -616,6 +770,10 @@ pub const ArgumentsPayload = struct {
 
     pub fn destroy(self: *ArgumentsPayload, rt: *JSRuntime) void {
         destroyValueSlice(rt, &self.var_refs);
+    }
+
+    pub fn traceChildEdges(self: *ArgumentsPayload, visitor: anytype) !void {
+        for (self.var_refs) |*stored| try callVisitValue(visitor, stored);
     }
 };
 
@@ -625,6 +783,10 @@ pub const ObjectDataPayload = struct {
     pub fn destroy(self: *ObjectDataPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.data);
     }
+
+    pub fn traceChildEdges(self: *ObjectDataPayload, visitor: anytype) !void {
+        try traceOptValue(visitor, &self.data);
+    }
 };
 
 pub const WeakRefPayload = struct {
@@ -633,6 +795,12 @@ pub const WeakRefPayload = struct {
 
     pub fn destroy(self: *WeakRefPayload, rt: *JSRuntime) void {
         rt.clearWeakIdentitySlot(&self.weak_target_identity);
+    }
+
+    pub fn traceChildEdges(self: *const WeakRefPayload, visitor: anytype) !void {
+        _ = self;
+        _ = visitor;
+        // Weak identities are not strong cycle-GC edges.
     }
 };
 
@@ -645,6 +813,10 @@ pub const VarRefPayload = struct {
     pub fn destroy(self: *VarRefPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.value);
         self.* = .{};
+    }
+
+    pub fn traceChildEdges(self: *VarRefPayload, visitor: anytype) !void {
+        try traceOptValue(visitor, &self.value);
     }
 };
 
@@ -674,6 +846,14 @@ pub const FinalizationRegistryPayload = struct {
         }
         self.* = .{};
     }
+
+    pub fn traceChildEdges(self: *FinalizationRegistryPayload, visitor: anytype) !void {
+        try callVisitRealm(visitor, &self.realm.ptr);
+        try traceOptValue(visitor, &self.cleanup_callback);
+        for (self.cells) |*entry| {
+            try callVisitFinalizationCell(visitor, entry);
+        }
+    }
 };
 
 pub const StdFilePayload = struct {
@@ -683,6 +863,12 @@ pub const StdFilePayload = struct {
 
     pub fn destroy(self: *StdFilePayload) void {
         self.* = .{};
+    }
+
+    pub fn traceChildEdges(self: *const StdFilePayload, visitor: anytype) !void {
+        _ = self;
+        _ = visitor;
+        // FILE* host handle; no cycle-GC child edges.
     }
 };
 
@@ -739,6 +925,16 @@ pub const DisposableStackPayload = struct {
         destroyOptionalValue(rt, &self.async_dispose_error);
         self.* = .{};
     }
+
+    pub fn traceChildEdges(self: *DisposableStackPayload, visitor: anytype) !void {
+        for (self.resources) |*resource| {
+            try callVisitValue(visitor, &resource.value);
+            try callVisitValue(visitor, &resource.method);
+        }
+        try traceOptValue(visitor, &self.async_dispose_resolve);
+        try traceOptValue(visitor, &self.async_dispose_reject);
+        try traceOptValue(visitor, &self.async_dispose_error);
+    }
 };
 
 /// State belonging to the global *object*, not to the realm. Intrinsics,
@@ -760,6 +956,10 @@ pub const GlobalPayload = struct {
         }
         self.* = .{};
     }
+
+    pub fn traceChildEdges(self: *GlobalPayload, visitor: anytype) !void {
+        try callVisitObject(visitor, &self.uninitialized_vars);
+    }
 };
 
 /// Host-visible `$262.createRealm()` record.  Its one strong edge is explicit:
@@ -771,6 +971,11 @@ pub const RealmRecordPayload = struct {
     pub fn destroy(self: *RealmRecordPayload) void {
         self.realm.deinit();
         self.* = .{};
+    }
+
+    pub fn traceChildEdges(self: *RealmRecordPayload, visitor: anytype) !void {
+        var realm = self.realm.borrow();
+        try callVisitRealm(visitor, &realm);
     }
 };
 
@@ -795,6 +1000,13 @@ pub const PromisePayload = struct {
         destroyValueSliceWithCapacity(rt, &self.reactions, &self.reactions_capacity);
         self.is_rejected = false;
         self.atomics_wait_async = false;
+    }
+
+    pub fn traceChildEdges(self: *PromisePayload, visitor: anytype) !void {
+        try traceOptValue(visitor, &self.result);
+        try traceOptValue(visitor, &self.reaction_callback);
+        try traceOptValue(visitor, &self.reaction_arg);
+        for (self.reactions) |*stored| try callVisitValue(visitor, stored);
     }
 };
 
@@ -888,6 +1100,21 @@ pub const FunctionRarePayload = struct {
         destroyOptionalValue(rt, &self.async_function_continuation);
         self.* = .{};
     }
+
+    pub fn traceChildEdges(self: *FunctionRarePayload, visitor: anytype) !void {
+        try traceOptValue(visitor, &self.source);
+        try traceOptValue(visitor, &self.realm_global);
+        try traceOptValue(visitor, &self.proxy_revoke_target);
+        try traceOptValue(visitor, &self.promise_capability_slot);
+        try traceOptValue(visitor, &self.promise_resolving_target);
+        try traceOptValue(visitor, &self.promise_resolving_state);
+        try traceOptValue(visitor, &self.promise_combinator_state);
+        try traceOptValue(visitor, &self.promise_finally_payload);
+        try traceOptValue(visitor, &self.promise_finally_callback);
+        try traceOptValue(visitor, &self.promise_finally_constructor);
+        try traceOptValue(visitor, &self.async_dispose_stack);
+        try traceOptValue(visitor, &self.async_function_continuation);
+    }
 };
 
 pub const FunctionPayload = struct {
@@ -938,6 +1165,10 @@ pub const FunctionPayload = struct {
         fields.native_dispatch_name = atom.null_atom;
         rt.atoms.free(native_dispatch_name);
         self.destroyRare(rt);
+    }
+
+    pub fn traceNativeRealm(self: *FunctionPayload, visitor: anytype) !void {
+        try callVisitRealm(visitor, &self.native.realm.ptr);
     }
 
     comptime {

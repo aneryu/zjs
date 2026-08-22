@@ -6146,6 +6146,8 @@ pub const Object = extern struct {
     pub const destroyRuntimeCyclesWithValueRoots = object_gc.destroyRuntimeCyclesWithValueRoots;
     pub const drainCycleDeferredFrees = object_gc.drainCycleDeferredFrees;
     pub const releaseCallbackOwnedFunctionBytecodeCycles = object_gc.releaseCallbackOwnedFunctionBytecodeCycles;
+    pub const CycleMarkPathForTest = object_gc.CycleMarkPathForTest;
+    pub const collectCycleMarkChildHeadersForTest = object_gc.collectCycleMarkChildHeadersForTest;
 
     fn weakIdentityIsLive(rt: *const JSRuntime, identity: usize) bool {
         if ((identity & 1) != 0) {
@@ -6255,88 +6257,51 @@ pub const Object = extern struct {
         };
     }
 
+    /// Edge kinds the ordinary-object / fast-array / shape cycle-mark contracts
+    /// cover. `object_gc` hot arms comptime-assert they declare the same set.
+    /// Runtime membership of any one kind still depends on the live payload
+    /// (empty property lists, absent iterator-next cache, null proto).
+    pub const CycleHotEdgeKind = enum(u8) {
+        shape,
+        property_slots,
+        array_elements,
+        iterator_next_cache,
+        proto,
+    };
+
+    pub const ordinary_object_cycle_hot_edges = [_]CycleHotEdgeKind{
+        .shape,
+        .property_slots,
+        .iterator_next_cache,
+    };
+    pub const fast_array_cycle_hot_edges = [_]CycleHotEdgeKind{
+        .shape,
+        .property_slots,
+        .array_elements,
+        .iterator_next_cache,
+    };
+    pub const shape_cycle_hot_edges = [_]CycleHotEdgeKind{.proto};
+
     pub inline fn traceChildEdgesFallible(self: *Object, rt: *JSRuntime, visitor: anytype) !void {
         const Helper = struct {
             inline fn callVisitObject(vis: anytype, obj_ptr: anytype) !void {
-                const VisType = @TypeOf(vis);
-                const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-                if (comptime @hasDecl(CleanType, "visitObject")) {
-                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitObject)).@"fn".return_type.?;
-                    if (comptime @typeInfo(ReturnType) == .error_union) {
-                        try vis.visitObject(obj_ptr);
-                    } else {
-                        vis.visitObject(obj_ptr);
-                    }
-                }
+                return object_payloads.callVisitObject(vis, obj_ptr);
             }
 
             inline fn callVisitValue(vis: anytype, val_ptr: anytype) !void {
-                const VisType = @TypeOf(vis);
-                const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-                if (comptime @hasDecl(CleanType, "visitValue")) {
-                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitValue)).@"fn".return_type.?;
-                    if (comptime @typeInfo(ReturnType) == .error_union) {
-                        try vis.visitValue(val_ptr);
-                    } else {
-                        vis.visitValue(val_ptr);
-                    }
-                }
+                return object_payloads.callVisitValue(vis, val_ptr);
             }
 
             inline fn callVisitShape(vis: anytype, shape_ref: *shape.Shape) !void {
-                const VisType = @TypeOf(vis);
-                const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-                if (comptime @hasDecl(CleanType, "visitShape")) {
-                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitShape)).@"fn".return_type.?;
-                    if (comptime @typeInfo(ReturnType) == .error_union) {
-                        try vis.visitShape(shape_ref);
-                    } else {
-                        vis.visitShape(shape_ref);
-                    }
-                }
+                return object_payloads.callVisitShape(vis, shape_ref);
             }
 
             inline fn callVisitRealm(vis: anytype, ctx_ptr: *?*context_mod.RealmContext) !void {
-                const VisType = @TypeOf(vis);
-                const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-                if (comptime @hasDecl(CleanType, "visitRealm")) {
-                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitRealm)).@"fn".return_type.?;
-                    if (comptime @typeInfo(ReturnType) == .error_union) {
-                        try vis.visitRealm(ctx_ptr);
-                    } else {
-                        vis.visitRealm(ctx_ptr);
-                    }
-                }
+                return object_payloads.callVisitRealm(vis, ctx_ptr);
             }
 
             inline fn traceOptValue(vis: anytype, opt_val: anytype) !void {
-                if (opt_val.*) |*stored| try callVisitValue(vis, stored);
-            }
-
-            inline fn callVisitWeakCollectionEntry(vis: anytype, entry: anytype) !void {
-                const VisType = @TypeOf(vis);
-                const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-                if (comptime @hasDecl(CleanType, "visitWeakCollectionEntry")) {
-                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitWeakCollectionEntry)).@"fn".return_type.?;
-                    if (comptime @typeInfo(ReturnType) == .error_union) {
-                        try vis.visitWeakCollectionEntry(entry);
-                    } else {
-                        vis.visitWeakCollectionEntry(entry);
-                    }
-                }
-            }
-
-            inline fn callVisitFinalizationCell(vis: anytype, entry: anytype) !void {
-                const VisType = @TypeOf(vis);
-                const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-                if (comptime @hasDecl(CleanType, "visitFinalizationCell")) {
-                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitFinalizationCell)).@"fn".return_type.?;
-                    if (comptime @typeInfo(ReturnType) == .error_union) {
-                        try vis.visitFinalizationCell(entry);
-                    } else {
-                        vis.visitFinalizationCell(entry);
-                    }
-                }
+                return object_payloads.traceOptValue(vis, opt_val);
             }
 
             /// qjs:6585-6597 TMASK arms (GETSET / VARREF / AUTOINIT). Kept off
@@ -6396,16 +6361,15 @@ pub const Object = extern struct {
         if (self.flags.class_payload_kind == .realm_record) {
             const ptr = self.u.payload orelse unreachable;
             const payload: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
-            var realm = payload.realm.borrow();
-            try Helper.callVisitRealm(visitor, &realm);
+            try payload.traceChildEdges(visitor);
         }
         if (self.class_id == class.ids.c_function) {
             const payload = self.functionPayload() orelse unreachable;
-            try Helper.callVisitRealm(visitor, &payload.native.realm.ptr);
+            try payload.traceNativeRealm(visitor);
         }
         if (self.globalPayload()) |payload| {
             // qjs js_global_object_mark (quickjs.c:17062-17067).
-            try Helper.callVisitObject(visitor, &payload.uninitialized_vars);
+            try payload.traceChildEdges(visitor);
         }
         if (rt.cached_iterator_next_entries.len != 0) {
             if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
@@ -6433,29 +6397,22 @@ pub const Object = extern struct {
             try Helper.traceUnusualProperty(visitor, entry, slot_flags);
         }
         if (self.ordinaryPayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.callsite_file);
-            try Helper.traceOptValue(visitor, &payload.callsite_function);
-            try Helper.traceOptValue(visitor, &payload.promise_reaction_on_fulfilled);
-            try Helper.traceOptValue(visitor, &payload.promise_reaction_on_rejected);
-            try Helper.traceOptValue(visitor, &payload.promise_reaction_resolve);
-            try Helper.traceOptValue(visitor, &payload.promise_reaction_reject);
-            try Helper.traceOptValue(visitor, &payload.promise_capability_resolve);
-            try Helper.traceOptValue(visitor, &payload.promise_capability_reject);
-            try Helper.traceOptValue(visitor, &payload.promise_combinator_resolve);
-            try Helper.traceOptValue(visitor, &payload.promise_combinator_reject);
-            try Helper.traceOptValue(visitor, &payload.promise_combinator_values);
-            try Helper.traceOptValue(visitor, &payload.promise_combinator_keys);
-            try Helper.traceOptValue(visitor, &payload.error_stack);
-            try Helper.traceOptValue(visitor, &payload.error_stack_sites);
+            try payload.traceChildEdges(visitor);
         }
         for (self.arrayElements()) |*stored| {
             try Helper.callVisitValue(visitor, stored);
         }
         if (self.typedArrayPayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.buffer);
+            try payload.traceChildEdges(visitor);
         }
         if (self.objectDataPayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.data);
+            try payload.traceChildEdges(visitor);
+        }
+        if (self.bufferPayload()) |payload| {
+            try payload.traceChildEdges(visitor);
+        }
+        if (self.regExpPayload()) |payload| {
+            try payload.traceChildEdges(visitor);
         }
         if (class.isBytecodeFunctionClass(self.class_id)) {
             // qjs js_bytecode_function_mark (quickjs.c:6262-6287), the class
@@ -6490,112 +6447,36 @@ pub const Object = extern struct {
             // qjs 6262; keep so rare cycle edges stay live. Then return: the
             // class mark is done.
             if (self.functionRarePayload()) |rare| {
-                try Helper.traceOptValue(visitor, &rare.source);
-                try Helper.traceOptValue(visitor, &rare.realm_global);
-                try Helper.traceOptValue(visitor, &rare.proxy_revoke_target);
-                try Helper.traceOptValue(visitor, &rare.promise_capability_slot);
-                try Helper.traceOptValue(visitor, &rare.promise_resolving_target);
-                try Helper.traceOptValue(visitor, &rare.promise_resolving_state);
-                try Helper.traceOptValue(visitor, &rare.promise_combinator_state);
-                try Helper.traceOptValue(visitor, &rare.promise_finally_payload);
-                try Helper.traceOptValue(visitor, &rare.promise_finally_callback);
-                try Helper.traceOptValue(visitor, &rare.promise_finally_constructor);
-                try Helper.traceOptValue(visitor, &rare.async_dispose_stack);
-                try Helper.traceOptValue(visitor, &rare.async_function_continuation);
+                try rare.traceChildEdges(visitor);
             }
             return;
         }
         if (self.functionRarePayload()) |rare| {
-            try Helper.traceOptValue(visitor, &rare.source);
-            try Helper.traceOptValue(visitor, &rare.realm_global);
-            try Helper.traceOptValue(visitor, &rare.proxy_revoke_target);
-            try Helper.traceOptValue(visitor, &rare.promise_capability_slot);
-            try Helper.traceOptValue(visitor, &rare.promise_resolving_target);
-            try Helper.traceOptValue(visitor, &rare.promise_resolving_state);
-            try Helper.traceOptValue(visitor, &rare.promise_combinator_state);
-            try Helper.traceOptValue(visitor, &rare.promise_finally_payload);
-            try Helper.traceOptValue(visitor, &rare.promise_finally_callback);
-            try Helper.traceOptValue(visitor, &rare.promise_finally_constructor);
-            try Helper.traceOptValue(visitor, &rare.async_dispose_stack);
-            try Helper.traceOptValue(visitor, &rare.async_function_continuation);
+            try rare.traceChildEdges(visitor);
         }
         if (self.boundFunctionPayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.target);
-            try Helper.traceOptValue(visitor, &payload.this_value);
-            for (payload.args) |*stored| try Helper.callVisitValue(visitor, stored);
+            try payload.traceChildEdges(visitor);
         }
         if (self.collectionPayload()) |payload| {
-            for (payload.entries) |*entry| {
-                try Helper.callVisitValue(visitor, &entry.key);
-                try Helper.callVisitValue(visitor, &entry.value);
-            }
-            for (payload.weak_entries) |*entry| {
-                try Helper.callVisitWeakCollectionEntry(visitor, entry);
-            }
+            try payload.traceChildEdges(visitor);
         }
         if (self.finalizationRegistryPayload()) |payload| {
-            try Helper.callVisitRealm(visitor, &payload.realm.ptr);
-            try Helper.traceOptValue(visitor, &payload.cleanup_callback);
-            for (payload.cells) |*entry| {
-                try Helper.callVisitFinalizationCell(visitor, entry);
-            }
+            try payload.traceChildEdges(visitor);
         }
         if (self.disposableStackPayload()) |payload| {
-            for (payload.resources) |*resource| {
-                try Helper.callVisitValue(visitor, &resource.value);
-                try Helper.callVisitValue(visitor, &resource.method);
-            }
-            try Helper.traceOptValue(visitor, &payload.async_dispose_resolve);
-            try Helper.traceOptValue(visitor, &payload.async_dispose_reject);
-            try Helper.traceOptValue(visitor, &payload.async_dispose_error);
+            try payload.traceChildEdges(visitor);
         }
         if (self.iteratorPayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.target);
-            try Helper.traceOptValue(visitor, &payload.data);
-            try Helper.traceOptValue(visitor, &payload.next);
-            try Helper.traceOptValue(visitor, &payload.callback);
-            try Helper.traceOptValue(visitor, &payload.inner_next);
-            try Helper.traceOptValue(visitor, &payload.zip_nexts);
-            try Helper.traceOptValue(visitor, &payload.zip_pads);
-            try Helper.traceOptValue(visitor, &payload.zip_keys);
+            try payload.traceChildEdges(visitor);
         }
         if (self.generatorPayload()) |payload| {
-            if (payload.execution) |execution| {
-                try Helper.callVisitValue(visitor, &execution.this_value);
-                if (!execution.suspended.running_aliases) {
-                    for (execution.suspended.storage.stack.values) |*stored| try Helper.callVisitValue(visitor, stored);
-                    for (execution.suspended.storage.frame.locals) |*stored| try Helper.callVisitValue(visitor, stored);
-                    for (execution.suspended.storage.frame.args) |*stored| try Helper.callVisitValue(visitor, stored);
-                    // qjs marks the resident JSAsyncFunctionState frame's var_refs;
-                    // there is no second generator-payload capture array.
-                    for (execution.suspended.storage.frame.var_refs) |cell| {
-                        var cell_value = cell.valueRef();
-                        try Helper.callVisitValue(visitor, &cell_value);
-                    }
-                    for (execution.suspended.storage.frame.open_var_refs) |maybe_cell| {
-                        const cell = maybe_cell orelse continue;
-                        var cell_value = cell.valueRef();
-                        try Helper.callVisitValue(visitor, &cell_value);
-                    }
-                }
-                try Helper.callVisitValue(visitor, &execution.current_function);
-                try Helper.callVisitValue(visitor, &execution.yield_star_iterator);
-            }
-            try Helper.traceOptValue(visitor, &payload.async_promise);
-            // Async-generator request queue values (mirrors
-            // js_async_generator_mark, quickjs.c:21400-21418).
-            for (payload.async_queue) |*req| {
-                try Helper.callVisitValue(visitor, &req.result);
-                try Helper.callVisitValue(visitor, &req.promise);
-                try Helper.callVisitValue(visitor, &req.resolve);
-                try Helper.callVisitValue(visitor, &req.reject);
-            }
+            try payload.traceChildEdges(visitor);
         }
         if (self.argumentsPayload()) |payload| {
-            for (payload.var_refs) |*stored| try Helper.callVisitValue(visitor, stored);
+            try payload.traceChildEdges(visitor);
         }
         if (self.varRefPayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.value);
+            try payload.traceChildEdges(visitor);
         }
         if (self.class_id == class.ids.mapped_arguments) {
             for (self.argumentsVarRefs()) |maybe_cell| {
@@ -6605,14 +6486,16 @@ pub const Object = extern struct {
             }
         }
         if (self.proxyPayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.target);
-            try Helper.traceOptValue(visitor, &payload.handler);
+            try payload.traceChildEdges(visitor);
         }
         if (self.promisePayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.result);
-            try Helper.traceOptValue(visitor, &payload.reaction_callback);
-            try Helper.traceOptValue(visitor, &payload.reaction_arg);
-            for (payload.reactions) |*stored| try Helper.callVisitValue(visitor, stored);
+            try payload.traceChildEdges(visitor);
+        }
+        if (self.weakRefPayload()) |payload| {
+            try payload.traceChildEdges(visitor);
+        }
+        if (self.stdFilePayload()) |payload| {
+            try payload.traceChildEdges(visitor);
         }
         const Adaptor = ClassPayloadTraceAdaptor(@TypeOf(visitor));
         var adaptor = Adaptor{ .visitor = visitor };
