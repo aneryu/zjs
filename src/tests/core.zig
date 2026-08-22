@@ -970,6 +970,49 @@ test "FinalizationRegistry RealmRef edge participates in realm-global cycle coll
     try std.testing.expect(rt.firstContext() == null);
 }
 
+fn liveRealmCount(rt: *core.JSRuntime) usize {
+    var count: usize = 0;
+    var current = rt.firstContext();
+    while (current) |ctx| : (current = ctx.runtime_next) count += 1;
+    return count;
+}
+
+test "auto_init slot to another realm retains it across JSContext.destroy and cycle GC" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx_a = try core.JSContext.create(rt);
+    defer ctx_a.destroy();
+    const ctx_b = try core.JSContext.create(rt);
+
+    const host_rc = ctx_b.header.meta().rc;
+    {
+        const obj = try core.Object.create(rt, core.class.ids.object, null);
+        defer obj.value().free(rt);
+        try obj.defineFunctionPrototypeAutoInit(
+            rt,
+            ctx_b,
+            core.property.Flags.data(true, false, true),
+        );
+        const proto_index = obj.findProperty(core.atom.ids.prototype) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(core.property.Kind.auto_init, obj.propFlagsAt(proto_index).kind);
+        const stored = obj.prop_values[proto_index].slot.auto_init.realm_and_id.realmHeader();
+        try std.testing.expectEqual(&ctx_b.header, stored.?);
+        try std.testing.expectEqual(host_rc + 1, ctx_b.header.meta().rc);
+
+        ctx_b.destroy();
+        try std.testing.expectEqual(host_rc, ctx_b.header.meta().rc);
+        try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
+        try std.testing.expectEqual(&ctx_b.header, obj.prop_values[proto_index].slot.auto_init.realm_and_id.realmHeader().?);
+    }
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), liveRealmCount(rt));
+    try std.testing.expectEqual(ctx_a, rt.firstContext().?);
+}
+
 test "FinalizationRegistry RealmRef retains and releases its construction realm exactly once" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

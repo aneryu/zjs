@@ -390,6 +390,10 @@ pub const JSContext = struct {
     construction_next: ?*JSContext = null,
     publication_state: RealmPublicationState = .constructing,
     construction_complete: bool = false,
+    /// Consumed by `destroy` / `tryDestroy` and by `RealmRef.takeOwned`.
+    /// The host API may release this create-ref exactly once; leftover
+    /// `visitRealm` edges are ordinary RC, not a second `destroy`.
+    host_api_release_consumed: bool = false,
     /// Realm-local module map. Every linked record's list base-ref is an owned
     /// Context -> ModuleRecord GC edge; record addresses stay stable.
     modules: module.Registry,
@@ -442,12 +446,16 @@ pub const JSContext = struct {
     eval_function: JSValue = JSValue.nullValue(),
     host_event_loop: ?HostEventLoop = null,
 
-    /// Returns an owned context. Caller must release it with `destroy`.
+    /// Returns an owned context. Caller must release that host reference with
+    /// `destroy` exactly once. `destroy` is not "tear down this realm": it is
+    /// one `gc.release`, and `createRealm` transfers the child's create-ref
+    /// onto the realm-record value instead of returning it here.
     pub fn create(rt: *JSRuntime) !*JSContext {
         return createWithOptions(rt, .{});
     }
 
-    /// Returns an owned context. Caller must release it with `destroy`.
+    /// Returns an owned context. Caller must release that host reference with
+    /// `destroy` exactly once.
     pub fn createWithOptions(rt: *JSRuntime, options: ContextOptions) !*JSContext {
         return createWithPublication(rt, options, true);
     }
@@ -832,6 +840,7 @@ pub const JSContext = struct {
 
     pub fn destroy(self: *JSContext) void {
         self.runtime.assertOwnerThread();
+        self.consumeHostApiRelease();
         gc.release(self.runtime, &self.header);
     }
 
@@ -839,7 +848,16 @@ pub const JSContext = struct {
     /// Runtime owner thread. A wrong-thread call does not decrement the Realm.
     pub fn tryDestroy(self: *JSContext) runtime_mod.RuntimeMutationError!void {
         try self.runtime.requireOwnerThread();
+        self.consumeHostApiRelease();
         gc.release(self.runtime, &self.header);
+    }
+
+    fn consumeHostApiRelease(self: *JSContext) void {
+        // Debug/ReleaseSafe: a second host destroy (createRealm child looked
+        // up via contextForGlobal, or destroy twice) undercounts visitRealm
+        // edges. ReleaseFast keeps the flag write so the layout matches.
+        std.debug.assert(!self.host_api_release_consumed);
+        self.host_api_release_consumed = true;
     }
 
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
@@ -1322,6 +1340,7 @@ pub const RealmRef = extern struct {
     }
 
     pub fn takeOwned(ctx: *RealmContext) RealmRef {
+        ctx.consumeHostApiRelease();
         return .{ .ptr = ctx };
     }
 

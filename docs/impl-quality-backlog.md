@@ -713,6 +713,101 @@ when the function object holds the bytecode's last reference (dynamic
 Gates: suite 2332/1/0, test262 delta 0, rule-2 A/B 0.9994 / 1.0004 over two
 samplings.
 
+**Q20 (STATUS defect #2) — closed 2026-08-23** (`9c341306` + `17808d50`,
+realm-b grok lane). Not an engine defect: `JSContext.destroy` is one
+`gc.release` of the caller's host reference (verified at `context.zig:833`),
+matching `JS_FreeContext`, while property-slot realm edges
+(`AutoInitSlot.realm_and_id`) carry their own `gc.retain`. The recorded
+reproduction — walking the children `$262.createRealm()` left behind and
+destroying them — is a *second* host release of a reference the realm record
+already owns, i.e. the double-free shape; that undercount is what made cycle
+mark hit `rc == 0`. Regression tests pin the correct shapes (cross-realm
+stolen `Array.prototype`, newest-first and oldest-first teardown, createRealm
+leftovers without a child destroy).
+Driver additions beyond the lane's own finding, because "the caller used it
+wrong" only counts if the next caller can't:
+  * **the ownership rule is now in `docs/public-api-contract.md`** (who owns
+    the create-ref, that `destroy` is not "tear down this realm", the
+    `contextForGlobal` / `context_head` prohibition and its consequence, and
+    `RealmRef.retain` as the supported way to take another reference) —
+    it was documented nowhere, while both `JSContext.destroy` and
+    `contextForGlobal` are public;
+  * **a Debug/ReleaseSafe `host_api_release_consumed` flag** makes a second
+    host release assert *at the call site* instead of surfacing as a distant
+    GC assert later. One bool, present in all modes so layout matches;
+  * **the shared test tier now tears down at process exit** (atexit: restore
+    the baseline, release the snapshot's extra retains — VARREF snapshot slots
+    alias the live cell, so drop the extra retain without `slot.destroy` —
+    then destroy only the host-owned main context). ~400 tests thereby enter
+    the `context_head` and `allocation_count` asserts. **Driver live-fire
+    verified the guard has teeth**: a deliberate 64-byte allocator imbalance
+    in a shared-engine test panics on `allocation_count` at teardown; the lane
+    had only reported "no leaks found", which is not the same claim.
+Gates: suite 2337/1/0, test262 delta 0, leak census 1524 (two passes).
+
+### G — GC refactor preparation (opened 2026-08-23)
+
+Groundwork so the coming GC refactor has a safety net, honest instruments,
+and a code shape where a missed edge is visible. Nothing here changes GC
+policy; that is the refactor itself.
+
+**G1. Three defects in the GC instrument panel.** (First pass at this item
+reported the panel as mostly dead; that was a bad grep — the writes use
+saturating `+|=`. Corrected findings, each verified at the write site:)
+  * **`cycles_collected` is a lie**: `recordSuccess` (`gc.zig:1509`) assigns
+    it `result.freed_objects`, the same value as `freed_objects` on the line
+    above. "Cycles collected" and "objects freed" are different quantities;
+    `CollectionResult` carries no cycle count to assign. Nothing reads the
+    field. Either count real cycles in the collector or delete it — do not
+    ship a metric whose name misdescribes its value into a GC refactor.
+  * **`rc_inc` / `rc_dec` are dead** — zero references anywhere. They cannot
+    be implemented as-is either: refcount traffic is the hottest path in the
+    engine and a counter there is not cost-neutral (2026-08-11 ruling).
+    Delete, or gate behind an explicit diagnostic build.
+  * **`collections`** (`:532`) has no write and no read; only the unrelated
+    `failed_collections` does.
+The live counters are `cycle_gc_count`, `cycle_gc_time_ns`,
+`last_collection_time_ns`, `freed_objects`, `failed_collections`,
+`last_failure` and `zero_ref_drains`.
+  **Done 2026-08-23** (`a6dc84fb`): the four dead/misdescribed fields
+  deleted; survivors document their write sites. Two grep lessons on the
+  way, both worth carrying into the refactor: the writes use saturating
+  `+|=` (a `+=`-only scan reported the whole panel as dead), and
+  `collections` is written from `object_gc.zig`, not `gc.zig` — **a
+  dead-field claim needs a tree-wide scan and every assignment spelling**.
+  The identity gate did *not* hold (the deleted assignment was live code and
+  the struct shrink moves `Registry` offsets), so the item escalated to
+  rule-2 A/B: composite **1.0043**, every suite inside its envelope.
+
+**G2. GC state is observable from an embedding, but not from a real
+workload.** (Two corrections to this item's first draft, both mine: the
+embedding accessor *does* exist — `JSRuntime.gcStats()`
+(`runtime.zig:2711`), public and re-exported as `zjs.JSRuntime`; and the
+panel it returns is *complete* — the nine fields `Registry.statsSnapshot`
+leaves at their defaults are all filled by `gcStats` afterwards, which is
+why core-suite tests can assert `weak_ref_count == 8`. Judging a field dead
+from one producer is how both errors happened.)
+What is genuinely missing is a way to read those numbers from a real script
+run: the CLI has no flag, so tuning the collector against an actual workload
+means writing a Zig test instead of running the shipped binary. Direction:
+a `--gc-stats` flag that prints the honest subset (collections, completed
+rounds, elapsed, freed objects, failures, live/peak bytes) after execution.
+Gate: suite; CLI smoke; no new pub API surface expected.
+
+**G3. Hot mark arms and the authority trace have no consistency guard.**
+`markOrdinaryObjectHot` / `markFastArrayHot` (`object_gc.zig`) hand-enumerate
+their child edges; the authority is `Object.traceChildEdgesFallible`. Q1 was
+exactly this drift (fast-array arm missed the iterator-next cache edge → an
+uncollectable cycle, invisible to test262 and to the leak checker, which
+only catches destroy-side misses). The fix added two lines and left no
+mechanism. In flight on the proto-a lane: a deterministic edge-coverage
+guard comparing the arms against the authority, proven by deletion probes.
+
+**G4 (parked from Q11 T2). Move each payload's trace arm beside its destroy
+method** so a missing pair is visible while writing the code rather than
+after a leak report. Hot file, so it lands under **AB** + pad lineage; it
+should follow G3's guard, not precede it.
+
 ## Standing discipline (carried from prior campaigns, applies to every item)
 
 - Deletion-only changes: A/B ratio alone cannot judge them; pair with the

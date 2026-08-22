@@ -69,7 +69,9 @@ Do not introduce a public `Engine` facade as the central API. It hides lifetime
 and dispatch costs that embedders need to control.
 
 Root aliases are additive only. Do not document names as available until they
-appear in `docs/public-api-contract.md`.
+appear in `docs/public-api-contract.md`. JSContext host-reference ownership
+(`create` vs `createRealm`, and the ban on `destroy` via `contextForGlobal` /
+`context_head`) is documented there, not here.
 
 ## Performance Shape
 

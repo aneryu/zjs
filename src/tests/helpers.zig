@@ -169,6 +169,12 @@ pub fn countJobArgs(ctx: *core.JSContext, args: []const core.JSValue) core.JSVal
 // own stack buffers / `std.ArrayList` instances with
 // `std.testing.allocator`; those are independent of the engine and
 // continue to be leak-checked the usual way.
+//
+// Process exit (atexit, registered on first `sharedTestEngine()`)
+// restores the baseline, releases the snapshot's extra retains, then
+// destroys only the host-owned main context and the runtime. Leftover
+// `$262.createRealm()` children are cycle-collected there. Do not walk
+// `context_head` and `JSContext.destroy` them.
 
 const module_graph = engine.exec.module_graph;
 const RuntimeError = engine.exec.exceptions.RuntimeError;
@@ -481,6 +487,7 @@ const shared_engine_allocation_tolerance: usize = 8;
 var shared_engine_baseline_allocation_count: usize = 0;
 var shared_engine_baseline_allocated_bytes: usize = 0;
 var shared_engine_baseline_module_count: usize = 0;
+var shared_engine_teardown_registered: bool = false;
 
 extern var zjs_test_runner_current_name_ptr: [*]const u8;
 extern var zjs_test_runner_current_name_len: usize;
@@ -547,12 +554,131 @@ pub fn sharedTestEngine() *TestEngine {
         shared_engine_baseline_allocation_count = eng.runtime.memory.allocation_count;
         shared_engine_baseline_allocated_bytes = eng.runtime.memory.allocated_bytes;
         shared_engine_baseline_module_count = eng.context.modules.count;
+        registerSharedEngineProcessTeardown();
     }
     return &shared_engine_storage.?;
 }
 
+extern "c" fn atexit(function: *const fn () callconv(.c) void) c_int;
+
+fn registerSharedEngineProcessTeardown() void {
+    if (shared_engine_teardown_registered) return;
+    shared_engine_teardown_registered = true;
+    _ = atexit(&sharedEngineProcessTeardown);
+}
+
+fn sharedEngineProcessTeardown() callconv(.c) void {
+    deinitSharedTestEngine();
+}
+
+/// Process-exit teardown for the shared engine. Restores the baseline so
+/// extra globals drop, releases the snapshot's extra realm retains, then
+/// destroys only the host-owned main context. Leftover createRealm cycles
+/// are collected by `JSRuntime.deinit`; extra `JSContext.destroy` on those
+/// children is the undercount that trips `visitRealm`.
+pub fn deinitSharedTestEngine() void {
+    const eng = if (shared_engine_storage) |*e| e else return;
+    // Last `endSharedTest` already restored the baseline. Releasing the
+    // snapshot drops its untraced extra retains (auto_init on the context,
+    // data dups, var_ref value extras) so cycle GC can collect the host realm.
+    releaseSharedEngineBaselineSnapshot(eng.runtime);
+    var owned = eng.*;
+    shared_engine_storage = null;
+    owned.deinit();
+}
+
+fn releaseSharedEngineBaselineSnapshot(rt: *core.JSRuntime) void {
+    if (shared_engine_baseline_var_refs) |var_refs| {
+        for (var_refs) |maybe_state| {
+            if (maybe_state) |state| state.value.free(rt);
+        }
+        std.heap.page_allocator.free(var_refs);
+        shared_engine_baseline_var_refs = null;
+    }
+    if (shared_engine_baseline_properties) |baselines| {
+        const baseline_shape_props = shared_engine_baseline_shape_props.?;
+        for (baselines, 0..) |base, idx| {
+            const base_flags = core.property.Flags.fromBits(baseline_shape_props[idx].flags);
+            // VARREF snapshot slots alias the live global's cell. `slot.dup`
+            // extra-retains that cell's value; drop the extra without
+            // `slot.destroy`, which would free the live cell value twice.
+            if (base_flags.isVarRef()) {
+                if (!base_flags.deleted) base.slot.var_ref.valueRef().free(rt);
+            } else {
+                base.slot.destroy(base_flags, rt);
+            }
+        }
+        std.heap.page_allocator.free(baselines);
+        shared_engine_baseline_properties = null;
+    }
+    if (shared_engine_baseline_shape_props) |baseline_shape_props| {
+        for (baseline_shape_props) |prop| {
+            if (prop.atom_id != core.atom.null_atom) rt.atoms.free(prop.atom_id);
+        }
+        std.heap.page_allocator.free(baseline_shape_props);
+        shared_engine_baseline_shape_props = null;
+    }
+    shared_engine_baseline_property_count = 0;
+    shared_engine_baseline_shape_prop_count = 0;
+    shared_engine_baseline_shape_hash = 0;
+    shared_engine_baseline_shape_deleted_count = 0;
+}
+
 pub fn endSharedTest() void {
     const eng = if (shared_engine_storage) |*e| e else return;
+    resetSharedEngineAfterTest(eng);
+
+    const allocation_count = eng.runtime.memory.allocation_count;
+    const allocated_bytes = eng.runtime.memory.allocated_bytes;
+    const module_count = eng.context.modules.count;
+    const count_delta = @as(i128, @intCast(allocation_count)) - @as(i128, @intCast(shared_engine_baseline_allocation_count));
+    const bytes_delta = @as(i128, @intCast(allocated_bytes)) - @as(i128, @intCast(shared_engine_baseline_allocated_bytes));
+    const module_delta = @as(i128, @intCast(module_count)) - @as(i128, @intCast(shared_engine_baseline_module_count));
+    const test_name = zjs_test_runner_current_name_ptr[0..zjs_test_runner_current_name_len];
+
+    if (zjs_test_runner_leak_census) {
+        std.debug.print("leak-census: pass={} test=\"{s}\" count_delta={d} bytes_delta={d} module_count={} module_delta={d} count={} bytes={}\n", .{
+            zjs_test_runner_current_pass,
+            test_name,
+            count_delta,
+            bytes_delta,
+            module_count,
+            module_delta,
+            allocation_count,
+            allocated_bytes,
+        });
+    }
+
+    // Pass 0 deliberately warms lazy shared-Realm state. From pass 1 onward,
+    // module-registry growth is the sole unbounded owner and is accounted by
+    // its own monotonic count; every other test must stay within the measured
+    // bounded property-capacity noise floor.
+    const module_count_grew = module_count > shared_engine_baseline_module_count;
+    if (zjs_test_runner_current_pass != 0 and !module_count_grew) {
+        const limit = std.math.add(usize, shared_engine_baseline_allocation_count, shared_engine_allocation_tolerance) catch std.math.maxInt(usize);
+        if (allocation_count > limit) {
+            std.debug.panic(
+                "shared-test leak gate: test=\"{s}\" count_delta={d} bytes_delta={d} module_count={} module_delta={d} baseline_count={} observed_count={} tolerance={}",
+                .{
+                    test_name,
+                    count_delta,
+                    bytes_delta,
+                    module_count,
+                    module_delta,
+                    shared_engine_baseline_allocation_count,
+                    allocation_count,
+                    shared_engine_allocation_tolerance,
+                },
+            );
+        }
+    }
+
+    shared_engine_baseline_allocation_count = @max(shared_engine_baseline_allocation_count, allocation_count);
+    shared_engine_baseline_allocated_bytes = @max(shared_engine_baseline_allocated_bytes, allocated_bytes);
+    shared_engine_baseline_module_count = @max(shared_engine_baseline_module_count, module_count);
+}
+
+fn resetSharedEngineAfterTest(eng: *TestEngine) void {
     // Clear any exception still sitting on the context from a test
     // that returned via `try` without explicitly taking it.
     if (eng.context.hasException()) {
@@ -654,55 +780,6 @@ pub fn endSharedTest() void {
         }
     }
     _ = eng.runtime.runObjectCycleRemoval();
-
-    const allocation_count = eng.runtime.memory.allocation_count;
-    const allocated_bytes = eng.runtime.memory.allocated_bytes;
-    const module_count = eng.context.modules.count;
-    const count_delta = @as(i128, @intCast(allocation_count)) - @as(i128, @intCast(shared_engine_baseline_allocation_count));
-    const bytes_delta = @as(i128, @intCast(allocated_bytes)) - @as(i128, @intCast(shared_engine_baseline_allocated_bytes));
-    const module_delta = @as(i128, @intCast(module_count)) - @as(i128, @intCast(shared_engine_baseline_module_count));
-    const test_name = zjs_test_runner_current_name_ptr[0..zjs_test_runner_current_name_len];
-
-    if (zjs_test_runner_leak_census) {
-        std.debug.print("leak-census: pass={} test=\"{s}\" count_delta={d} bytes_delta={d} module_count={} module_delta={d} count={} bytes={}\n", .{
-            zjs_test_runner_current_pass,
-            test_name,
-            count_delta,
-            bytes_delta,
-            module_count,
-            module_delta,
-            allocation_count,
-            allocated_bytes,
-        });
-    }
-
-    // Pass 0 deliberately warms lazy shared-Realm state. From pass 1 onward,
-    // module-registry growth is the sole unbounded owner and is accounted by
-    // its own monotonic count; every other test must stay within the measured
-    // bounded property-capacity noise floor.
-    const module_count_grew = module_count > shared_engine_baseline_module_count;
-    if (zjs_test_runner_current_pass != 0 and !module_count_grew) {
-        const limit = std.math.add(usize, shared_engine_baseline_allocation_count, shared_engine_allocation_tolerance) catch std.math.maxInt(usize);
-        if (allocation_count > limit) {
-            std.debug.panic(
-                "shared-test leak gate: test=\"{s}\" count_delta={d} bytes_delta={d} module_count={} module_delta={d} baseline_count={} observed_count={} tolerance={}",
-                .{
-                    test_name,
-                    count_delta,
-                    bytes_delta,
-                    module_count,
-                    module_delta,
-                    shared_engine_baseline_allocation_count,
-                    allocation_count,
-                    shared_engine_allocation_tolerance,
-                },
-            );
-        }
-    }
-
-    shared_engine_baseline_allocation_count = @max(shared_engine_baseline_allocation_count, allocation_count);
-    shared_engine_baseline_allocated_bytes = @max(shared_engine_baseline_allocated_bytes, allocated_bytes);
-    shared_engine_baseline_module_count = @max(shared_engine_baseline_module_count, module_count);
 }
 
 pub const vm_helpers = struct {

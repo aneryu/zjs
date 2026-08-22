@@ -95,6 +95,33 @@ populated only in profiling builds (`zig build zjs-profile` /
 Returned owning values must be released with the same runtime unless ownership
 is transferred into a documented public handle or engine object.
 
+### JSContext host ownership
+
+`JSContext.destroy` (and the binding facade's `destroy` / `deinit`) releases
+**the caller's host reference**, matching QuickJS `JS_FreeContext`. It does
+not destroy a realm by itself. Auto-init property slots, native-function
+`RealmRef`s, function bytecode, jobs, and realm-record payloads hold their
+own retains; those keep the `JSContext` allocated until they drop.
+
+Who owns that host reference:
+
+- `JSContext.create` / `createWithOptions` returns it to the caller. Destroy
+  that returned context exactly once.
+- `JSContext.createRealm` (and `$262.createRealm()`) transfers the child's
+  create reference onto the realm-record `JSValue`. Free that value. Do not
+  call `JSContext.destroy` on the child.
+
+`JSRuntime.contextForGlobal`, `firstContext`, and the `context_head` list are
+lookups, not ownership transfers. Do not walk `context_head` or resolve a
+global to a context and `destroy` it unless that pointer is the host
+reference you created and still own. A second host `destroy` (the createRealm
+child, or `destroy` twice on a `create` realm) undercounts remaining realm
+edges. Cycle GC then hits `gcDecrefChildInline` (`rc > 0`) on `visitRealm`.
+
+`RealmRef.retain` / `deinit` is the explicit extra host-reference pair
+(`JS_DupContext` / `JS_FreeContext`). Use that when you need another owner,
+not `contextForGlobal` plus `destroy`.
+
 Some low-level runtime helper APIs still accept the public context's `.core`
 field while the adapter layer is being completed. Do not add new public
 core-typed APIs without documenting the migration shape.

@@ -492,7 +492,6 @@ pub const CollectionError = error{
 
 pub const CollectionResult = struct {
     freed_objects: usize = 0,
-    freed_bytecodes: usize = 0,
     duration_ns: u64 = 0,
 };
 
@@ -517,18 +516,25 @@ pub const InvariantError = error{
 };
 
 /// 19. GE Stats
+/// Counters the collector actually maintains. Every field here has a write
+/// site in `recordSuccess` / `recordFailure` / the zero-ref drain; refcount
+/// traffic is deliberately uninstrumented because a counter on that path is
+/// not cost-neutral (2026-08-11 ruling), and cycle *count* is absent because
+/// the collector reports freed objects, not strongly-connected components.
 pub const GeStats = struct {
-    rc_inc: usize = 0,
-    rc_dec: usize = 0,
     zero_ref_drains: usize = 0,
 
     cycle_gc_count: usize = 0,
     cycle_gc_time_ns: u64 = 0,
-    cycles_collected: usize = 0,
     failed_collections: usize = 0,
     last_failure: FailureKind = .none,
     last_collection_time_ns: u64 = 0,
 
+    /// Cycle-collection entry count, bumped by
+    /// `object_gc.destroyRuntimeCyclesWithValueRoots`. Distinct from
+    /// `cycle_gc_count`, which records completed rounds via `recordSuccess`;
+    /// the pair is what tells an aborted round from a finished one, and the
+    /// core suite uses this one as its "did a collection run" oracle.
     collections: usize = 0,
     freed_objects: usize = 0,
 
@@ -1506,7 +1512,6 @@ pub const Registry = struct {
         self.stats.cycle_gc_count +|= 1;
         self.stats.cycle_gc_time_ns +|= result.duration_ns;
         self.stats.freed_objects +|= result.freed_objects;
-        self.stats.cycles_collected +|= result.freed_objects;
     }
 
     pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {

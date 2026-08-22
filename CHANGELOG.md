@@ -65,6 +65,18 @@ under the refactor-policy gates.
   also fails closed: it never returns the exception sentinel without first
   installing a pending exception (docs/impl-quality-backlog.md, Q16 Stage 1).
 
+- **The GC statistics struct no longer advertises numbers it does not keep.**
+  `GeStats.cycles_collected` was assigned the *object* count on every
+  successful collection — a different quantity from the name, with no reader;
+  `rc_inc` / `rc_dec` and `CollectionResult.freed_bytecodes` had no references
+  at all, and refcount traffic is deliberately left uninstrumented because a
+  counter on that path is not cost-neutral. All four are removed (0.2.0-dev
+  breaking window). The live counters — `collections`, `cycle_gc_count`,
+  `cycle_gc_time_ns`, `last_collection_time_ns`, `freed_objects`,
+  `failed_collections`, `last_failure`, `zero_ref_drains` — now document
+  which write site maintains them. Groundwork for the GC refactor: tuning a
+  collector against fields that read zero is worse than having no panel.
+
 - **Fixed: a returning frame read its bytecode after releasing the object that
   owned it.** All three simple-teardown arms closed open var refs *after*
   freeing `current_function`, so a call whose function object held the last

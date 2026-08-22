@@ -410,6 +410,103 @@ test "embedding public API core signatures stay source-compatible" {
     }
 }
 
+fn liveRealmCount(rt: *zjs.JSRuntime) usize {
+    var count: usize = 0;
+    var current = rt.firstContext();
+    while (current) |ctx| : (current = ctx.runtime_next) count += 1;
+    return count;
+}
+
+fn stealArrayPrototype(ctx_from: *zjs.JSContext, ctx_into: *zjs.JSContext) !zjs.JSValue {
+    const proto = try ctx_from.eval("Array.prototype", .{});
+    errdefer proto.free(ctx_from.core.runtime);
+    const global = try ctx_into.eval("globalThis", .{});
+    defer global.free(ctx_into.core.runtime);
+    try ctx_into.defineDataProperty(global, "stolenProto", proto, .{});
+    return proto;
+}
+
+test "embedding destroy of one context keeps auto_init-bearing objects from that realm alive" {
+    const allocator = std.testing.allocator;
+    const rt = try zjs.JSRuntime.create(allocator);
+    defer rt.destroy();
+    const ctx_a = try zjs.JSContext.create(rt);
+    defer ctx_a.destroy();
+    const ctx_b = try zjs.JSContext.create(rt);
+
+    const proto = try stealArrayPrototype(ctx_b, ctx_a);
+    defer proto.free(rt);
+    const b_global = try ctx_b.globalObject();
+
+    try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
+    ctx_b.destroy();
+    try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
+    try std.testing.expect(rt.contextForGlobal(b_global) != null);
+}
+
+test "embedding newest-first context destroy with cross-realm Array.prototype still tears down" {
+    const allocator = std.testing.allocator;
+    const rt = try zjs.JSRuntime.create(allocator);
+    errdefer rt.destroy();
+    const ctx_a = try zjs.JSContext.create(rt);
+    errdefer ctx_a.destroy();
+    const ctx_b = try zjs.JSContext.create(rt);
+    errdefer ctx_b.destroy();
+
+    const proto = try stealArrayPrototype(ctx_b, ctx_a);
+    proto.free(rt);
+
+    ctx_b.destroy();
+    ctx_a.destroy();
+    rt.destroy();
+}
+
+test "embedding oldest-first context destroy with cross-realm Array.prototype still tears down" {
+    const allocator = std.testing.allocator;
+    const rt = try zjs.JSRuntime.create(allocator);
+    errdefer rt.destroy();
+    const ctx_a = try zjs.JSContext.create(rt);
+    errdefer ctx_a.destroy();
+    const ctx_b = try zjs.JSContext.create(rt);
+    errdefer ctx_b.destroy();
+
+    const proto = try stealArrayPrototype(ctx_b, ctx_a);
+    proto.free(rt);
+
+    ctx_a.destroy();
+    ctx_b.destroy();
+    rt.destroy();
+}
+
+test "embedding createRealm leftover is collected without JSContext.destroy on the child" {
+    const allocator = std.testing.allocator;
+    const rt = try zjs.JSRuntime.create(allocator);
+    errdefer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt);
+    errdefer ctx.destroy();
+
+    const realm = try ctx.createRealm();
+    const realm_global = try ctx.realmGlobal(realm);
+    const array = try ctx.getProperty(realm_global, "Array");
+    const proto = try ctx.getProperty(array, "prototype");
+    array.free(rt);
+    const global = try ctx.eval("globalThis", .{});
+    try ctx.defineDataProperty(global, "stolenProto", proto, .{});
+    global.free(rt);
+    proto.free(rt);
+    realm_global.free(rt);
+    realm.free(rt);
+
+    try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
+
+    ctx.destroy();
+    rt.destroy();
+}
+
 fn NamespaceType(comptime namespace: anytype) type {
     return switch (@typeInfo(@TypeOf(namespace))) {
         .type => namespace,

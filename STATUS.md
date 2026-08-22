@@ -99,32 +99,80 @@ test262 `0/49778 errors, passed 44584` (delta 0), rule-2 bench-v8 A/B composite
 0.9994 and 1.0004 across two samplings (RayTrace's first-run −1.88% converged
 to −0.92%, i.e. dispersion, not a regression).
 
-### Destroying a realm can decref an already-dead JSContext
+### Constraint 2026-08-23: extra `JSContext.destroy` undercounts live realm edges
 
 `JSRuntime.deinit` asserts `context_head == null`, so every `JSContext` must
-be destroyed before its runtime. The test suite's process-lifetime shared
-engine (`src/tests/helpers.zig` `sharedTestEngine`) never is — which also
-means ~400 tests sit outside that assert entirely, and outside the
-`allocation_count` one beside it.
+be destroyed before its runtime. The shared engine
+(`src/tests/helpers.zig` `sharedTestEngine`) now does that at process exit:
+restore the baseline, drop the snapshot's extra retains, destroy only the
+host-owned main context, then `JSRuntime.destroy`. Leftover
+`$262.createRealm()` cycles are collected there; the ~400 shared tests now
+enter both the `context_head` and `allocation_count` asserts.
 
-Wiring a teardown for it (destroy the extra realms `$262.createRealm()` left
-behind, then the engine) trips a deeper assert:
+The historical abort when wiring that teardown was:
 
 ```
-src/core/object.zig:7624  gcDecrefChildInline: assert(p.meta().rc > 0)
-  <- src/core/object.zig:7693  visitRealm: self.mark_func(self.rt, &ctx.header)
+src/core/object_gc.zig  gcDecrefChildInline: assert(p.meta().rc > 0)
+  <- visitRealm
   <- markUnusualPropertyCold <- markPropertyDataSlots
+     (or markChildrenCold for C_FUNCTION / realm-record / bytecode edges)
 ```
 
-An object in one realm holds a realm reference to a `JSContext` that has
-already been destroyed: destroying a context does not clear or decref the
-realm references other realms' property slots hold into it. Destruction order
-does not help — newest-first and oldest-first fail identically.
+That stack is not a missing sweep on the documented destroy path. Property-slot
+realm pointers are `AutoInitSlot.realm_and_id` (`RealmAndAutoInitId.retain` =
+`gc.retain` of the `JSContext` header; `visitRealm` during cycle mark;
+`deinit` on slot destroy). `RealmValueSlot` is the per-context intrinsic
+cache, not this edge. Sibling `visitRealm` owners (C_FUNCTION native
+`RealmRef`, `FunctionBytecode.realm`, `$262.createRealm()` record payloads)
+use the same RC.
 
-Scope not established: reachable from the embedding API (`JSContext.destroy`
-is public) but not demonstrated there, and not reachable from JS, which has no
-realm-destroy. Two separable pieces of work: the engine-side realm-reference
-teardown, and then arming the shared tier's leak gate on top of it.
+`JSContext.destroy` is one `gc.release` of the host ref, matching QuickJS
+`JS_FreeContext`. A slot that retained B therefore keeps B alive after the
+host destroy; cycle GC's trial decref/restore matches the retain. JavaScript
+has no realm-destroy.
+
+Constructive reachability (embedding API, no shared engine):
+
+  * Two `JSContext.create` realms, A's object holds B via an auto_init slot
+    (`Object.defineFunctionPrototypeAutoInit`) or via a stolen
+    `Array.prototype`: one `B.destroy()` leaves B live (`rc` is the remaining
+    auto_init / native / bytecode retains). Cycle GC does not trip. Dropping
+    the holder then collecting frees B.
+  * Newest-first and oldest-first host destroy of those two contexts, then
+    `JSRuntime.destroy`, both tear down. The earlier "order does not help"
+    observation was from the extra-destroy recipe below, not from this path.
+  * `$262.createRealm()` / `JSContext.createRealm` transfers the child's
+    create ref onto the realm-record `RealmRef`. The public owner is that
+    JSValue (free it), not a second `JSContext.destroy`. Leftovers on the
+    parent global collect when the parent and runtime go down, without
+    destroying the child context.
+
+The abort is an extra `gc.release`: looking up the child with
+`contextForGlobal` (or walking `context_head`) and calling
+`JSContext.destroy` while auto_init / native / bytecode edges still point at
+it. That undercounts remaining `visitRealm` edges by one, so cycle mark hits
+`rc == 0` on a later slot. The same shape is `destroy()` twice on a
+`JSContext.create` realm. It is not a shape the documented embedding API
+produces, and it is not reachable from JS.
+
+Shared-tier teardown is armed on that recipe (atexit from the first
+`sharedTestEngine()`). Walking leftover children and `destroy()`ing them is
+the undercount and is not the gate.
+
+Debug/ReleaseSafe `JSContext.destroy` / `tryDestroy` and `RealmRef.takeOwned`
+consume the host API release exactly once (`host_api_release_consumed`). A
+second host `destroy` on a still-allocated realm panics at the call instead
+of later in cycle mark. `RealmRef.retain`/`deinit` remains the extra-host-ref
+pair and does not consume that flag. The field is present in ReleaseFast for
+layout identity; the assert is `std.debug.assert`.
+
+Host-ref ownership is documented in `docs/public-api-contract.md`.
+
+Regression tests: "auto_init slot to another realm retains it across
+`JSContext.destroy` and cycle GC" (`src/tests/core.zig`); embedding
+cross-realm `Array.prototype` keep-alive, newest-first / oldest-first
+teardown, and createRealm leftover without child `JSContext.destroy`
+(`src/tests/embedding_examples.zig`).
 
 ## Reproduction Commands
 
