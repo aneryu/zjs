@@ -1,3 +1,13 @@
+//! String constructor/prototype records and their direct builtin bodies.
+//!
+//! Receiver and argument values are borrowed for ordinary calls; returned
+//! JSValues are owned. Helpers explicitly named `Owned` consume their inputs,
+//! and temporary flattened strings or buffers are released locally. Realm- and
+//! VM-aware string/RegExp integration stays in `string_ops.zig`; the record/id
+//! seam here lets direct leaf handlers avoid that wider dependency. QuickJS
+//! coordinates include `js_string_concat` at quickjs.c:45525, split at
+//! quickjs.c:45749-45836, and repeat at quickjs.c:46371.
+
 const core = @import("../core/root.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const number_format = @import("../libs/number_format.zig");

@@ -542,6 +542,10 @@ pub fn anchorClassTotal(census: AnchorSplitCensus, class: AnchorClass) u64 {
 /// `ZJS-V2-ANCHOR-SPLIT A=<n> B=<n> C=<n> D=<n> cases{...} folds{...}
 /// relax{...} integrity{...}` - one line, class A first because it is the only
 /// class that changes the model.
+// Oracle diagnostics below write to fixed buffers sized by their callers (and
+// local violation keys use bounded enum names and integers). Their
+// `catch unreachable` sites encode that capacity contract; extend the buffers
+// whenever a rendered schema grows.
 pub fn formatAnchorSplit(buffer: []u8, census: AnchorSplitCensus) []const u8 {
     if (comptime !audit_oracles) {
         return "ZJS-V2-ANCHOR-SPLIT unavailable: counters are comptime-erased in this build";

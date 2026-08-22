@@ -1,3 +1,13 @@
+//! Primitive conversion, arithmetic/comparison, BigInt, and string-value kernels.
+//!
+//! Inputs are borrowed unless a helper is explicitly named `Owned`; notably
+//! `addStringsOwned` consumes both string operands and returns one owned value.
+//! Temporary BigInts, UTF buffers, and formatting storage are released in this
+//! module. Realm-aware coercion remains in exec callers, while bare-runtime
+//! string policy delegates to core. QuickJS coordinates include
+//! `JS_ToNumberHintFree` at quickjs.c:12955, `JS_StringToBigInt` at
+//! quickjs.c:14609, and `JS_ToCStringLen2` at quickjs.c:4458.
+
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const dtoa = @import("../libs/number_format.zig");

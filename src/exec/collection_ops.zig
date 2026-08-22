@@ -1,3 +1,15 @@
+//! Map, Set, WeakMap, and WeakSet construction, methods, and iteration.
+//!
+//! Strong collection records own duplicated key/value references; weak tables
+//! retain identity without making their keys strong, and live iterators retain
+//! their backing record until detach. Returned JSValues are owned. Re-export
+//! and alias walls preserve the neutral core callback/id ABI and earlier exec
+//! extraction seams without merging implementations. Keep the measured
+//! `ctx`/`output`/`global`/caller-function/caller-frame tuple explicit and keep
+//! collection hot arms separate from cold generic callbacks. QuickJS mappings
+//! include groupBy at quickjs.c:52343, forEach at 52318-52332, and collection
+//! iterators at 52556-52605.
+
 const core = @import("../core/root.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const function_builtin = core.function;
@@ -2107,17 +2119,12 @@ fn setDifference(
         }
         var iterator_value = try setLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
         defer iterator_value.free(ctx.runtime);
-        var iterator_done = false;
         while (true) {
             const step = iterator_ops.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-                if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
                 return err;
             };
             defer step.value.free(ctx.runtime);
-            if (step.done) {
-                iterator_done = true;
-                break;
-            }
+            if (step.done) break;
             try setDeleteValue(ctx.runtime, result_value, step.value);
         }
     } else {
@@ -2158,17 +2165,12 @@ fn setIntersection(
     } else {
         var iterator_value = try setLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
         defer iterator_value.free(ctx.runtime);
-        var iterator_done = false;
         while (true) {
             const step = iterator_ops.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-                if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
                 return err;
             };
             defer step.value.free(ctx.runtime);
-            if (step.done) {
-                iterator_done = true;
-                break;
-            }
+            if (step.done) break;
             if (try setHasValue(ctx.runtime, receiver.value(), step.value)) {
                 try setAddValue(ctx.runtime, result_value, step.value);
             }
@@ -2190,17 +2192,12 @@ fn setUnion(
     defer iterator_value.free(ctx.runtime);
     const result_value = try setCloneReceiver(ctx, receiver);
     errdefer result_value.free(ctx.runtime);
-    var iterator_done = false;
     while (true) {
         const step = iterator_ops.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             return err;
         };
         defer step.value.free(ctx.runtime);
-        if (step.done) {
-            iterator_done = true;
-            break;
-        }
+        if (step.done) break;
         try setAddValue(ctx.runtime, result_value, step.value);
     }
     return result_value;
@@ -2219,17 +2216,12 @@ fn setSymmetricDifference(
     defer iterator_value.free(ctx.runtime);
     const result_value = try setCloneReceiver(ctx, receiver);
     errdefer result_value.free(ctx.runtime);
-    var iterator_done = false;
     while (true) {
         const step = iterator_ops.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             return err;
         };
         defer step.value.free(ctx.runtime);
-        if (step.done) {
-            iterator_done = true;
-            break;
-        }
+        if (step.done) break;
         if (try setHasValue(ctx.runtime, receiver.value(), step.value)) {
             try setDeleteValue(ctx.runtime, result_value, step.value);
         } else if (!try setHasValue(ctx.runtime, result_value, step.value)) {
@@ -2262,20 +2254,16 @@ fn setIsDisjointFrom(
 
     var iterator_value = try setLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
-    var iterator_done = false;
     while (true) {
         const step = iterator_ops.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             return err;
         };
         defer step.value.free(ctx.runtime);
         if (step.done) {
-            iterator_done = true;
             return core.JSValue.boolean(true);
         }
         if (try setHasValue(ctx.runtime, receiver.value(), step.value)) {
-            forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-            iterator_done = true;
+            try forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value);
             return core.JSValue.boolean(false);
         }
     }
@@ -2314,20 +2302,16 @@ fn setIsSupersetOf(
     if (@as(i64, @intCast(setStrongSize(receiver))) < other_record.size) return core.JSValue.boolean(false);
     var iterator_value = try setLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
-    var iterator_done = false;
     while (true) {
         const step = iterator_ops.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             return err;
         };
         defer step.value.free(ctx.runtime);
         if (step.done) {
-            iterator_done = true;
             return core.JSValue.boolean(true);
         }
         if (!try setHasValue(ctx.runtime, receiver.value(), step.value)) {
-            forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-            iterator_done = true;
+            try forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value);
             return core.JSValue.boolean(false);
         }
     }

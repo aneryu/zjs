@@ -357,6 +357,26 @@ pub fn closeStackTopForOfIteratorForPendingErrorInternal(
     }
 }
 
+/// Run IteratorClose for an abrupt completion without letting a close failure
+/// replace the exception that was already pending on the context.
+pub fn closeIteratorForAbruptCompletion(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    iterator_value: core.JSValue,
+) void {
+    if (ctx.exceptionIsUncatchable()) return;
+    const pending_out_of_memory = ctx.exceptionIsOutOfMemory();
+    const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
+    defer if (pending_exception) |value| value.free(ctx.runtime);
+    closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+    if (ctx.hasException()) ctx.clearException();
+    if (pending_exception) |value| {
+        _ = ctx.throwValue(value.dup());
+        if (pending_out_of_memory) ctx.markExceptionOutOfMemory();
+    }
+}
+
 fn findTopClosableForOfRecordIndexBefore(stack: *const stack_mod.Stack, before: usize) ?usize {
     const end = @min(before, stack.len());
     if (end < 3) return null;

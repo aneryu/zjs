@@ -1,3 +1,14 @@
+//! Public call entry, host-global installation, and native builtin dispatch.
+//!
+//! Callee, receiver, and argument values are borrowed for a call; returned
+//! JSValues are owned, while records or object fields that retain a value must
+//! duplicate it. The import/alias wall preserves the established dispatch and
+//! ownership seams across extracted builtin domains. The explicit
+//! `ctx`/`output`/`global`/caller-function/caller-frame tuple is a measured call
+//! ABI: do not republish it through shared context state, and keep hot dispatch
+//! arms separate from cold host/error paths. Native calls follow
+//! js_call_c_function and OP_call_method at quickjs.c:17562 and 18220.
+
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const bytecode = @import("../bytecode.zig");

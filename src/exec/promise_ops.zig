@@ -1,3 +1,15 @@
+//! Promise jobs, capabilities, reactions, combinators, and async-function glue.
+//!
+//! This historical file also houses Atomics, Reflect glue, and Disposable
+//! algorithms: four domains sharing one namespace until the Q18 split. The
+//! alias wall preserves the ownership seams and names established by earlier
+//! extractions; it is not an invitation to merge their implementations back.
+//! Call inputs are borrowed, returned values are owned, and values retained by
+//! promise/job payloads must be duplicated. Keep the measured
+//! `ctx`/`output`/`global`/caller-function/caller-frame ABI explicit, and never
+//! share benchmark-hot arms with cold paths. Promise behavior follows
+//! quickjs.c:53415-54663.
+
 const std = @import("std");
 const function_ops = @import("function_ops.zig");
 const reflect_ops = @import("reflect_ops.zig");
@@ -67,6 +79,7 @@ const boundFunctionArgs = call_runtime.boundFunctionArgs;
 const cachedRealmObject = object_ops.cachedRealmObject;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const callableObjectFromValue = object_ops.callableObjectFromValue;
+const closeIteratorForAbruptCompletion = forof_ops.closeIteratorForAbruptCompletion;
 const closeIteratorFromVm = forof_ops.closeIteratorFromVm;
 const closeIteratorFromVmImpl = forof_ops.closeIteratorFromVmImpl;
 const constructDynamicFunctionFromSource = function_ops.constructDynamicFunctionFromSource;
@@ -2702,7 +2715,6 @@ pub fn promiseCombinatorCall(
     var index: u32 = 0;
     while (true) {
         const next_result_value = callValueOrBytecodeRoot(ctx, output, global, iterator_value, iterator_next, &.{}, caller_function, caller_frame) catch |err| {
-            if (!iterator_done) closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             const reason = try promiseErrorValue(ctx, global, err);
             defer reason.free(ctx.runtime);
             try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
@@ -2710,7 +2722,6 @@ pub fn promiseCombinatorCall(
         };
         defer next_result_value.free(ctx.runtime);
         const next_result = property_ops.expectObject(next_result_value) catch |err| {
-            if (!iterator_done) closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             const reason = try promiseErrorValue(ctx, global, err);
             defer reason.free(ctx.runtime);
             try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
@@ -2742,7 +2753,7 @@ pub fn promiseCombinatorCall(
         }
 
         const next_promise = callValueOrBytecodeRoot(ctx, output, global, constructor_value, promise_resolve, &.{step_value}, caller_function, caller_frame) catch |err| {
-            if (!iterator_done) closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            if (!iterator_done) closeIteratorForAbruptCompletion(ctx, output, global, iterator_value);
             const reason = try promiseErrorValue(ctx, global, err);
             defer reason.free(ctx.runtime);
             try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
@@ -2753,7 +2764,7 @@ pub fn promiseCombinatorCall(
         const then_key = try ctx.runtime.internAtom("then");
         defer ctx.runtime.atoms.free(then_key);
         const then_value = getValueProperty(ctx, output, global, next_promise, then_key, caller_function, caller_frame) catch |err| {
-            if (!iterator_done) closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            if (!iterator_done) closeIteratorForAbruptCompletion(ctx, output, global, iterator_value);
             const reason = try promiseErrorValue(ctx, global, err);
             defer reason.free(ctx.runtime);
             try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
@@ -2761,7 +2772,7 @@ pub fn promiseCombinatorCall(
         };
         defer then_value.free(ctx.runtime);
         if (!isCallableValue(then_value)) {
-            if (!iterator_done) closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            if (!iterator_done) closeIteratorForAbruptCompletion(ctx, output, global, iterator_value);
             const reason = try promiseErrorValue(ctx, global, error.TypeError);
             defer reason.free(ctx.runtime);
             try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
@@ -2790,7 +2801,7 @@ pub fn promiseCombinatorCall(
         defer on_rejected.free(ctx.runtime);
 
         const then_result = callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
-            if (!iterator_done) closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            if (!iterator_done) closeIteratorForAbruptCompletion(ctx, output, global, iterator_value);
             const reason = try promiseErrorValue(ctx, global, err);
             defer reason.free(ctx.runtime);
             try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);

@@ -1,3 +1,13 @@
+//! Bytecode property/global/local/var-ref decoding and guarded fast paths.
+//!
+//! Operand values are borrowed while frame-rooted; result structs name whether
+//! a returned value is borrowed or owned, and `Owned` stores transfer their
+//! input. Generic proxy/coercion/property behavior stays in the slower owning
+//! exec modules. Preserve the dedicated hot probes and fused dispatch arms:
+//! they discharge representation guards before raw slot access rather than
+//! sharing cold fallback code. QuickJS coordinates include dense array reads
+//! at quickjs.c:9047-9049 and integer-atom lookup at quickjs.c:12005.
+
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");

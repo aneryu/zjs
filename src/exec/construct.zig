@@ -1,3 +1,13 @@
+//! Generic construction routing and constructor-specific allocation bodies.
+//!
+//! Callee and argument values are borrowed and rooted across observable work;
+//! temporary prototype values are owned locally, while persistent proxy or
+//! payload slots duplicate or explicitly take their inputs. Builtin record
+//! domains own their direct bodies; this module selects the constructor seam
+//! and delegates TypedArray allocation to `typed_array_construct.zig`.
+//! Construction follows `JS_CallConstructorInternal` at quickjs.c:20809-20869,
+//! with Error/Object bodies at quickjs.c:41441 and quickjs.c:40098.
+
 const core = @import("../core/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const closure_mod = @import("closure.zig");

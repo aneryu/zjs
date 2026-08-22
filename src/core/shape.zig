@@ -195,6 +195,9 @@ pub const Shape = extern struct {
     }
 
     pub inline fn traceChildEdgesNoFail(self: *Shape, rt: *JSRuntime, visitor: anytype) void {
+        // Only the cycle collector's MarkVisitor instantiates this wrapper;
+        // its visit methods return void. Allocation-bearing graph visitors use
+        // traceChildEdgesFallible directly, so this instantiation cannot fail.
         self.traceChildEdgesFallible(rt, visitor) catch unreachable;
     }
 };

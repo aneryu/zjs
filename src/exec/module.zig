@@ -1,3 +1,13 @@
+//! Static module installation, linking, namespaces, and evaluation.
+//!
+//! Parser artifacts are consumed into `PendingDefinition`; installation moves
+//! owned bytecode and duplicates request atoms or binding cells retained by a
+//! module record. Link diagnostics borrow atoms from those stable records.
+//! Asynchronous host loading and dynamic-import job ownership stay in
+//! `module_graph.zig`, while this file remains the authority for the registry
+//! and graph-link state. The corresponding QuickJS resolver/linker/evaluator
+//! spans quickjs.c:30525-30836 and quickjs.c:31423-31563.
+
 const std = @import("std");
 const builtin = @import("builtin");
 

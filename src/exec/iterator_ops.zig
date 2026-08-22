@@ -1,3 +1,14 @@
+//! Synchronous/async iterator protocols, VM iterator records, and iterator helpers.
+//!
+//! Iterator and `next` values are borrowed while local or frame-rooted, then
+//! transferred with `pushOwned` when a VM record takes them; returned JSValues
+//! are owned. The alias wall preserves the extracted for-of, array, object, and
+//! promise seams without erasing their ownership boundaries. Keep the measured
+//! `ctx`/`output`/`global`/caller-function/caller-frame tuple explicit and never
+//! share iterator hot arms with cold protocol fallbacks. The core protocol maps
+//! to QuickJS JS_IteratorNext2 and for-in handling at quickjs.c:16341-16548,
+//! with collection iterators around quickjs.c:52556-52605.
+
 const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");

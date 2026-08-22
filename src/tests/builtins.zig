@@ -4375,6 +4375,110 @@ test "Promise capability executor keeps internal slot off user properties" {
     try std.testing.expect(!js.context.hasException());
 }
 
+test "Promise.all preserves a resolve abrupt completion across IteratorClose" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var resolveError = new Test262Error("resolve-error");
+        \\var returnCalls = 0;
+        \\var iterable = {
+        \\  [Symbol.iterator]: function() {
+        \\    return {
+        \\      next: function() { return { done: false, value: 1 }; },
+        \\      return: function() {
+        \\        returnCalls++;
+        \\        throw new Test262Error("close-error");
+        \\      }
+        \\    };
+        \\  }
+        \\};
+        \\class P extends Promise {
+        \\  static resolve() { throw resolveError; }
+        \\}
+        \\P.all(iterable).then(
+        \\  function() { print("fulfilled"); },
+        \\  function(reason) { print(reason === resolveError, reason.message, returnCalls); }
+        \\);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true resolve-error 1\n", stream.buffered());
+    try std.testing.expect(!js.context.hasException());
+}
+
+test "Promise.all next abrupt completion does not close the iterator" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var nextError = new Test262Error("next-error");
+        \\var returnCalls = 0;
+        \\var iterable = {
+        \\  [Symbol.iterator]: function() {
+        \\    return {
+        \\      next: function() { throw nextError; },
+        \\      return: function() {
+        \\        returnCalls++;
+        \\        throw new Test262Error("close-error");
+        \\      }
+        \\    };
+        \\  }
+        \\};
+        \\Promise.all(iterable).then(
+        \\  function() { print("fulfilled"); },
+        \\  function(reason) { print(reason === nextError, reason.message, returnCalls); }
+        \\);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true next-error 0\n", stream.buffered());
+    try std.testing.expect(!js.context.hasException());
+}
+
+test "Promise.all preserves a then abrupt completion across IteratorClose" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var thenError = new Test262Error("then-error");
+        \\var returnCalls = 0;
+        \\var iterable = {
+        \\  [Symbol.iterator]: function() {
+        \\    return {
+        \\      next: function() { return { done: false, value: 1 }; },
+        \\      return: function() {
+        \\        returnCalls++;
+        \\        throw new Test262Error("close-error");
+        \\      }
+        \\    };
+        \\  }
+        \\};
+        \\class P extends Promise {
+        \\  static resolve() {
+        \\    return { then: function() { throw thenError; } };
+        \\  }
+        \\}
+        \\P.all(iterable).then(
+        \\  function() { print("fulfilled"); },
+        \\  function(reason) { print(reason === thenError, reason.message, returnCalls); }
+        \\);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true then-error 1\n", stream.buffered());
+    try std.testing.expect(!js.context.hasException());
+}
+
 test "Promise combinator element callbacks inherit Function.prototype" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -5214,6 +5318,126 @@ test "host map closure rolls back appended entry when size update fails" {
     try std.testing.expectEqual(old_len, observed_len);
     try std.testing.expectEqual(old_active, observed_active);
     try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
+}
+
+test "Set.prototype.isDisjointFrom propagates IteratorClose errors on early false" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\var closeError = new Test262Error("close-disjoint");
+        \\var returnCalls = 0;
+        \\var other = {
+        \\  size: 1,
+        \\  has: function() { return false; },
+        \\  keys: function() {
+        \\    return {
+        \\      next: function() { return { done: false, value: 2 }; },
+        \\      return: function() { returnCalls++; throw closeError; }
+        \\    };
+        \\  }
+        \\};
+        \\try {
+        \\  new Set([1, 2, 3]).isDisjointFrom(other);
+        \\  throw new Test262Error("expected IteratorClose to throw");
+        \\} catch (error) {
+        \\  assert.sameValue(error, closeError);
+        \\}
+        \\assert.sameValue(returnCalls, 1);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Set.prototype.isSupersetOf propagates IteratorClose errors on early false" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\var closeError = new Test262Error("close-superset");
+        \\var returnCalls = 0;
+        \\var other = {
+        \\  size: 0,
+        \\  has: function() { return true; },
+        \\  keys: function() {
+        \\    return {
+        \\      next: function() { return { done: false, value: 99 }; },
+        \\      return: function() { returnCalls++; throw closeError; }
+        \\    };
+        \\  }
+        \\};
+        \\try {
+        \\  new Set([1]).isSupersetOf(other);
+        \\  throw new Test262Error("expected IteratorClose to throw");
+        \\} catch (error) {
+        \\  assert.sameValue(error, closeError);
+        \\}
+        \\assert.sameValue(returnCalls, 1);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Set relation IteratorClose rejects a non-object return result" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\var returnCalls = 0;
+        \\var other = {
+        \\  size: 1,
+        \\  has: function() { return false; },
+        \\  keys: function() {
+        \\    return {
+        \\      next: function() { return { done: false, value: 2 }; },
+        \\      return: function() { returnCalls++; return 42; }
+        \\    };
+        \\  }
+        \\};
+        \\assert.throws(TypeError, function() {
+        \\  new Set([1, 2, 3]).isDisjointFrom(other);
+        \\});
+        \\assert.sameValue(returnCalls, 1);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Set relation next abrupt completion does not close the iterator" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\var nextError = new Test262Error("next-error");
+        \\var returnCalls = 0;
+        \\var other = {
+        \\  size: 1,
+        \\  has: function() { return false; },
+        \\  keys: function() {
+        \\    return {
+        \\      next: function() { throw nextError; },
+        \\      return: function() {
+        \\        returnCalls++;
+        \\        throw new Test262Error("close-error");
+        \\      }
+        \\    };
+        \\  }
+        \\};
+        \\var thrown;
+        \\try {
+        \\  new Set([1, 2, 3]).isDisjointFrom(other);
+        \\} catch (error) {
+        \\  thrown = error;
+        \\}
+        \\assert.sameValue(thrown, nextError);
+        \\assert.sameValue(returnCalls, 0);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
 }
 
 test "Set.prototype.union uses GetSetRecord order for set-like classes" {

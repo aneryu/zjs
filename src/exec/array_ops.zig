@@ -1,3 +1,15 @@
+//! Array, TypedArray, ArrayBuffer, DataView, and array-iterator builtins.
+//!
+//! Inputs and operand-stack values are borrowed while frame-rooted; returned
+//! values are owned, and `pushOwned` transfers that ownership to the stack.
+//! The alias wall preserves names and ownership seams across extracted exec
+//! modules rather than joining their implementations. Keep the measured
+//! `ctx`/`output`/`global`/caller-function/caller-frame ABI explicit, and keep
+//! dense/typed-array hot arms separate from cold generic property paths.
+//! QuickJS coordinates are recorded beside the individual algorithms, notably
+//! ArrayBuffer resize at quickjs.c:57216-57238 and TypedArray search at
+//! quickjs.c:58072-58245.
+
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");

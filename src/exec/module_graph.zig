@@ -1,3 +1,14 @@
+//! Host-integrated module loading, dynamic import jobs, and graph evaluation.
+//!
+//! `HostHooks.LoadedModule.owned` decides whether the loader or this module
+//! owns returned source/path storage. Dynamic-import state owns its private
+//! continuation/waiter lists, while queued continuations duplicate retained
+//! JSValues and hold a `RealmRef` until completion. Parser artifacts and the
+//! static module registry remain owned by `module.zig`; this file drives their
+//! asynchronous graph lifecycle without absorbing the linker. The protocol
+//! follows `js_dynamic_import` and its job at quickjs.c:31037-31169, plus
+//! module evaluation at quickjs.c:31423-31563.
+
 const std = @import("std");
 const atomics_ops = @import("atomics_ops.zig");
 const core = @import("../core/root.zig");

@@ -1,3 +1,15 @@
+//! Execution-layer object, property, prototype, proxy, and function-object algorithms.
+//!
+//! Object/value arguments are borrowed unless a helper explicitly takes or
+//! duplicates them; returned JSValues are owned, and persistent object slots
+//! retain their own reference. The alias wall is a compatibility seam across
+//! extracted exec modules, preserving call sites and ownership boundaries. Keep
+//! the measured `ctx`/`output`/`global`/caller-function/caller-frame tuple
+//! explicit: the threaded `global` is cross-realm authority, not necessarily
+//! `ctx.globalObject()`. Benchmark-hot object/property arms must not be shared
+//! with cold generic paths. Core mappings include QuickJS primitive-prototype,
+//! closure, and function-object paths at quickjs.c:7995-8011 and 17228-17417.
+
 const std = @import("std");
 const function_ops = @import("function_ops.zig");
 const builtin = @import("builtin");

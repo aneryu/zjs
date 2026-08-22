@@ -1,3 +1,12 @@
+//! Object constructor, static/prototype records, and direct builtin bodies.
+//!
+//! Receiver and argument values are borrowed; returned JSValues are owned.
+//! `RootedValueCopies` owns only its root/bits buffers, not the copied values.
+//! Generic property, proxy, iterator, and construction algorithms remain with
+//! their owning exec modules behind the alias wall below. The builtin domain
+//! follows `js_object_constructor` and its tables at quickjs.c:40098 and
+//! quickjs.c:41006-41054; per-property source maps stay beside each algorithm.
+
 const core = @import("../core/root.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const std = @import("std");

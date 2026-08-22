@@ -1,3 +1,13 @@
+//! RegExp constructor/prototype records, compilation, accessors, and escape.
+//!
+//! Receiver and argument values are borrowed; returned JSValues are owned, and
+//! temporary source/flag strings plus compiled buffers are released locally.
+//! The matching engine remains in `libs/regexp.zig`; VM/string observable
+//! integration stays behind `regexp_fastpath.zig` and `string_ops.zig` rather
+//! than being folded into these builtin bodies. QuickJS mappings include the
+//! constructor at quickjs.c:47728, flags access at quickjs.c:47943, and
+//! compilation/error handling at quickjs.c:47633-48000.
+
 const core = @import("../core/root.zig");
 const regexp_adapter = @import("regexp_adapter.zig");
 const regexp_lib = @import("../libs/regexp.zig");

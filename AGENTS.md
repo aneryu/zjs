@@ -34,9 +34,14 @@ is considered wrong.
 
 ## Project Purpose
 
-This repository is a **QuickJS C -> Zig** rewrite. QuickJS remains the semantic
-reference, and the Zig implementation should continuously improve JavaScript
-semantic compatibility, tooling usability, and validation coverage.
+This repository is a **QuickJS C -> Zig** rewrite that has graduated from
+mirror to engine. The semantic authority is ECMA-262 as validated by test262;
+QuickJS is a reference implementation for comparison, not the standard
+(owner ruling 2026-08-22 — it previously was). Where the pinned QuickJS
+deviates from the spec, follow the spec and record the divergence. The
+engineering goal is a first-class Zig project: idiomatic error sets,
+documented modules, and Zig discipline take precedence over preserving
+C-shaped structure. QuickJS remains the performance yardstick (bench-v8).
 
 ## Source Of Truth
 
@@ -96,8 +101,9 @@ arguments print usage and exit non-zero.
 - Make the smallest necessary change in the existing subsystem.
 - Do not delete, move, skip, weaken, or widen excludes to manufacture a pass.
 - Fix one problem class at a time; do not mix unrelated semantic domains.
-- Compare semantic fixes against QuickJS reference behavior and record key
-  evidence.
+- Differential runs against the pinned QuickJS remain a primary instrument
+  for finding behavior drift; verdicts follow ECMA-262 (spec-first,
+  2026-08-22). Record probe evidence either way.
 - Use the cheapest GUIDE B.6 tier that covers the change. Do not run the full
   Debug suite after every small edit.
 - Runner or test262 changes require the relevant runner fixture or target slice.

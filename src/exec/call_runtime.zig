@@ -1,3 +1,15 @@
+//! VM call/construct routing and the runtime machinery around call frames.
+//!
+//! Callees and arguments borrowed from the operand stack remain frame-rooted
+//! until their region is released; results pushed with `pushOwned` transfer one
+//! owned reference. The alias wall keeps extracted subsystems behind their
+//! established names without recreating a dependency cycle. The explicit
+//! `ctx`/`output`/`global`/caller-function/caller-frame tuple is a measured ABI:
+//! `global` is the call's realm authority, and publishing these scalars through
+//! shared VM/context state regresses the hot path. Hot dispatch arms therefore
+//! stay separate from cold catch and fallback bodies. Mirrors JS_CallInternal
+//! and constructor dispatch around quickjs.c:20817-20951.
+
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const std = @import("std");
 const function_ops = @import("function_ops.zig");

@@ -1,3 +1,12 @@
+//! Runtime host event loop for timers, fd readiness, signals, and job draining.
+//!
+//! The loop owns duplicated callback JSValues and retained realm references;
+//! handler removal/deinit releases them, while `output` remains borrowed from
+//! the host. JS call/job semantics stay in exec and the public adapter stays in
+//! binding: this module supplies only their runtime scheduling seam. Its host
+//! topology follows QuickJS libc read/write handlers, signals, timers, and poll
+//! loop at quickjs-libc.c:2014-2175 and quickjs-libc.c:2422-2627.
+
 const std = @import("std");
 const atomics_ops = @import("../exec/atomics_ops.zig");
 const builtin = @import("builtin");
@@ -10,6 +19,8 @@ const libc = if (builtin.os.tag == .windows)
     struct {}
 else
     @cImport({
+        // glibc's fortified poll.h adds bits/poll2.h redirect/inline wrappers;
+        // keep them out of this translation unit to avoid translate-c conflicts.
         @cUndef("_FORTIFY_SOURCE");
         @cDefine("_FORTIFY_SOURCE", "0");
         @cInclude("poll.h");
@@ -81,6 +92,8 @@ pub const EventLoop = struct {
             self.installed = false;
         }
         const rt = self.context.runtimePtr();
+        // `len` counts initialized handlers, but allocation used the full
+        // capacity slice: deinit live elements, then free ptr[0..capacity].
         const timers = self.timers;
         const timers_capacity = self.timers_capacity;
         self.timers = &.{};

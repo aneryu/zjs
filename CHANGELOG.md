@@ -7,6 +7,15 @@ breaking public-API cleanup is approved for this cycle; hot-path structural
 refactors are deferred to `docs/maintainability-backlog.md` and land only
 under the refactor-policy gates.
 
+- **IteratorClose now follows ECMA-262 for Set relation methods and Promise
+  combinators.** An abrupt `next()` call or iterator-result validation no
+  longer calls `return()`; Promise combinators preserve the original
+  resolve/`then` exception when `return()` also throws; and
+  `Set.prototype.isDisjointFrom` / `isSupersetOf` propagate early-exit close
+  errors, including the TypeError for a non-object `return()` result. Under
+  the 2026-08-22 spec-first ruling, the P1-P3 early-exit cases deliberately
+  diverge from the pinned QuickJS, which still returns `false`.
+
 - **The lexer moved out of `parser.zig`** (3,362 lines to its own file,
   lifted verbatim behind one alias — zero call sites changed; `parser.zig`
   falls from 20,769 to 17,408 lines). Emission is byte-identical

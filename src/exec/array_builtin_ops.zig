@@ -1,3 +1,13 @@
+//! Array constructor/prototype records and direct array builtin bodies.
+//!
+//! Receiver and argument values are borrowed; returned JSValues are owned.
+//! `RootedValueCopies` copies value bits solely to give the GC stable root
+//! addresses: it frees its buffers but never frees the caller-owned values.
+//! TypedArray/ArrayBuffer machinery and VM-generic array algorithms stay behind
+//! their existing module seams. QuickJS mappings include reverse at
+//! quickjs.c:42497-42547, sort at quickjs.c:43017-43144, and concat at
+//! quickjs.c:41684-41739.
+
 const core = @import("../core/root.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const core_array = @import("../core/array.zig");

@@ -6632,6 +6632,10 @@ pub const Object = extern struct {
     }
 
     pub inline fn traceChildEdgesNoFail(self: *Object, rt: *JSRuntime, visitor: anytype) void {
+        // Cycle marking and typed-payload trace tests instantiate this wrapper
+        // only with void-returning visit methods. Allocation-bearing graph
+        // visitors use traceChildEdgesFallible directly, so no error can reach
+        // this catch.
         self.traceChildEdgesFallible(rt, visitor) catch unreachable;
     }
 

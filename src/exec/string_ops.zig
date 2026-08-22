@@ -1,3 +1,14 @@
+//! String builtins, coercion/concatenation, and RegExp-string integration.
+//!
+//! String/value inputs are borrowed; returned JSValues and temporary concat or
+//! capture values carry explicit ownership and must be freed or transferred.
+//! The large alias wall keeps extracted RegExp, object, array, and error-stack
+//! seams source-compatible; it does not make their implementations one module.
+//! Preserve the measured `ctx`/`output`/`global`/caller-function/caller-frame
+//! ABI and keep benchmark-hot string/RegExp arms out of shared cold bodies.
+//! Algorithm coordinates live beside each implementation, including QuickJS
+//! concatenation at quickjs.c:4646-5042 and replacement at quickjs.c:46012.
+
 const std = @import("std");
 
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;

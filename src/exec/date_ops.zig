@@ -1,3 +1,13 @@
+//! Date constructor, static/prototype records, coercion, and calendar logic.
+//!
+//! Call arguments are borrowed; coercion results and temporary strings are
+//! owned locally, and constructed/returned JSValues transfer one owned
+//! reference. VM-observable coercion stays on the explicit call environment;
+//! record bodies receive only already-resolved inputs where possible. QuickJS
+//! mappings include `set_date_field` at quickjs.c:55253, Date construction at
+//! quickjs.c:55403-55480, parsing at quickjs.c:55907, and
+//! `Symbol.toPrimitive` at quickjs.c:55964.
+
 const std = @import("std");
 const builtin = @import("builtin");
 

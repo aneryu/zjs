@@ -1804,6 +1804,9 @@ pub const JSRuntime = struct {
 
     fn invalidateContextStandardArrayPrototype(ctx: *context_mod.JSContext, object_prototype: *Object) void {
         const object_value = ctx.cached_values[@intFromEnum(object_mod.RealmValueSlot.object_prototype)] orelse return;
+        // Standard-realm bootstrap fills these two cache slots only from the
+        // corresponding constructor prototype objects, so a present value has
+        // already discharged Object.expect's type check.
         const realm_object_prototype = Object.expect(object_value) catch unreachable;
         if (realm_object_prototype != object_prototype) return;
         const array_value = ctx.cached_values[@intFromEnum(object_mod.RealmValueSlot.array_prototype)] orelse return;

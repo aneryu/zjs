@@ -414,6 +414,96 @@ Precursor 2 done 2026-08-22: lexer lifted verbatim; parser.zig 20,769 →
 17,408. The parser_core file split still waits on the QCP-1 legacy Gate-B2
 verdict.
 
+### P2 — Zig-quality hygiene (added 2026-08-22; owner direction: "a more
+qualified Zig project", with QuickJS alignment downgraded to reference and
+ECMA-262/test262 as the semantic authority)
+
+**Q15. Module documentation: 40 `src/exec/` files (120 tree-wide) have no
+`//!` header.** Coverage is 76/196 files.
+  **Batch 1 done 2026-08-22** (`8ea6ca69`): the eight priority files below.
+  Gate: `.text` byte-identical within lineage (three-way same-HEAD builds,
+  cmp=0; the cross-lineage size shift was attributed to anonymous-symbol
+  numbering, the known Q7 phenomenon). ~32 exec files + the rest of the
+  tree remain.
+  **Batch 2 done 2026-08-22** (`829d0232`): eleven more files (ten exec +
+  `runtime/event_loop.zig`, which also gained the `_FORTIFY_SOURCE`
+  translate-c and capacity-slice teardown point comments). Identity cmp=0
+  same-lineage; ~21 exec files + the rest of the tree remain. The standard is `src/lexer.zig`:
+state what the module owns, the ownership/lifetime contracts a reader cannot
+infer from signatures, and reference coordinates where they exist. The worst
+offender is `promise_ops.zig` (4,755 lines, zero header, name undersells the
+content — see Q18). Priority order: promise_ops, call_runtime, object_ops,
+array_ops, string_ops, iterator_ops, call, collection_ops, then the rest.
+Headers only — no code motion. Gate: identity (comment-only).
+
+**Q16. `HostError` folds ~47 std I/O errors into the engine's error
+surface.** `core/errors.zig` makes `CallbackError = HostError =
+RuntimeError || {... AntivirusInterference, DiskQuota, ...}`, so every
+dispatch-boundary function is typed as able to return filesystem errors,
+exhaustive switching over the set is impractical, and
+`builtin_dispatch.zig` carries 14 `@errorCast` narrowings to hold the line.
+Idiomatic target: host callbacks return a small transport set; the boundary
+converts std errors into a thrown JS exception (helper on `JSContext`)
+before returning. Staged: (1) inventory which std errors actually flow
+today (probe: exhaustive switch at the adapter), (2) add the conversion
+helper, (3) shrink `CallbackError` under the approved 0.2.0-dev breaking
+window, (4) delete the `@errorCast` adapters. Gate: suite + test262;
+**AB** (`builtin_dispatch` is on the call chain).
+  **Inventory done 2026-08-22** (lane report
+  `.scratch/q16-hosterror-inventory-2026-08-22.md`, gitignored; this
+  summary is the durable record): the union adds **48** members. 33 have
+  producer edges — all 31 non-OOM members of `ReadFileAllocError` via the
+  module file loader, `WriteFailed` from the output writer, and the
+  engine's `OperationUnsupported` sentinel; 26 are ordinary-host
+  reachable; 15 have no producer at all. Current JS-facing behavior:
+  `FileNotFound` maps to a useful ReferenceError; everything else
+  collapses to an empty-message `Error`; two seams leak raw Zig errors to
+  the embedder (the legacy `hostCallOutput` arm, and module/TLA stall
+  `OperationUnsupported`). Confirmed hazard: `nativeFromHostError` returns
+  the exception sentinel without installing a pending exception for the 48
+  unmapped members — Debug asserts, Release carries a sentinel with no
+  exception. The `DynamicImportError` name has also contaminated unrelated
+  public signatures (`Object.getOwnProperty`/`getProperty`,
+  `installStandardGlobals`, `AppendStringError`, `binding.PropNameID`).
+  **Ruling (driver, 2026-08-22): proceed as a staged correctness change**
+  in the report's order — (1) exec-owned exhaustive conversion helpers,
+  convert the writer and module-I/O seams, and make `nativeFromHostError`
+  fail closed; (2) drop std members from `HostError`/`DynamicImportError`
+  and repair the contaminated signatures; (3) thread realm context through
+  the collection callback seam and shrink `CallbackError` to the
+  seven-member hard/control transport (no runtime-derived current-context
+  — Q12's rejection stands); (4) delete the 14 `@errorCast` adapters.
+  Invariant throughout: every exception sentinel has a pending JS
+  exception, and no std/backend error name crosses an engine boundary
+  unconverted. Gates: stages 1-2 suite + test262; stages 3-4 add **AB**.
+
+**Q17. Unreachability without evidence.**
+  **Done 2026-08-22** (`7ff86866`): all three site families got invariant
+  comments after the lane read the code to confirm each claim — realm
+  bootstrap fills the cached slots from constructor prototypes; cfg oracle
+  diagnostics write to caller-sized fixed buffers (comment records the
+  extend-on-growth duty); the `NoFail` trace wrappers are instantiated only
+  with void-returning visitors. Comments only, no asserts needed; identity
+  cmp=0 within lineage; test-core 345 / test-exec 492 green.
+  Original item: Debug-assert plus a one-line
+invariant comment at: `runtime.zig`
+`invalidateContextStandardArrayPrototype` (two `Object.expect(...) catch
+unreachable` on `cached_values` slots — the realm-init invariant is real
+but unstated); `compiler/cfg.zig`'s 32 `writer.print(...) catch
+unreachable` dump sites (one comment at the dump entry stating the writer
+contract, or convert the dump family to `try`); the
+`traceChildEdgesNoFail` → `traceChildEdgesFallible(...) catch unreachable`
+pair (`shape.zig`, `core/object.zig` — state why the fallible authority
+cannot fail on that path). Gate: identity (asserts Debug-only; use the Q7
+pattern).
+
+**Q18. `promise_ops.zig` is four modules wearing one name.** Promise
+combinators + Atomics + Reflect glue + Disposable share the file plus a
+68-line re-export alias wall. Cold split candidate (same shape as Q11 T1:
+lift verbatim, alias back, zero call-site churn) — or at minimum the Q15
+header must say what actually lives there. Needs an owner ruling on split
+vs document. Gate if split: suite (cold file) per the 2026-08-22 tiers.
+
 ## Standing discipline (carried from prior campaigns, applies to every item)
 
 - Deletion-only changes: A/B ratio alone cannot judge them; pair with the
