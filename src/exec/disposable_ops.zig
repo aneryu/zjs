@@ -18,7 +18,6 @@ const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const PromiseCapabilityVm = promise_ops.PromiseCapabilityVm;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
-const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
 const callValueOrBytecodeSyncInternal = call_runtime.callValueOrBytecodeSyncInternalOutlined;
 const objectFromValue = object_ops.objectFromValue;
 const isCallableValue = call_runtime.isCallableValue;
@@ -290,7 +289,7 @@ pub fn suppressedErrorForDispose(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const prototype = constructorPrototypeFromGlobal(ctx.runtime, global, "SuppressedError");
+    const prototype = ctx.nativeErrorPrototypeObject(.suppressed_error) orelse return error.InvalidBuiltinRegistry;
     const args = [_]core.JSValue{ error_value, suppressed_value };
     return suppressedErrorConstructWithPrototype(ctx, output, global, prototype, &args, caller_function, caller_frame);
 }
@@ -300,8 +299,9 @@ pub fn disposableStackMove(
     global: *core.Object,
     stack: *core.Object,
 ) !core.JSValue {
+    _ = global;
     if (stack.disposableStackDisposed()) return error.ReferenceError;
-    const prototype = constructorPrototypeFromGlobal(ctx.runtime, global, "DisposableStack");
+    const prototype = ctx.classPrototypeObject(core.class.ids.disposable_stack) orelse return error.InvalidBuiltinRegistry;
     const moved = try core.Object.create(ctx.runtime, core.class.ids.disposable_stack, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &moved.header);
     try stack.moveDisposableResourcesTo(ctx.runtime, moved);
@@ -487,8 +487,9 @@ pub fn asyncDisposableStackMove(
     global: *core.Object,
     stack: *core.Object,
 ) !core.JSValue {
+    _ = global;
     if (stack.disposableStackDisposed()) return error.ReferenceError;
-    const prototype = constructorPrototypeFromGlobal(ctx.runtime, global, "AsyncDisposableStack");
+    const prototype = ctx.classPrototypeObject(core.class.ids.async_disposable_stack) orelse return error.InvalidBuiltinRegistry;
     const moved = try core.Object.create(ctx.runtime, core.class.ids.async_disposable_stack, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &moved.header);
     try stack.moveDisposableResourcesTo(ctx.runtime, moved);

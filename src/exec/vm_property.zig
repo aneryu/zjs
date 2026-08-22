@@ -30,7 +30,6 @@ const globalWritableDataStoreAvailableForFastPath = property_direct.globalWritab
 const setGlobalWritableDataStoreForFastPathOwned = property_direct.setGlobalWritableDataStoreForFastPathOwned;
 
 const op = bytecode.opcode.op;
-const atom_string = core.atom.predefinedId("String", .string).?;
 
 pub const Step = enum { done, continue_loop };
 
@@ -816,8 +815,9 @@ pub fn decodeStringSliceConstLocalStore(
     atom_id: core.Atom,
     arg_pc: usize,
 ) ?StringSliceConstLocalStore {
+    _ = global;
     const string_value = stringFromValue(receiver) orelse return null;
-    if (!fastStringPrototypeMethodIsDefault(ctx.runtime, global, atom_id, @intFromEnum(method_ids.string.PrototypeMethod.slice))) return null;
+    if (!fastStringPrototypeMethodIsDefault(ctx, atom_id, @intFromEnum(method_ids.string.PrototypeMethod.slice))) return null;
 
     const code = function.byteCode();
     const start_arg = immediateInt32Operand(code, arg_pc) orelse return null;
@@ -1109,14 +1109,14 @@ pub fn fastArrayPrototypeMethodIsDefault(value: core.JSValue, atom_id: core.Atom
     return ownPrototypeEntryIsNativeBuiltinDefault(proto, atom_id, .array, expected_id);
 }
 
-pub fn fastStringPrototypeMethodIsDefault(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
+pub fn fastStringPrototypeMethodIsDefault(ctx: *core.JSContext, atom_id: core.Atom, expected_id: u32) bool {
     const expected_name = switch (expected_id) {
         @intFromEnum(method_ids.string.PrototypeMethod.slice) => "slice",
         @intFromEnum(method_ids.string.PrototypeMethod.substring) => "substring",
         else => return false,
     };
-    if (!value_ops.atomNameEql(rt, atom_id, expected_name)) return false;
-    const proto = object_ops.constructorPrototypeFromGlobalAtom(rt, global, atom_string) orelse return false;
+    if (!value_ops.atomNameEql(ctx.runtime, atom_id, expected_name)) return false;
+    const proto = ctx.classPrototypeObject(core.class.ids.string) orelse return false;
     return ownPrototypeEntryIsNativeBuiltinDefault(proto, atom_id, .string, expected_id);
 }
 

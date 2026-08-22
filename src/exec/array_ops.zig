@@ -55,8 +55,6 @@ const callValueOrBytecodeSyncInternal = call_runtime.callValueOrBytecodeSyncInte
 const SyncInternalCallSite = call_runtime.SyncInternalCallSite;
 const callableObjectFromValue = object_ops.callableObjectFromValue;
 const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
-const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
-const constructorPrototypeFromGlobalAtom = object_ops.constructorPrototypeFromGlobalAtom;
 const constructorPrototypeObject = object_ops.constructorPrototypeObject;
 const createBytecodeFunctionObject = object_ops.createBytecodeFunctionObject;
 const createCallSiteObject = object_ops.createCallSiteObject;
@@ -733,8 +731,9 @@ pub fn typedArrayConstructorPrototypeVm(
     if (prototype_value.isObject()) return .{ .value = prototype_value };
     prototype_value.free(ctx.runtime);
     const constructor_name = typedArrayNameFromKind(function_object.typedArrayKind()) orelse return object_ops.OwnedPrototype.fromObject(null);
-    const constructor_global = function_object.nativeFunctionRealmGlobalPtr() orelse global;
-    return object_ops.OwnedPrototype.fromObject(constructorPrototypeFromGlobal(ctx.runtime, constructor_global, constructor_name));
+    const realm = function_object.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry;
+    const class_id = object_ops.constructorClassPrototypeId(constructor_name) orelse return object_ops.OwnedPrototype.fromObject(null);
+    return object_ops.OwnedPrototype.fromObject(realm.classPrototypeObject(class_id) orelse return error.InvalidBuiltinRegistry);
 }
 
 pub fn typedArrayConstructToIndex(
@@ -5948,28 +5947,16 @@ pub fn uint8ArrayOmitPadding(
 }
 
 pub fn createUint8ArrayFromBytes(rt: *core.JSRuntime, global: *core.Object, bytes: []const u8) !core.JSValue {
-    const buffer_proto = constructorPrototypeFromGlobalAtom(rt, global, core.atom.predefinedId("ArrayBuffer", .string).?);
+    const ctx = rt.contextForGlobal(global) orelse return error.InvalidBuiltinRegistry;
+    const buffer_proto = ctx.classPrototypeObject(core.class.ids.array_buffer) orelse return error.InvalidBuiltinRegistry;
     const buffer_value = try core.typed_array.arrayBufferConstructLength(rt, bytes.len, null, buffer_proto);
     var buffer_owned = true;
     errdefer if (buffer_owned) buffer_value.free(rt);
     const buffer = try property_ops.expectObject(buffer_value);
     if (bytes.len != 0) @memcpy(buffer.byteStorage()[0..bytes.len], bytes);
-    var prototype = try uint8ArrayConstructorPrototypeObject(rt, global, "Uint8Array");
-    defer prototype.deinit(rt);
+    const prototype = ctx.classPrototypeObject(core.class.ids.uint8_array) orelse return error.InvalidBuiltinRegistry;
     buffer_owned = false;
-    return try core.typed_array.typedArrayConstructFullBufferOwned(rt, 1, 2, buffer_value, buffer, prototype.object());
-}
-
-pub fn uint8ArrayConstructorPrototypeObject(rt: *core.JSRuntime, global: *core.Object, name: []const u8) !object_ops.OwnedPrototype {
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
-    const ctor_value = try global.getProperty(key);
-    defer ctor_value.free(rt);
-    const ctor = property_ops.expectObject(ctor_value) catch return object_ops.OwnedPrototype.fromObject(null);
-    const proto_value = try ctor.getProperty(core.atom.ids.prototype);
-    if (proto_value.isObject()) return .{ .value = proto_value };
-    proto_value.free(rt);
-    return object_ops.OwnedPrototype.fromObject(null);
+    return try core.typed_array.typedArrayConstructFullBufferOwned(rt, 1, 2, buffer_value, buffer, prototype);
 }
 
 pub fn uint8ArrayViewBytes(rt: *core.JSRuntime, object: *core.Object) ![]u8 {

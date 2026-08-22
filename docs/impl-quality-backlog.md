@@ -148,6 +148,26 @@ this entry is its durable residue):
   correct shape exists in the same file (`fromAsyncFinish`). Gate: **AB** +
   suite.
 
+**Q3a tail closed 2026-08-23** (`3f11ec95`, proto-a grok lane): the 2026-08-21
+note that the remaining `constructorPrototypeFromGlobal` consumers were
+"probed unobservable" **was wrong** — eight families were user-observable and
+are fixed: `RegExp()` without `new`, the `RegExpCreate` in String
+`match`/`search`/`matchAll` (now via the cached `%RegExp%` slot),
+`Uint8Array.fromHex`/`fromBase64` plus the bytes-module ArrayBuffer proto,
+the native-error `Reflect.construct` fallback, `Error.prototype.stack`
+identity, `DisposableStack`/`AsyncDisposableStack.move`, and dispose-produced
+`SuppressedError`. Driver-verified pre/post: with `globalThis.RegExp`
+replaced, `RegExp()` returned the fake prototype and `"abc".match("b")`
+threw TypeError outright; both correct after. Remaining global walks
+(`objectPrototypeFromGlobal`, primitive boxing, `initializeInitialShapes`)
+are documented embedder fallbacks for realms with no published class table.
+Gates: suite 2339/1/0, test262 delta 0. **A/B: the driver re-measured and ran
+the pad lineage** — RegExp read −2.5% twice on pad 0 (stable, and the changed
+domain, so not dismissible as dispersion) but **+1.2% on pad 3 and +2.0% on
+pad 7 = sign flip = LAYOUT**, consistent with the mechanism (a global property
+walk replaced by an O(1) class-table read is strictly less work). Composite
+0.9977 / 1.0047 / 0.9979 / 1.0000 across four runs, all in band.
+
 **Q4. The shared-engine test tier (403 of 616 tests) has no leak check.**
 `sharedTestEngine` (`src/tests/helpers.zig`) never deinits, so
 `JSRuntime.deinit`'s outstanding-allocation assert is unreachable there.
@@ -671,6 +691,27 @@ combinators + Atomics + Reflect glue + Disposable share the file plus a
 lift verbatim, alias back, zero call-site churn) — or at minimum the Q15
 header must say what actually lives there. Needs an owner ruling on split
 vs document. Gate if split: suite (cold file) per the 2026-08-22 tiers.
+
+**Q19 (STATUS defect #1) — done 2026-08-22** (`a1ead092`), driver-executed
+after two lane sessions hit vendor refusals and a context limit on the same
+item. Root: all three simple-teardown arms in `inline_calls.zig` read
+`frame.function.openVarRefCount()` *after* `frame.current_function.free(rt)`;
+when the function object holds the bytecode's last reference (dynamic
+`Function(...)`), the read is a use-after-free. Method worth reusing:
+  1. the historical abort reproduces on `47cf81ef` (restore the collection
+     constructors test to `sharedTestEngine`, run `test-builtins`) — the
+     shared engine matters only for allocation history, not generators;
+  2. **making an `inline` accessor `noinline` is how you name a reader whose
+     frames the optimizer erased** — three probe rounds guessing at call sites
+     (fusion builder, apply-forward analyzer, publish path) all missed; one
+     `noinline` gave the answer immediately;
+  3. on a tree where the UAF no longer faults, a destroy witness compared
+     against the pointer proves the defect is latent rather than fixed — and
+     that same witness is **not** a durable guard (address reuse makes it fire
+     after the fix), so the guard shipped is the ordering comment plus a
+     JS-level regression test.
+Gates: suite 2332/1/0, test262 delta 0, rule-2 A/B 0.9994 / 1.0004 over two
+samplings.
 
 ## Standing discipline (carried from prior campaigns, applies to every item)
 

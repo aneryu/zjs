@@ -53,7 +53,7 @@ const appendUtf16UnitsAsUtf8 = string_ops.appendUtf16UnitsAsUtf8;
 const appendUtf8CodePointForRegExpName = string_ops.appendUtf8CodePointForRegExpName;
 const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
 const combinedSurrogateCodePoint = string_ops.combinedSurrogateCodePoint;
-const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
+
 const createRegExpMatchArrayFromValue = string_ops.createRegExpMatchArrayFromValue;
 const defineSplitValueElement = string_ops.defineSplitValueElement;
 const decodeRegExpLegacyCaptureSlice = string_ops.decodeRegExpLegacyCaptureSlice;
@@ -175,7 +175,7 @@ pub fn regExpFunctionCall(
         flags = string_value;
     }
 
-    return constructRegExpRecordInNativeScope(ctx, output, global, constructor, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"), pattern, flags, caller_function, caller_frame);
+    return constructRegExpRecordInNativeScope(ctx, output, global, constructor, ctx.classPrototypeObject(core.class.ids.regexp), pattern, flags, caller_function, caller_frame);
 }
 
 pub fn regExpConstructCall(

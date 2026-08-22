@@ -7,6 +7,22 @@ breaking public-API cleanup is approved for this cycle; hot-path structural
 refactors are deferred to `docs/maintainability-backlog.md` and land only
 under the refactor-policy gates.
 
+- **Fixed: replacing or deleting standard constructors still mutated result
+  prototypes of several builtins.** After the Set combinators / `Map.groupBy`
+  fix, remaining `constructorPrototypeFromGlobal` consumers were re-probed
+  against ECMA-262 (pinned QuickJS as reference). Observable sites now take
+  `%Intrinsic.prototype%` from the realm class table or `native_error_proto[]`:
+  `RegExp()` without `new`, String `RegExpCreate` (`match`/`search`/`matchAll`),
+  `Uint8Array.fromHex`/`fromBase64`, native-Error `Reflect.construct` fallback,
+  `Error.prototype.stack` identity, `DisposableStack.move` /
+  `AsyncDisposableStack.move`, and dispose `SuppressedError`. Cache-first JSON
+  parse, TypedArray construct fallback, and embedder-only shape init already
+  used or now prefer the class table; the global walk remains only as a last
+  resort when no realm table is published. Differential probes match qjs on the
+  constructors it implements; DisposableStack is spec-first (qjs lacks it).
+  `regexp_fastpath` conversion is an O(1) class-table read, not a hot-path
+  regression.
+
 - **Breaking (0.2.0-dev): collection callback and native-record error ABIs are
   now explicit.** `CallbackCallFn` receives the authoritative `*JSContext`
   instead of a bare `*JSRuntime`; migrate callback implementations to read the
@@ -48,6 +64,16 @@ under the refactor-policy gates.
   instead of leaking `OperationUnsupported` to the embedder. Native dispatch
   also fails closed: it never returns the exception sentinel without first
   installing a pending exception (docs/impl-quality-backlog.md, Q16 Stage 1).
+
+- **Fixed: a returning frame read its bytecode after releasing the object that
+  owned it.** All three simple-teardown arms closed open var refs *after*
+  freeing `current_function`, so a call whose function object held the last
+  reference to its `FunctionBytecode` — reachable from JavaScript via a dynamic
+  `Function(...)` call — read freed memory, and aborted outright under the
+  allocation history of a shared-engine test run. The close now precedes the
+  releases, matching the QuickJS ordering the adjacent comment cites. This
+  closes the oldest entry in STATUS.md's known-defect list, whose original
+  generator attribution is retracted there.
 
 - **Parser diagnostics arc complete.** The last five user-reachable bare
   sites now explain themselves ("using declaration is not allowed at the

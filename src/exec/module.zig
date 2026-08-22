@@ -1343,7 +1343,7 @@ fn syntheticBytesModuleValue(ctx: *core.JSContext, global: *core.Object, source_
     const object = try array_ops.expectUint8ArrayObject(value);
     const buffer_value = object.typedArrayBuffer() orelse return error.TypeError;
     const buffer = try property_ops.expectObject(buffer_value);
-    if (object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "ArrayBuffer")) |prototype| {
+    if (ctx.classPrototypeObject(core.class.ids.array_buffer)) |prototype| {
         try buffer.setPrototype(ctx.runtime, prototype);
     }
     try markImmutableArrayBuffer(ctx.runtime, buffer);

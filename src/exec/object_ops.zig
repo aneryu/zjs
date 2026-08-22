@@ -149,9 +149,16 @@ pub fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*co
     if (global.cachedRealmValue(rt, .object_prototype)) |stored| {
         return property_ops.expectObject(stored) catch null;
     }
+    if (rt.contextForGlobal(global)) |ctx| {
+        if (ctx.classPrototypeObject(core.class.ids.object)) |prototype| return prototype;
+    }
     return constructorPrototypeFromGlobalAtom(rt, global, core.atom.ids.Object);
 }
 
+/// Global-binding walk of `global[name].prototype`. Result objects that spec
+/// says should use a realm intrinsic must not call this: use
+/// `JSContext.classPrototypeObject` or `nativeErrorPrototypeObject` instead.
+/// Kept for embedder fallbacks where no class table has been published.
 pub fn constructorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object, constructor_name: []const u8) ?*core.Object {
     const ctor_key = rt.internAtom(constructor_name) catch return null;
     defer rt.atoms.free(ctor_key);
@@ -189,6 +196,9 @@ pub fn primitivePrototypeFromRealmOrGlobal(
     // prototype lookup reads ctx->class_proto[...] directly. The realm slot is
     // the intrinsic pointer; fallback preserves bare-runtime/global-walk behavior.
     if (cachedRealmObject(rt, global, slot)) |stored| return stored;
+    // Embedder fallback when the realm slot is unpublished. Standard boxing
+    // uses the cached intrinsic, so replacing `globalThis.String` is not
+    // observable here.
     return constructorPrototypeFromGlobalAtom(rt, global, constructor_atom);
 }
 
@@ -1954,6 +1964,20 @@ pub fn constructorClassPrototypeId(name: []const u8) ?core.ClassId {
     return null;
 }
 
+pub fn nativeErrorKindFromConstructorName(name: []const u8) ?core.context.NativeErrorKind {
+    if (std.mem.eql(u8, name, "Error")) return .error_;
+    if (std.mem.eql(u8, name, "EvalError")) return .eval_error;
+    if (std.mem.eql(u8, name, "RangeError")) return .range_error;
+    if (std.mem.eql(u8, name, "ReferenceError")) return .reference_error;
+    if (std.mem.eql(u8, name, "SyntaxError")) return .syntax_error;
+    if (std.mem.eql(u8, name, "TypeError")) return .type_error;
+    if (std.mem.eql(u8, name, "URIError")) return .uri_error;
+    if (std.mem.eql(u8, name, "InternalError")) return .internal_error;
+    if (std.mem.eql(u8, name, "AggregateError")) return .aggregate_error;
+    if (std.mem.eql(u8, name, "SuppressedError")) return .suppressed_error;
+    return null;
+}
+
 pub fn objectRealmGlobal(object: *core.Object) ?*core.Object {
     // QuickJS JS_GetFunctionRealm recursively unwraps Proxy and bound
     // functions for the explicit FunctionRealm query. This is distinct from
@@ -2522,7 +2546,7 @@ fn argumentsPropertyTemplate(rt: *core.JSRuntime, global: *core.Object, comptime
     try ctx.initializeInitialShapes(
         objectPrototypeFromGlobal(rt, global),
         arrayPrototypeFromGlobal(rt, global),
-        constructorPrototypeFromGlobal(rt, global, "RegExp"),
+        ctx.classPrototypeObject(core.class.ids.regexp) orelse constructorPrototypeFromGlobal(rt, global, "RegExp"),
     );
     return (if (mapped) ctx.mapped_arguments_shape else ctx.arguments_shape) orelse return error.TypeError;
 }
@@ -3616,12 +3640,13 @@ pub fn reflectConstructPrototypeVm(
         return OwnedPrototype.fromObject(fallback_realm.classPrototypeObject(class_id) orelse return error.InvalidBuiltinRegistry);
     }
 
-    // Native Error subclasses are a separate QuickJS realm-state family
-    // (`native_error_proto[]`), not class-prototype entries. Keep their current
-    // non-observable intrinsic lookup isolated until that family is migrated;
-    // importantly, it neither reads nor manufactures a hidden realm property.
-    const fallback_global = fallback_realm.global orelse return error.InvalidBuiltinRegistry;
-    return OwnedPrototype.fromObject(constructorPrototypeFromGlobal(ctx.runtime, fallback_global, target_name));
+    // Native Error subclasses live in the realm `native_error_proto[]` family,
+    // not the class-prototype table. GetPrototypeFromConstructor still has to
+    // use that intrinsic when `newTarget.prototype` is not an object.
+    if (nativeErrorKindFromConstructorName(target_name)) |kind| {
+        return OwnedPrototype.fromObject(fallback_realm.nativeErrorPrototypeObject(kind) orelse return error.InvalidBuiltinRegistry);
+    }
+    return OwnedPrototype.fromObject(null);
 }
 
 pub fn objectHasImmutablePrototype(rt: *core.JSRuntime, object: *core.Object) bool {

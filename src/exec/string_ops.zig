@@ -64,7 +64,7 @@ const SyncInternalCallSite = call_runtime.SyncInternalCallSite;
 const callableObjectFromValue = object_ops.callableObjectFromValue;
 const clearRegExpLegacySlot = regexp_fastpath.clearRegExpLegacySlot;
 const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
-const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
+
 const createDataPropertyOrThrow = object_ops.createDataPropertyOrThrow;
 const createIteratorResult = iterator_ops.createIteratorResult;
 const createRegExpIndicesArray = array_ops.createRegExpIndicesArray;
@@ -1265,7 +1265,7 @@ pub fn stringMatchAll(
     const flags = try value_ops.createStringValue(ctx.runtime, "g");
     defer flags.free(ctx.runtime);
     const regexp_args = [_]core.JSValue{ regexp, flags };
-    const matcher = (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, regexp_construct_ref, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"), &regexp_args, caller_function, caller_frame)) orelse return error.TypeError;
+    const matcher = (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, regexp_construct_ref, ctx.classPrototypeObject(core.class.ids.regexp), &regexp_args, caller_function, caller_frame)) orelse return error.TypeError;
     defer matcher.free(ctx.runtime);
     const match_all = try getValueProperty(ctx, output, global, matcher, match_all_atom, caller_function, caller_frame);
     defer match_all.free(ctx.runtime);
@@ -2537,8 +2537,13 @@ pub fn stringRegExpCreateAndInvoke(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const regexp_key = comptime core.atom.predefinedId("RegExp", .string).?;
-    const constructor = try global.getProperty(regexp_key);
+    const constructor = if (global.cachedRealmValue(ctx.runtime, .regexp_constructor)) |stored|
+        stored.dup()
+    else blk: {
+        // Embedder fallback when the realm has not published %RegExp%.
+        const regexp_key = comptime core.atom.predefinedId("RegExp", .string).?;
+        break :blk try global.getProperty(regexp_key);
+    };
     defer constructor.free(ctx.runtime);
     // String.prototype.match/search fallback is spec RegExpCreate(P, undefined):
     // RegExpAlloc + RegExpInitialize, which ToStrings a non-RegExp pattern.
@@ -2834,7 +2839,7 @@ pub noinline fn initRegExpResultPropertyTemplate(rt: *core.JSRuntime, global: *c
     try ctx.initializeInitialShapes(
         object_ops.objectPrototypeFromGlobal(rt, global),
         arrayPrototypeFromGlobal(rt, global),
-        constructorPrototypeFromGlobal(rt, global, "RegExp"),
+        ctx.classPrototypeObject(core.class.ids.regexp) orelse object_ops.constructorPrototypeFromGlobal(rt, global, "RegExp"),
     );
     return ctx.regexp_result_shape orelse return error.TypeError;
 }

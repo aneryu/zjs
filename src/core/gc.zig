@@ -221,7 +221,6 @@ pub const SpaceAccount = struct {
         std.debug.assert(self.live_bytes >= bytes);
         self.live_bytes -%= bytes;
     }
-
 };
 
 fn ratioPerMille(numerator: usize, denominator: usize) usize {

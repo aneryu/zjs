@@ -4016,6 +4016,29 @@ pub const vm_helpers = helpers.vm_helpers;
 
 // ================== core_native.zig ==================
 
+test "a dynamic function outlives its teardown when its object held the last bytecode reference" {
+    // Frame teardown reads `frame.function` (the FunctionBytecode) to decide
+    // whether open var refs need closing. A dynamic `Function(...)` call is the
+    // reachable shape where the frame's function object holds that bytecode's
+    // last reference, so releasing it first destroyed what the read needs.
+    // A Debug witness in `inline_calls` asserts the ordering; this exercises it.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let total = 0;
+        \\for (let i = 0; i < 8; i += 1) {
+        \\    total += Function("var a = 2; var g = function () { return a; }; return g();")();
+        \\}
+        \\print(total);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("16\n", stream.buffered());
+}
+
 test "vm executes push constants arithmetic comparisons and return" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

@@ -5229,6 +5229,262 @@ test "Map.groupBy result uses the realm intrinsic prototype after global mutatio
     try std.testing.expect(result.isUndefined());
 }
 
+test "RegExp call and String RegExpCreate use the realm intrinsic after global mutation" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var IntrinsicRegExp = RegExp;
+        \\function checkRegExpCreate() {
+        \\  var called = IntrinsicRegExp("abc", "i");
+        \\  assert.sameValue(Object.getPrototypeOf(called), IntrinsicRegExp.prototype);
+        \\  assert.sameValue(called.source, "abc");
+        \\  assert.sameValue(called.flags, "i");
+        \\  var constructed = new IntrinsicRegExp("xyz");
+        \\  assert.sameValue(Object.getPrototypeOf(constructed), IntrinsicRegExp.prototype);
+        \\  var matches = [..."aba".matchAll("a")];
+        \\  assert.sameValue(matches.length, 2);
+        \\  assert.sameValue(matches[0][0], "a");
+        \\  assert.sameValue(matches[1][0], "a");
+        \\  var matched = "abc".match("b");
+        \\  assert.sameValue(matched[0], "b");
+        \\  assert.sameValue("abc".search("b"), 1);
+        \\}
+        \\try {
+        \\  globalThis.RegExp = function Polyfill() {};
+        \\  checkRegExpCreate();
+        \\  delete globalThis.RegExp;
+        \\  checkRegExpCreate();
+        \\} finally {
+        \\  globalThis.RegExp = IntrinsicRegExp;
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Uint8Array.fromHex/fromBase64 use realm intrinsic prototypes after global mutation" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var IntrinsicUint8Array = Uint8Array;
+        \\var IntrinsicArrayBuffer = ArrayBuffer;
+        \\function checkCodecs() {
+        \\  var hex = IntrinsicUint8Array.fromHex("aa");
+        \\  assert.sameValue(Object.getPrototypeOf(hex), IntrinsicUint8Array.prototype);
+        \\  assert.sameValue(Object.getPrototypeOf(hex.buffer), IntrinsicArrayBuffer.prototype);
+        \\  assert.sameValue(hex.length, 1);
+        \\  assert.sameValue(hex[0], 0xaa);
+        \\  var b64 = IntrinsicUint8Array.fromBase64("YQ==");
+        \\  assert.sameValue(Object.getPrototypeOf(b64), IntrinsicUint8Array.prototype);
+        \\  assert.sameValue(Object.getPrototypeOf(b64.buffer), IntrinsicArrayBuffer.prototype);
+        \\  assert.sameValue(b64.length, 1);
+        \\  assert.sameValue(b64[0], 0x61);
+        \\}
+        \\try {
+        \\  globalThis.Uint8Array = function Polyfill() {};
+        \\  globalThis.ArrayBuffer = function PolyfillBuffer() {};
+        \\  checkCodecs();
+        \\  delete globalThis.Uint8Array;
+        \\  delete globalThis.ArrayBuffer;
+        \\  checkCodecs();
+        \\} finally {
+        \\  globalThis.Uint8Array = IntrinsicUint8Array;
+        \\  globalThis.ArrayBuffer = IntrinsicArrayBuffer;
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "native Error Reflect.construct fallback uses the realm intrinsic after global mutation" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function Fake() {}
+        \\Fake.prototype = 1;
+        \\function checkNativeError(intrinsic, expectedName) {
+        \\  var thrown = Reflect.construct(intrinsic, ["msg"], Fake);
+        \\  assert.sameValue(Object.getPrototypeOf(thrown), intrinsic.prototype);
+        \\  assert.sameValue(thrown.name, expectedName);
+        \\  assert.sameValue(thrown.message, "msg");
+        \\}
+        \\var IntrinsicTypeError = TypeError;
+        \\var IntrinsicRangeError = RangeError;
+        \\var IntrinsicEvalError = EvalError;
+        \\try {
+        \\  globalThis.TypeError = function Polyfill() {};
+        \\  globalThis.RangeError = function Polyfill() {};
+        \\  globalThis.EvalError = function Polyfill() {};
+        \\  checkNativeError(IntrinsicTypeError, "TypeError");
+        \\  checkNativeError(IntrinsicRangeError, "RangeError");
+        \\  checkNativeError(IntrinsicEvalError, "EvalError");
+        \\  delete globalThis.TypeError;
+        \\  delete globalThis.RangeError;
+        \\  delete globalThis.EvalError;
+        \\  checkNativeError(IntrinsicTypeError, "TypeError");
+        \\  checkNativeError(IntrinsicRangeError, "RangeError");
+        \\  checkNativeError(IntrinsicEvalError, "EvalError");
+        \\} finally {
+        \\  globalThis.TypeError = IntrinsicTypeError;
+        \\  globalThis.RangeError = IntrinsicRangeError;
+        \\  globalThis.EvalError = IntrinsicEvalError;
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Error.prototype.stack setter still recognizes the intrinsic after global mutation" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var IntrinsicError = Error;
+        \\var proto = IntrinsicError.prototype;
+        \\function expectSetterRejects() {
+        \\  var threw = false;
+        \\  try {
+        \\    proto.stack = "hijack";
+        \\  } catch (e) {
+        \\    threw = true;
+        \\    assert.sameValue(e.name, "TypeError");
+        \\  }
+        \\  assert.sameValue(threw, true);
+        \\  var desc = Object.getOwnPropertyDescriptor(proto, "stack");
+        \\  assert.sameValue(typeof desc.get, "function");
+        \\  assert.sameValue(typeof desc.set, "function");
+        \\}
+        \\expectSetterRejects();
+        \\try {
+        \\  globalThis.Error = function Polyfill() {};
+        \\  expectSetterRejects();
+        \\  delete globalThis.Error;
+        \\  expectSetterRejects();
+        \\} finally {
+        \\  globalThis.Error = IntrinsicError;
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "DisposableStack.move and dispose keep realm intrinsic prototypes after global mutation" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var IntrinsicDisposableStack = DisposableStack;
+        \\var IntrinsicAsyncDisposableStack = AsyncDisposableStack;
+        \\var IntrinsicSuppressedError = SuppressedError;
+        \\function checkMoveAndDispose() {
+        \\  var stack = new IntrinsicDisposableStack();
+        \\  var moved = stack.move();
+        \\  assert.sameValue(Object.getPrototypeOf(moved), IntrinsicDisposableStack.prototype);
+        \\  assert.sameValue(stack.disposed, true);
+        \\  var asyncStack = new IntrinsicAsyncDisposableStack();
+        \\  var asyncMoved = asyncStack.move();
+        \\  assert.sameValue(Object.getPrototypeOf(asyncMoved), IntrinsicAsyncDisposableStack.prototype);
+        \\  assert.sameValue(asyncStack.disposed, true);
+        \\  var disposing = new IntrinsicDisposableStack();
+        \\  disposing.use({ [Symbol.dispose]: function () { throw 1; } });
+        \\  disposing.use({ [Symbol.dispose]: function () { throw 2; } });
+        \\  var thrown = false;
+        \\  try {
+        \\    disposing.dispose();
+        \\  } catch (e) {
+        \\    thrown = true;
+        \\    assert.sameValue(Object.getPrototypeOf(e), IntrinsicSuppressedError.prototype);
+        \\    assert.sameValue(e.name, "SuppressedError");
+        \\  }
+        \\  assert.sameValue(thrown, true);
+        \\}
+        \\try {
+        \\  globalThis.DisposableStack = function Polyfill() {};
+        \\  globalThis.AsyncDisposableStack = function Polyfill() {};
+        \\  globalThis.SuppressedError = function Polyfill() {};
+        \\  checkMoveAndDispose();
+        \\  delete globalThis.DisposableStack;
+        \\  delete globalThis.AsyncDisposableStack;
+        \\  delete globalThis.SuppressedError;
+        \\  checkMoveAndDispose();
+        \\} finally {
+        \\  globalThis.DisposableStack = IntrinsicDisposableStack;
+        \\  globalThis.AsyncDisposableStack = IntrinsicAsyncDisposableStack;
+        \\  globalThis.SuppressedError = IntrinsicSuppressedError;
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "JSON.parse uses realm intrinsic Object/Array prototypes after global mutation" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var IntrinsicObject = Object;
+        \\var IntrinsicArray = Array;
+        \\var getProto = Object.getPrototypeOf;
+        \\function checkJson() {
+        \\  var parsed = JSON.parse('{"a":[1,2]}');
+        \\  assert.sameValue(getProto(parsed), IntrinsicObject.prototype);
+        \\  assert.sameValue(getProto(parsed.a), IntrinsicArray.prototype);
+        \\  assert.sameValue(parsed.a.length, 2);
+        \\  assert.sameValue(parsed.a[0], 1);
+        \\  assert.sameValue(parsed.a[1], 2);
+        \\}
+        \\try {
+        \\  globalThis.Object = function Polyfill() {};
+        \\  globalThis.Array = function Polyfill() {};
+        \\  checkJson();
+        \\  delete globalThis.Object;
+        \\  delete globalThis.Array;
+        \\  checkJson();
+        \\} finally {
+        \\  globalThis.Object = IntrinsicObject;
+        \\  globalThis.Array = IntrinsicArray;
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "TypedArray Reflect.construct fallback uses the realm intrinsic after global mutation" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var IntrinsicUint8Array = Uint8Array;
+        \\function Fake() {}
+        \\Fake.prototype = 1;
+        \\function checkTypedArray() {
+        \\  var view = Reflect.construct(IntrinsicUint8Array, [4], Fake);
+        \\  assert.sameValue(Object.getPrototypeOf(view), IntrinsicUint8Array.prototype);
+        \\  assert.sameValue(view.length, 4);
+        \\}
+        \\try {
+        \\  globalThis.Uint8Array = function Polyfill() {};
+        \\  checkTypedArray();
+        \\  delete globalThis.Uint8Array;
+        \\  checkTypedArray();
+        \\} finally {
+        \\  globalThis.Uint8Array = IntrinsicUint8Array;
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Set.prototype.symmetricDifference tracks receiver mutations from a set-like keys call" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

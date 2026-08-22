@@ -60,48 +60,44 @@ and four commits landed past a stale `JSValue` pin before anyone noticed.
 
 ## Known defects
 
-Recorded rather than fixed, with the reproduction that found them.
+Recorded rather than fixed, with the reproduction that found them. Entries
+that have since been fixed keep their attribution trail here until the next
+release notes absorb them.
 
-### A generator bound to a `const` on the shared test engine outlives its bytecode
+### Fixed 2026-08-22: frame teardown read its bytecode after releasing it
 
-Minimal reproduction — add this test to any file that uses the shared engine,
-then run the whole target:
+A returning frame decides whether to close open var refs by reading
+`frame.function.openVarRefCount()`. All three simple-teardown arms in
+`src/exec/inline_calls.zig` performed that read *after*
+`frame.current_function.free(rt)`. When the frame's function object holds the
+last reference to its `FunctionBytecode` — a dynamic `Function(...)` call is
+the shape reachable from JavaScript — that release destroyed the bytecode the
+next line reads.
 
-```zig
-const js = helpers.sharedTestEngine();
-defer helpers.endSharedTest();
-_ = try js.evalWithOutput(
-    \\const gen = function* () { yield 1; };
-    \\print(JSON.stringify([...gen()]));
-, &stream);
-```
+Attribution (the earlier entry's generator diagnosis is retracted; the freed
+object was the dynamic function's ordinary `anonymous` bytecode,
+`isGenerator=false`, atom 815):
 
-The test itself passes. A LATER test in the same run then dies:
+  * The historical abort is reproducible on `47cf81ef` by restoring the
+    "collection constructors iterate their array argument" test to
+    `sharedTestEngine()` and running `zig build test-builtins`. Allocation
+    history, not generators, is what made it fault there.
+  * Making `openVarRefCount` `noinline` in that checkout named the reader:
+    `inline_calls.deinitOrdinarySimpleResources`, not any compile-time scan.
+  * On the current tree the read still hit freed memory — it simply no longer
+    faulted, because the allocation stayed mapped. A destroy witness compared
+    against `frame.function` fired on
+    `Function("var a = 2; var g = function () { return a; }; return g();")()`
+    before the fix and is silent after it.
 
-```
-Segmentation fault
-  src/bytecode.zig:2134  openVarRefCount: return self.var_ref_count;
-  <- tailcall_dispatch.runDispatchLoop <- zjs_vm.runTC
-```
-
-Narrowed by substitution, one variable at a time:
-
-  * a plain function returning an iterator object in place of the generator —
-    passes. It is specific to generator bytecode.
-  * `new Set(iterable)` in place of the spread — same crash, so the collection
-    constructors are not involved; any drain of the generator does it.
-  * the same script through the CLI on a fresh runtime — no crash. It needs
-    `endSharedTest`, which frees the lexical environment (`ctx.lexicals = null`
-    then `env.value().free(rt)`) that the `const` binding lived in.
-
-So something still references the generator's `FunctionBytecode` after that
-environment is freed, and the next test's dispatch loop reads it. Pre-existing:
-reproduced on an unmodified engine with `git stash`. The suite has not been
-hitting it because its generator tests either use dedicated engines or
-`function*` declarations rather than a `const` binding on the shared engine.
-
-Related: the shared tier is also outside the allocator leak check and outside
-`JSRuntime.deinit`'s asserts — see the realm-teardown entry below.
+The fix moves the var-ref close above the `this_value` / `current_function`
+releases in all three arms, which is also the order the adjacent QuickJS
+reference comment describes. Regression test: "a dynamic function outlives its
+teardown when its object held the last bytecode reference"
+(`src/tests/exec.zig`). Gates: full suite 2332 passed / 1 skipped / 0 failed,
+test262 `0/49778 errors, passed 44584` (delta 0), rule-2 bench-v8 A/B composite
+0.9994 and 1.0004 across two samplings (RayTrace's first-run −1.88% converged
+to −0.92%, i.e. dispersion, not a regression).
 
 ### Destroying a realm can decref an already-dead JSContext
 

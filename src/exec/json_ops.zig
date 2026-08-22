@@ -1253,11 +1253,19 @@ fn valueFromStdJson(rt: *core.JSRuntime, global: ?*core.Object, value: std.json.
 }
 
 fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
+    const global_object = global orelse return null;
+    if (rt.contextForGlobal(global_object)) |ctx| {
+        if (ctx.classPrototypeObject(core.class.ids.object)) |prototype| return prototype;
+    }
     if (cachedRealmObject(rt, global, .object_prototype)) |prototype| return prototype;
     return constructorPrototypeFromGlobal(rt, global, "Object");
 }
 
 fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
+    const global_object = global orelse return null;
+    if (rt.contextForGlobal(global_object)) |ctx| {
+        if (ctx.classPrototypeObject(core.class.ids.array)) |prototype| return prototype;
+    }
     if (cachedRealmObject(rt, global, .array_prototype)) |prototype| return prototype;
     return constructorPrototypeFromGlobal(rt, global, "Array");
 }
@@ -1270,6 +1278,8 @@ fn cachedRealmObject(rt: *core.JSRuntime, global: ?*core.Object, slot: core.obje
 
 const objectFromValue = core.value_semantics.objectFromValue;
 
+/// Embedder fallback used only when the realm class table and cache are both
+/// unpublished. JSON.parse result objects must not take this path in a live realm.
 fn constructorPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object, name: []const u8) ?*core.Object {
     _ = rt;
     const global_object = global orelse return null;

@@ -260,11 +260,10 @@ fn reflectConstructPrototype(ctx: *core.JSContext, target_name: []const u8, new_
         return object_ops.OwnedPrototype.fromObject(fallback_realm.classPrototypeObject(class_id) orelse return error.InvalidBuiltinRegistry);
     }
 
-    // Native Error subclasses use the separate realm native-error prototype
-    // family. Until that family is migrated, isolate its intrinsic lookup here
-    // without exposing or consulting any hidden realm property.
-    const fallback_global = fallback_realm.global orelse return error.InvalidBuiltinRegistry;
-    return object_ops.OwnedPrototype.fromObject(object_ops.constructorPrototypeFromGlobal(rt, fallback_global, target_name));
+    if (object_ops.nativeErrorKindFromConstructorName(target_name)) |kind| {
+        return object_ops.OwnedPrototype.fromObject(fallback_realm.nativeErrorPrototypeObject(kind) orelse return error.InvalidBuiltinRegistry);
+    }
+    return object_ops.OwnedPrototype.fromObject(null);
 }
 
 pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const core.JSValue) !core.JSValue {

@@ -739,13 +739,17 @@ pub const Entry = struct {
         std.debug.assert(self.canUseSimpleTeardown());
         std.debug.assert(frame.ownership.var_refs == .borrowed or frame.var_refs.len == 0);
         std.debug.assert(frame.locals.ptr + frame.locals.len == self.stack.values);
-        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
-        if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
-        if (self.teardown.has_native_caller) self.releaseNativeCaller(rt);
         // R-A1: do not read `frame.open_var_refs` — the hot exact constructor
         // does not publish that slice. FB count is the publication truth;
         // a non-zero count means Slow/Impl wrote a live window.
+        // The read has to happen before `current_function` is released: for a
+        // function whose object holds the last reference to its bytecode (a
+        // dynamic `Function(...)` call is the reachable case), that release
+        // destroys the FB this line reads.
         if (frame.function.openVarRefCount() != 0) frame.closeOpenVarRefs(rt);
+        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
+        if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
+        if (self.teardown.has_native_caller) self.releaseNativeCaller(rt);
         // qjs done: close var refs first, then free local_buf..sp (quickjs.c:20701-20706).
         const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
         for (live_values) |v| v.free(rt);
@@ -765,9 +769,10 @@ pub const Entry = struct {
         std.debug.assert(self.canUseSimpleTeardown());
         std.debug.assert(frame.ownership.var_refs == .borrowed or frame.var_refs.len == 0);
         std.debug.assert(frame.locals.ptr + frame.locals.len == self.stack.values);
+        // Bytecode read first: releasing `current_function` can destroy the FB.
+        if (frame.function.openVarRefCount() != 0) frame.closeOpenVarRefs(rt);
         if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
         if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
-        if (frame.function.openVarRefCount() != 0) frame.closeOpenVarRefs(rt);
         // qjs done: close var refs first, then free local_buf..sp (quickjs.c:20701-20706).
         const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
         for (live_values) |v| v.free(rt);
@@ -820,9 +825,10 @@ pub const Entry = struct {
             const frame = &self.frame;
             std.debug.assert(frame.ownership.var_refs == .borrowed or frame.var_refs.len == 0);
             std.debug.assert(frame.locals.ptr + frame.locals.len == self.stack.values);
+            // Bytecode read first: releasing `current_function` can destroy the FB.
+            if (frame.function.openVarRefCount() != 0) frame.closeOpenVarRefs(rt);
             if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
             if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
-            if (frame.function.openVarRefCount() != 0) frame.closeOpenVarRefs(rt);
             // qjs done: close var refs first, then free local_buf..sp
             // (quickjs.c:20701-20706).
             const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];

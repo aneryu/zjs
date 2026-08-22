@@ -287,7 +287,7 @@ pub fn errorStackSetter(
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (!value.isString()) return error.TypeError;
 
-    if (object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "Error")) |error_proto| {
+    if (ctx.nativeErrorPrototypeObject(.error_)) |error_proto| {
         if (object_ops.sameObjectIdentity(this_value, error_proto.value())) return error.TypeError;
     }
 
