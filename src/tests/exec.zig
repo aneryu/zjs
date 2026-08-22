@@ -3699,6 +3699,65 @@ test "ordinary global closure selector preserves QuickJS cell waterfall and owne
     try std.testing.expectEqual(core.VarRef.fromValue(auto_selected).?, core.VarRef.fromValue(auto_again).?);
 }
 
+test "hidden uninitialized globals compact at the QuickJS sawtooth bound" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const rt = js.runtime;
+    const ctx = js.context;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    const live_count = 78;
+    const churn_width = 12;
+    var names: [live_count]core.Atom = undefined;
+    var initialized: usize = 0;
+    defer for (names[0..initialized]) |name| rt.atoms.free(name);
+    for (&names, 0..) |*name, index| {
+        var buffer: [48]u8 = undefined;
+        name.* = try rt.internAtom(try std.fmt.bufPrint(&buffer, "__compact_hidden_{d}", .{index}));
+        initialized += 1;
+        const cell = try engine.exec.call_runtime.globalObjectGetUninitializedVar(ctx, global, name.*);
+        cell.free(rt);
+    }
+
+    const hidden = global.globalUninitializedVars() orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u32, 78), hidden.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(u32, 0), hidden.shape_ref.deleted_prop_count);
+
+    const expected_counts = [_]struct { props: u32, deleted: u32 }{
+        .{ .props = 90, .deleted = 12 },
+        .{ .props = 102, .deleted = 24 },
+        .{ .props = 114, .deleted = 36 },
+        .{ .props = 126, .deleted = 48 },
+        .{ .props = 138, .deleted = 60 },
+        .{ .props = 150, .deleted = 72 },
+        .{ .props = 86, .deleted = 8 },
+    };
+    var peak_deleted: u32 = 0;
+    var saw_compaction = false;
+    for (expected_counts) |expected| {
+        for (names[0..churn_width]) |name| {
+            const parked = engine.exec.call_runtime.globalObjectFindUninitializedVar(ctx, global, name, false) orelse
+                return error.TestExpectedEqual;
+            parked.free(rt);
+            const deleted = hidden.shape_ref.deleted_prop_count;
+            const live = hidden.shape_ref.prop_count - deleted;
+            try std.testing.expect(deleted < @max(@as(u32, 8), live + 1));
+            if (deleted == 0) saw_compaction = true;
+            peak_deleted = @max(peak_deleted, deleted);
+
+            const replacement = try engine.exec.call_runtime.globalObjectGetUninitializedVar(ctx, global, name);
+            replacement.free(rt);
+        }
+        try std.testing.expectEqual(expected.props, hidden.shape_ref.prop_count);
+        try std.testing.expectEqual(expected.deleted, hidden.shape_ref.deleted_prop_count);
+    }
+
+    try std.testing.expect(saw_compaction);
+    try std.testing.expectEqual(@as(u32, 75), peak_deleted);
+    try std.testing.expectEqual(@as(u32, live_count), hidden.shape_ref.prop_count - hidden.shape_ref.deleted_prop_count);
+    for (names) |name| try std.testing.expect(hidden.hasOwnProperty(name));
+}
+
 test "runtime-strict script still constructs its global function declaration" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -5962,12 +6021,8 @@ test "add_loc string+object goes through slow add after toPrimitive (qjs OP_add_
     // X-03: qjs:19766-19767 requires both operands already JS_TAG_STRING
     // before in-place concat. An object RHS must take js_add_slow so a
     // toString that reassigns the accumulator cannot mutate a stale rope.
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
 
-    var output_buffer: [1024]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function f(){
         \\  var s = "abc";
         \\  var stash = null;
@@ -6051,22 +6106,15 @@ test "add_loc string+object goes through slow add after toPrimitive (qjs OP_add_
         \\  return "s=" + s + " r=" + r + " stash=" + stash;
         \\}
         \\print(notAddLoc());
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
+    , "s=abcdQ stash=abcd\n" ++
         "s=abcdQ stash=abcd\n" ++
-            "s=abcdQ stash=abcd\n" ++
-            "s=abcdQ stash=abcd\n" ++
-            "s=abcdQ stash=abcd\n" ++
-            "s=abcdQ stash=abcd cap=abcdQ\n" ++
-            "s_len=9002 s_is_ZZZ=false stash_len=9001\n" ++
-            "t=abcyQ stash=abcy\n" ++
-            "s=abcd1 stash=abcd\n" ++
-            "s=ZZZ r=abcdQ stash=abcd\n",
-        stream.buffered(),
-    );
+        "s=abcdQ stash=abcd\n" ++
+        "s=abcdQ stash=abcd\n" ++
+        "s=abcdQ stash=abcd cap=abcdQ\n" ++
+        "s_len=9002 s_is_ZZZ=false stash_len=9001\n" ++
+        "t=abcyQ stash=abcy\n" ++
+        "s=abcd1 stash=abcd\n" ++
+        "s=ZZZ r=abcdQ stash=abcd\n");
 }
 
 test "checked lexical string accumulation keeps rope depth bounded" {
@@ -6923,12 +6971,7 @@ test "initial_yield keeps sync generators in suspended-start after parameter ini
 }
 
 test "initial_yield keeps async generators in suspended-start" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\const asyncInitialYieldEvents = [];
         \\async function* asyncInitialYieldGenerator(
         \\  value = (asyncInitialYieldEvents.push("param"), 3)
@@ -6951,17 +6994,10 @@ test "initial_yield keeps async generators in suspended-start" {
         \\    print("throw", reason, asyncInitialYieldEvents.join(","));
         \\  });
         \\});
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "create param\n" ++
-            "next 3 false param,body\n" ++
-            "return 9 true param,body,param\n" ++
-            "throw 11 param,body,param,param\n",
-        stream.buffered(),
-    );
+    , "create param\n" ++
+        "next 3 false param,body\n" ++
+        "return 9 true param,body,param\n" ++
+        "throw 11 param,body,param,param\n");
 }
 
 test "initial_yield executes exported generator bytecode in module mode" {
@@ -7500,12 +7536,8 @@ test "class extends Number ToPrimitive matches JS_ToNumeric" {
     // X-37: qjs js_number_constructor (qjs:44822) uses JS_ToNumeric
     // (qjs:13030) so object arguments run valueOf/toString. The subclass
     // super path must not skip that via toNumberValue's missing object arm.
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
 
-    var output_buffer: [1024]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\class MyNum extends Number {}
         \\function t(n,f){ try{ print(n+" => "+f()); }catch(e){ print(n+" => THROW "+e.name+": "+e.message); } }
         \\t("new MyNum({valueOf:42})", ()=> new MyNum({valueOf(){return 42}}).valueOf());
@@ -7518,33 +7550,22 @@ test "class extends Number ToPrimitive matches JS_ToNumeric" {
         \\t("throwing valueOf", ()=> new MyNum({valueOf(){throw new Error("boom")}}).valueOf());
         \\var log=[]; try{ new MyNum({valueOf(){log.push("v");return 1}}); }catch(e){}
         \\print("sideeffect log=["+log+"]");
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "new MyNum({valueOf:42}) => 42\n" ++
-            "new MyNum([5]) => 5\n" ++
-            "new MyNum({toString:'7'}) => 7\n" ++
-            "Reflect.construct => 42\n" ++
-            "new Number(obj) plain => 42\n" ++
-            "new MyNum(new Date(1000)) => 1000\n" ++
-            "new MyNum(SymToPrim) => 9\n" ++
-            "throwing valueOf => THROW Error: boom\n" ++
-            "sideeffect log=[v]\n",
-        stream.buffered(),
-    );
+    , "new MyNum({valueOf:42}) => 42\n" ++
+        "new MyNum([5]) => 5\n" ++
+        "new MyNum({toString:'7'}) => 7\n" ++
+        "Reflect.construct => 42\n" ++
+        "new Number(obj) plain => 42\n" ++
+        "new MyNum(new Date(1000)) => 1000\n" ++
+        "new MyNum(SymToPrim) => 9\n" ++
+        "throwing valueOf => THROW Error: boom\n" ++
+        "sideeffect log=[v]\n");
 }
 
 test "Number.prototype.toString saturates out-of-i32 radix before intFromFloat" {
     // X-12: qjs js_get_radix (qjs:44953) uses JS_ToInt32Sat (qjs:13125)
     // before the 2..36 check. `@intFromFloat(Infinity)` panics in Debug.
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
 
-    var output_buffer: [512]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\try { print((5).toString(Infinity)); } catch(e){ print("Inf:", e.name, e.message); }
         \\try { print((5).toString(-Infinity)); } catch(e){ print("-Inf:", e.name, e.message); }
         \\try { print((5).toString(1e30)); } catch(e){ print("1e30:", e.name, e.message); }
@@ -7555,23 +7576,16 @@ test "Number.prototype.toString saturates out-of-i32 radix before intFromFloat" 
         \\try { print((5).toString({valueOf:()=>NaN})); } catch(e){ print("objNaN:", e.name, e.message); }
         \\try { print((5).toString(-0)); } catch(e){ print("-0:", e.name, e.message); }
         \\try { print((5).toString(16)); } catch(e){ print("16:", e); }
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "Inf: RangeError radix must be between 2 and 36\n" ++
-            "-Inf: RangeError radix must be between 2 and 36\n" ++
-            "1e30: RangeError radix must be between 2 and 36\n" ++
-            "-1e30: RangeError radix must be between 2 and 36\n" ++
-            "objInf: RangeError radix must be between 2 and 36\n" ++
-            "2**31: RangeError radix must be between 2 and 36\n" ++
-            "NaN: RangeError radix must be between 2 and 36\n" ++
-            "objNaN: RangeError radix must be between 2 and 36\n" ++
-            "-0: RangeError radix must be between 2 and 36\n" ++
-            "5\n",
-        stream.buffered(),
-    );
+    , "Inf: RangeError radix must be between 2 and 36\n" ++
+        "-Inf: RangeError radix must be between 2 and 36\n" ++
+        "1e30: RangeError radix must be between 2 and 36\n" ++
+        "-1e30: RangeError radix must be between 2 and 36\n" ++
+        "objInf: RangeError radix must be between 2 and 36\n" ++
+        "2**31: RangeError radix must be between 2 and 36\n" ++
+        "NaN: RangeError radix must be between 2 and 36\n" ++
+        "objNaN: RangeError radix must be between 2 and 36\n" ++
+        "-0: RangeError radix must be between 2 and 36\n" ++
+        "5\n");
 }
 
 test "string static native builtin records ignore dispatch names" {
@@ -9238,20 +9252,13 @@ test "qjs alignment X-10 Get miss does not fall back to globalThis constructor p
 }
 
 test "qjs alignment X-10 tagged template objects keep Array.prototype" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function tag(strings) {
         \\  print(typeof strings.map);
         \\  print(Object.getPrototypeOf(strings) === Array.prototype);
         \\}
         \\tag`[${1}]`;
-    , &stream);
-    defer result.free(js.runtime);
-    try std.testing.expectEqualStrings("function\ntrue\n", stream.buffered());
+    , "function\ntrue\n");
 }
 
 test "qjs alignment C4 Array instanceof follows prototype chain" {
@@ -10557,21 +10564,12 @@ test "runtime-strict eval overrides parse-time mapped arguments subtype" {
 }
 
 test "Engine strict script top-level this remains the global object" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [32]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\"use strict";
         \\print(this === globalThis);
         \\function strictThis() { return this === undefined; }
         \\print(strictThis());
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("true\ntrue\n", stream.buffered());
+    , "true\ntrue\n");
 }
 
 test "Engine direct eval publishes Annex B block functions" {
@@ -10619,6 +10617,27 @@ test "Engine direct eval Annex B block function updates same-name parameter" {
     try std.testing.expectEqualStrings("123\nfunction\nundefined\n", stream.buffered());
 }
 
+fn expectEvalCycleReclaimed(js: *helpers.TestEngine, warmup_source: []const u8, cycle_source: []const u8) !void {
+    const old_threshold = js.runtime.gcThreshold();
+    js.runtime.setGCThreshold(std.math.maxInt(usize));
+    defer js.runtime.setGCThreshold(old_threshold);
+
+    const warmup = try js.eval(warmup_source);
+    warmup.free(js.runtime);
+    try js.runJobs();
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_live_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval(cycle_source);
+    result.free(js.runtime);
+    try js.runJobs();
+
+    try std.testing.expect(js.runtime.gc.liveCount() > baseline_live_objects);
+    try std.testing.expect(js.runtime.runObjectCycleRemoval() > 0);
+    try std.testing.expectEqual(baseline_live_objects, js.runtime.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 0), js.runtime.runObjectCycleRemoval());
+}
+
 test "Engine eval exit leaves closed var-ref cycles for explicit collection" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -10645,6 +10664,102 @@ test "Engine eval exit leaves closed var-ref cycles for explicit collection" {
     try std.testing.expect(js.runtime.runObjectCycleRemoval() > 0);
     try std.testing.expectEqual(baseline_live_objects, js.runtime.gc.liveCount());
     try std.testing.expectEqual(@as(usize, 0), js.runtime.runObjectCycleRemoval());
+}
+
+test "Promise result cycle is released by runtime cycle removal" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Pins PromisePayload.result, object.zig:8661-8665.
+    try expectEvalCycleReclaimed(
+        &js,
+        "(() => { let resolve; new Promise(r => { resolve = r; }); resolve({}); })()",
+        "(() => { let resolve; const promise = new Promise(r => { resolve = r; }); const result = { promise }; resolve(result); })()",
+    );
+}
+
+test "Promise reaction cycle is released by runtime cycle removal" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Pins PromisePayload reaction fields/list, object.zig:8661-8665.
+    try expectEvalCycleReclaimed(
+        &js,
+        "(() => { new Promise(() => {}).then(() => {}); })()",
+        "(() => { const promise = new Promise(() => {}); promise.then(() => promise); })()",
+    );
+}
+
+test "proxy revoke FunctionRare cycle is released by runtime cycle removal" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Pins FunctionRarePayload.proxy_revoke_target, object.zig:8561-8573.
+    try expectEvalCycleReclaimed(
+        &js,
+        "(() => { Proxy.revocable({}, {}); })()",
+        "(() => { const target = {}; const pair = Proxy.revocable(target, {}); target.revoke = pair.revoke; })()",
+    );
+}
+
+test "Promise finally FunctionRare cycle is released by runtime cycle removal" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Pins FunctionRarePayload.promise_finally_callback, object.zig:8561-8573.
+    try expectEvalCycleReclaimed(
+        &js,
+        "(() => { new Promise(() => {}).finally(() => {}); })()",
+        "(() => { const promise = new Promise(() => {}); promise.finally(() => promise); })()",
+    );
+}
+
+test "DisposableStack resource self-cycle is released by runtime cycle removal" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Pins DisposableStackPayload resource value/method edges, object.zig:8596-8603.
+    try expectEvalCycleReclaimed(
+        &js,
+        "(() => { const stack = new DisposableStack(); stack.adopt({}, () => {}); })()",
+        "(() => { const stack = new DisposableStack(); stack.adopt(stack, () => {}); })()",
+    );
+}
+
+test "module import-meta and eval-exception cycles are released by runtime cycle removal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    var ctx_alive = true;
+    defer if (ctx_alive) ctx.destroy();
+
+    const module_name = try rt.internAtom("gc-module-payload-cycle.mjs");
+    defer rt.atoms.free(module_name);
+    const back_key = try rt.internAtom("module");
+    defer rt.atoms.free(back_key);
+    var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer pending.deinit(rt);
+    const prepared = try ctx.modules.prepareFreshTarget(module_name, &pending);
+    const record = prepared.record();
+    const import_meta = try core.Object.create(rt, core.class.ids.object, null);
+    const eval_exception = try core.Object.create(rt, core.class.ids.object, null);
+    const record_value = core.JSValue.module(&record.header);
+    try import_meta.defineOwnProperty(rt, back_key, core.Descriptor.data(record_value, true, true, true));
+    try eval_exception.defineOwnProperty(rt, back_key, core.Descriptor.data(record_value, true, true, true));
+
+    // Pins ModuleRecord import_meta/eval_exception edges, module.zig:572-573.
+    record.import_meta = import_meta.value().dup();
+    record.setEvalException(rt, eval_exception.value().dup());
+
+    import_meta.value().free(rt);
+    eval_exception.value().free(rt);
+    ctx.destroy();
+    ctx_alive = false;
+    const expected = rt.gc.liveCount();
+    try std.testing.expect(expected != 0);
+    try std.testing.expectEqual(expected, rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.shape));
 }
 
 test "Engine eval supports Annex B escape and unescape code-unit semantics" {
@@ -11422,12 +11537,7 @@ test "ordinary script entry points do not run full-heap cycle collection on exit
 }
 
 test "IC-R1: delete then get_field is undefined after a prior hit" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function read(o) { return o.x; }
         \\var o = { x: 1 };
         \\var a = read(o);
@@ -11436,71 +11546,37 @@ test "IC-R1: delete then get_field is undefined after a prior hit" {
         \\o.x = 2;
         \\var c = read(o);
         \\print([a, d, typeof b, b, c].join("/"));
-    , &stream);
-    defer result.free(js.runtime);
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("1/true/undefined//2\n", stream.buffered());
+    , "1/true/undefined//2\n");
 }
 
 test "IC-P1: OrdinarySet forwards to a Proxy proto [[Set]] trap" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var called = false;
         \\var recv;
         \\var p = new Proxy({}, { set: function (t, k, v, r) { called = true; recv = r; return true; } });
         \\var o = Object.create(p);
         \\o.x = 1;
         \\print([called, o === recv, Object.prototype.hasOwnProperty.call(o, "x")].join("/"));
-    , &stream);
-    defer result.free(js.runtime);
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("true/true/false\n", stream.buffered());
+    , "true/true/false\n");
 }
 
 test "Engine eval executes simple variable assignment and print" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput("let value = 5; value = value + 7; print(value);", &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("12\n", stream.buffered());
+    try helpers.expectPrints("let value = 5; value = value + 7; print(value);", "12\n");
 }
 
 test "String.prototype.match invokes a custom matcher before coercing the receiver" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var log = [];
         \\var receiver = { toString: function () { log.push("toString"); return "abc"; } };
         \\var matcher = {};
         \\matcher[Symbol.match] = function (value) { log.push(value === receiver ? "same" : "different"); return 7; };
         \\print(String.prototype.match.call(receiver, matcher));
         \\print(log.join(","));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("7\nsame\n", stream.buffered());
+    , "7\nsame\n");
 }
 
 test "RegExp Symbol.split preserves captures returned by custom exec" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var log = [];
         \\var capture = { toString: function () { log.push("coerced"); return "capture"; } };
         \\function Splitter() { this.lastIndex = 0; }
@@ -11514,38 +11590,20 @@ test "RegExp Symbol.split preserves captures returned by custom exec" {
         \\var parts = regexp[Symbol.split]("axb");
         \\print(parts[1] === capture);
         \\print(log.join(","));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("true\n\n", stream.buffered());
+    , "true\n\n");
 }
 
 test "RegExp Symbol.split propagates invalid species exec TypeError" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var regexp = /,/;
         \\function Splitter() { return { exec: 1, lastIndex: 0 }; }
         \\regexp.constructor = { [Symbol.species]: Splitter };
         \\try { "a,b".split(regexp); } catch (error) { print(error.name); }
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("TypeError\n", stream.buffered());
+    , "TypeError\n");
 }
 
 test "RegExp Symbol.split appends sticky flag without narrowing wide species flags" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var seen;
         \\function Splitter(pattern, flags) { seen = flags; return /,/y; }
         \\var regexp = /,/;
@@ -11554,11 +11612,7 @@ test "RegExp Symbol.split appends sticky flag without narrowing wide species fla
         \\var parts = "a,b".split(regexp);
         \\print(seen === "\u0100y");
         \\print(parts.join("|"));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("true\na|b\n", stream.buffered());
+    , "true\na|b\n");
 }
 
 test "flagless RegExp flags accessor reuses the runtime empty string" {
@@ -11579,79 +11633,41 @@ test "flagless RegExp flags accessor reuses the runtime empty string" {
 }
 
 test "RegExp exec result template preserves metadata groups and indices" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [192]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var plain = /a/.exec("ba");
         \\print([plain.length, plain[0], plain.index, plain.input, plain.groups === undefined].join("|"));
         \\var named = /(?<word>a)/d.exec("ba");
         \\print([named.length, named[0], named[1], named.index, named.input, named.groups.word,
         \\       named.indices[0][0], named.indices[0][1], named.indices.groups.word[0], named.indices.groups.word[1]].join("|"));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("1|a|1|ba|true\n2|a|a|1|ba|a|1|2|1|2\n", stream.buffered());
+    , "1|a|1|ba|true\n2|a|a|1|ba|a|1|2|1|2\n");
 }
 
 test "RegExp compiler stack overflow is a catchable SyntaxError" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\try { new RegExp("(?:".repeat(40000)); print("no throw"); } catch(e) { print(e.name + ":" + e.message); }
         \\try { new RegExp("[".repeat(4000)+"a"+"]".repeat(4000),"v"); print("v-no throw"); } catch(e) { print("v:" + e.name + ":" + e.message); }
         \\try { new RegExp("[".repeat(200)+"a"+"]".repeat(200),"v"); print("v-shallow-ok"); } catch(e) { print("v-shallow:" + e.name); }
         \\try { new RegExp("(?:".repeat(1000)+")".repeat(1000)); print("shallow-ok"); } catch(e) { print("shallow:" + e.name); }
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "SyntaxError:stack overflow\n" ++
-            "v:SyntaxError:stack overflow\n" ++
-            "v-shallow-ok\n" ++
-            "shallow-ok\n",
-        stream.buffered(),
-    );
+    , "SyntaxError:stack overflow\n" ++
+        "v:SyntaxError:stack overflow\n" ++
+        "v-shallow-ok\n" ++
+        "shallow-ok\n");
 }
 
 test "RegExp accepts literal astral group names in non-unicode mode" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var nm = String.fromCharCode(0xD801,0xDC00);
         \\["", "u", "v"].forEach(function(fl){
         \\  try { var r = new RegExp("(?<"+nm+">x)", fl); print("flags["+fl+"] accepted; groups:", JSON.stringify(Object.keys(r.exec("x").groups))); }
         \\  catch(e){ print("flags["+fl+"]:", e.message); }
         \\});
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "flags[] accepted; groups: [\"𐐀\"]\n" ++
-            "flags[u] accepted; groups: [\"𐐀\"]\n" ++
-            "flags[v] accepted; groups: [\"𐐀\"]\n",
-        stream.buffered(),
-    );
+    , "flags[] accepted; groups: [\"𐐀\"]\n" ++
+        "flags[u] accepted; groups: [\"𐐀\"]\n" ++
+        "flags[v] accepted; groups: [\"𐐀\"]\n");
 }
 
 test "RegExp literals reuse parse-time bytecode and the intrinsic realm shape" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [192]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var IntrinsicRegExp = RegExp;
         \\var intrinsicPrototype = RegExp.prototype;
         \\function make() { return /(?<letter>a)/dgi; }
@@ -11669,25 +11685,13 @@ test "RegExp literals reuse parse-time bytecode and the intrinsic realm shape" {
         \\       afterReplacement.constructor === IntrinsicRegExp, constructorCalls,
         \\       afterReplacement.source, afterReplacement.flags,
         \\       afterReplacement.test("b"), afterReplacement.lastIndex].join("|"));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "true|3|0|(?<letter>a)|dgi\n" ++
-            "A|4\n" ++
-            "true|true|0|b|gy|true|1\n",
-        stream.buffered(),
-    );
+    , "true|3|0|(?<letter>a)|dgi\n" ++
+        "A|4\n" ++
+        "true|true|0|b|gy|true|1\n");
 }
 
 test "RegExp legacy statics preserve the realm snapshot across constructor replacement" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var IntrinsicRegExp = RegExp;
         \\var noCapture = /x/;
         \\var captured = /(a)/;
@@ -11704,42 +11708,21 @@ test "RegExp legacy statics preserve the realm snapshot across constructor repla
         \\IntrinsicRegExp.input = "override";
         \\print([IntrinsicRegExp.input, IntrinsicRegExp.lastMatch, IntrinsicRegExp.leftContext,
         \\       IntrinsicRegExp.rightContext, IntrinsicRegExp.$1].join("|"));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "zabq|ab|b|z|q|a|b|\n" ++
-            "xx|x|||x|\n" ++
-            "override|a|z|q|a\n",
-        stream.buffered(),
-    );
+    , "zabq|ab|b|z|q|a|b|\n" ++
+        "xx|x|||x|\n" ++
+        "override|a|z|q|a\n");
 }
 
 test "regexp split and global match arrays use the realm Array prototype" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\print(Object.getPrototypeOf("a".split(/x/)) === Array.prototype);
         \\print(Object.getPrototypeOf("a".split(/x/, 0)) === Array.prototype);
         \\print(Object.getPrototypeOf("a".match(/a/g)) === Array.prototype);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("true\ntrue\ntrue\n", stream.buffered());
+    , "true\ntrue\ntrue\n");
 }
 
 test "RegExp Symbol.split uses the realm intrinsic default species" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var IntrinsicRegExp = RegExp;
         \\var split = IntrinsicRegExp.prototype[Symbol.split];
         \\var rx = /,/;
@@ -11748,20 +11731,11 @@ test "RegExp Symbol.split uses the realm intrinsic default species" {
         \\globalThis.RegExp = function FakeRegExp() { fakeCalls++; return { lastIndex: 0, exec: function () { return null; } }; };
         \\var parts = split.call(rx, "a,b");
         \\print(fakeCalls + ":" + parts.join("|"));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("0:a|b\n", stream.buffered());
+    , "0:a|b\n");
 }
 
 test "Engine eval preserves global lexical write fast path semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let g = 0;
         \\g = 1;
         \\function setGlobal() { g = g + 2; }
@@ -11775,11 +11749,7 @@ test "Engine eval preserves global lexical write fast path semantics" {
         \\let withTarget = { g: 10 };
         \\with (withTarget) { g = 11; }
         \\print(g, withTarget.g);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("3\nTypeError 1\nchanged global\n3 11\n", stream.buffered());
+    , "3\nTypeError 1\nchanged global\n3 11\n");
 }
 
 test "Engine nested functions retain ancestor with environments during finalization" {
@@ -11801,12 +11771,7 @@ test "Engine nested functions retain ancestor with environments during finalizat
 }
 
 test "Engine eval preserves selected with references during updates" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function updateDeletedProperty() {
         \\  var x = 0;
         \\  var scope = { get x() { delete this.x; return 2; } };
@@ -11825,20 +11790,11 @@ test "Engine eval preserves selected with references during updates" {
         \\  }) { x++; }
         \\}
         \\print(probes, outer.x, inner.x, flag);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("6 0\n1 7 5 false\n", stream.buffered());
+    , "6 0\n1 7 5 false\n");
 }
 
 test "with compound assignment rechecks proxy binding before get and set" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var log = [];
         \\var target = { p: 0 };
         \\var proxy = new Proxy(target, {
@@ -11850,23 +11806,11 @@ test "with compound assignment rechecks proxy binding before get and set" {
         \\});
         \\with (proxy) { p += 1; }
         \\print(log.join("|"));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "has:p|get:Symbol(Symbol.unscopables)|has:p|get:p|has:p|set:p|getOwnPropertyDescriptor:p|defineProperty:p\n",
-        stream.buffered(),
-    );
+    , "has:p|get:Symbol(Symbol.unscopables)|has:p|get:p|has:p|set:p|getOwnPropertyDescriptor:p|defineProperty:p\n");
 }
 
 test "Engine destructuring snapshots with binding references before property reads" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var log = [];
         \\var sourceKey = { toString: function() { log.push('sourceKey'); return 'p'; } };
         \\var source = { get p() { log.push('get source'); return undefined; } };
@@ -11892,16 +11836,9 @@ test "Engine destructuring snapshots with binding references before property rea
         \\  var [readY, { p: y }] = [function() { return y; }, { p: 13 }];
         \\  print(y, readY());
         \\})();
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "0 binding::source|binding::sourceKey|sourceKey|binding::varTarget|get source|binding::defaultValue\n" ++
-            "local 9 has:selectedSource|has:selected|get selected|has:selected\n" ++
-            "1 1\n13 13\n",
-        stream.buffered(),
-    );
+    , "0 binding::source|binding::sourceKey|sourceKey|binding::varTarget|get source|binding::defaultValue\n" ++
+        "local 9 has:selectedSource|has:selected|get selected|has:selected\n" ++
+        "1 1\n13 13\n");
 }
 
 test "Engine with destructuring assignment reaches const fallback at runtime" {
@@ -11932,12 +11869,7 @@ test "Engine with destructuring assignment reaches const fallback at runtime" {
 }
 
 test "Engine eval assignments capture the target before dynamic var insertion" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function simpleAssignment() {
         \\  var x = 0;
         \\  var inner = (function() {
@@ -11974,23 +11906,11 @@ test "Engine eval assignments capture the target before dynamic var insertion" {
         \\compoundAssignment();
         \\initializerAssignment();
         \\templateAssignment();
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n",
-        stream.buffered(),
-    );
+    , "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n");
 }
 
 test "Engine arrow eval assignments capture the target before dynamic var insertion" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function outer() {
         \\  var x = 0;
         \\  var simple = () => { x = (eval("var x;"), 1); return x; };
@@ -12020,23 +11940,16 @@ test "Engine arrow eval assignments capture the target before dynamic var insert
         \\const parameterEvalResult = parameterEval();
         \\assert.sameValue(parameterEvalResult[0], "body");
         \\assert.sameValue(parameterEvalResult[1], "parameter");
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n",
-        stream.buffered(),
-    );
+    , "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n");
 }
 
 test "Engine direct eval captures the caller arguments binding" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
 
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    // The direct eval assignment observes the function's mapped Arguments
+    // binding. Parameter initializers use the parameter-environment binding
+    // when the body declares its own `arguments` variable, and otherwise
+    // share the function binding with the body.
+    try helpers.expectPrints(
         \\function direct(value) { return eval("arguments[0]"); }
         \\function throughArrow(value) { return (() => eval("arguments[0]"))(); }
         \\function replace(value) {
@@ -12078,27 +11991,11 @@ test "Engine direct eval captures the caller arguments binding" {
         \\print(open1(), open2());
         \\var noInit = parameterClosureNoInit();
         \\print(parameterClosure(), noInit[0], noInit[1], noInit[2]);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    // The direct eval assignment observes the function's mapped Arguments
-    // binding. Parameter initializers use the parameter-environment binding
-    // when the body declares its own `arguments` variable, and otherwise
-    // share the function binding with the body.
-    try std.testing.expectEqualStrings(
-        "41 42\n41 replaced false [object Object]\ninside inside inside\ninside inside\nfalse false true false\n",
-        stream.buffered(),
-    );
+    , "41 42\n41 replaced false [object Object]\ninside inside inside\ninside inside\nfalse false true false\n");
 }
 
 test "Engine arguments writes prefer the current function binding over outer lexical bindings" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let arguments = 'outer';
         \\function ordinary() {
         \\  arguments = 'ordinary';
@@ -12125,23 +12022,15 @@ test "Engine arguments writes prefer the current function binding over outer lex
         \\print(parameterArrow(), arguments);
         \\print(explicitParameter(), destructuredParameter());
         \\print(arrow(), arguments);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "ordinary outer\nparameter parameter outer\nparameter-arrow parameter-arrow outer\nold new\narrow arrow\n",
-        stream.buffered(),
-    );
+    , "ordinary outer\nparameter parameter outer\nparameter-arrow parameter-arrow outer\nold new\narrow arrow\n");
 }
 
 test "Engine direct eval shares top-level lexical cells across nested closures" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
 
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    // A direct eval var declaration must skip the temporary catch binding and
+    // keep the caller's dynamic var object available after the catch exits.
+    // Repeating a plain `var saved` declaration preserves the existing value.
+    try helpers.expectPrints(
         \\let x = 500;
         \\function direct() { return eval("x"); }
         \\function write() { eval("x = 501"); }
@@ -12171,23 +12060,11 @@ test "Engine direct eval shares top-level lexical cells across nested closures" 
         \\catchEval();
         \\print(catchValue, catchLog);
         \\print(preserveEvalVar());
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    // A direct eval var declaration must skip the temporary catch binding and
-    // keep the caller's dynamic var object available after the catch exits.
-    // Repeating a plain `var saved` declaration preserves the existing value.
-    try std.testing.expectEqualStrings("500 500\n501 511\nglobal 42local\n1\n", stream.buffered());
+    , "500 500\n501 511\nglobal 42local\n1\n");
 }
 
 test "Engine constructor parameter defaults use the initialized this binding" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\class A {
         \\  #x = 'hello';
         \\  constructor(value = this.#x) { this.value = value; }
@@ -12202,11 +12079,7 @@ test "Engine constructor parameter defaults use the initialized this binding" {
         \\  constructor(value = this) { super(value); }
         \\}
         \\try { new C(); } catch (error) { print(error.name); }
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("hello\ntrue hello\nReferenceError\n", stream.buffered());
+    , "hello\ntrue hello\nReferenceError\n");
 }
 
 test "Engine heritage closures retain the initialized inner class-name binding" {
@@ -12274,29 +12147,15 @@ test "Engine inferred class names precede static initialization across named-eva
 }
 
 test "Engine eval assigns contextual await bindings in sloppy scripts" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [16]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var await = 0;
         \\await = 1;
         \\print(await);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("1\n", stream.buffered());
+    , "1\n");
 }
 
 test "Engine eval creates non-configurable enumerable global var bindings" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\print(delete __globalVar);
         \\var __globalVar = "defined";
         \\print(__globalVar);
@@ -12306,37 +12165,15 @@ test "Engine eval creates non-configurable enumerable global var bindings" {
         \\print(seen);
         \\var first = 1, second = first + 1, third;
         \\print(first, second, third);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("false\ndefined\nfalse false\ntrue\n1 2 undefined\n", stream.buffered());
+    , "false\ndefined\nfalse false\ntrue\n1 2 undefined\n");
 }
 
 test "Engine eval executes object property assignment through quick parser" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput("const obj = { x: 1 }; obj.x = obj.x + 2; print(obj.x);", &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("3\n", stream.buffered());
+    try helpers.expectPrints("const obj = { x: 1 }; obj.x = obj.x + 2; print(obj.x);", "3\n");
 }
 
 test "Engine eval executes parenthesized literal postfix through quick parser" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput("const obj = { x: 1 }; print(({ y: obj.x + 2 }).y); print(([3, 4])[1]);", &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("3\n4\n", stream.buffered());
+    try helpers.expectPrints("const obj = { x: 1 }; print(({ y: obj.x + 2 }).y); print(([3, 4])[1]);", "3\n4\n");
 }
 
 // qjs CASE(OP_define_field) (quickjs.c:19269) takes the same
@@ -12385,37 +12222,15 @@ test "Engine eval balances refcounts for refcounted duplicate-key object literal
 }
 
 test "Engine eval executes compound assignment and update statements through quick parser" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput("let x = 10; x += 5; x -= 3; x *= 2; x /= 4; x %= 5; x++; x--; print(x);", &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("1\n", stream.buffered());
+    try helpers.expectPrints("let x = 10; x += 5; x -= 3; x *= 2; x /= 4; x %= 5; x++; x--; print(x);", "1\n");
 }
 
 test "Engine eval executes console.log with many arguments" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [1024]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput("console.log(1,2,3,4,5,6,7,8,9,10);", &stream);
-    defer result.free(js.runtime);
-    const output = stream.buffered();
-    try std.testing.expectEqualStrings("1 2 3 4 5 6 7 8 9 10\n", output);
+    try helpers.expectPrints("console.log(1,2,3,4,5,6,7,8,9,10);", "1 2 3 4 5 6 7 8 9 10\n");
 }
 
 test "Engine eval routes host output through global function calls" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [512]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\print(1);
         \\console.log("x");
         \\const out = print;
@@ -12424,11 +12239,7 @@ test "Engine eval routes host output through global function calls" {
         \\logger("ok");
         \\const c = console;
         \\c.log("alias");
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("1\nx\n5 function\nok\nalias\n", stream.buffered());
+    , "1\nx\n5 function\nok\nalias\n");
 }
 
 test "using early exit before await using keeps sync disposal synchronous" {
@@ -12469,12 +12280,7 @@ test "using early exit before await using keeps sync disposal synchronous" {
 }
 
 test "Engine eval preserves local numeric add host output semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let a = 1;
         \\let b = 2;
         \\print(a + b);
@@ -12485,11 +12291,7 @@ test "Engine eval preserves local numeric add host output semantics" {
         \\print(a + b);
         \\oldPrint(globalThis.seen);
         \\print = oldPrint;
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("3\n2147483648\ncustom:3\n", stream.buffered());
+    , "3\n2147483648\ncustom:3\n");
 }
 
 test "get_array_el2 dense indexed call keeps the receiver" {
@@ -12528,12 +12330,7 @@ test "int32 add sub mul overflow stays a number on the generic binary" {
 }
 
 test "Engine eval preserves collection read host output semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [512]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let map = new Map();
         \\map.set("a", 1);
         \\print(map.get("a"));
@@ -12557,11 +12354,7 @@ test "Engine eval preserves collection read host output semantics" {
         \\map.get = function(k) { return "own:" + k; };
         \\print(map.get("a"));
         \\delete map.get;
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("1\ntrue\n2\ntrue\ntrue\ntrue\ncustom:a\nown:a\n", stream.buffered());
+    , "1\ntrue\n2\ntrue\ntrue\ntrue\ncustom:a\nown:a\n");
 }
 
 test "runtime teardown preserves closure capture metadata until objects are destroyed" {
@@ -12611,12 +12404,7 @@ test "cycle teardown preserves restored strong counts for weakly referenced keys
 }
 
 test "Engine eval preserves regexp UTF-16 test host output semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let re = new RegExp("\u00e9+", "");
         \\print(re.test("\u00e9\u00e9"));
         \\print(re.test("\u0100\u00e9"));
@@ -12640,11 +12428,7 @@ test "Engine eval preserves regexp UTF-16 test host output semantics" {
         \\let stickyRe = /a/y;
         \\stickyRe.lastIndex = 1;
         \\print(stickyRe.test("ba"), stickyRe.lastIndex);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("true\ntrue\nfalse\n2:true\n233\nfalse\nfalse\naaab:true\ntrue 4\nfalse 0\ntrue 2\n", stream.buffered());
+    , "true\ntrue\nfalse\n2:true\n233\nfalse\nfalse\naaab:true\ntrue 4\nfalse 0\ntrue 2\n");
 }
 
 test "Engine eval prepared RegExp call observes same-site property changes" {
@@ -12671,12 +12455,7 @@ test "Engine eval prepared RegExp call observes same-site property changes" {
 }
 
 test "Engine eval preserves dense array join host output semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [512]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let tab = [3, 1, 2];
         \\tab.sort();
         \\print(tab.join(","));
@@ -12690,20 +12469,11 @@ test "Engine eval preserves dense array join host output semantics" {
         \\tab[0] = { toString: function() { globalThis.seenJoinObject = "object"; return "obj"; } };
         \\print(tab.join(","));
         \\print(globalThis.seenJoinObject);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("1,2,3\ncustom:|:3\nown:,\nobj,2,3\nobject\n", stream.buffered());
+    , "1,2,3\ncustom:|:3\nown:,\nobj,2,3\nobject\n");
 }
 
 test "Engine eval preserves dense array pop host output semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [512]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let tab = [1, 2];
         \\print(tab.pop());
         \\print(tab.length);
@@ -12719,20 +12489,11 @@ test "Engine eval preserves dense array pop host output semantics" {
         \\print(accessorTab.pop());
         \\print(accessorTab.length);
         \\print(globalThis.seenPopGetter);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("2\n1\ncustom:1\nown:1\n9\n0\ngetter\n", stream.buffered());
+    , "2\n1\ncustom:1\nown:1\n9\n0\ngetter\n");
 }
 
 test "Engine eval preserves ordinary array pop fast path semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [512]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let a = [1, 2, 3];
         \\let x = a.pop();
         \\print(x, a.length, a.join(","));
@@ -12753,11 +12514,7 @@ test "Engine eval preserves ordinary array pop fast path semantics" {
         \\} catch (e) {
         \\    print(e.name, d.length, d[1]);
         \\}
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("3 2 1,2\n2 1 1\nundefined 1\n7 1\nTypeError 2 2\n", stream.buffered());
+    , "3 2 1,2\n2 1 1\nundefined 1\n7 1\nTypeError 2 2\n");
 }
 
 test "empty native array pop fast arm preserves observable length writes" {
@@ -12851,12 +12608,7 @@ test "array pop reports read-only length after deleting a configurable last elem
 }
 
 test "Engine eval preserves simple closure call host output semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function counter() { let n = 0; return function () { n++; return n; }; }
         \\let next = counter();
         \\print(next());
@@ -12866,20 +12618,11 @@ test "Engine eval preserves simple closure call host output semantics" {
         \\print(next());
         \\oldPrint(globalThis.seenClosureCall);
         \\print = oldPrint;
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("1\n2\n[3]\n", stream.buffered());
+    , "1\n2\n[3]\n");
 }
 
 test "Engine eval preserves one-shot array literal host output semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function lengthOnly() {
         \\  let tab = [1, 2];
         \\  print(tab.length);
@@ -12898,20 +12641,11 @@ test "Engine eval preserves one-shot array literal host output semantics" {
         \\print(tab.length);
         \\oldPrint(globalThis.seen);
         \\print = oldPrint;
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("2\ntrue\n2\n1\ntrue\n[2][1]\n", stream.buffered());
+    , "2\ntrue\n2\n1\ntrue\n[2][1]\n");
 }
 
 test "Engine eval preserves one-shot array named property host output semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let tab = [1];
         \\tab.a = 9;
         \\print(tab.a);
@@ -12931,20 +12665,11 @@ test "Engine eval preserves one-shot array named property host output semantics"
         \\tab3.guarded = 7;
         \\print(tab3.guarded);
         \\delete Array.prototype.guarded;
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("9\ncustom:8\n8\n", stream.buffered());
+    , "9\ncustom:8\n8\n");
 }
 
 test "Engine eval preserves typed array constructor length host output semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function lengthOnly() {
         \\  let tab = new Int32Array(new ArrayBuffer(16));
         \\  print(tab.length);
@@ -12961,20 +12686,11 @@ test "Engine eval preserves typed array constructor length host output semantics
         \\let fake = new Int32Array(new ArrayBuffer(16));
         \\print(fake.length);
         \\Int32Array = OldTA;
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("4\ntrue\nprint:4\n99\n", stream.buffered());
+    , "4\ntrue\nprint:4\n99\n");
 }
 
 test "Engine eval preserves Int32Array indexed read fast path semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let a = new Int32Array(2);
         \\a[0] = 7;
         \\a[1] = -3;
@@ -12986,62 +12702,23 @@ test "Engine eval preserves Int32Array indexed read fast path semantics" {
         \\let c = new Int32Array(1);
         \\c.buffer.transfer();
         \\print(c[0]);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("7 -3 undefined\nundefined\nundefined\n", stream.buffered());
+    , "7 -3 undefined\nundefined\nundefined\n");
 }
 
 test "Engine eval executes simple template interpolation" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput("const x = 10; const y = 20; print(`${x} + ${y} = ${x + y}`);", &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("10 + 20 = 30\n", stream.buffered());
+    try helpers.expectPrints("const x = 10; const y = 20; print(`${x} + ${y} = ${x + y}`);", "10 + 20 = 30\n");
 }
 
 test "Engine eval template interpolation calls object toString" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
-        "const x = { toString(){ return 'custom'; } }; print(`${x}`);",
-        &stream,
-    );
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("custom\n", stream.buffered());
+    try helpers.expectPrints("const x = { toString(){ return 'custom'; } }; print(`${x}`);", "custom\n");
 }
 
 test "Engine eval executes simple arrays and map" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput("const arr = [1, 2, 3]; print(arr); print(arr.length); print(arr[0]); print(arr.map(x => x * 2));", &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("1,2,3\n3\n1\n2,4,6\n", stream.buffered());
+    try helpers.expectPrints("const arr = [1, 2, 3]; print(arr); print(arr.length); print(arr[0]); print(arr.map(x => x * 2));", "1,2,3\n3\n1\n2,4,6\n");
 }
 
 test "Engine eval executes simple functions and arrows" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [160]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function add(a, b) { return a + b; }
         \\print(add(2, 3));
         \\const double = x => x * 2;
@@ -13052,11 +12729,7 @@ test "Engine eval executes simple functions and arrows" {
         \\print(mul(3, 4));
         \\function varArguments() { return typeof arguments; var arguments = 1; }
         \\print(varArguments(42));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("5\n42\n720\n12\nobject\n", stream.buffered());
+    , "5\n42\n720\n12\nobject\n");
 }
 
 test "strict plain calls preserve this arguments eval captures and backtraces" {
@@ -13374,19 +13047,10 @@ test "implicit arguments resolution preserves mapped aliases" {
 }
 
 test "body function named arguments does not create a synthetic lexical collision" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [16]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function bodyCollision() { return typeof arguments; function arguments() {} }
         \\print(bodyCollision());
-    , &output);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("function\n", output.buffered());
+    , "function\n");
 }
 
 test "resident mapped arguments share one open bare arg slot" {
@@ -16416,16 +16080,13 @@ test "native tail calls preserve iterator and proxy continuation success and thr
 }
 
 test "strict arrow tails stay constant while method recursion exhausts the logical stack budget" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
 
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
     // In a STRICT script, plain / arrow `return f()` is a proper tail call
     // and stays in constant stack. Method tails (`return this.m()`) still
     // grow a logical frame, so deep method recursion remains a catchable
     // stack overflow. Prove the runtime is usable after each catch.
-    const result = try js.evalWithOutput(
+
+    try helpers.expectPrints(
         \\"use strict";
         \\function expectStackOverflow(run) {
         \\  try {
@@ -16445,17 +16106,10 @@ test "strict arrow tails stay constant while method recursion exhausts the logic
         \\const counter = { loop(n) { return n === 0 ? 0 : this.loop(n - 1); } };
         \\expectStackOverflow(() => counter.loop(40000));
         \\print("recovered");
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "arrow:0\n" ++
-            "InternalError: stack overflow\n" ++
-            "InternalError: stack overflow\n" ++
-            "recovered\n",
-        stream.buffered(),
-    );
+    , "arrow:0\n" ++
+        "InternalError: stack overflow\n" ++
+        "InternalError: stack overflow\n" ++
+        "recovered\n");
 }
 
 test "return conditional followed by newline comma keeps the comma expression" {
@@ -16475,16 +16129,13 @@ test "return conditional followed by newline comma keeps the comma expression" {
 }
 
 test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
 
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
     // An arrow captures `this` lexically. Its unobservable frame slot follows
     // the ordinary strict/sloppy or receiver policy, while bytecode reads the
     // capture cell. `bound.call(other)`/`carrier.m()` must not change that
     // lexical `this`.
-    const result = try js.evalWithOutput(
+
+    try helpers.expectPrints(
         \\const lex = { tag: "LEX" };
         \\function make() { return () => this.tag; }
         \\const bound = make.call(lex);
@@ -16494,11 +16145,7 @@ test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
         \\print(carrier.m());
         \\const obj = { name: "outer", run() { const a = () => this.name; return a(); } };
         \\print(obj.run());
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("LEX\nLEX\nLEX\nouter\n", stream.buffered());
+    , "LEX\nLEX\nLEX\nouter\n");
 }
 
 test "arrow direct eval reads captured this and new.target" {
@@ -16921,12 +16568,7 @@ test "function caller and arguments restrictions follow immutable function shape
 }
 
 test "Engine eval Function.prototype.toString returns source or native text" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [768]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function f(x) { return x; }
         \\print(f.toString());
         \\function /* a */ g /* b */ ( /* c */ y /* d */ ) /* e */ { /* f */ return y; /* g */ }
@@ -16936,19 +16578,12 @@ test "Engine eval Function.prototype.toString returns source or native text" {
         \\print(print.toString());
         \\try { Function.prototype.toString.call({}); } catch (e) { print(e.name); }
         \\try { String({ toString: Function.prototype.toString }); } catch (e) { print(e.name); }
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "function f(x) { return x; }\n" ++
-            "function /* a */ g /* b */ ( /* c */ y /* d */ ) /* e */ { /* f */ return y; /* g */ }\n" ++
-            "y => y + 1\n" ++
-            "function print() {\n    [native code]\n}\n" ++
-            "TypeError\n" ++
-            "TypeError\n",
-        stream.buffered(),
-    );
+    , "function f(x) { return x; }\n" ++
+        "function /* a */ g /* b */ ( /* c */ y /* d */ ) /* e */ { /* f */ return y; /* g */ }\n" ++
+        "y => y + 1\n" ++
+        "function print() {\n    [native code]\n}\n" ++
+        "TypeError\n" ++
+        "TypeError\n");
 }
 
 test "Engine eval Function.prototype.toString emits syntactic native names" {
@@ -16971,12 +16606,7 @@ test "Engine eval Function.prototype.toString emits syntactic native names" {
 }
 
 test "Engine eval Function.prototype.toString returns method and class source" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [1280]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\const method = { /* before */ f /* a */ ( /* b */ ) /* c */ { /* d */ } /* after */ }.f;
         \\print(method.toString());
         \\const asyncComputed = { async /* a */ [ /* b */ "g" /* c */ ] /* d */ ( /* e */ ) /* f */ { /* g */ } }.g;
@@ -16986,17 +16616,10 @@ test "Engine eval Function.prototype.toString returns method and class source" {
         \\function B() {}
         \\const C = class /* a */ A /* b */ extends /* c */ B /* d */ { /* e */ constructor /* f */ ( /* g */ ) /* h */ { /* i */ } /* j */ };
         \\print(C.toString());
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "f /* a */ ( /* b */ ) /* c */ { /* d */ }\n" ++
-            "async /* a */ [ /* b */ \"g\" /* c */ ] /* d */ ( /* e */ ) /* f */ { /* g */ }\n" ++
-            "async /* a */ * /* b */ [ /* c */ \"h\" /* d */ ] /* e */ ( /* f */ ) /* g */ { /* h */ }\n" ++
-            "class /* a */ A /* b */ extends /* c */ B /* d */ { /* e */ constructor /* f */ ( /* g */ ) /* h */ { /* i */ } /* j */ }\n",
-        stream.buffered(),
-    );
+    , "f /* a */ ( /* b */ ) /* c */ { /* d */ }\n" ++
+        "async /* a */ [ /* b */ \"g\" /* c */ ] /* d */ ( /* e */ ) /* f */ { /* g */ }\n" ++
+        "async /* a */ * /* b */ [ /* c */ \"h\" /* d */ ] /* e */ ( /* f */ ) /* g */ { /* h */ }\n" ++
+        "class /* a */ A /* b */ extends /* c */ B /* d */ { /* e */ constructor /* f */ ( /* g */ ) /* h */ { /* i */ } /* j */ }\n");
 }
 
 test "Engine eval releases arrow destructuring iterator closures cleanly" {
@@ -17024,12 +16647,7 @@ test "Engine eval releases arrow destructuring iterator closures cleanly" {
 }
 
 test "Engine eval preserves one-shot object missing field host output semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let obj = { a: 1 };
         \\print(obj.b === undefined);
         \\let obj2 = { a: 1 };
@@ -17044,20 +16662,11 @@ test "Engine eval preserves one-shot object missing field host output semantics"
         \\  let obj4 = { a: 1 };
         \\  print(obj4.b === undefined);
         \\}
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("true\nfalse\ncustom:true\nfalse\n", stream.buffered());
+    , "true\nfalse\ncustom:true\nfalse\n");
 }
 
 test "Engine eval preserves local string substring host output semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [512]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let s = "abcdef";
         \\print(s.substring(4, 1));
         \\print(s.substring(2));
@@ -17068,20 +16677,11 @@ test "Engine eval preserves local string substring host output semantics" {
         \\};
         \\print(s.substring(4, 1));
         \\String.prototype.substring = oldSubstring;
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("bcd\ncdef\nabcdef\ncustom:abcdef:4:1\n", stream.buffered());
+    , "bcd\ncdef\nabcdef\ncustom:abcdef:4:1\n");
 }
 
 test "String index-read native records preserve primitive fast paths and observable coercion" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [1024]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let log = "";
         \\const receiver = { toString() { log += "s"; return "A😀Z"; } };
         \\const index = { valueOf() { log += "i"; return 1; } };
@@ -17096,26 +16696,14 @@ test "String index-read native records preserve primitive fast paths and observa
         \\  catch (error) { print(method + "-index", error.name); }
         \\}
         \\print(String.prototype.charCodeAt.call(42, 1));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "55357\nZ\n128512\nsissi\n" ++
-            "charCodeAt TypeError\ncharCodeAt-index TypeError\n" ++
-            "at TypeError\nat-index TypeError\n" ++
-            "codePointAt TypeError\ncodePointAt-index TypeError\n50\n",
-        stream.buffered(),
-    );
+    , "55357\nZ\n128512\nsissi\n" ++
+        "charCodeAt TypeError\ncharCodeAt-index TypeError\n" ++
+        "at TypeError\nat-index TypeError\n" ++
+        "codePointAt TypeError\ncodePointAt-index TypeError\n50\n");
 }
 
 test "mod cold handler preserves fmod and ToNumeric fallbacks" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [512]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\const out = [];
         \\const show = value => Object.is(value, -0) ? "-0" : String(value);
         \\for (const pair of [[5.5, 2], [5, 2.5], [-4, 2], [4, -2],
@@ -17131,40 +16719,19 @@ test "mod cold handler preserves fmod and ToNumeric fallbacks" {
         \\out.push(iterator.next().value, show(iterator.next().value));
         \\try { 1 % Symbol(); } catch (error) { out.push(error.name); }
         \\print(out.join("|"));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "1.5|0|-0|0|NaN|NaN|2|NaN|2.5|lr|3|pause|1.5|TypeError\n",
-        stream.buffered(),
-    );
+    , "1.5|0|-0|0|NaN|NaN|2|NaN|2.5|lr|3|pause|1.5|TypeError\n");
 }
 
 test "Engine eval preserves ASCII string integer literal concat semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\print("a" + 1);
         \\print("a" + -1);
         \\print("" + 12345);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("a1\na-1\n12345\n", stream.buffered());
+    , "a1\na-1\n12345\n");
 }
 
 test "Engine eval preserves resolve-label peephole semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function probe(v, u) {
         \\  let x = 0;
         \\  let y;
@@ -17179,11 +16746,7 @@ test "Engine eval preserves resolve-label peephole semantics" {
         \\    typeof new Proxy(fn, {}) === "function"].join(","));
         \\}
         \\probe(3, undefined);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("3,3,9,false,true,true,true,true,true\n", stream.buffered());
+    , "3,3,9,false,true,true,true,true,true\n");
 }
 
 test "resident is_null preserves qjs true and refcounted false legs" {
@@ -17435,12 +16998,7 @@ test "destructuring rest parameter defaults use the parameter environment" {
 }
 
 test "caught destructuring error preserves IteratorClose output" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\const iterator = {
         \\  [Symbol.iterator]() { return this; },
         \\  next() { return { value: undefined, done: false }; },
@@ -17448,20 +17006,11 @@ test "caught destructuring error preserves IteratorClose output" {
         \\};
         \\try { let [value = missingName] = iterator; } catch (error) {}
         \\print("END");
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("CLOSED\nEND\n", stream.buffered());
+    , "CLOSED\nEND\n");
 }
 
 test "generator parameter eval cells close before body resume" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var x = 'outside';
         \\var first, second, body;
         \\function* g(
@@ -17476,23 +17025,16 @@ test "generator parameter eval cells close before body resume" {
         \\}
         \\h().next();
         \\print(first(), second(), body(), restParam(), restBody());
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("inside inside inside inside inside\n", stream.buffered());
+    , "inside inside inside inside inside\n");
 }
 
 test "generator return executes an add_loc-terminated shared finally before completing" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
 
     // The pending completion and gosub return PC now live on the resident
     // operand stack. An add_loc-terminated finalizer must reach `ret`, resume
     // the compiled return leg and never execute the post-finalizer body.
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+
+    try helpers.expectPrints(
         \\function* g() {
         \\  var s = 0;
         \\  try { yield 1; } finally { s += 1; }
@@ -17504,11 +17046,7 @@ test "generator return executes an add_loc-terminated shared finally before comp
         \\var second = it.return(42);
         \\var third = it.next();
         \\print(first.value, first.done, second.value, second.done, third.value, third.done);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("1 false 42 true undefined true\n", stream.buffered());
+    , "1 false 42 true undefined true\n");
 }
 
 test "generator default argument stores release refcounted stack values" {
@@ -18723,12 +18261,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
 }
 
 test "Engine generator return propagates an explicit finally throw" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var syncError = new Error('sync');
         \\function* syncGenerator() {
         \\  try { yield 1; } finally { throw syncError; }
@@ -18756,23 +18289,11 @@ test "Engine generator return propagates an explicit finally throw" {
         \\}).then(function(result) {
         \\  print('async-closed', result.value, result.done);
         \\});
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "sync-rejected true\nasync-rejected true\nasync-closed undefined true\n",
-        stream.buffered(),
-    );
+    , "sync-rejected true\nasync-rejected true\nasync-closed undefined true\n");
 }
 
 test "async generator return awaits for-await iterator close before completing" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var closeCalls = 0;
         \\var awaitCalls = 0;
         \\var iterable = {};
@@ -18796,20 +18317,11 @@ test "async generator return awaits for-await iterator close before completing" 
         \\}, function(error) {
         \\  print("rejected", error.name, closeCalls, awaitCalls);
         \\});
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("9 true 1 1\n", stream.buffered());
+    , "9 true 1 1\n");
 }
 
 test "async generator return closes an inner iterator before its enclosing finally" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\const events = [];
         \\const iterable = {
         \\  [Symbol.asyncIterator]() {
@@ -18832,20 +18344,11 @@ test "async generator return closes an inner iterator before its enclosing final
         \\}).then(function(returned) {
         \\  print(events.join(","), returned.value, returned.done);
         \\});
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("return,finally 9 true\n", stream.buffered());
+    , "return,finally 9 true\n");
 }
 
 test "async generator return awaits its value once before a yielding finalizer" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let awaitCount = 0;
         \\const returned = { then(resolve) { awaitCount++; resolve(7); } };
         \\async function* values() {
@@ -18861,20 +18364,11 @@ test "async generator return awaits its value once before a yielding finalizer" 
         \\}).then(function(completion) {
         \\  print(completion.value, completion.done, awaitCount);
         \\});
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("2 false 1\n7 true 1\n", stream.buffered());
+    , "2 false 1\n7 true 1\n");
 }
 
 test "Engine eval preserves simple for-in mutation semantics" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\let obj = { a: 1, b: 2, c: 3 };
         \\let keys = "";
         \\for (var k in obj) {
@@ -18892,11 +18386,7 @@ test "Engine eval preserves simple for-in mutation semantics" {
         \\  }
         \\}
         \\print(keys);
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("ac\nab\n", stream.buffered());
+    , "ac\nab\n");
 }
 
 test "Engine runJobs preserves pending JS exceptions for callers" {
@@ -20948,12 +20438,8 @@ test "ToNumber latin1 high bytes are code points not UTF-8 whitespace" {
     // X-38: latin1 0x80-0xFF are single code points. Feeding the raw bytes to
     // a UTF-8 whitespace decoder made Number("\xe2\x80\x801") == 1 while
     // qjs skip_spaces (qjs:11230) / lre_is_space classify by code point.
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
 
-    var output_buffer: [2048]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var s = String.fromCharCode(0xE2,0x80,0x80) + "1";
         \\print("len="+s.length+" cc="+s.charCodeAt(0)+","+s.charCodeAt(1)+","+s.charCodeAt(2)+","+s.charCodeAt(3));
         \\print("Number(s)="+Number(s));  print("+s="+(+s));  print("-s="+(-s));
@@ -20981,44 +20467,37 @@ test "ToNumber latin1 high bytes are code points not UTF-8 whitespace" {
         \\print("U00A0 Number="+Number("\u00A0"+"1")+" parseFloat="+parseFloat("\u00A0"+"1"));
         \\print("U2000 Number="+Number("\u2000"+"1")+" parseFloat="+parseFloat("\u2000"+"1"));
         \\print("UFEFF Number="+Number("\uFEFF"+"1")+" parseFloat="+parseFloat("\uFEFF"+"1"));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings(
-        "len=4 cc=226,128,128,49\n" ++
-            "Number(s)=NaN\n" ++
-            "+s=NaN\n" ++
-            "-s=NaN\n" ++
-            "parseFloat=NaN\n" ++
-            "parseInt=NaN\n" ++
-            "Math.abs=NaN\n" ++
-            "eqloose=false\n" ++
-            "at=7\n" ++
-            "Math.max=NaN\n" ++
-            "slice=3\n" ++
-            "s*2=NaN\n" ++
-            "s|0=0\n" ++
-            "p0 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
-            "s0 Number=NaN parseFloat=1 parseInt=1\n" ++
-            "p1 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
-            "s1 Number=NaN parseFloat=1 parseInt=1\n" ++
-            "p2 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
-            "s2 Number=NaN parseFloat=1 parseInt=1\n" ++
-            "p3 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
-            "s3 Number=NaN parseFloat=1 parseInt=1\n" ++
-            "p4 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
-            "s4 Number=NaN parseFloat=1 parseInt=1\n" ++
-            "p5 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
-            "s5 Number=NaN parseFloat=1 parseInt=1\n" ++
-            "p6 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
-            "s6 Number=NaN parseFloat=1 parseInt=1\n" ++
-            "bareA0 Number=1 parseFloat=1\n" ++
-            "U00A0 Number=1 parseFloat=1\n" ++
-            "U2000 Number=1 parseFloat=1\n" ++
-            "UFEFF Number=1 parseFloat=1\n",
-        stream.buffered(),
-    );
+    , "len=4 cc=226,128,128,49\n" ++
+        "Number(s)=NaN\n" ++
+        "+s=NaN\n" ++
+        "-s=NaN\n" ++
+        "parseFloat=NaN\n" ++
+        "parseInt=NaN\n" ++
+        "Math.abs=NaN\n" ++
+        "eqloose=false\n" ++
+        "at=7\n" ++
+        "Math.max=NaN\n" ++
+        "slice=3\n" ++
+        "s*2=NaN\n" ++
+        "s|0=0\n" ++
+        "p0 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+        "s0 Number=NaN parseFloat=1 parseInt=1\n" ++
+        "p1 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+        "s1 Number=NaN parseFloat=1 parseInt=1\n" ++
+        "p2 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+        "s2 Number=NaN parseFloat=1 parseInt=1\n" ++
+        "p3 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+        "s3 Number=NaN parseFloat=1 parseInt=1\n" ++
+        "p4 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+        "s4 Number=NaN parseFloat=1 parseInt=1\n" ++
+        "p5 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+        "s5 Number=NaN parseFloat=1 parseInt=1\n" ++
+        "p6 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+        "s6 Number=NaN parseFloat=1 parseInt=1\n" ++
+        "bareA0 Number=1 parseFloat=1\n" ++
+        "U00A0 Number=1 parseFloat=1\n" ++
+        "U2000 Number=1 parseFloat=1\n" ++
+        "UFEFF Number=1 parseFloat=1\n");
 }
 
 test "JSON.rawJSON latin1 payload survives the simple stringify byte buffer" {
@@ -21183,40 +20662,21 @@ test "sloppy CallExpression assignment targets throw after evaluating only the c
 }
 
 test "async context-keyword arrow binding identifier is a function" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [32]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var f = async yield => yield+1;
         \\f(41).then(v=>print(v));
-    , &output);
-    defer result.free(js.runtime);
-    try std.testing.expectEqualStrings("42\n", output.buffered());
+    , "42\n");
 }
 
 test "get/set object shorthand serializes like a named property" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [64]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\var get=1; print(JSON.stringify({get}));
         \\var set=1; print(JSON.stringify({set}));
-    , &output);
-    defer result.free(js.runtime);
-    try std.testing.expectEqualStrings("{\"get\":1}\n{\"set\":1}\n", output.buffered());
+    , "{\"get\":1}\n{\"set\":1}\n");
 }
 
 test "top-level direct eval does not break private-name eval resolution" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\class C {
         \\  #f = 1;
         \\  get #g(){ return 2; }
@@ -21240,21 +20700,11 @@ test "top-level direct eval does not break private-name eval resolution" {
         \\show("write", function(){ return o.write(); });
         \\show("noneval", function(){ return o.noneval(); });
         \\eval("1");
-    , &output);
-    defer result.free(js.runtime);
-    try std.testing.expectEqualStrings(
-        "field: 1\ngetter: 2\nmethod: 3\nbrand: true\nwrite: 50\nnoneval: 55\n",
-        output.buffered(),
-    );
+    , "field: 1\ngetter: 2\nmethod: 3\nbrand: true\nwrite: 50\nnoneval: 55\n");
 }
 
 test "switch fallthrough after while-family tails reaches the next case" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [256]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\function run(body){
         \\  var r=[];
         \\  switch(0){
@@ -21279,26 +20729,14 @@ test "switch fallthrough after while-family tails reaches the next case" {
         \\function t(x){ var r=[]; switch(x){ case 0: while(true){ r.push("a"); break; } case 1: r.push("b"); break; default: r.push("d"); } return r.join(","); }
         \\print(t(0));
         \\switch(0){ case 0: if(false) break; print("y"); case 1: print("z"); }
-    , &output);
-    defer result.free(js.runtime);
-    try std.testing.expectEqualStrings(
-        "b\nb\nb\nb\nb\nb\nb\nb\nb\nb\nb\nb\na,b\ny\nz\n",
-        output.buffered(),
-    );
+    , "b\nb\nb\nb\nb\nb\nb\nb\nb\nb\nb\nb\na,b\ny\nz\n");
 }
 
 test "long numeric literals parse without a 128-byte cap" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [128]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
+    try helpers.expectPrints(
         \\print(111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111);
         \\print(0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111);
-    , &output);
-    defer result.free(js.runtime);
-    try std.testing.expectEqualStrings("1.1111111111111112e+128\n2.288265886710203e+155\n", output.buffered());
+    , "1.1111111111111112e+128\n2.288265886710203e+155\n");
 }
 
 test "small-function-inlining: sc_Pair constructor is eligible and arguments ctor is not" {

@@ -2825,12 +2825,9 @@ test "createFunctionBytecode: final declaration metadata lives only in ClosureVa
 
 test "createFunctionBytecode accounts large finalized payload in large space" {
     const large_threshold = @sizeOf(bytecode.FunctionBytecode) + 64;
-    const large_weight = 7;
     const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
         .gc_policy = .{
             .large_object_threshold = large_threshold,
-            .large_weight = large_weight,
-            .old_weight = 3,
             .major_debt_threshold = std.math.maxInt(usize),
         },
     });
@@ -2874,8 +2871,6 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     try std.testing.expectEqual(before_fb.large_allocated_bytes + heap_bytes, stats.large_allocated_bytes);
     try std.testing.expectEqual(before_fb.heap_live_bytes + heap_bytes, stats.heap_live_bytes);
     try std.testing.expectEqual(before_fb.large_object_bytes + heap_bytes, stats.large_object_bytes);
-    try std.testing.expect(stats.large_committed_bytes >= heap_bytes);
-    try std.testing.expectEqual(stats.large_committed_bytes, stats.heap_committed_bytes);
     try std.testing.expectEqual(before_fb.old_alloc_count, stats.old_alloc_count);
     // Heap object allocations no longer feed the weighted allocation_debt:
     // js_trigger_gc pacing rides on memory.allocated_bytes vs malloc_gc_threshold
@@ -2893,11 +2888,6 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     try std.testing.expectEqual(@as(usize, 0), after_free.large_alloc_count);
     try std.testing.expectEqual(@as(usize, 0), after_free.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), after_free.large_object_bytes);
-    // Large-space committed follows live_bytes to zero the moment the payload is
-    // freed (derived on demand); the freed bytes are returned to the backing
-    // allocator directly, so there is no separately-tracked decommit hysteresis.
-    try std.testing.expectEqual(@as(usize, 0), after_free.large_committed_bytes);
-    try std.testing.expectEqual(@as(usize, 0), after_free.decommitted_bytes);
 }
 
 fn populateFunctionDefForFinalizeFailure(

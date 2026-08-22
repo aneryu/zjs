@@ -68,6 +68,10 @@ helpers such as `freeObjectAssumeObject` and
 (backlog H9). Cookbook and embedding examples must not call those internal
 names.
 
+`JSRuntime` currently publishes 167 public declarations. Its count is pinned
+beside the `JSValue` count in the embedding surface test, so any addition or
+removal requires an explicit public-contract update.
+
 ## Runtime And Context
 
 `JSRuntime` owns allocator-backed engine state, atom tables, GC state, public

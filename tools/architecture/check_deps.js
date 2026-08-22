@@ -96,13 +96,14 @@ function violationReason(source, target) {
 
   if (source.startsWith('src/core/')) {
     const disallowed = [
+      'src/binding/',
       'src/builtins/',
       'src/cli/',
       'src/exec/',
       'src/parser.zig',
       'src/runtime/',
     ];
-    return targetStarts(target, disallowed) ? 'core must not depend on parser, builtins, exec, runtime, or CLI' : null;
+    return targetStarts(target, disallowed) ? 'core must not depend on binding, parser, builtins, exec, runtime, or CLI' : null;
   }
 
   if (source.startsWith('src/libs/')) {
@@ -218,6 +219,7 @@ const TEST_ROOTS = [
   'src/parser_tests.zig',
   'src/bytecode_tests.zig',
   'src/runner_tests.zig',
+  'src/leak_census_tests.zig',
   'src/embedding_tests.zig',
   'src/compiler_tests.zig',
   'src/runtime_tests.zig',

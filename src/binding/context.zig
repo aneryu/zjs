@@ -704,3 +704,19 @@ fn arrayObjectFromValue(value: JSValue) !?*Object {
     }
     return if (object.isArray()) object else null;
 }
+
+test "JSContext.toString performs ECMAScript ToString instead of tag assertion" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    var wrapper = JSContext.borrowCore(ctx);
+    const object = try wrapper.eval("({ toString() { return 'semantic-string'; } })", .{});
+    defer object.free(rt);
+    try std.testing.expect(object.asString() == null);
+
+    const converted = try wrapper.toString(object);
+    defer converted.free(rt);
+    try std.testing.expectEqualStrings("semantic-string", converted.asString().?.units().?.latin1);
+}

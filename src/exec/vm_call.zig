@@ -56,25 +56,7 @@ pub const CallDepthGuard = struct {
     }
 };
 
-pub const CallProfileGuard = if (false) struct {
-    rt: *core.JSRuntime,
-    previous: ?*core.profile.OpcodeProfile,
-
-    pub fn deinit(self: @This()) void {
-        if (self.rt.opcode_profile != null) {
-            _ = core.profile.activate(self.previous);
-        }
-    }
-
-    /// A proper-tail-call replacement enters the callee while the caller is
-    /// still current so every fallible setup edge remains catchable by that
-    /// caller. Once setup succeeds, only the callee guard survives; make its
-    /// eventual restore skip the retired caller's activation level.
-    pub fn adoptRetiredCaller(self: *@This(), retired: @This()) void {
-        std.debug.assert(self.rt == retired.rt);
-        self.previous = retired.previous;
-    }
-} else struct {
+pub const CallProfileGuard = struct {
     pub fn deinit(_: @This()) void {}
 
     pub fn adoptRetiredCaller(_: *@This(), _: @This()) void {}
@@ -303,19 +285,8 @@ noinline fn inlineCallDepthOverflow(ctx: *core.JSContext, global: *core.Object) 
     return error.StackOverflow;
 }
 
-pub fn enterCallProfile(rt: *core.JSRuntime) CallProfileGuard {
-    if (comptime true) {
-        return .{};
-    }
-    if (rt.opcode_profile == null) {
-        return .{ .rt = rt, .previous = null };
-    }
-    const previous = if (rt.opcode_profile) |opcode_profile|
-        core.profile.activate(opcode_profile)
-    else
-        null;
-    if (rt.opcode_profile) |profile| profile.recordCallFrame();
-    return .{ .rt = rt, .previous = previous };
+pub fn enterCallProfile(_: *core.JSRuntime) CallProfileGuard {
+    return .{};
 }
 
 pub inline fn initFrameLocals(

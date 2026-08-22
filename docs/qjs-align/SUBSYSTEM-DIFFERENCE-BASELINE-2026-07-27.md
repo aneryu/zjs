@@ -275,10 +275,8 @@ zjs 的 metadata 与 small-object slab header 叠合，并保存 slab class/GC f
 - 非移动、单线程。
 
 zjs 当前 HEAD 已把 zero-ref/cycle partition、sibling edge release 和 weak-husk
-次序继续向 qjs 收敛。`gc.Policy` 中虽然保留
-`enable_concurrent_mark/sweep/selective_evacuation` 字段，但默认均为 false，
-当前也没有可工作的 concurrent/generational collector。文档和产品材料不得把
-这些 policy 字段写成已实现能力。
+次序继续向 qjs 收敛。当前没有 concurrent/generational collector；文档和产品
+材料不得把它写成已实现能力。
 
 ### 6.3 zjs 的附加安全/恢复机制（S）
 

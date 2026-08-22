@@ -22,6 +22,46 @@ const profile = @import("profile.zig");
 const property = @import("property.zig");
 const context_mod = @import("context.zig");
 
+extern "c" fn pclose(stream: *std.c.FILE) c_int;
+
+const DeferredStdFileClose = struct {
+    runtime: *JSRuntime,
+    file: *std.c.FILE,
+    is_popen: bool = false,
+
+    fn run(ptr: *anyopaque) void {
+        const job: *DeferredStdFileClose = @ptrCast(@alignCast(ptr));
+        const rt = job.runtime;
+        _ = closeStdFileHandle(job.file, job.is_popen);
+        rt.memory.destroy(DeferredStdFileClose, job);
+    }
+};
+
+pub fn closeStdFileHandle(file: *std.c.FILE, is_popen: bool) c_int {
+    if (is_popen) {
+        const rc = pclose(file);
+        return if (rc == -1) -@as(c_int, @intCast(@intFromEnum(std.c.errno(-1)))) else rc;
+    }
+    const rc = std.c.fclose(file);
+    return if (rc == -1) -@as(c_int, @intCast(@intFromEnum(std.c.errno(-1)))) else rc;
+}
+
+pub fn enqueueDeferredStdFileClose(rt: *JSRuntime, file: *std.c.FILE, is_popen: bool) void {
+    const job = rt.createRuntime(DeferredStdFileClose) catch {
+        _ = closeStdFileHandle(file, is_popen);
+        return;
+    };
+    job.* = .{
+        .runtime = rt,
+        .file = file,
+        .is_popen = is_popen,
+    };
+    rt.enqueueDeferredNativeCleanup(DeferredStdFileClose.run, @ptrCast(job)) catch {
+        _ = closeStdFileHandle(file, is_popen);
+        rt.memory.destroy(DeferredStdFileClose, job);
+    };
+}
+
 pub const default_stack_size = 1024 * 1024;
 pub const default_gc_threshold = 256 * 1024;
 /// Native C-stack budget for the recursion guard, matching QuickJS
@@ -2353,6 +2393,17 @@ pub const JSRuntime = struct {
     }
 
     pub fn registerExternalHostFunction(self: *JSRuntime, record: host_function.ExternalRecord) !u32 {
+        // A finalizer-free record is a pure dispatch tuple: sharing its id is
+        // unobservable and keeps repeated Realm/host installation idempotent.
+        // Finalized records are ownership registrations, so each one keeps a
+        // distinct id and cleanup obligation even when the tuple is identical.
+        if (record.finalizer == null) {
+            for (self.external_host_functions, 0..) |existing, index| {
+                if (existing.finalizer == null and existing.ptr == record.ptr and existing.call == record.call) {
+                    return @intCast(index + 1);
+                }
+            }
+        }
         try appendRuntimeExternalHostFunction(&self.memory, &self.external_host_functions, &self.external_host_functions_capacity, record);
         return @intCast(self.external_host_functions.len);
     }
@@ -2437,8 +2488,7 @@ pub const JSRuntime = struct {
         defer self.gc_running = false;
 
         const start_ns = profile.nowNanos();
-        self.gc.beginMajorCycle(self.gc.activeMajorReason() orelse .manual, start_ns);
-        self.gc.setMajorPhase(.mark_incremental);
+        self.gc.beginMajorCycle(self.gc.activeMajorReason() orelse .manual);
         const freed = Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
             const mapped: gc.CollectionError = switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -2459,7 +2509,7 @@ pub const JSRuntime = struct {
             },
         };
         self.gc.recordSuccess(result);
-        self.gc.finishMajorCycle(result);
+        self.gc.finishMajorCycle();
         self.resetGCThreshold();
         return result;
     }
@@ -2495,7 +2545,7 @@ pub const JSRuntime = struct {
             gc.RequestReason.allocation_threshold
         else
             gc.RequestReason.manual;
-        self.gc.beginMajorCycle(reason, profile.nowNanos());
+        self.gc.beginMajorCycle(reason);
         return try self.tryRunObjectCycleRemovalWithValueRoots(null);
     }
 
@@ -2686,7 +2736,6 @@ pub const JSRuntime = struct {
         const rss_bytes = currentRssBytes();
         const cgroup_limit_bytes = cgroupLimitBytes();
         if (self.gc.processMemoryRequest(rss_bytes, cgroup_limit_bytes)) |request| {
-            if (request.urgency == .urgent) self.gc.decommitEmptyPagesNow();
             self.gc.requestGC(request.reason, request.urgency);
         }
     }
@@ -3726,10 +3775,8 @@ test "external hard memory pressure requests urgent major gc" {
     _ = try rt.pollGC(null, .callback_boundary);
     if (comptime memory.force_gc_on_allocation_enabled) {
         try std.testing.expect(rt.gcStats().major_gc_count >= 1);
-        try std.testing.expect(rt.gcStats().major_slice_count >= 1);
     } else {
         try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_gc_count);
-        try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_slice_count);
     }
     try std.testing.expect(!rt.gcPendingForTest());
 }

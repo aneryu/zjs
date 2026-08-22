@@ -3963,12 +3963,9 @@ pub fn arrayFromCall(
             item.free(ctx.runtime);
             item = mapped;
         }
-        try createArrayDataOrTypedArrayElement(ctx.runtime, out, key, item);
+        try createArrayFactoryDataPropertyOrThrow(ctx, output, global, out.value(), out, key, item, caller_function, caller_frame);
     }
-    if (!core.object.isTypedArrayObject(out)) {
-        const set_result = try setValueProperty(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(length)), caller_function, caller_frame);
-        set_result.free(ctx.runtime);
-    }
+    try setValuePropertyOrThrow(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(length)), caller_function, caller_frame);
     return out_value;
 }
 
@@ -4727,13 +4724,10 @@ pub fn arrayFromArrayLike(
             item.free(ctx.runtime);
             item = mapped;
         }
-        try createArrayDataOrTypedArrayElement(ctx.runtime, out, key, item);
+        try createArrayFactoryDataPropertyOrThrow(ctx, output, global, out.value(), out, key, item, caller_function, caller_frame);
     }
     if (index > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
-    if (!core.object.isTypedArrayObject(out)) {
-        const set_result = try setValueProperty(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(index)), caller_function, caller_frame);
-        set_result.free(ctx.runtime);
-    }
+    try setValuePropertyOrThrow(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(index)), caller_function, caller_frame);
     return out_value;
 }
 
@@ -4795,15 +4789,12 @@ pub fn arrayFromIteratorLike(
             item.free(ctx.runtime);
             item = mapped;
         }
-        createArrayDataOrTypedArrayElement(ctx.runtime, out, core.atom.atomFromUInt32(index), item) catch |err| {
+        createArrayFactoryDataPropertyOrThrow(ctx, output, global, out.value(), out, core.atom.atomFromUInt32(index), item, caller_function, caller_frame) catch |err| {
             try iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
     }
-    if (!core.object.isTypedArrayObject(out)) {
-        const set_result = try setValueProperty(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(index)), caller_function, caller_frame);
-        set_result.free(ctx.runtime);
-    }
+    try setValuePropertyOrThrow(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(index)), caller_function, caller_frame);
     return out_value;
 }
 
@@ -4841,12 +4832,9 @@ pub fn arrayOfCall(
 
     for (args, 0..) |arg, index| {
         const key = core.atom.atomFromUInt32(@intCast(index));
-        try createDataPropertyOrThrow(ctx, output, global, out.value(), out, key, arg, caller_function, caller_frame);
+        try createArrayFactoryDataPropertyOrThrow(ctx, output, global, out.value(), out, key, arg, caller_function, caller_frame);
     }
-    if (!core.object.isTypedArrayObject(out)) {
-        const set_result = try setValueProperty(ctx, output, global, out.value(), core.atom.ids.length, length_value, caller_function, caller_frame);
-        set_result.free(ctx.runtime);
-    }
+    try setValuePropertyOrThrow(ctx, output, global, out.value(), core.atom.ids.length, length_value, caller_function, caller_frame);
     return out_value;
 }
 
@@ -4908,6 +4896,33 @@ pub fn typedArrayOfStaticCall(
         try typedArraySetElementValue(ctx, output, global, out, index, arg);
     }
     return out_value;
+}
+
+fn createArrayFactoryDataPropertyOrThrow(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver_value: core.JSValue,
+    object: *core.Object,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    if (core.object.isTypedArrayObject(object)) {
+        const defined = (try core.typed_array.typedArrayDefineOwnProperty(
+            ctx.runtime,
+            object,
+            atom_id,
+            core.Descriptor.data(value, true, true, true),
+        )) orelse return error.TypeError;
+        if (!defined) {
+            _ = try throwTypeErrorMessage(ctx, global, "out-of-bound index in typed array");
+            unreachable;
+        }
+        return;
+    }
+    try createDataPropertyOrThrow(ctx, output, global, receiver_value, object, atom_id, value, caller_function, caller_frame);
 }
 
 pub fn createArrayDataOrTypedArrayElement(

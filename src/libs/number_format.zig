@@ -205,12 +205,6 @@ inline fn uint64AsFloat64(u: u64) f64 {
     return @bitCast(u);
 }
 
-fn strlen(p: [*]const u8) usize {
-    var len: usize = 0;
-    while (p[len] != 0) : (len += 1) {}
-    return len;
-}
-
 // ============================================================
 // Bump-pointer allocator (matches dtoa_malloc/dtoa_free)
 // ============================================================
@@ -1491,62 +1485,6 @@ pub fn formatDtoaChecked(buf: []u8, value: f64, n_digits: i32, flags: i32) ![]co
     const len = jsDtoaImpl(buf, value, 10, n_digits, flags, &tmp_mem);
     if (len >= buf.len) return error.NoSpaceLeft;
     return buf[0..len];
-}
-
-// ============================================================
-// Exported wrappers (C ABI)
-// ============================================================
-
-pub export fn js_dtoa_max_len(d: f64, radix: c_int, n_digits: c_int, flags: c_int) callconv(.c) c_int {
-    return jsDtoaMaxLenImpl(d, radix, n_digits, flags);
-}
-
-pub export fn js_dtoa(buf_ptr: [*]u8, d: f64, radix: c_int, n_digits: c_int, flags: c_int, tmp_mem: *JSDTOATempMem) callconv(.c) c_int {
-    const max_len: usize = @intCast(jsDtoaMaxLenImpl(d, radix, n_digits, flags));
-    const len = jsDtoaImpl(buf_ptr[0 .. max_len + 10], d, radix, n_digits, flags, tmp_mem);
-    return @intCast(len);
-}
-
-pub export fn js_atod(str_ptr: [*]const u8, pnext: [*c][*c]const u8, radix: c_int, flags: c_int, tmp_mem: *JSATODTempMem) callconv(.c) f64 {
-    const s = str_ptr[0..strlen(str_ptr)];
-    var pn: ?[*]const u8 = null;
-    const val = jsAtodImpl(s, &pn, radix, flags, tmp_mem);
-    if (@intFromPtr(pnext) != 0) {
-        pnext.* = if (pn) |p| p else str_ptr;
-    }
-    return val;
-}
-
-pub export fn mul_log2_radix(a: c_int, radix: c_int) callconv(.c) c_int {
-    return mulLog2Radix(a, radix);
-}
-
-pub export fn pow_ui(radix: c_int, n: c_int) callconv(.c) u64 {
-    return powUi(@intCast(radix), @intCast(n));
-}
-
-pub export fn pow_ui_inv(pr_inv: *u32, pshift: *c_int, radix: c_int, n: c_int) callconv(.c) void {
-    _ = powUiInv(pr_inv, pshift, @intCast(radix), @intCast(n));
-}
-
-pub export fn output_digits(buf: [*]u8, a: *const anyopaque, radix: c_int, n_digits: c_int, dot_pos: c_int) callconv(.c) c_int {
-    const mpb: *MpbMax = @ptrCast(@alignCast(@constCast(a)));
-    const max_out: usize = @intCast(n_digits + 2);
-    return @intCast(outputDigits(buf[0..max_out], mpb, radix, n_digits, dot_pos));
-}
-
-pub export fn round_to_d(pe: *c_int, a: *anyopaque, e_offset: c_int, rnd_mode: c_int) callconv(.c) u64 {
-    const mpb: *MpbMax = @ptrCast(@alignCast(a));
-    return roundToD(pe, mpb, e_offset, rnd_mode);
-}
-
-pub export fn udiv1norm_init(d: limb_t) callconv(.c) limb_t {
-    return udiv1normInit(d);
-}
-
-pub export fn mp_div1norm(tabr: [*]limb_t, taba: [*]const limb_t, n: limb_t, b: limb_t, r: limb_t, b_inv: limb_t, shift: c_int) callconv(.c) limb_t {
-    const len: usize = @intCast(n);
-    return mpDiv1normInternal(tabr[0..len], taba[0..len], b, r, b_inv, shift);
 }
 
 test "dtoa functionality" {

@@ -351,6 +351,10 @@ pub fn specializeCallSite(
     if (caller.byteCode().len > 2048) return;
     if (argc < callee.arg_count) return;
     if (hasTrailingAfterReturn(callee.byteCode())) return;
+    // Frame construction installs `current_function` from a bytecode-function
+    // object, discharging the raw bytecode-function union read below.
+    std.debug.assert(core.class.isBytecodeFunctionClass(caller_obj.class_id));
+    std.debug.assert(caller_obj.flags.class_payload_kind == .function);
     const base_fb = caller_obj.u.bytecode_function.function_bytecode orelse caller;
     // One clone expands every same-argc constructor site. A second clone of an
     // already-expanded spec is unsafe (while/goto images).

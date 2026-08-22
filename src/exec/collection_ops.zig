@@ -1962,8 +1962,8 @@ fn setStrongSize(object: *core.Object) usize {
     return count;
 }
 
-fn constructPlainSet(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
-    const set_proto = object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "Set") orelse return error.TypeError;
+fn constructPlainSet(ctx: *core.JSContext) !core.JSValue {
+    const set_proto = ctx.classPrototypeObject(core.class.ids.set) orelse return error.InvalidBuiltinRegistry;
     return constructWithPrototype(ctx.runtime, 2, set_proto);
 }
 
@@ -2041,8 +2041,8 @@ fn setLikeKeysIterator(
     return source;
 }
 
-fn setCloneReceiver(ctx: *core.JSContext, global: *core.Object, receiver: *core.Object) !core.JSValue {
-    const result_value = try constructPlainSet(ctx, global);
+fn setCloneReceiver(ctx: *core.JSContext, receiver: *core.Object) !core.JSValue {
+    const result_value = try constructPlainSet(ctx);
     errdefer result_value.free(ctx.runtime);
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
@@ -2096,7 +2096,7 @@ fn setDifference(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    const result_value = try constructPlainSet(ctx, global);
+    const result_value = try constructPlainSet(ctx);
     errdefer result_value.free(ctx.runtime);
     if (@as(i64, @intCast(setStrongSize(receiver))) > other_record.size) {
         var copy_index: usize = 0;
@@ -2144,7 +2144,7 @@ fn setIntersection(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    const result_value = try constructPlainSet(ctx, global);
+    const result_value = try constructPlainSet(ctx);
     errdefer result_value.free(ctx.runtime);
     if (@as(i64, @intCast(setStrongSize(receiver))) <= other_record.size) {
         var index: usize = 0;
@@ -2188,7 +2188,7 @@ fn setUnion(
 ) !core.JSValue {
     var iterator_value = try setLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
-    const result_value = try setCloneReceiver(ctx, global, receiver);
+    const result_value = try setCloneReceiver(ctx, receiver);
     errdefer result_value.free(ctx.runtime);
     var iterator_done = false;
     while (true) {
@@ -2217,7 +2217,7 @@ fn setSymmetricDifference(
 ) !core.JSValue {
     var iterator_value = try setLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
-    const result_value = try setCloneReceiver(ctx, global, receiver);
+    const result_value = try setCloneReceiver(ctx, receiver);
     errdefer result_value.free(ctx.runtime);
     var iterator_done = false;
     while (true) {
@@ -2341,7 +2341,7 @@ pub fn mapGroupByCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    const map_proto = object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "Map") orelse return error.TypeError;
+    const map_proto = ctx.classPrototypeObject(core.class.ids.map) orelse return error.InvalidBuiltinRegistry;
     return mapGroupByRecord(ctx, output, global, args, map_proto, caller_function, caller_frame);
 }
 

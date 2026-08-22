@@ -17,7 +17,6 @@ const shape = @import("shape.zig");
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
-pub const logical_page_size: usize = 16 * KB;
 
 pub const Mode = enum {
     balanced,
@@ -29,10 +28,6 @@ pub const Mode = enum {
 pub const Policy = struct {
     mode: Mode = .balanced,
 
-    old_heap_growth_factor: f64 = 1.6,
-    old_fragmentation_trigger: f64 = 0.45,
-    old_fragmentation_trigger_per_mille: usize = 450,
-
     large_object_threshold: usize = 8 * KB,
 
     callback_slice_budget_ns: u64 = 300_000,
@@ -40,8 +35,6 @@ pub const Policy = struct {
     allocation_slow_path_budget_ns: u64 = 2_000_000,
     native_cleanup_slice_jobs: usize = 8,
 
-    old_weight: usize = 4,
-    large_weight: usize = 8,
     external_weight: usize = 8,
     major_debt_threshold: usize = 64 * MB,
     external_soft_limit: ?usize = null,
@@ -50,10 +43,6 @@ pub const Policy = struct {
     rss_hard_limit: ?usize = null,
     cgroup_soft_ratio_per_mille: usize = 0,
     cgroup_hard_ratio_per_mille: usize = 0,
-
-    enable_concurrent_mark: bool = false,
-    enable_concurrent_sweep: bool = false,
-    enable_selective_evacuation: bool = false,
 
     /// Whether any policy field actually consumes the OS-level memory
     /// snapshot, i.e. whether `Registry.processMemoryRequest` can return
@@ -79,14 +68,12 @@ pub const Policy = struct {
         switch (mode) {
             .balanced => {},
             .throughput => {
-                policy.old_heap_growth_factor = 1.8;
                 policy.callback_slice_budget_ns = 200_000;
                 policy.idle_slice_budget_ns = 2_000_000;
                 policy.allocation_slow_path_budget_ns = 2_000_000;
                 policy.native_cleanup_slice_jobs = 16;
             },
             .low_rss => {
-                policy.old_heap_growth_factor = 1.3;
                 policy.callback_slice_budget_ns = 300_000;
                 policy.idle_slice_budget_ns = 5_000_000;
                 policy.external_weight = 12;
@@ -160,9 +147,6 @@ pub const Phase = enum {
 pub const MajorPhase = enum(u8) {
     idle,
     mark_roots,
-    mark_incremental,
-    weak_fixpoint,
-    finalize_mark,
     sweep,
 };
 
@@ -211,24 +195,10 @@ pub const PinEntry = struct {
 
 pub const SpaceAccount = struct {
     live_bytes: usize = 0,
-    committed_bytes: usize = 0,
-    free_bytes: usize = 0,
-    decommitted_bytes: usize = 0,
-    allocating_page_count: usize = 0,
-    full_page_count: usize = 0,
-    empty_page_count: usize = 0,
-    decommitted_page_count: usize = 0,
-    needs_sweep_page_count: usize = 0,
-    evacuation_candidate_page_count: usize = 0,
-    sweep_cursor_page: usize = 0,
 
-    // qjs-aligned hot path: mirror rt->malloc_size / rt->malloc_count by tracking
-    // only live_bytes (quickjs.c:2160 js_def_malloc bumps a single scalar and
-    // delegates all page management to the system allocator). The committed/free
-    // page geometry that used to be maintained on every alloc/free is now derived
-    // from live_bytes on demand in refreshPageState (statsSnapshot / Debug verify
-    // only). SmallObjectSlab returns an arena as soon as its last block is freed,
-    // so there is no retained-empty-page hysteresis to carry on the hot path.
+    // qjs-aligned hot path: mirror rt->malloc_size / rt->malloc_count by
+    // tracking only live_bytes (quickjs.c:2160 js_def_malloc bumps a single
+    // scalar and delegates all page management to the system allocator).
     fn recordAlloc(self: *SpaceAccount, bytes: usize) void {
         // Plain unsigned add, exactly qjs `s->malloc_size += ...`
         // (quickjs.c:2166). The former checked-add-with-saturation compiled to
@@ -252,80 +222,12 @@ pub const SpaceAccount = struct {
         self.live_bytes -%= bytes;
     }
 
-    fn fragmentationPerMille(self: SpaceAccount) usize {
-        return ratioPerMille(self.free_bytes, self.committed_bytes);
-    }
-
-    // Derive the page-geometry diagnostics from live_bytes on demand (qjs has no
-    // page geometry; this mirrors JS_ComputeMemoryUsage recomputing usage from the
-    // object graph). committed = live rounded up to logical pages, free = the
-    // intra-page slack; there is no retained-empty-page or virtual-decommit
-    // hysteresis because the slab returns empty arenas eagerly, so committed
-    // tracks live exactly (rounded to a page).
-    fn refreshPageState(self: *SpaceAccount, fragmentation_trigger_per_mille: usize) void {
-        const committed = alignForwardSaturating(self.live_bytes, logical_page_size);
-        self.committed_bytes = committed;
-        self.free_bytes = committed -| self.live_bytes;
-        self.decommitted_bytes = 0;
-        const committed_pages = committed / logical_page_size;
-        const live_pages = @min(committed_pages, alignForwardSaturating(self.live_bytes, logical_page_size) / logical_page_size);
-        self.empty_page_count = @min(committed_pages, self.free_bytes / logical_page_size);
-        self.decommitted_page_count = 0;
-        self.full_page_count = @min(live_pages, self.live_bytes / logical_page_size);
-        self.allocating_page_count = if (live_pages > self.full_page_count) 1 else 0;
-        const fragmented_pages = committed_pages -| self.full_page_count -| self.empty_page_count -| self.allocating_page_count;
-        self.evacuation_candidate_page_count = if (fragmentation_trigger_per_mille != 0 and self.fragmentationPerMille() >= fragmentation_trigger_per_mille)
-            fragmented_pages
-        else
-            0;
-        if (self.needs_sweep_page_count > committed_pages) self.needs_sweep_page_count = committed_pages;
-        if (self.sweep_cursor_page > committed_pages) self.sweep_cursor_page = committed_pages;
-    }
-
-    fn startSweep(self: *SpaceAccount, fragmentation_trigger_per_mille: usize) void {
-        self.refreshPageState(fragmentation_trigger_per_mille);
-        self.needs_sweep_page_count = self.committedPageCount() -| self.empty_page_count -| self.decommitted_page_count;
-        self.sweep_cursor_page = 0;
-    }
-
-    fn sweepSomePages(self: *SpaceAccount, max_pages: usize, fragmentation_trigger_per_mille: usize) usize {
-        if (max_pages == 0) return 0;
-        self.refreshPageState(fragmentation_trigger_per_mille);
-        if (self.needs_sweep_page_count == 0) return 0;
-        const swept = @min(max_pages, self.needs_sweep_page_count);
-        self.needs_sweep_page_count -= swept;
-        self.sweep_cursor_page +|= swept;
-        if (self.needs_sweep_page_count == 0) self.sweep_cursor_page = 0;
-        self.refreshPageState(fragmentation_trigger_per_mille);
-        return swept;
-    }
-
-    fn sweepAllPages(self: *SpaceAccount, fragmentation_trigger_per_mille: usize) usize {
-        return self.sweepSomePages(std.math.maxInt(usize), fragmentation_trigger_per_mille);
-    }
-
-    fn cancelSweep(self: *SpaceAccount, fragmentation_trigger_per_mille: usize) void {
-        self.needs_sweep_page_count = 0;
-        self.sweep_cursor_page = 0;
-        self.refreshPageState(fragmentation_trigger_per_mille);
-    }
-
-    fn committedPageCount(self: SpaceAccount) usize {
-        return self.committed_bytes / logical_page_size;
-    }
 };
 
 fn ratioPerMille(numerator: usize, denominator: usize) usize {
     if (denominator == 0) return 0;
     const scaled = std.math.mul(usize, numerator, 1000) catch std.math.maxInt(usize);
     return @min(@as(usize, 1000), scaled / denominator);
-}
-
-fn alignForwardSaturating(value: usize, alignment: usize) usize {
-    if (value == 0) return 0;
-    const rem = value % alignment;
-    if (rem == 0) return value;
-    return std.math.add(usize, value, alignment - rem) catch std.math.maxInt(usize);
 }
 
 /// Byte 3 of the metadata prefix: the GC kind and the GC lifecycle bits share
@@ -595,34 +497,6 @@ pub const CollectionResult = struct {
     duration_ns: u64 = 0,
 };
 
-const pause_sample_capacity: usize = 64;
-
-const PauseSamples = struct {
-    values: [pause_sample_capacity]u64 = [_]u64{0} ** pause_sample_capacity,
-    len: usize = 0,
-    next: usize = 0,
-
-    fn record(self: *PauseSamples, duration_ns: u64) void {
-        self.values[self.next] = duration_ns;
-        self.next = (self.next + 1) % pause_sample_capacity;
-        if (self.len < pause_sample_capacity) self.len += 1;
-    }
-
-    fn percentile(self: PauseSamples, per_mille: usize) u64 {
-        if (self.len == 0) return 0;
-        var scratch = self.values;
-        const samples = scratch[0..self.len];
-        std.sort.heap(u64, samples, {}, u64LessThan);
-        const clamped = @min(per_mille, @as(usize, 1000));
-        const rank = @max(@as(usize, 1), (clamped * self.len + 999) / 1000);
-        return samples[@min(rank - 1, self.len - 1)];
-    }
-};
-
-fn u64LessThan(_: void, lhs: u64, rhs: u64) bool {
-    return lhs < rhs;
-}
-
 pub const InvariantError = error{
     CorruptGcList,
     NegativeRefCount,
@@ -634,8 +508,6 @@ pub const InvariantError = error{
     LargeObjectBytesMismatch,
     OldSpaceLiveBytesMismatch,
     LargeSpaceLiveBytesMismatch,
-    OldSpacePageStateMismatch,
-    LargeSpacePageStateMismatch,
     DuplicateExternalMemoryToken,
     EmptyExternalMemoryToken,
     ExternalTokenBytesMismatch,
@@ -657,16 +529,6 @@ pub const GeStats = struct {
     failed_collections: usize = 0,
     last_failure: FailureKind = .none,
     last_collection_time_ns: u64 = 0,
-    major_pause_samples: PauseSamples = .{},
-    incremental_slice_samples: PauseSamples = .{},
-    last_incremental_slice_ns: u64 = 0,
-    major_slice_count: usize = 0,
-    concurrent_mark_time_ns: u64 = 0,
-    sweep_time_ns: u64 = 0,
-    swept_page_count: usize = 0,
-    last_swept_page_count: usize = 0,
-    current_mark_stack_depth: usize = 0,
-    mark_stack_peak: usize = 0,
 
     collections: usize = 0,
     freed_objects: usize = 0,
@@ -688,26 +550,6 @@ pub const Stats = struct {
     heap_live_bytes: usize = 0,
     old_live_bytes: usize = 0,
     large_object_bytes: usize = 0,
-    heap_committed_bytes: usize = 0,
-    old_committed_bytes: usize = 0,
-    old_empty_page_bytes: usize = 0,
-    large_committed_bytes: usize = 0,
-    large_empty_page_bytes: usize = 0,
-    empty_page_bytes: usize = 0,
-    decommitted_bytes: usize = 0,
-    old_fragmentation_ratio: usize = 0,
-    old_page_count: usize = 0,
-    old_allocating_page_count: usize = 0,
-    old_full_page_count: usize = 0,
-    old_empty_page_count: usize = 0,
-    old_decommitted_page_count: usize = 0,
-    old_needs_sweep_page_count: usize = 0,
-    old_sweep_cursor_page: usize = 0,
-    old_evacuation_candidate_page_count: usize = 0,
-    large_page_count: usize = 0,
-    large_empty_page_count: usize = 0,
-    large_decommitted_page_count: usize = 0,
-    large_needs_sweep_page_count: usize = 0,
     rss_bytes: usize = 0,
     cgroup_limit_bytes: usize = 0,
 
@@ -729,19 +571,6 @@ pub const Stats = struct {
     major_gc_count: usize = 0,
     major_gc_time_ns: u64 = 0,
     major_phase: MajorPhase = .idle,
-    major_slice_count: usize = 0,
-    last_incremental_slice_ns: u64 = 0,
-    major_pause_ns_p50: u64 = 0,
-    major_pause_ns_p95: u64 = 0,
-    major_pause_ns_p99: u64 = 0,
-    incremental_slice_ns_p50: u64 = 0,
-    incremental_slice_ns_p95: u64 = 0,
-    incremental_slice_ns_p99: u64 = 0,
-    concurrent_mark_time_ns: u64 = 0,
-    sweep_time_ns: u64 = 0,
-    swept_page_count: usize = 0,
-    last_swept_page_count: usize = 0,
-    mark_stack_peak: usize = 0,
     failed_collections: usize = 0,
     last_failure: FailureKind = .none,
     freed_objects: usize = 0,
@@ -803,8 +632,6 @@ pub const Registry = struct {
 
     major_phase: MajorPhase = .idle,
     major_reason: ?RequestReason = null,
-    major_epoch: u64 = 0,
-    major_started_ns: u64 = 0,
     major_request: Request = .{},
     old_space: SpaceAccount = .{},
     large_space: SpaceAccount = .{},
@@ -1073,15 +900,6 @@ pub const Registry = struct {
         return null;
     }
 
-    pub fn decommitEmptyPagesNow(self: *Registry) void {
-        // The SmallObjectSlab returns an arena to the backing allocator the moment
-        // it empties (memory.zig free()), so there are no retained empty pages for
-        // the GC layer to hand back here. Page geometry is derived from live_bytes
-        // on demand, so all this does now is refresh the diagnostics for an
-        // urgent-pressure caller (mirrors qjs delegating reclaim to system malloc).
-        self.refreshSpacePageState();
-    }
-
     pub fn requestGC(self: *Registry, reason: RequestReason, urgency: RequestUrgency) void {
         self.stats.gc_request_count +|= 1;
         self.stats.last_request_reason = reason;
@@ -1156,18 +974,13 @@ pub const Registry = struct {
         };
     }
 
-    pub fn beginMajorCycle(self: *Registry, reason: RequestReason, start_ns: u64) void {
+    pub fn beginMajorCycle(self: *Registry, reason: RequestReason) void {
         if (self.major_phase != .idle) {
             if (self.major_reason == null) self.major_reason = reason;
             return;
         }
         self.major_phase = .mark_roots;
         self.major_reason = reason;
-        self.major_epoch +%= 1;
-        self.major_started_ns = start_ns;
-        self.stats.current_mark_stack_depth = 0;
-        self.old_space.startSweep(self.fragmentationTriggerPerMille());
-        self.large_space.startSweep(self.fragmentationTriggerPerMille());
     }
 
     pub fn setMajorPhase(self: *Registry, phase: MajorPhase) void {
@@ -1182,47 +995,11 @@ pub const Registry = struct {
     pub fn abortMajorCycle(self: *Registry) void {
         self.major_phase = .idle;
         self.major_reason = null;
-        self.major_started_ns = 0;
-        self.stats.current_mark_stack_depth = 0;
-        self.old_space.cancelSweep(self.fragmentationTriggerPerMille());
-        self.large_space.cancelSweep(self.fragmentationTriggerPerMille());
     }
 
-    pub fn finishMajorCycle(self: *Registry, result: CollectionResult) void {
-        self.recordIncrementalSlice(result.duration_ns);
-        const swept_pages = self.old_space.sweepAllPages(self.fragmentationTriggerPerMille()) +| self.large_space.sweepAllPages(self.fragmentationTriggerPerMille());
-        self.stats.last_swept_page_count = swept_pages;
-        self.stats.swept_page_count +|= swept_pages;
-        self.stats.sweep_time_ns +|= result.duration_ns;
+    pub fn finishMajorCycle(self: *Registry) void {
         self.major_phase = .idle;
         self.major_reason = null;
-        self.major_started_ns = 0;
-        self.stats.current_mark_stack_depth = 0;
-    }
-
-    pub fn recordIncrementalSlice(self: *Registry, duration_ns: u64) void {
-        self.stats.last_incremental_slice_ns = duration_ns;
-        self.stats.major_slice_count +|= 1;
-        self.stats.incremental_slice_samples.record(duration_ns);
-    }
-
-    pub fn recordMarkStackDepth(self: *Registry, depth: usize) void {
-        self.stats.current_mark_stack_depth = depth;
-        self.stats.mark_stack_peak = @max(self.stats.mark_stack_peak, depth);
-    }
-
-    pub fn clearMarkStackDepth(self: *Registry) void {
-        self.stats.current_mark_stack_depth = 0;
-    }
-
-    fn refreshSpacePageState(self: *Registry) void {
-        const trigger = self.fragmentationTriggerPerMille();
-        self.old_space.refreshPageState(trigger);
-        self.large_space.refreshPageState(trigger);
-    }
-
-    fn fragmentationTriggerPerMille(self: Registry) usize {
-        return self.policy.old_fragmentation_trigger_per_mille;
     }
 
     pub fn resetAllocationDebt(self: *Registry) void {
@@ -1230,13 +1007,10 @@ pub const Registry = struct {
     }
 
     pub fn statsSnapshot(self: *const Registry, rt: anytype) Stats {
-        var snapshot = self.*;
-        snapshot.refreshSpacePageState();
-        // Diagnostics that used to be maintained per allocation are recomputed
-        // here, like qjs JS_ComputeMemoryUsage. The space accounts are the byte
-        // source of truth. Counts are split by walking the already-maintained GC
-        // object list; this cold snapshot work removes four scalar updates from
-        // the large-object allocation path and two from every ordinary one.
+        const snapshot = self.*;
+        // The space accounts are the byte source of truth. Counts are split by
+        // walking the already-maintained GC object list; this cold snapshot work
+        // keeps scalar count updates off the allocation paths.
         const old_live = snapshot.old_space.live_bytes;
         const large_live = snapshot.large_space.live_bytes;
         const derived_heap_live = old_live +| large_live;
@@ -1259,26 +1033,6 @@ pub const Registry = struct {
             .heap_live_bytes = derived_heap_live,
             .old_live_bytes = old_live,
             .large_object_bytes = large_live,
-            .heap_committed_bytes = snapshot.old_space.committed_bytes +| snapshot.large_space.committed_bytes,
-            .old_committed_bytes = snapshot.old_space.committed_bytes,
-            .old_empty_page_bytes = snapshot.old_space.free_bytes,
-            .large_committed_bytes = snapshot.large_space.committed_bytes,
-            .large_empty_page_bytes = snapshot.large_space.free_bytes,
-            .empty_page_bytes = snapshot.old_space.free_bytes +| snapshot.large_space.free_bytes,
-            .decommitted_bytes = snapshot.old_space.decommitted_bytes +| snapshot.large_space.decommitted_bytes,
-            .old_fragmentation_ratio = snapshot.old_space.fragmentationPerMille(),
-            .old_page_count = snapshot.old_space.committedPageCount(),
-            .old_allocating_page_count = snapshot.old_space.allocating_page_count,
-            .old_full_page_count = snapshot.old_space.full_page_count,
-            .old_empty_page_count = snapshot.old_space.empty_page_count,
-            .old_decommitted_page_count = snapshot.old_space.decommitted_page_count,
-            .old_needs_sweep_page_count = snapshot.old_space.needs_sweep_page_count,
-            .old_sweep_cursor_page = snapshot.old_space.sweep_cursor_page,
-            .old_evacuation_candidate_page_count = snapshot.old_space.evacuation_candidate_page_count,
-            .large_page_count = snapshot.large_space.committedPageCount(),
-            .large_empty_page_count = snapshot.large_space.empty_page_count,
-            .large_decommitted_page_count = snapshot.large_space.decommitted_page_count,
-            .large_needs_sweep_page_count = snapshot.large_space.needs_sweep_page_count,
             .old_allocated_bytes = old_live,
             .old_alloc_count = derived_old_count,
             .large_allocated_bytes = large_live,
@@ -1295,19 +1049,6 @@ pub const Registry = struct {
             .major_gc_count = snapshot.stats.cycle_gc_count,
             .major_gc_time_ns = snapshot.stats.cycle_gc_time_ns,
             .major_phase = snapshot.major_phase,
-            .major_slice_count = snapshot.stats.major_slice_count,
-            .last_incremental_slice_ns = snapshot.stats.last_incremental_slice_ns,
-            .major_pause_ns_p50 = snapshot.stats.major_pause_samples.percentile(500),
-            .major_pause_ns_p95 = snapshot.stats.major_pause_samples.percentile(950),
-            .major_pause_ns_p99 = snapshot.stats.major_pause_samples.percentile(990),
-            .incremental_slice_ns_p50 = snapshot.stats.incremental_slice_samples.percentile(500),
-            .incremental_slice_ns_p95 = snapshot.stats.incremental_slice_samples.percentile(950),
-            .incremental_slice_ns_p99 = snapshot.stats.incremental_slice_samples.percentile(990),
-            .concurrent_mark_time_ns = snapshot.stats.concurrent_mark_time_ns,
-            .sweep_time_ns = snapshot.stats.sweep_time_ns,
-            .swept_page_count = snapshot.stats.swept_page_count,
-            .last_swept_page_count = snapshot.stats.last_swept_page_count,
-            .mark_stack_peak = snapshot.stats.mark_stack_peak,
             .failed_collections = snapshot.stats.failed_collections,
             .last_failure = snapshot.stats.last_failure,
             .freed_objects = snapshot.stats.freed_objects,
@@ -1592,7 +1333,8 @@ pub const Registry = struct {
         h.retain();
     }
 
-    pub fn releaseObject(self: *Registry, h: *GCObjectHeader) bool {
+    pub fn releaseObjectForTest(self: *Registry, h: *GCObjectHeader) bool {
+        if (!builtin.is_test) @compileError("test-only helper");
         std.debug.assert(h.meta().rc > 0);
         h.meta().rc -= 1;
 
@@ -1764,7 +1506,6 @@ pub const Registry = struct {
         self.stats.last_collection_time_ns = result.duration_ns;
         self.stats.cycle_gc_count +|= 1;
         self.stats.cycle_gc_time_ns +|= result.duration_ns;
-        self.stats.major_pause_samples.record(result.duration_ns);
         self.stats.freed_objects +|= result.freed_objects;
         self.stats.cycles_collected +|= result.freed_objects;
     }
@@ -1851,33 +1592,12 @@ pub const Registry = struct {
         if (accounted_external_bytes != self.stats.external_bytes) return error.ExternalTokenBytesMismatch;
         if (old_live_bytes != self.old_space.live_bytes) return error.OldSpaceLiveBytesMismatch;
         if (large_object_bytes != self.large_space.live_bytes) return error.LargeSpaceLiveBytesMismatch;
-        // committed_bytes / free_bytes are derived from live_bytes on demand
-        // (refreshPageState), so live + free == committed holds by construction —
-        // there is no independently-maintained committed total left to cross-check
-        // here. spacePageStateMatches still verifies the derivation is idempotent.
-        if (!self.spacePageStateMatches(self.old_space)) return error.OldSpacePageStateMismatch;
-        if (!self.spacePageStateMatches(self.large_space)) return error.LargeSpacePageStateMismatch;
     }
 
     pub fn verifyNoExternalTokenLeaks(self: Registry) InvariantError!void {
         if (self.external_tokens.len != 0) return error.LeakedExternalMemoryToken;
         if (self.stats.external_bytes != 0) return error.ExternalTokenBytesMismatch;
         if (self.stats.external_untracked_bytes != 0) return error.ExternalTokenBytesMismatch;
-    }
-
-    fn spacePageStateMatches(self: Registry, space: SpaceAccount) bool {
-        const trigger = self.fragmentationTriggerPerMille();
-        var current = space;
-        current.refreshPageState(trigger);
-        var expected = current;
-        expected.refreshPageState(trigger);
-        return expected.allocating_page_count == current.allocating_page_count and
-            expected.full_page_count == current.full_page_count and
-            expected.empty_page_count == current.empty_page_count and
-            expected.decommitted_page_count == current.decommitted_page_count and
-            expected.needs_sweep_page_count == current.needs_sweep_page_count and
-            expected.sweep_cursor_page == current.sweep_cursor_page and
-            expected.evacuation_candidate_page_count == current.evacuation_candidate_page_count;
     }
 
     /// Diagnostic/test-only: derived by walking, exactly like `liveCountKind`.
@@ -1934,13 +1654,30 @@ pub inline fn release(rt: anytype, header: anytype) void {
     if (header.meta().rc == 0) destroyZeroRef(rt, header);
 }
 
+const ZeroRefKindSet = enum {
+    finalizing,
+    deinit,
+    remove_cycles,
+    enqueue,
+};
+
+/// Central oracle for the deliberately unequal zero-ref kind sets. The
+/// comptime selector preserves each call site's exact checks after inlining.
+inline fn zeroRefKindMatches(kind: GcKind, comptime set: ZeroRefKindSet) bool {
+    return switch (set) {
+        .finalizing, .remove_cycles => kind == .object or kind == .var_ref or kind == .function_bytecode or kind == .realm_context or kind == .module,
+        .deinit => kind == .object or kind == .var_ref or kind == .function_bytecode or kind == .shape or kind == .realm_context or kind == .module,
+        .enqueue => kind == .object or kind == .function_bytecode or kind == .realm_context or kind == .module,
+    };
+}
+
 /// Slow path after the caller has already decremented the common RC word to 0.
 /// JSValue.free uses this after its QuickJS-style payload-4 fast path; direct
 /// GC owners also arrive here through `release` above.
 pub noinline fn destroyZeroRef(rt: anytype, header: *Header) align(32) void {
     std.debug.assert(header.meta().rc == 0);
-    if (header.meta().flags.finalizing and (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module)) return;
-    if (rt.gc.phase == .deinit and (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .shape or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module)) return;
+    if (header.meta().flags.finalizing and zeroRefKindMatches(header.meta().flags.kind, .finalizing)) return;
+    if (rt.gc.phase == .deinit and zeroRefKindMatches(header.meta().flags.kind, .deinit)) return;
     // During cycle removal, a child reaching rc 0 must NOT be freed here: the
     // dedicated batch loop in `destroyRuntimeCyclesWithValueRoots` frees every
     // marked-garbage object exactly once. Freeing it here (a cascade) would
@@ -1959,7 +1696,7 @@ pub noinline fn destroyZeroRef(rt: anytype, header: *Header) align(32) void {
     // destroyFromHeader shape-skip);
     // a live/shared shape's eager release here can never reach rc 0 during a cycle
     // round, so shape needs no gate.
-    if (rt.gc.phase == .remove_cycles and (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module)) return;
+    if (rt.gc.phase == .remove_cycles and zeroRefKindMatches(header.meta().flags.kind, .remove_cycles)) return;
 
     // qjs free_var_ref (quickjs.c:6164-6183) tears a dead cell down fully
     // synchronously: --ref_count -> JS_FreeValueRT(value) -> remove_gc_object
@@ -1982,7 +1719,7 @@ pub noinline fn destroyZeroRef(rt: anytype, header: *Header) align(32) void {
     // own direct release path and can only add object work while a queued node
     // is being destroyed. This removes unbounded Object/FB destructor
     // recursion without adding a fallible allocation to the zero-ref path.
-    if (header.meta().flags.kind == .object or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module) {
+    if (zeroRefKindMatches(header.meta().flags.kind, .enqueue)) {
         rt.gc.enqueueZeroRef(rt, header);
         return;
     }

@@ -3542,6 +3542,10 @@ pub fn op_put_array_el_ta(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
         return @call(.always_tail, propertyTailHandler(vm, .put_array_el_rest), .{ pc, sp, var_buf, vm });
     const index: u32 = @bitCast(key_int);
     const rt = vm.ctx.runtime;
+    // The dispatch point admits only numeric TypedArray classes; that class
+    // registration contract discharges the raw payload-union read below.
+    std.debug.assert(core.class.isNumericTypedArrayClass(object.class_id));
+    std.debug.assert(object.flags.class_payload_kind == .typed_array);
     if (object.u.payload) |raw| {
         const payload: *const core.object.TypedArrayPayload = @ptrCast(@alignCast(raw));
         const backing = payload.backing_payload orelse {
@@ -4082,6 +4086,8 @@ pub fn op_get_array_el_ta(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
     // slot per kind and blow this frame to 0x100.
     var result = JSValue.undefinedValue();
     // class_id already proved numeric TA: skip the payload-kind reload.
+    std.debug.assert(core.class.isNumericTypedArrayClass(object.class_id));
+    std.debug.assert(object.flags.class_payload_kind == .typed_array);
     if (object.u.payload) |raw| {
         const payload: *const core.object.TypedArrayPayload = @ptrCast(@alignCast(raw));
         if (index < payload.live_length) {

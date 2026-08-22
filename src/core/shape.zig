@@ -579,6 +579,80 @@ pub const Registry = struct {
         self.atoms.free(removed_atom);
     }
 
+    /// Remove deleted shape/property slots while preserving the relative order
+    /// of every live entry. Mirrors qjs `compact_properties` (quickjs.c:5400):
+    /// the caller prepares an unshared, unhashed shape first, then this rebuilds
+    /// the inline descriptor/hash layout and the object's parallel value array.
+    pub fn compactProperties(self: *Registry, object: *Object) !void {
+        const old = object.shape_ref;
+        std.debug.assert(old.header.meta().rc == 1);
+        std.debug.assert(!old.is_hashed);
+        std.debug.assert(old.deleted_prop_count != 0);
+
+        const live_count = old.prop_count - old.deleted_prop_count;
+        // Object value-buffer frees derive their exact allocation length from
+        // shape.prop_size. Keep zjs's power-of-two buffer-capacity invariant
+        // while reclaiming every logical tombstone from prop_count; otherwise a
+        // 77-slot compact followed by the ordinary 128-slot value grow would let
+        // the shape's doubling path report 154 slots for a 128-slot allocation.
+        const new_prop_size: u32 = @intCast(propertyCapacityForNeeded(@max(initial_prop_size, live_count)));
+        std.debug.assert(new_prop_size <= old.prop_size);
+
+        var new_bucket_count = old.bucketCount();
+        while (new_bucket_count / 2 >= new_prop_size) : (new_bucket_count /= 2) {}
+        const new_fam_bytes = famRegionBytes(new_prop_size, new_bucket_count);
+
+        // Keep both old arrays authoritative until every fallible allocation has
+        // succeeded. Unlike qjs's best-effort realloc, zjs must know the exact
+        // value-buffer capacity from shape.prop_size for later free accounting.
+        const new_shape = try self.memory.createWithFam(Shape, new_fam_bytes);
+        errdefer self.memory.destroyWithFam(Shape, new_shape, new_fam_bytes);
+        const Entry = @typeInfo(@TypeOf(object.prop_values)).pointer.child;
+        const new_values = try self.memory.alloc(Entry, new_prop_size);
+        errdefer self.memory.free(Entry, new_values);
+
+        new_shape.* = .{
+            .header = .{},
+            .is_hashed = false,
+            .hash = old.hash,
+            .prop_hash_mask = @intCast(new_bucket_count - 1),
+            .prop_size = new_prop_size,
+            .prop_count = live_count,
+            .deleted_prop_count = 0,
+            .registry_hash_next = null,
+            .proto = old.proto,
+        };
+        const new_props = new_shape.props();
+        @memset(new_props, .{});
+        @memset(new_shape.hashBuckets(), no_property_index);
+
+        var destination: usize = 0;
+        for (old.props()[0..old.prop_count], 0..) |old_prop, source| {
+            if (old_prop.atom_id == atom.null_atom) continue;
+            new_props[destination] = .{
+                .hash_next = no_property_index,
+                .flags = old_prop.flags,
+                .atom_id = old_prop.atom_id,
+            };
+            new_values[destination] = object.prop_values[source];
+            self.linkPropertyHash(new_shape, destination);
+            destination += 1;
+        }
+        std.debug.assert(destination == live_count);
+
+        // No fallible operations remain: proto/atom/value ownership moves to the
+        // compact arrays, then the old raw storage is discarded without cleanup.
+        const old_fam_bytes = old.famByteSize();
+        const old_prop_size = old.prop_size;
+        const old_values = object.prop_values[0..old_prop_size];
+        self.gc_registry.unlinkObjectWithBytes(&old.header, @sizeOf(Shape) + old_fam_bytes);
+        self.gc_registry.addInitializedShape(&new_shape.header, @sizeOf(Shape) + new_fam_bytes);
+        object.shape_ref = new_shape;
+        object.prop_values = new_values.ptr;
+        self.memory.destroyWithFam(Shape, old, old_fam_bytes);
+        self.memory.free(Entry, old_values);
+    }
+
     pub fn updatePropertyFlags(self: *Registry, shape: *Shape, index: usize, flags: u6) void {
         _ = self;
         std.debug.assert(index < shape.prop_count);

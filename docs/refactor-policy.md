@@ -50,6 +50,43 @@ performance tax. The rules below are the policy.
    command. Amended 2026-08-19 by owner ruling: the instrument moved from the
    15-item zoo to bench-v8 when bench-v8 became the published metric. Amended
    2026-08-18: pad 0 only; previously ≥3 layout pads.)
+
+> **Owner ruling 2026-08-22 — tiered gates.** The 2026-08-21/22
+> implementation-quality campaign measured ten bench-v8 A/Bs and intercepted
+> no real regression; both pad lineages that the old trigger requested ruled
+> LAYOUT. The expensive gates were measuring effects below the instrument's
+> resolution, while the cheap gates caught every real defect. Rule 2 therefore
+> routes work by measured risk:
+>
+> 1. **Tier 0 — comments, Debug-only code, and documentation.** Require fast
+>    suites plus `.text` identity: same-lineage, two-sided builds and a
+>    section-only comparison. No A/B. An identity failure is a discovery, not
+>    a formality: stop and attribute it.
+> 2. **Tier 1 — cold-file changes outside rule 1's hot list.** Require unit
+>    suites, leak census, borrowed-atoms, the production gate, and a QuickJS
+>    differential whenever behavior is spec-facing. No A/B. Require test262
+>    for spec-surface changes, but it may run at the batch window instead of
+>    per item.
+> 3. **Tier 2 — changes involving rule 1's hot list.** Keep the per-item
+>    bench-v8 A/B. Pass when the composite ratio is at least `0.995` and every
+>    suite remains inside its historical dispersion envelope. Run pad lineage
+>    only when the change mechanically adds work to benchmark-hot paths or the
+>    composite is below `0.995`. Campaign-ledger calibration (`n = 10`):
+>    composite readings `0.9973`–`1.0081`; RegExp `±3.5` percentage points,
+>    Splay and Richards `±2.0` points, and every other suite `±1.5` points.
+> 4. **Batch windows.** Test262, and Tier-2 A/B when several small hot items
+>    land together, may gate once at the lane tip for a merge window of at
+>    most three items. A red result is bisected within the window; per-item
+>    commits make that a two-build attribution.
+> 5. **The ledger rides the work commit.** The driver drafts the changelog and
+>    backlog text, the lane applies it to the item commit, and merge becomes
+>    fast-forward plus verification only.
+> 6. **Backstop.** After a merge window lands Tier-1 work without A/B, the
+>    driver runs one bench-v8 drift check of `main` against the frozen
+>    last-known-good binary on the measurement host. Nightly `test-oom`, leak
+>    census, and ownership-audit suites are unchanged. The published-metric
+>    refresh protocol is unchanged.
+
 3. Pure test-harness and build-graph splits have no layout risk and are
    exempt from rule 2.
 4. Mechanical identity gates may substitute for the zoo A/B in rule 2,

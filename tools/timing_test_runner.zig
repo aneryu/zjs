@@ -3,6 +3,13 @@ const std = @import("std");
 const Io = std.Io;
 const runner_threaded_io: Io = Io.Threaded.global_single_threaded.io();
 
+// Test-only process context consumed by src/tests/helpers.zig. Exported scalars
+// avoid threading the runner's current test through hundreds of test bodies.
+pub export var zjs_test_runner_current_name_ptr: [*]const u8 = undefined;
+pub export var zjs_test_runner_current_name_len: usize = 0;
+pub export var zjs_test_runner_current_pass: usize = 0;
+pub export var zjs_test_runner_leak_census: bool = false;
+
 pub fn main(init: std.process.Init.Minimal) !void {
     const test_fns = builtin.test_functions;
     var args = try std.process.Args.Iterator.initAllocator(init.args, std.heap.page_allocator);
@@ -14,6 +21,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var fail_fast = false;
     var list_only = false;
     var require_tests = false;
+    var repeat_count: usize = 1;
+    var leak_census = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--list")) {
@@ -22,6 +31,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
             require_tests = true;
         } else if (std.mem.eql(u8, arg, "--fail-fast")) {
             fail_fast = true;
+        } else if (std.mem.eql(u8, arg, "--repeat")) {
+            repeat_count = try std.fmt.parseUnsigned(usize, args.next() orelse return error.InvalidArgs, 10);
+            if (repeat_count == 0) return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--leak-census")) {
+            leak_census = true;
         } else if (std.mem.eql(u8, arg, "--range")) {
             const range_arg = args.next() orelse return error.InvalidArgs;
             const range = try parseRange(range_arg, test_fns.len);
@@ -40,11 +54,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
         return;
     }
+    if (leak_census and repeat_count < 2) return error.InvalidArgs;
 
+    zjs_test_runner_leak_census = leak_census;
     std.debug.print("Running {} tests with timing", .{test_fns.len});
     if (filter) |pattern| std.debug.print(" matching \"{s}\"", .{pattern});
     if (start_index != 0 or end_index != test_fns.len) std.debug.print(" in range {}..{}", .{ start_index, end_index });
+    if (repeat_count != 1) std.debug.print(" for {} passes", .{repeat_count});
     std.debug.print("...\n", .{});
+    if (leak_census) {
+        std.debug.print("leak-census: pass test count_delta bytes_delta module_count module_delta count bytes\n", .{});
+    }
 
     const allocator = std.heap.page_allocator;
 
@@ -61,7 +81,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var skip_count: usize = 0;
     var filtered_count: usize = 0;
 
-    for (test_fns, 0..) |test_fn, test_index| {
+    const invocation_count = std.math.mul(usize, repeat_count, test_fns.len) catch return error.InvalidArgs;
+    tests: for (0..invocation_count) |invocation_index| {
+        const pass = invocation_index / test_fns.len;
+        const test_index = invocation_index % test_fns.len;
+        const test_fn = test_fns[test_index];
         if (test_index < start_index or test_index >= end_index) {
             filtered_count += 1;
             continue;
@@ -72,6 +96,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 continue;
             }
         }
+
+        zjs_test_runner_current_name_ptr = test_fn.name.ptr;
+        zjs_test_runner_current_name_len = test_fn.name.len;
+        zjs_test_runner_current_pass = pass;
 
         // Setup testing environment
         std.testing.allocator_instance = .{};
@@ -103,7 +131,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 if (@errorReturnTrace()) |trace| {
                     std.debug.dumpErrorReturnTrace(trace);
                 }
-                if (fail_fast) break;
+                if (fail_fast) break :tests;
             },
         }
 
@@ -130,7 +158,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     fail_count += 1;
                 },
             }
-            if (fail_fast) break;
+            if (fail_fast) break :tests;
         }
 
         try timings.append(allocator, .{

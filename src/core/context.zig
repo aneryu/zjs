@@ -14,6 +14,36 @@ const shape = @import("shape.zig");
 const string = @import("string.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
+
+pub const RealmValueSlot = enum(u8) {
+    throw_type_error_intrinsic,
+    object_prototype,
+    array_prototype,
+    array_prototype_values,
+    string_prototype,
+    number_prototype,
+    boolean_prototype,
+    bigint_prototype,
+    symbol_prototype,
+    async_function_constructor,
+    async_function_prototype,
+    generator_prototype,
+    async_iterator_prototype,
+    async_generator_prototype,
+    generator_function_constructor,
+    generator_function_prototype,
+    async_generator_function_constructor,
+    async_generator_function_prototype,
+    iterator_helper_prototype,
+    iterator_concat_prototype,
+    wrap_for_valid_iterator_prototype,
+    std_file_prototype,
+    regexp_constructor,
+    promise_constructor,
+    callsite_prototype,
+    count,
+};
+
 pub const BacktraceFrame = struct {
     function_name: atom.Atom,
     filename: atom.Atom,
@@ -77,7 +107,6 @@ pub const BacktraceLocationResolver = *const fn (?*const anyopaque, usize) Backt
 /// Dynamic `import()` runs arbitrary engine work and arbitrary host I/O, so it
 /// can fail with anything in the host error surface.
 pub const DynamicImportError = errors.HostError;
-
 
 pub const DynamicImportCallback = *const fn (
     userdata: ?*anyopaque,
@@ -366,7 +395,7 @@ pub const JSContext = struct {
     native_error_prototypes: [native_error_kind_count]JSValue = @splat(JSValue.nullValue()),
     cached_function_proto: ?*Object = null,
     cached_promise_proto: ?*Object = null,
-    cached_values: [@intFromEnum(object_mod.RealmValueSlot.count)]?JSValue = @splat(null),
+    cached_values: [@intFromEnum(RealmValueSlot.count)]?JSValue = @splat(null),
     /// QuickJS's five context-owned initial shapes. Values live in each fresh
     /// object's property cells; the realm owns only these immutable layouts.
     array_shape: ?*shape.Shape = null,

@@ -4716,6 +4716,70 @@ test "unique shape append OOM rolls back shape and value storage together" {
     try std.testing.expectEqual(@as(?i32, 5), (try object.getProperty(atoms[4])).asInt32());
 }
 
+test "property compaction removes tombstones without mutating shared sibling shapes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const names = [_][]const u8{
+        "compact_00", "compact_01", "compact_02", "compact_03",
+        "compact_04", "compact_05", "compact_06", "compact_07",
+        "compact_08", "compact_09", "compact_10", "compact_11",
+        "compact_12", "compact_13", "compact_14", "compact_15",
+    };
+    var atoms: [names.len]core.Atom = undefined;
+    for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
+    defer for (atoms) |name| rt.atoms.free(name);
+
+    const template = try core.Object.create(rt, core.class.ids.object, null);
+    defer template.value().free(rt);
+    for (atoms, 0..) |name, index| {
+        try template.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
+    }
+    const sibling = try core.Object.createFromPropertyTemplate(rt, template);
+    defer sibling.value().free(rt);
+    const victim = try core.Object.createFromPropertyTemplate(rt, template);
+    defer victim.value().free(rt);
+    const shared_shape = template.shape_ref;
+    try std.testing.expectEqual(shared_shape, sibling.shape_ref);
+    try std.testing.expectEqual(shared_shape, victim.shape_ref);
+
+    var peak_deleted: u32 = 0;
+    var compacted = false;
+    for (0..8) |index| {
+        const deleted_before = victim.shape_ref.deleted_prop_count;
+        try std.testing.expect(victim.deleteProperty(rt, atoms[index * 2]));
+        const deleted = victim.shape_ref.deleted_prop_count;
+        const live = victim.shape_ref.prop_count - deleted;
+        try std.testing.expect(deleted < @max(@as(u32, 8), live + 1));
+        peak_deleted = @max(peak_deleted, deleted);
+        if (deleted == 0) {
+            compacted = true;
+            try std.testing.expectEqual(@as(u32, 7), deleted_before);
+        }
+    }
+
+    try std.testing.expect(compacted);
+    try std.testing.expectEqual(@as(u32, 7), peak_deleted);
+    try std.testing.expect(victim.shape_ref != shared_shape);
+    try std.testing.expectEqual(@as(u32, 8), victim.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(u32, 0), victim.shape_ref.deleted_prop_count);
+    try std.testing.expectEqual(@as(u32, 8), victim.shape_ref.prop_size);
+    for (0..8) |index| {
+        const source_index = index * 2 + 1;
+        try std.testing.expectEqual(atoms[source_index], victim.shape_ref.props()[index].atom_id);
+        const value = try victim.getProperty(atoms[source_index]);
+        defer value.free(rt);
+        try std.testing.expectEqual(@as(?i32, @intCast(source_index)), value.asInt32());
+    }
+
+    try std.testing.expectEqual(shared_shape, sibling.shape_ref);
+    try std.testing.expectEqual(@as(u32, 16), sibling.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(u32, 0), sibling.shape_ref.deleted_prop_count);
+    const sibling_value = try sibling.getProperty(atoms[0]);
+    defer sibling_value.free(rt);
+    try std.testing.expectEqual(@as(?i32, 0), sibling_value.asInt32());
+}
+
 test "context lexicals property alias releases context strong reference" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -5505,15 +5569,11 @@ test "gc registry tracks live objects and intrusive list state" {
     core.Object.destroyFromHeader(rt, &obj.header);
 }
 
-test "gc policy presets do not enable unimplemented concurrent collectors by default" {
+test "gc policy presets configure real pressure and slice controls" {
     const default_policy: core.gc.Policy = .{};
-    try std.testing.expect(!default_policy.enable_concurrent_mark);
-    try std.testing.expect(!default_policy.enable_concurrent_sweep);
 
     const throughput = core.gc.Policy.forMode(.throughput);
     try std.testing.expectEqual(core.gc.Mode.throughput, throughput.mode);
-    try std.testing.expect(!throughput.enable_concurrent_mark);
-    try std.testing.expect(!throughput.enable_concurrent_sweep);
 
     const low_rss = core.gc.Policy.forMode(.low_rss);
     try std.testing.expect(low_rss.external_weight > default_policy.external_weight);
@@ -5657,7 +5717,6 @@ test "function bytecode registration is old-space accounted" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{
         .gc_policy = .{
-            .old_weight = 3,
             .major_debt_threshold = fixture_layout.total_size * 3,
         },
     });
@@ -5753,8 +5812,6 @@ test "runtime exposes stable gc stats snapshot" {
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.old_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), snapshot.large_object_bytes);
-    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), snapshot.heap_committed_bytes);
-    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), snapshot.old_committed_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.old_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 4), snapshot.old_alloc_count);
     try std.testing.expectEqual(@as(usize, 32), snapshot.external_bytes);
@@ -5765,9 +5822,6 @@ test "runtime exposes stable gc stats snapshot" {
     try std.testing.expectEqual(@as(usize, 0), snapshot.finalizer_queue_length);
     if (!core.memory.force_gc_on_allocation_enabled) {
         try std.testing.expectEqual(@as(usize, 0), snapshot.major_gc_count);
-        try std.testing.expectEqual(@as(u64, 0), snapshot.incremental_slice_ns_p50);
-        try std.testing.expectEqual(@as(u64, 0), snapshot.incremental_slice_ns_p95);
-        try std.testing.expectEqual(@as(u64, 0), snapshot.incremental_slice_ns_p99);
     }
     if (builtin.os.tag == .linux) try std.testing.expect(snapshot.rss_bytes != 0);
 
@@ -5791,8 +5845,6 @@ test "gc live heap stats drop when object is released" {
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), allocated.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), allocated.old_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), allocated.large_object_bytes);
-    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), allocated.heap_committed_bytes);
-    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), allocated.old_committed_bytes);
 
     object.value().free(rt);
 
@@ -5804,21 +5856,6 @@ test "gc live heap stats drop when object is released" {
     try std.testing.expectEqual(@as(usize, 0), released.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.old_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.large_object_bytes);
-    // Page geometry is derived from live_bytes on demand. The SmallObjectSlab's
-    // bounded per-class reserve is allocator-private and released at runtime
-    // teardown, so a fully-freed GC heap reports zero logical committed/empty/
-    // fragmentation immediately.
-    try std.testing.expectEqual(@as(usize, 0), released.heap_committed_bytes);
-    try std.testing.expectEqual(@as(usize, 0), released.empty_page_bytes);
-    try std.testing.expectEqual(@as(usize, 0), released.old_fragmentation_ratio);
-
-    // decommitEmptyPagesNow is a diagnostics refresh; allocator-private reserves
-    // are outside the logical GC page account.
-    rt.gc.decommitEmptyPagesNow();
-    const decommitted = rt.gcStats();
-    try std.testing.expectEqual(@as(usize, 0), decommitted.heap_committed_bytes);
-    try std.testing.expectEqual(@as(usize, 0), decommitted.empty_page_bytes);
-    try std.testing.expectEqual(@as(usize, 0), decommitted.decommitted_bytes);
 }
 
 test "external memory token registry audits duplicate releases and leaks" {
@@ -5903,6 +5940,39 @@ test "external host finalizers are deferred through native cleanup queue" {
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredNativeCleanupCountForTest());
 }
 
+test "external host registry reuses identical non-owning records" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var context: usize = 0;
+    const record: core.host_function.ExternalRecord = .{
+        .ptr = @ptrCast(&context),
+        .call = dummyExternalHostCall,
+    };
+    const before = rt.external_host_functions.len;
+    const first = try rt.registerExternalHostFunction(record);
+    const second = try rt.registerExternalHostFunction(record);
+
+    try std.testing.expectEqual(first, second);
+    try std.testing.expectEqual(before + 1, rt.external_host_functions.len);
+
+    const owning_record: core.host_function.ExternalRecord = .{
+        .ptr = @ptrCast(&context),
+        .call = dummyExternalHostCall,
+        .finalizer = countNativeCleanup,
+    };
+    const first_owning = try rt.registerExternalHostFunction(owning_record);
+    const second_owning = try rt.registerExternalHostFunction(owning_record);
+    try std.testing.expect(first_owning != second_owning);
+    try std.testing.expectEqual(before + 3, rt.external_host_functions.len);
+
+    rt.clearExternalHostFunctions();
+    try std.testing.expectEqual(@as(usize, 2), rt.pendingDeferredNativeCleanupCountForTest());
+    rt.drainDeferredNativeCleanups();
+    try std.testing.expectEqual(@as(usize, 2), context);
+}
+
 test "std file object destruction defers native close cleanup" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{});
@@ -5943,7 +6013,6 @@ test "gc callback boundary defers non-urgent major work until idle" {
     const callback_result = try rt.pollGC(null, .callback_boundary);
     try std.testing.expectEqual(@as(usize, 0), callback_result.freed_objects);
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().major_gc_count);
-    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().major_slice_count);
     try std.testing.expect(rt.gcPendingForTest());
     try std.testing.expect(rt.gc.hasPendingMajorRequest());
 
@@ -5951,12 +6020,6 @@ test "gc callback boundary defers non-urgent major work until idle" {
     const after_idle = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 1), after_idle.major_gc_count);
     try std.testing.expectEqual(core.gc.MajorPhase.idle, after_idle.major_phase);
-    try std.testing.expectEqual(@as(usize, 1), after_idle.major_slice_count);
-    try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.last_incremental_slice_ns);
-    try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.sweep_time_ns);
-    try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.major_pause_ns_p50);
-    try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.major_pause_ns_p95);
-    try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.major_pause_ns_p99);
     try std.testing.expect(!rt.gcPendingForTest());
 }
 
@@ -5969,7 +6032,6 @@ test "gc callback boundary runs urgent major work" {
     _ = try rt.pollGC(null, .callback_boundary);
 
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_gc_count);
-    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_slice_count);
     try std.testing.expect(!rt.gcPendingForTest());
 }
 
@@ -5981,7 +6043,6 @@ test "runtime force major gc runs an urgent major poll" {
     const result = try rt.forceMajorGC(null);
     try std.testing.expectEqual(@as(usize, 0), result.freed_objects);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_gc_count);
-    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_slice_count);
     try std.testing.expect(!rt.gcPendingForTest());
 }
 
@@ -6199,7 +6260,7 @@ test "gc object release does not allocate after refcount reaches zero" {
     const obj = try core.Object.create(rt, core.class.ids.object, null);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    const did_release = rt.gc.releaseObject(&obj.header);
+    const did_release = rt.gc.releaseObjectForTest(&obj.header);
     rt.setMemoryLimit(null);
 
     try std.testing.expect(did_release);
@@ -6307,6 +6368,158 @@ test "closed object property cycle is released by runtime cycle removal" {
     left.value().free(rt);
     right.value().free(rt);
     try expectClosedPropertyCycleReclaimed(rt, rt.runObjectCycleRemoval());
+}
+
+test "fast array iterator-next cache cycle is released by runtime cycle removal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const it = try core.Object.createArray(rt, null);
+    std.debug.assert(it.flags.fast_array);
+    const next_obj = try core.Object.create(rt, core.class.ids.object, null);
+    const key = try rt.internAtom("iterator");
+    defer rt.atoms.free(key);
+
+    try next_obj.defineOwnProperty(rt, key, core.Descriptor.data(it.value(), true, true, true));
+    const slot = try it.cachedIteratorNextSlot(rt);
+    slot.* = next_obj.value().dup();
+
+    it.value().free(rt);
+    next_obj.value().free(rt);
+    try expectClosedPropertyCycleReclaimed(rt, rt.runObjectCycleRemoval());
+}
+
+test "strong Map and Set entry cycles are released by runtime cycle removal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const map = try core.Object.create(rt, core.class.ids.map, null);
+    const map_key = try core.Object.create(rt, core.class.ids.object, null);
+    const map_value = try core.Object.create(rt, core.class.ids.object, null);
+    const set = try core.Object.create(rt, core.class.ids.set, null);
+    const set_value = try core.Object.create(rt, core.class.ids.object, null);
+    const back_key = try rt.internAtom("collection");
+    defer rt.atoms.free(back_key);
+    try map_key.defineOwnProperty(rt, back_key, core.Descriptor.data(map.value(), true, true, true));
+    try map_value.defineOwnProperty(rt, back_key, core.Descriptor.data(map.value(), true, true, true));
+    try set_value.defineOwnProperty(rt, back_key, core.Descriptor.data(set.value(), true, true, true));
+
+    // Pins CollectionPayload strong key/value entry edges, object.zig:8580-8584.
+    const map_entries = try rt.memory.alloc(core.object.CollectionEntry, 1);
+    map_entries[0] = .{ .key = map_key.value().dup(), .value = map_value.value().dup() };
+    map.collectionEntriesSlot().* = map_entries;
+    const set_entries = try rt.memory.alloc(core.object.CollectionEntry, 1);
+    set_entries[0] = .{ .key = set_value.value().dup(), .value = core.JSValue.undefinedValue() };
+    set.collectionEntriesSlot().* = set_entries;
+
+    map.value().free(rt);
+    map_key.value().free(rt);
+    map_value.value().free(rt);
+    set.value().free(rt);
+    set_value.value().free(rt);
+    const expected = rt.gc.liveCount();
+    try std.testing.expect(expected != 0);
+    try expectCycleReclaimedIncludingShapes(rt, expected, rt.runObjectCycleRemoval());
+}
+
+test "ordinary error stack and callsite cycles are released by runtime cycle removal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const owner = try core.Object.create(rt, core.class.ids.object, null);
+    const stack = try core.Object.create(rt, core.class.ids.object, null);
+    const callsite = try core.Object.create(rt, core.class.ids.object, null);
+    const back_key = try rt.internAtom("owner");
+    defer rt.atoms.free(back_key);
+    try stack.defineOwnProperty(rt, back_key, core.Descriptor.data(owner.value(), true, true, true));
+    try callsite.defineOwnProperty(rt, back_key, core.Descriptor.data(owner.value(), true, true, true));
+
+    // Pins OrdinaryPayload callsite_file/error_stack edges, object.zig:8488-8502.
+    try owner.setCallSiteMetadata(rt, callsite.value(), core.JSValue.undefinedValue(), 1, 1, false);
+    try owner.setErrorStack(rt, stack.value());
+
+    owner.value().free(rt);
+    stack.value().free(rt);
+    callsite.value().free(rt);
+    const expected = rt.gc.liveCount();
+    try std.testing.expect(expected != 0);
+    try expectCycleReclaimedIncludingShapes(rt, expected, rt.runObjectCycleRemoval());
+}
+
+test "accessor getter and setter self-cycle is released by runtime cycle removal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const object = try core.Object.create(rt, core.class.ids.object, null);
+    const key = try rt.internAtom("accessor");
+    defer rt.atoms.free(key);
+
+    // Pins accessor getter/setter property slots, object.zig:8399-8408.
+    try object.defineOwnProperty(rt, key, core.Descriptor.accessor(object.value(), object.value(), true, true));
+
+    object.value().free(rt);
+    const expected = rt.gc.liveCount();
+    try std.testing.expect(expected != 0);
+    try expectCycleReclaimedIncludingShapes(rt, expected, rt.runObjectCycleRemoval());
+}
+
+test "bound function payload self-cycle is released by runtime cycle removal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const bound = try core.Object.create(rt, core.class.ids.bound_function, null);
+
+    // Pins BoundFunction target/this/args edges, object.zig:8575-8578.
+    bound.boundTargetSlot().* = bound.value().dup();
+    bound.boundThisSlot().* = bound.value().dup();
+    const args = try rt.memory.alloc(core.JSValue, 1);
+    args[0] = bound.value().dup();
+    bound.boundArgsSlot().* = args;
+
+    bound.value().free(rt);
+    const expected = rt.gc.liveCount();
+    try std.testing.expect(expected != 0);
+    try expectCycleReclaimedIncludingShapes(rt, expected, rt.runObjectCycleRemoval());
+}
+
+test "arguments payload value-slice cycle is released by runtime cycle removal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const arguments_class = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(arguments_class, .{ .class_name = "ArgumentsPayloadCycle", .payload_kind = .arguments });
+    defer rt.classes.unregisterDynamic(arguments_class);
+    const arguments = try core.Object.create(rt, arguments_class, null);
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    const key = try rt.internAtom("arguments-payload");
+    defer rt.atoms.free(key);
+
+    // Pins ArgumentsPayload.var_refs value-slice edges, object.zig:8670-8672.
+    const payload: *core.object.ArgumentsPayload = @ptrCast(@alignCast(arguments.u.payload.?));
+    payload.var_refs = try rt.memory.alloc(core.JSValue, 1);
+    payload.var_refs[0] = target.value().dup();
+    try target.defineOwnProperty(rt, key, core.Descriptor.data(arguments.value(), true, true, true));
+
+    arguments.value().free(rt);
+    target.value().free(rt);
+    const expected = rt.gc.liveCount();
+    try std.testing.expect(expected != 0);
+    try expectCycleReclaimedIncludingShapes(rt, expected, rt.runObjectCycleRemoval());
+}
+
+test "object data self-cycle is released by runtime cycle removal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const object = try core.Object.create(rt, core.class.ids.string, null);
+
+    // Pins ObjectDataPayload.data, object.zig:8510-8512.
+    object.objectDataSlot().* = object.value().dup();
+
+    object.value().free(rt);
+    const expected = rt.gc.liveCount();
+    try std.testing.expect(expected != 0);
+    try expectCycleReclaimedIncludingShapes(rt, expected, rt.runObjectCycleRemoval());
 }
 
 test "fallible GC API reports reclaimed objects and no failure" {
@@ -7926,7 +8139,7 @@ test "replacing auto-init rolls back descriptor OOM and retries in same runtime"
     defer rt.setMemoryLimit(null);
     try std.testing.expectError(
         error.OutOfMemory,
-        holder.replaceAutoInitPropertyWithRealmAndNative(rt, key, "oom-replace-realm", 0, next_flags, second_global, 0),
+        holder.replaceAutoInitPropertyWithRealmAndNative(rt, key, "oom-replace-realm-next", 0, next_flags, second_global, 0),
     );
     rt.setMemoryLimit(null);
 
@@ -7936,7 +8149,7 @@ test "replacing auto-init rolls back descriptor OOM and retries in same runtime"
     try std.testing.expectEqual(second_realm_refs, second_ctx.header.meta().rc);
     try std.testing.expectEqual(baseline_allocated_bytes, rt.memory.allocated_bytes);
 
-    try holder.replaceAutoInitPropertyWithRealmAndNative(rt, key, "oom-replace-realm", 0, next_flags, second_global, 0);
+    try holder.replaceAutoInitPropertyWithRealmAndNative(rt, key, "oom-replace-realm-next", 0, next_flags, second_global, 0);
     try std.testing.expectEqual(next_flags.withKind(.auto_init).bits(), holder.propFlagsAt(0).bits());
     try std.testing.expectEqual(&second_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
     try std.testing.expectEqual(first_realm_refs - 1, first_ctx.header.meta().rc);
@@ -8066,6 +8279,31 @@ test "specialized auto-init producers retain the same typed Realm owner" {
         try std.testing.expectEqual(&ctx.header, slot.realm_and_id.realmHeader().?);
     }
     try std.testing.expectEqual(@as(i32, 1 + holders.len), ctx.header.meta().rc);
+}
+
+test "auto-init descriptor interning reuses value-identical metadata" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first_name = "repeat-method";
+    var second_name: [first_name.len]u8 = undefined;
+    @memcpy(&second_name, first_name);
+    const first_info: core.property.AutoInit = .{
+        .name = first_name,
+        .length = 2,
+        .host_function_kind = core.host_function.ids.external_host,
+        .external_host_function_id = 7,
+        .host_function_prototype = true,
+    };
+    var second_info = first_info;
+    second_info.name = &second_name;
+
+    const before = rt.auto_init_descriptors.items.len;
+    const first = try core.property.internAutoInit(rt, first_info);
+    const second = try core.property.internAutoInit(rt, second_info);
+
+    try std.testing.expectEqual(first, second);
+    try std.testing.expectEqual(before + 1, rt.auto_init_descriptors.items.len);
 }
 
 test "materialized auto-init true C function owns its construction realm" {

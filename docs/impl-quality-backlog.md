@@ -1,0 +1,426 @@
+# Implementation Quality Backlog
+
+Durable queue from the 2026-08-21 implementation-quality review. That review
+did two things: it reconciled the 2026-08-20 audit worklist against `main`
+item by item (grep-verified, not changelog-trusted), and it examined for the
+first time the three blind spots the audit itself declared — the GC/trace
+family, the parser/compiler front end, and `src/core/object.zig` internals.
+
+Line numbers were verified at the review commit; they drift, function names
+are the anchor. Gate abbreviations as in
+[maintainability-backlog.md](maintainability-backlog.md): **AB** = bench-v8
+A/B (hot file); **suite** = test262 + unified suite; **identity** = `.text`
+byte-compare.
+Gates follow [refactor-policy.md](refactor-policy.md)'s 2026-08-22 tiers.
+
+## What the review verified as healthy (do not re-audit)
+
+- **`object.zig` union discipline is exemplary.** All 20 out-of-line payload
+  kinds are read through kind-checking accessors; teardown is kind-switched;
+  no unguarded union read was found. The discriminant is *more* explicit than
+  QuickJS's (5-bit `class_payload_kind` tag + comptime layout asserts vs bare
+  `class_id`).
+- **The compiler "same-name copy-drift" suspicion is refuted.** Every
+  `bytecode.zig`↔`parser.zig` and `resolve_labels`↔`resolve_variables`
+  same-name pair examined is either wrapper→authority delegation, a
+  deliberate two-pass mirror (disjoint opcode sets), or cross-phase
+  complement. The only true copies are `updateLabel` and `reserve`
+  (rl:393/rv:146, rl:39/rv:114), currently drift-free.
+- **The cycle collector is a faithful three-phase QuickJS mirror**
+  (`destroyRuntimeCyclesWithValueRoots`, qjs line numbers annotated inline).
+  Re-entrancy gates, recursion shape, phase doors, and weak-collection
+  ordering all check out. Every trace-vs-destroy discrepancy found points in
+  the *leak* direction; no over-trace (trial-RC underflow → UAF) direction
+  defect exists.
+- **`resolve_labels`' four parallel streams** (output bytes, atom ledger,
+  source events, label/bind/reloc tables) are still hand-synchronized in
+  every special-cased arm, but a missed sync now fails closed:
+  `validateFinalOutput` / `validateFinalSources` run in **all** build modes.
+  The residual defect is Q5b (the failure wears a SyntaxError mask), not the
+  fragility itself.
+
+## Corrections to existing ledgers
+
+- **H8's "six manual `align(16)` pins"** are all *function-entry* alignment
+  (`destroyFromHeader`, the three `mark*Hot` arms, `markChildrenCold`,
+  `setOrDefineOwnDataPropertyForPutFieldOwned`) with a measurement lineage in
+  git (`224a0628`, `0280e278`). None pins a data field. `Object`'s data
+  layout is pinned by comptime asserts alone (`@sizeOf == 64`, `u` at offset
+  40). Consequence: an H8 method move carries the pins along with the
+  functions; the layout risk is `.text` rearrangement, not struct layout.
+- **"~15 payload domains"** is actually 20 `PayloadKind`s + 3 inline union
+  arms (array / bytecode_function / regexp) + 1 external-opaque convention =
+  24 discriminated states.
+
+## Queue
+
+### P0 — correctness
+
+**Q14. `engine-production-gate` is red on main: `check_borrowed_atoms`
+reports `parseFunctionDecl` storing a defer-freed `name_atom`
+(parser.zig:15246).**
+  **Done 2026-08-21**: bisect stopped at 47cf81ef already red —
+  audit-tier gap, not a Q5/Q6 regression. Rule-D static false positive
+  (defer LIFO ordering); fixed with the contract's borrowed-reason
+  annotation (+1 line), checker at 0 escapes / 0 allowlisted, gate
+  34/34, emission byte-identical. Process note stands regardless:
+  parser items should run `check_borrowed_atoms` in their gate set —
+  nightly-only instruments hide regressions for a full cycle.
+Found by Q10's gate sweep on an untouched
+checkout; the ownership audit is a nightly instrument, so per-item
+suites never ran it — attribution (pre-existing vs a Q5/Q6 parser
+regression) is the first step. Gate: check_borrowed_atoms green +
+full parser suite + emission identity (+ AB if the fix touches
+non-error paths).
+
+**Q1. `markFastArrayHot` misses the iterator-next cache edge** *(confirmed;
+the one live GC defect found)*
+- **Done 2026-08-21**: fix + bare-runtime regression test landed in one
+  commit. Gate: rule-2 bench-v8 A/B vs `47cf81ef` — composite Score medians
+  2612 / 2592, ratio 1.0081, per-suite deltas mixed in sign (layout-noise
+  signature); test-core / test-exec / smoke-dev green.
+- `markFastArrayHot` (`object.zig:7756`) marks shape + props + elements only.
+  The authority `traceChildEdgesFallible` (`:8461`) and the sibling hot arm
+  `markOrdinaryObjectHot` (`:7749`) both visit
+  `cachedIteratorNextSlotIfPresent`; the destroy side owns and frees the edge
+  (`clearCachedIteratorNext`, `:2965`). The cache attaches to any object used
+  as an iterator (`call_runtime.cacheIteratorNextMethod` has no class guard),
+  so `[Symbol.iterator]()` returning a fast array hits the gap. All three
+  trial-deletion phases go through the same `markOne`, so the miss is
+  consistent: not a UAF — a cycle through that edge is never collected.
+- Fix: mirror the two-line cache block into `markFastArrayHot`. Repro test
+  first (project discipline), then the fix, then prove the hot arm parity —
+  the hot arms have now demonstrably drifted from the authority once.
+- Gate: repro test + suite + **AB** (GC mark hot arm).
+
+**Q2. ~10 payload families have no cycle-release regression test.**
+- **Done 2026-08-21**: eleven guards landed, tests only (+225 lines).
+  Deletion probes confirmed each guard turns red when its trace arm is
+  removed; production files byte-identical after restore. test-core 341 /
+  test-exec 491 green.
+Only per-family "cycle is released" tests catch a trace-side miss (the leak
+checker catches destroy-side misses only). Template: `src/tests/core.zig`
+"prototype cycle is released" (~15 lines each). Missing, in rough order of
+exposure: iterator-next cache (with Q1), strong Map/Set entry cycles,
+Promise result/reactions, `OrdinaryPayload` error_stack/callsite,
+accessor-pair properties, `FunctionRarePayload` (11 of 12 fields),
+BoundFunction target/args, DisposableStack resources, ObjectData,
+ModuleRecord import_meta/eval_exception.
+- Gate: suite (tests only).
+
+**Q3. 2026-08-20 worklist stragglers — reproduced spec bugs still open**
+(the worklist itself lives in `.scratch/audit-2026-08-20/`, gitignored;
+this entry is its durable residue):
+- **Q3a.**
+  **Done 2026-08-21**: both sites resolve through `classPrototypeObject`;
+  differential probes vs pinned QuickJS byte-equal post-fix
+  (replaced / deleted / untouched globals × four combinators + groupBy);
+  regression tests pin every case. The remaining
+  `constructorPrototypeFromGlobal` consumers stay queued — hot-path blanket
+  conversion, separately gated.
+  Set combinators + `Map.groupBy` take result prototypes from the
+  mutable `globalThis.Set`/`Map` binding: `constructPlainSet`
+  (`collection_ops.zig:1966`) still calls
+  `object_ops.constructorPrototypeFromGlobal`. Switch to
+  `JSContext.classPrototypeObject`, then convert or delete the remaining
+  `constructorPrototypeFromGlobal` consumers (probed unobservable in the
+  audit). Gate: suite.
+- **Q3b.**
+  **Done 2026-08-21**: name added to the single predicate, `length` 0 per
+  WebIDL, all construction forms covered by tests. Gate: rule-2 A/B —
+  composite medians 2536 / 2529, ratio 1.0026, mixed-sign per-suite
+  (layout-noise signature); builtins / exec suites green.
+  `DOMException` is missing from the (now single) builtin
+  constructor name list (`call_runtime.isBuiltinConstructorName`, `:2656`) —
+  `new DOMException` works but `Reflect.construct` and
+  `class X extends DOMException` throw. Also `DOMException.length` should be
+  0 per WebIDL. Gate: **AB** (call_runtime) + suite.
+- **Q3c.**
+  **Done 2026-08-21**: four tails converged onto one typed-array-aware
+  CreateDataPropertyOrThrow helper + unconditional throwing length-Set;
+  differential probes byte-equal vs pinned QuickJS; test262 delta 0
+  (49,778 / 44,584). Gate: rule-2 A/B — composite medians 2534 / 2528,
+  ratio 1.0028, mixed-sign per-suite (layout noise).
+  `Array.of`/`Array.from` tails keep the non-spec
+  `!isTypedArrayObject` length carve-out and a strictness-dependent
+  `setValueProperty` where the spec says `Set(..., true)`
+  (`arrayOfCall` tail, `array_ops.zig:4847`; three sibling sites). The
+  correct shape exists in the same file (`fromAsyncFinish`). Gate: **AB** +
+  suite.
+
+**Q4. The shared-engine test tier (403 of 616 tests) has no leak check.**
+`sharedTestEngine` (`src/tests/helpers.zig`) never deinits, so
+`JSRuntime.deinit`'s outstanding-allocation assert is unreachable there.
+
+**Status 2026-08-21** — the discovery gate ran and split the item:
+- The naive plateau assert is structurally invalid: lazy first-use state
+  is legitimate (empty-file pass even shrinks bytes). The real signal is
+  same-process repeat non-convergence: 18 tests still grew on pass 1/2.
+- Attribution clustered them into three roots, zero definite leaks
+  (post-GC snapshots throughout):
+  **R1 by-design** — `evalModule`'s unique `<eval>#N` specifiers populate
+  `ctx.modules` per eval; accepted, the future gate accounts for it.
+  **R2 fixed (this commit)** — `internAutoInit` appended without
+  interning; `registerExternalHostFunction` never deduped. Both flat on
+  repeat now, with regression guards.
+  **R3 fixed 2026-08-21 (Q4b)** — property compaction ported: exact
+  reference trigger (deleted ≥ 8 and ≥ prop_count/2, delete-path only),
+  transactional stable rebuild via `shape.prepareUpdate`. Bounded-sawtooth
+  parity proven on the real hidden-globals object (peak 150/72 → 86/8,
+  live 78 intact). Gate: A/B 0.9973 + pad lineage 0.9975/0.9990/1.0008 =
+  sign-flip = LAYOUT; test262 delta 0; full suite green. Driver note: the
+  original "flat on repeat" criterion was wrong — the reference mechanism
+  is lazily bounded, and acceptance criteria for faithful ports must be
+  derived from the reference's own steady state.
+- **Q4c (the gate itself)** lands after Q4b, as a post-GC plateau with
+  module-registry growth explicitly accounted.
+  **Q4c landed 2026-08-21 — item closed.** Per-test gate: post-collection
+  module-accounted high-water, T=8 over a measured p95=0/max=7
+  zero-module floor (n=814); proven live on a scratch leak. Nightly
+  `test-leak-census` runs both shared tiers twice in one process; pass 0
+  warms lazy state, pass 1 enforces full accounting. No new pub surface.
+  Residual accepted risk: single-pass runs ratchet through first-use
+  growth, so sub-tolerance drips are caught by the nightly census, not
+  per-test.
+
+### P1 — user-visible diagnostics (cheap; downstream pipe already exists)
+
+**Q5. Parse errors report the wrong place and the wrong thing.**
+  **Done 2026-08-21 (Q5a + Q5b + the expectToken choke point)**: pending
+  diagnostic on `State`, last-writer-wins; 467/468 error paths inherit the
+  exact site (sole boundary: deferred module-export validation, where the
+  reference also prints no position); internal-error arm separated;
+  emission byte-identical on five corpora. Gate: A/B 0.9983 + pad lineage
+  sign-flip (RegExp 0.9769/0.9893/1.0276) = LAYOUT; test262 delta 0. The
+  377-site message long tail remains open (mechanical, incremental).
+- **Q5a.** Every syntax error's line/column points at **EOF**, not the error
+  site (verified by running the shipped binary: error on line 3 of a 4-line
+  file reports `5:1`). Cause: `setFallbackSyntaxError` (`parser.zig:20357`)
+  recovers the position by re-lexing the whole source; a syntax error re-lexes
+  clean to EOF. The downstream pipeline (`diagnostics.SyntaxError` →
+  `throwParseSyntaxError`, 5 call sites) already carries line/column/message —
+  only upstream capture is missing. Fix: a pending-diagnostic field on
+  `State` (position from `s.token.line_num/col_num`), last-writer-wins;
+  this alone fixes the position even while the message stays
+  "UnexpectedToken".
+- **Q5b.** Internal compiler errors (`InvalidBytecode`, `BytecodeOverflow`,
+  `InvalidTopology`) reach users as `SyntaxError: <errorName>` at EOF
+  (`parser.zig:20372`) — an engine bug wearing a user-error mask. One switch
+  arm: report "internal compiler error", distinct from syntax errors.
+- **Q5c.** Message quality long tail: `expectToken` (`parser.zig:5613`) is a
+  three-line choke point — one change yields "expected X, got Y" for a large
+  class. The 377 bare `return Error.UnexpectedToken` sites convert to a
+  recording helper incrementally, purely mechanical.
+- Gate: suite (parser is CodeLoad-measured: keep emission byte-identical;
+  error paths are cold).
+
+### P2 — structure and hardening
+
+**Q6. Parser state-restore hazards** (same family as three historical real
+bugs):
+  **Done 2026-08-21**: Q6a mutation-after-defer fixed; Q6b folded as an
+  explicit `StaticBlockContext` extension (field sites unchanged); Q6c
+  census found six entry sites (three more than known), all on one
+  comptime `FunctionEntryContext`. Gate: A/B 1.0037, emission
+  byte-identical, 20-case qjs corpus exact, test262 delta 0. **New
+  pre-existing finding logged during execution**: zjs accepts
+  `(arguments) => { 'use strict'; }` where the pinned QuickJS (and the
+  spec: the directive strictens the whole function, making `arguments` a
+  banned binding name) reject with SyntaxError — queued below as Q6d.
+- **Q6a.** `parseFunctionExpr` mutates `pending_function_name` ~40 lines
+  before registering its restore defer (`parser.zig:15101` → `:15142`);
+  three error returns and one failable `advance()` sit in the window, one of
+  which can leave a dangling atom. Unobservable today (no error-recovery
+  path re-enters the parser), but it is armed. Move the mutation below the
+  defer, matching the declaration-form sibling (`:15076`).
+- **Q6b.** Class static block still open-codes a 14-field snapshot
+  (documented at `FieldInitContext`); fold onto the collapsed mechanism.
+- **Q6c.** ~100 hand-written single-field save/restores over ~45 `State`
+  fields remain, with function-entry sites each saving *different* subsets
+  and no single oracle type. Introduce `FunctionEntryContext` covering the
+  union of the entry-family fields.
+- Gate: suite; emission must stay byte-identical (identity on bytecode
+  streams for representative sources).
+
+**Q6d. `(arguments) => { 'use strict'; }` is accepted; spec and QuickJS
+reject.**
+  **Done 2026-08-21**: divergence was exactly the six strict-body arrow
+  variants; one shared retroactive validator now covers arrows and
+  ordinary functions; 24/24 differential parity, red-first regression,
+  emission byte-identical, A/B 1.0017. Position note: zjs reports the
+  offending parameter, QuickJS the directive — verdict parity is the
+  contract, and the parameter position is the more actionable of the
+  two.
+Found by Q6's differential corpus run; pre-existing, untouched
+by Q6. Fix belongs with the directive-prologue / strict-parameter
+validation path. Gate: suite + qjs differential (+ AB, parser).
+
+**Q7. `object.zig` conventions hardening** (no layout changes):
+- **Done 2026-08-21** (minimal form; the full `.external` enum kind rides
+  the Q11 T1 split): tri-state contract + exclusion-list duty documented
+  with Debug proofs, trap default fixed (verified bit-identical), three
+  exec-side raw reads asserted, doc rot repaired. Gate: `.text`
+  byte-identical; full suite green; no assert fired. Note: the first
+  candidate build's `.text` moved and was correctly attributed to
+  cache-lineage anonymous-symbol numbering — clean two-sided builds
+  converged; identity claims need same-lineage builds.
+- **Q7a.** `class_payload_kind == .none` means three things (no payload /
+  embedder-external payload / inline-arm class), disambiguated by a manual
+  exclusion list in `externalClassPayload` (`:3132`). Add an explicit
+  `.external` kind (u5 has 11 free values) or, minimally, document the
+  tri-state on `ObjectStorage` and add a debug assert.
+- **Q7b.** `u: ObjectStorage = .{ .array = .{} }` (`:1879`) is a trap
+  default: an object literal that omits `.u` would yield
+  kind==`.none` + word0==dangling-sentinel, which `externalClassPayload`
+  would hand out as a payload pointer. All six current literals override it;
+  change the default to the null-payload form (bit-identical today).
+- **Q7c.** Three out-of-file guard omissions get zero-cost debug asserts:
+  `tailcall_dispatch.zig:3545`/`:4085` (raw `u.payload` →
+  `*TypedArrayPayload` cast; dispatch-point guard proven but unasserted),
+  `small_inline.zig:354` (raw `u.bytecode_function`).
+- **Q7d.** Doc rot: the `array_length` invariant comment at `:1880-1887`
+  describes a field that moved into `DenseArrayStorage.length`.
+- Gate: identity (asserts are Debug-only; defaults bit-identical) + suite.
+
+**Q8. GC switch-surface convergence** (make "add a kind, miss a spot"
+compile-visible):
+  **Done 2026-08-21**: exhaustive `markChildrenCold` (−312 bytes for the
+  function itself), one comptime predicate for the four zero-ref kind
+  sets (`.text` byte-identical for that half), symmetric
+  `ArgumentsPayload` trace arm with red-first cycle guard,
+  `releaseObjectForTest` rename + compile guard. Gate: A/B composite
+  1.0000; full suite + leak census green.
+- `markChildrenCold`'s `else => {}` (`object.zig:7806`) silently no-traces
+  any new GC kind → exhaustive switch.
+- `destroyZeroRef`'s four hand-copied kind sets (`gc.zig:1942-1985`) → one
+  comptime predicate.
+- `ArgumentsPayload` has destroy but no trace arm; production never
+  registers the kind (tests only). Delete the kind or add the arm — a
+  registered embedder class would silently leak today.
+- `Registry.releaseObject` (`gc.zig:1595`) unlinks at rc 0 without
+  destroying; single test caller. Rename to a `...ForTest` name or delete.
+- Gate: suite; **AB** only if the exhaustive switch changes codegen in the
+  mark path (check identity first).
+
+**Q9. Delete the unimplemented "major GC" surface in `gc.zig`** (~500
+lines): `MajorPhase.mark_incremental`/`weak_fixpoint`,
+`enable_concurrent_mark/sweep/selective_evacuation` (no consumers),
+page-geometry derived from `live_bytes`, and pause percentiles that are
+synchronous whole-pass durations in costume. A test admits the phases are
+unimplemented. Keep the honest parts (registry, thresholds, phase doors).
+  **Done 2026-08-21**: 92 decls / 351 lines deleted to a fixed point. The
+  review's "no implementation" claim was consumer-side only — the
+  producer side was codegen-reachable (identity gate caught it:
+  `refreshPageState` 304 B of live code, `pollGC` −216 B), so the item
+  escalated from identity to A/B and PASSED at 1.0039 with both GC-heavy
+  suites positive. Public removals enumerated in the changelog under the
+  approved 0.2.0-dev breaking window.
+- Gate: suite + identity (dead surface should be codegen-neutral; if `.text`
+  moves, stop and find out why).
+
+**Q10. Gate & tool hygiene stragglers** (from the 08-20 worklist):
+  **Done 2026-08-21** in five commits (deps hole / profiler honesty /
+  envelope collapse / shim deletion / JSRuntime pin). Residual noted:
+  the profiler CLI also leaves value_dups and global_lookups
+  uninstrumented — folded into the "not instrumented" labeling.
+- `check_deps.js` core disallow list is missing `src/binding/` — core
+  transitively reaches exec through one test import
+  (`core/string_view.zig` → `binding/root.zig` → `exec`). Move the test,
+  close the hole.
+- `--profile-opcodes` prints structurally-zero counters
+  (`vm_call.zig:307` opens with `if (comptime true) return .{};`; five
+  orphaned recorders). Delete the dead recorders; print "not instrumented"
+  for what remains uninstrumented.
+- 166 hand-rolled print-capture envelopes → one `helpers.expectPrints`
+  (~−1,275 lines, provably coverage-neutral; do not move the 48
+  deinit-checked tests into the unchecked tier).
+- 10 residual `export fn` C-ABI shims in `libs/number_format.zig` (30 → 10
+  done); re-verify the survivors have callers, delete the rest (size axis,
+  no perf claim).
+- Record + pin `JSRuntime`'s public surface (167 pub decls, currently
+  unpinned — unlike `JSValue`'s).
+
+### P3 — structural moves (each gated; investigate before acting)
+
+**Q11. `object.zig` split (executes H8), in risk order:**
+  **T1 done 2026-08-22**: object.zig 13,251 → 11,774; two new core files
+  + two rehomes; 47 aliases, zero call-site churn; field blocks
+  byte-identical; A/B 1.0010, all suites within ±0.32%. Note for a later
+  tranche: `destroyDetachedClassPayload` stays in object.zig — it
+  bridges Object cursor teardown and both extracted modules.
+  **T2 done 2026-08-22 (narrow seam)**: object.zig 11,774 → 11,163;
+  object_gc.zig 709 lines; five `…ForCycleGc` purpose seams (first cut
+  needing 23 pub promotions was stopped by the ceiling and re-ruled —
+  edge enumeration stays on Object). All 13 cycle guards green; A/B
+  0.9988 in-envelope = pass without lineage under the 2026-08-22 tiers.
+  Parked design candidate: move each payload's trace arm beside its
+  destroy method (institutionalizes the Q1 trace/destroy pairing
+  lesson). T3 (class-family method sections) remains optional; T4
+  remains recommended-against.
+- **T1**: payload-type prelude → `object_payloads.zig`; `RealmValueSlot` →
+  `context.zig`; StdFile/pclose → runtime host layer; generator
+  suspend-state (~460 lines) → `generator_state.zig`. ~−2,300 lines, types +
+  cold methods.
+- **T2**: the cycle-collection engine (`:7577-9934`, ~2,360 lines) →
+  `object_gc.zig`. Mostly cold; the four hot mark arms' `align(16)` travel
+  with the functions. Side benefit: the audit blind spot becomes one file.
+- **T3**: the six class-family method sections (~3,760 lines), aliased back
+  (`pub const foo = impl.foo;` keeps call sites unchanged).
+- **T4**: create/destroy/define/set property engines — hottest, two hot
+  pins. **Recommended stop point: do not do T4.** Residue after T1–T3 is
+  ~7,200 cohesive lines.
+- Forbidden: converting `ObjectStorage` to a tagged union or reordering
+  `Object` fields — that is a representation experiment, and QuickJS-parity
+  representation is a load-bearing wall.
+- Gate: every tranche **AB** + pad lineage (`--pads 0 3 7`); data layout is
+  comptime-pinned but `.text` placement is not, and pure-placement swings of
+  ±0.4–2.7% are on record.
+
+**Q12. The exec five-tuple threading — investigate, then decide.**
+  **Investigated 2026-08-22 — ruling: keep the threading** (memo:
+  `.scratch/q12-five-tuple-memo-2026-08-21.md`). The hot position is
+  measured (removing a 9-field env round trip once won −1.31%
+  fixed-work cycles), `output` is API policy inside that ABI, `global`
+  is cross-realm correctness authority, and the QuickJS
+  current-stack-frame alternative is exactly the rejected per-call
+  publication pattern. Standing discipline: no output-on-context, no
+  global derivation, no runtime current-frame collapse without a new
+  requirement. One parked increment: a gated `*const BuiltinCallEnv`
+  pilot in the disposable/reflect cold domains (~409 cold sites upper
+  bound), sequenced after Q11/Q13.
+`output: ?*std.Io.Writer` is threaded through **829** parameter positions in
+`src/exec/`, `caller_function` through 414, `global` alongside — while
+`JSContext.globalObject()` exists. This is the single largest readability
+tax in the tree, *and* it is probably a measured perf position (the Vm
+scalar-mirror publication was a diagnosed disease; explicit register
+threading was the cure). Do not collapse blindly. The investigation:
+document why `output` cannot live on `JSContext`; if a collapse is viable,
+it is two-track — cold builtins take a bundled env struct, the hot call
+chain keeps explicit args — and every step is **AB**-gated.
+
+**Q13. Parser file split — after the legacy ruling.** Natural seams exist
+(`lexer` 3,363 lines, `token`, `compile_entry` are namespace-clean; ~4,300
+lines liftable verbatim). But the QCP-1 legacy/v2 dual-emission residue
+(user-ruled NO-GO for deletion) interleaves with `parser_core`, and a split
+would scatter the 543 preserved lines. Sequence: land Q5/Q6 first, split
+only once the legacy path has its Gate-B2 verdict. Largest-function cleanup
+(`parseStatementOrDeclSlow`, 936 lines, mechanical case-extraction) can
+proceed independently under emission-identity.
+
+Precursor 1 done 2026-08-22: statement-kind bodies extracted to named
+functions; emission byte-identical.
+
+Precursor 2 done 2026-08-22: lexer lifted verbatim; parser.zig 20,769 →
+17,408. The parser_core file split still waits on the QCP-1 legacy Gate-B2
+verdict.
+
+## Standing discipline (carried from prior campaigns, applies to every item)
+
+- Deletion-only changes: A/B ratio alone cannot judge them; pair with the
+  pad lineage (0.9956-was-LAYOUT case).
+- Fast-path guard changes need a QuickJS differential run, not just the
+  suite (two collection defects shipped green under test262).
+- After narrowing a guard, prove the fast path still fires
+  (`if (len > 0) @panic(...)` probe form).
+- Hot-arm bodies are never shared with cold paths; merging call layers has
+  fattened frames three times.

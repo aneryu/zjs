@@ -1,8 +1,9 @@
-//! Object model monolith (QuickJS `JSObject` shape). Payload types occupy the
-//! first stretch of this file; `Object` itself is a 64-byte `extern struct`
-//! with the class methods below. For property behavior start at `shape.zig`
-//! and `property.zig`, then the call site in `src/exec/` — do not read this
-//! file from the first line.
+//! QuickJS-shaped object model. Out-of-line payload representations and
+//! generator suspension storage live in `object_payloads.zig` and
+//! `generator_state.zig`; their public names are re-exported here so existing
+//! users retain one object-model namespace. `Object` remains a 64-byte
+//! `extern struct` with the class methods below. For property behavior start at
+//! `shape.zig` and `property.zig`, then the call site in `src/exec/`.
 
 const array = @import("array.zig");
 const atom = @import("atom.zig");
@@ -14,12 +15,15 @@ const function = @import("function.zig");
 const gc = @import("gc.zig");
 const host_function = @import("host_function.zig");
 const module_mod = @import("module.zig");
+const object_gc = @import("object_gc.zig");
+const object_payloads = @import("object_payloads.zig");
 const property = @import("property.zig");
 const profile = @import("profile.zig");
 const runtime_mod = @import("runtime.zig");
 const shape = @import("shape.zig");
 const string = @import("string.zig");
 const var_ref_mod = @import("var_ref.zig");
+const generator_state = @import("generator_state.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 const function_bytecode_mod = @import("../bytecode.zig").function_bytecode;
@@ -28,14 +32,12 @@ const memory_mod = @import("memory.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 
-extern "c" fn pclose(stream: *std.c.FILE) c_int;
-
 const ObjectVisitSet = std.AutoHashMap(usize, void);
 const ObjectIncomingMap = std.AutoHashMap(usize, usize);
 const ObjectGraphError = std.mem.Allocator.Error || error{PayloadMarkFailed};
 const OwnKeysError = std.mem.Allocator.Error;
 
-// ===== Payload types (QuickJS-style flattened class data) =====
+// ===== Object-model support and re-exported payload types =====
 
 /// Process-lifetime empty shape exposed only while a class finalizer inspects
 /// an object whose own property buffer and original shape have already been
@@ -99,1528 +101,62 @@ pub const ArrayStorageMode = enum {
     sparse,
 };
 
-pub const collection_no_entry: usize = std.math.maxInt(usize);
-
-pub const CollectionEntry = struct {
-    key: JSValue,
-    value: JSValue,
-    active: bool = true,
-    hash: u64 = 0,
-    hash_next: usize = collection_no_entry,
-
-    pub fn destroy(self: CollectionEntry, rt: *JSRuntime) void {
-        self.key.free(rt);
-        self.value.free(rt);
-    }
-};
-
-pub const WeakCollectionEntry = struct {
-    key_identity: usize,
-    value: JSValue,
-    hash: u64 = 0,
-    hash_next: usize = collection_no_entry,
-
-    pub fn destroy(self: WeakCollectionEntry, rt: *JSRuntime) void {
-        rt.releaseWeakIdentity(self.key_identity);
-        self.value.free(rt);
-    }
-};
-
-pub const FinalizationRegistryCellState = enum(u8) {
-    active,
-    pending_enqueue,
-    queued,
-};
-
-pub const FinalizationRegistryCell = struct {
-    target_identity: ?usize = null,
-    held_value: JSValue = JSValue.undefinedValue(),
-    unregister_token_identity: ?usize = null,
-    state: FinalizationRegistryCellState = .active,
-
-    pub fn isActive(self: FinalizationRegistryCell) bool {
-        return self.state == .active;
-    }
-
-    pub fn isPending(self: FinalizationRegistryCell) bool {
-        return self.state == .pending_enqueue;
-    }
-
-    pub fn keepsHeldValuesAlive(self: FinalizationRegistryCell) bool {
-        return self.state == .active or self.state == .pending_enqueue;
-    }
-
-    pub fn destroy(self: FinalizationRegistryCell, rt: *JSRuntime) void {
-        if (self.target_identity) |identity| rt.releaseWeakIdentity(identity);
-        if (self.unregister_token_identity) |identity| rt.releaseWeakIdentity(identity);
-        self.held_value.free(rt);
-    }
-};
-
-fn destroyOptionalValue(rt: *JSRuntime, slot: *?JSValue) void {
-    const old_value = slot.*;
-    slot.* = null;
-    if (old_value) |stored| stored.free(rt);
-}
-
-fn destroyOwnedValue(rt: *JSRuntime, slot: *JSValue) void {
-    const old_value = slot.*;
-    slot.* = JSValue.undefinedValue();
-    old_value.free(rt);
-}
-
-fn replaceOwnedValue(rt: *JSRuntime, slot: *JSValue, next_value: JSValue) void {
-    const old_value = slot.*;
-    slot.* = next_value;
-    old_value.free(rt);
-}
-
-fn destroyOptionalObjectRef(rt: *JSRuntime, slot: *?*Object) void {
-    const old_object = slot.*;
-    slot.* = null;
-    if (old_object) |stored| stored.value().free(rt);
-}
-
-fn destroyOptionalValueSlots(rt: *JSRuntime, slots: []?JSValue) void {
-    for (slots) |*slot| destroyOptionalValue(rt, slot);
-}
-
-fn destroyValueSlice(rt: *JSRuntime, slot: *[]JSValue) void {
-    const values = slot.*;
-    slot.* = &.{};
-    for (values) |stored| stored.free(rt);
-    if (values.len != 0) rt.memory.free(JSValue, values);
-}
-
-fn destroyValueSliceValuesOnly(rt: *JSRuntime, slot: *[]JSValue) void {
-    const values = slot.*;
-    slot.* = &.{};
-    for (values) |stored| stored.free(rt);
-}
-
-/// Release the nullable module/ordinary closure slots and their single backing
-/// allocation.  Module creation deliberately leaves MODULE_IMPORT entries
-/// null until indexed linking; ordinary published functions are sealed.
-///
-/// qjs `js_bytecode_function_finalizer` (quickjs.c:6253-6256) is one loop of
-/// `free_var_ref` then `js_free_rt` of the pointer array. Keep that shape:
-/// null slots are skipped inside `free_var_ref`, not by a second helper.
-fn destroyOptionalVarRefCellSlice(rt: *JSRuntime, slot: *[]?*var_ref_mod.VarRef) void {
-    const cells = slot.*;
-    slot.* = &.{};
-    for (cells) |cell| var_ref_mod.VarRef.freeVarRef(rt, cell);
-    if (cells.len != 0) rt.memory.free(?*var_ref_mod.VarRef, cells);
-}
-
-/// Cell releases only — for a var-ref window whose backing memory belongs to
-/// a surrounding storage slab.
-fn destroyVarRefCellSliceValuesOnly(rt: *JSRuntime, slot: *[]*var_ref_mod.VarRef) void {
-    const cells = slot.*;
-    slot.* = &.{};
-    for (cells) |cell| cell.freeCell(rt);
-}
-
-/// Close and release the frame-owned references in an open-var-ref window.
-/// The window itself belongs to the surrounding frame slab.
-fn closeOpenVarRefCellSlots(rt: *JSRuntime, slots: []?*var_ref_mod.VarRef) void {
-    for (slots) |*slot| {
-        const cell = slot.* orelse continue;
-        slot.* = null;
-        cell.close(rt);
-        cell.freeCell(rt);
-    }
-}
-
-fn destroyValueSliceWithCapacity(rt: *JSRuntime, slot: *[]JSValue, capacity: *usize) void {
-    const values = slot.*;
-    const old_capacity = capacity.*;
-    slot.* = &.{};
-    capacity.* = 0;
-    for (values) |stored| stored.free(rt);
-    if (old_capacity != 0) {
-        rt.memory.free(JSValue, values.ptr[0..old_capacity]);
-    } else if (values.len != 0) {
-        rt.memory.free(JSValue, values);
-    }
-}
-
-fn destroyAtomSlice(rt: *JSRuntime, slot: *[]atom.Atom) void {
-    const atoms = slot.*;
-    slot.* = &.{};
-    for (atoms) |atom_id| rt.atoms.free(atom_id);
-    if (atoms.len != 0) rt.memory.free(atom.Atom, atoms);
-}
-
-pub const DataPropertyLookup = struct {
-    index: usize,
-    value: JSValue,
-};
-
-pub const OrdinaryPayload = struct {
-    callsite_file: ?JSValue = null,
-    callsite_function: ?JSValue = null,
-    promise_reaction_on_fulfilled: ?JSValue = null,
-    promise_reaction_on_rejected: ?JSValue = null,
-    promise_reaction_resolve: ?JSValue = null,
-    promise_reaction_reject: ?JSValue = null,
-    promise_capability_resolve: ?JSValue = null,
-    promise_capability_reject: ?JSValue = null,
-    promise_combinator_resolve: ?JSValue = null,
-    promise_combinator_reject: ?JSValue = null,
-    promise_combinator_values: ?JSValue = null,
-    promise_combinator_keys: ?JSValue = null,
-    error_stack: ?JSValue = null,
-    error_stack_sites: ?JSValue = null,
-    error_stack_site_count: usize = 0,
-    callsite_line: i32 = 1,
-    callsite_column: i32 = 1,
-    is_callsite: bool = false,
-    callsite_is_native: bool = false,
-    promise_already_resolved: bool = false,
-    promise_combinator_remaining: i32 = 0,
-
-    pub fn destroy(self: *OrdinaryPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.callsite_file);
-        destroyOptionalValue(rt, &self.callsite_function);
-        destroyOptionalValue(rt, &self.promise_reaction_on_fulfilled);
-        destroyOptionalValue(rt, &self.promise_reaction_on_rejected);
-        destroyOptionalValue(rt, &self.promise_reaction_resolve);
-        destroyOptionalValue(rt, &self.promise_reaction_reject);
-        destroyOptionalValue(rt, &self.promise_capability_resolve);
-        destroyOptionalValue(rt, &self.promise_capability_reject);
-        destroyOptionalValue(rt, &self.promise_combinator_resolve);
-        destroyOptionalValue(rt, &self.promise_combinator_reject);
-        destroyOptionalValue(rt, &self.promise_combinator_values);
-        destroyOptionalValue(rt, &self.promise_combinator_keys);
-        destroyOptionalValue(rt, &self.error_stack);
-        destroyOptionalValue(rt, &self.error_stack_sites);
-        self.* = .{};
-    }
-};
-
-pub const IteratorPayload = struct {
-    target: ?JSValue = null,
-    data: ?JSValue = null,
-    next: ?JSValue = null,
-    callback: ?JSValue = null,
-    inner_next: ?JSValue = null,
-    zip_nexts: ?JSValue = null,
-    zip_pads: ?JSValue = null,
-    zip_keys: ?JSValue = null,
-    atom_keys: []atom.Atom = &.{},
-    index: usize = 0,
-    length: u32 = 0,
-    zip_alive: usize = 0,
-    kind: u8 = 0,
-    zip_mode: u8 = 0,
-    zip_state: u8 = 0,
-    executing: bool = false,
-    /// Set while this Map/Set iterator holds a cursor on `target`'s entry
-    /// array. Taken on the first advance and dropped on exhaustion or
-    /// finalization, mirroring qjs's `it->cur_record` reference: an iterator
-    /// that has not stepped yet holds no record (js_map_iterator_next
-    /// quickjs.c:52596 only refs once it has picked one), so it must not pin
-    /// anything either.
-    collection_cursor_held: bool = false,
-
-    pub fn destroy(self: *IteratorPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.target);
-        destroyOptionalValue(rt, &self.data);
-        destroyOptionalValue(rt, &self.next);
-        destroyOptionalValue(rt, &self.callback);
-        destroyOptionalValue(rt, &self.inner_next);
-        destroyOptionalValue(rt, &self.zip_nexts);
-        destroyOptionalValue(rt, &self.zip_pads);
-        destroyOptionalValue(rt, &self.zip_keys);
-        destroyAtomSlice(rt, &self.atom_keys);
-    }
-};
-
-/// Per-payload node in the runtime's weak-holder list. The links point to the
-/// owning Object rather than to another node, so traversal does not need a
-/// payload-kind cast. `borrowed_holder_index` is the independent O(1) index
-/// into Runtime.borrowed_reference_holders; keeping both pieces here matches
-/// QuickJS's payload-resident JSWeakRefHeader without growing JSObject.
-pub const WeakReferenceHolderLink = struct {
-    previous: ?*Object = null,
-    next: ?*Object = null,
-    borrowed_holder_index: u32 = 0,
-    registered: bool = false,
-};
-
-pub const CollectionPayload = struct {
-    entries: []CollectionEntry = &.{},
-    entries_capacity: usize = 0,
-    bucket_heads: []usize = &.{},
-    active_count: usize = 0,
-    /// Number of cursors currently parked inside `entries`: live Map/Set
-    /// iterators plus in-flight native scans (forEach, the Set-composition
-    /// helpers). This is the zjs form of the per-record `ref_count` an
-    /// enumerator takes in qjs (`JSMapRecord.ref_count`, quickjs.c:1080;
-    /// `mr->ref_count++` in js_map_iterator_next quickjs.c:52605 and
-    /// js_map_forEach quickjs.c:52320): a qjs cursor is a record pointer, so it
-    /// pins one record, while a zjs cursor is an entry index, so it pins the
-    /// whole array layout. Nonzero => deletions keep tombstones exactly like a
-    /// qjs zombie record (`mr->empty = TRUE`, quickjs.c:52082); zero => the
-    /// tombstones can be compacted away, which is what
-    /// `map_delete_record_internal` does when `--ref_count == 0`.
-    live_cursors: usize = 0,
-    weak_entries: []WeakCollectionEntry = &.{},
-    weak_entries_capacity: usize = 0,
-    weak_holder_link: WeakReferenceHolderLink = .{},
-
-    pub fn destroy(self: *CollectionPayload, rt: *JSRuntime) void {
-        const old_entries = self.entries;
-        const old_entries_capacity = self.entries_capacity;
-        const old_bucket_heads = self.bucket_heads;
-        const old_weak_entries = self.weak_entries;
-        const old_weak_entries_capacity = self.weak_entries_capacity;
-        self.entries = &.{};
-        self.entries_capacity = 0;
-        self.bucket_heads = &.{};
-        self.active_count = 0;
-        self.weak_entries = &.{};
-        self.weak_entries_capacity = 0;
-
-        for (old_entries) |entry| entry.destroy(rt);
-        if (old_entries_capacity != 0) {
-            rt.memory.free(CollectionEntry, old_entries.ptr[0..old_entries_capacity]);
-        } else if (old_entries.len != 0) {
-            rt.memory.free(CollectionEntry, old_entries);
-        }
-        if (old_bucket_heads.len != 0) rt.memory.free(usize, old_bucket_heads);
-        const started_borrowed_cleanup = old_weak_entries.len != 0 and !rt.borrowedWeakCleanupActive();
-        if (started_borrowed_cleanup) rt.beginBorrowedWeakCleanup();
-        defer if (started_borrowed_cleanup) rt.endBorrowedWeakCleanup();
-        for (old_weak_entries) |entry| {
-            rt.releaseWeakIdentity(entry.key_identity);
-            const prepared_identity = rt.prepareBorrowedWeakCleanupForLastRefValue(entry.value);
-            rt.enqueueDeferredWeakValueFreeWithPreparedIdentity(entry.value, prepared_identity) catch |err| switch (err) {
-                error.OutOfMemory => entry.value.free(rt),
-            };
-        }
-        if (started_borrowed_cleanup) Object.drainBorrowedWeakCleanup(rt);
-        if (old_weak_entries_capacity != 0) {
-            rt.memory.free(WeakCollectionEntry, old_weak_entries.ptr[0..old_weak_entries_capacity]);
-        } else if (old_weak_entries.len != 0) {
-            rt.memory.free(WeakCollectionEntry, old_weak_entries);
-        }
-    }
-};
-
-pub const SharedBufferStore = struct {
-    ref_count: std.atomic.Value(usize) = .init(1),
-    bytes: []u8 = &.{},
-    external_memory: gc.ExternalMemoryToken = .{},
-    external_deinit: ?ExternalByteStorageDeinit = null,
-    external_context: ?*anyopaque = null,
-
-    pub fn create(rt: *JSRuntime, byte_length: usize) !*SharedBufferStore {
-        const allocator = std.heap.page_allocator;
-        const store = try allocator.create(SharedBufferStore);
-        errdefer allocator.destroy(store);
-        const bytes = try allocator.alloc(u8, byte_length);
-        errdefer allocator.free(bytes);
-        var external_memory = try rt.reportExternalAlloc(byte_length);
-        errdefer external_memory.release();
-        @memset(bytes, 0);
-        store.* = .{
-            .ref_count = .init(1),
-            .bytes = bytes,
-            .external_memory = external_memory,
-        };
-        return store;
-    }
-
-    pub fn createExternal(
-        rt: *JSRuntime,
-        bytes: []u8,
-        deinit_fn: ExternalByteStorageDeinit,
-        context: ?*anyopaque,
-    ) !*SharedBufferStore {
-        const allocator = std.heap.page_allocator;
-        const store = try allocator.create(SharedBufferStore);
-        errdefer allocator.destroy(store);
-        var external_memory = try rt.reportExternalAlloc(bytes.len);
-        errdefer external_memory.release();
-        store.* = .{
-            .ref_count = .init(1),
-            .bytes = bytes,
-            .external_memory = external_memory,
-            .external_deinit = deinit_fn,
-            .external_context = context,
-        };
-        return store;
-    }
-
-    pub fn retain(self: *SharedBufferStore) void {
-        _ = self.ref_count.fetchAdd(1, .monotonic);
-    }
-
-    pub fn release(self: *SharedBufferStore) void {
-        if (self.ref_count.fetchSub(1, .acq_rel) != 1) return;
-        const allocator = std.heap.page_allocator;
-        const bytes = self.bytes;
-        const external_deinit = self.external_deinit;
-        const external_context = self.external_context;
-        self.external_memory.release();
-        self.bytes = &.{};
-        self.external_deinit = null;
-        self.external_context = null;
-        if (external_deinit) |deinit_fn| {
-            deinit_fn(external_context, bytes);
-        } else {
-            allocator.free(bytes);
-        }
-        allocator.destroy(self);
-    }
-};
-
-pub const ExternalByteStorageDeinit = *const fn (context: ?*anyopaque, bytes: []u8) void;
-
-pub const BufferPayload = struct {
-    pub const inline_storage_capacity: usize = 32;
-
-    bytes: []u8 = &.{},
-    inline_bytes: [inline_storage_capacity]u8 = undefined,
-    inline_length: u8 = 0,
-    shared_store: ?*SharedBufferStore = null,
-    external_memory: gc.ExternalMemoryToken = .{},
-    external_deinit: ?ExternalByteStorageDeinit = null,
-    external_context: ?*anyopaque = null,
-    detached: bool = false,
-    immutable: bool = false,
-    max_byte_length: ?usize = null,
-    first_view: ?*TypedArrayPayload = null,
-
-    pub fn destroy(self: *BufferPayload, rt: *JSRuntime) void {
-        // QuickJS's ArrayBuffer finalizer can run before the TypedArray /
-        // DataView finalizers during cycle removal. Sever every weak view link
-        // first so a later view finalizer never dereferences this payload.
-        self.unlinkAllViews();
-        self.releaseStorage(rt);
-    }
-
-    fn releaseStorage(self: *BufferPayload, rt: *JSRuntime) void {
-        // Any release may invalidate or move the data pointer. Clear cached
-        // view state before the old storage is returned to its owner; install
-        // paths republish the new state after committing the replacement.
-        self.invalidateViews();
-        if (self.shared_store) |store| {
-            store.release();
-        } else if (self.external_deinit) |deinit| {
-            self.external_memory.release();
-            deinit(self.external_context, self.bytes);
-        } else if (self.inline_length != 0) {
-            rt.reportExternalFreeUntracked(self.inline_length);
-            self.inline_length = 0;
-        } else {
-            self.external_memory.release();
-            if (self.bytes.len != 0) rt.memory.free(u8, self.bytes);
-        }
-        self.bytes = &.{};
-        self.shared_store = null;
-        self.external_memory = .{};
-        self.external_deinit = null;
-        self.external_context = null;
-    }
-
-    fn attachView(self: *BufferPayload, view: *TypedArrayPayload) void {
-        std.debug.assert(view.backing_payload == null);
-        std.debug.assert(view.buffer_prev == null);
-        std.debug.assert(view.buffer_next == null);
-
-        view.backing_payload = self;
-        view.buffer_next = self.first_view;
-        if (self.first_view) |first| first.buffer_prev = view;
-        self.first_view = view;
-        view.updateLiveState(self);
-    }
-
-    fn detachView(self: *BufferPayload, view: *TypedArrayPayload) void {
-        if (view.backing_payload != self) {
-            std.debug.assert(view.backing_payload == null);
-            return;
-        }
-
-        const previous = view.buffer_prev;
-        const next = view.buffer_next;
-        if (previous) |prev| {
-            prev.buffer_next = next;
-        } else {
-            std.debug.assert(self.first_view == view);
-            self.first_view = next;
-        }
-        if (next) |following| following.buffer_prev = previous;
-
-        view.backing_payload = null;
-        view.buffer_prev = null;
-        view.buffer_next = null;
-        view.clearLiveState();
-    }
-
-    fn invalidateViews(self: *BufferPayload) void {
-        var current = self.first_view;
-        while (current) |view| : (current = view.buffer_next) {
-            view.clearLiveState();
-        }
-    }
-
-    fn updateViews(self: *BufferPayload) void {
-        var current = self.first_view;
-        while (current) |view| : (current = view.buffer_next) {
-            view.updateLiveState(self);
-        }
-    }
-
-    fn unlinkAllViews(self: *BufferPayload) void {
-        while (self.first_view) |view| self.detachView(view);
-    }
-};
-
-pub const TypedArrayPayload = struct {
-    buffer: ?JSValue = null,
-    byte_offset: usize = 0,
-    element_size: u32 = 0,
-    fixed_length: ?u32 = null,
-    kind: u8 = 0,
-    live_length: u32 = 0,
-    data: ?[*]u8 = null,
-    backing_payload: ?*BufferPayload = null,
-    buffer_prev: ?*TypedArrayPayload = null,
-    buffer_next: ?*TypedArrayPayload = null,
-
-    pub fn destroy(self: *TypedArrayPayload, rt: *JSRuntime) void {
-        // Mirrors js_typed_array_finalizer: unlink before releasing the strong
-        // buffer value because that release may immediately finalize the
-        // ArrayBuffer payload.
-        if (self.backing_payload) |backing| backing.detachView(self);
-        destroyOptionalValue(rt, &self.buffer);
-    }
-
-    fn clearLiveState(self: *TypedArrayPayload) void {
-        self.live_length = 0;
-        self.data = null;
-    }
-
-    fn updateLiveState(self: *TypedArrayPayload, backing: *BufferPayload) void {
-        self.clearLiveState();
-        if (backing.detached) return;
-
-        const offset = self.byte_offset;
-        const storage = backing.bytes;
-        if (offset > storage.len) return;
-        const remaining = storage.len - offset;
-
-        // DataView is byte-addressed (`element_size == 0`). QuickJS updates a
-        // length-tracking DataView's byte length from the ArrayBuffer list; the
-        // fixed-length form stays live only while its complete range fits.
-        if (self.element_size == 0) {
-            const tracks_buffer = self.kind == 1 and backing.max_byte_length != null;
-            const live: usize = if (!tracks_buffer) blk: {
-                const fixed = self.fixed_length orelse return;
-                if (@as(usize, fixed) > remaining) return;
-                break :blk fixed;
-            } else blk: {
-                // qjs requires offset < byte_length for a tracking DataView to
-                // have a non-zero live range.
-                if (offset == storage.len) return;
-                break :blk remaining;
-            };
-            self.live_length = std.math.cast(u32, live) orelse return;
-            self.data = storage.ptr + offset;
-            return;
-        }
-
-        const width: usize = self.element_size;
-        if (self.fixed_length) |fixed| {
-            const byte_length = std.math.mul(usize, fixed, width) catch return;
-            if (byte_length > remaining) return;
-            self.live_length = fixed;
-            self.data = storage.ptr + offset;
-            return;
-        }
-
-        // QuickJS only publishes a pointer for a length-tracking TypedArray
-        // when at least one complete element remains. Partial trailing bytes
-        // are not addressable.
-        if (remaining < width) return;
-        self.live_length = std.math.cast(u32, @divTrunc(remaining, width)) orelse return;
-        self.data = storage.ptr + offset;
-    }
-};
-
-pub const RegExpPayload = extern struct {
-    /// QuickJS stores these two owned `JSString *` fields directly in
-    /// `JSObject.u.regexp` (quickjs.c:748-751, 47554-47564). Keeping the zjs
-    /// representation pointer-only lets the standard RegExp class use the
-    /// object's existing union instead of a second payload allocation.
-    source: ?*string.String = null,
-    compiled_bytecode: ?*string.String = null,
-
-    pub fn destroy(self: *RegExpPayload, rt: *JSRuntime) void {
-        const old_source = self.source;
-        const old_bytecode = self.compiled_bytecode;
-        self.* = .{};
-        if (old_source) |stored_string| stored_string.value().free(rt);
-        if (old_bytecode) |stored_string| stored_string.value().free(rt);
-    }
-
-    comptime {
-        std.debug.assert(@sizeOf(@This()) == 2 * @sizeOf(?*string.String));
-    }
-};
-
-pub const BoundFunctionPayload = struct {
-    target: ?JSValue = null,
-    this_value: ?JSValue = null,
-    args: []JSValue = &.{},
-
-    pub fn destroy(self: *BoundFunctionPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.target);
-        destroyOptionalValue(rt, &self.this_value);
-        destroyValueSlice(rt, &self.args);
-    }
-};
-
-pub const ProxyPayload = struct {
-    target: ?JSValue = null,
-    handler: ?JSValue = null,
-
-    pub fn destroy(self: *ProxyPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.target);
-        destroyOptionalValue(rt, &self.handler);
-    }
-};
-
-pub const ArgumentsPayload = struct {
-    var_refs: []JSValue = &.{},
-
-    pub fn destroy(self: *ArgumentsPayload, rt: *JSRuntime) void {
-        destroyValueSlice(rt, &self.var_refs);
-    }
-};
-
-pub const ObjectDataPayload = struct {
-    data: ?JSValue = null,
-
-    pub fn destroy(self: *ObjectDataPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.data);
-    }
-};
-
-pub const WeakRefPayload = struct {
-    weak_target_identity: ?usize = null,
-    weak_holder_link: WeakReferenceHolderLink = .{},
-
-    pub fn destroy(self: *WeakRefPayload, rt: *JSRuntime) void {
-        rt.clearWeakIdentitySlot(&self.weak_target_identity);
-    }
-};
-
-pub const VarRefPayload = struct {
-    value: ?JSValue = null,
-    is_const: bool = false,
-    is_function_name: bool = false,
-    is_deletable: bool = false,
-
-    pub fn destroy(self: *VarRefPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.value);
-        self.* = .{};
-    }
-};
-
-pub const FinalizationRegistryPayload = struct {
-    cleanup_callback: ?JSValue = null,
-    cells: []FinalizationRegistryCell = &.{},
-    cells_capacity: usize = 0,
-    /// QuickJS `JSFinalizationRegistryData.realm`: the registry, not its
-    /// callback, selects the Realm used to enqueue and begin the cleanup job.
-    /// The callback's own callable carrier may subsequently switch execution
-    /// to a different Realm when the job invokes it.
-    realm: context_mod.RealmRef = .{},
-    weak_holder_link: WeakReferenceHolderLink = .{},
-
-    pub fn destroy(self: *FinalizationRegistryPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.cleanup_callback);
-        self.realm.deinit();
-        const old_cells = self.cells;
-        const old_capacity = self.cells_capacity;
-        self.cells = &.{};
-        self.cells_capacity = 0;
-        for (old_cells) |entry| entry.destroy(rt);
-        if (old_capacity != 0) {
-            rt.memory.free(FinalizationRegistryCell, old_cells.ptr[0..old_capacity]);
-        } else if (old_cells.len != 0) {
-            rt.memory.free(FinalizationRegistryCell, old_cells);
-        }
-        self.* = .{};
-    }
-};
-
-pub const StdFilePayload = struct {
-    file: ?*std.c.FILE = null,
-    is_popen: bool = false,
-    is_stdio: bool = false,
-
-    pub fn destroy(self: *StdFilePayload) void {
-        self.* = .{};
-    }
-};
-
-const DeferredStdFileClose = struct {
-    runtime: *JSRuntime,
-    file: *std.c.FILE,
-    is_popen: bool = false,
-
-    fn run(ptr: *anyopaque) void {
-        const job: *DeferredStdFileClose = @ptrCast(@alignCast(ptr));
-        const rt = job.runtime;
-        _ = closeStdFileHandle(job.file, job.is_popen);
-        rt.memory.destroy(DeferredStdFileClose, job);
-    }
-};
-
-fn closeStdFileHandle(file: *std.c.FILE, is_popen: bool) c_int {
-    if (is_popen) {
-        const rc = pclose(file);
-        return if (rc == -1) -@as(c_int, @intCast(@intFromEnum(std.c.errno(-1)))) else rc;
-    } else {
-        const rc = std.c.fclose(file);
-        return if (rc == -1) -@as(c_int, @intCast(@intFromEnum(std.c.errno(-1)))) else rc;
-    }
-}
-
-pub const DisposableResourceKind = enum(u8) {
-    use,
-    adopt,
-    defer_,
-};
-
-pub const DisposalHint = enum(u8) {
-    sync,
-    async,
-};
-
-pub const DisposableMethodKind = enum(u8) {
-    direct,
-    async_from_sync,
-};
-
-pub const DisposableResource = struct {
-    value: JSValue = JSValue.undefinedValue(),
-    method: JSValue = JSValue.undefinedValue(),
-    kind: DisposableResourceKind = .defer_,
-    hint: DisposalHint = .sync,
-    method_kind: DisposableMethodKind = .direct,
-
-    pub fn destroy(self: DisposableResource, rt: *JSRuntime) void {
-        self.value.free(rt);
-        self.method.free(rt);
-    }
-};
-
-pub const DisposableStackPayload = struct {
-    resources: []DisposableResource = &.{},
-    resource_capacity: usize = 0,
-    disposed: bool = false,
-    async_dispose_resolve: ?JSValue = null,
-    async_dispose_reject: ?JSValue = null,
-    async_dispose_error: ?JSValue = null,
-
-    pub fn destroy(self: *DisposableStackPayload, rt: *JSRuntime) void {
-        const old_resources = self.resources;
-        const old_capacity = self.resource_capacity;
-        self.resources = &.{};
-        self.resource_capacity = 0;
-        for (old_resources) |resource| resource.destroy(rt);
-        if (old_capacity != 0) {
-            rt.memory.free(DisposableResource, old_resources.ptr[0..old_capacity]);
-        } else if (old_resources.len != 0) {
-            rt.memory.free(DisposableResource, old_resources);
-        }
-        destroyOptionalValue(rt, &self.async_dispose_resolve);
-        destroyOptionalValue(rt, &self.async_dispose_reject);
-        destroyOptionalValue(rt, &self.async_dispose_error);
-        self.* = .{};
-    }
-};
-
-pub const RealmValueSlot = enum(u8) {
-    throw_type_error_intrinsic,
-    object_prototype,
-    array_prototype,
-    array_prototype_values,
-    string_prototype,
-    number_prototype,
-    boolean_prototype,
-    bigint_prototype,
-    symbol_prototype,
-    async_function_constructor,
-    async_function_prototype,
-    generator_prototype,
-    async_iterator_prototype,
-    async_generator_prototype,
-    generator_function_constructor,
-    generator_function_prototype,
-    async_generator_function_constructor,
-    async_generator_function_prototype,
-    iterator_helper_prototype,
-    iterator_concat_prototype,
-    wrap_for_valid_iterator_prototype,
-    std_file_prototype,
-    regexp_constructor,
-    promise_constructor,
-    callsite_prototype,
-    count,
-};
-
-/// State belonging to the global *object*, not to the realm. Intrinsics,
-/// prototypes, eval, lexical state, random state, and initial Shapes are owned
-/// by `RealmContext`.
-pub const GlobalPayload = struct {
-    // qjs JSGlobalObject.uninitialized_vars (quickjs.c js_global_object_get_-
-    // uninitialized_var, 17069-17096): side table of shared UNINITIALIZED
-    // var-ref cells for globals captured before any declaration exists. A later
-    // global var/let/const declaration of the same name reuses the parked cell
-    // (js_global_object_find_uninitialized_var, 17098-17123) so every earlier
-    // capture aliases the new binding.
-    uninitialized_vars: ?*Object = null,
-    pub fn destroy(self: *GlobalPayload, rt: *JSRuntime) void {
-        const uninitialized_vars = self.uninitialized_vars;
-        self.uninitialized_vars = null;
-        if (uninitialized_vars) |env| {
-            if (rt.gc.phase != .deinit) env.value().free(rt);
-        }
-        self.* = .{};
-    }
-};
-
-/// Host-visible `$262.createRealm()` record.  Its one strong edge is explicit:
-/// the record may escape the creating call, so it owns a `RealmRef` rather
-/// than borrowing a context pointer.
-pub const RealmRecordPayload = struct {
-    realm: context_mod.RealmRef = .{},
-
-    pub fn destroy(self: *RealmRecordPayload) void {
-        self.realm.deinit();
-        self.* = .{};
-    }
-};
-
-pub const PromisePayload = struct {
-    result: ?JSValue = null,
-    reaction_callback: ?JSValue = null,
-    reaction_arg: ?JSValue = null,
-    /// Live prefix of the subscriber list. qjs threads reaction records onto
-    /// the promise with `list_add_tail` (quickjs.c:54221-54222), so a pending
-    /// promise absorbs N subscribers in O(N); `reactions_capacity` describes
-    /// the backing allocation so the array adaptation grows amortized instead
-    /// of reallocating at the exact length on every subscription.
-    reactions: []JSValue = &.{},
-    reactions_capacity: usize = 0,
-    is_rejected: bool = false,
-    atomics_wait_async: bool = false,
-
-    pub fn destroy(self: *PromisePayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.result);
-        destroyOptionalValue(rt, &self.reaction_callback);
-        destroyOptionalValue(rt, &self.reaction_arg);
-        destroyValueSliceWithCapacity(rt, &self.reactions, &self.reactions_capacity);
-        self.is_rejected = false;
-        self.atomics_wait_async = false;
-    }
-};
-
-/// One queued async-generator request (mirrors qjs JSAsyncGeneratorRequest,
-/// quickjs.c:21354): completion type (GEN_MAGIC next=0 / return=1 / throw=2),
-/// the completion argument, and the request's promise capability.
-pub const AsyncGeneratorRequest = struct {
-    completion_type: i32,
-    result: JSValue,
-    promise: JSValue,
-    resolve: JSValue,
-    reject: JSValue,
-};
-
-/// How a generator/async frame last suspended (zjs adaptation of qjs
-/// FUNC_RET_YIELD / FUNC_RET_YIELD_STAR / FUNC_RET_AWAIT return codes,
-/// quickjs.c:17735-17738): written by the save sites in vm_gen_async.zig,
-/// read by the async-generator driver to discriminate the suspension.
-pub const GeneratorSuspendKind = enum(u8) {
-    none = 0,
-    yield = 1,
-    yield_star = 2,
-    await_op = 3,
-};
-
-/// Owned operand-stack buffer parked while a generator/async frame is
-/// suspended. `values` is the live prefix; `capacity` describes the backing
-/// allocation when non-zero.
-pub const SuspendedStackStorage = struct {
-    values: []JSValue = &.{},
-    capacity: usize = 0,
-
-    /// Grow the parked stack without changing ownership on failure. Values are
-    /// moved as raw slots (no dup/free); only the backing allocation changes.
-    pub fn ensureAdditional(self: *SuspendedStackStorage, rt: *JSRuntime, limit: usize, additional: usize) !void {
-        return self.ensureAdditionalWithResidentBacking(rt, limit, additional, false);
-    }
-
-    /// `resident_backing` means the current buffer is trailing storage in its
-    /// GeneratorExecutionState allocation. Growth migrates the live prefix to
-    /// a normal owned buffer but leaves that region for the record destructor.
-    pub fn ensureAdditionalWithResidentBacking(self: *SuspendedStackStorage, rt: *JSRuntime, limit: usize, additional: usize, resident_backing: bool) !void {
-        if (self.values.len > limit) return error.StackOverflow;
-        if (additional > limit - self.values.len) return error.StackOverflow;
-        const needed = self.values.len + additional;
-        if (needed <= self.capacity) return;
-
-        var next_capacity = if (self.capacity == 0) @min(@as(usize, 8), limit) else self.capacity;
-        while (next_capacity < needed) {
-            if (next_capacity > limit / 2) {
-                next_capacity = limit;
-                break;
-            }
-            next_capacity *= 2;
-        }
-        const next = try rt.memory.alloc(JSValue, next_capacity);
-        errdefer rt.memory.free(JSValue, next);
-        @memcpy(next[0..self.values.len], self.values);
-        const old_values = self.values;
-        const old_capacity = self.capacity;
-        self.values = next[0..old_values.len];
-        self.capacity = next_capacity;
-        if (old_capacity != 0 and !resident_backing) {
-            rt.memory.free(JSValue, old_values.ptr[0..old_capacity]);
-        } else if (old_capacity == 0 and old_values.len != 0) {
-            rt.memory.free(JSValue, old_values);
-        }
-    }
-
-    pub fn deinit(self: *SuspendedStackStorage, rt: *JSRuntime) void {
-        destroyValueSliceWithCapacity(rt, &self.values, &self.capacity);
-    }
-
-    pub fn isEmpty(self: *const SuspendedStackStorage) bool {
-        return self.values.len == 0 and self.capacity == 0;
-    }
-};
-
-/// Owned frame slab and its typed live windows while execution is suspended.
-/// When `storage` is non-empty the other slices borrow windows inside it; a
-/// storage-less state may own separate locals/args slices, while var-ref and
-/// open-var-ref slots release cells only because their slot memory is never
-/// standalone. Open cells continue pointing into `locals`/`args`; preserving
-/// the unchanged slab therefore preserves their qjs-style live aliases.
-pub const SuspendedFrameStorage = struct {
-    storage: []JSValue = &.{},
-    locals: []JSValue = &.{},
-    args: []JSValue = &.{},
-    var_refs: []*var_ref_mod.VarRef = &.{},
-    open_var_refs: []?*var_ref_mod.VarRef = &.{},
-
-    pub fn deinit(self: *SuspendedFrameStorage, rt: *JSRuntime) void {
-        const owned = self.*;
-        self.* = .{};
-        var locals = owned.locals;
-        var args = owned.args;
-        var var_refs = owned.var_refs;
-        // Close while the aliased local/argument slots are still live, then
-        // release their values and finally the shared slab backing.
-        closeOpenVarRefCellSlots(rt, owned.open_var_refs);
-        if (owned.storage.len != 0) {
-            destroyValueSliceValuesOnly(rt, &locals);
-            destroyValueSliceValuesOnly(rt, &args);
-            destroyVarRefCellSliceValuesOnly(rt, &var_refs);
-            rt.memory.free(JSValue, owned.storage);
-            return;
-        }
-        destroyValueSlice(rt, &locals);
-        destroyValueSlice(rt, &args);
-        destroyVarRefCellSliceValuesOnly(rt, &var_refs);
-    }
-
-    /// Release the live window contents while leaving the backing bytes to the
-    /// surrounding GeneratorExecutionState FAM allocation.
-    pub fn deinitResident(self: *SuspendedFrameStorage, rt: *JSRuntime) void {
-        const owned = self.*;
-        self.* = .{};
-        var locals = owned.locals;
-        var args = owned.args;
-        var var_refs = owned.var_refs;
-        closeOpenVarRefCellSlots(rt, owned.open_var_refs);
-        destroyValueSliceValuesOnly(rt, &locals);
-        destroyValueSliceValuesOnly(rt, &args);
-        destroyVarRefCellSliceValuesOnly(rt, &var_refs);
-    }
-
-    pub fn isEmpty(self: *const SuspendedFrameStorage) bool {
-        return self.storage.len == 0 and self.locals.len == 0 and
-            self.args.len == 0 and self.var_refs.len == 0 and
-            self.open_var_refs.len == 0;
-    }
-};
-
-/// All buffer ownership parked while a generator is suspended. Program-counter
-/// state intentionally lives one level above this record: resume moves these
-/// buffers into live exec owners while finally/catch drivers continue reading
-/// the payload's pc, matching qjs retaining `cur_pc` while `cur_sp == NULL`.
-pub const SuspendedExecutionStorage = struct {
-    stack: SuspendedStackStorage = .{},
-    frame: SuspendedFrameStorage = .{},
-
-    /// Exchange ownership field-wise. `std.mem.swap` lowers this wide
-    /// record to a short-element loop in ReleaseFast, and save sites execute
-    /// that loop at every yield/await suspension.
-    fn swapOwned(self: *SuspendedExecutionStorage, other: *SuspendedExecutionStorage) void {
-        const stack_values = self.stack.values;
-        self.stack.values = other.stack.values;
-        other.stack.values = stack_values;
-
-        const stack_capacity = self.stack.capacity;
-        self.stack.capacity = other.stack.capacity;
-        other.stack.capacity = stack_capacity;
-
-        const frame_storage = self.frame.storage;
-        self.frame.storage = other.frame.storage;
-        other.frame.storage = frame_storage;
-
-        const frame_locals = self.frame.locals;
-        self.frame.locals = other.frame.locals;
-        other.frame.locals = frame_locals;
-
-        const frame_args = self.frame.args;
-        self.frame.args = other.frame.args;
-        other.frame.args = frame_args;
-
-        const frame_var_refs = self.frame.var_refs;
-        self.frame.var_refs = other.frame.var_refs;
-        other.frame.var_refs = frame_var_refs;
-
-        const frame_open_var_refs = self.frame.open_var_refs;
-        self.frame.open_var_refs = other.frame.open_var_refs;
-        other.frame.open_var_refs = frame_open_var_refs;
-    }
-
-    pub fn deinit(self: *SuspendedExecutionStorage, rt: *JSRuntime) void {
-        // Resume normally takes every parked buffer before the next save. In
-        // that overwhelmingly common case there is no previous owner to tear
-        // down; avoid copying/resetting the full record just to discover that
-        // all seven ownership fields are empty.
-        if (self.isEmpty()) return;
-        const owned = self.*;
-        self.* = .{};
-        var stack = owned.stack;
-        var frame = owned.frame;
-        stack.deinit(rt);
-        frame.deinit(rt);
-    }
-
-    /// Move this storage into an empty destination.
-    pub fn moveInto(self: *SuspendedExecutionStorage, destination: *SuspendedExecutionStorage) void {
-        std.debug.assert(self != destination);
-        std.debug.assert(destination.isEmpty());
-        self.swapOwned(destination);
-    }
-
-    pub fn isEmpty(self: *const SuspendedExecutionStorage) bool {
-        return self.stack.isEmpty() and self.frame.isEmpty();
-    }
-};
-
-/// The single execution record parked in a generator payload. This is a
-/// core-neutral precursor to qjs's resident `JSAsyncFunctionState.frame`.
-pub const SuspendedExecutionState = struct {
-    pc: usize = 0,
-    storage: SuspendedExecutionStorage = .{},
-    /// Authoritative dynamic catch target observed when the frame was parked.
-    /// `maxInt(u32)` is the null sentinel; bytecode offsets are u32-addressable.
-    /// A shared finalizer PC has multiple possible incoming catch states, so
-    /// resume must restore this scalar instead of inferring it from `pc`.
-    catch_target_pc: u32 = no_suspended_catch_target,
-    /// A resident frame exists even when every window is zero length and pc is
-    /// zero. This is the zjs counterpart of qjs `func_state != NULL`; neither
-    /// the program counter nor storage emptiness can represent that state.
-    has_frame: bool = false,
-    /// While true, the parked storage is installed in a live exec Frame/Stack.
-    /// Legacy/standalone states temporarily hand ownership to those views;
-    /// FAM-backed generator states keep ownership resident and lend borrowed
-    /// views, matching qjs `JSAsyncFunctionState.frame` with `cur_sp == NULL`.
-    running_aliases: bool = false,
-    /// The parked record remains the backing owner while `running_aliases` is
-    /// true. This is enabled after the first suspension proves that the normal
-    /// generator's stack and frame still occupy their combined FAM windows.
-    resident_storage_owner: bool = false,
-
-    pub fn deinit(self: *SuspendedExecutionState, rt: *JSRuntime) void {
-        if (self.running_aliases) {
-            std.debug.assert(!self.resident_storage_owner);
-            // The active Frame/Stack owns these aliases and tears them down.
-            // A running generator is normally rooted, but keeping deinit
-            // ownership-safe prevents a double free if teardown is forced.
-            self.storage = .{};
-            self.running_aliases = false;
-        } else {
-            self.storage.deinit(rt);
-        }
-        self.pc = 0;
-        self.catch_target_pc = no_suspended_catch_target;
-        self.has_frame = false;
-        self.resident_storage_owner = false;
-    }
-
-    /// Mark the parked storage as aliases of the newly-installed live owners.
-    /// No GC point may occur between installing the views and this call.
-    pub fn beginRunningAliases(self: *SuspendedExecutionState) void {
-        std.debug.assert(!self.running_aliases);
-        self.running_aliases = true;
-    }
-
-    /// A run completed or failed without suspending. Drop the stale aliases;
-    /// the live Frame/Stack remains responsible for releasing the buffers.
-    pub fn finishRunningAliases(self: *SuspendedExecutionState) void {
-        if (!self.running_aliases) return;
-        self.running_aliases = false;
-        self.has_frame = false;
-        self.catch_target_pc = no_suspended_catch_target;
-        if (self.resident_storage_owner) return;
-        self.storage = .{};
-    }
-
-    pub fn catchTarget(self: *const SuspendedExecutionState) ?usize {
-        if (self.catch_target_pc == no_suspended_catch_target) return null;
-        return self.catch_target_pc;
-    }
-
-    /// Publish replacement storage and pc before destroying the old buffers;
-    /// cleanup-time GC therefore observes the new authoritative state.
-    pub fn replaceStorageOwned(self: *SuspendedExecutionState, pc: usize, catch_target_pc: u32, replacement: *SuspendedExecutionStorage, rt: *JSRuntime) void {
-        std.debug.assert(&self.storage != replacement);
-        if (self.running_aliases) {
-            // The old fields are aliases of the same live owners (and may be
-            // stale if the operand stack grew). Publish the current views with
-            // direct ownership transfer; never inspect or destroy the aliases.
-            self.storage = replacement.*;
-            replacement.* = .{};
-            self.pc = pc;
-            self.catch_target_pc = catch_target_pc;
-            self.has_frame = true;
-            self.running_aliases = false;
-            self.resident_storage_owner = false;
-            return;
-        }
-        self.storage.swapOwned(replacement);
-        self.pc = pc;
-        self.catch_target_pc = catch_target_pc;
-        self.has_frame = true;
-        self.resident_storage_owner = false;
-        // The normal resume path emptied the previous parked owner. Test at
-        // the publication seam so that case does not enter the heavyweight
-        // generic destructor prologue at all.
-        if (!replacement.isEmpty()) replacement.deinit(rt);
-    }
-};
-
-const no_suspended_catch_target = std.math.maxInt(u32);
-
-const empty_suspended_execution_state: SuspendedExecutionState = .{};
-
-/// The separately-owned qjs `JSAsyncFunctionState` analogue.  A live
-/// generator points at one of these; completion destroys it and leaves only
-/// the compact `GeneratorPayload` state discriminator on the iterator object,
-/// matching `JSGeneratorData { state, func_state }`.
-pub const GeneratorExecutionState = struct {
-    suspended: SuspendedExecutionState = .{},
-    // qjs stores these as raw JSValue slots with JS_UNDEFINED as the empty
-    // sentinel. Avoiding Zig optionals keeps the resident state in the same
-    // 160-byte slab class as its qjs-style field set.
-    this_value: JSValue = JSValue.undefinedValue(),
-    current_function: JSValue = JSValue.undefinedValue(),
-    yield_star_iterator: JSValue = JSValue.undefinedValue(),
-    /// qjs JSAsyncFunctionState.argc. Once parameter initialization parks the
-    /// resident frame, the separate input slice is gone; this scalar preserves
-    /// mapped/unmapped `arguments` actual-count semantics on resume.
-    actual_arg_count: u16 = 0,
-    /// Operand-stack slots trailing this record in the same allocation. Zero
-    /// denotes the standalone record used by internal hand-built continuations.
-    combined_stack_slots: u16 = 0,
-    /// Frame args/locals/var-ref slots immediately following the stack region.
-    /// The high bit is the completion-pending flag, keeping the record's tail
-    /// at four bytes while allowing strict generators with >32K actual args to
-    /// retain both args and their required original-args snapshot. A u16 count
-    /// incorrectly rejected those ordinary calls even though qjs accepts up to
-    /// JS_MAX_LOCAL_VARS (65534) actual arguments.
-    combined_frame_metadata: u32 = 0,
-
-    const completion_pending_bit: u32 = 1 << 31;
-    const frame_slot_count_mask: u32 = completion_pending_bit - 1;
-
-    fn combinedFrameSlotCount(self: *const GeneratorExecutionState) usize {
-        return self.combined_frame_metadata & frame_slot_count_mask;
-    }
-
-    fn completionPending(self: *const GeneratorExecutionState) bool {
-        return self.combined_frame_metadata & completion_pending_bit != 0;
-    }
-
-    fn setCompletionPending(self: *GeneratorExecutionState, pending: bool) void {
-        if (pending) {
-            self.combined_frame_metadata |= completion_pending_bit;
-        } else {
-            self.combined_frame_metadata &= frame_slot_count_mask;
-        }
-    }
-
-    fn combinedStackStorage(self: *GeneratorExecutionState) []JSValue {
-        if (self.combined_stack_slots == 0) return &.{};
-        const base: [*]u8 = @ptrCast(self);
-        const slots: [*]JSValue = @ptrCast(@alignCast(base + generator_execution_storage_offset));
-        return slots[0..self.combined_stack_slots];
-    }
-
-    fn combinedFrameStorage(self: *GeneratorExecutionState) []JSValue {
-        const frame_slot_count = self.combinedFrameSlotCount();
-        if (frame_slot_count == 0) return &.{};
-        const base: [*]u8 = @ptrCast(self);
-        const stack_bytes = @as(usize, self.combined_stack_slots) * @sizeOf(JSValue);
-        const slots: [*]JSValue = @ptrCast(@alignCast(base + generator_execution_storage_offset + stack_bytes));
-        return slots[0..frame_slot_count];
-    }
-
-    pub fn stackUsesCombinedStorage(self: *GeneratorExecutionState) bool {
-        const combined = self.combinedStackStorage();
-        if (combined.len == 0) return false;
-        const stack = self.suspended.storage.stack;
-        return stack.capacity != 0 and stack.values.ptr == combined.ptr;
-    }
-
-    pub fn frameUsesCombinedStorage(self: *GeneratorExecutionState) bool {
-        const combined = self.combinedFrameStorage();
-        if (combined.len == 0) return false;
-        const frame = self.suspended.storage.frame;
-        return frame.storage.len != 0 and frame.storage.ptr == combined.ptr;
-    }
-
-    pub fn canRetainResidentStorageOwnership(self: *GeneratorExecutionState) bool {
-        if (!self.stackUsesCombinedStorage()) return false;
-        return self.combinedFrameSlotCount() == 0 or self.frameUsesCombinedStorage();
-    }
-
-    pub fn destroy(self: *GeneratorExecutionState, rt: *JSRuntime) void {
-        // qjs async_func_free_frame releases the resident frame before cur_func
-        // and this_val. Keep the same ownership order; yield-star's separate
-        // zjs root belongs to this execution record as well.
-        if (!self.suspended.running_aliases and self.stackUsesCombinedStorage()) {
-            var live_values = self.suspended.storage.stack.values;
-            destroyValueSliceValuesOnly(rt, &live_values);
-            self.suspended.storage.stack = .{};
-        }
-        if (!self.suspended.running_aliases and self.frameUsesCombinedStorage()) {
-            self.suspended.storage.frame.deinitResident(rt);
-        }
-        self.suspended.deinit(rt);
-        destroyOwnedValue(rt, &self.current_function);
-        destroyOwnedValue(rt, &self.this_value);
-        destroyOwnedValue(rt, &self.yield_star_iterator);
-        self.* = .{};
-    }
-};
-
-const generator_execution_alignment = blk: {
-    const state_alignment = std.mem.Alignment.of(GeneratorExecutionState);
-    const value_alignment = std.mem.Alignment.of(JSValue);
-    break :blk if (state_alignment.compare(.gt, value_alignment)) state_alignment else value_alignment;
-};
-const generator_execution_storage_offset = std.mem.alignForward(usize, @sizeOf(GeneratorExecutionState), @alignOf(JSValue));
-
-fn createGeneratorExecutionStateWithStorage(rt: *JSRuntime, stack_slots: usize, frame_slots: usize) !*GeneratorExecutionState {
-    const stack_slot_count = std.math.cast(u16, stack_slots) orelse return error.StackOverflow;
-    if (frame_slots > GeneratorExecutionState.frame_slot_count_mask) return error.StackOverflow;
-    const frame_slot_count: u32 = @intCast(frame_slots);
-    const total_slots = try std.math.add(usize, stack_slots, frame_slots);
-    const slot_bytes = try std.math.mul(usize, total_slots, @sizeOf(JSValue));
-    const allocation_size = try std.math.add(usize, generator_execution_storage_offset, slot_bytes);
-    const bytes = try rt.allocRuntimeAlignedBytes(allocation_size, generator_execution_alignment);
-    const execution: *GeneratorExecutionState = @ptrCast(@alignCast(bytes.ptr));
-    execution.* = .{
-        .combined_stack_slots = stack_slot_count,
-        .combined_frame_metadata = frame_slot_count,
-    };
-    const combined_stack = execution.combinedStackStorage();
-    execution.suspended.storage.stack = .{
-        .values = combined_stack.ptr[0..0],
-        .capacity = combined_stack.len,
-    };
-    execution.suspended.storage.frame.storage = execution.combinedFrameStorage();
-    return execution;
-}
-
-fn freeGeneratorExecutionState(rt: *JSRuntime, execution: *GeneratorExecutionState) void {
-    const combined_stack_slots = execution.combined_stack_slots;
-    const combined_frame_slots = execution.combinedFrameSlotCount();
-    execution.destroy(rt);
-    if (combined_stack_slots == 0 and combined_frame_slots == 0) {
-        rt.memory.destroy(GeneratorExecutionState, execution);
-        return;
-    }
-    const total_slots = @as(usize, combined_stack_slots) + combined_frame_slots;
-    const slot_bytes = total_slots * @sizeOf(JSValue);
-    const allocation_size = generator_execution_storage_offset + slot_bytes;
-    const bytes: [*]u8 = @ptrCast(execution);
-    rt.memory.freeAlignedBytes(bytes[0..allocation_size], generator_execution_alignment);
-}
-
-fn destroyGeneratorExecutionState(rt: *JSRuntime, slot: *?*GeneratorExecutionState) void {
-    const execution = slot.* orelse return;
-    // Publish completion before releasing graph edges so re-entrant GC sees
-    // the compact completed state, never a half-destroyed execution record.
-    slot.* = null;
-    std.debug.assert(!execution.completionPending());
-    freeGeneratorExecutionState(rt, execution);
-}
-
-pub const GeneratorPayload = struct {
-    execution: ?*GeneratorExecutionState = null,
-    async_promise: ?JSValue = null,
-    /// Async-generator request queue (mirrors JSAsyncGeneratorData.queue,
-    /// quickjs.c:21362): FIFO of pending next/return/throw requests.
-    async_queue: []AsyncGeneratorRequest = &.{},
-    async_queue_capacity: usize = 0,
-    resume_completion_type: i32 = 0,
-    /// Async-generator state machine (mirrors JSAsyncGeneratorStateEnum,
-    /// quickjs.c:21345). Only meaningful for JS_CLASS_ASYNC_GENERATOR objects.
-    async_state: u8 = 0,
-    /// GeneratorSuspendKind of the last suspension.
-    suspend_kind: u8 = 0,
-    done: bool = false,
-    executing: bool = false,
-    started: bool = false,
-    just_yielded: bool = false,
-    yield_star_suspended: bool = false,
-
-    pub fn destroy(self: *GeneratorPayload, rt: *JSRuntime) void {
-        destroyGeneratorExecutionState(rt, &self.execution);
-        destroyOptionalValue(rt, &self.async_promise);
-        for (self.async_queue) |*req| {
-            req.result.free(rt);
-            req.promise.free(rt);
-            req.resolve.free(rt);
-            req.reject.free(rt);
-        }
-        if (self.async_queue_capacity != 0) {
-            rt.memory.free(AsyncGeneratorRequest, self.async_queue.ptr[0..self.async_queue_capacity]);
-        }
-        self.async_queue = &.{};
-        self.async_queue_capacity = 0;
-        self.* = .{};
-    }
-};
-
-pub const ArrayBuiltinMarker = property.ArrayBuiltinMarker;
-pub const TypedArrayBuiltinMarker = property.TypedArrayBuiltinMarker;
-
-pub const RegExpLegacyStatics = struct {
-    input: ?JSValue = null,
-    last_match: ?JSValue = null,
-    last_paren: ?JSValue = null,
-    left_context: ?JSValue = null,
-    right_context: ?JSValue = null,
-    captures: [9]?JSValue = @splat(null),
-    /// Number of capture slots that can be populated by the current legacy
-    /// snapshot. Updates clear only the union of the old and new live ranges
-    /// instead of scanning all nine Annex-B slots after every match.
-    capture_slot_count: u8 = 0,
-    lazy_no_capture_match: bool = false,
-    lazy_match_index: usize = 0,
-    lazy_match_len: usize = 0,
-    lazy_input_len: usize = 0,
-
-    pub fn destroy(self: *RegExpLegacyStatics, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.input);
-        destroyOptionalValue(rt, &self.last_match);
-        destroyOptionalValue(rt, &self.last_paren);
-        destroyOptionalValue(rt, &self.left_context);
-        destroyOptionalValue(rt, &self.right_context);
-        destroyOptionalValueSlots(rt, &self.captures);
-        self.* = .{};
-    }
-};
-
-pub const FunctionRarePayload = struct {
-    source: ?JSValue = null,
-    internal_callable_tag: host_function.InternalCallableTag = .none,
-    array_builtin_marker: ArrayBuiltinMarker = .none,
-    typed_array_builtin_marker: TypedArrayBuiltinMarker = .none,
-    array_iterator_kind: u8 = 0,
-    iterator_identity: bool = false,
-    array_iterator_next: bool = false,
-    generator_next: bool = false,
-    throw_type_error_intrinsic: bool = false,
-    async_iterator_async_dispose: bool = false,
-    async_generator_method: bool = false,
-    iterator_helper_method: u8 = 0,
-    async_from_sync_iterator_method: u8 = 0,
-    disposable_stack_method: u8 = 0,
-    async_disposable_stack_method: u8 = 0,
-    collection_method_owner_class: class.ClassId = class.invalid_class_id,
-    typed_array_element_size: u32 = 0,
-    typed_array_kind: u8 = 0,
-    iterator_wrap_method: u8 = 0,
-    async_from_sync_unwrap_done: u8 = 0,
-    realm_global: ?JSValue = null,
-    proxy_revoke_target: ?JSValue = null,
-    promise_capability_slot: ?JSValue = null,
-    promise_resolving_target: ?JSValue = null,
-    promise_resolving_state: ?JSValue = null,
-    promise_resolving_reject: bool = false,
-    promise_combinator_state: ?JSValue = null,
-    promise_combinator_index: u32 = 0,
-    promise_combinator_mode: u8 = 0,
-    promise_combinator_called: bool = false,
-    promise_finally_payload: ?JSValue = null,
-    promise_finally_callback: ?JSValue = null,
-    promise_finally_constructor: ?JSValue = null,
-    promise_finally_mode: u8 = 0,
-    async_dispose_stack: ?JSValue = null,
-    async_dispose_rejected: bool = false,
-    async_function_continuation: ?JSValue = null,
-    async_function_rejected: bool = false,
-    /// Action discriminator for `.async_generator_resolve` trampolines (zjs
-    /// adaptation of the js_async_generator_resolve_function magic,
-    /// quickjs.c:21670; extra actions carry the awaits qjs compiles into the
-    /// body bytecode — see exec/async_generator.zig ResolveAction).
-    async_generator_action: u8 = 0,
-
-    pub fn destroy(self: *FunctionRarePayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.source);
-        destroyOptionalValue(rt, &self.realm_global);
-        destroyOptionalValue(rt, &self.proxy_revoke_target);
-        destroyOptionalValue(rt, &self.promise_capability_slot);
-        destroyOptionalValue(rt, &self.promise_resolving_target);
-        destroyOptionalValue(rt, &self.promise_resolving_state);
-        destroyOptionalValue(rt, &self.promise_combinator_state);
-        destroyOptionalValue(rt, &self.promise_finally_payload);
-        destroyOptionalValue(rt, &self.promise_finally_callback);
-        destroyOptionalValue(rt, &self.promise_finally_constructor);
-        destroyOptionalValue(rt, &self.async_dispose_stack);
-        destroyOptionalValue(rt, &self.async_function_continuation);
-        self.* = .{};
-    }
-};
-
-pub const FunctionPayload = struct {
-    pub const NativeFields = extern struct {
-        // qjs `u.cfunc.realm`: a true C_FUNCTION owns its construction realm.
-        // C_FUNCTION_DATA and other caller-semantics payloads leave this empty;
-        // bytecode functions instead own the shared realm through their FB.
-        realm: context_mod.RealmRef = .{},
-        // Memoized resolved internal-record handle, mirroring qjs
-        // `p->u.cfunc.c_function`. The record is comptime rodata and cannot
-        // dangle.
-        call_cache: ?*const host_function.InternalRecord = null,
-        host_function_kind: i32 = 0,
-        native_function_id: i32 = 0,
-        external_host_function_id: u32 = 0,
-        native_dispatch_name: atom.Atom = atom.null_atom,
-        typed_array_element_size: u32 = 0,
-        typed_array_kind: u8 = 0,
-    };
-
-    // Bytecode functions use Object.u.bytecode_function directly, so this
-    // out-of-line extension is native-only.
-    native: NativeFields = .{},
-    rare: ?*FunctionRarePayload = null,
-    /// Dense-index cache for the runtime's borrowed-reference-holder registry.
-    /// Stored as a little-endian 24-bit index+1 so zero is the uncached
-    /// sentinel. Registries beyond 16M entries fall back to generic lookup.
-    borrowed_holder_index_lo: u8 = 0,
-    borrowed_holder_index_mid: u8 = 0,
-    borrowed_holder_index_hi: u8 = 0,
-
-    pub fn initNative() FunctionPayload {
-        return .{};
-    }
-
-    fn destroyRare(self: *FunctionPayload, rt: *JSRuntime) void {
-        if (self.rare) |rare| {
-            self.rare = null;
-            rare.destroy(rt);
-            rt.memory.destroy(FunctionRarePayload, rare);
-        }
-    }
-
-    pub fn destroyNative(self: *FunctionPayload, rt: *JSRuntime) void {
-        const fields = &self.native;
-        fields.realm.deinit();
-        const native_dispatch_name = fields.native_dispatch_name;
-        fields.native_dispatch_name = atom.null_atom;
-        rt.atoms.free(native_dispatch_name);
-        self.destroyRare(rt);
-    }
-
-    comptime {
-        std.debug.assert(@sizeOf(NativeFields) == 40);
-        std.debug.assert(@sizeOf(FunctionPayload) == 56);
-    }
-};
-
-/// Cold per-closure extension for zjs-only function metadata. The hot qjs
-/// `u.func.home_object` word stores a direct Object pointer when this extension
-/// is absent; its low tag bit points here only when a bytecode function needs
-/// rare per-closure state in addition to its optional home object.
-pub const BytecodeFunctionAux = struct {
-    home_object: ?*Object = null,
-    rare: FunctionRarePayload = .{},
-
-    fn destroy(self: *BytecodeFunctionAux, rt: *JSRuntime) void {
-        destroyOptionalObjectRef(rt, &self.home_object);
-        self.rare.destroy(rt);
-    }
-};
-
-/// Exact qjs `JSObject.u.func` three-word arm.
-pub const BytecodeFunctionStorage = extern struct {
-    function_bytecode: ?*FunctionBytecode = null,
-    // A non-null dangling pointer represents the empty capture array. The
-    // pointer is never dereferenced while the FB count is zero. This keeps the
-    // hot call prologue branch-free without changing qjs's one-word var_refs
-    // storage or allocating an empty array.
-    var_refs: [*]?*var_ref_mod.VarRef = emptyVarRefs(),
-    /// null/direct `Object*`, or a low-bit-tagged `BytecodeFunctionAux*`.
-    home_or_aux: ?*anyopaque = null,
-
-    inline fn captureSlots(self: *const BytecodeFunctionStorage) []?*var_ref_mod.VarRef {
-        // FB is installed before closure capture construction. Treat the
-        // sentinel as an empty/uninstalled array even when the eventual FB
-        // count is non-zero, so construction rollback and replacement never
-        // walk the dangling pointer. Fully-published callables with a non-zero
-        // count have already replaced it with their allocated array.
-        if (self.var_refs == emptyVarRefs()) return &.{};
-        const fb = self.function_bytecode orelse return &.{};
-        return self.var_refs[0..fb.closureVarCount()];
-    }
-
-    pub inline fn captureSlice(self: *const BytecodeFunctionStorage) []*var_ref_mod.VarRef {
-        const fb = self.function_bytecode orelse return &.{};
-        const slots = self.captureSlots();
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
-            std.debug.assert(slots.len == fb.closureVarCount());
-            for (slots) |slot| std.debug.assert(slot != null);
-        }
-        if (slots.len == 0) return &.{};
-        const sealed: [*]*var_ref_mod.VarRef = @ptrCast(slots.ptr);
-        return sealed[0..slots.len];
-    }
-
-    pub inline fn emptyVarRefs() [*]?*var_ref_mod.VarRef {
-        return @ptrFromInt(@alignOf(?*var_ref_mod.VarRef));
-    }
-
-    comptime {
-        std.debug.assert(@sizeOf(@This()) == 24);
-    }
-};
+pub const collection_no_entry = object_payloads.collection_no_entry;
+pub const CollectionEntry = object_payloads.CollectionEntry;
+pub const WeakCollectionEntry = object_payloads.WeakCollectionEntry;
+pub const FinalizationRegistryCellState = object_payloads.FinalizationRegistryCellState;
+pub const FinalizationRegistryCell = object_payloads.FinalizationRegistryCell;
+pub const DataPropertyLookup = object_payloads.DataPropertyLookup;
+pub const OrdinaryPayload = object_payloads.OrdinaryPayload;
+pub const IteratorPayload = object_payloads.IteratorPayload;
+pub const WeakReferenceHolderLink = object_payloads.WeakReferenceHolderLink;
+pub const CollectionPayload = object_payloads.CollectionPayload;
+pub const SharedBufferStore = object_payloads.SharedBufferStore;
+pub const ExternalByteStorageDeinit = object_payloads.ExternalByteStorageDeinit;
+pub const BufferPayload = object_payloads.BufferPayload;
+pub const TypedArrayPayload = object_payloads.TypedArrayPayload;
+pub const RegExpPayload = object_payloads.RegExpPayload;
+pub const BoundFunctionPayload = object_payloads.BoundFunctionPayload;
+pub const ProxyPayload = object_payloads.ProxyPayload;
+pub const ArgumentsPayload = object_payloads.ArgumentsPayload;
+pub const ObjectDataPayload = object_payloads.ObjectDataPayload;
+pub const WeakRefPayload = object_payloads.WeakRefPayload;
+pub const VarRefPayload = object_payloads.VarRefPayload;
+pub const FinalizationRegistryPayload = object_payloads.FinalizationRegistryPayload;
+pub const StdFilePayload = object_payloads.StdFilePayload;
+pub const DisposableResourceKind = object_payloads.DisposableResourceKind;
+pub const DisposalHint = object_payloads.DisposalHint;
+pub const DisposableMethodKind = object_payloads.DisposableMethodKind;
+pub const DisposableResource = object_payloads.DisposableResource;
+pub const DisposableStackPayload = object_payloads.DisposableStackPayload;
+pub const RealmValueSlot = context_mod.RealmValueSlot;
+pub const GlobalPayload = object_payloads.GlobalPayload;
+pub const RealmRecordPayload = object_payloads.RealmRecordPayload;
+pub const PromisePayload = object_payloads.PromisePayload;
+pub const AsyncGeneratorRequest = generator_state.AsyncGeneratorRequest;
+pub const GeneratorSuspendKind = generator_state.GeneratorSuspendKind;
+pub const SuspendedStackStorage = generator_state.SuspendedStackStorage;
+pub const SuspendedFrameStorage = generator_state.SuspendedFrameStorage;
+pub const SuspendedExecutionStorage = generator_state.SuspendedExecutionStorage;
+pub const SuspendedExecutionState = generator_state.SuspendedExecutionState;
+pub const GeneratorExecutionState = generator_state.GeneratorExecutionState;
+pub const GeneratorPayload = generator_state.GeneratorPayload;
+pub const ArrayBuiltinMarker = object_payloads.ArrayBuiltinMarker;
+pub const TypedArrayBuiltinMarker = object_payloads.TypedArrayBuiltinMarker;
+pub const RegExpLegacyStatics = object_payloads.RegExpLegacyStatics;
+pub const FunctionRarePayload = object_payloads.FunctionRarePayload;
+pub const FunctionPayload = object_payloads.FunctionPayload;
+pub const BytecodeFunctionAux = object_payloads.BytecodeFunctionAux;
+pub const BytecodeFunctionStorage = object_payloads.BytecodeFunctionStorage;
+
+const destroyOwnedValue = object_payloads.destroyOwnedValue;
+const replaceOwnedValue = object_payloads.replaceOwnedValue;
+const destroyValueSlice = object_payloads.destroyValueSlice;
+const destroyValueSliceWithCapacity = object_payloads.destroyValueSliceWithCapacity;
+const destroyOptionalVarRefCellSlice = object_payloads.destroyOptionalVarRefCellSlice;
+const createGeneratorExecutionStateWithStorage = generator_state.createGeneratorExecutionStateWithStorage;
+const destroyGeneratorExecutionState = generator_state.destroyGeneratorExecutionState;
+const empty_suspended_execution_state = generator_state.empty_suspended_execution_state;
 
 pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payload_kind: class.PayloadKind, payload: *class.Payload) void {
     const ptr = payload.* orelse return;
@@ -1828,6 +364,13 @@ pub const DenseArrayStorage = extern struct {
     values: [*]JSValue = @ptrFromInt(@alignOf(JSValue)),
     count: u32 = 0,
     capacity: u32 = 0,
+    /// JS-observable `.length` for arrays, distinct from the dense element
+    /// extent in `count`: an array may carry `length > count`, with the slots
+    /// `[count, length)` being holes (resolved up the prototype chain, never
+    /// owned, and not enumerated). This mirrors qjs `p->prop[0].u.value` in
+    /// set_array_length/add_fast_array_element; `length >= count` for arrays.
+    /// Unmapped arguments keep it equal to `count` solely as dense-storage
+    /// metadata; their visible `length` is an ordinary own property.
     length: u32 = 0,
     _padding: u32 = 0,
 };
@@ -1835,6 +378,16 @@ pub const DenseArrayStorage = extern struct {
 /// Full 24-byte class-data union, matching qjs `JSObject.u`. Payload-backed
 /// classes use only the first pointer; dense arrays use the complete array arm.
 /// Bytecode functions will use the same three-word budget for FB/var_refs/home.
+///
+/// `ObjectFlags.class_payload_kind == .none` is intentionally tri-state: the
+/// object may have no payload, may carry an embedder-external or trailing-inline
+/// payload pointer in word 0, or may use a non-payload inline/dense union arm.
+/// `externalClassPayload` owns the manual class/flag exclusion for the last
+/// case; a new inline/dense arm must join it before storing non-payload bytes.
+/// Payload-pointer objects must use `initPayload`: it zeroes union bytes 8..24
+/// before writing word 0. Some cross-arm checks (for example the ordinary
+/// Array.prototype path reading `u.array.capacity`) rely on those bytes staying
+/// zero even while the payload arm is active.
 pub const ObjectStorage = extern union {
     /// Out-of-line payload for non-array classes (Map/Proxy/native function/...).
     payload: class.Payload,
@@ -1875,16 +428,9 @@ pub const Object = extern struct {
     // A dangling aligned sentinel means no storage; allocated capacity remains
     // derivable from the shape, avoiding a redundant object flag.
     prop_values: [*]property.Entry = @ptrFromInt(@alignOf(property.Entry)),
-    // qjs 24-byte class union: payload pointer OR dense-array state.
-    u: ObjectStorage = .{ .array = .{} },
-    /// JS-observable `.length` for arrays. Distinct from dense `count` (the
-    /// dense element extent): an array may carry `array_length > array_count`
-    /// with the slots `[array_count, array_length)` being HOLES (resolve up the
-    /// prototype chain; never own; not enumerated). Semantically mirrors qjs
-    /// `p->prop[0].u.value` (set_array_length / add_fast_array_element). Invariant:
-    /// `array_length >= array_count` for arrays. Unmapped arguments keep it
-    /// equal to `array_count` solely as dense-storage metadata; their visible
-    /// `length` remains an ordinary own property in the shared arguments shape.
+    // qjs 24-byte class union: payload pointer OR dense-array state. All six
+    // construction literals override this; keep omission safe and null-backed.
+    u: ObjectStorage = ObjectStorage.initPayload(null),
     // ===== create / construction =====
     pub fn expect(val: JSValue) !*Object {
         const header = val.refHeader() orelse return error.TypeError;
@@ -2984,6 +1530,11 @@ pub const Object = extern struct {
         return &rt.cached_iterator_next_entries[index].value;
     }
 
+    /// Narrow cross-file seam for the cycle collector's cached-edge walk.
+    pub fn cachedIteratorNextSlotForCycleGc(self: *const Object, rt: *JSRuntime) ?*?JSValue {
+        return self.cachedIteratorNextSlotIfPresent(rt);
+    }
+
     fn cachedIteratorNextEntryIndex(rt: *const JSRuntime, self: *const Object) ?usize {
         if (rt.cached_iterator_next_entries.len == 0) return null;
         for (rt.cached_iterator_next_entries, 0..) |entry, index| {
@@ -3126,15 +1677,25 @@ pub const Object = extern struct {
     }
 
     pub fn externalClassPayload(self: *Object) ?*anyopaque {
-        // A dense-element object's `u` holds `array_values`, not a payload;
-        // only an object with kind==.none and no dense storage can carry an
-        // external payload pointer.
+        // `.none` is tri-state (ObjectStorage contract). This list excludes
+        // non-payload inline/dense arms; trailing-inline payload classes stay
+        // eligible because their word 0 really is the payload pointer. A new
+        // inline/dense arm must join this exclusion before storing union data.
         if (self.isArray() or self.flags.fast_array or self.class_id == class.ids.mapped_arguments or self.flags.class_payload_kind != .none) return null;
+        std.debug.assert(self.u.array.count == 0);
+        std.debug.assert(self.u.array.capacity == 0);
+        std.debug.assert(self.u.array.length == 0);
+        std.debug.assert(self.u.payload == null or @intFromPtr(self.u.payload.?) != @alignOf(JSValue));
         return self.u.payload;
     }
 
     pub fn externalClassPayloadConst(self: *const Object) ?*anyopaque {
+        // Keep this exclusion and its Debug proof paired with the mutable arm.
         if (self.isArray() or self.flags.fast_array or self.class_id == class.ids.mapped_arguments or self.flags.class_payload_kind != .none) return null;
+        std.debug.assert(self.u.array.count == 0);
+        std.debug.assert(self.u.array.capacity == 0);
+        std.debug.assert(self.u.array.length == 0);
+        std.debug.assert(self.u.payload == null or @intFromPtr(self.u.payload.?) != @alignOf(JSValue));
         return self.u.payload;
     }
 
@@ -3203,7 +1764,7 @@ pub const Object = extern struct {
         const file = payload.file orelse return 0;
         if (payload.is_stdio) return 0;
         payload.file = null;
-        return closeStdFileHandle(file, payload.is_popen);
+        return runtime_mod.closeStdFileHandle(file, payload.is_popen);
     }
 
     fn enqueueDeferredStdFileClose(self: *Object, rt: *JSRuntime) void {
@@ -3212,19 +1773,7 @@ pub const Object = extern struct {
         if (payload.is_stdio) return;
         payload.file = null;
 
-        const job = rt.createRuntime(DeferredStdFileClose) catch {
-            _ = closeStdFileHandle(file, payload.is_popen);
-            return;
-        };
-        job.* = .{
-            .runtime = rt,
-            .file = file,
-            .is_popen = payload.is_popen,
-        };
-        rt.enqueueDeferredNativeCleanup(DeferredStdFileClose.run, @ptrCast(job)) catch {
-            _ = closeStdFileHandle(file, payload.is_popen);
-            rt.memory.destroy(DeferredStdFileClose, job);
-        };
+        runtime_mod.enqueueDeferredStdFileClose(rt, file, payload.is_popen);
     }
 
     // ===== destroy / teardown =====
@@ -3650,7 +2199,8 @@ pub const Object = extern struct {
         return false;
     }
 
-    fn sweepCycleGarbageWeakCollectionEntries(rt: *JSRuntime) void {
+    /// Remove weak entries whose keys are in the condemned cycle partition.
+    pub fn sweepCycleGarbageWeakCollectionEntriesForCycleGc(rt: *JSRuntime) void {
         rt.gc.beginDecrefPhase();
         defer rt.gc.endDecrefPhase(rt);
 
@@ -3777,7 +2327,7 @@ pub const Object = extern struct {
                     write_index += 1;
                     continue;
                 }
-                enqueueFinalizationCleanup(rt, finalization_payload, cell.held_value) catch |err| switch (err) {
+                object_gc.enqueueFinalizationCleanup(rt, finalization_payload, cell.held_value) catch |err| switch (err) {
                     error.OutOfMemory => {
                         finalization_enqueue_blocked.* = true;
                         finalization_payload.cells[write_index] = cell;
@@ -7176,6 +5726,11 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
+    /// Narrow cross-file seam for weak-entry processing during cycle GC.
+    pub fn collectionPayloadForCycleGc(self: *Object) ?*CollectionPayload {
+        return self.collectionPayload();
+    }
+
     fn collectionPayloadConst(self: *const Object) ?*const CollectionPayload {
         if (self.flags.class_payload_kind != .collection) return null;
         const ptr = self.u.payload orelse return null;
@@ -7196,6 +5751,11 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
+    /// Narrow cross-file seam for finalization-cell processing during cycle GC.
+    pub fn finalizationRegistryPayloadForCycleGc(self: *Object) ?*FinalizationRegistryPayload {
+        return self.finalizationRegistryPayload();
+    }
+
     fn finalizationRegistryPayloadConst(self: *const Object) ?*const FinalizationRegistryPayload {
         if (self.flags.class_payload_kind != .finalization_registry) return null;
         const ptr = self.u.payload orelse return null;
@@ -7214,6 +5774,11 @@ pub const Object = extern struct {
         if (self.flags.class_payload_kind != .weak_ref) return null;
         const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
+    }
+
+    /// Narrow cross-file seam for weak-target processing during cycle GC.
+    pub fn weakRefPayloadForCycleGc(self: *Object) ?*WeakRefPayload {
+        return self.weakRefPayload();
     }
 
     fn weakRefPayloadConst(self: *const Object) ?*const WeakRefPayload {
@@ -7575,370 +6140,10 @@ pub const Object = extern struct {
     }
 
     // ===== visit* / cycle GC =====
-    pub fn destroyRuntimeCycles(rt: *JSRuntime) usize {
-        return rt.runObjectCycleRemoval();
-    }
-
-    /// qjs `JS_MarkFunc` (quickjs.h). Cold-tail walk uses one shared body.
-    const MarkFunc = *const fn (rt: *JSRuntime, header: *gc.Header) void;
-
-    /// Phase selector for the specialized ordinary-object data-slot arm.
-    /// Comptime so Decref / ScanIncref each get a small hot copy with the
-    /// child update inlined (no per-edge `blr`). Rare class-payload tails
-    /// stay in `markChildrenCold`.
-    const MarkMode = enum(u8) { decref, scan_incref, scan_restore };
-
-    inline fn markFuncFor(comptime mode: MarkMode) MarkFunc {
-        return switch (mode) {
-            .decref => gcDecrefChild,
-            .scan_incref => gcScanIncrefChild,
-            .scan_restore => gcScanIncrefChild2,
-        };
-    }
-
-    inline fn isOrdinaryCycleHotObject(self: *const Object) bool {
-        // qjs mark_children OBJECT arm stops after properties when
-        // class_id == JS_CLASS_OBJECT (quickjs.c:6605).
-        return self.class_id == class.ids.object and self.flags.class_payload_kind == .none;
-    }
-
-    /// qjs `gc_decref_child` (quickjs.c:6687-6695).
-    inline fn gcDecrefChildInline(rt: *JSRuntime, p: *gc.Header) void {
-        std.debug.assert(p.meta().rc > 0);
-        p.meta().rc -= 1;
-        if (p.meta().rc == 0 and p.meta().flags.mark) {
-            rt.gc.detachCycleCandidate(p);
-            gc.listAddTail(&rt.gc.tmp_obj_list, p);
-        }
-    }
-
-    fn gcDecrefChild(rt: *JSRuntime, p: *gc.Header) void {
-        gcDecrefChildInline(rt, p);
-    }
-
-    /// qjs `gc_scan_incref_child` (quickjs.c:6719-6728).
-    inline fn gcScanIncrefChildInline(rt: *JSRuntime, p: *gc.Header) void {
-        p.meta().rc += 1;
-        if (p.meta().rc != 1) return;
-        // Unlinked headers are not cycle-list members (heap BigInt used to
-        // reach here via refCountHeader; cycleMarkHeader now matches
-        // JS_MarkValue, but force-GC and mid-construction edges can still
-        // present a non-listed GC header). list_del on prev==null is SEGV.
-        if (p.prev == null) return;
-        gc.listDel(p);
-        rt.gc.restoreCycleCandidate(p);
-        p.meta().flags.mark = false;
-    }
-
-    fn gcScanIncrefChild(rt: *JSRuntime, p: *gc.Header) void {
-        gcScanIncrefChildInline(rt, p);
-    }
-
-    /// qjs `gc_scan_incref_child2` (quickjs.c:6731-6734).
-    inline fn gcScanIncrefChild2Inline(rt: *JSRuntime, p: *gc.Header) void {
-        _ = rt;
-        p.meta().rc += 1;
-    }
-
-    fn gcScanIncrefChild2(rt: *JSRuntime, p: *gc.Header) void {
-        gcScanIncrefChild2Inline(rt, p);
-    }
-
-    inline fn markHeader(rt: *JSRuntime, h: *gc.Header, comptime mode: MarkMode) void {
-        switch (mode) {
-            .decref => gcDecrefChildInline(rt, h),
-            .scan_incref => gcScanIncrefChildInline(rt, h),
-            .scan_restore => gcScanIncrefChild2Inline(rt, h),
-        }
-    }
-
-    const MarkVisitor = struct {
-        rt: *JSRuntime,
-        mark_func: MarkFunc,
-
-        pub fn visitValue(self: MarkVisitor, val: *JSValue) void {
-            // JS_MarkValue (quickjs.c:6553-6566).
-            if (val.cycleMarkHeader()) |h| self.mark_func(self.rt, h);
-        }
-
-        pub fn visitObject(self: MarkVisitor, obj_ptr: *?*Object) void {
-            if (obj_ptr.*) |obj| {
-                if (@intFromPtr(obj) == 0) return;
-                self.mark_func(self.rt, &obj.header);
-            }
-        }
-
-        pub fn visitShape(self: MarkVisitor, shape_ref: *shape.Shape) void {
-            self.mark_func(self.rt, &shape_ref.header);
-        }
-
-        pub fn visitRealm(self: MarkVisitor, ctx_ptr: *?*context_mod.RealmContext) void {
-            if (ctx_ptr.*) |ctx| self.mark_func(self.rt, &ctx.header);
-        }
-
-        pub fn visitModule(self: MarkVisitor, record: *module_mod.ModuleRecord) void {
-            self.mark_func(self.rt, &record.header);
-        }
-
-        pub fn visitWeakCollectionEntry(self: MarkVisitor, entry: *WeakCollectionEntry) void {
-            _ = self;
-            _ = entry;
-        }
-
-        pub fn visitFinalizationCell(self: MarkVisitor, entry: *FinalizationRegistryCell) void {
-            if (entry.keepsHeldValuesAlive()) self.visitValue(&entry.held_value);
-        }
-    };
-
-    fn markUnusualPropertyCold(
-        rt: *JSRuntime,
-        entry: *property.Entry,
-        slot_flags: property.Flags,
-        mark_func: MarkFunc,
-    ) void {
-        const visitor = MarkVisitor{ .rt = rt, .mark_func = mark_func };
-        switch (slot_flags.kind) {
-            .data => unreachable,
-            .accessor => {
-                var getter_value = entry.slot.accessor.getterValue();
-                visitor.visitValue(&getter_value);
-                entry.slot.accessor.syncGetterFromVisitedValue(getter_value);
-                var setter_value = entry.slot.accessor.setterValue();
-                visitor.visitValue(&setter_value);
-                entry.slot.accessor.syncSetterFromVisitedValue(setter_value);
-            },
-            .var_ref => {
-                var cell_value = entry.slot.var_ref.valueRef();
-                visitor.visitValue(&cell_value);
-            },
-            .auto_init => {
-                const realm_header = entry.slot.auto_init.realm_and_id.realmHeader() orelse unreachable;
-                var realm: ?*context_mod.RealmContext = @alignCast(@fieldParentPtr("header", realm_header));
-                visitor.visitRealm(&realm);
-                entry.slot.auto_init.realm_and_id.syncRealmHeader(&(realm orelse unreachable).header);
-            },
-        }
-    }
-
-    fn markIteratorNextCacheCold(rt: *JSRuntime, self: *Object, mark_func: MarkFunc) void {
-        const visitor = MarkVisitor{ .rt = rt, .mark_func = mark_func };
-        if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
-            if (slot.*) |*stored| visitor.visitValue(stored);
-        }
-    }
-
-    inline fn markPropertyDataSlots(rt: *JSRuntime, self: *Object, comptime mode: MarkMode) void {
-        const traced_prop_count = self.shape_ref.prop_count;
-        for (self.prop_values[0..traced_prop_count], 0..) |*entry, index| {
-            const slot_flags = self.propFlagsAt(index);
-            if (slot_flags.deleted) continue;
-            if (slot_flags.kind == .data) {
-                if (entry.slot.data.cycleMarkHeader()) |h| markHeader(rt, h, mode);
-                continue;
-            }
-            @call(.never_inline, markUnusualPropertyCold, .{ rt, entry, slot_flags, markFuncFor(mode) });
-        }
-    }
-
-    /// Specialized ordinary-object arm (qjs:6572-6603, class_id == OBJECT).
-    /// One small copy per MarkMode so the data-slot `JS_MarkValue` + child
-    /// update inline. Accessor / var_ref / autoinit stay outlined.
-    fn markOrdinaryObjectHot(rt: *JSRuntime, self: *Object, comptime mode: MarkMode) align(16) void {
-        markHeader(rt, &self.shape_ref.header, mode);
-        markPropertyDataSlots(rt, self, mode);
-        if (rt.cached_iterator_next_entries.len != 0) {
-            @call(.never_inline, markIteratorNextCacheCold, .{ rt, self, markFuncFor(mode) });
-        }
-    }
-
-    /// Specialized fast-array arm (qjs js_array_mark, quickjs.c:6204).
-    fn markFastArrayHot(rt: *JSRuntime, self: *Object, comptime mode: MarkMode) align(16) void {
-        markHeader(rt, &self.shape_ref.header, mode);
-        markPropertyDataSlots(rt, self, mode);
-        for (self.arrayElements()) |*stored| {
-            if (stored.cycleMarkHeader()) |h| markHeader(rt, h, mode);
-        }
-    }
-
-    /// Specialized shape arm (qjs:6662-6668).
-    fn markShapeHot(rt: *JSRuntime, header: *gc.Header, comptime mode: MarkMode) align(16) void {
-        const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", header));
-        if (shape_ref.proto) |proto| {
-            if (@intFromPtr(proto) != 0) markHeader(rt, &proto.header, mode);
-        }
-    }
-
-    /// Shared cold walk: non-ordinary objects and non-object GC kinds.
-    /// Single instantiation; visitor is a function pointer.
-    fn markChildrenCold(rt: *JSRuntime, header: *gc.Header, mark_func: MarkFunc) align(16) void {
-        const visitor = MarkVisitor{ .rt = rt, .mark_func = mark_func };
-        switch (header.meta().flags.kind) {
-            .object => {
-                const obj: *Object = @alignCast(@fieldParentPtr("header", header));
-                obj.traceChildEdgesNoFail(rt, visitor);
-            },
-            .function_bytecode => {
-                const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
-                visitor.visitRealm(&fb.realm.ptr);
-                for (fb.cpoolSlice()) |*stored| visitor.visitValue(stored);
-            },
-            .var_ref => {
-                const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", header));
-                // Closed: value is the owned binding value. Open: pvalue is a
-                // borrowed frame slot, while value owns the parked generator
-                // that keeps that slot alive. This is QuickJS's detached-value
-                // vs attached-async_func union; tracing pvalue for an open cell
-                // double-counts the frame-owned slot and corrupts trial RC.
-                visitor.visitValue(&ref.value);
-            },
-            .shape => {
-                const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", header));
-                shape_ref.traceChildEdgesNoFail(rt, visitor);
-            },
-            .realm_context => {
-                const ctx: *context_mod.JSContext = @alignCast(@fieldParentPtr("header", header));
-                ctx.traceChildEdgesNoFail(visitor);
-            },
-            .module => {
-                const record: *module_mod.ModuleRecord = @alignCast(@fieldParentPtr("header", header));
-                record.traceChildEdgesNoFail(rt, visitor);
-            },
-            else => {},
-        }
-    }
-
-    inline fn markOne(rt: *JSRuntime, header: *gc.Header, comptime mode: MarkMode) void {
-        switch (header.meta().flags.kind) {
-            .object => {
-                const obj: *Object = @alignCast(@fieldParentPtr("header", header));
-                if (isOrdinaryCycleHotObject(obj)) {
-                    @call(.never_inline, markOrdinaryObjectHot, .{ rt, obj, mode });
-                    return;
-                }
-                if (obj.isArray() and obj.flags.fast_array) {
-                    @call(.never_inline, markFastArrayHot, .{ rt, obj, mode });
-                    return;
-                }
-            },
-            .shape => {
-                @call(.never_inline, markShapeHot, .{ rt, header, mode });
-                return;
-            },
-            else => {},
-        }
-        @call(.never_inline, markChildrenCold, .{ rt, header, markFuncFor(mode) });
-    }
-
-    fn gcRemoveWeakObjects(rt: *JSRuntime) ObjectGraphError!void {
-        sweepDeadWeakRootSlots(rt);
-
-        // Match qjs gc_remove_weak_objects: the payload-resident holder list is
-        // traversed exactly once while zero-ref destruction is deferred. Empty
-        // weak holders stay linked for their full lifetime, so this traversal
-        // has no allocation and no registry rescans or mark-bit side effects.
-        rt.gc.beginDecrefPhase();
-        defer rt.gc.endDecrefPhase(rt);
-        var finalization_enqueue_blocked = false;
-        var current = rt.weak_reference_holder_head;
-        while (current) |holder| {
-            const next = holder.weakReferenceHolderNext();
-            try holder.sweepDeadWeakPayloadReferences(rt, &finalization_enqueue_blocked);
-            current = next;
-        }
-    }
-
-    fn sweepDeadWeakRootSlots(rt: *JSRuntime) void {
-        for (rt.weak_root_slots) |slot| {
-            const identity = slot.identity orelse continue;
-            if (!weakIdentityIsLive(rt, identity)) {
-                rt.clearWeakRootSlot(slot, true);
-            }
-        }
-    }
-
-    fn sweepDeadWeakPayloadReferences(
-        self: *Object,
-        rt: *JSRuntime,
-        finalization_enqueue_blocked: *bool,
-    ) ObjectGraphError!void {
-        if (self.weakRefPayload()) |payload| {
-            if (payload.weak_target_identity) |identity| {
-                if (!weakIdentityIsLive(rt, identity)) {
-                    rt.clearWeakIdentitySlot(&payload.weak_target_identity);
-                }
-            }
-        }
-
-        if (self.collectionPayload()) |payload| {
-            var read_index: usize = 0;
-            var write_index: usize = 0;
-            var removed_weak_entry = false;
-            while (read_index < payload.weak_entries.len) : (read_index += 1) {
-                const entry = payload.weak_entries[read_index];
-                if (weakIdentityIsLive(rt, entry.key_identity)) {
-                    if (write_index != read_index) payload.weak_entries[write_index] = entry;
-                    write_index += 1;
-                    continue;
-                }
-
-                rt.releaseWeakIdentity(entry.key_identity);
-                entry.value.free(rt);
-                removed_weak_entry = true;
-            }
-            if (removed_weak_entry) {
-                payload.weak_entries = payload.weak_entries.ptr[0..write_index];
-                self.clearCollectionIndex(rt);
-            }
-        }
-
-        const finalization_payload = self.finalizationRegistryPayload() orelse {
-            self.pruneBorrowedReferenceHolderIfEmpty(rt);
-            return;
-        };
-        var read_index: usize = 0;
-        var write_index: usize = 0;
-        while (read_index < finalization_payload.cells.len) : (read_index += 1) {
-            var cell = finalization_payload.cells[read_index];
-            if (cell.unregister_token_identity) |identity| {
-                if (!weakIdentityIsLive(rt, identity)) {
-                    rt.clearWeakIdentitySlot(&cell.unregister_token_identity);
-                }
-            }
-            const target_identity = cell.target_identity orelse {
-                finalization_payload.cells[write_index] = cell;
-                write_index += 1;
-                continue;
-            };
-            if (weakIdentityIsLive(rt, target_identity)) {
-                finalization_payload.cells[write_index] = cell;
-                write_index += 1;
-                continue;
-            }
-
-            if (cell.isActive()) cell.state = .pending_enqueue;
-            if (finalization_enqueue_blocked.*) {
-                finalization_payload.cells[write_index] = cell;
-                write_index += 1;
-                continue;
-            }
-            enqueueFinalizationCleanup(rt, finalization_payload, cell.held_value) catch |err| switch (err) {
-                error.OutOfMemory => {
-                    // No later cleanup in this GC traversal may overtake this
-                    // retained cell. A later collection retries the stable
-                    // registry/entry order after allocator recovery.
-                    finalization_enqueue_blocked.* = true;
-                    finalization_payload.cells[write_index] = cell;
-                    write_index += 1;
-                    continue;
-                },
-                error.PayloadMarkFailed => return error.PayloadMarkFailed,
-            };
-            cell.state = .queued;
-            cell.destroy(rt);
-        }
-        finalization_payload.cells = finalization_payload.cells.ptr[0..write_index];
-        self.pruneBorrowedReferenceHolderIfEmpty(rt);
-    }
+    pub const destroyRuntimeCycles = object_gc.destroyRuntimeCycles;
+    pub const destroyRuntimeCyclesWithValueRoots = object_gc.destroyRuntimeCyclesWithValueRoots;
+    pub const drainCycleDeferredFrees = object_gc.drainCycleDeferredFrees;
+    pub const releaseCallbackOwnedFunctionBytecodeCycles = object_gc.releaseCallbackOwnedFunctionBytecodeCycles;
 
     fn weakIdentityIsLive(rt: *const JSRuntime, identity: usize) bool {
         if ((identity & 1) != 0) {
@@ -7947,263 +6152,6 @@ pub const Object = extern struct {
             return rt.atoms.kind(@intCast(atom_id)) == .symbol;
         }
         return rt.liveObjectFromWeakIdentity(identity) != null;
-    }
-
-    pub fn destroyRuntimeCyclesWithValueRoots(rt: *JSRuntime, roots: ?*const runtime_mod.ValueRootFrame) ObjectGraphError!usize {
-        _ = roots;
-        rt.gc.stats.collections += 1;
-        // This is the only fallible operation in the collection round, and it
-        // completes before trial refcounts, list membership, or round flags are
-        // changed. Everything below is therefore a committed, no-error path.
-        try gcRemoveWeakObjects(rt);
-
-        gc.listInit(&rt.gc.tmp_obj_list);
-
-        // Phase 1: gc_decref (quickjs.c:6697-6717)
-        {
-            var gc_iter = rt.gc.objectIterator();
-            while (gc_iter.next()) |h| {
-                markOne(rt, h, .decref);
-                // Match qjs gc_decref: mark the current node after visiting
-                // its children, then move it immediately if its trial count
-                // is zero. GcObjectIterator captured `next` before tracing.
-                h.meta().flags.mark = true;
-                if (h.meta().rc == 0) {
-                    rt.gc.detachCycleCandidate(h);
-                    gc.listAddTail(&rt.gc.tmp_obj_list, h);
-                }
-            }
-        }
-
-        // Phase 2: gc_scan (quickjs.c:6736-6747)
-        {
-            // Walk the live list dynamically: reviving a trial-zero child moves
-            // it from tmp_obj_list to the registry tail, so it is visited without
-            // recursion or an auxiliary worklist.
-            var cursor = rt.gc.gc_obj_list.next;
-            while (cursor) |h| {
-                if (h == &rt.gc.gc_obj_list) break;
-                std.debug.assert(h.meta().rc > 0);
-                h.meta().flags.mark = false;
-                markOne(rt, h, .scan_incref);
-                cursor = h.next;
-            }
-        }
-
-        // Phase 3: restore refcounts of the detached dead-cycle partition
-        // (quickjs.c:6749-6753, gc_scan_incref_child2).
-        {
-            var cursor = rt.gc.tmp_obj_list.next;
-            while (cursor) |h| {
-                if (h == &rt.gc.tmp_obj_list) break;
-                markOne(rt, h, .scan_restore);
-                cursor = h.next;
-            }
-        }
-
-        sweepCycleGarbageWeakCollectionEntries(rt);
-
-        // Consume tmp_obj_list like qjs gc_free_cycles (quickjs.c:6756-6793):
-        // no 6-way staging lists. Explicit free_gc_object set is OBJECT /
-        // FUNCTION_BYTECODE / MODULE (zjs has no JS_GC_OBJ_TYPE_ASYNC_FUNCTION).
-        // Objects still run first so FB capture-count metadata outlives
-        // closures (qjs free_object reads b->var_ref_count). Default kinds
-        // (var_ref / shape / realm_context) stay on tmp until the four-kind
-        // pass finishes, then get resource teardown — owners skip them via
-        // cycle_visited, so they cannot rely on ownership the way qjs does.
-        const old_phase = rt.gc.phase;
-        rt.gc.phase = .remove_cycles;
-        defer {
-            rt.gc.phase = old_phase;
-        }
-
-        var garbage_count: usize = 0;
-        // One walk per kind (O(n)), not one walk per node (O(n²)).
-        var cursor = rt.gc.tmp_obj_list.next;
-        while (cursor) |h| {
-            if (h == &rt.gc.tmp_obj_list) break;
-            const next = h.next;
-            if (h.meta().flags.kind == .object) {
-                gc.listDel(h);
-                garbage_count += 1;
-                destroyFromHeader(rt, h);
-            }
-            cursor = next;
-        }
-        cursor = rt.gc.tmp_obj_list.next;
-        while (cursor) |h| {
-            if (h == &rt.gc.tmp_obj_list) break;
-            const next = h.next;
-            if (h.meta().flags.kind == .realm_context) {
-                gc.listDel(h);
-                garbage_count += 1;
-                rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-                context_mod.JSContext.destroyFromHeader(rt, h);
-            }
-            cursor = next;
-        }
-        cursor = rt.gc.tmp_obj_list.next;
-        while (cursor) |h| {
-            if (h == &rt.gc.tmp_obj_list) break;
-            const next = h.next;
-            if (h.meta().flags.kind == .module) {
-                gc.listDel(h);
-                garbage_count += 1;
-                rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-                module_mod.ModuleRecord.destroyFromHeader(rt, h);
-            }
-            cursor = next;
-        }
-        cursor = rt.gc.tmp_obj_list.next;
-        while (cursor) |h| {
-            if (h == &rt.gc.tmp_obj_list) break;
-            const next = h.next;
-            if (h.meta().flags.kind == .function_bytecode) {
-                gc.listDel(h);
-                rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-                function_bytecode_mod.destroyFromHeader(rt, h);
-            }
-            cursor = next;
-        }
-        while (gc.listFirst(&rt.gc.tmp_obj_list)) |h| {
-            gc.listDel(h);
-            switch (h.meta().flags.kind) {
-                .var_ref => {
-                    garbage_count += 1;
-                    rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-                    var_ref_mod.VarRef.destroyFromHeader(rt, h);
-                },
-                .shape => {
-                    garbage_count += 1;
-                    if (!h.meta().flags.finalizing) rt.shapes.destroyFromHeader(h);
-                },
-                else => unreachable,
-            }
-        }
-
-        // Pass B: now every garbage object's resources are gone AND every shape
-        // (whose teardown re-releases protos) has run. If class-payload
-        // finalizers were deferred, keep the resource-stripped object husks until
-        // those finalizers drain: payloads may still hold JSValues into the
-        // condemned cycle and must be able to release them without dereferencing
-        // freed object memory.
-        if (!rt.hasPendingDeferredClassPayloadFinalizers()) drainCycleDeferredFrees(rt);
-
-        return garbage_count;
-    }
-
-    /// Pass B: qjs `gc_free_cycles` second walk (quickjs.c:6797-6810).
-    /// One `list_for_each_safe`, in-place free, no pop/continue revisit.
-    /// Keep only a JS object with remaining weakrefs (qjs:6803-6806). Leftover
-    /// rc after the resource pass is intra-cycle and is freed here so the next
-    /// GC does not walk the husk again. Still only the four qjs kinds (OBJECT /
-    /// FUNCTION_BYTECODE / MODULE; zjs has no ASYNC) plus var_ref / realm_context
-    /// leftovers whose owners skipped them via cycle_visited. Does not delete
-    /// `cycle_visited`, does not touch RC teardown or ScanIncref.
-    pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
-        const parked = &rt.gc.cycle_deferred_frees;
-        var cursor = gc.listFirst(&parked.sentinel);
-        while (cursor) |h| {
-            const next = parked.nextAfter(h);
-            parked.remove(h);
-            switch (h.meta().flags.kind) {
-                .object => {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                    // qjs:6803-6806. deinit must still free weak husks (phase != remove_cycles).
-                    if (rt.gc.phase == .remove_cycles and obj.weakref_count != 0) {
-                        h.meta().flags.mark = false;
-                        h.meta().flags.cycle_visited = false;
-                        h.meta().flags.finalizing = false;
-                    } else {
-                        freeCycleDeferredStruct(rt, obj);
-                    }
-                },
-                .function_bytecode => function_bytecode_mod.freeCycleDeferredStruct(rt, h),
-                .module => module_mod.ModuleRecord.freeCycleDeferredStruct(rt, h),
-                .var_ref => var_ref_mod.VarRef.freeCycleDeferredStruct(rt, h),
-                .realm_context => context_mod.JSContext.freeCycleDeferredStruct(rt, h),
-                else => {},
-            }
-            cursor = next;
-        }
-    }
-
-    pub fn releaseCallbackOwnedFunctionBytecodeCycles(rt: *JSRuntime) void {
-        var candidates = ObjectVisitSet.init(rt.memory.allocator);
-        defer candidates.deinit();
-
-        var gc_iter = rt.gc.objectIterator();
-        while (gc_iter.next()) |h| {
-            const function_bytecode = functionBytecodeFromGcHeader(h) orelse continue;
-            candidates.put(@intFromPtr(function_bytecode), {}) catch return;
-        }
-        if (candidates.count() == 0) return;
-
-        pruneCallbackOwnedFunctionBytecodeCycles(&candidates) catch return;
-        if (candidates.count() == 0) return;
-
-        retainFunctionBytecodeGuards(&candidates);
-        defer releaseFunctionBytecodeGuards(rt, &candidates);
-
-        var iterator = candidates.keyIterator();
-        while (iterator.next()) |address| {
-            const function_bytecode: *FunctionBytecode = @ptrFromInt(address.*);
-            clearCallbackOwnedFunctionBytecodeCycleRefs(rt, function_bytecode, &candidates);
-        }
-    }
-
-    fn pruneCallbackOwnedFunctionBytecodeCycles(candidates: *ObjectVisitSet) ObjectGraphError!void {
-        while (true) {
-            var removed = false;
-            var iterator = candidates.keyIterator();
-            while (iterator.next()) |address| {
-                const function_bytecode: *const FunctionBytecode = @ptrFromInt(address.*);
-                const internal_refs = countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, candidates);
-                const ref_count = function_bytecode.header.metaConst().rc;
-                if (ref_count == internal_refs or (ref_count != 0 and ref_count - 1 == internal_refs)) continue;
-
-                _ = candidates.remove(address.*);
-                removed = true;
-                break;
-            }
-            if (!removed) return;
-        }
-    }
-
-    fn retainFunctionBytecodeGuards(candidates: *const ObjectVisitSet) void {
-        var iterator = candidates.keyIterator();
-        while (iterator.next()) |address| {
-            const function_bytecode: *FunctionBytecode = @ptrFromInt(address.*);
-            function_bytecode.header.retain();
-        }
-    }
-
-    fn releaseFunctionBytecodeGuards(rt: *JSRuntime, candidates: *const ObjectVisitSet) void {
-        var iterator = candidates.keyIterator();
-        while (iterator.next()) |address| {
-            const function_bytecode: *FunctionBytecode = @ptrFromInt(address.*);
-            if (rt.gc.containsHeader(&function_bytecode.header)) {
-                gc.release(rt, &function_bytecode.header);
-            }
-        }
-    }
-
-    fn clearCallbackOwnedFunctionBytecodeCycleRefs(
-        rt: *JSRuntime,
-        function_bytecode: *FunctionBytecode,
-        candidates: *const ObjectVisitSet,
-    ) void {
-        for (function_bytecode.cpoolSlice()) |*stored| {
-            if (!valueReferencesFunctionBytecodeCandidate(stored.*, candidates)) continue;
-            const old_value = stored.*;
-            stored.* = JSValue.undefinedValue();
-            old_value.free(rt);
-        }
-    }
-
-    fn valueReferencesFunctionBytecodeCandidate(stored: JSValue, candidates: *const ObjectVisitSet) bool {
-        const function_bytecode = functionBytecodeFromValue(stored) orelse return false;
-        return candidates.contains(@intFromPtr(function_bytecode));
     }
 
     // mirror of value_semantics.objectFromValue (kind check included), keep
@@ -8641,6 +6589,9 @@ pub const Object = extern struct {
                 try Helper.callVisitValue(visitor, &req.reject);
             }
         }
+        if (self.argumentsPayload()) |payload| {
+            for (payload.var_refs) |*stored| try Helper.callVisitValue(visitor, stored);
+        }
         if (self.varRefPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.value);
         }
@@ -8729,16 +6680,6 @@ pub const Object = extern struct {
             if (realm.global) |realm_global| try collectReachableObjects(rt, visited, realm_global);
         }
         for (function_bytecode.cpoolSlice()) |stored| try collectValueObject(rt, visited, stored);
-    }
-
-    fn enqueueFinalizationCleanup(
-        rt: *JSRuntime,
-        payload: *const FinalizationRegistryPayload,
-        held_value: JSValue,
-    ) ObjectGraphError!void {
-        const callback = payload.cleanup_callback orelse return;
-        const realm = payload.realm.borrow() orelse unreachable;
-        try rt.enqueueFinalizationJobForRealm(realm, callback, held_value);
     }
 
     /// Returns the weak identity for `stored`, registering objects in the
@@ -11581,7 +9522,7 @@ pub const Object = extern struct {
     fn deleteOrdinaryPropertyAt(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, index: usize) bool {
         const old_flags = self.propFlagsAt(index);
         if (!old_flags.configurable) return false;
-        self.ensureUniqueShapeForMutation(rt) catch return false;
+        rt.shapes.prepareUpdate(&self.shape_ref) catch return false;
         const entry = &self.prop_values[index];
         const old_slot = entry.slot;
         // `deleted` is a flag bit, not a kind/arm: keep a harmless data cell.
@@ -11611,6 +9552,14 @@ pub const Object = extern struct {
         }
         destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
+        const object_shape = self.shape_ref;
+        if (object_shape.deleted_prop_count >= 8 and
+            object_shape.deleted_prop_count >= object_shape.prop_count / 2)
+        {
+            // qjs ignores compact_properties OOM after the deletion is already
+            // committed; retaining tombstones is a valid fallback.
+            rt.shapes.compactProperties(self) catch {};
+        }
         return true;
     }
 

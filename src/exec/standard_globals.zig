@@ -1689,7 +1689,7 @@ fn installStandardConstructors(
     try installStandardConstructor(rt, global, constructors, "InternalError", .internal_error, 1, &no_methods, &no_methods);
     try installStandardConstructor(rt, global, constructors, "AggregateError", .aggregate_error, 2, &no_methods, &no_methods);
     try installStandardConstructor(rt, global, constructors, "SuppressedError", .suppressed_error, 3, &no_methods, &no_methods);
-    try installStandardConstructor(rt, global, constructors, "DOMException", .dom_exception, 2, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "DOMException", .dom_exception, 0, &no_methods, &no_methods);
     try installStandardConstructor(rt, global, constructors, "DisposableStack", .disposable_stack, 0, &no_methods, &disposable_stack_prototype);
     try installStandardConstructor(rt, global, constructors, "AsyncDisposableStack", .async_disposable_stack, 0, &no_methods, &async_disposable_stack_prototype);
     try installStandardConstructor(rt, global, constructors, "Promise", .promise, 1, &promise_static, &promise_prototype);

@@ -175,6 +175,34 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         scoped_step.dependOn(&run_scoped_tests.step);
     }
 
+    // Shared-engine convergence census (`zig build test-leak-census`): run
+    // both shared tiers twice in one process. Pass 0 warms legitimate lazy
+    // state; pass 1 enforces the module-accounted allocation high-water gate.
+    // This is an instrumentation/nightly tier, not a checkpoint dependency.
+    const leak_census_root = b.createModule(.{
+        .root_source_file = b.path("src/leak_census_tests.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = scoped_test_engine_mod },
+        },
+    });
+    leak_census_root.addOptions("build_options", scoped_test_options);
+    const leak_census_tests = b.addTest(.{
+        .name = "leak-census-tests",
+        .root_module = leak_census_root,
+    });
+    forceLlvmBackendOnDebug(leak_census_tests);
+    leak_census_tests.test_runner = .{
+        .path = b.path("tools/timing_test_runner.zig"),
+        .mode = .simple,
+    };
+    const run_leak_census_tests = b.addRunArtifact(leak_census_tests);
+    run_leak_census_tests.addArgs(&.{ "--require-tests", "--repeat", "2", "--leak-census" });
+    const test_leak_census_step = b.step("test-leak-census", "Run the shared exec and builtins tiers twice and reject unaccounted retained growth (instrumentation tier; runs nightly)");
+    test_leak_census_step.dependOn(&run_leak_census_tests.step);
+
     // Public-module assembly check. Independent Debug `zjs` module rooted at
     // `src/root.zig` (not internal_root) and its own options object (rule 丙).
     // The shell does not attest: the public surface does not export

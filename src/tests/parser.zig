@@ -9750,6 +9750,54 @@ test "source positions and syntax errors carry filename line and column" {
     try std.testing.expectEqualStrings("bad.js", rt.atoms.name(parsed.syntax_error.?.filename).?);
 }
 
+test "compile syntax errors report the failing token position" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_]struct {
+        source: []const u8,
+        line: u32,
+        column: u32,
+    }{
+        .{ .source = "var x = ;", .line = 1, .column = 9 },
+        .{ .source = "const a = 1;\nconst b = 2;\nvar x = ;\nconst c = 3;", .line = 3, .column = 9 },
+        .{ .source = "const a = 1;\nconst b = 2;\nvar x = ;", .line = 3, .column = 9 },
+        .{ .source = "function f() {\n  const y = 1;\n  const x = ;\n}\nf();", .line = 3, .column = 13 },
+    };
+
+    for (cases) |case| {
+        var parsed = try compileForTest(rt, case.source, .{ .mode = .script, .filename = "token-position.js" });
+        defer parsed.deinit();
+        const syntax_error = parsed.syntax_error orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(case.line, syntax_error.position.line);
+        try std.testing.expectEqual(case.column, syntax_error.position.column);
+    }
+}
+
+test "expectToken syntax errors name the expected and actual token kinds" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(rt, "if (true {\n  print(\"bad\");\n}", .{ .mode = .script, .filename = "expected-token.js" });
+    defer parsed.deinit();
+    const syntax_error = parsed.syntax_error orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u32, 1), syntax_error.position.line);
+    try std.testing.expectEqual(@as(u32, 10), syntax_error.position.column);
+    try std.testing.expectEqualStrings("expected ')', got '{'", syntax_error.message);
+}
+
+test "lexer syntax errors retain the failing token position" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(rt, "const a = 1;\nconst s = \"unterminated", .{ .mode = .script, .filename = "lexer-position.js" });
+    defer parsed.deinit();
+    const syntax_error = parsed.syntax_error orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u32, 2), syntax_error.position.line);
+    try std.testing.expectEqual(@as(u32, 11), syntax_error.position.column);
+    try std.testing.expectEqualStrings("UnterminatedString", syntax_error.message);
+}
+
 test "direct eval propagates script or module identity without changing display filename" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -11520,6 +11568,78 @@ test "arrow early errors reject non-simple strict and invalid rest parameters" {
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error != null);
         try std.testing.expect(parsed.syntax_error.?.message.len > 0);
+    }
+}
+
+test "strict parameter binding names follow directive and method grammar" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const rejected = [_][]const u8{
+        "(arguments) => { 'use strict'; };",
+        "(eval) => { 'use strict'; };",
+        "arguments => { 'use strict'; };",
+        "eval => { 'use strict'; };",
+        "async (arguments) => { 'use strict'; };",
+        "async eval => { 'use strict'; };",
+        "function f(arguments) { 'use strict'; }",
+        "function f(eval) { 'use strict'; }",
+        "({ m(arguments) { 'use strict'; } });",
+        "({ m(eval) { 'use strict'; } });",
+        "({ set x(arguments) { 'use strict'; } });",
+        "({ set x(eval) { 'use strict'; } });",
+        "class C { m(arguments) {} }",
+        "class C { m(eval) {} }",
+        "class C { set x(arguments) {} }",
+        "(a = 1) => { 'use strict'; };",
+        "function f(a = 1) { 'use strict'; }",
+    };
+    for (rejected) |source| {
+        var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "strict-parameter-matrix.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+    }
+
+    const accepted = [_][]const u8{
+        "({ get arguments() { 'use strict'; } });",
+        "({ get eval() { 'use strict'; } });",
+        "class C { get arguments() {} }",
+        "(arguments) => {};",
+        "(eval) => {};",
+        "function f(arguments) {}",
+        "({ m(arguments) {} });",
+    };
+    for (accepted) |source| {
+        var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "strict-parameter-matrix.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+}
+
+test "retroactive strict arrow parameter errors retain the binding position" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_][]const u8{
+        \\const fn = (
+        \\  arguments
+        \\) => {
+        \\  'use strict';
+        \\};
+        ,
+        \\const fn = (
+        \\  eval
+        \\) => {
+        \\  'use strict';
+        \\};
+        ,
+    };
+    for (cases) |source| {
+        var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "strict-arrow-position.js" });
+        defer parsed.deinit();
+        const syntax_error = parsed.syntax_error orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(@as(u32, 2), syntax_error.position.line);
+        try std.testing.expectEqual(@as(u32, 3), syntax_error.position.column);
     }
 }
 

@@ -7,6 +7,247 @@ breaking public-API cleanup is approved for this cycle; hot-path structural
 refactors are deferred to `docs/maintainability-backlog.md` and land only
 under the refactor-policy gates.
 
+- **The lexer moved out of `parser.zig`** (3,362 lines to its own file,
+  lifted verbatim behind one alias — zero call sites changed; `parser.zig`
+  falls from 20,769 to 17,408 lines). Emission is byte-identical
+  (docs/impl-quality-backlog.md, Q13 precursor).
+
+- **`parseStatementOrDeclSlow` is no longer a 936-line switch.** Each
+  statement kind's case body is a named function; the dispatch prelude and
+  order are unchanged and emission is byte-identical on the five reference
+  corpora (docs/impl-quality-backlog.md, Q13 precursor).
+
+- **Refactor gates are now tiered by measured risk.** The 2026-08-22 owner
+  ruling separates identity-gated documentation/Debug work, cold changes
+  covered by the cheap correctness gates, and hot changes that retain
+  bench-v8 A/B with a calibrated `0.995` composite floor and per-suite
+  dispersion envelopes. Test262 and small hot changes may share a merge
+  window of at most three commits; ledgers now ride the work commit, and a
+  post-window drift check backs Tier-1 merges that skipped A/B. Nightly and
+  published-metric protocols are unchanged
+  (docs/refactor-policy.md, 2026-08-22 amendment).
+
+- **The cycle collector's three-phase driver moves to `object_gc.zig`**
+  (H8 tranche 2, narrow seam). The first cut needed 23 private payload
+  accessors made public and was rejected as encapsulation reversal; the
+  ruling kept edge enumeration on `Object` — where the data lives — and
+  moved only the 645-line trial-deletion driver, behind five
+  purpose-named seams (`…ForCycleGc`). The four measured `align(16)`
+  entry pins moved verbatim with their functions; zero call sites
+  changed; all thirteen cycle-release guards pass. Gate under the
+  2026-08-22 tiered rules: A/B 0.9988 with every suite in its dispersion
+  envelope — pass, no lineage (docs/impl-quality-backlog.md, Q11 T2).
+
+- **`object.zig` sheds 1,477 lines of content that was never the object
+  model** (H8 tranche 1). The twenty out-of-line payload type definitions
+  move to `object_payloads.zig`, the generator suspend machinery to
+  `generator_state.zig`, `RealmValueSlot` to `context.zig` beside its
+  consumers, and the libc file-close helpers to the runtime host seam.
+  Forty-seven compatibility aliases keep every existing name resolving —
+  zero call sites changed. `Object`/`ObjectStorage` field blocks are
+  byte-identical and the layer gate stays at zero violations. Gate: A/B
+  composite 1.0010 with every suite inside ±0.32%
+  (docs/impl-quality-backlog.md, Q11 T1).
+
+- **Fixed: a `'use strict'` directive no longer fails to reject
+  `arguments`/`eval` as arrow parameter names.** Six arrow variants
+  (parenthesized, bare, async × both names) accepted what the spec and
+  the pinned QuickJS reject, because arrow parameter names were
+  discarded before the directive prologue was parsed, while ordinary
+  functions retained theirs for retroactive strict validation. Both
+  shapes now share one retroactive check, and the error points at the
+  offending parameter with an exact position. The other eighteen family
+  shapes (plain functions, methods, accessors, class bodies, non-simple
+  lists, sloppy controls) already matched and are pinned by the new
+  matrix tests (docs/impl-quality-backlog.md, Q6d — found by Q6's own
+  differential corpus).
+
+- **`engine-production-gate` is green again (34/34).** The
+  borrowed-atom checker flagged `parseFunctionDecl` storing a
+  defer-freed name atom — a long-standing static false positive
+  (red before this campaign's base), not a live ownership bug: the
+  restore defer registered after the free defer runs FIRST under LIFO
+  and clears the stored slot before the free executes. The store now
+  carries the contract's borrowed-reason annotation, chosen over a
+  refcount dup to avoid success-path churn. All six function-entry
+  sites were audited for the same shape and are clean
+  (docs/impl-quality-backlog.md, Q14).
+
+- **Hygiene five-pack.** The dependency gate now forbids core→binding
+  (closing the transitive core→exec hole; the one offending test moved to
+  the binding tier). `--profile-opcodes` no longer prints
+  structurally-zero counters as data: orphaned recorders and the dead
+  activation path are deleted (release `.text` byte-identical) and
+  unavailable fields say "not instrumented". 178 hand-rolled
+  print-capture envelopes collapsed onto `helpers.expectPrints`
+  (coverage-neutral; deinit-checked tests untouched). The last 10 C-ABI
+  `export fn` shims in `libs/number_format.zig` were caller-less by
+  whole-binary cross-reference and are gone (`.text` −4,052 bytes).
+  `zjs.JSRuntime`'s public surface is recorded (167 decls) and pinned
+  beside the JSValue pin, so it can no longer change silently
+  (docs/impl-quality-backlog.md, Q10).
+
+- **Removed the unimplemented "major GC" surface — which turned out to be
+  live bookkeeping** (−333 net lines, `.text` −6,040 bytes). The
+  incremental/concurrent collector's phases, policy switches, pause
+  percentiles and page geometry had no consumer and no implementation,
+  but the producer side RAN: every GC-control pass computed derived page
+  state and costume statistics nobody read. Deleting it removes real work
+  from `pollGC` and the cycle-removal entry; the GC-heavy benchmark
+  suites both moved positive under the gate (Splay +0.8%, EarleyBoyer
+  +0.8%, composite 1.0039). **Breaking (0.2.0-dev window):** removes 8
+  `RuntimeOptions.gc_policy` fields, 33 `JSRuntime.gcStats` fields,
+  `MajorPhase.mark_incremental`/`weak_fixpoint`/`finalize_mark`,
+  diagnostic `Registry`/`SpaceAccount` members reachable via
+  `JSRuntime.gc`, and `core.gc.logical_page_size` + two invariant tags.
+  What remains measures real behavior: registry, thresholds,
+  RSS/cgroup pressure, scheduler budgets, cycle counts/times/failures
+  (docs/impl-quality-backlog.md, Q9).
+
+- **The GC kind dispatch surface can no longer silently ignore a new
+  kind.** `markChildrenCold`'s `else => {}` — which would have no-traced
+  any future GC kind (the exact silent-gap shape behind the fast-array
+  cache-edge leak) — is now an exhaustive switch with each no-op arm
+  stating why it has no child edges; LLVM compiles it 312 bytes SMALLER.
+  The four hand-copied kind sets in the zero-ref release path share one
+  predicate. `ArgumentsPayload` gained its missing trace arm (destroy
+  existed, trace did not — a leak lying in wait for the first embedder
+  class that registers the kind), pinned by a cycle guard proven red
+  before the arm landed. The unlink-without-destroy `releaseObject` is
+  now test-only by name and compile guard. Gate: A/B composite 1.0000
+  (docs/impl-quality-backlog.md, Q8).
+
+- **Hardened `object.zig`'s unwritten conventions, at zero release-codegen
+  cost.** The three meanings of `class_payload_kind == .none` (no payload /
+  embedder-external / inline-payload class) are now a written contract on
+  `ObjectStorage` with Debug-build proofs at the manual exclusion list;
+  the cross-arm invariant that payload-pointer objects rely on zeroed
+  trailing union bytes is documented at its read site; the `u` field's
+  default no longer dangles a fake payload pointer for a literal that
+  omits it; three out-of-file raw union reads carry the class/kind proofs
+  their dispatch points discharge; and a stale `array_length` doc comment
+  moved to the field that now owns the invariant. Gate: `.text`
+  byte-identical (3,336,136 bytes both sides), so this is provably
+  documentation-and-Debug-only (docs/impl-quality-backlog.md, Q7).
+
+- **Defused the parser's state-restore hazard family** (the shape behind
+  three historical real bugs). `parseFunctionExpr` no longer mutates
+  parser state before its restore defer exists — the old window could
+  leave a dangling atom on an error exit, unobservable today but armed
+  against any future error-recovery path. The class static block's
+  hand-written 14-field snapshot folded onto the collapsed mechanism as an
+  explicit `StaticBlockContext` extension (the four extra displacements
+  stay visibly distinct). Six function-entry sites that each saved a
+  different hand-picked field subset now share one comptime
+  `FunctionEntryContext` oracle. Bytecode emission is byte-identical on
+  five corpora; a 20-case entry-state differential corpus agrees with the
+  pinned QuickJS byte-for-byte before and after
+  (docs/impl-quality-backlog.md, Q6).
+
+- **Syntax errors now point at the error, not the end of the file.** Every
+  parse diagnostic used to surface as `SyntaxError: UnexpectedToken` at an
+  EOF position, because the position was recovered by re-lexing the whole
+  source after the fact. The parser now records a pending diagnostic at
+  the failure site (last writer wins), and 99.8% of error paths (467 of
+  468) inherit the exact site — line AND column agree with the pinned
+  QuickJS on every probe. `expectToken` failures additionally say
+  "expected X, got Y". Internal compiler invariants (`InvalidBytecode`
+  and siblings) no longer masquerade as user syntax errors: they report
+  as internal compiler errors. Bytecode emission for valid sources is
+  byte-identical (verified on five corpora incl. 100 KB); the gate read
+  0.9983 and the pad lineage ruled it placement — RegExp flipped from
+  0.977 to 1.028 across pads (docs/impl-quality-backlog.md, Q5).
+
+- **The shared-engine test tier can now fail on a leak.** Two thirds of the
+  suite ran on a shared engine whose teardown leak assert was structurally
+  unreachable. `endSharedTest` now forces a cycle collection and enforces a
+  module-accounted allocation high-water gate (tolerance 8 counts over a
+  measured p95=0 / max=7 floor), with a self-diagnosing failure message;
+  a deliberately leaky scratch test fired it on first contact. A new
+  nightly step, `test-leak-census`, runs both shared tiers twice in one
+  process and asserts second-pass growth is fully accounted — the durable
+  form of the discovery machinery that found and fixed the two registry
+  and compaction defects (docs/impl-quality-backlog.md, Q4 — item closed).
+
+- **Ported property compaction: deleted slots are now reclaimed.**
+  `Shape.deleted_prop_count` existed but nothing ever compacted, so every
+  delete left a permanent tombstone — the shared realm's hidden globals
+  object gained twelve per eval cycle, forever. The QuickJS mechanism now
+  has a counterpart: on delete, once tombstones reach the reference
+  predicate (≥ 8 and ≥ half the slots, deleted included), the unshared
+  shape and its values are rebuilt stably in insertion order. Proven as a
+  bounded sawtooth matching the reference's amplitude: the real
+  hidden-globals object climbs to 150 slots / 72 tombstones and compacts
+  back to 86 / 8 with all 78 live entries intact; churn probes are
+  byte-equal to the pinned QuickJS; test262 unchanged. The gate read
+  0.9973 and the pad lineage ruled it placement (sign flips across pads
+  0/3/7). Root R3 of the shared-tier leak census
+  (docs/impl-quality-backlog.md, Q4). Also hardened the shared-test
+  baseline restore that the compaction exposed as order-sensitive.
+
+- **Fixed: two runtime registries grew without bound on identical repeated
+  work.** `internAutoInit` interned nothing — every registration allocated
+  and appended, so a long-lived runtime re-installing the same builtin
+  descriptors leaked list entries; it now returns the existing stable
+  pointer on a full-field match. `registerExternalHostFunction` likewise
+  appended forever; finalizer-free records — pure dispatch tuples whose id
+  sharing is unobservable — now dedup, while finalized records keep
+  distinct ids and their cleanup obligations. Root R2 of the shared-tier
+  leak-census discovery (docs/impl-quality-backlog.md, Q4); regression
+  guards pin both registries flat under repeated registration.
+
+- **Fixed: `Array.of` and `Array.from` silently fabricated results where the
+  spec throws.** Their four tail copies skipped `Set(A, "length")` for
+  TypedArray results and used a strictness-gated write where the spec
+  mandates `Set(..., true)` — so `Array.of.call(Uint8Array)` fabricated a
+  Uint8Array (QuickJS: `TypeError: no setter for property`),
+  `Array.from.call(Uint8Array, new Set([1,2]))` silently lost every element,
+  and a non-writable `length` was ignored from sloppy callers. All four
+  tails now share one typed-array-aware CreateDataPropertyOrThrow helper and
+  an unconditional throwing length-Set, matching the pinned QuickJS
+  byte-for-byte on the divergence probes; test262 is unchanged at
+  49,778 prepared / 44,584 passed (docs/impl-quality-backlog.md, Q3c).
+
+- **Fixed: `DOMException` was un-constructible through every path except
+  plain `new`.** `Reflect.construct(DOMException, …)`,
+  `Reflect.construct(Object, [], DOMException)` and
+  `class X extends DOMException {}` all threw, because the shared
+  builtin-constructor predicate did not list the name — an internal
+  contradiction, since `new` (including through `.bind()`) worked. The
+  predicate now recognizes it, and `DOMException.length` is 0 per WebIDL
+  (was 2). The pinned QuickJS has no DOMException, so the oracle is
+  internal consistency plus WebIDL (docs/impl-quality-backlog.md, Q3b).
+
+- **Fixed: replacing or deleting `globalThis.Set`/`globalThis.Map` broke the
+  Set combinators and `Map.groupBy`.** Result objects took their prototype
+  from the writable global binding, so a polyfill assigning `globalThis.Set`
+  — or `delete globalThis.Set` — made `union`/`intersection`/`difference`/
+  `symmetricDifference` and `Map.groupBy` throw. They now resolve
+  %Set.prototype% / %Map.prototype% through the realm's class-prototype
+  table; the divergence probes match the pinned QuickJS byte-for-byte after
+  the fix, untouched-global control included
+  (docs/impl-quality-backlog.md, Q3a).
+
+- **Added cycle-release regression guards for eleven GC payload families**
+  (strong Map/Set entries, Promise result/reactions, ordinary
+  error-stack/callsite slots, accessor pairs, FunctionRare fields, bound
+  functions, DisposableStack resources, ObjectData, and ModuleRecord
+  import.meta/eval-exception). Each test's cycle closes only through the
+  family under test, so deleting that family's trace arm turns exactly that
+  guard red — verified by deletion probes for every family, with the
+  production tree restored byte-identically afterwards. Closes the
+  test-coverage half of the GC blind spot (docs/impl-quality-backlog.md, Q2).
+
+- **Fixed: a reference cycle through a fast array's cached iterator `next`
+  edge was never collected.** The fast-array trial-deletion hot arm omitted
+  the iterator-next cache edge that the authority trace and the
+  ordinary-object hot arm both visit, while the destroy side owned it — so
+  the miss was consistent across all three phases: not a use-after-free, a
+  permanent leak. The arm now marks the same rare cache edge, and a
+  bare-runtime regression test pins it. First defect confirmed out of the
+  GC blind spot the 2026-08-20 audit declared
+  (docs/impl-quality-backlog.md, Q1).
+
 - **Fixed: `new Set`/`Map` bulk filled past a user-overridable adder.** The
   dense fast path calls the adder once per element but advances the iterator's
   cursor only once, at the end, and skips IteratorClose — invisible for the

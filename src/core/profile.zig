@@ -71,37 +71,9 @@ pub const OpcodeProfile = struct {
         self.global_lookup_count +|= 1;
     }
 
-    pub fn recordSlowPath(self: *OpcodeProfile, opcode: ?u8) void {
-        if (opcode) |op| self.slow_count[op] +|= 1;
-    }
-
-    pub fn recordCallFrame(self: *OpcodeProfile) void {
-        self.call_frame_count +|= 1;
-    }
-
     pub fn opcodeName(opcode: u8) []const u8 {
         if (opcode_name_provider) |provider| return provider(opcode);
         return "unknown";
-    }
-
-    pub fn recordIcHit(self: *OpcodeProfile, opcode: ?u8) void {
-        incrementOpcodeCounter(&self.ic_hit, opcode);
-    }
-
-    pub fn recordIcMiss(self: *OpcodeProfile, opcode: ?u8) void {
-        incrementOpcodeCounter(&self.ic_miss, opcode);
-    }
-
-    pub fn recordIcInvalidate(self: *OpcodeProfile, opcode: ?u8) void {
-        incrementOpcodeCounter(&self.ic_invalidate, opcode);
-    }
-
-    pub fn recordIcPromotePoly(self: *OpcodeProfile, opcode: ?u8) void {
-        incrementOpcodeCounter(&self.ic_promote_poly, opcode);
-    }
-
-    pub fn recordIcPromoteMega(self: *OpcodeProfile, opcode: ?u8) void {
-        incrementOpcodeCounter(&self.ic_promote_mega, opcode);
     }
 
     pub fn totalOpcodeCount(self: OpcodeProfile) u64 {
@@ -141,10 +113,6 @@ pub fn setOpcodeNameProvider(provider: ?OpcodeNameProvider) void {
     opcode_name_provider = provider;
 }
 
-fn incrementOpcodeCounter(counter: *[max_opcode_count]u64, opcode: ?u8) void {
-    if (opcode) |op| counter[op] +|= 1;
-}
-
 fn totalCounter(counter: [max_opcode_count]u64) u64 {
     var total: u64 = 0;
     for (counter) |value| total +|= value;
@@ -152,7 +120,6 @@ fn totalCounter(counter: [max_opcode_count]u64) u64 {
 }
 
 threadlocal var active_profile: ?*OpcodeProfile = null;
-threadlocal var active_opcode: ?u8 = null;
 
 pub fn activate(profile: ?*OpcodeProfile) ?*OpcodeProfile {
     const previous = active_profile;
@@ -174,10 +141,6 @@ pub fn recordPropLookup(is_global: bool) void {
 
 pub fn recordGlobalLookup() void {
     if (active_profile) |profile| profile.recordGlobalLookup();
-}
-
-pub fn recordSlowPath() void {
-    if (active_profile) |profile| profile.recordSlowPath(active_opcode);
 }
 
 pub fn nowNanos() u64 {

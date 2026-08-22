@@ -102,6 +102,19 @@ pub fn expectStringValueBytes(value: core.JSValue, expected: []const u8) !void {
     }
 }
 
+pub fn expectPrints(source: []const u8, expected: []const u8) !void {
+    const js = sharedTestEngine();
+    defer endSharedTest();
+
+    var output_buffer: [8192]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(source, &output);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(expected, output.buffered());
+}
+
 pub var job_counter: usize = 0;
 
 pub fn countJob(_: *core.JSContext, _: []const core.JSValue) core.JSValue {
@@ -452,6 +465,27 @@ var shared_engine_baseline_shape_hash: u32 = 0;
 var shared_engine_baseline_shape_deleted_count: usize = 0;
 var shared_engine_baseline_properties: ?[]core.property.Entry = null;
 var shared_engine_baseline_shape_props: ?[]core.shape.Property = null;
+// A Slot.dup of a VARREF retains the same mutable cell. Keep its original
+// contents separately so deleting a baseline global cannot corrupt the
+// snapshot by parking that shared cell at UNINITIALIZED.
+const SharedBaselineVarRef = struct {
+    value: core.JSValue,
+    is_lexical: bool,
+    is_const: bool,
+    is_deletable: bool,
+};
+var shared_engine_baseline_var_refs: ?[]?SharedBaselineVarRef = null;
+// Fresh three-pass census after Q4b: 814 warmed zero-module observations had
+// allocation-count p95 0 and max 7. One extra allocation is the safety margin.
+const shared_engine_allocation_tolerance: usize = 8;
+var shared_engine_baseline_allocation_count: usize = 0;
+var shared_engine_baseline_allocated_bytes: usize = 0;
+var shared_engine_baseline_module_count: usize = 0;
+
+extern var zjs_test_runner_current_name_ptr: [*]const u8;
+extern var zjs_test_runner_current_name_len: usize;
+extern var zjs_test_runner_current_pass: usize;
+extern var zjs_test_runner_leak_census: bool;
 
 pub fn sharedTestEngine() *TestEngine {
     if (shared_engine_storage == null) {
@@ -483,10 +517,21 @@ pub fn sharedTestEngine() *TestEngine {
             // key atoms and flags are snapshotted with the shape props
             // below).
             shared_engine_baseline_properties = std.heap.page_allocator.alloc(core.property.Entry, g.shape_ref.prop_count) catch unreachable;
+            shared_engine_baseline_var_refs = std.heap.page_allocator.alloc(?SharedBaselineVarRef, g.shape_ref.prop_count) catch unreachable;
+            @memset(shared_engine_baseline_var_refs.?, null);
             for (g.propertyEntries(), 0..) |entry, idx| {
                 // Dup the slot using its kind (read from the shape flags); the
                 // value cell is untagged so dup/destroy need the flags.
                 shared_engine_baseline_properties.?[idx] = .{ .slot = entry.slot.dup(g.propFlagsAt(idx)) };
+                if (g.propFlagsAt(idx).isVarRef()) {
+                    const cell = entry.slot.var_ref;
+                    shared_engine_baseline_var_refs.?[idx] = .{
+                        .value = cell.varRefValue().dup(),
+                        .is_lexical = cell.is_lexical,
+                        .is_const = cell.varRefIsConstSlot().*,
+                        .is_deletable = cell.varRefIsDeletableSlot().*,
+                    };
+                }
             }
 
             shared_engine_baseline_shape_props = std.heap.page_allocator.alloc(core.shape.Property, g.shape_ref.prop_count) catch unreachable;
@@ -498,6 +543,10 @@ pub fn sharedTestEngine() *TestEngine {
                 }
             }
         }
+        _ = eng.runtime.runObjectCycleRemoval();
+        shared_engine_baseline_allocation_count = eng.runtime.memory.allocation_count;
+        shared_engine_baseline_allocated_bytes = eng.runtime.memory.allocated_bytes;
+        shared_engine_baseline_module_count = eng.context.modules.count;
     }
     return &shared_engine_storage.?;
 }
@@ -559,37 +608,38 @@ pub fn endSharedTest() void {
             eng.runtime.memory.trigger_gc_ctx = saved_trigger_ctx;
         }
 
-        // Remove any user-added properties (`var x = ...`,
-        // `function f()`, ...) so the next test sees a clean global.
-        // Standard globals (`Object`, `Array`, ...) and host helpers
-        // (`print`, ...) installed by `installHostGlobals` live at
-        // indices below `shared_engine_baseline_property_count` and
-        // are kept.
+        // Property compaction may have shifted live baseline entries and shrunk
+        // the global's value buffer. Restore capacity before destroying current
+        // entries, then rebuild both parallel arrays entirely from the snapshot.
+        // This also removes user-added globals without assuming baseline indices
+        // survived a compacting delete.
         const baseline = shared_engine_baseline_property_count;
-        if (global.shape_ref.prop_count > baseline) {
-            for (global.propertyEntries()[baseline..], baseline..) |*entry, idx| {
-                // Untagged value cell: destroy needs the kind (current shape
-                // flags are still valid; restorePropertyLayout runs below).
-                entry.slot.destroy(global.propFlagsAt(idx), eng.runtime);
-                // `deleted` is a flag, not a slot arm: leave a harmless cell.
-                entry.slot = .{ .data = core.JSValue.undefinedValue() };
-            }
-            // Count shrink to baseline is handled by restorePropertyLayout
-            // below (the per-object count now lives in shape.prop_count).
+        global.reserveOwnPropertyCapacity(eng.runtime, baseline) catch unreachable;
+
+        // Destroy every current slot using the CURRENT shape flags before the
+        // baseline layout replaces them.
+        for (global.propertyEntries(), 0..) |entry, idx| {
+            entry.slot.destroy(global.propFlagsAt(idx), eng.runtime);
         }
 
-        // Restore baseline properties below baseline to their original states
+        // Restore baseline properties to their original states.
         if (shared_engine_baseline_properties) |baselines| {
-            // First, destroy current values below baseline using the CURRENT
-            // shape flags (the layout has not been restored yet).
-            for (global.propertyEntries()[0..baseline], 0..) |entry, idx| {
-                entry.slot.destroy(global.propFlagsAt(idx), eng.runtime);
-            }
-            // Second, restore baseline values, dupping with the BASELINE
+            // Restore baseline values, dupping with the BASELINE
             // flags snapshotted alongside the baseline slots (1:1 by index).
             const baseline_shape_props = shared_engine_baseline_shape_props.?;
             for (baselines, 0..) |base, idx| {
                 const base_flags = core.property.Flags.fromBits(baseline_shape_props[idx].flags);
+                if (shared_engine_baseline_var_refs.?[idx]) |state| {
+                    // Restore the snapshot cell before publishing another ref
+                    // to it in the rebuilt property array.
+                    const cell = base.slot.var_ref;
+                    const old_value = cell.varRefValueSlot().*;
+                    cell.varRefValueSlot().* = state.value.dup();
+                    cell.is_lexical = state.is_lexical;
+                    cell.varRefIsConstSlot().* = state.is_const;
+                    cell.varRefIsDeletableSlot().* = state.is_deletable;
+                    old_value.free(eng.runtime);
+                }
                 global.prop_values[idx] = .{ .slot = base.slot.dup(base_flags) };
             }
         }
@@ -603,6 +653,56 @@ pub fn endSharedTest() void {
             ) catch unreachable;
         }
     }
+    _ = eng.runtime.runObjectCycleRemoval();
+
+    const allocation_count = eng.runtime.memory.allocation_count;
+    const allocated_bytes = eng.runtime.memory.allocated_bytes;
+    const module_count = eng.context.modules.count;
+    const count_delta = @as(i128, @intCast(allocation_count)) - @as(i128, @intCast(shared_engine_baseline_allocation_count));
+    const bytes_delta = @as(i128, @intCast(allocated_bytes)) - @as(i128, @intCast(shared_engine_baseline_allocated_bytes));
+    const module_delta = @as(i128, @intCast(module_count)) - @as(i128, @intCast(shared_engine_baseline_module_count));
+    const test_name = zjs_test_runner_current_name_ptr[0..zjs_test_runner_current_name_len];
+
+    if (zjs_test_runner_leak_census) {
+        std.debug.print("leak-census: pass={} test=\"{s}\" count_delta={d} bytes_delta={d} module_count={} module_delta={d} count={} bytes={}\n", .{
+            zjs_test_runner_current_pass,
+            test_name,
+            count_delta,
+            bytes_delta,
+            module_count,
+            module_delta,
+            allocation_count,
+            allocated_bytes,
+        });
+    }
+
+    // Pass 0 deliberately warms lazy shared-Realm state. From pass 1 onward,
+    // module-registry growth is the sole unbounded owner and is accounted by
+    // its own monotonic count; every other test must stay within the measured
+    // bounded property-capacity noise floor.
+    const module_count_grew = module_count > shared_engine_baseline_module_count;
+    if (zjs_test_runner_current_pass != 0 and !module_count_grew) {
+        const limit = std.math.add(usize, shared_engine_baseline_allocation_count, shared_engine_allocation_tolerance) catch std.math.maxInt(usize);
+        if (allocation_count > limit) {
+            std.debug.panic(
+                "shared-test leak gate: test=\"{s}\" count_delta={d} bytes_delta={d} module_count={} module_delta={d} baseline_count={} observed_count={} tolerance={}",
+                .{
+                    test_name,
+                    count_delta,
+                    bytes_delta,
+                    module_count,
+                    module_delta,
+                    shared_engine_baseline_allocation_count,
+                    allocation_count,
+                    shared_engine_allocation_tolerance,
+                },
+            );
+        }
+    }
+
+    shared_engine_baseline_allocation_count = @max(shared_engine_baseline_allocation_count, allocation_count);
+    shared_engine_baseline_allocated_bytes = @max(shared_engine_baseline_allocated_bytes, allocated_bytes);
+    shared_engine_baseline_module_count = @max(shared_engine_baseline_module_count, module_count);
 }
 
 pub const vm_helpers = struct {

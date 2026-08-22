@@ -705,4 +705,10 @@ test "public API surface snapshot matches the checked-in name lists" {
     const jsvalue_decl_count = @typeInfo(zjs.JSValue).@"struct".decls.len;
     try std.testing.expectEqual(@as(usize, 89), jsvalue_decl_count);
     try std.testing.expect(@hasDecl(zjs.JSValue, "freeObjectAssumeObjectDuringActiveBytecode"));
+
+    // JSRuntime is likewise a public type with a deliberately broad internal
+    // surface. Pin its declaration count so additions and removals require an
+    // explicit contract update instead of passing silently.
+    const jsruntime_decl_count = @typeInfo(zjs.JSRuntime).@"struct".decls.len;
+    try std.testing.expectEqual(@as(usize, 167), jsruntime_decl_count);
 }

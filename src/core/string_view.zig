@@ -332,21 +332,3 @@ test "JSString.Utf8 rejects non-string values" {
     const core = @import("root.zig");
     try std.testing.expectError(error.TypeError, core.JSValue.String.Utf8.fromValue(std.testing.allocator, core.JSValue.int32(1)));
 }
-
-test "JSContext.toString performs ECMAScript ToString instead of tag assertion" {
-    const core = @import("root.zig");
-    const zjs = @import("../binding/root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-
-    var wrapper = zjs.JSContext.borrowCore(ctx);
-    const object = try wrapper.eval("({ toString() { return 'semantic-string'; } })", .{});
-    defer object.free(rt);
-    try std.testing.expect(object.asString() == null);
-
-    const converted = try wrapper.toString(object);
-    defer converted.free(rt);
-    try std.testing.expectEqualStrings("semantic-string", converted.asString().?.units().?.latin1);
-}

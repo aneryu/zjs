@@ -333,6 +333,24 @@ pub const AutoInit = struct {
     /// metadata on the freshly-created result function; it must not retain or
     /// mutate the owner whose AUTOINIT slot is being materialized.
     prepare_native_function: ?*const fn (*JSRuntime, *const AutoInit, JSValue) anyerror!void = null,
+
+    fn eql(self: AutoInit, other: AutoInit) bool {
+        return std.mem.eql(u8, self.name, other.name) and
+            self.length == other.length and
+            self.kind == other.kind and
+            self.host_function_kind == other.host_function_kind and
+            self.external_host_function_id == other.external_host_function_id and
+            self.host_function_prototype == other.host_function_prototype and
+            self.native_builtin_id == other.native_builtin_id and
+            self.array_builtin_marker == other.array_builtin_marker and
+            self.typed_array_builtin_marker == other.typed_array_builtin_marker and
+            self.array_iterator_kind == other.array_iterator_kind and
+            self.iterator_identity == other.iterator_identity and
+            self.collection_method_owner_class == other.collection_method_owner_class and
+            self.disposable_stack_method == other.disposable_stack_method and
+            self.async_disposable_stack_method == other.async_disposable_stack_method and
+            self.prepare_native_function == other.prepare_native_function;
+    }
 };
 
 /// Compatibility aliases for callers that historically imported these
@@ -413,6 +431,9 @@ pub fn internAutoInit(rt: *JSRuntime, info: AutoInit) !*const AutoInit {
     // Each descriptor has a stable address for the Runtime lifetime. Parsing
     // may temporarily replace `memory.allocator` with a short-lived arena, so
     // allocate and index these through the persistent Runtime account.
+    for (rt.auto_init_descriptors.items) |stored| {
+        if (stored.*.eql(info)) return stored;
+    }
     const stored = try rt.createRuntime(AutoInit);
     errdefer rt.destroyRuntime(AutoInit, stored);
     stored.* = info;
