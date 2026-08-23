@@ -603,6 +603,37 @@ pub inline fn rootValues(slots: anytype) ValueRootScope(slots.len) {
     return scope;
 }
 
+/// A `ValueRootFrame` over `*?*Object` slots, same activate discipline as
+/// `rootValues`. Tracing does not treat a Zig `*Object` local as a root
+/// unless it is named here.
+pub fn ObjectRootScope(comptime count: usize) type {
+    return struct {
+        const Self = @This();
+
+        storage: [count]ObjectRootValue,
+        frame: ValueRootFrame = .{},
+
+        pub inline fn activate(self: *Self, rt: *JSRuntime) void {
+            if (comptime value_root_frames_enabled) {
+                self.frame.objects = &self.storage;
+                self.frame.activate(rt);
+            }
+        }
+
+        pub inline fn deactivate(self: *Self, rt: *JSRuntime) void {
+            self.frame.deactivate(rt);
+        }
+    };
+}
+
+pub inline fn rootObjects(slots: anytype) ObjectRootScope(slots.len) {
+    var scope: ObjectRootScope(slots.len) = .{ .storage = undefined };
+    if (comptime value_root_frames_enabled) {
+        inline for (slots, 0..) |slot, index| scope.storage[index] = .{ .object = slot };
+    }
+    return scope;
+}
+
 pub const RootTraceError = std.mem.Allocator.Error || error{PayloadMarkFailed};
 
 pub const RootVisitor = struct {
@@ -1090,6 +1121,12 @@ pub const JSRuntime = struct {
     weak_root_slots_capacity: usize = 0,
     active_value_roots: ?*const ValueRootFrame = null,
     job_queue: job_mod.Queue = undefined,
+    /// WeakRef [[KeptAlive]] (tracing-gc-design.md §9.2). Traced as a root
+    /// and cleared at job end. Empty in default `rc`.
+    weakref_kept_alive: if (gc.trace_stw_enabled) []JSValue else void =
+        if (gc.trace_stw_enabled) &.{} else {},
+    weakref_kept_alive_capacity: if (gc.trace_stw_enabled) usize else void =
+        if (gc.trace_stw_enabled) 0 else {},
     /// Cross-thread, allocation-free wake signal for host completions that
     /// must be consumed on this Runtime's owner thread. Atomics.waitAsync is
     /// the first producer; the signal carries no JS state and is reset only
@@ -1290,6 +1327,10 @@ pub const JSRuntime = struct {
         rt.weak_root_slots_capacity = 0;
         rt.active_value_roots = null;
         rt.job_queue = job_mod.Queue.init(&rt.memory);
+        if (comptime gc.trace_stw_enabled) {
+            rt.weakref_kept_alive = &.{};
+            rt.weakref_kept_alive_capacity = 0;
+        }
         rt.deferred_native_cleanups = &.{};
         rt.deferred_native_cleanups_capacity = 0;
         rt.draining_deferred_native_cleanups = false;
@@ -1403,6 +1444,7 @@ pub const JSRuntime = struct {
         self.current_exception_uncatchable = false;
         self.current_exception_out_of_memory = false;
         current_exception.free(self);
+        self.clearWeakRefKeptAlive();
         self.job_queue.deinit();
         self.drainDeferredWeakValueFrees();
         self.clearPendingFinalizationJobs();
@@ -2114,6 +2156,9 @@ pub const JSRuntime = struct {
             try visitor.value(&item.value);
         }
         try self.job_queue.traceRoots(visitor);
+        if (comptime gc.trace_stw_enabled) {
+            for (self.weakref_kept_alive) |*kept| try visitor.value(kept);
+        }
         for (self.root_providers) |provider| {
             try provider.trace(provider.context, visitor);
         }
@@ -2130,6 +2175,14 @@ pub const JSRuntime = struct {
         } else {
             try self.traceRoots(null, visitor);
         }
+    }
+
+    pub fn traceValueRootFrameChain(
+        self: *JSRuntime,
+        roots: ?*const ValueRootFrame,
+        visitor: *RootVisitor,
+    ) RootTraceError!void {
+        try self.traceValueRootFrames(roots, visitor);
     }
 
     fn traceValueRootFrames(self: *JSRuntime, roots: ?*const ValueRootFrame, visitor: *RootVisitor) RootTraceError!void {
@@ -2327,6 +2380,36 @@ pub const JSRuntime = struct {
             const slot_identity = slot.identity orelse continue;
             if (slot_identity == identity) self.clearWeakRootSlot(slot, notify);
         }
+    }
+
+    /// §9.2: a successful WeakRef.deref promotes the target into the current
+    /// job's keep-alive set. No-op in default `rc`.
+    pub fn keepAliveWeakRefTarget(self: *JSRuntime, value: JSValue) void {
+        if (comptime !gc.trace_stw_enabled) return;
+        const len = self.weakref_kept_alive.len;
+        if (len == self.weakref_kept_alive_capacity) {
+            const next_capacity: usize = if (self.weakref_kept_alive_capacity == 0) 4 else self.weakref_kept_alive_capacity * 2;
+            const next = self.memory.alloc(JSValue, next_capacity) catch return;
+            @memcpy(next[0..len], self.weakref_kept_alive);
+            const old_capacity = self.weakref_kept_alive_capacity;
+            const old: []JSValue = if (old_capacity != 0) self.weakref_kept_alive.ptr[0..old_capacity] else self.weakref_kept_alive[0..0];
+            self.weakref_kept_alive = next[0..len];
+            self.weakref_kept_alive_capacity = next_capacity;
+            if (old.len != 0) self.memory.free(JSValue, old);
+        }
+        self.weakref_kept_alive = self.weakref_kept_alive.ptr[0 .. len + 1];
+        self.weakref_kept_alive[len] = value.dup();
+    }
+
+    /// Clear [[KeptAlive]] at job end, not at an arbitrary safepoint.
+    pub fn clearWeakRefKeptAlive(self: *JSRuntime) void {
+        if (comptime !gc.trace_stw_enabled) return;
+        const values = self.weakref_kept_alive;
+        const capacity = self.weakref_kept_alive_capacity;
+        self.weakref_kept_alive = &.{};
+        self.weakref_kept_alive_capacity = 0;
+        for (values) |stored| stored.free(self);
+        if (capacity != 0) self.memory.free(JSValue, values.ptr[0..capacity]);
     }
 
     pub fn retainWeakIdentity(self: *JSRuntime, identity: usize) void {
@@ -2625,7 +2708,7 @@ pub const JSRuntime = struct {
         const start_ns = profile.nowNanos();
         self.gc.beginMajorCycle(self.gc.activeMajorReason() orelse .manual);
         const freed = if (comptime gc.trace_stw_enabled)
-            @import("gc_trace_stw.zig").collectCycles(self) catch |err| {
+            @import("gc_trace_stw.zig").collectCycles(self, roots) catch |err| {
                 const mapped: gc.CollectionError = switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.PayloadMarkFailed => error.PayloadMarkFailed,
@@ -2987,6 +3070,26 @@ pub const JSRuntime = struct {
         if (total > self.malloc_gc_threshold) {
             self.gc.requestGC(.allocation_threshold, .soon);
         }
+    }
+
+    /// Same pre-allocation GC boundary as `collectBeforeObjectAllocation`, but
+    /// the Shape (or other header) already retained for the object being
+    /// constructed is named as a pin. Trial deletion keeps it via RC; STW
+    /// would otherwise sweep an unmarked constructor temporary.
+    pub fn collectBeforeObjectAllocationKeepingHeader(
+        self: *JSRuntime,
+        size: usize,
+        header: *gc.Header,
+    ) void {
+        if (comptime gc.trace_stw_enabled) {
+            // Flag-only pin: sweep skips `is_pinned` even when the constructor
+            // temporary is unmarked. Avoids allocating `pin_entries` under the
+            // same threshold that is about to collect.
+            const already = header.pinned();
+            header.setPinned(true);
+            defer if (!already) header.setPinned(false);
+        }
+        self.collectBeforeObjectAllocation(size);
     }
 
     /// QuickJS `JS_NewObjectFromShape` runs its threshold GC before entering

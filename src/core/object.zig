@@ -643,7 +643,7 @@ pub const Object = extern struct {
         errdefer if (shape_owned) rt.shapes.release(initial_shape);
 
         const alloc_size = @sizeOf(Object);
-        rt.collectBeforeObjectAllocation(alloc_size);
+        rt.collectBeforeObjectAllocationKeepingHeader(alloc_size, &initial_shape.header);
         const self = try rt.memory.createNoTrigger(Object);
         var initialized = false;
         errdefer if (initialized)
@@ -723,7 +723,7 @@ pub const Object = extern struct {
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
 
         const alloc_size = @sizeOf(Object);
-        rt.collectBeforeObjectAllocation(alloc_size);
+        rt.collectBeforeObjectAllocationKeepingHeader(alloc_size, &shape_ref.header);
         const self = try rt.memory.createNoTrigger(Object);
         var initialized = false;
         errdefer if (initialized)
@@ -898,7 +898,7 @@ pub const Object = extern struct {
         errdefer if (shape_owned) rt.shapes.release(initial_shape);
 
         const alloc_size = @sizeOf(Object);
-        rt.collectBeforeObjectAllocation(alloc_size);
+        rt.collectBeforeObjectAllocationKeepingHeader(alloc_size, &initial_shape.header);
         const self = try rt.memory.createNoTrigger(Object);
         var initialized = false;
         errdefer if (initialized)
@@ -997,7 +997,7 @@ pub const Object = extern struct {
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
 
         const alloc_size = @sizeOf(Object);
-        rt.collectBeforeObjectAllocation(alloc_size);
+        rt.collectBeforeObjectAllocationKeepingHeader(alloc_size, &shape_ref.header);
         const self = try rt.memory.createNoTrigger(Object);
         var initialized = false;
         errdefer if (initialized)
@@ -1118,7 +1118,7 @@ pub const Object = extern struct {
         // before the raw JSObject allocation. Keep the root/retained Shape live
         // across the same boundary so a cache-miss allocation can make the
         // threshold request visible before a memory-limit check rejects Object.
-        rt.collectBeforeObjectAllocation(alloc_size);
+        rt.collectBeforeObjectAllocationKeepingHeader(alloc_size, &shape_ref.header);
         const self = if (inline_layout) |layout| blk: {
             // The object-level threshold/force-GC hook just ran above. Enter
             // MemoryAccount directly so this same allocation does not request
@@ -3827,7 +3827,9 @@ pub const Object = extern struct {
             return rt.atoms.symbolValueIfLive(rt, symbol_atom) catch JSValue.undefinedValue();
         }
         const target = rt.liveObjectFromWeakIdentity(identity) orelse return JSValue.undefinedValue();
-        return target.value().dup();
+        const retained = target.value().dup();
+        if (comptime gc.trace_stw_enabled) rt.keepAliveWeakRefTarget(retained);
+        return retained;
     }
 
     // ===== fast* array paths =====

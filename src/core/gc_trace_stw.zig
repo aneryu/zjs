@@ -77,8 +77,8 @@ pub const Report = struct {
 
 pub var last_report: Report = .{};
 
-pub fn collectCycles(rt: *JSRuntime) CollectError!usize {
-    var collector = try Collector.init(rt);
+pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame) CollectError!usize {
+    var collector = try Collector.init(rt, extra_roots);
     defer collector.deinit();
     const swept = try collector.run();
     last_report = collector.report;
@@ -89,6 +89,7 @@ pub fn collectCycles(rt: *JSRuntime) CollectError!usize {
 
 const Collector = struct {
     rt: *JSRuntime,
+    extra_roots: ?*const runtime_mod.ValueRootFrame,
     arena: std.heap.ArenaAllocator,
     work: std.ArrayList(*gc.Header),
     err: ?CollectError = null,
@@ -96,11 +97,12 @@ const Collector = struct {
     exact_mark_count: usize = 0,
     conservative_on: bool,
 
-    fn init(rt: *JSRuntime) std.mem.Allocator.Error!Collector {
+    fn init(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame) std.mem.Allocator.Error!Collector {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         errdefer arena.deinit();
         return .{
             .rt = rt,
+            .extra_roots = extra_roots,
             .arena = arena,
             .work = .empty,
             // Tests link every ValueRootFrame; conservative scan would add
@@ -206,12 +208,20 @@ const Collector = struct {
 
     fn seedRoots(self: *Collector) CollectError!void {
         // `context_head` / `constructing_context_head` are membership lists,
-        // not strong roots. A host-released Realm still sitting on the list
-        // because a heap cycle holds its last RC must be collectable — the
-        // same graph trial deletion frees. Live contexts are reached through
-        // `root_providers` (registered at `publishLive`) and `traceActiveRoots`.
+        // not strong roots (gc-invariants.md). A host-released Realm still
+        // sitting on the list because a heap cycle holds its last RC must be
+        // collectable — the same graph trial deletion frees. Live contexts
+        // are reached through host-create-ref `root_providers` (registered
+        // by ownership, unregistered when that ref is consumed) and
+        // `traceActiveRoots`.
         for (self.rt.gc.pin_entries) |entry| {
             self.shade(entry.header);
+        }
+        // Constructor-temporary pins may set `is_pinned` without a pin_entries
+        // slot. Shade them so their child edges (proto) stay live too.
+        var pinned = self.rt.gc.objectIterator();
+        while (pinned.next()) |header| {
+            if (header.pinned()) self.shade(header);
         }
         if (self.err) |err| return err;
 
@@ -244,6 +254,12 @@ const Collector = struct {
             .visit_header = Adaptor.visitHeader,
         };
         try self.rt.traceActiveRoots(&visitor);
+        // `runObjectCycleRemovalWithValueRoots` passes a frame that is not
+        // necessarily linked on `active_value_roots`. Trial deletion ignored
+        // it because RC>0 already kept those values; STW must visit it.
+        if (self.extra_roots) |roots| {
+            try self.rt.traceValueRootFrameChain(roots, &visitor);
+        }
     }
 
     fn shadeConservative(context: *anyopaque, header: *gc.Header) void {
@@ -332,6 +348,9 @@ const Collector = struct {
     }
 
     fn processWeak(self: *Collector) void {
+        self.rt.gc.beginDecrefPhase();
+        defer self.rt.gc.endDecrefPhase(self.rt);
+
         for (self.rt.weak_root_slots) |slot| {
             const identity = slot.identity orelse continue;
             if (!keyIsMarked(self.rt, identity)) {

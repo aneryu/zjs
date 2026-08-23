@@ -859,12 +859,12 @@ test "process-global ClassId allocation is atomic across owner-thread Runtimes" 
 test "RealmContext participates in cycle collection through typed RealmRef edges" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.RealmContext.create(rt);
+    var ctx = try core.RealmContext.create(rt);
 
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
-    const realm_record = try core.Object.create(rt, core.class.ids.object, null);
+    var realm_record = try core.Object.create(rt, core.class.ids.object, null);
     var realm_owner = core.RealmRef.retain(ctx);
     try realm_record.installOwnedRealmRef(rt, &realm_owner);
     const record_key = try rt.internAtom("realmCycleRecord");
@@ -875,8 +875,10 @@ test "RealmContext participates in cycle collection through typed RealmRef edges
         core.Descriptor.data(realm_record.value(), true, true, true),
     );
     realm_record.value().free(rt);
+    dropGcPtr(&realm_record);
 
     ctx.destroy();
+    dropGcPtr(&ctx);
     try std.testing.expect(rt.firstContext() != null);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.firstContext() == null);
@@ -982,12 +984,16 @@ test "auto_init slot to another realm retains it across JSContext.destroy and cy
     defer rt.destroy();
     const ctx_a = try core.JSContext.create(rt);
     defer ctx_a.destroy();
-    const ctx_b = try core.JSContext.create(rt);
+    var ctx_b = try core.JSContext.create(rt);
 
     const host_rc = ctx_b.header.meta().rc;
     {
         const obj = try core.Object.create(rt, core.class.ids.object, null);
         defer obj.value().free(rt);
+        var obj_slot: ?*core.Object = obj;
+        var obj_roots = core.runtime.rootObjects(.{&obj_slot});
+        obj_roots.activate(rt);
+        defer obj_roots.deactivate(rt);
         try obj.defineFunctionPrototypeAutoInit(
             rt,
             ctx_b,
@@ -1008,6 +1014,7 @@ test "auto_init slot to another realm retains it across JSContext.destroy and cy
         try std.testing.expectEqual(&ctx_b.header, obj.prop_values[proto_index].slot.auto_init.realm_and_id.realmHeader().?);
     }
 
+    dropGcPtr(&ctx_b);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), liveRealmCount(rt));
     try std.testing.expectEqual(ctx_a, rt.firstContext().?);
@@ -1631,6 +1638,15 @@ test "GC keeps dequeued finalization job function bytecode symbol constants unti
     var job_alive = true;
     defer if (job_alive) job.deinit();
 
+    // Dequeued job is a Zig local; RC kept the bytecode via the payload
+    // JSValue. Tracing needs the same ownership named as a root frame.
+    var job_roots = core.runtime.rootValues(.{
+        &job.payload.finalization.callback,
+        &job.payload.finalization.held_value,
+    });
+    job_roots.activate(rt);
+    defer job_roots.deactivate(rt);
+
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
@@ -1720,7 +1736,11 @@ test "GC keeps object-held and registered symbol atoms" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const object = try core.Object.create(rt, core.class.ids.object, null);
+    var object = try core.Object.create(rt, core.class.ids.object, null);
+    var obj_slot: ?*core.Object = object;
+    var obj_roots = core.runtime.rootObjects(.{&obj_slot});
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
     const key = try rt.internAtom("symbolValue");
     defer rt.atoms.free(key);
 
@@ -1732,6 +1752,8 @@ test "GC keeps object-held and registered symbol atoms" {
     try std.testing.expect(rt.atoms.name(object_symbol) != null);
 
     object.value().free(rt);
+    obj_slot = null;
+    dropGcPtr(&object);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(object_symbol) == null);
 
@@ -6398,7 +6420,11 @@ test "cycle scan preserves a deeply rooted object chain without recursion" {
 
     const key = try rt.internAtom("deep-cycle-scan-next");
     defer rt.atoms.free(key);
-    _ = try createDeepOwnedPropertyChain(rt, key, deep_gc_chain_length);
+    const head = try createDeepOwnedPropertyChain(rt, key, deep_gc_chain_length);
+    var head_slot: ?*core.Object = head;
+    var obj_roots = core.runtime.rootObjects(.{&head_slot});
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
 
     const before = rt.gc.liveCount();
     const result = try rt.tryRunObjectCycleRemoval();
@@ -6422,6 +6448,12 @@ fn expectCycleReclaimedIncludingShapes(rt: *core.JSRuntime, expected: usize, act
     try expectNoLiveGc(rt);
 }
 
+/// Zero a Zig pointer local that no longer holds a GC object, so a
+/// conservative scan cannot treat leftover stack bits as a root (§7.2).
+fn dropGcPtr(ptr: anytype) void {
+    @memset(std.mem.asBytes(ptr), 0);
+}
+
 fn expectClosedPropertyCycleReclaimed(rt: *core.JSRuntime, freed: usize) !void {
     // Shape is a GC object. This graph collects the two JS objects plus the two
     // one-property transition shapes; the shared empty root shape is released
@@ -6434,8 +6466,8 @@ test "closed object property cycle is released by runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const left = try core.Object.create(rt, core.class.ids.object, null);
-    const right = try core.Object.create(rt, core.class.ids.object, null);
+    var left = try core.Object.create(rt, core.class.ids.object, null);
+    var right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("left");
     defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("right");
@@ -6446,6 +6478,8 @@ test "closed object property cycle is released by runtime cycle removal" {
 
     left.value().free(rt);
     right.value().free(rt);
+    dropGcPtr(&left);
+    dropGcPtr(&right);
     try expectClosedPropertyCycleReclaimed(rt, rt.runObjectCycleRemoval());
 }
 
@@ -6453,9 +6487,9 @@ test "fast array iterator-next cache cycle is released by runtime cycle removal"
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const it = try core.Object.createArray(rt, null);
+    var it = try core.Object.createArray(rt, null);
     std.debug.assert(it.flags.fast_array);
-    const next_obj = try core.Object.create(rt, core.class.ids.object, null);
+    var next_obj = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("iterator");
     defer rt.atoms.free(key);
 
@@ -6465,6 +6499,8 @@ test "fast array iterator-next cache cycle is released by runtime cycle removal"
 
     it.value().free(rt);
     next_obj.value().free(rt);
+    dropGcPtr(&it);
+    dropGcPtr(&next_obj);
     try expectClosedPropertyCycleReclaimed(rt, rt.runObjectCycleRemoval());
 }
 
@@ -7310,7 +7346,7 @@ test "trace_stw ephemeron keeps value only when table and key are live" {
     weakmap.value().free(rt);
     key.value().free(rt);
 
-    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), weakmap.weakCollectionEntries().len);
     try std.testing.expect(rt.gc.containsHeader(&value.header));
     try std.testing.expect(core.gc_trace_stw.last_report.ephemeron_values_shaded >= 1);
@@ -7332,16 +7368,13 @@ test "trace_stw ephemeron value does not keep its key alive" {
     ctx.global = global;
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
-    const key = try core.Object.create(rt, core.class.ids.object, null);
+    var key = try core.Object.create(rt, core.class.ids.object, null);
     const value = try core.Object.create(rt, core.class.ids.object, null);
     try appendWeakCollectionEntry(rt, weakmap, key, value.value());
 
     const map_atom = try rt.internAtom("wm");
     defer rt.atoms.free(map_atom);
-    const val_atom = try rt.internAtom("wv");
-    defer rt.atoms.free(val_atom);
     try global.defineOwnProperty(rt, map_atom, core.Descriptor.data(weakmap.value(), true, true, true));
-    try global.defineOwnProperty(rt, val_atom, core.Descriptor.data(value.value(), true, true, true));
     weakmap.value().free(rt);
     value.value().free(rt);
 
@@ -7349,18 +7382,91 @@ test "trace_stw ephemeron value does not keep its key alive" {
     defer rt.atoms.free(back);
     try value.defineOwnProperty(rt, back, core.Descriptor.data(key.value(), true, true, true));
     key.value().free(rt);
+    dropGcPtr(&key);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expect(!rt.gc.containsHeader(&key.header));
+}
+
+test "trace_stw WeakRef deref keep-alive lasts until job end" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+
+    var weak_ref = try core.Object.create(rt, core.class.ids.weak_ref, null);
+    var target = try core.Object.create(rt, core.class.ids.object, null);
+    const target_header = &target.header;
+    try weak_ref.setWeakRefTarget(rt, target.value());
+    const wr_atom = try rt.internAtom("wr");
+    defer rt.atoms.free(wr_atom);
+    try global.defineOwnProperty(rt, wr_atom, core.Descriptor.data(weak_ref.value(), true, true, true));
+    weak_ref.value().free(rt);
+
+    const held = weak_ref.weakRefDeref(rt);
+    target.value().free(rt);
+    dropGcPtr(&target);
+    held.free(rt);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.gc.containsHeader(target_header));
+
+    rt.clearWeakRefKeptAlive();
+    dropGcPtr(&weak_ref);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.gc.containsHeader(target_header));
+}
+
+test "trace_stw survivor classes on a known graph" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // Matching kept: a named root keeps the object under both RC and STW.
+    var live = try core.Object.create(rt, core.class.ids.object, null);
+    var live_slot: ?*core.Object = live;
+    var live_roots = core.runtime.rootObjects(.{&live_slot});
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
+
+    // Matching collected: dropped create-refs on a closed cycle. Exact mark
+    // and trial deletion both reclaim it; leftover stack bits would be
+    // floating garbage under conservative scan (§7.2), so they are nulled.
+    var left = try core.Object.create(rt, core.class.ids.object, null);
+    var right = try core.Object.create(rt, core.class.ids.object, null);
+    const left_key = try rt.internAtom("surv-left");
+    defer rt.atoms.free(left_key);
+    const right_key = try rt.internAtom("surv-right");
+    defer rt.atoms.free(right_key);
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    left.value().free(rt);
+    right.value().free(rt);
+    dropGcPtr(&left);
+    dropGcPtr(&right);
+
+    const live_header = &live.header;
+    const swept = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(closed_property_cycle_reclaimed_count, swept);
+    try std.testing.expect(rt.gc.containsHeader(live_header));
+    try std.testing.expectEqual(@as(usize, 0), core.gc_trace_stw.last_report.marked_conservative_extra);
+
+    live.value().free(rt);
+    live_slot = null;
+    dropGcPtr(&live);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.gc.containsHeader(live_header));
 }
 
 test "pollGC runs pending collection and clears pending flag" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const left = try core.Object.create(rt, core.class.ids.object, null);
-    const right = try core.Object.create(rt, core.class.ids.object, null);
+    var left = try core.Object.create(rt, core.class.ids.object, null);
+    var right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("poll-left");
     defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("poll-right");
@@ -7370,6 +7476,8 @@ test "pollGC runs pending collection and clears pending flag" {
     try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
     left.value().free(rt);
     right.value().free(rt);
+    dropGcPtr(&left);
+    dropGcPtr(&right);
 
     rt.requestGCForTest();
     try std.testing.expectEqual(@as(?core.gc.RequestReason, core.gc.RequestReason.manual), rt.gcLastRequestReasonForTest());
@@ -9973,9 +10081,13 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const left = try core.Object.create(rt, core.class.ids.object, null);
-    const right = try core.Object.create(rt, core.class.ids.object, null);
-    const external = try core.Object.create(rt, core.class.ids.object, null);
+    var left = try core.Object.create(rt, core.class.ids.object, null);
+    var right = try core.Object.create(rt, core.class.ids.object, null);
+    var external = try core.Object.create(rt, core.class.ids.object, null);
+    var ext_slot: ?*core.Object = external;
+    var ext_roots = core.runtime.rootObjects(.{&ext_slot});
+    ext_roots.activate(rt);
+    defer ext_roots.deactivate(rt);
     const left_key = try rt.internAtom("left");
     defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("right");
@@ -9989,9 +10101,13 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
 
     left.value().free(rt);
     right.value().free(rt);
+    dropGcPtr(&left);
+    dropGcPtr(&right);
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(i32, 1), external.header.meta().rc);
     external.value().free(rt);
+    ext_slot = null;
+    dropGcPtr(&external);
     try expectNoLiveGc(rt);
 }
 

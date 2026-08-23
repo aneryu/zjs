@@ -47,6 +47,10 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // interpreter — makes the guard correct even when the runtime was
     // constructed on a different thread's stack (test262 worker threads).
     if (ctx.runtime.hot.call_depth == 0) rt.updateNativeStackTop();
+    const outermost = ctx.runtime.hot.call_depth == 0;
+    defer if (comptime core.gc.trace_stw_enabled) {
+        if (outermost) rt.clearWeakRefKeptAlive();
+    };
     var module_name_buf: [64]u8 = undefined;
     const module_name: core.Atom = if (options.mode == .module) blk: {
         const module_name_bytes = if (std.mem.eql(u8, options.filename, "<eval>"))

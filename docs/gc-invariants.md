@@ -82,6 +82,43 @@ catches destroy-side ones.
 - `--gc-stats` measures behaviour; see the baseline document for what the
   current numbers are and which of them are stable enough to compare.
 
+## Membership is not a root
+
+Intrusive runtime lists answer "which runtime does this belong to", not "is
+it live". `JSRuntime.context_head` / `context_tail` are QuickJS
+`context_list`: **realm ownership is carried by `RealmRef` and the GC
+header, never by these links** (`runtime.zig`). The same holds for
+`constructing_context_head` and for `root_providers` membership as a mere
+table slot.
+
+A realm is a root only while the host create-ref is live (the provider
+registered at construction, unregistered when `host_api_release_consumed`
+is set). After the host drops that ref, remaining `RealmRef` edges are
+ordinary heap edges: the collector traces them, it does not treat list
+membership as a keep-alive. The shadow observer could shade `context_head`
+because it ran after RC had already unlinked dead realms; a reclaiming
+tracer must not.
+
+## Membership lists are not roots
+
+`context_head`, `constructing_context_head` and the root-provider registry
+answer "which runtime does this belong to", not "is this alive".
+`runtime.zig` states it directly: *"QuickJS `context_list`: intrusive
+membership only. Realm ownership is carried by `RealmRef` and the GC header,
+never by these links."*
+
+A realm is live because of an unconsumed host create-ref, a realm edge held
+in some object's property slot (a heap edge the trace walks, not a root), or
+because it is executing. Treating membership as a root keeps
+host-destroyed realms alive forever.
+
+This bites differently in the two collectors, which is why it is stated
+here rather than in the tracing design. Trial deletion never marks from
+roots, so it cannot notice; the shadow tracer got away with shading
+`context_head` only because it runs *after* RC has already unlinked the
+dead. A reclaiming tracer has no such luxury, and a root set built from
+membership is how it silently stops collecting realms.
+
 ## Representation is out of scope
 
 Converting `ObjectStorage` to a tagged union or reordering `Object` fields is

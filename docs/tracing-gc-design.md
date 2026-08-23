@@ -1451,12 +1451,20 @@ ephemeron fixed point shades a WeakMap/WeakSet value only when both the table
 and the key are marked. Sweep walks the current registry. Default `rc` does
 not import the module.
 
-Halted for a driver ruling on the compatibility-heap root set. Exact mark
-misses Zig `*Object` locals that RC treats as live (RC>0, no ValueRootFrame).
-Conservative scan would keep those, but also keeps cycle-test stack pointers
-after the embedder has already dropped RC — under-collect vs trial deletion.
-Host-destroyed Realms still registered as `root_providers` are another
-membership-vs-root mismatch. WeakRef `[[KeptAlive]]` is not a job root yet.
+Root-set ruling 2026-08-23: Zig locals without `ValueRootFrame` are not
+roots (add frames; do not weaken assertions). Conservative retention of
+stable stack bits is an accepted §7.2 cost (null dangling test locals; do
+not filter candidates). `context_head` membership is not a root
+(gc-invariants.md). WeakRef `[[KeptAlive]]` is a job-scoped root cleared at
+job end. Finalization still allocates a job record at sweep (Stage 3 gap:
+§9.3 wants storage reserved at registration). Constructor paths pin the
+already-retained Shape across `collectBeforeObjectAllocation` so opportunistic
+STW does not sweep a temporary that trial deletion keeps via RC.
+
+Remaining Stage 3 holes (not a gate pass): exact-mark `test-core` still
+panics in `inline class finalizer reentry keeps definition pinned while
+growing the table` (shape double-free during RC teardown after a threshold
+collection). CLI STW with conservative scan runs cycle corpora.
 
 ### Stage 4: block heap
 

@@ -381,6 +381,12 @@ pub const Job = struct {
     }
 
     pub fn traceRoots(self: *Job, visitor: anytype) !void {
+        // A queued job's RealmRef is ownership, not membership. Default `rc`
+        // erases `constHeader`. Tracing must shade the realm from the job,
+        // not from `context_head`.
+        if (comptime core.runtime.value_root_frames_enabled) {
+            if (self.realm.borrow()) |ctx| try visitor.constHeader(&ctx.header);
+        }
         switch (self.payload) {
             .generic => |*payload| for (payload.argv[0..payload.argc]) |*arg| try visitor.value(arg),
             .promise => |*payload| try visitor.value(&payload.value),

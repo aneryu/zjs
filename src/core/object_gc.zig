@@ -698,6 +698,9 @@ pub fn enqueueFinalizationCleanup(
     payload: *const FinalizationRegistryPayload,
     held_value: JSValue,
 ) ObjectGraphError!void {
+    // Stage 3 gap (tracing-gc-design.md §9.3): this path may allocate a job
+    // record. The design requires cleanup storage reserved at registration
+    // or reuse of the detached cell, so GC never allocates while stopped.
     const callback = payload.cleanup_callback orelse return;
     const realm = payload.realm.borrow() orelse unreachable;
     try rt.enqueueFinalizationJobForRealm(realm, callback, held_value);

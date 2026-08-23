@@ -498,6 +498,11 @@ pub const JSContext = struct {
         errdefer self.deinitClassPrototypeSlots();
         try rt.gc.addInitializedWithSize(&self.header, @sizeOf(JSContext));
         rt.linkConstructingContext(self);
+        errdefer rt.unlinkConstructingContext(self);
+        // Host create-ref is a root (gc-invariants.md). Membership on
+        // `constructing_context_head` is not. Register the provider by
+        // ownership here; `publishLive` re-registers idempotently.
+        try rt.registerRootProvider(self.rootProvider());
     }
 
     pub fn publishLive(self: *JSContext) !void {
@@ -858,6 +863,16 @@ pub const JSContext = struct {
         // edges. ReleaseFast keeps the flag write so the layout matches.
         std.debug.assert(!self.host_api_release_consumed);
         self.host_api_release_consumed = true;
+        // Drop the host create-ref root. Heap RealmRef edges remain and are
+        // traced as child edges, not as membership on `context_head`.
+        self.dropHostRootProvider();
+    }
+
+    fn dropHostRootProvider(self: *JSContext) void {
+        switch (self.publication_state) {
+            .live, .constructing => self.runtime.unregisterRootProvider(self.rootProvider()),
+            .finalizing => {},
+        }
     }
 
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
@@ -990,13 +1005,11 @@ pub const JSContext = struct {
 
     fn traceRootProvider(context: *anyopaque, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
         const self: *JSContext = @ptrCast(@alignCast(context));
-        // Host `destroy` consumes the embedder root but leaves the Realm on
-        // `context_head` while a heap cycle still holds RC. Trial deletion
-        // can collect that cycle; STW must not treat the leftover provider
-        // as a strong root. Default `rc` erases the check.
-        if (comptime gc.trace_stw_enabled) {
-            if (self.host_api_release_consumed) return;
-        }
+        // Membership on `context_head` is not a root (gc-invariants.md). This
+        // provider is the host create-ref; once that ref is consumed the
+        // realm stays alive only through heap RealmRef edges.
+        if (self.host_api_release_consumed) return;
+        try visitor.constHeader(&self.header);
         try self.traceRoots(visitor);
     }
 

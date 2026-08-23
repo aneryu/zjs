@@ -3877,6 +3877,7 @@ pub fn drainOnePendingJob(
     var entry = ctx.runtime.job_queue.takeFirst().?;
     var entry_owned = true;
     defer if (entry_owned) entry.deinit();
+    defer if (comptime core.gc.trace_stw_enabled) ctx.runtime.clearWeakRefKeptAlive();
     const job_ctx = entry.realm.borrow() orelse unreachable;
     const job_global = job_ctx.global orelse return error.InvalidBuiltinRegistry;
     var result: ?core.JSValue = null;
