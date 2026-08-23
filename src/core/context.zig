@@ -990,6 +990,13 @@ pub const JSContext = struct {
 
     fn traceRootProvider(context: *anyopaque, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
         const self: *JSContext = @ptrCast(@alignCast(context));
+        // Host `destroy` consumes the embedder root but leaves the Realm on
+        // `context_head` while a heap cycle still holds RC. Trial deletion
+        // can collect that cycle; STW must not treat the leftover provider
+        // as a strong root. Default `rc` erases the check.
+        if (comptime gc.trace_stw_enabled) {
+            if (self.host_api_release_consumed) return;
+        }
         try self.traceRoots(visitor);
     }
 

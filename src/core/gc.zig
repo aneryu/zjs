@@ -24,6 +24,11 @@ const MB: usize = 1024 * KB;
 /// production collector's machine code is unchanged.
 pub const shadow_tracer_enabled: bool = std.mem.eql(u8, build_options.zjs_gc, "shadow");
 
+/// `-Dzjs_gc=trace_stw` compiles the stop-the-world reclaiming tracer
+/// (`gc_trace_stw.zig`) over the compatibility heap. Mutually exclusive with
+/// `shadow`. Default `rc` stays false so production `.text` is unchanged.
+pub const trace_stw_enabled: bool = std.mem.eql(u8, build_options.zjs_gc, "trace_stw");
+
 pub const Mode = enum {
     balanced,
     throughput,

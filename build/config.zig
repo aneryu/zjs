@@ -113,7 +113,8 @@ pub const EngineOptionInputs = struct {
     dossier_layout_pad: usize,
     /// Collector Implementation. `rc` is the production default and must not
     /// change generated machine code. `shadow` additionally compiles the
-    /// non-reclaiming observer in `src/core/gc_shadow.zig`.
+    /// non-reclaiming observer in `src/core/gc_shadow.zig`. `trace_stw`
+    /// compiles the experimental stop-the-world tracer in `gc_trace_stw.zig`.
     zjs_gc: []const u8,
 
     pub fn withExpect(self: EngineOptionInputs, expect_config: []const u8) EngineOptionInputs {

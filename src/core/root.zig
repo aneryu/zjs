@@ -81,6 +81,15 @@ pub const profile = @import("profile.zig");
 pub const gc_shadow = if (gc.shadow_tracer_enabled) @import("gc_shadow.zig") else struct {
     pub const enabled = false;
 };
+/// Imported only when `-Dzjs_gc=trace_stw`. Default `rc` builds see an empty
+/// namespace so the reclaiming tracer is not part of the production compile.
+pub const gc_trace_stw = if (gc.trace_stw_enabled) @import("gc_trace_stw.zig") else struct {
+    pub const enabled = false;
+    pub const Report = struct {
+        ephemeron_values_shaded: usize = 0,
+    };
+    pub var last_report: Report = .{};
+};
 
 pub const JSValue = value.JSValue;
 pub const JSString = JSValue.String;

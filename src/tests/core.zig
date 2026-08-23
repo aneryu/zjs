@@ -7267,6 +7267,94 @@ test "object property and dense writes hit the write audit" {
     try std.testing.expect(snap.siteCount(.object_dense_store) + snap.siteCount(.object_dense_memcpy) > 0);
 }
 
+test "trace_stw collects a closed property cycle" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const left = try core.Object.create(rt, core.class.ids.object, null);
+    const right = try core.Object.create(rt, core.class.ids.object, null);
+    const left_key = try rt.internAtom("left");
+    defer rt.atoms.free(left_key);
+    const right_key = try rt.internAtom("right");
+    defer rt.atoms.free(right_key);
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    left.value().free(rt);
+    right.value().free(rt);
+    try expectClosedPropertyCycleReclaimed(rt, rt.runObjectCycleRemoval());
+}
+
+test "trace_stw ephemeron keeps value only when table and key are live" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+
+    const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
+    const key = try core.Object.create(rt, core.class.ids.object, null);
+    const value = try core.Object.create(rt, core.class.ids.object, null);
+    try appendWeakCollectionEntry(rt, weakmap, key, value.value());
+    value.value().free(rt);
+
+    const map_atom = try rt.internAtom("wm");
+    defer rt.atoms.free(map_atom);
+    const key_atom = try rt.internAtom("wk");
+    defer rt.atoms.free(key_atom);
+    try global.defineOwnProperty(rt, map_atom, core.Descriptor.data(weakmap.value(), true, true, true));
+    try global.defineOwnProperty(rt, key_atom, core.Descriptor.data(key.value(), true, true, true));
+    weakmap.value().free(rt);
+    key.value().free(rt);
+
+    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 1), weakmap.weakCollectionEntries().len);
+    try std.testing.expect(rt.gc.containsHeader(&value.header));
+    try std.testing.expect(core.gc_trace_stw.last_report.ephemeron_values_shaded >= 1);
+
+    try std.testing.expect(global.deleteProperty(rt, key_atom));
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
+    try std.testing.expect(!rt.gc.containsHeader(&value.header));
+}
+
+test "trace_stw ephemeron value does not keep its key alive" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+
+    const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
+    const key = try core.Object.create(rt, core.class.ids.object, null);
+    const value = try core.Object.create(rt, core.class.ids.object, null);
+    try appendWeakCollectionEntry(rt, weakmap, key, value.value());
+
+    const map_atom = try rt.internAtom("wm");
+    defer rt.atoms.free(map_atom);
+    const val_atom = try rt.internAtom("wv");
+    defer rt.atoms.free(val_atom);
+    try global.defineOwnProperty(rt, map_atom, core.Descriptor.data(weakmap.value(), true, true, true));
+    try global.defineOwnProperty(rt, val_atom, core.Descriptor.data(value.value(), true, true, true));
+    weakmap.value().free(rt);
+    value.value().free(rt);
+
+    const back = try rt.internAtom("key");
+    defer rt.atoms.free(back);
+    try value.defineOwnProperty(rt, back, core.Descriptor.data(key.value(), true, true, true));
+    key.value().free(rt);
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
+    try std.testing.expect(!rt.gc.containsHeader(&key.header));
+}
+
 test "pollGC runs pending collection and clears pending flag" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

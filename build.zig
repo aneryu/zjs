@@ -51,9 +51,9 @@ pub fn build(b: *std.Build) void {
     // out of the shadow observer so the production `.text` stays identical.
     // `shadow` adds a non-reclaiming reachability tracer over the current
     // intrusive registry (docs/tracing-gc-design.md §13 Stage 1).
-    const zjs_gc = b.option([]const u8, "zjs_gc", "collector: rc (default) or shadow (non-reclaiming observer)") orelse "rc";
-    if (!std.mem.eql(u8, zjs_gc, "rc") and !std.mem.eql(u8, zjs_gc, "shadow")) {
-        std.debug.print("error: invalid -Dzjs_gc value '{s}': expected rc or shadow\n", .{zjs_gc});
+    const zjs_gc = b.option([]const u8, "zjs_gc", "collector: rc (default), shadow (non-reclaiming observer), or trace_stw (experimental STW tracer)") orelse "rc";
+    if (!std.mem.eql(u8, zjs_gc, "rc") and !std.mem.eql(u8, zjs_gc, "shadow") and !std.mem.eql(u8, zjs_gc, "trace_stw")) {
+        std.debug.print("error: invalid -Dzjs_gc value '{s}': expected rc, shadow, or trace_stw\n", .{zjs_gc});
         std.process.exit(1);
     }
 

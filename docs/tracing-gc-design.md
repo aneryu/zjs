@@ -1443,6 +1443,21 @@ failure coverage, no unexplained leak growth, and an attributed performance/
 memory report. Failure returns to the experimental build; it does not silently
 fall back mid-runtime to RC.
 
+Implementation 2026-08-23 (in progress, not a gate pass): `-Dzjs_gc=trace_stw`
+compiles `src/core/gc_trace_stw.zig` and replaces trial deletion at
+`JSRuntime.tryRunObjectCycleRemovalWithValueRoots`. Strong mark reuses
+`traceChildEdges*` with `visitWeakCollectionEntry` still a no-op; a separate
+ephemeron fixed point shades a WeakMap/WeakSet value only when both the table
+and the key are marked. Sweep walks the current registry. Default `rc` does
+not import the module.
+
+Halted for a driver ruling on the compatibility-heap root set. Exact mark
+misses Zig `*Object` locals that RC treats as live (RC>0, no ValueRootFrame).
+Conservative scan would keep those, but also keeps cycle-test stack pointers
+after the embedder has already dropped RC — under-collect vs trial deletion.
+Host-destroyed Realms still registered as `root_providers` are another
+membership-vs-root mismatch. WeakRef `[[KeptAlive]]` is not a job root yet.
+
 ### Stage 4: block heap
 
 Deliver the small/medium/large spaces, side metadata, address registry, epochs,

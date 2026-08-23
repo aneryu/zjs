@@ -452,13 +452,14 @@ pub const ObjectRootValue = struct {
 
 /// Precise ValueRootFrame linking. Default `rc` production keeps this false
 /// so activate/deactivate erase at comptime (identity). Tests keep all-on
-/// because there is no conservative scanner yet. Shadow CLI (`-Dzjs_gc=shadow`
-/// and not `is_test`) links only container/window frames (design §7.1).
-pub const value_root_frames_enabled = builtin.is_test or gc.shadow_tracer_enabled;
+/// because there is no conservative scanner yet. Shadow/STW CLI
+/// (`-Dzjs_gc=shadow`/`trace_stw` and not `is_test`) links only
+/// container/window frames (design §7.1).
+pub const value_root_frames_enabled = builtin.is_test or gc.shadow_tracer_enabled or gc.trace_stw_enabled;
 
-/// Shadow production (non-test) does not list-link scalar Zig locals; those
+/// Shadow/STW production (non-test) does not list-link scalar Zig locals; those
 /// wait for conservative stack/register capture. Tests link every activate.
-pub const value_root_link_containers_only = gc.shadow_tracer_enabled and !builtin.is_test;
+pub const value_root_link_containers_only = (gc.shadow_tracer_enabled or gc.trace_stw_enabled) and !builtin.is_test;
 
 pub const ValueRootFrameStats = struct {
     activate_calls: usize = 0,
@@ -2623,16 +2624,28 @@ pub const JSRuntime = struct {
 
         const start_ns = profile.nowNanos();
         self.gc.beginMajorCycle(self.gc.activeMajorReason() orelse .manual);
-        const freed = Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
-            const mapped: gc.CollectionError = switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.PayloadMarkFailed => error.PayloadMarkFailed,
+        const freed = if (comptime gc.trace_stw_enabled)
+            @import("gc_trace_stw.zig").collectCycles(self) catch |err| {
+                const mapped: gc.CollectionError = switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.PayloadMarkFailed => error.PayloadMarkFailed,
+                };
+                self.gc.recordFailure(mapped);
+                self.gc.abortMajorCycle();
+                self.gc.requestGC(.collection_failed, .soon);
+                return mapped;
+            }
+        else
+            Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
+                const mapped: gc.CollectionError = switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.PayloadMarkFailed => error.PayloadMarkFailed,
+                };
+                self.gc.recordFailure(mapped);
+                self.gc.abortMajorCycle();
+                self.gc.requestGC(.collection_failed, .soon);
+                return mapped;
             };
-            self.gc.recordFailure(mapped);
-            self.gc.abortMajorCycle();
-            self.gc.requestGC(.collection_failed, .soon);
-            return mapped;
-        };
         self.gc.setMajorPhase(.sweep);
 
         const result = gc.CollectionResult{
