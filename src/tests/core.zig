@@ -13307,3 +13307,39 @@ test "the generational barrier ignores edges a minor would find anyway" {
     rt.gc.generationalBarrier(&young_owner.header, &young_child.header);
     try std.testing.expectEqual(before, rt.gc.generation.stats.remembered_owners);
 }
+
+test "candidate validation rejects the tear shapes the litmus measured" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const live = try core.Object.createPlainObject(rt, null);
+    defer live.value().free(rt);
+    const addr = @intFromPtr(&live.header);
+
+    var stats = core.gc.candidate_validation.Stats{};
+
+    // A well-formed candidate whose claimed kind agrees is accepted.
+    try std.testing.expect(core.gc.candidate_validation.validate(&rt.gc, addr, .object, &stats) != null);
+
+    // The tear the litmus measures: a reference tag carrying a payload from a
+    // different write. Here that is a real object address paired with a kind
+    // the object is not. It must be rejected before anything dereferences it.
+    try std.testing.expect(core.gc.candidate_validation.validate(&rt.gc, addr, .shape, &stats) == null);
+    try std.testing.expectEqual(@as(usize, 1), stats.rejected_kind);
+
+    // An immediate payload wearing a reference tag: plausible-looking bits
+    // that were never an allocation.
+    try std.testing.expect(core.gc.candidate_validation.validate(&rt.gc, 0xdead_0000, .object, &stats) == null);
+    try std.testing.expect(stats.rejected_unregistered >= 1);
+
+    // Sub-page and misaligned addresses are rejected without touching the
+    // registry at all.
+    try std.testing.expect(core.gc.candidate_validation.validate(&rt.gc, 8, .object, &stats) == null);
+    try std.testing.expect(core.gc.candidate_validation.validate(&rt.gc, addr + 1, .object, &stats) == null);
+    try std.testing.expectEqual(@as(usize, 1), stats.rejected_low);
+    try std.testing.expectEqual(@as(usize, 1), stats.rejected_misaligned);
+    try std.testing.expectEqual(@as(usize, 1), stats.accepted);
+}

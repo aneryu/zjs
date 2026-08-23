@@ -67,6 +67,10 @@ else
 
 pub const generation_enabled: bool = trace_stw_enabled;
 
+/// Candidate validation for torn concurrent reads (§5.4). Compiled wherever a
+/// tracer exists, since conservative scanning needs the same checks.
+pub const candidate_validation = @import("gc_candidate.zig");
+
 /// Young objects required before a minor is worth its root scan. A starting
 /// value, not a tuned one: the histogram work that would justify a number
 /// lives with allocation headroom in a later tranche.
