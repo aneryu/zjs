@@ -1614,6 +1614,45 @@ Gate: old-to-young deletion probes, young-list scaling, minor pause
 distribution, false conservative promotion, and memory amplification. Major is
 still STW at this stage.
 
+**Driver verdict: Stage 5 mechanism landed, gate NOT claimed.**
+
+What works: sticky generations keyed beside the heap (the header has no
+spare bit and §4.5 keeps header changes elsewhere), a minor that traces
+roots plus remembered owners following only young children, young-only
+sweep, and survivors promoted by clearing the young set. Remembered owners
+are force-traced rather than `tryMark`ed, which §8.3 warns about and which
+would otherwise make the walk skip the very children a minor exists to
+find. The barrier's deletion probe passes: disabling it turns the
+old-to-young test red.
+
+What does not work yet, measured rather than assumed. On a cycle-heavy
+workload the collector reports:
+
+```
+gc: collection entries 21, completed rounds 21
+gc: generation young 108834, remembered owners 0
+gc: minor collections 21, promoted 669, remembered without young 0
+```
+
+`remembered owners 0` is the tell. The barrier is correct but unreached:
+`HeapValueSlot.setOwned` — the only path that carries an owner and can
+therefore record one — has no callers. Every heap write still goes through
+the owner-less `set`, so the remembered set stays empty, every minor sees
+an empty old-to-young frontier, and 108k young objects survive to be
+handled by the major instead. The minor is running and reclaiming
+essentially nothing.
+
+This is the same shape as the block heap earlier in Stage 4: a mechanism
+that compiles, tests green, and is not yet wired into the paths that would
+exercise it. Recording it as a gate pass would make the Stage 5 rows
+(young-list scaling, minor pause distribution, memory amplification)
+measurements of a collector that is not doing the work.
+
+Remaining for the gate: migrate heap writes to owner-carrying stores so the
+barrier fires, then re-measure young-list scaling, minor pauses, false
+conservative promotion and memory amplification against a remembered set
+that is actually populated.
+
 ### Stage 6: concurrent major
 
 Deliver atomic heap Slots, target shading, barrier-critical handshake, marker

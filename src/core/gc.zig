@@ -67,6 +67,11 @@ else
 
 pub const generation_enabled: bool = trace_stw_enabled;
 
+/// Young objects required before a minor is worth its root scan. A starting
+/// value, not a tuned one: the histogram work that would justify a number
+/// lives with allocation headroom in a later tranche.
+pub const minor_young_threshold: usize = 512;
+
 const GenerationState = if (generation_enabled)
     @import("gc_generation.zig").State
 else
@@ -1685,6 +1690,16 @@ pub const Registry = struct {
         }
     }
 
+    /// Whether a minor is worth attempting: enough young objects to be worth
+    /// the root scan, and no full collection already in flight. Deliberately
+    /// simple — the scheduling policy that replaces it belongs with the
+    /// allocation-headroom work, not with the collector mechanism.
+    pub inline fn shouldTryMinor(self: *const Registry) bool {
+        if (comptime !generation_enabled) return false;
+        if (self.phase != .none) return false;
+        return self.generation.young.count() >= minor_young_threshold;
+    }
+
     /// Generational write barrier (§8.3). Lives on the Registry because the
     /// state and its allocator are private here; callers pass owner and child
     /// headers and stay out of the generation representation.
@@ -1869,7 +1884,13 @@ pub const Registry = struct {
             if (h == &self.gc_obj_list) break;
             if (!isCycleCandidate(h)) return error.CorruptGcList;
             if (h.meta().rc < 0) return error.NegativeRefCount;
-            if (h.meta().flags.mark and self.phase == .none) return error.MarkBitLeftSet;
+            // Trial deletion must leave every mark bit clear once a round
+            // ends. Sticky generations invert that: a survivor's mark bit is
+            // precisely what records "this is old now" between collections
+            // (§8.2), so the invariant only applies where marks are transient.
+            if (comptime !generation_enabled) {
+                if (h.meta().flags.mark and self.phase == .none) return error.MarkBitLeftSet;
+            }
             if (h.prev != previous) return error.CorruptGcList;
             const next = h.next orelse return error.CorruptGcList;
             if (next.prev != h) return error.CorruptGcList;

@@ -412,6 +412,9 @@ pub fn main(init: std.process.Init) !void {
         if (comptime engine.core.gc.block_heap_enabled) {
             try dumpGcBlockHeapStats(&stdout_writer.interface, &runtime.runtime.gc);
         }
+        if (comptime engine.core.gc.generation_enabled) {
+            try dumpGcGenerationStats(&stdout_writer.interface, &runtime.runtime.gc);
+        }
         try stdout_writer.interface.flush();
     }
     if (comptime engine.core.gc.shadow_tracer_enabled) {
@@ -834,6 +837,22 @@ fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Regi
             },
         );
     }
+}
+
+/// Generational counters. `remembered without young` is the one to watch: it
+/// counts owners a minor re-traced that turned out to hold no young child, so
+/// a large share means the write barrier is firing more than it needs to.
+fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
+    const st = registry.generation.stats;
+    try writer.print("gc: generation young {d}, remembered owners {d}\n", .{
+        st.young_count,
+        st.remembered_owners,
+    });
+    try writer.print("gc: minor collections {d}, promoted {d}, remembered without young {d}\n", .{
+        st.minor_collections,
+        st.promoted,
+        st.remembered_without_young,
+    });
 }
 
 fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {

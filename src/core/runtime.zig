@@ -2720,6 +2720,7 @@ pub const JSRuntime = struct {
         defer self.gc_running = false;
 
         const start_ns = profile.nowNanos();
+
         self.gc.beginMajorCycle(self.gc.activeMajorReason() orelse .manual);
         const freed = if (comptime gc.trace_stw_enabled)
             @import("gc_trace_stw.zig").collectCycles(self, roots) catch |err| {
@@ -2764,7 +2765,31 @@ pub const JSRuntime = struct {
         mode: GCPollMode,
     ) gc.CollectionError!gc.CollectionResult {
         self.assertOwnerThread();
-        _ = roots;
+        // §8.5: an automatic poll prefers a minor. A minor only reaches the
+        // young set, so allocation churn is reclaimed without a whole-heap
+        // trace -- but only here. An explicit `runObjectCycleRemoval` means
+        // "collect everything", and answering it with a minor would silently
+        // change what that call promises.
+        if (comptime gc.generation_enabled) {
+            if (!self.gc_running and self.gc.shouldTryMinor()) {
+                self.gc_running = true;
+                defer self.gc_running = false;
+                const started = profile.nowNanos();
+                if (@import("gc_trace_stw.zig").collectMinor(self, roots) catch null) |freed| {
+                    if (freed > 0) {
+                        self.gc.stats.collections += 1;
+                        const ended = profile.nowNanos();
+                        const result: gc.CollectionResult = .{
+                            .freed_objects = freed,
+                            .duration_ns = if (ended > started) ended - started else 0,
+                        };
+                        self.gc.recordSuccess(result);
+                        self.resetGCThreshold();
+                        return result;
+                    }
+                }
+            }
+        }
         if (self.gc_running or self.gc.phase != .none) return .{};
         const scheduler_point: gc.SchedulerPoint = switch (mode) {
             .normal => .allocation_slow_path,
