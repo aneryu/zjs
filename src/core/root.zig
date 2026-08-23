@@ -26,6 +26,25 @@ else
     struct {
         pub const stats_enabled = false;
     };
+/// Shadow write audit of Slot-bypassing heap stores. Default `rc` erases the
+/// module so production `.text` does not grow observer symbols.
+pub const gc_write_audit = if (builtin.is_test or gc.shadow_tracer_enabled)
+    @import("gc_write_audit.zig")
+else
+    struct {
+        pub const enabled = false;
+        pub fn reset() void {}
+        pub fn snapshot() Snapshot {
+            return .{};
+        }
+        pub fn format(_: anytype) !void {}
+        pub const Snapshot = struct {
+            slot_writes: usize = 0,
+            pub fn hits(_: Snapshot) usize {
+                return 0;
+            }
+        };
+    };
 pub const atom = @import("atom.zig");
 pub const string = @import("string.zig");
 pub const bigint = @import("bigint.zig");

@@ -171,6 +171,9 @@ fn printSummary(io: std.Io, summary: ExecutionSummary) !void {
         if (summary.shadow_first_unexplained_path_len != 0) {
             try stdout.print("shadow-census first unexplained: {s}\n", .{summary.shadowFirstUnexplainedPath()});
         }
+        if (comptime test262_root.core.gc.shadow_tracer_enabled) {
+            try test262_root.core.gc_write_audit.format(stdout);
+        }
     }
     try stdout.flush();
 }

@@ -7223,6 +7223,50 @@ test "GcBuffer copyOwned moveOwned resize preserve live prefix" {
     try std.testing.expectEqual(@as(usize, 0), slice.len);
 }
 
+test "write audit records FAM memcpy union and shape-slot bypasses without failing" {
+    if (comptime !core.gc_write_audit.enabled) return error.SkipZigTest;
+    core.gc_write_audit.reset();
+    core.gc_write_audit.hit(.memcpy_bulk, .object_prop_values_memcpy);
+    core.gc_write_audit.hitN(.fam_slice, .object_dense_store, 3);
+    core.gc_write_audit.hit(.union_arm, .object_prop_slot);
+    core.gc_write_audit.hit(.shape_slot, .object_set_entry_kind_and_slot);
+    core.gc_write_audit.noteSlot();
+    const snap = core.gc_write_audit.snapshot();
+    try std.testing.expectEqual(@as(usize, 6), snap.hits());
+    try std.testing.expectEqual(@as(usize, 1), snap.kindCount(.memcpy_bulk));
+    try std.testing.expectEqual(@as(usize, 3), snap.kindCount(.fam_slice));
+    try std.testing.expectEqual(@as(usize, 1), snap.kindCount(.union_arm));
+    try std.testing.expectEqual(@as(usize, 1), snap.kindCount(.shape_slot));
+    try std.testing.expectEqual(@as(usize, 0), snap.kindCount(.plugin_opaque));
+    try std.testing.expectEqual(@as(usize, 1), snap.slot_writes);
+    core.gc_write_audit.reset();
+    try std.testing.expectEqual(@as(usize, 0), core.gc_write_audit.snapshot().hits());
+}
+
+test "object property and dense writes hit the write audit" {
+    if (comptime !core.gc_write_audit.enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    core.gc_write_audit.reset();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    const child = try core.Object.create(rt, core.class.ids.object, null);
+    defer child.value().free(rt);
+    const key = try rt.internAtom("x");
+    defer rt.atoms.free(key);
+    try obj.defineOwnProperty(rt, key, core.Descriptor.data(child.value(), true, true, true));
+
+    const arr = try core.Object.createArray(rt, null);
+    defer arr.value().free(rt);
+    try std.testing.expect(try arr.defineDenseArrayDataProperty(rt, 0, child.value()));
+
+    const snap = core.gc_write_audit.snapshot();
+    try std.testing.expect(snap.hits() > 0);
+    try std.testing.expect(snap.siteCount(.object_prop_slot) + snap.siteCount(.object_prop_values_memcpy) > 0);
+    try std.testing.expect(snap.siteCount(.object_dense_store) + snap.siteCount(.object_dense_memcpy) > 0);
+}
+
 test "pollGC runs pending collection and clears pending flag" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

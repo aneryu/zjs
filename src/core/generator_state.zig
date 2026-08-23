@@ -6,6 +6,7 @@ const var_ref_mod = @import("var_ref.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 const std = @import("std");
+const builtin = @import("builtin");
 
 const closeOpenVarRefCellSlots = payloads.closeOpenVarRefCellSlots;
 const callVisitValue = payloads.callVisitValue;
@@ -71,6 +72,9 @@ pub const SuspendedStackStorage = struct {
         }
         const next = try rt.memory.alloc(JSValue, next_capacity);
         errdefer rt.memory.free(JSValue, next);
+        if (comptime builtin.is_test or std.mem.eql(u8, @import("build_options").zjs_gc, "shadow")) {
+            @import("gc_write_audit.zig").hit(.memcpy_bulk, .generator_values_memcpy);
+        }
         @memcpy(next[0..self.values.len], self.values);
         const old_values = self.values;
         const old_capacity = self.capacity;

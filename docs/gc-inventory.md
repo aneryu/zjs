@@ -171,7 +171,10 @@ gate). Heap `JSValue` / `*Object` / `*Shape` / `*VarRef` / `*FunctionBytecode`
 (`baseline_count` is the recorded seed). Bulk Slot APIs live in
 `src/core/gc_slot.zig` with Stage 6 barrier comments on copy/move/resize/
 destroy/property-install; they are not wired to `Object.prop_values` or dense
-elements (§6.4).
+elements (§6.4). Shadow write audit (`src/core/gc_write_audit.zig`, printed by
+`--gc-shadow-check`) records those lint-invisible stores at runtime; hits are
+the Stage 6 barrier candidate list, not a failure. Plugin-opaque DSO payload
+stores are outside the engine ABI and stay uninstrumented.
 
 Migrated `gc-slot: heap` families (writes already go through
 `Object.setOptionalValueSlot` / `GcBuffer.setSlice`, the Slot-under-RC

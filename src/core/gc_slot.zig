@@ -37,17 +37,21 @@ pub const Stats = struct {
 
 pub var stats: Stats = .{};
 
+const write_audit = @import("gc_write_audit.zig");
+
 inline fn noteSet(retained_new: bool, released_old: bool) void {
     if (comptime !stats_enabled) return;
     stats.set_calls += 1;
     stats.publishes += 1;
     if (retained_new) stats.retains += 1;
     if (released_old) stats.releases += 1;
+    write_audit.noteSlot();
 }
 
 inline fn noteBulk() void {
     if (comptime !stats_enabled) return;
     stats.bulk_calls += 1;
+    write_audit.noteSlot();
 }
 
 /// Heap JSValue field. Storage remains a plain `JSValue` / `?JSValue`.

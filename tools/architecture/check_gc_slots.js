@@ -195,7 +195,7 @@ if (fs.existsSync(bytecodeDir)) walk(bytecodeDir, files);
 
 const findings = [];
 for (const file of files) {
-  if (file.endsWith('/gc_slot.zig')) continue;
+  if (file.endsWith('/gc_slot.zig') || file.endsWith('/gc_write_audit.zig')) continue;
   findings.push(...scanFile(file));
 }
 

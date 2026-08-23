@@ -19,6 +19,7 @@
 //! (`setWeakMapEntry`, consumed by `exec/closure.zig`) live here too.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const core = @import("root.zig");
 const bignum = @import("../libs/bigint.zig");
@@ -484,6 +485,9 @@ fn shrinkStrongStorage(rt: *core.JSRuntime, object: *core.Object) void {
         while (next_capacity < live * 2) next_capacity *= 2;
         if (next_capacity < capacity_slot.*) shrink: {
             const next = rt.allocRuntime(core.object.CollectionEntry, next_capacity) catch break :shrink;
+            if (comptime builtin.is_test or core.gc.shadow_tracer_enabled) {
+                @import("gc_write_audit.zig").hit(.memcpy_bulk, .collection_entries_memcpy);
+            }
             @memcpy(next[0..live], entries_slot.*);
             const old_entries = entries_slot.*;
             const old_capacity = capacity_slot.*;

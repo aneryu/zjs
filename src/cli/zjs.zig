@@ -462,6 +462,9 @@ fn runGcShadowCheck(out: *std.Io.Writer, rt: *zjs.JSRuntime) !void {
         std.process.exit(1);
     };
     try report.format(out);
+    if (comptime engine.core.gc.shadow_tracer_enabled) {
+        try engine.core.gc_write_audit.format(out);
+    }
     try out.flush();
     if (report.unexplained != 0) std.process.exit(1);
 }

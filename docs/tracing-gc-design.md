@@ -1404,7 +1404,11 @@ Stage 6 barrier step. Default `rc` erases the module. Cold `gc-slot: heap`
 families: Iterator, Proxy, ObjectData, TypedArray.buffer, BoundFunction,
 Arguments.var_refs. Naked-field lint:
 `tools/architecture/check_gc_slots.js` (shrinking allowlist). Not wired to
-`Object.prop_values` or dense elements.
+`Object.prop_values` or dense elements. Shadow write audit:
+`src/core/gc_write_audit.zig` records FAM/slice stores, `@memcpy` of live
+JSValue/Entry, union-arm stores, and Shape-discriminated `setEntryKindAndSlot`
+at runtime; `--gc-shadow-check` prints the hit inventory and does not fail on
+hits. Plugin-opaque DSO stores remain uninstrumented (ABI).
 
 ### Stage 3: stop-the-world tracing prototype
 

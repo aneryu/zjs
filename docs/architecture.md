@@ -57,6 +57,7 @@ runtime/context storage.
 | `object.zig` / `shape.zig` / `property.zig` | objects, shapes, properties |
 | `gc.zig` | registry, policy, external-memory accounting |
 | `gc_slot.zig` | Stage 2 Slot-under-RC mutation protocol (no atomics) |
+| `gc_write_audit.zig` | Shadow runtime write audit of Slot-bypassing heap stores |
 | `host_function.zig` | native-function ABI (`NativeCProto`, records) |
 
 Lifetime model: non-atomic reference counting for immediate free; cycle
