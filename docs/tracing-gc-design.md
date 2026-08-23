@@ -1360,6 +1360,23 @@ that class still disables reclaiming tracing. `Atomics.waitAsync` still has
 no Adapter; those tests were in the 44584 and did not produce unexplained
 cycle-list objects.
 
+**Driver verdict: Stage 1 gate PASSED.** Independently re-run rather than
+accepted from the report: `--gc-shadow-check` over the whole V8 benchmark
+suite (unexplained 0, all five buckets 0, exit 0), and `run-test262
+--gc-shadow-check -t 20` over the full corpus —
+`tests=44584 errors=0 unexplained_tests=0 unexplained_objects=0`, every
+bucket zero, 25 s. The gate sentence was not restated or narrowed to reach
+this.
+
+Two things this verdict does *not* claim, both recorded rather than
+smoothed over. The gate is about unexplained objects, and the following are
+Stage 1 deliverable gaps carried into Stage 2: the `Atomics.waitAsync`
+waiter registry has no root Adapter, and strings and BigInts stay outside
+`gc_obj_list`. Separately, shadow calls `opaquePayloadMark` for classes
+that ship a legacy tracer — that is a classification, not a pass: those
+classes remain disabled for reclaiming tracing (§6.1), and the plugin
+corpus is what demonstrated it rather than a design assertion.
+
 ### Stage 2: Slot-under-RC
 
 Deliver:
