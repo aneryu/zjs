@@ -45,6 +45,9 @@ pub const Report = struct {
     marked_exact: usize = 0,
     marked_conservative_extra: usize = 0,
     swept: usize = 0,
+    /// Minor-collection outcome; zero on a major.
+    minor_reclaimed: usize = 0,
+    minor_young_before: usize = 0,
     remaining: usize = 0,
     ephemeron_rounds: usize = 0,
     ephemeron_values_shaded: usize = 0,
@@ -128,6 +131,49 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
         last_report.string_live = rt.gc.address_registry.stats.string_live;
     }
     return swept;
+}
+
+/// Stop-the-world minor collection over the young set (§8.5).
+///
+/// The minor traces roots and remembered owners, following only young
+/// children, then reclaims young objects that stayed unmarked. Survivors
+/// become old by the sticky rule, which here means clearing the young set:
+/// nothing is copied and no age is counted.
+///
+/// Returns the number of young objects reclaimed, or null when there is no
+/// generational state to work with.
+pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame) CollectError!?usize {
+    if (comptime !gc.generation_enabled) return null;
+    if (rt.gc.generation.young.count() == 0) return 0;
+    const young_before = rt.gc.generation.young.count();
+
+    var collector = try Collector.init(rt, extra_roots);
+    defer collector.deinit();
+
+    collector.clearMarks();
+    try collector.seedRoots();
+    if (collector.conservative_on) try collector.seedConservativeRoots();
+
+    // §8.3: force-trace each remembered owner instead of `tryMark`ing it. An
+    // old owner already carries a sticky mark, so marking it would make the
+    // walk skip exactly the children the minor exists to find.
+    var remembered = rt.gc.generation.rememberedIterator();
+    while (remembered.next()) |addr| {
+        const header: *gc.Header = @ptrFromInt(addr.*);
+        const before = collector.work.items.len;
+        try collector.traceHeader(header);
+        if (collector.work.items.len == before) {
+            rt.gc.generation.stats.remembered_without_young += 1;
+        }
+    }
+    try collector.drain();
+    try collector.ephemeronFixedPoint();
+
+    const reclaimed = collector.sweepUnmarkedYoung();
+    rt.gc.generation.promoteSurvivors(young_before - reclaimed);
+    last_report.minor_reclaimed = reclaimed;
+    last_report.minor_young_before = young_before;
+    return reclaimed;
 }
 
 const Collector = struct {
@@ -530,6 +576,47 @@ const Collector = struct {
         }
         finalization_payload.cells = finalization_payload.cells.ptr[0..write_index];
         holder.pruneBorrowedReferenceHolderIfEmpty(self.rt);
+    }
+
+    /// Young-only sweep for a minor. An old object cannot be proven dead by a
+    /// minor -- its incoming edges were never traced -- so only unmarked young
+    /// objects are condemned, and old marks are left alone rather than reset.
+    fn sweepUnmarkedYoung(self: *Collector) usize {
+        gc.listInit(&self.rt.gc.tmp_obj_list);
+
+        var doomed: std.ArrayList(*gc.Header) = .empty;
+        defer doomed.deinit(self.allocator());
+        var young_it = self.rt.gc.generation.youngIterator();
+        while (young_it.next()) |addr| {
+            const header: *gc.Header = @ptrFromInt(addr.*);
+            if (header.metaConst().flags.mark) continue;
+            if (header.metaConst().flags.is_pinned) continue;
+            if (header.metaConst().flags.kind != .object) continue;
+            doomed.append(self.allocator(), header) catch return 0;
+        }
+        for (doomed.items) |header| {
+            self.rt.gc.detachCycleCandidate(header);
+            gc.listAddTail(&self.rt.gc.tmp_obj_list, header);
+        }
+
+        const old_phase = self.rt.gc.phase;
+        self.rt.gc.phase = .remove_cycles;
+        defer self.rt.gc.phase = old_phase;
+
+        var reclaimed: usize = 0;
+        var cursor = self.rt.gc.tmp_obj_list.next;
+        while (cursor) |h| {
+            if (h == &self.rt.gc.tmp_obj_list) break;
+            const next = h.next;
+            gc.listDel(h);
+            reclaimed += 1;
+            Object.destroyFromHeader(self.rt, h);
+            cursor = next;
+        }
+        gc.listInit(&self.rt.gc.tmp_obj_list);
+
+        // Survivors keep their marks: that is what makes them old.
+        return reclaimed;
     }
 
     fn sweepUnmarked(self: *Collector) usize {

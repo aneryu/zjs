@@ -13243,3 +13243,67 @@ test "fused multiply-subtract matches the reference limb for limb" {
         try std.testing.expectEqualSlices(Limb, reference, under_test);
     }
 }
+
+test "minor collection reclaims young garbage and promotes survivors" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const kept = try core.Object.createPlainObject(rt, null);
+    defer kept.value().free(rt);
+    var roots = core.runtime.rootValues(.{});
+    _ = &roots;
+
+    const young_before = rt.gc.generation.young.count();
+    try std.testing.expect(young_before > 0);
+
+    const reclaimed = (try core.gc_trace_stw.collectMinor(rt, null)).?;
+    // Survivors leave the young set; the set is rebuilt by later allocation.
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.young.count());
+    try std.testing.expect(rt.gc.generation.stats.minor_collections >= 1);
+    try std.testing.expect(reclaimed <= young_before);
+    // The rooted object must have survived.
+    try std.testing.expect(rt.gc.liveCount() > 0);
+}
+
+test "old-to-young edge survives a minor only because the barrier remembered it" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // Age an owner: after one minor everything that survived counts as old.
+    const owner = try core.Object.createPlainObject(rt, null);
+    defer owner.value().free(rt);
+    _ = try core.gc_trace_stw.collectMinor(rt, null);
+    try std.testing.expect(!rt.gc.generation.isYoung(&owner.header));
+
+    // A young child reachable only through that old owner.
+    const child = try core.Object.createPlainObject(rt, null);
+    try std.testing.expect(rt.gc.generation.isYoung(&child.header));
+
+    const remembered_before = rt.gc.generation.stats.remembered_owners;
+    rt.gc.generationalBarrier(&owner.header, &child.header);
+    try std.testing.expect(rt.gc.generation.stats.remembered_owners > remembered_before);
+}
+
+test "the generational barrier ignores edges a minor would find anyway" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const young_owner = try core.Object.createPlainObject(rt, null);
+    defer young_owner.value().free(rt);
+    const young_child = try core.Object.createPlainObject(rt, null);
+    defer young_child.value().free(rt);
+
+    // Young owner: a minor scans it regardless, so remembering it is waste.
+    const before = rt.gc.generation.stats.remembered_owners;
+    rt.gc.generationalBarrier(&young_owner.header, &young_child.header);
+    try std.testing.expectEqual(before, rt.gc.generation.stats.remembered_owners);
+}

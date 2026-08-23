@@ -65,6 +65,13 @@ const SweepModel = if (sweep_model_enabled)
 else
     void;
 
+pub const generation_enabled: bool = trace_stw_enabled;
+
+const GenerationState = if (generation_enabled)
+    @import("gc_generation.zig").State
+else
+    void;
+
 /// Max alignment the block heap can serve; `void`-safe for default `rc`.
 pub inline fn blockHeapMaxAlign() usize {
     return if (block_heap_enabled) @import("gc_block_heap.zig").cell_alignment else 0;
@@ -797,6 +804,8 @@ pub const Registry = struct {
         if (sweep_model_enabled) .{} else {},
 
     /// 64 KiB block heap. Void unless `-Dzjs_gc=trace_stw`.
+    generation: if (generation_enabled) GenerationState else void =
+        if (generation_enabled) .{} else {},
     block_heap: if (block_heap_enabled) BlockHeap else void =
         if (block_heap_enabled) .init(std.heap.page_allocator) else {},
 
@@ -955,6 +964,7 @@ pub const Registry = struct {
 
         if (comptime address_registry_enabled) {
             self.address_registry.deinit(addressRegistryAllocator());
+            if (comptime generation_enabled) self.generation.deinit(addressRegistryAllocator());
         }
         if (comptime sweep_model_enabled) {
             self.sweep_model.deinit(addressRegistryAllocator());
@@ -1675,6 +1685,17 @@ pub const Registry = struct {
         }
     }
 
+    /// Generational write barrier (§8.3). Lives on the Registry because the
+    /// state and its allocator are private here; callers pass owner and child
+    /// headers and stay out of the generation representation.
+    pub inline fn generationalBarrier(self: *Registry, owner: *GCObjectHeader, child: ?*GCObjectHeader) void {
+        if (comptime !generation_enabled) return;
+        const target = child orelse return;
+        if (self.generation.isYoung(owner)) return;
+        if (!self.generation.isYoung(target)) return;
+        self.generation.rememberOwner(addressRegistryAllocator(), owner);
+    }
+
     inline fn addressRegistryAllocator() std.mem.Allocator {
         // Independent of the JS heap allocator: NoFail publication must not
         // grow a new fallible allocation on the object allocator, and
@@ -1688,11 +1709,17 @@ pub const Registry = struct {
         self.address_registry.insert(addressRegistryAllocator(), header, bytes) catch {
             self.address_registry.stats.failed_inserts += 1;
         };
+        // Generation shares this lifetime: an object is young from the moment
+        // it is published until a collection lets it survive.
+        if (comptime generation_enabled) {
+            self.generation.noteAllocated(addressRegistryAllocator(), header);
+        }
     }
 
     inline fn unregisterLiveAddress(self: *Registry, header: *GCObjectHeader) void {
         if (comptime !address_registry_enabled) return;
         self.address_registry.remove(addressRegistryAllocator(), header);
+        if (comptime generation_enabled) self.generation.forget(header);
     }
 
     pub fn registerLiveStringRange(

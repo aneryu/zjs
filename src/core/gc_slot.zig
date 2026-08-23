@@ -83,6 +83,15 @@ pub const HeapValueSlot = struct {
         old_value.free(rt);
     }
 
+    /// Owner-aware store. The generational barrier needs the *owner*, not the
+    /// slot: a minor re-traces owners, so that is what has to be remembered
+    /// (§8.3). Callers that have the owning header at hand should prefer this
+    /// over `set`; the barrier is a no-op outside generational builds.
+    pub inline fn setOwned(rt: *JSRuntime, owner: *gc.Header, slot: *JSValue, new_value: JSValue) void {
+        set(rt, slot, new_value);
+        rt.gc.generationalBarrier(owner, new_value.cycleMarkHeader());
+    }
+
     /// Stage 6: no write barrier (no new exact target). Must not allocate.
     pub inline fn clearOptional(rt: *JSRuntime, slot: *?JSValue) void {
         noteSet(false, slot.* != null);
