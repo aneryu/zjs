@@ -1690,10 +1690,36 @@ raw pointers, is its own problem; §4.6's reserve/initialize/publish exists
 precisely because that window is hostile, and the minor would have to
 observe the same discipline.
 
-So the young budget needs a safepoint of its own rather than a hook on the
-allocation path. That is §8.7 work — mark debt, sweep debt and headroom
-already live there — and it is what stands between Stage 5's mechanism and
-its gate.
+A third attempt put the minor on the interpreter's own cadence — the
+`pollInterruptSlow` safepoint, between instructions, which is exactly the
+place with no half-built object in flight. It crashed too, and this time
+the stack named the real problem:
+
+```
+assert  <- Object.collectionEntriesSlot
+        <- collection.findStrongEntry
+        <- collection_ops.setAddNoResult   (Set.prototype.add)
+```
+
+A minor ran in the middle of `Set.add` and reclaimed the collection whose
+entries the operation was walking. The receiver is a caller-supplied
+object, alive by refcount, and under tracing that is not a root. This is
+the same family as the unpublished operand windows Stage 3 had to name —
+native code holding a JSValue across a point where a collection can happen
+— but Stage 3 only had to survive collections at allocation boundaries.
+A minor fires often enough to catch the rest.
+
+So the gap is not scheduling after all; scheduling only exposed it. Stage 5
+needs the *native call surface* rooted: builtin receivers and their
+in-flight arguments have to be named roots for the duration of the
+operation, the way §4.6 already requires of construction. Until that lands,
+a minor cannot safely run anywhere a builtin might be executing, which is
+almost everywhere.
+
+That is the honest distance to the Stage 5 gate: not a constant, not a
+scheduling policy, but a root-coverage tranche over the builtin call
+surface. It is the same kind of work as Stage 1's `active_invocation`
+adapter, and it is sized like it.
 
 ### Stage 6: concurrent major
 
