@@ -4,9 +4,10 @@
 //! Default `rc` never sees this file. AArch64 Linux (AAPCS64) is implemented;
 //! every other ABI is an explicit unimplemented branch.
 //!
-//! Candidates are never dereferenced. The allocated Registry census is turned
-//! into address ranges first; a machine word is a root only if it falls inside
-//! one of those ranges (header, metadata prefix, interior, or one-past-end).
+//! Candidates are never dereferenced. A machine word is a root only if the
+//! live address registry maps it to a published allocation (header, metadata
+//! prefix, interior, or one-past-end). `AddressLookup.build` remains a
+//! census-snapshot oracle for tests.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -46,6 +47,8 @@ const Range = struct {
 pub const AddressLookup = struct {
     ranges: []Range,
 
+    /// Census snapshot used as a test oracle against the live page-radix
+    /// registry. Collection no longer builds this on the mark path.
     pub fn build(rt: *JSRuntime, allocator: std.mem.Allocator) std.mem.Allocator.Error!AddressLookup {
         var list: std.ArrayList(Range) = .empty;
         var iterator = rt.gc.objectIterator();
@@ -162,9 +165,9 @@ fn dumpAarch64(image: *SpillImage) usize {
 }
 
 fn scanWords(
+    rt: *JSRuntime,
     lo: usize,
     hi: usize,
-    lookup: AddressLookup,
     metrics: *Metrics,
     shade: *const fn (*anyopaque, *gc.Header) void,
     shade_ctx: *anyopaque,
@@ -173,7 +176,7 @@ fn scanWords(
     while (addr + @sizeOf(usize) <= hi) : (addr += @sizeOf(usize)) {
         metrics.candidates += 1;
         const word = @as(*const usize, @ptrFromInt(addr)).*;
-        if (lookup.resolve(word)) |header| {
+        if (rt.gc.address_registry.resolve(word)) |header| {
             metrics.validated_hits += 1;
             shade(shade_ctx, header);
         }
@@ -182,7 +185,6 @@ fn scanWords(
 
 pub fn spillRegistersAndScan(
     rt: *JSRuntime,
-    lookup: AddressLookup,
     metrics: *Metrics,
     shade: *const fn (*anyopaque, *gc.Header) void,
     shade_ctx: *anyopaque,
@@ -191,9 +193,10 @@ pub fn spillRegistersAndScan(
         metrics.supported = false;
         return;
     }
+    comptime std.debug.assert(gc.address_registry_enabled);
     var image: SpillImage = undefined;
     const sp = dumpAarch64(&image);
     std.mem.doNotOptimizeAway(&image);
     const high = scanHigh(rt, sp);
-    scanWords(sp, high, lookup, metrics, shade, shade_ctx);
+    scanWords(rt, sp, high, metrics, shade, shade_ctx);
 }

@@ -81,6 +81,14 @@ pub const profile = @import("profile.zig");
 pub const gc_shadow = if (gc.shadow_tracer_enabled) @import("gc_shadow.zig") else struct {
     pub const enabled = false;
 };
+/// Live page-radix address registry. Default production `rc` erases the
+/// module so the allocation hot path does not grow a registry Implementation.
+pub const gc_address_registry = if (gc.address_registry_enabled)
+    @import("gc_address_registry.zig")
+else
+    struct {
+        pub const enabled = false;
+    };
 /// Imported only when `-Dzjs_gc=trace_stw`. Default `rc` builds see an empty
 /// namespace so the reclaiming tracer is not part of the production compile.
 pub const gc_trace_stw = if (gc.trace_stw_enabled) @import("gc_trace_stw.zig") else struct {

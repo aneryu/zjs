@@ -7500,6 +7500,128 @@ test "trace_stw survivor classes on a known graph" {
     try std.testing.expect(!rt.gc.containsHeader(live_header));
 }
 
+test "address registry tracks published objects and interior pointers" {
+    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    try std.testing.expectEqual(rt.gc.liveCount(), rt.gc.address_registry.stats.live);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.address_registry.stats.failed_inserts);
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    const header = &obj.header;
+    const bytes = obj.allocationSize(rt);
+    const occupant = core.gc_address_registry.Table.occupantFor(header, bytes);
+
+    try std.testing.expect(rt.gc.address_registry.containsHeader(header));
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(@intFromPtr(header)));
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(occupant.lo));
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(occupant.hi - 1));
+    if (bytes > 1) {
+        try std.testing.expectEqual(header, rt.gc.address_registry.resolve(@intFromPtr(header) + bytes / 2));
+    }
+    try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(occupant.hi));
+    try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(0x10));
+
+    var iterator = rt.gc.objectIterator();
+    while (iterator.next()) |live| {
+        try std.testing.expectEqual(live, rt.gc.address_registry.resolve(@intFromPtr(live)));
+    }
+    try std.testing.expectEqual(rt.gc.liveCount(), rt.gc.address_registry.stats.live);
+}
+
+test "address registry page radix covers a multi-page allocation" {
+    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, 2048);
+    defer obj.value().free(rt);
+    const header = &obj.header;
+    const bytes = obj.allocationSize(rt);
+    const occupant = core.gc_address_registry.Table.occupantFor(header, bytes);
+    const pages = (occupant.hi - 1) / core.gc_address_registry.page_size - occupant.lo / core.gc_address_registry.page_size + 1;
+    try std.testing.expect(pages >= 1);
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(occupant.lo));
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(@intFromPtr(header)));
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(occupant.hi - 1));
+    if (pages >= 2) {
+        const mid_page = ((occupant.lo >> 12) + 1) << 12;
+        try std.testing.expectEqual(header, rt.gc.address_registry.resolve(mid_page));
+    }
+}
+
+test "address registry lookup cost stays with page occupants not live N" {
+    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const count: usize = 2048;
+    var objects: [count]*core.Object = undefined;
+    var created: usize = 0;
+    defer {
+        var i: usize = 0;
+        while (i < created) : (i += 1) objects[i].value().free(rt);
+    }
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const register_start = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds();
+    while (created < count) : (created += 1) {
+        objects[created] = try core.Object.create(rt, core.class.ids.object, null);
+    }
+    const register_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds() - register_start;
+
+    try std.testing.expectEqual(rt.gc.liveCount(), rt.gc.address_registry.stats.live);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.address_registry.stats.failed_inserts);
+
+    const lookups: usize = 50_000;
+    const lookup_start = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds();
+    var hits: usize = 0;
+    var index: usize = 0;
+    while (index < lookups) : (index += 1) {
+        const obj = objects[index % count];
+        const addr = @intFromPtr(&obj.header) + (index % 8);
+        if (rt.gc.address_registry.resolve(addr) == &obj.header) hits += 1;
+    }
+    const lookup_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds() - lookup_start;
+    try std.testing.expectEqual(lookups, hits);
+
+    const miss_start = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds();
+    var misses: usize = 0;
+    index = 0;
+    while (index < lookups) : (index += 1) {
+        if (rt.gc.address_registry.resolve(0x1000 + index * 64) == null) misses += 1;
+    }
+    const miss_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds() - miss_start;
+    try std.testing.expectEqual(lookups, misses);
+
+    const register_u = @as(u64, @intCast(register_ns));
+    const lookup_u = @as(u64, @intCast(lookup_ns));
+    const miss_u = @as(u64, @intCast(miss_ns));
+    std.debug.print(
+        \\
+        \\address registry (2048 objects, 50000 lookups):
+        \\  live={d} pages={d} register_ns={d} hit_ns={d} miss_ns={d}
+        \\  per-register ~{d}ns  per-hit ~{d}ns  per-miss ~{d}ns
+        \\
+    , .{
+        rt.gc.address_registry.stats.live,
+        rt.gc.address_registry.stats.pages,
+        register_u,
+        lookup_u,
+        miss_u,
+        register_u / count,
+        lookup_u / lookups,
+        miss_u / lookups,
+    });
+}
+
 test "pollGC runs pending collection and clears pending flag" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

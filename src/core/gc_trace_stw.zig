@@ -263,10 +263,8 @@ const Collector = struct {
     }
 
     fn seedConservativeRoots(self: *Collector) CollectError!void {
-        const lookup = try conservative.AddressLookup.build(self.rt, self.allocator());
         conservative.spillRegistersAndScan(
             self.rt,
-            lookup,
             &self.report.conservative,
             shadeConservative,
             @ptrCast(self),

@@ -392,10 +392,8 @@ const Tracer = struct {
     }
 
     fn seedConservativeRoots(self: *Tracer) ShadowError!void {
-        const lookup = try conservative.AddressLookup.build(self.rt, self.allocator());
         conservative.spillRegistersAndScan(
             self.rt,
-            lookup,
             &self.conservative,
             shadeConservative,
             @ptrCast(self),

@@ -888,9 +888,12 @@ does not scan fibers: suspended generator/async windows live on
 The first Implementation (`src/core/gc_conservative.zig`, shadow-only) is
 AArch64 Linux AAPCS64: it spills x0–x30 and q0–q31, then scans `[SP, thread
 stack high)` from `pthread_getattr_np`. Candidates are resolved against
-`RcRegistryHeapCensus` address ranges (metadata prefix, body, one-past-end)
-and are never dereferenced as guessed headers. x86_64 SysV, x86_64 Windows,
-AArch64 Windows, and AArch64 macOS are explicit unimplemented branches.
+the live page-radix address registry (`src/core/gc_address_registry.zig`)
+which indexes published compatibility-heap objects at insert/remove, not
+a census snapshot built at scan time. Ranges still cover the metadata
+prefix, body, and one-past-end, and are never dereferenced as guessed
+headers. x86_64 SysV, x86_64 Windows, AArch64 Windows, and AArch64 macOS
+are explicit unimplemented branches.
 
 ### 7.3 Native pointer contract
 
@@ -1516,6 +1519,16 @@ and mutator-only lazy sweep. Migrate strings/ropes explicitly. Preserve public
 Gate: allocator fragmentation/committed-memory envelope, interior-candidate
 lookup, OOM, sweep debt, and frozen bench-v8 A/B. Header/object representation
 changes land as separately measurable sub-tranches.
+
+Implementation 2026-08-23 (address registry only):
+`src/core/gc_address_registry.zig` is a 4 KiB page radix plus per-page
+occupant lists over the existing allocator. Insert/remove run at
+`addInitialized*` / `unlinkObjectWithBytes` / `removeGcObject` for cycle-
+list objects. Conservative scan (`gc_conservative.zig`) resolves
+candidates through the live table; `AddressLookup.build` stays as a
+census oracle. Default production `rc` erases the table (`void` field,
+no insert). This round does not introduce 64 KiB blocks, size classes,
+or header replacement.
 
 ### Stage 5: sticky minor
 

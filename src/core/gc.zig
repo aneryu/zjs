@@ -29,6 +29,17 @@ pub const shadow_tracer_enabled: bool = std.mem.eql(u8, build_options.zjs_gc, "s
 /// `shadow`. Default `rc` stays false so production `.text` is unchanged.
 pub const trace_stw_enabled: bool = std.mem.eql(u8, build_options.zjs_gc, "trace_stw");
 
+/// Live page-radix address registry for conservative candidate validation.
+/// On in tests (so the map can be unit-tested on default `rc` tests) and in
+/// shadow/STW builds. Default production `rc` keeps this false so Registry
+/// layout and the allocation hot path stay the original body.
+pub const address_registry_enabled: bool = shadow_tracer_enabled or trace_stw_enabled or builtin.is_test;
+
+const AddressRegistryTable = if (address_registry_enabled)
+    @import("gc_address_registry.zig").Table
+else
+    void;
+
 pub const Mode = enum {
     balanced,
     throughput,
@@ -738,6 +749,10 @@ pub const Registry = struct {
     // freed struct. The batch driver drains this list after the resource pass.
     cycle_deferred_frees: HeaderList = .{},
 
+    /// Page-radix map of published GC objects. Void in production `rc`.
+    address_registry: if (address_registry_enabled) AddressRegistryTable else void =
+        if (address_registry_enabled) .{} else {},
+
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
         return .{
             .memory = account,
@@ -886,6 +901,10 @@ pub const Registry = struct {
         }
         self.pin_entries = &.{};
         self.pin_entries_capacity = 0;
+
+        if (comptime address_registry_enabled) {
+            self.address_registry.deinit(addressRegistryAllocator());
+        }
 
         self.phase = .none;
     }
@@ -1245,7 +1264,10 @@ pub const Registry = struct {
             self.old_space.recordAlloc(bytes);
         }
 
-        if (tracked) self.linkGcObjectTail(h);
+        if (comptime address_registry_enabled) {
+            if (tracked) self.linkGcObjectTail(h);
+            self.registerLiveAddress(h, bytes, tracked);
+        } else if (tracked) self.linkGcObjectTail(h);
     }
 
     /// qjs `add_gc_object` for shapes (quickjs.c:6540): rc/kind already live
@@ -1263,7 +1285,10 @@ pub const Registry = struct {
         std.debug.assert(!h.meta().alloc_info.large);
         h.meta().alloc_info.heap_accounted = true;
         self.old_space.recordAlloc(bytes);
-        self.linkGcObjectTail(h);
+        if (comptime address_registry_enabled) {
+            self.linkGcObjectTail(h);
+            self.registerLiveAddress(h, bytes, true);
+        } else self.linkGcObjectTail(h);
     }
 
     fn defaultHeapBytes(h: *const GCObjectHeader) usize {
@@ -1442,6 +1467,7 @@ pub const Registry = struct {
         // Already unlinked, or condemned on tmp_obj_list / a partition list.
         // qjs remove_gc_object is only called while the node is on gc_obj_list.
         if (h.prev == null or h.meta().flags.cycle_visited) return;
+        if (comptime address_registry_enabled) self.unregisterLiveAddress(h);
         listDel(h);
     }
 
@@ -1569,8 +1595,8 @@ pub const Registry = struct {
     /// headers (deinit shape self-remove) are a no-op; a linked node is spliced
     /// with no head/tail null branches.
     fn removeGcObject(self: *Registry, header: *GCObjectHeader) void {
-        _ = self;
         if (header.prev == null) return;
+        if (comptime address_registry_enabled) self.unregisterLiveAddress(header);
         listDel(header);
     }
 
@@ -1584,6 +1610,30 @@ pub const Registry = struct {
         std.debug.assert(header.meta().flags.cycle_visited);
         header.meta().flags.cycle_visited = false;
         self.appendGcObject(header);
+        if (comptime address_registry_enabled) {
+            const bytes = storedHeapBytes(header) orelse defaultHeapBytes(header);
+            self.registerLiveAddress(header, bytes, true);
+        }
+    }
+
+    inline fn addressRegistryAllocator() std.mem.Allocator {
+        // Independent of the JS heap allocator: NoFail publication must not
+        // grow a new fallible allocation on the object allocator, and
+        // conservative lookup must not recurse into collectBeforeObjectAllocation.
+        return std.heap.page_allocator;
+    }
+
+    inline fn registerLiveAddress(self: *Registry, header: *GCObjectHeader, bytes: usize, tracked: bool) void {
+        if (comptime !address_registry_enabled) return;
+        if (!tracked) return;
+        self.address_registry.insert(addressRegistryAllocator(), header, bytes) catch {
+            self.address_registry.stats.failed_inserts += 1;
+        };
+    }
+
+    inline fn unregisterLiveAddress(self: *Registry, header: *GCObjectHeader) void {
+        if (comptime !address_registry_enabled) return;
+        self.address_registry.remove(addressRegistryAllocator(), header);
     }
 
     fn appendZeroRef(self: *Registry, header: *GCObjectHeader) void {

@@ -56,6 +56,7 @@ runtime/context storage.
 | `value.zig` | `JSValue` representation and refcount entry |
 | `object.zig` / `shape.zig` / `property.zig` | objects, shapes, properties |
 | `gc.zig` | registry, policy, external-memory accounting |
+| `gc_address_registry.zig` | Page-radix address → allocation map for conservative lookup (tests/shadow/STW; production `rc` erases it) |
 | `gc_slot.zig` | Stage 2 Slot-under-RC mutation protocol (no atomics) |
 | `gc_write_audit.zig` | Shadow runtime write audit of Slot-bypassing heap stores |
 | `gc_trace_stw.zig` | Experimental STW mark/sweep over the compatibility heap (`-Dzjs_gc=trace_stw`) |
