@@ -1758,6 +1758,34 @@ re-enlistment, snapshot churn, construction publication, epoch transition,
 ephemeron fixed point, and shutdown. Report bailout share, floating garbage,
 assist time, safepoint latency, and pause distributions.
 
+**Stage 6 prerequisite measured: the two-word protocol tears, as predicted,
+at a rate that makes candidate validation load-bearing rather than
+theoretical.**
+
+§5.4 called the protocol provisional until a litmus covered the
+interleavings. `src/core/gc_slot_litmus.zig` now drives real concurrent
+writers against the published ordering on this target:
+
+- **79,412 reads, 4,933 of them torn (6.2%)** — a reference tag paired with
+  a payload from a different write. The design says this may happen and
+  that such a pair is a *candidate*, not a value. At 6.2% that path is not
+  a rare corner: on the V8 suite's ~10 M marks it would be exercised
+  hundreds of thousands of times per cycle.
+- **Zero violations of the acquire/release obligation**: once a reader
+  acquires the new tag it never observes the older payload. That is the one
+  ordering guarantee the whole scheme rests on, and it holds here.
+
+The consequence for Stage 6 is a sequencing one. Candidate validation —
+address registry, owner runtime, space state, cell start, allocated bit,
+tag-to-kind agreement — is not an optimisation to add after the marker
+works; it is what keeps a 6.2% tear rate from becoming a wrong-kind
+dereference. It has to exist before the first concurrent mark runs, and the
+address registry built in Stage 4 is what makes that possible.
+
+This is one target's answer. §5.4 also asks for the emitted LLVM ordering
+to be inspected per supported backend, which stays open along with the
+release-platform question in §15.
+
 ### Stage 7: experimental enablement and production default
 
 First expose tracing only through an explicit experimental build/config. Run
