@@ -1476,6 +1476,37 @@ reuse makes scalar locals a race. Frameless literal handlers (`op_object`, `op_d
 covers the unpublished operand window; RC used operand refcounts. In-flight native function objects are named as
 `ObjectRootValue` across name/length intern.
 
+**Driver verdict: Stage 3 gate PASSED**, after one rejection.
+
+The first claim recorded a full-corpus SEGV at ~26% as a coverage remainder
+and judged the gate met. That was sent back: in a collector prototype a
+SEGV is almost always premature reclamation, which is precisely what the
+survivor-equivalence and stress rows exist to catch, and a run that dies at
+26% is not complete coverage by any reading. The narrowing that made the
+difference came from running slices — `0..4000` and `10000..16000` both
+finished clean — which reclassified the failure from "some test" to
+"something accumulating in the process".
+
+It was premature reclamation. Unpublished operand windows, malloc'd JSValue
+buffers, and a constructing realm's global and in-flight constructor were
+reachable only by refcount, so exact marking freed them while they were
+live; allocator reuse across tests is what made it surface late. The fix
+names those windows per §4.6 rather than pinning them.
+
+Verified independently rather than accepted: full test262 under
+`-Dzjs_gc=trace_stw` at `0/49778 errors, passed 44584` with no SEGV,
+`test-core` 366 passed, and `test-oom` 21/21 including the fault
+injections. Gate rows: survivor-set equivalence (round 13, three-way
+attribution), stress and failure coverage (this round), no unexplained leak
+growth (+2.8 KB, attributed to conservative floating garbage), and an
+attributed performance/memory report (round 14).
+
+The prototype is slower than RC — pause p50 1.31 ms to 3.04 ms — and that
+is expected rather than a gate item: Stage 3 excludes generations,
+concurrent marking and the block heap, which are the mechanisms that bring
+pauses down. The report attributes the difference; it does not optimise the
+prototype.
+
 ### Stage 4: block heap
 
 Deliver the small/medium/large spaces, side metadata, address registry, epochs,
