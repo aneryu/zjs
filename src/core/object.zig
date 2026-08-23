@@ -643,7 +643,7 @@ pub const Object = extern struct {
         errdefer if (shape_owned) rt.shapes.release(initial_shape);
 
         const alloc_size = @sizeOf(Object);
-        rt.collectBeforeObjectAllocationKeepingHeader(alloc_size, &initial_shape.header);
+        rt.collectBeforeObjectAllocation(alloc_size);
         const self = try rt.memory.createNoTrigger(Object);
         var initialized = false;
         errdefer if (initialized)
@@ -718,12 +718,16 @@ pub const Object = extern struct {
             std.debug.assert(!payloadKindAllocates(definition.payload_kind));
             std.debug.assert(!classHasExoticMethods(class.ids.object, definition.has_exotic));
         }
-        const shape_ref = try rt.shapes.createObjectRoot(prototype);
+        const shape_ref = if (comptime gc.trace_stw_enabled)
+            try rt.shapes.createObjectRootReserved(prototype)
+        else
+            try rt.shapes.createObjectRoot(prototype);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
 
         const alloc_size = @sizeOf(Object);
-        rt.collectBeforeObjectAllocationKeepingHeader(alloc_size, &shape_ref.header);
+        rt.collectBeforeObjectAllocation(alloc_size);
+        if (comptime gc.trace_stw_enabled) rt.shapes.publish(shape_ref);
         const self = try rt.memory.createNoTrigger(Object);
         var initialized = false;
         errdefer if (initialized)
@@ -898,7 +902,7 @@ pub const Object = extern struct {
         errdefer if (shape_owned) rt.shapes.release(initial_shape);
 
         const alloc_size = @sizeOf(Object);
-        rt.collectBeforeObjectAllocationKeepingHeader(alloc_size, &initial_shape.header);
+        rt.collectBeforeObjectAllocation(alloc_size);
         const self = try rt.memory.createNoTrigger(Object);
         var initialized = false;
         errdefer if (initialized)
@@ -997,7 +1001,7 @@ pub const Object = extern struct {
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
 
         const alloc_size = @sizeOf(Object);
-        rt.collectBeforeObjectAllocationKeepingHeader(alloc_size, &shape_ref.header);
+        rt.collectBeforeObjectAllocation(alloc_size);
         const self = try rt.memory.createNoTrigger(Object);
         var initialized = false;
         errdefer if (initialized)
@@ -1107,6 +1111,11 @@ pub const Object = extern struct {
             std.debug.assert(template.entries.len == template.shape_ref.prop_count);
             template.shape_ref.retain();
             break :blk template.shape_ref;
+        } else if (comptime gc.trace_stw_enabled) blk: {
+            break :blk if (property_capacity == 0)
+                try rt.shapes.createObjectRootReserved(prototype)
+            else
+                try rt.shapes.createObjectRootWithPropertyCapacityReserved(prototype, property_capacity);
         } else if (property_capacity == 0)
             try rt.shapes.createObjectRoot(prototype)
         else
@@ -1118,7 +1127,10 @@ pub const Object = extern struct {
         // before the raw JSObject allocation. Keep the root/retained Shape live
         // across the same boundary so a cache-miss allocation can make the
         // threshold request visible before a memory-limit check rejects Object.
-        rt.collectBeforeObjectAllocationKeepingHeader(alloc_size, &shape_ref.header);
+        // §4.6: a freshly interned Shape stays off `gc_obj_list` until after
+        // this collection, then is published with the object.
+        rt.collectBeforeObjectAllocation(alloc_size);
+        if (comptime gc.trace_stw_enabled) rt.shapes.publish(shape_ref);
         const self = if (inline_layout) |layout| blk: {
             // The object-level threshold/force-GC hook just ran above. Enter
             // MemoryAccount directly so this same allocation does not request
@@ -2362,6 +2374,7 @@ pub const Object = extern struct {
                 continue;
             }
 
+            if (cell.state == .queued) continue;
             if (cell.isActive()) {
                 cell.state = .pending_enqueue;
                 if (finalization_enqueue_blocked.*) {
@@ -2369,15 +2382,8 @@ pub const Object = extern struct {
                     write_index += 1;
                     continue;
                 }
-                object_gc.enqueueFinalizationCleanup(rt, finalization_payload, cell.held_value) catch |err| switch (err) {
-                    error.OutOfMemory => {
-                        finalization_enqueue_blocked.* = true;
-                        finalization_payload.cells[write_index] = cell;
-                        write_index += 1;
-                        continue;
-                    },
-                    error.PayloadMarkFailed => unreachable,
-                };
+                finalization_payload.cells[read_index].state = .queued;
+                object_gc.enqueueFinalizationCleanup(rt, finalization_payload, cell.held_value);
                 cell.state = .queued;
             } else if (cell.isPending()) {
                 if (write_index != read_index) finalization_payload.cells[write_index] = cell;
@@ -2958,6 +2964,11 @@ pub const Object = extern struct {
         errdefer if (target_identity) |identity| rt.releaseWeakIdentity(identity);
         if (unregister_token_identity) |identity| rt.retainWeakIdentity(identity);
         errdefer if (unregister_token_identity) |identity| rt.releaseWeakIdentity(identity);
+        // §9.3: reserve the cleanup job slot at registration so sweep never
+        // allocates a record. The cell owns the reservation until enqueue or
+        // destroy.
+        try rt.job_queue.reserveEntries(1);
+        errdefer rt.job_queue.releaseReservedEntries(1);
         refreshed_entries.*[index] = .{
             .target_identity = target_identity,
             .held_value = rooted_held_value.dup(),

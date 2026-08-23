@@ -3393,8 +3393,8 @@ test "runtime cycle removal follows class payload mark hooks" {
         .payload_mark = markTestExternalPayload,
     });
 
-    const payloadless = try core.Object.create(rt, payloadless_id, null);
-    const external = try core.Object.create(rt, external_id, null);
+    var payloadless = try core.Object.create(rt, payloadless_id, null);
+    var external = try core.Object.create(rt, external_id, null);
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{ .value = payloadless.value().dup() };
     external.u.payload = @ptrCast(payload);
@@ -3405,15 +3405,26 @@ test "runtime cycle removal follows class payload mark hooks" {
 
     payload_finalizer_calls = 0;
     payload_mark_calls = 0;
+    var payloadless_slot: ?*core.Object = payloadless;
+    var external_slot: ?*core.Object = external;
+    var cycle_roots = core.runtime.rootObjects(.{ &payloadless_slot, &external_slot });
+    cycle_roots.activate(rt);
+    defer cycle_roots.deactivate(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    try std.testing.expect(payload_mark_calls > 0);
+
     external.value().free(rt);
     payloadless.value().free(rt);
+    dropGcPtr(&external);
+    dropGcPtr(&payloadless);
+    payloadless_slot = null;
+    external_slot = null;
     rt.classes.unregisterDynamic(payloadless_id);
     rt.classes.unregisterDynamic(external_id);
     try std.testing.expect(rt.classes.unregisterPending(payloadless_id));
     try std.testing.expect(rt.classes.unregisterPending(external_id));
 
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
-    try std.testing.expect(payload_mark_calls > 0);
     try std.testing.expectEqual(@as(usize, 2), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(2));
@@ -3507,8 +3518,8 @@ test "runtime cycle removal synchronously finalizes class payload object slots o
         .payload_mark = markTestExternalObjectPayload,
     });
 
-    const external = try core.Object.create(rt, external_id, null);
-    const child = try core.Object.create(rt, core.class.ids.object, null);
+    var external = try core.Object.create(rt, external_id, null);
+    var child = try core.Object.create(rt, core.class.ids.object, null);
     const payload = try rt.memory.create(TestExternalObjectPayload);
     payload.* = .{ .object = child };
     core.gc.retain(&child.header);
@@ -3520,11 +3531,22 @@ test "runtime cycle removal synchronously finalizes class payload object slots o
 
     payload_finalizer_calls = 0;
     payload_mark_calls = 0;
+    var external_slot: ?*core.Object = external;
+    var child_slot: ?*core.Object = child;
+    var cycle_roots = core.runtime.rootObjects(.{ &external_slot, &child_slot });
+    cycle_roots.activate(rt);
+    defer cycle_roots.deactivate(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    try std.testing.expect(payload_mark_calls > 0);
+
     external.value().free(rt);
     child.value().free(rt);
+    dropGcPtr(&external);
+    dropGcPtr(&child);
+    external_slot = null;
+    child_slot = null;
 
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
-    try std.testing.expect(payload_mark_calls > 0);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(1));
@@ -9568,10 +9590,14 @@ test "finalization registry dead target cleanup tolerates held value reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+    var registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
     defer registry.value().free(rt);
-    const first_target = try core.Object.create(rt, core.class.ids.object, null);
-    const held_and_second_target = try core.Object.create(rt, core.class.ids.object, null);
+    var registry_slot: ?*core.Object = registry;
+    var registry_roots = core.runtime.rootObjects(.{&registry_slot});
+    registry_roots.activate(rt);
+    defer registry_roots.deactivate(rt);
+    var first_target = try core.Object.create(rt, core.class.ids.object, null);
+    var held_and_second_target = try core.Object.create(rt, core.class.ids.object, null);
 
     try appendFinalizationRegistryCell(
         rt,
@@ -9588,8 +9614,10 @@ test "finalization registry dead target cleanup tolerates held value reentry" {
         core.JSValue.undefinedValue(),
     );
     held_and_second_target.value().free(rt);
+    dropGcPtr(&held_and_second_target);
 
     first_target.value().free(rt);
+    dropGcPtr(&first_target);
     _ = rt.runObjectCycleRemoval();
 
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
@@ -9803,7 +9831,7 @@ test "finalization registry unregister cannot remove queued cleanup cell" {
     rt.clearPendingFinalizationJobs();
 }
 
-test "finalization registry enqueue OOM retains stable pending cells for same-runtime retry" {
+test "finalization registry cleanup enqueue does not allocate after registration" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -9811,14 +9839,21 @@ test "finalization registry enqueue OOM retains stable pending cells for same-ru
 
     const cleanup = try core.Object.create(rt, core.class.ids.object, null);
     defer cleanup.value().free(rt);
-    const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
+    var registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
     defer registry.value().free(rt);
+    var registry_slot: ?*core.Object = registry;
+    var cleanup_slot: ?*core.Object = cleanup;
+    var live_roots = core.runtime.rootObjects(.{ &registry_slot, &cleanup_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
     registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value().dup();
 
     var targets: [3]*core.Object = undefined;
+    var target_slots: [3]?*core.Object = .{ null, null, null };
     for (&targets, 0..) |*slot, index| {
         const target = try core.Object.create(rt, core.class.ids.object, null);
         slot.* = target;
+        target_slots[index] = target;
         try registry.appendFinalizationRegistryCell(
             rt,
             target.value(),
@@ -9826,25 +9861,30 @@ test "finalization registry enqueue OOM retains stable pending cells for same-ru
             core.JSValue.undefinedValue(),
         );
     }
+    var target_roots = core.runtime.rootObjects(.{
+        &target_slots[0],
+        &target_slots[1],
+        &target_slots[2],
+    });
+    target_roots.activate(rt);
+    defer target_roots.deactivate(rt);
 
-    // Warm the collector while all targets are live so the injected failure is
-    // specifically the first unified-FIFO publication allocation.
     _ = try rt.tryRunObjectCycleRemoval();
-    for (targets) |target| target.value().free(rt);
+    for (&targets, &target_slots) |*target, *held| {
+        target.*.value().free(rt);
+        dropGcPtr(target);
+        held.* = null;
+    }
 
+    // §9.3: the job slot was reserved at register, so a tight memory limit
+    // during sweep still publishes the three cleanup jobs.
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     defer rt.setMemoryLimit(null);
     _ = try rt.tryRunObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
-    try std.testing.expectEqual(@as(usize, 3), registry.pendingFinalizationCellCountForTest());
-    try std.testing.expectEqual(@as(usize, 3), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(ctx, registry.finalizationRegistryRealmContext().?);
-
-    rt.setMemoryLimit(null);
-    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 3), rt.pendingFinalizationJobCountForTest());
     try std.testing.expectEqual(@as(usize, 0), registry.pendingFinalizationCellCountForTest());
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(@as(usize, 3), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(ctx, registry.finalizationRegistryRealmContext().?);
 
     for (rt.job_queue.jobs[0..3], 0..) |job, index| {
         try std.testing.expectEqual(ctx, job.realm.borrow().?);

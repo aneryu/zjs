@@ -246,6 +246,13 @@ pub const Registry = struct {
         return self.createShape(proto);
     }
 
+    /// Tracing-gc-design.md §4.6: an unpublished Shape is initialized and
+    /// hashed but not yet on `gc_obj_list`. Hash hits are already published.
+    pub fn publish(self: *Registry, shape_ref: *Shape) void {
+        if (shape_ref.header.meta().alloc_info.heap_accounted) return;
+        self.gc_registry.addInitializedShape(&shape_ref.header, shape_ref.allocationSize());
+    }
+
     pub fn createObjectRoot(self: *Registry, proto: ?*Object) !*Shape {
         // qjs find_hashed_shape_proto (quickjs.c:5514-5527) rejects bucket
         // co-residents on the already-loaded `hash` field before touching
@@ -253,30 +260,65 @@ pub const Registry = struct {
         // sh1->prop_count == 0`. Mirror that check order.
         const expected_hash = initialHash(proto);
         var current = self.firstShapeWithHash(expected_hash);
-        while (current) |shape| : (current = shape.registry_hash_next) {
-            if (shape.hash != expected_hash) continue;
-            if (shape.proto != proto or shape.prop_count != 0) continue;
-            shape.retain();
-            return shape;
+        while (current) |found| : (current = found.registry_hash_next) {
+            if (found.hash != expected_hash) continue;
+            if (found.proto != proto or found.prop_count != 0) continue;
+            found.retain();
+            return found;
         }
         return self.createShape(proto);
+    }
+
+    /// Reserve/initialize a root shape without publishing it onto the GC list.
+    /// Object constructors collect, then `publish`, then register the object.
+    pub fn createObjectRootReserved(self: *Registry, proto: ?*Object) !*Shape {
+        // qjs find_hashed_shape_proto (quickjs.c:5514-5527) rejects bucket
+        // co-residents on the already-loaded `hash` field before touching
+        // proto/prop_count: `sh1->hash == h && sh1->proto == proto &&
+        // sh1->prop_count == 0`. Mirror that check order.
+        const expected_hash = initialHash(proto);
+        var current = self.firstShapeWithHash(expected_hash);
+        while (current) |found| : (current = found.registry_hash_next) {
+            if (found.hash != expected_hash) continue;
+            if (found.proto != proto or found.prop_count != 0) continue;
+            found.retain();
+            return found;
+        }
+        return self.createShapeReserved(proto);
     }
 
     pub fn createObjectRootWithPropertyCapacity(self: *Registry, proto: ?*Object, property_capacity: usize) !*Shape {
         if (property_capacity == 0) return self.createObjectRoot(proto);
         const expected_hash = initialHash(proto);
         var current = self.firstShapeWithHash(expected_hash);
-        while (current) |shape| : (current = shape.registry_hash_next) {
-            if (shape.hash != expected_hash) continue;
+        while (current) |found| : (current = found.registry_hash_next) {
+            if (found.hash != expected_hash) continue;
             // The owning Object allocates a value buffer with exactly this
             // capacity. Reusing a larger root would make shape.prop_size exceed
             // the real buffer length, corrupting later appends and teardown.
             // qjs shape transition reuse likewise requires equal prop_size.
-            if (shape.prop_count != 0 or shape.proto != proto or shape.prop_size != property_capacity) continue;
-            shape.retain();
-            return shape;
+            if (found.prop_count != 0 or found.proto != proto or found.prop_size != property_capacity) continue;
+            found.retain();
+            return found;
         }
         return self.createShapeWithPropertyCapacity(proto, property_capacity);
+    }
+
+    pub fn createObjectRootWithPropertyCapacityReserved(self: *Registry, proto: ?*Object, property_capacity: usize) !*Shape {
+        if (property_capacity == 0) return self.createObjectRootReserved(proto);
+        const expected_hash = initialHash(proto);
+        var current = self.firstShapeWithHash(expected_hash);
+        while (current) |found| : (current = found.registry_hash_next) {
+            if (found.hash != expected_hash) continue;
+            // The owning Object allocates a value buffer with exactly this
+            // capacity. Reusing a larger root would make shape.prop_size exceed
+            // the real buffer length, corrupting later appends and teardown.
+            // qjs shape transition reuse likewise requires equal prop_size.
+            if (found.prop_count != 0 or found.proto != proto or found.prop_size != property_capacity) continue;
+            found.retain();
+            return found;
+        }
+        return self.createShapeWithPropertyCapacityReserved(proto, property_capacity);
     }
 
     /// Build one context-owned initial shape without ever materializing a
@@ -320,6 +362,24 @@ pub const Registry = struct {
         return shape;
     }
 
+    fn createShapeReserved(self: *Registry, proto: ?*Object) !*Shape {
+        const fam_bytes = comptime famRegionBytes(initial_prop_size, initial_hash_size);
+        const shape = try self.memory.createWithFamComptime(Shape, fam_bytes);
+        errdefer self.memory.destroyWithFam(Shape, shape, fam_bytes);
+        shape.* = .{
+            .header = .{},
+            .proto = proto,
+            .prop_hash_mask = @intCast(initial_hash_size - 1),
+            .prop_size = initial_prop_size,
+            .hash = initialHash(proto),
+        };
+        @memset(shape.hashBuckets(), no_property_index);
+        try self.link(shape, true);
+        errdefer self.unlink(shape);
+        if (proto) |object| gc.retain(&object.header);
+        return shape;
+    }
+
     fn createShapeWithPropertyCapacity(
         self: *Registry,
         proto: ?*Object,
@@ -342,9 +402,33 @@ pub const Registry = struct {
         }
         try self.link(shape, true);
         errdefer self.unlink(shape);
-        // Same-value passthrough: fam_bytes derives from the capacity fields
-        // stored above, so this equals allocationSize() bit-for-bit.
         self.gc_registry.addInitializedShape(&shape.header, @sizeOf(Shape) + fam_bytes);
+        if (proto) |object| gc.retain(&object.header);
+        return shape;
+    }
+
+    fn createShapeWithPropertyCapacityReserved(
+        self: *Registry,
+        proto: ?*Object,
+        property_capacity: usize,
+    ) !*Shape {
+        std.debug.assert(property_capacity != 0);
+        const bucket_count: usize = @max(initial_hash_size, nextPowerOfTwo(property_capacity + 1));
+        const fam_bytes = famRegionBytes(property_capacity, bucket_count);
+        const shape = try self.memory.createWithFam(Shape, fam_bytes);
+        errdefer self.memory.destroyWithFam(Shape, shape, fam_bytes);
+        shape.* = .{
+            .header = .{},
+            .proto = proto,
+            .prop_size = @intCast(property_capacity),
+            .prop_hash_mask = if (bucket_count == 0) no_property_hash else @as(u32, @intCast(bucket_count - 1)),
+            .hash = initialHash(proto),
+        };
+        if (shape.hashBuckets().len != 0) {
+            @memset(shape.hashBuckets(), no_property_index);
+        }
+        try self.link(shape, true);
+        errdefer self.unlink(shape);
         if (proto) |object| gc.retain(&object.header);
         return shape;
     }

@@ -72,6 +72,12 @@ pub const FinalizationRegistryCell = struct {
         if (self.target_identity) |identity| rt.releaseWeakIdentity(identity);
         if (self.unregister_token_identity) |identity| rt.releaseWeakIdentity(identity);
         self.held_value.free(rt);
+        // Active/pending cells still own the job-queue reservation taken at
+        // register. Queued cells already consumed it via enqueueReserved.
+        // Runtime teardown destroys the queue before leftover objects.
+        if ((self.isActive() or self.isPending()) and rt.job_queue.capacity != 0) {
+            rt.job_queue.releaseReservedEntries(1);
+        }
     }
 };
 

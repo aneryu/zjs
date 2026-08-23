@@ -78,6 +78,7 @@ pub const Report = struct {
 pub var last_report: Report = .{};
 
 pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame) CollectError!usize {
+    rt.gc.stats.collections += 1;
     var collector = try Collector.init(rt, extra_roots);
     defer collector.deinit();
     const swept = try collector.run();
@@ -216,12 +217,6 @@ const Collector = struct {
         // `traceActiveRoots`.
         for (self.rt.gc.pin_entries) |entry| {
             self.shade(entry.header);
-        }
-        // Constructor-temporary pins may set `is_pinned` without a pin_entries
-        // slot. Shade them so their child edges (proto) stay live too.
-        var pinned = self.rt.gc.objectIterator();
-        while (pinned.next()) |header| {
-            if (header.pinned()) self.shade(header);
         }
         if (self.err) |err| return err;
 
@@ -425,26 +420,17 @@ const Collector = struct {
                 continue;
             }
 
+            if (cell.state == .queued) continue;
             if (cell.isActive()) cell.state = .pending_enqueue;
             if (finalization_enqueue_blocked.*) {
                 finalization_payload.cells[write_index] = cell;
                 write_index += 1;
                 continue;
             }
-            object_gc.enqueueFinalizationCleanup(self.rt, finalization_payload, cell.held_value) catch |err| switch (err) {
-                error.OutOfMemory => {
-                    finalization_enqueue_blocked.* = true;
-                    finalization_payload.cells[write_index] = cell;
-                    write_index += 1;
-                    continue;
-                },
-                error.PayloadMarkFailed => {
-                    self.err = err;
-                    finalization_payload.cells[write_index] = cell;
-                    write_index += 1;
-                    return;
-                },
-            };
+            // Tombstone before enqueue/destroy so a reentrant collection cannot
+            // consume another cell's reserved job slot (§9.3).
+            finalization_payload.cells[read_index].state = .queued;
+            object_gc.enqueueFinalizationCleanup(self.rt, finalization_payload, cell.held_value);
             cell.state = .queued;
             cell.destroy(self.rt);
             self.report.finalization_enqueued += 1;

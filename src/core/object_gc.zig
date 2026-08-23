@@ -372,24 +372,15 @@ fn sweepDeadWeakPayloadReferences(
             continue;
         }
 
+        if (cell.state == .queued) continue;
         if (cell.isActive()) cell.state = .pending_enqueue;
         if (finalization_enqueue_blocked.*) {
             finalization_payload.cells[write_index] = cell;
             write_index += 1;
             continue;
         }
-        enqueueFinalizationCleanup(rt, finalization_payload, cell.held_value) catch |err| switch (err) {
-            error.OutOfMemory => {
-                // No later cleanup in this GC traversal may overtake this
-                // retained cell. A later collection retries the stable
-                // registry/entry order after allocator recovery.
-                finalization_enqueue_blocked.* = true;
-                finalization_payload.cells[write_index] = cell;
-                write_index += 1;
-                continue;
-            },
-            error.PayloadMarkFailed => return error.PayloadMarkFailed,
-        };
+        finalization_payload.cells[read_index].state = .queued;
+        enqueueFinalizationCleanup(rt, finalization_payload, cell.held_value);
         cell.state = .queued;
         cell.destroy(rt);
     }
@@ -697,13 +688,23 @@ pub fn enqueueFinalizationCleanup(
     rt: *JSRuntime,
     payload: *const FinalizationRegistryPayload,
     held_value: JSValue,
-) ObjectGraphError!void {
-    // Stage 3 gap (tracing-gc-design.md §9.3): this path may allocate a job
-    // record. The design requires cleanup storage reserved at registration
-    // or reuse of the detached cell, so GC never allocates while stopped.
-    const callback = payload.cleanup_callback orelse return;
+) void {
+    // §9.3: the job slot was reserved when the cell was registered. Sweep
+    // must not allocate.
+    const callback = payload.cleanup_callback orelse {
+        if (rt.job_queue.capacity != 0) rt.job_queue.releaseReservedEntries(1);
+        return;
+    };
     const realm = payload.realm.borrow() orelse unreachable;
-    try rt.enqueueFinalizationJobForRealm(realm, callback, held_value);
+    // Normal collections consume the slot reserved at register. Runtime
+    // teardown deinits the queue first, then cycle-removes leftover
+    // objects; fall back to an allocating enqueue so that path can
+    // rehydrate the queue the way trial deletion always did.
+    if (rt.job_queue.reserved_entries != 0) {
+        rt.enqueueFinalizationJobReserved(realm, callback, held_value);
+    } else {
+        rt.enqueueFinalizationJobForRealm(realm, callback, held_value) catch {};
+    }
 }
 
 fn functionBytecodeFromGcHeader(header: *gc.GCObjectHeader) ?*const FunctionBytecode {

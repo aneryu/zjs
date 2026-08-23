@@ -3072,26 +3072,6 @@ pub const JSRuntime = struct {
         }
     }
 
-    /// Same pre-allocation GC boundary as `collectBeforeObjectAllocation`, but
-    /// the Shape (or other header) already retained for the object being
-    /// constructed is named as a pin. Trial deletion keeps it via RC; STW
-    /// would otherwise sweep an unmarked constructor temporary.
-    pub fn collectBeforeObjectAllocationKeepingHeader(
-        self: *JSRuntime,
-        size: usize,
-        header: *gc.Header,
-    ) void {
-        if (comptime gc.trace_stw_enabled) {
-            // Flag-only pin: sweep skips `is_pinned` even when the constructor
-            // temporary is unmarked. Avoids allocating `pin_entries` under the
-            // same threshold that is about to collect.
-            const already = header.pinned();
-            header.setPinned(true);
-            defer if (!already) header.setPinned(false);
-        }
-        self.collectBeforeObjectAllocation(size);
-    }
-
     /// QuickJS `JS_NewObjectFromShape` runs its threshold GC before entering
     /// the allocator. Object construction uses this stronger boundary instead
     /// of merely leaving a pending request for post-registration service: a
@@ -3379,6 +3359,18 @@ pub const JSRuntime = struct {
     pub fn enqueueFinalizationJobForRealm(self: *JSRuntime, realm: *context_mod.JSContext, callback: JSValue, held_value: JSValue) !void {
         std.debug.assert(realm.runtime == self);
         try self.job_queue.enqueueFinalization(realm, callback, held_value);
+    }
+
+    /// Commit a FinalizationRegistry cleanup against a slot reserved at cell
+    /// registration. No allocation.
+    pub fn enqueueFinalizationJobReserved(
+        self: *JSRuntime,
+        realm: *context_mod.JSContext,
+        callback: JSValue,
+        held_value: JSValue,
+    ) void {
+        std.debug.assert(realm.runtime == self);
+        self.job_queue.enqueueReserved(job_mod.Job.initFinalization(realm, callback, held_value));
     }
 
     pub fn clearPendingFinalizationJobs(self: *JSRuntime) void {

@@ -1456,15 +1456,16 @@ roots (add frames; do not weaken assertions). Conservative retention of
 stable stack bits is an accepted §7.2 cost (null dangling test locals; do
 not filter candidates). `context_head` membership is not a root
 (gc-invariants.md). WeakRef `[[KeptAlive]]` is a job-scoped root cleared at
-job end. Finalization still allocates a job record at sweep (Stage 3 gap:
-§9.3 wants storage reserved at registration). Constructor paths pin the
-already-retained Shape across `collectBeforeObjectAllocation` so opportunistic
-STW does not sweep a temporary that trial deletion keeps via RC.
+job end.
 
-Remaining Stage 3 holes (not a gate pass): exact-mark `test-core` still
-panics in `inline class finalizer reentry keeps definition pinned while
-growing the table` (shape double-free during RC teardown after a threshold
-collection). CLI STW with conservative scan runs cycle corpora.
+Construction follows §4.6 on the compatibility heap: a miss interned Shape
+is reserved/initialized off `gc_obj_list`, the pre-allocation collection
+runs, then the Shape is published with the object. Temporary pin flags are
+not used. FinalizationRegistry cells reserve a job-queue slot at
+registration; sweep commits with `enqueueReserved` and does not allocate
+(§9.3). Remaining exact-mark `test-core` hole: force-GC during
+`definePlainDataPropertyKnownFast` does not name the in-flight value as a
+root (trial deletion kept it via RC).
 
 ### Stage 4: block heap
 
