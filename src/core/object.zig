@@ -3182,10 +3182,14 @@ pub const Object = extern struct {
     }
 
     pub fn setOptionalValueSlot(self: *Object, rt: *JSRuntime, slot: *?JSValue, next_value: ?JSValue) !void {
-        _ = self;
         errdefer if (next_value) |stored_value| stored_value.free(rt);
         const old_value = slot.*;
         slot.* = next_value;
+        // The receiver is the owner, which is what the generational barrier
+        // needs (§8.3): a minor re-traces owners, so an old object gaining a
+        // young child has to be remembered. Compiles away outside generational
+        // builds.
+        if (next_value) |stored| rt.gc.generationalBarrier(&self.header, stored.cycleMarkHeader());
         if (old_value) |stored| stored.free(rt);
     }
 
@@ -9381,6 +9385,12 @@ pub const Object = extern struct {
     }
 
     pub fn setOrDefineOwnDataPropertyForSimpleSet(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
+        // Generational barrier at the property funnels (§8.3). These carry
+        // both owner and child, which the raw slot stores below do not, so
+        // this is where an old-to-young edge can still be recorded without
+        // rewriting every prop_values write. The remaining direct and memcpy
+        // stores belong to §6.4's snapshot domain.
+        rt.gc.generationalBarrier(&self.header, new_value.cycleMarkHeader());
         if (self.class_id == class.ids.module_ns) return false;
         if (self.findProperty(atom_id)) |index| {
             const entry_flags = self.propFlagsAt(index);
@@ -9563,6 +9573,12 @@ pub const Object = extern struct {
     ///   quickjs.c:9862-9865): a non-extensible receiver whose chain holds a
     ///   setter must reach that setter, never a synthesized failure.
     pub fn setOrDefineOwnDataPropertyForPutFieldOwned(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) align(16) PutFieldFast {
+        // Generational barrier at the property funnels (§8.3). These carry
+        // both owner and child, which the raw slot stores below do not, so
+        // this is where an old-to-young edge can still be recorded without
+        // rewriting every prop_values write. The remaining direct and memcpy
+        // stores belong to §6.4's snapshot domain.
+        rt.gc.generationalBarrier(&self.header, new_value.cycleMarkHeader());
         // Admission runs ONCE: needsSlowPropertyAccess covers the exotic bit
         // plus the array/typed-array/dataview/mapped-arguments/module_ns/proxy
         // classes, whose set semantics (length, canonical numeric indices,
@@ -10154,6 +10170,12 @@ pub const Object = extern struct {
     /// property slot is assembled in registers rather than spilled through a
     /// by-pointer call boundary (the loadSlotAsIntPair store-forward hazard).
     pub noinline fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, data_value: JSValue) !void {
+        // Generational barrier at the property funnels (§8.3). These carry
+        // both owner and child, which the raw slot stores below do not, so
+        // this is where an old-to-young edge can still be recorded without
+        // rewriting every prop_values write. The remaining direct and memcpy
+        // stores belong to §6.4's snapshot domain.
+        rt.gc.generationalBarrier(&self.header, data_value.cycleMarkHeader());
         // §4.6 rooted construction: the over-hang value is excluded from
         // `propertyEntries()` until the shape transition commits, and the
         // holder is only a Zig `*Object`. Trial deletion treated the live RC

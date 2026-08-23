@@ -853,6 +853,11 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *const engine.core.gc
         st.promoted,
         st.remembered_without_young,
     });
+    try writer.print("gc: barrier calls {d}, skipped young-owner {d}, skipped old-target {d}\n", .{
+        st.barrier_calls,
+        st.barrier_young_owner,
+        st.barrier_old_target,
+    });
 }
 
 fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {

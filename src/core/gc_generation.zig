@@ -25,6 +25,10 @@ pub const Stats = struct {
     /// Owners re-traced by a minor that turned out to hold no young child.
     /// A high share means the remembered set is being written too eagerly.
     remembered_without_young: usize = 0,
+    /// Barrier call breakdown: why an edge was or was not remembered.
+    barrier_calls: usize = 0,
+    barrier_young_owner: usize = 0,
+    barrier_old_target: usize = 0,
 };
 
 pub const State = struct {

@@ -1706,8 +1706,15 @@ pub const Registry = struct {
     pub inline fn generationalBarrier(self: *Registry, owner: *GCObjectHeader, child: ?*GCObjectHeader) void {
         if (comptime !generation_enabled) return;
         const target = child orelse return;
-        if (self.generation.isYoung(owner)) return;
-        if (!self.generation.isYoung(target)) return;
+        self.generation.stats.barrier_calls += 1;
+        if (self.generation.isYoung(owner)) {
+            self.generation.stats.barrier_young_owner += 1;
+            return;
+        }
+        if (!self.generation.isYoung(target)) {
+            self.generation.stats.barrier_old_target += 1;
+            return;
+        }
         self.generation.rememberOwner(addressRegistryAllocator(), owner);
     }
 
