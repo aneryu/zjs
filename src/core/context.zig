@@ -895,6 +895,13 @@ pub const JSContext = struct {
 
     pub fn traceRoots(self: *JSContext, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
         if (self.publication_state != .live) return;
+        // Cycle-collector child edges already include the module registry and
+        // the five initial Shapes. Mirror them on the root Interface only when
+        // tracing roots are live; default `rc` keeps this function's .text.
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            var module_iter = self.modules.iterator();
+            while (module_iter.next()) |record| try visitor.moduleRoot(record);
+        }
         for (self.unhandled_rejections) |*entry| {
             try visitor.value(&entry.promise);
             try visitor.value(&entry.reason);
@@ -912,6 +919,13 @@ pub const JSContext = struct {
             var rooted: ?*Object = prototype;
             try visitor.optionalObject(&rooted);
             self.cached_promise_proto = rooted;
+        }
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            if (self.array_shape) |owned| try visitor.shapeRoot(owned);
+            if (self.arguments_shape) |owned| try visitor.shapeRoot(owned);
+            if (self.mapped_arguments_shape) |owned| try visitor.shapeRoot(owned);
+            if (self.regexp_shape) |owned| try visitor.shapeRoot(owned);
+            if (self.regexp_result_shape) |owned| try visitor.shapeRoot(owned);
         }
         for (&self.cached_values) |*slot| if (slot.*) |*value| try visitor.value(value);
         if (self.regexp_legacy_statics) |legacy| {

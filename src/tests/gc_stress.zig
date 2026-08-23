@@ -10,6 +10,47 @@ const Rng = std.Random.DefaultPrng;
 const helpers = @import("helpers.zig");
 const appendWeakCollectionEntry = helpers.appendWeakCollectionEntry;
 
+test "gc stress deterministic tiny heap preserves live roots" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{ .gc_threshold = 1 });
+    defer rt.deinit();
+
+    const count = 32;
+    var objects: [count]*core.Object = undefined;
+    const edge_key = try rt.internAtom("tiny-heap-edge");
+    defer rt.atoms.free(edge_key);
+
+    for (&objects, 0..) |*slot, index| {
+        slot.* = try core.Object.create(&rt, core.class.ids.object, null);
+        if (index != 0) {
+            try objects[index - 1].defineOwnProperty(
+                &rt,
+                edge_key,
+                core.Descriptor.data(slot.*.value(), true, true, true),
+            );
+        }
+    }
+    try objects[count - 1].defineOwnProperty(
+        &rt,
+        edge_key,
+        core.Descriptor.data(objects[0].value(), true, true, true),
+    );
+    const live_with_cycle = rt.gc.liveCount();
+    try std.testing.expect(live_with_cycle >= count);
+
+    // Native locals protect current RC objects by retaining them, not through
+    // ValueRootFrame (which is a tracing-preparation seam). Keep one external
+    // retain while releasing the other construction references.
+    for (objects[1..]) |obj| obj.value().free(&rt);
+    _ = try rt.forceMajorGC(null);
+    try std.testing.expectEqual(live_with_cycle, rt.gc.liveCount());
+
+    objects[0].value().free(&rt);
+    _ = try rt.forceMajorGC(null);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try std.testing.expect(rt.gc.stats.cycle_gc_count > 1);
+}
+
 test "gc stress deterministic object cycles are reclaimed" {
     var prng = Rng.init(0x7a6a_6763_0001);
     const random = prng.random();

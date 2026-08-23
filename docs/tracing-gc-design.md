@@ -1,22 +1,27 @@
 # Tracing GC design
 
-Version: 0.5 draft  
-Date: 2026-08-23  
+Version: 0.6 draft
+Date: 2026-08-23
 Status: reviewed against the source; research and migration plan, not the
 production collector
 
-Review note (0.4 -> 0.5): every factual claim this document makes about the
-current engine was checked against the code — `JSValue`'s 16-byte layout, the
-eight `gc.RefKind`s, the 4 KiB small-object arena, the 4-byte string RC prefix,
-the 10,000-tick interrupt counter, the compile-time erasure of
-`ValueRootFrame`, `pollGC` discarding its roots argument, and every symbol
-named in §2's mapping table. All of them hold; no factual corrections were
-needed. The changes in 0.5 are elsewhere: the pause gates in §1.3 were
-unevaluable with the instrumentation that exists and now say so; §1.2 now
-distinguishes which correctness rows are evidence about the *collector*;
-§1.3 requires counter evidence alongside the A/B, because the A/B was measured
-to be blind to a 2.5% reclamation shift; and Stage 0 is split into what the
-2026-08-23 preparation tranche delivered and what remains.
+Review note (0.5 -> 0.6): source review found two material corrections to the
+first migration plan. `Registry.objectIterator()` enumerates only the six
+cycle-candidate carriers, not String/Rope or BigInt, and `StringRope` owns two
+strong `JSValue` edges despite sharing `RefKind.string`; therefore the shadow
+cannot be built over `RcRegistryHeapCensus` alone. Also, the previous root
+Interface could express only `JSValue` and `Object`, while a context and an
+active frame directly own Module, Shape, VarRef, RealmContext, and
+FunctionBytecode headers. The gated preparation now makes both gaps
+executable without paying a production call-boundary store: `gc.ref_kind_catalog`
+classifies all eight kinds and Registry `census()` reports its incomplete
+coverage; `RootVisitor.constHeader` is live only when
+`value_root_frames_enabled`; `JSContext.traceRoots` mirrors modules and initial
+Shapes onto the root Interface in that same gated build; exec publishes an
+`ActiveInvocationTrace` prefix that default `rc` compiles to a no-op. An
+ungated `{context,trace}` Adapter that stored two fields on every
+`runWithArgsState` lost four rule-2 A/B reads (median 0.9972). None of these
+changes transfers reclamation away from RC.
 
 This document adapts the 0.3 proposal to the code that exists in zjs today. It
 defines the intended end state, but it deliberately does not authorize a
@@ -78,7 +83,7 @@ The immediate project recommendation is therefore:
 
 - **go**: trace descriptors, production root completion, shadow tracing, and
   the remainder of GC observability (its contract, baseline, counters, and
-  edge-parity guards landed 2026-08-23; pause histograms did not), followed by
+  edge-parity guards and pause histograms landed 2026-08-23), followed by
   Slot-under-RC under the shadow checker;
 - **conditional go**: an opt-in stop-the-world tracing prototype after the
   shadow gate;
@@ -235,47 +240,46 @@ The following facts are load-bearing:
 
 The final 8-byte immutable tracing header and the new block heap remain valid
 end-state options. They are not prerequisites for proving tracing reachability.
-Early tracing modes keep the current object layouts and locate objects through
-the current registry. Header replacement is a later representation experiment
-with its own binary/performance gates.
+Early tracing modes keep the current object layouts and locate the six
+intrusive carriers through Registry plus String/Rope/BigInt through the
+diagnostic allocation ledger. Header replacement is a later representation
+experiment with its own binary/performance gates.
 
 ### 2.2 Current roots are not yet tracing-complete
 
 zjs already has good root Interfaces: local and persistent handle slots, weak
 slots, context roots, jobs, module state, deferred finalization state, and
-registered `RootProvider`s. Three gaps block a tracing cutover — the first two
-are missing root sets, the third is a seam that exists but is unused:
+registered `RootProvider`s. The 2026-08-23 gated Adapter closed the opaque
+bytecode-invocation hole: `traceActiveRoots` walks live windows through
+`ActiveInvocationTrace` when `value_root_frames_enabled`, and
+`JSContext.traceRoots` mirrors modules and the five initial Shapes in that
+same build. Default `rc` still compiles both walks away.
+
+Gaps that still block a tracing cutover:
 
 1. `ValueRootFrame` activation is compiled only when `value_root_frames_enabled`
    (`runtime.zig`: "Production builds erase both operations at compile time").
    Native locals survive in production today because their `JSValue`s own
-   reference counts.
-2. `JSRuntime.traceActiveRoots` does not trace the opaque active bytecode
-   invocation. VM arguments, locals, operand-stack live prefixes, cells, and
-   suspended execution state currently own references rather than register as
-   tracing roots.
-3. `JSRuntime.pollGC` takes a `roots: ?*const ValueRootFrame` parameter and
+   reference counts. Shadow CLI links only container/window frames; scalar Zig
+   locals wait for conservative capture.
+2. The global `Atomics.waitAsync` waiter registry owns Promise and Realm roots
+   under a cross-runtime mutex but has no snapshot Adapter. A tracer may not
+   call an allocating/reentrant visitor while holding that mutex.
+3. A currently executing job has already left `job_queue`; idle-only shadow
+   verification avoids that hole, but arbitrary safepoint collection still
+   needs the active execution/native-root contract and conservative capture.
+4. `JSRuntime.pollGC` takes a `roots: ?*const ValueRootFrame` parameter and
    discards it (`_ = roots;`), and so does
-   `destroyRuntimeCyclesWithValueRoots` (`object_gc.zig`). `active_value_roots`
-   is maintained by activate/deactivate and read by nobody.
+   `destroyRuntimeCyclesWithValueRoots` (`object_gc.zig`).
    **Corrected 2026-08-23**: an earlier draft called this "no design work,
-   only a consumer". That is wrong, and the reason matters for scoping Stage
-   1. The current collector is QuickJS trial deletion: it iterates the whole
-   heap, decrements trial refcounts across child edges, and derives liveness
-   from the counts that survive. It never marks from a root set, so there is
-   no place to plug a consumer into — writing one means building
-   mark-from-roots, which is Stage 3's reclamation algorithm, not a parameter
-   fix. The parameter and the frame list are a seam prepared for tracing, and
-   they stay unused until tracing exists.
+   only a consumer". That is wrong. Trial deletion never marks from a root
+   set, so writing that consumer means building mark-from-roots — Stage 3's
+   algorithm, not a parameter fix.
 
-   Practical consequence: **root completeness cannot be validated by the
-   current collector at all.** It must be validated by the shadow tracer,
-   which is exactly why Stage 1 pairs production roots with the shadow tracer
-   rather than landing them separately.
-
-Gaps 1 and 2 are the load-bearing ones: until they close, the reachable set a
-tracer computes is a strict subset of the truth, and every measurement taken
-before then describes an engine that still has RC underneath.
+Until conservative capture, the Atomics adapter, and in-flight job roots
+close, the reachable set a tracer computes is a strict subset of the truth
+outside a deliberately idle diagnostic point. Root completeness still cannot
+be validated by the current collector; the shadow tracer is the instrument.
 
 The root work is therefore an architectural requirement, not test scaffolding.
 The exec layer owns concrete frame layout; core must call it through a callback
@@ -326,12 +330,22 @@ Locality:
 - `SlotOps`: coherent load/publication plus generation/major barriers;
 - `RootSnapshot`: exact VM/host roots and conservative native capture.
 
-The first `HeapCensus` Implementation is a removable
-`RcRegistryHeapCensus` Adapter over the current intrusive registries. Replacing
-the allocator later does not change the tracer Interface. Existing
-`traceChildEdges*`, `RootVisitor`/`RootProvider`, and the opaque active
-invocation are the principal Seams and provide more leverage than teaching a
-new collector switch every concrete payload layout.
+The compatibility Implementation is a `CompositeHeapCensus` with two Adapters:
+
+- `RcRegistryHeapCensus` enumerates exactly Object, FunctionBytecode, VarRef,
+  RealmContext, Module, and Shape from `Registry.objectIterator()`;
+- `AllocationLedgerHeapCensus` enumerates flat String, StringRope, and BigInt,
+  which use raw/special allocation paths and never enter that intrusive list.
+
+The ledger assigns a monotonic allocation identity and records allocation,
+publication, finalization, and free state; an address is only a lookup key and
+cannot be identity because allocator reuse creates ABA. A test-only
+`SyntheticHeapCensus` is the second executable Adapter for bounded-queue,
+deletion, unpublished-object, and address-reuse tests. Replacing the allocator
+later does not change the `HeapCensus` Interface. Existing `traceChildEdges*`,
+`RootVisitor`/`RootProvider`, and the gated `ActiveInvocationTrace` prefix are
+the principal Seams and provide more leverage than teaching a collector switch
+every concrete payload layout.
 
 ### 3.1 Core invariants
 
@@ -796,10 +810,22 @@ The precise root set includes:
 - finalization and deferred-cleanup records;
 - the current job's WeakRef keep-alive set.
 
-The existing `active_invocation: ?*anyopaque` is the Seam. Exec publishes a
-borrowed record containing both the machine and a no-fail root-trace callback;
-core invokes that callback without importing exec types. The callback traces
-only live windows, never the unused capacity of a frame slab or VM stack.
+The active-invocation Seam is a gated Adapter. Core retains
+`active_invocation: ?*anyopaque`; when `value_root_frames_enabled`, the first
+word of the published record is `ActiveInvocationTrace` and exec fills a
+no-fail live-window callback. Default `rc` keeps extra record fields as `void`
+and compiles `traceActiveRoots` to `traceRoots(null, visitor)`. The callback
+traces only semantic live windows — arguments, locals, original arguments,
+current bindings, VarRefs, FunctionBytecode, generator state, native_caller
+when that slot is a JSValue, and each operand stack's live prefix — never
+unused frame-slab capacity, unused chunk slots, or the empty-leaf resume-word
+overlay. Nested `runWithArgsState` is chained through `previous`. Suspended
+generator/async state is a heap payload edge, not an invocation root.
+
+`RootVisitor.visit_header` exists only in the gated build (void in default
+`rc`). A shadow tracer must provide it; otherwise direct Shape, Module,
+VarRef, and FunctionBytecode roots are unobservable. The Interface remains
+non-moving: direct-header roots are not rewrite slots.
 
 External native arrays/windows containing `JSValue`s require a precise root
 record: conservative scanning sees their backing pointer, not the values stored
@@ -808,6 +834,12 @@ register/stack capture. Whether every scalar `ValueRootFrame` is linked in
 production or only container/window records are linked is a measured
 Implementation choice; completeness is mandatory, blanket hot-path list
 linking is not assumed free.
+
+`Atomics.waitAsync` is a separate native-root Adapter, not part of the active
+Machine. Snapshotting it must not invoke a visitor while holding the global
+waiter mutex: reserve and retain Promise/Realm roots, unlock, then visit and
+release the snapshot. Until that Adapter lands, shadow verification is
+restricted to a checked quiescent state with no linked async waiters.
 
 The production root transition has two required checks:
 
@@ -1249,22 +1281,31 @@ Delivered 2026-08-23 (the G1-G6 preparation tranche):
   uninstrumented because a counter on that path is not cost-neutral);
 - hot-arm-versus-authority edge parity guards across eight shapes, plus
   comptime dual edge lists for the three specialised arms, each proven red by
-  deletion probe and by re-enacting the original iterator-next defect.
+  deletion probe and by re-enacting the original iterator-next defect;
+- pause histograms over the last 1024 rounds, including the explicit empty
+  state and p50/p95/p99/max output;
+- an exhaustive `gc.ref_kind_catalog` and a non-reclaiming Registry `census()`.
+  Together they prove the current registry covers six carriers and that
+  String/Rope plus BigInt still need a ledger census;
+- a gated direct-header root Interface, context-owned Module/initial-Shape
+  roots, and the exec-owned `ActiveInvocationTrace` Adapter. Default `rc`
+  erases the publish/trace path;
+- a deterministic `gc_threshold = 1` tiny-heap stress case.
 
 Still open in this stage:
 
-- ~~pause histograms~~ — **delivered 2026-08-23**: the collector retains its
-  last 1024 round durations and `--gc-stats` reports p50/p95/p99/max, with an
-  empty distribution printed as "no collection completed" rather than as
-  zeros. The measurement immediately showed the current p99 exceeds this
-  document's own 2 ms target (§1.3);
 - reason/phase counters, root counts, conservative hits, mark and sweep debt
   (several of these have no meaning until the corresponding mechanism exists,
   and should land with it rather than as empty fields — the panel was just
   cleaned of exactly that kind of decoration);
-- the full inventory of heap edges, raw-pointer exceptions, root providers,
-  native boundaries, allocation sites, and finalizable types;
-- deterministic tiny-heap and tiny-queue stress configurations.
+- an AST-derived inventory of heap fields/raw-pointer exceptions, allocation
+  and publication sites, native boundaries, payload classifications, and
+  finalizable types. The RefKind catalog is exhaustive for carriers but cannot
+  see FAM/slice storage or opaque payloads;
+- deterministic tiny-mark-queue stress. It lands with the first real bounded
+  shadow worklist and must compare its overflow report with an unbounded
+  SyntheticHeapCensus reference; adding an empty queue knob now would test no
+  mechanism.
 
 Gate: current RC behaviour and machine-code/performance requirements remain
 inside the applicable repository policy.
@@ -1274,21 +1315,30 @@ inside the applicable repository policy.
 Deliver:
 
 - production `ValueRootFrame` or an equivalent complete local-root Interface;
-- exec-owned active-invocation root Adapter;
-- context/job/module/host/finalization root census;
+- ~~exec-owned active-invocation root Adapter~~ — delivered 2026-08-23, gated
+  so default `rc` `.text` is unchanged;
+- context/job/module/host/finalization root census (context-owned Module and
+  Shape roots are delivered in the gated build; in-flight jobs and
+  `Atomics.waitAsync` remain);
 - platform register/stack scanner behind a conservative-root Interface;
-- a non-reclaiming tracer over all current `gc.RefKind`s through
-  `RcRegistryHeapCensus`;
+- a non-reclaiming tracer over all current carriers through
+  `CompositeHeapCensus`: `RcRegistryHeapCensus` for the six intrusive kinds,
+  `AllocationLedgerHeapCensus` for String/StringRope/BigInt, and a
+  `SyntheticHeapCensus` test Adapter;
 - classification of every host/plugin payload edge as an engine-managed root,
   edge-free payload, or legacy reentrant tracer that disables tracing mode;
 - stable diagnostic allocation identities plus exact-root and
   conservative-inclusive reachability diagnostics.
 
 Run shadow tracing after a full current cycle collection and finalization
-quiescence. Every allocated object outside the reachable set must be explained
-by a declared external owner, conservative retention, pending finalization, or
-a documented current-collector semantic; the unexplained set must be zero.
-Deletion probes remove each root/edge and prove the shadow checker becomes red.
+quiescence, with no linked `Atomics.waitAsync` waiter until its Adapter
+exists. Before CompositeHeapCensus, stable identities, native roots, and
+payload classification exist, the verifier must report **incomplete**, never a
+numeric `unexplained == 0` as a cutover gate. Once complete, every allocated
+object outside the reachable set must be explained by a declared external
+owner, conservative retention, pending finalization, or a documented
+current-collector semantic. Deletion probes remove each root/edge and prove
+the shadow checker becomes red.
 
 Gate: sustained zero unexplained objects across unit, test262, benchmark,
 plugin, OOM, and randomized stress corpora. Shadow mode never frees memory.
@@ -1395,23 +1445,24 @@ required because stress alone does not prove absence of a missed interleaving.
    declaration enforced?
 2. Does the compatibility shadow tracer store marks in a side hash/bitmap or
    temporarily reuse current metadata under STW?
-3. What is the exact exec-to-core root callback signature, including suspended
-   generator/async ownership?
-4. Which native platforms are release-supported when tracing first ships?
-5. What exact workload and sample count define the interactive pause gates?
-6. Is a process-shared `GcPlatform` measurably better than per-runtime pools at
+3. Which native platforms are release-supported when tracing first ships?
+4. What exact workload and sample count define the interactive pause gates?
+5. Is a process-shared `GcPlatform` measurably better than per-runtime pools at
    the expected number of runtimes?
-7. Which common payloads must leave `mutator_only` before concurrent mode can
+6. Which common payloads must leave `mutator_only` before concurrent mode can
    be enabled experimentally?
-8. Can the current weak identity registry serve all weak handles without an
+7. Can the current weak identity registry serve all weak handles without an
    additional generation field after allocator replacement?
-9. How is conservative-only transitive retention computed without distorting
+8. How is conservative-only transitive retention computed without distorting
    normal collection cost?
-10. At what stage, if any, is replacing the current 8-byte metadata plus
+9. At what stage, if any, is replacing the current 8-byte metadata plus
     16-byte intrusive header worth its representation and code-layout cost?
-11. Does the next plugin ABI require all JavaScript payload edges to be
+10. Does the next plugin ABI require all JavaScript payload edges to be
     engine-owned persistent handles, or add a no-allocation/no-reentry tracing
     callback? Reclaiming tracing cannot call the current reentrant tracer.
+11. Does the `Atomics.waitAsync` Adapter use a pre-reserved per-runtime root
+    buffer, a retained two-pass snapshot, or a process-level immutable
+    snapshot so it never invokes a visitor under the global waiter mutex?
 
 ## References
 

@@ -61,8 +61,11 @@ runtime/context storage.
 Lifetime model: non-atomic reference counting for immediate free; cycle
 removal for `Object` and `FunctionBytecode` graphs. There is no nursery,
 moving, or concurrent collector. VM operand stacks and locals are carved from
-a `VmStackArena` and released with the frame; they are not registered as
-per-frame GC roots. Host values that outlive a call must use public handles,
+a `VmStackArena` and released with the frame; they are not individually linked
+as per-frame roots. When tracing roots are live (`value_root_frames_enabled`),
+the exec-owned `ActiveInvocationTrace` prefix exposes those semantic live
+windows without teaching core the VM layout; default `rc` erases the call at
+compile time. Host values that outlive a call must use public handles,
 not a raw `JSValue`.
 
 `JSValue` has a single representation: a 16-byte struct of payload plus a

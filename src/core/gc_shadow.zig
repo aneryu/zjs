@@ -311,12 +311,19 @@ const Tracer = struct {
                 adaptor.tracer.visitObject(slot);
                 if (adaptor.tracer.err) |err| return err;
             }
+
+            fn visitHeader(context: *anyopaque, header: *const gc.Header) runtime_mod.RootTraceError!void {
+                const adaptor: *@This() = @ptrCast(@alignCast(context));
+                adaptor.tracer.shade(@constCast(header));
+                if (adaptor.tracer.err) |err| return err;
+            }
         };
         var adaptor = Adaptor{ .tracer = self };
         var visitor = runtime_mod.RootVisitor{
             .context = @ptrCast(&adaptor),
             .visit_value = Adaptor.visitValue,
             .visit_object = Adaptor.visitObject,
+            .visit_header = Adaptor.visitHeader,
         };
         // ValueRootFrames plus the exec active-invocation Adapter. Default
         // `rc` comptime-erases both; shadow/tests pass the live lists.

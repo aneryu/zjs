@@ -141,6 +141,54 @@ pub const RefKind = enum(u3) {
     big_int = 7,
 };
 
+/// Stage-0 tracing inventory for every encoded GC reference kind. Adding a
+/// RefKind without classifying its carrier is a compile error. This does not
+/// claim the composite tracing heap exists; `allocation_ledger` rows are the
+/// missing Implementation behind that future Interface.
+pub const HeapCensusClass = enum(u8) {
+    rc_registry,
+    allocation_ledger,
+};
+
+pub const StrongEdgeClass = enum(u8) {
+    registry_trace,
+    string_family,
+    leaf,
+};
+
+pub const RefKindDescriptor = struct {
+    kind: RefKind,
+    census: HeapCensusClass,
+    strong_edges: StrongEdgeClass,
+    cycle_candidate: bool,
+};
+
+pub const ref_kind_catalog = [_]RefKindDescriptor{
+    .{ .kind = .object, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
+    .{ .kind = .function_bytecode, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
+    .{ .kind = .var_ref, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
+    .{ .kind = .realm_context, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
+    .{ .kind = .module, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
+    .{ .kind = .shape, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
+    // RefKind does not distinguish flat strings from StringRope. Flat strings
+    // are leaves; ropes own left/right JSValue edges. Neither is on gc_obj_list.
+    .{ .kind = .string, .census = .allocation_ledger, .strong_edges = .string_family, .cycle_candidate = false },
+    .{ .kind = .big_int, .census = .allocation_ledger, .strong_edges = .leaf, .cycle_candidate = false },
+};
+
+pub inline fn refKindDescriptor(kind: RefKind) *const RefKindDescriptor {
+    return &ref_kind_catalog[@intFromEnum(kind)];
+}
+
+comptime {
+    const tags = std.meta.tags(RefKind);
+    std.debug.assert(ref_kind_catalog.len == tags.len);
+    for (ref_kind_catalog, 0..) |descriptor, index| {
+        std.debug.assert(@intFromEnum(descriptor.kind) == index);
+        std.debug.assert(descriptor.cycle_candidate == (descriptor.census == .rc_registry));
+    }
+}
+
 pub const GcKind = RefKind;
 pub const Phase = enum {
     none,
@@ -1463,6 +1511,41 @@ pub const Registry = struct {
             .cursor = self.gc_obj_list.next,
             .sentinel = &self.gc_obj_list,
         };
+    }
+
+    /// Non-reclaiming census of the intrusive RC registry. One Adapter for a
+    /// future CompositeHeapCensus, not a complete heap census: String/Rope
+    /// and BigInt need the allocation-ledger Adapter in `ref_kind_catalog`.
+    pub const Census = struct {
+        by_kind: [ref_kind_catalog.len]usize = [_]usize{0} ** ref_kind_catalog.len,
+        total: usize = 0,
+
+        pub fn count(self: Census, kind: RefKind) usize {
+            return self.by_kind[@intFromEnum(kind)];
+        }
+
+        pub fn covers(self: Census, kind: RefKind) bool {
+            _ = self;
+            return refKindDescriptor(kind).census == .rc_registry;
+        }
+
+        pub fn completeForAllRefKinds(self: Census) bool {
+            _ = self;
+            inline for (ref_kind_catalog) |descriptor| {
+                if (descriptor.census != .rc_registry) return false;
+            }
+            return true;
+        }
+    };
+
+    pub fn census(self: *const Registry) Census {
+        var result = Census{};
+        var iterator = self.objectIterator();
+        while (iterator.next()) |header| {
+            result.by_kind[@intFromEnum(header.metaConst().flags.kind)] += 1;
+            result.total += 1;
+        }
+        return result;
     }
 
     fn appendGcObject(self: *Registry, header: *GCObjectHeader) void {

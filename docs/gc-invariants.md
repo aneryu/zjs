@@ -60,6 +60,9 @@ the destroy side, and vice versa. A missing trace arm leaks; a missing
 destroy arm double-frees or leaks the child. `markChildrenCold`'s switch is
 exhaustive so a new GC kind cannot be silently skipped (Q8), and the four
 zero-ref kind sets are one comptime predicate rather than four hand-copies.
+`gc.ref_kind_catalog` classifies all eight kinds: the six intrusive Registry
+carriers versus String/Rope and BigInt, which never enter `gc_obj_list` and
+need an allocation-ledger census. A Rope is not a leaf.
 `ArgumentsPayload` was found with destroy but no trace arm and fixed the same
 way.
 

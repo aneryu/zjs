@@ -305,10 +305,10 @@ then the exec Adapter at `active_invocation` (first word is
 Covered via `JSContext.traceRoots` (provider): unhandled rejections, eval
 function, OOM error, class/native-error prototypes, cached function/promise
 protos, `cached_values`, regexp legacy statics, `global`, `lexicals`,
-`host_event_loop`.
-
-**Not** in `JSContext.traceRoots` (they are heap child edges of the realm
-node instead): `modules`, the five initial shapes.
+`host_event_loop`. When `value_root_frames_enabled`, also the module registry
+and the five initial Shapes (already cycle-collector child edges; mirrored
+onto the root Interface so a mark-from-roots tracer does not depend on
+shading the realm node first). Default `rc` keeps those walks erased.
 
 ### 3.4 Not covered by `traceActiveRoots` (the Stage 1 holes)
 

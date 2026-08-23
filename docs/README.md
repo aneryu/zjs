@@ -29,6 +29,9 @@ when needed.
 - [Contributing](../CONTRIBUTING.md): pull requests, QuickJS semantics, test rules.
 - [Guide](../GUIDE.md): Zig engineering rules and the validation command ladder.
 - [Architecture](architecture.md): current source tour and layer map.
+- [Tracing GC Design](tracing-gc-design.md): project-specific target
+  architecture, safety contracts, and staged migration from RC; the current
+  collector remains documented in [Cycle Collector Invariants](gc-invariants.md).
 - [API Boundary](api-boundary.md): layering rules between public API, core,
   runtime, bindings, and CLI.
 - [Testing Graph](testing-graph.md): compile-root chain, shell classes, step names.

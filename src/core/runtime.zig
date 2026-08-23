@@ -608,6 +608,12 @@ pub const RootVisitor = struct {
     context: *anyopaque,
     visit_value: *const fn (context: *anyopaque, slot: *JSValue) RootTraceError!void,
     visit_object: *const fn (context: *anyopaque, slot: *?*Object) RootTraceError!void,
+    /// Direct GC headers (Shape, Module, VarRef, FunctionBytecode, realm).
+    /// Void in default `rc` so RootVisitor constructions stay two callbacks.
+    visit_header: if (value_root_frames_enabled)
+        ?*const fn (context: *anyopaque, header: *const gc.Header) RootTraceError!void
+    else
+        void = if (value_root_frames_enabled) null else {},
 
     pub fn value(self: *RootVisitor, slot: *JSValue) RootTraceError!void {
         try self.visit_value(self.context, slot);
@@ -641,6 +647,21 @@ pub const RootVisitor = struct {
     pub fn constOptionalObject(self: *RootVisitor, stored: ?*Object) RootTraceError!void {
         var slot = stored;
         try self.optionalObject(&slot);
+    }
+
+    pub fn constHeader(self: *RootVisitor, header: *const gc.Header) RootTraceError!void {
+        if (comptime value_root_frames_enabled) {
+            const callback = self.visit_header orelse return;
+            try callback(self.context, header);
+        }
+    }
+
+    pub fn shapeRoot(self: *RootVisitor, stored: *shape.Shape) RootTraceError!void {
+        try self.constHeader(&stored.header);
+    }
+
+    pub fn moduleRoot(self: *RootVisitor, stored: *module.ModuleRecord) RootTraceError!void {
+        try self.constHeader(&stored.header);
     }
 };
 
