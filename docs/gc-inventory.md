@@ -318,7 +318,7 @@ shading the realm node first). Default `rc` keeps those walks erased.
 | `pollGC` / cycle-collector `roots` argument | see §3.7 | discarded the whole way down | HIGH / SHELL |
 | Active bytecode invocation | `JSRuntime.active_invocation: ?*anyopaque`, published by `src/exec/zjs_vm.zig`; decoded in `src/exec/inline_calls.zig` | tests/shadow: `ActiveInvocationTrace` prefix + `src/exec/active_invocation_trace.zig` walks live windows only; default `rc` erases the call | HIGH, gated Adapter landed (design §2.2 gap 2) |
 | Weak slots | `weak_root_slots` | correctly omitted from strong tracing; swept in `gcRemoveWeakObjects` | LOW |
-| Conservative native stack/registers | none | no scanner | HIGH (Stage 1 deliverable) |
+| Conservative native stack/registers | `src/core/gc_conservative.zig` (shadow-only) | AArch64 Linux spills x0–x30 and q0–q31 and scans `[SP, pthread stack high)`; lookup is census ranges, never a guessed dereference | MED remaining ABIs |
 | Atoms that own GC values | `AtomTable` | unique-symbol atoms are kept by atom RC / dedicated tests, not by `traceRoots` | MED |
 
 ### 3.4.1 Active-invocation live windows (gated Adapter)
@@ -608,6 +608,8 @@ already feeds `pollGC` / `shouldRunMajorAt` (`src/core/memory.zig`).
 3. `value_root_frames_enabled = builtin.is_test or gc.shadow_tracer_enabled`.
 4. `traceActiveRoots` passes `active_value_roots` and the exec Adapter when
    `value_root_frames_enabled`; default `rc` still calls `traceRoots(null, visitor)`.
+4b. Conservative native roots are shadow-only (`gc_conservative.zig`).
+    Generator/async is not a fiber scan.
 5. `pollGC` and `destroyRuntimeCyclesWithValueRoots` both `_ = roots;` —
    empty shell, not wired in this tranche.
 6. Plugin tracer symbol that blocks reclaiming tracing:

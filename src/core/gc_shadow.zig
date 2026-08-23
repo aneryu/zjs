@@ -13,6 +13,7 @@
 const std = @import("std");
 
 const context_mod = @import("context.zig");
+const conservative = @import("gc_conservative.zig");
 const gc = @import("gc.zig");
 const module_mod = @import("module.zig");
 const object_mod = @import("object.zig");
@@ -29,7 +30,8 @@ const Object = object_mod.Object;
 pub const enabled = true;
 
 const ShadowError = runtime_mod.RootTraceError;
-const HeaderSet = std.AutoHashMap(usize, void);
+const HeaderSet = std.AutoHashMapUnmanaged(usize, void);
+const HeaderSetManaged = std.AutoHashMap(usize, void);
 
 pub const KindCounts = struct {
     object: usize = 0,
@@ -86,6 +88,8 @@ pub const UnexplainedItem = struct {
 pub const Report = struct {
     allocated: usize = 0,
     reachable: usize = 0,
+    exact_reachable: usize = 0,
+    conservative_inclusive: usize = 0,
     allocated_by_kind: KindCounts = .{},
     reachable_by_kind: KindCounts = .{},
     pending_finalization: usize = 0,
@@ -94,6 +98,7 @@ pub const Report = struct {
     conservative_retention: usize = 0,
     known_current_collector_semantic: usize = 0,
     unexplained: usize = 0,
+    conservative: conservative.Metrics = .{},
     unexplained_by_kind: KindCounts = .{},
     /// Prefix of the allocated-not-reachable list; `unexplainedTotal()` is the
     /// full size. Stored inline so the report outlives the tracer arena.
@@ -116,9 +121,10 @@ pub const Report = struct {
     pub fn format(self: Report, writer: anytype) !void {
         try writer.print(
             \\shadow tracer
-            \\  allocated: {d}  reachable: {d}  not-reachable: {d}
+            \\  allocated: {d}  exact-reachable: {d}  conservative-inclusive: {d}  not-reachable: {d}
             \\  allocated by kind: object={d} fb={d} var_ref={d} realm={d} module={d} shape={d} string={d} big_int={d}
             \\  reachable by kind: object={d} fb={d} var_ref={d} realm={d} module={d} shape={d} string={d} big_int={d}
+            \\  conservative scan: supported={s} candidates={d} validated_hits={d} only={d} direct_bytes={d} transitive_bytes={d}
             \\  classified not-reachable:
             \\    pending_finalization: {d}
             \\    pinned: {d}
@@ -129,7 +135,8 @@ pub const Report = struct {
             \\
         , .{
             self.allocated,
-            self.reachable,
+            self.exact_reachable,
+            self.conservative_inclusive,
             self.unexplainedTotal(),
             self.allocated_by_kind.object,
             self.allocated_by_kind.function_bytecode,
@@ -147,6 +154,12 @@ pub const Report = struct {
             self.reachable_by_kind.shape,
             self.reachable_by_kind.string,
             self.reachable_by_kind.big_int,
+            if (self.conservative.supported) "yes" else "no",
+            self.conservative.candidates,
+            self.conservative.validated_hits,
+            self.conservative.retained_only_conservatively,
+            self.conservative.direct_bytes,
+            self.conservative.transitive_bytes,
             self.pending_finalization,
             self.pinned,
             self.declared_external_owner,
@@ -160,12 +173,19 @@ pub const Report = struct {
                 try writer.print("    {s} {s} {*}\n", .{ @tagName(item.class), @tagName(item.kind), item.header });
             }
         }
-        try writer.print(
-            \\  zero-unexplained still needs:
-            \\    - conservative native stack/register scanner (scalar Zig locals)
-            \\    - ephemeron fixed point (classified, not marked)
-            \\
-        , .{});
+        if (self.unexplained != 0) {
+            try writer.print(
+                \\  zero-unexplained still needs:
+                \\    - remaining unexplained items (see sample)
+                \\    - ephemeron fixed point (classified, not marked)
+                \\
+            , .{});
+        } else {
+            try writer.print(
+                \\  unexplained is zero; ephemeron values stay classified, not marked
+                \\
+            , .{});
+        }
     }
 };
 
@@ -191,6 +211,9 @@ pub fn run(rt: *JSRuntime) ShadowError!Report {
     defer tracer.deinit();
     try tracer.seedRoots();
     try tracer.drain();
+    try tracer.snapshotExact();
+    try tracer.seedConservativeRoots();
+    try tracer.drain();
     return try tracer.finish();
 }
 
@@ -200,8 +223,11 @@ const Tracer = struct {
     rt: *JSRuntime,
     arena: std.heap.ArenaAllocator,
     reachable: HeaderSet,
+    exact: HeaderSet,
+    conservative_direct: HeaderSet,
     work: std.ArrayList(*gc.Header),
     err: ?ShadowError = null,
+    conservative: conservative.Metrics = .{},
 
     fn init(rt: *JSRuntime) std.mem.Allocator.Error!Tracer {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -209,7 +235,9 @@ const Tracer = struct {
         return .{
             .rt = rt,
             .arena = arena,
-            .reachable = HeaderSet.init(arena.allocator()),
+            .reachable = .empty,
+            .exact = .empty,
+            .conservative_direct = .empty,
             .work = .empty,
         };
     }
@@ -229,7 +257,7 @@ const Tracer = struct {
         // Precise roots should never produce this; keep the observer from
         // chasing a tagged immediate that leaked into a JSValue window.
         if (addr < 4096 or !std.mem.isAligned(addr, @alignOf(gc.Header))) return;
-        const gop = self.reachable.getOrPut(addr) catch |err| {
+        const gop = self.reachable.getOrPut(self.allocator(), addr) catch |err| {
             self.err = err;
             return;
         };
@@ -330,6 +358,40 @@ const Tracer = struct {
         try self.rt.traceActiveRoots(&visitor);
     }
 
+    fn snapshotExact(self: *Tracer) ShadowError!void {
+        var iterator = self.reachable.iterator();
+        while (iterator.next()) |entry| {
+            try self.exact.put(self.allocator(), entry.key_ptr.*, {});
+        }
+    }
+
+    fn shadeConservative(context: *anyopaque, header: *gc.Header) void {
+        const self: *Tracer = @ptrCast(@alignCast(context));
+        const addr = @intFromPtr(header);
+        const already_exact = self.exact.get(addr) != null;
+        const already_reachable = self.reachable.get(addr) != null;
+        self.shade(header);
+        if (!already_exact and !already_reachable and self.conservative_direct.get(addr) == null) {
+            self.conservative_direct.put(self.allocator(), addr, {}) catch |err| {
+                self.err = err;
+                return;
+            };
+            self.conservative.direct_bytes += gc.Registry.heapByteSizeFromHeader(self.rt, header);
+        }
+    }
+
+    fn seedConservativeRoots(self: *Tracer) ShadowError!void {
+        const lookup = try conservative.AddressLookup.build(self.rt, self.allocator());
+        conservative.spillRegistersAndScan(
+            self.rt,
+            lookup,
+            &self.conservative,
+            shadeConservative,
+            @ptrCast(self),
+        );
+        if (self.err) |err| return err;
+    }
+
     fn drain(self: *Tracer) ShadowError!void {
         while (self.work.pop()) |header| {
             try self.traceHeader(header);
@@ -376,18 +438,26 @@ const Tracer = struct {
 
     fn finish(self: *Tracer) ShadowError!Report {
         var report = Report{};
-        var ephemeron_values = HeaderSet.init(self.allocator());
+        var ephemeron_values = HeaderSetManaged.init(self.allocator());
+        report.exact_reachable = self.exact.count();
+        report.conservative = self.conservative;
 
         var iterator = self.rt.gc.objectIterator();
         while (iterator.next()) |header| {
             report.allocated += 1;
             report.allocated_by_kind.add(header.metaConst().flags.kind);
-            if (self.reachable.get(@intFromPtr(header)) != null) {
+            const addr = @intFromPtr(header);
+            if (self.reachable.get(addr) != null) {
                 report.reachable += 1;
                 report.reachable_by_kind.add(header.metaConst().flags.kind);
                 try collectEphemeronValues(header, &ephemeron_values);
+                if (self.exact.get(addr) == null) {
+                    report.conservative.retained_only_conservatively += 1;
+                    report.conservative.transitive_bytes += gc.Registry.heapByteSizeFromHeader(self.rt, header);
+                }
             }
         }
+        report.conservative_inclusive = report.reachable;
 
         iterator = self.rt.gc.objectIterator();
         while (iterator.next()) |header| {
@@ -416,7 +486,7 @@ const Tracer = struct {
     }
 };
 
-fn collectEphemeronValues(header: *gc.Header, into: *HeaderSet) ShadowError!void {
+fn collectEphemeronValues(header: *gc.Header, into: *HeaderSetManaged) ShadowError!void {
     if (header.metaConst().flags.kind != .object) return;
     const obj: *Object = @alignCast(@fieldParentPtr("header", header));
     const payload = obj.collectionPayloadForCycleGc() orelse return;
@@ -429,7 +499,7 @@ fn collectEphemeronValues(header: *gc.Header, into: *HeaderSet) ShadowError!void
 
 fn classifyNotReachable(
     header: *gc.Header,
-    ephemeron_values: HeaderSet,
+    ephemeron_values: HeaderSetManaged,
 ) UnexplainedClass {
     if (header.metaConst().flags.is_pinned) return .pinned;
     if (header.metaConst().flags.finalizing) return .pending_finalization;

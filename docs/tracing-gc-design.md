@@ -880,7 +880,16 @@ Current zjs has exact generator/async state, not a registered stackful-fiber
 subsystem. If stackful fibers are added, each records stack bounds, saved SP,
 the complete saved register image, owner runtime, and state; only the used
 range is scanned. Fiber support is therefore a conditional target, not an
-implementation fact this migration may assume.
+implementation fact this migration may assume. Stage 1's conservative scanner
+does not scan fibers: suspended generator/async windows live on
+`GeneratorPayload` and are traced as heap edges.
+
+The first Implementation (`src/core/gc_conservative.zig`, shadow-only) is
+AArch64 Linux AAPCS64: it spills x0–x30 and q0–q31, then scans `[SP, thread
+stack high)` from `pthread_getattr_np`. Candidates are resolved against
+`RcRegistryHeapCensus` address ranges (metadata prefix, body, one-past-end)
+and are never dereferenced as guessed headers. x86_64 SysV, x86_64 Windows,
+AArch64 Windows, and AArch64 macOS are explicit unimplemented branches.
 
 ### 7.3 Native pointer contract
 

@@ -6994,16 +6994,16 @@ test "shadow tracer never frees and classifies a Zig-local object as unexplained
         try std.testing.expectEqual(live_before, rt.gc.liveCount());
         try std.testing.expect(report.allocated >= 1);
         try std.testing.expect(report.reachable >= 1);
-        try std.testing.expect(report.unexplained >= 1);
+        try std.testing.expectEqual(@as(usize, 0), report.unexplained);
+        try std.testing.expect(report.conservative.supported);
+        try std.testing.expect(report.conservative.retained_only_conservatively >= 1);
+        try std.testing.expect(report.conservative_inclusive >= report.exact_reachable);
 
-        var saw_orphan = false;
+        var saw_orphan_unexplained = false;
         for (report.sample()) |item| {
-            if (item.header == &orphan.header) {
-                saw_orphan = true;
-                try std.testing.expectEqual(core.gc_shadow.UnexplainedClass.unexplained, item.class);
-            }
+            if (item.header == &orphan.header) saw_orphan_unexplained = true;
         }
-        try std.testing.expect(saw_orphan or report.unexplained > report.sample_len);
+        try std.testing.expect(!saw_orphan_unexplained);
 
         var rooted = orphan.value();
         var root_values = [_]core.runtime.ValueRootValue{.{ .value = &rooted }};
@@ -7021,14 +7021,20 @@ test "shadow tracer never frees and classifies a Zig-local object as unexplained
 
         std.debug.print(
             \\
-            \\shadow report after quiesce (Zig-local object unexplained):
-            \\  allocated={d} reachable={d} unexplained={d} known_semantic={d}
+            \\shadow report after quiesce (Zig-local object conservative):
+            \\  allocated={d} exact={d} inclusive={d} unexplained={d} conservative_only={d}
+            \\  candidates={d} hits={d} direct_bytes={d} transitive_bytes={d}
             \\
         , .{
             report.allocated,
-            report.reachable,
+            report.exact_reachable,
+            report.conservative_inclusive,
             report.unexplained,
-            report.known_current_collector_semantic,
+            report.conservative.retained_only_conservatively,
+            report.conservative.candidates,
+            report.conservative.validated_hits,
+            report.conservative.direct_bytes,
+            report.conservative.transitive_bytes,
         });
     }
 }
@@ -7052,7 +7058,8 @@ test "container ValueRootFrame explains heap JSValue windows; scalar skip does n
         const live = rt.gc.liveCount();
         const before = try core.gc_shadow.run(rt);
         try std.testing.expectEqual(live, rt.gc.liveCount());
-        try std.testing.expect(before.unexplained >= 2);
+        try std.testing.expectEqual(@as(usize, 0), before.unexplained);
+        try std.testing.expect(before.conservative.retained_only_conservatively >= 2);
 
         var slices = [_]core.runtime.ValueRootSlice{buffer.slice()};
         var container = core.runtime.ValueRootFrame{ .slices = &slices };
@@ -7065,7 +7072,7 @@ test "container ValueRootFrame explains heap JSValue windows; scalar skip does n
             if (item.header == &a.header or item.header == &b.header) still_unexplained += 1;
         }
         try std.testing.expectEqual(@as(usize, 0), still_unexplained);
-        try std.testing.expect(after.unexplained < before.unexplained);
+        try std.testing.expectEqual(@as(usize, 0), after.unexplained);
 
         std.debug.print(
             \\
@@ -7082,11 +7089,12 @@ test "container ValueRootFrame explains heap JSValue windows; scalar skip does n
         scalar.activateContainersOnly(rt);
         try std.testing.expectEqual(@as(usize, 1), core.runtime.value_root_frame_stats.scalar_skipped);
         const scalar_skip = try core.gc_shadow.run(rt);
-        var orphan_still = false;
+        var orphan_unexplained = false;
         for (scalar_skip.sample()) |item| {
-            if (item.header == &orphan.header) orphan_still = true;
+            if (item.header == &orphan.header) orphan_unexplained = true;
         }
-        try std.testing.expect(orphan_still);
+        try std.testing.expect(!orphan_unexplained);
+        try std.testing.expectEqual(@as(usize, 0), scalar_skip.unexplained);
         rooted.free(rt);
     }
 }
