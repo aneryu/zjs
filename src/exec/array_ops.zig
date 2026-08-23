@@ -5011,6 +5011,33 @@ pub const ArraySortEntry = struct {
     }
 };
 
+/// `entries` is a malloc'd ArrayList of JSValues. Conservative scan sees the
+/// buffer pointer, not the values behind it, so CLI STW needs a native window
+/// from collection through comparator/writeback.
+const SortEntryRootWindow = struct {
+    rooted_values: []core.JSValue = &.{},
+    slices: [1]core.runtime.ValueRootSlice = undefined,
+    frame: core.runtime.ValueRootFrame = .{},
+
+    fn activate(self: *@This(), rt: *core.JSRuntime, entries: []const ArraySortEntry) !void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        if (entries.len == 0) return;
+        self.rooted_values = try rt.memory.alloc(core.JSValue, entries.len);
+        for (entries, 0..) |entry, i| self.rooted_values[i] = entry.value;
+        self.slices[0] = .{ .borrowed = self.rooted_values };
+        self.frame.slices = &self.slices;
+        self.frame.activate(rt);
+    }
+
+    fn deactivate(self: *@This(), rt: *core.JSRuntime) void {
+        self.frame.deactivate(rt);
+        if (self.rooted_values.len != 0) {
+            rt.memory.free(core.JSValue, self.rooted_values);
+            self.rooted_values = &.{};
+        }
+    }
+};
+
 pub fn arraySortCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -5074,6 +5101,10 @@ pub fn arraySortCall(
         try entries.append(ctx.runtime.memory.allocator, .{ .value = value, .order = index });
         value_owned = false;
     }
+
+    var sort_window: SortEntryRootWindow = .{};
+    try sort_window.activate(ctx.runtime, entries.items);
+    defer sort_window.deactivate(ctx.runtime);
 
     try stableArraySortEntries(ctx, output, global, is_typed_method, comparator, entries.items, caller_function, caller_frame);
 
@@ -5297,6 +5328,9 @@ pub fn arrayByCopyCall(
                 item_owned = false;
             }
         }
+        var sort_window: SortEntryRootWindow = .{};
+        try sort_window.activate(ctx.runtime, entries.items);
+        defer sort_window.deactivate(ctx.runtime);
         try stableArraySortEntries(ctx, output, global, false, comparator, entries.items, caller_function, caller_frame);
         for (entries.items, 0..) |entry, sorted_index| {
             try defineArrayByCopyElement(ctx.runtime, out, sorted_index, entry.value);

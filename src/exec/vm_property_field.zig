@@ -23,6 +23,29 @@ const objectFromValue = object_ops.objectFromValue;
 const readInt = call_runtime.readInt;
 const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
+/// CLI STW does not list-link scalar Zig locals (`value_root_link_containers_only`).
+/// Values popped off the VM stack before a fallible intern/GC must therefore
+/// sit in a native window so ActiveInvocation plus this frame both see them.
+fn PoppedWindow(comptime n: usize) type {
+    return struct {
+        slots: [n]core.JSValue = undefined,
+        slices: [1]core.runtime.ValueRootSlice = undefined,
+        frame: core.runtime.ValueRootFrame = .{},
+
+        inline fn activate(self: *@This(), rt: *core.JSRuntime, values: [n]core.JSValue) void {
+            if (comptime !core.runtime.value_root_frames_enabled) return;
+            self.slots = values;
+            self.slices[0] = .{ .borrowed = self.slots[0..] };
+            self.frame.slices = &self.slices;
+            self.frame.activate(rt);
+        }
+
+        inline fn deactivate(self: *@This(), rt: *core.JSRuntime) void {
+            self.frame.deactivate(rt);
+        }
+    };
+}
+
 // Helpers that remain in vm_property.zig (shared with the leftover handlers).
 const vm_property = @import("vm_property.zig");
 const BindingGet = vm_property.BindingGet;
@@ -932,6 +955,9 @@ pub inline fn putArrayElementAfterFastMiss(
     defer key.free(ctx.runtime);
     const obj = try stack.pop();
     defer obj.free(ctx.runtime);
+    var put_window: PoppedWindow(3) = .{};
+    put_window.activate(ctx.runtime, .{ obj, key, value });
+    defer put_window.deactivate(ctx.runtime);
     // The resident OP_put_array_el handler already ran qjs
     // JS_SetPropertyValue's object+int class switch (Array, slow Array, then
     // TypedArray). On that exact miss, continue at qjs's JS_ValueToAtom ->
@@ -1015,6 +1041,9 @@ pub noinline fn getArrayElement(
             defer key.free(ctx.runtime);
             const obj = try stack.pop();
             defer obj.free(ctx.runtime);
+            var get_window: PoppedWindow(2) = .{};
+            get_window.activate(ctx.runtime, .{ obj, key });
+            defer get_window.deactivate(ctx.runtime);
             if (obj.isNull() or obj.isUndefined()) {
                 _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key) catch |err| {
                     if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;

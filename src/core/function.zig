@@ -330,24 +330,7 @@ fn nativeFunctionWithClass(
 ) !JSValue {
     const function_object = try Object.createWithOwnPropertyCapacity(rt, class_id, prototype, 2);
     errdefer function_object.value().free(rt);
-
-    const length_key = atom.predefinedId("length", .string).?;
-    try function_object.defineOwnPropertyAssumingNew(rt, length_key, Descriptor.data(JSValue.int32(length), false, false, true));
-
-    const name_string = if (name.len == 0)
-        try rt.emptyString()
-    else if (isAsciiBuiltinName(name))
-        try string.String.createAscii(rt, name)
-    else
-        try string.String.createUtf8(rt, name);
-    const name_value = if (name.len == 0) name_string.value().dup() else name_string.value();
-    defer name_value.free(rt);
-
-    const name_key = atom.predefinedId("name", .string).?;
-    try function_object.defineOwnPropertyAssumingNew(rt, name_key, Descriptor.data(name_value, false, false, true));
-
-    function_object.nativeDispatchNameSlot().* = try rt.internAtom(name);
-
+    try publishNativeFunctionMetadata(rt, function_object, name, length);
     return function_object.value();
 }
 
@@ -376,7 +359,35 @@ pub fn nativeFunctionWithPrototypeAndCapacity(
     const function_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, prototype, capacity);
     function_object.setNativeFunctionRealm(realm);
     errdefer function_object.value().free(rt);
+    try publishNativeFunctionMetadata(rt, function_object, name, length);
+    return function_object.value();
+}
 
+/// Name, length, and dispatch-atom intern can collect. Exact-mark tests do
+/// not treat the Zig `*Object` as a root unless it is named here; CLI STW
+/// keeps conservative as backup for this scalar frame.
+fn publishNativeFunctionMetadata(
+    rt: *JSRuntime,
+    function_object: *Object,
+    name: []const u8,
+    length: i32,
+) !void {
+    if (comptime runtime.value_root_frames_enabled) {
+        var holder: ?*Object = function_object;
+        var obj_roots = runtime.rootObjects(.{&holder});
+        obj_roots.activate(rt);
+        defer obj_roots.deactivate(rt);
+        return publishNativeFunctionMetadataWork(rt, function_object, name, length);
+    }
+    return publishNativeFunctionMetadataWork(rt, function_object, name, length);
+}
+
+fn publishNativeFunctionMetadataWork(
+    rt: *JSRuntime,
+    function_object: *Object,
+    name: []const u8,
+    length: i32,
+) !void {
     const length_key = atom.predefinedId("length", .string).?;
     try function_object.defineOwnPropertyAssumingNew(rt, length_key, Descriptor.data(JSValue.int32(length), false, false, true));
 
@@ -393,7 +404,6 @@ pub fn nativeFunctionWithPrototypeAndCapacity(
     try function_object.defineOwnPropertyAssumingNew(rt, name_key, Descriptor.data(name_value, false, false, true));
 
     function_object.nativeDispatchNameSlot().* = try rt.internAtom(name);
-    return function_object.value();
 }
 
 /// Construct a QuickJS C_FUNCTION_DATA-style carrier. It deliberately owns no

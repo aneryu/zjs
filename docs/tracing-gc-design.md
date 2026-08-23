@@ -1465,7 +1465,16 @@ not used. FinalizationRegistry cells reserve a job-queue slot at
 registration; sweep commits with `enqueueReserved` and does not allocate
 (§9.3). In-flight define values use rooted construction: a mutation-window
 `ValueRootFrame` names the holder and JSValue until the unique-shape
-`prop_count` commit makes the over-hang a child edge.
+`prop_count` commit makes the over-hang a child edge. Values popped off
+the VM stack (`op.get_array_el` / `put_array_el`) and native JSValue
+buffers that outlive their heap edge (Array.sort entries, Array.reverse
+swap temps) are named as `ValueRootSlice` windows so CLI STW
+(`value_root_link_containers_only`) list-links them; conservative scan
+of the C stack does not see malloc'd backing storage, and register
+reuse makes scalar locals a race. Frameless literal handlers (`op_object`, `op_define_field`,
+`op_array_from`) `syncSp` before they allocate so STW `liveValues()`
+covers the unpublished operand window; RC used operand refcounts. In-flight native function objects are named as
+`ObjectRootValue` across name/length intern.
 
 ### Stage 4: block heap
 

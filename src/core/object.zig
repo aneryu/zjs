@@ -7626,6 +7626,14 @@ pub const Object = extern struct {
         const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
         const materialized = try function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, info.name, info.length, 2);
         errdefer materialized.free(realm.runtime);
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            var live = materialized;
+            var val_roots = runtime_mod.rootValues(.{&live});
+            val_roots.activate(realm.runtime);
+            defer val_roots.deactivate(realm.runtime);
+            try prepareAutoInitNativeFunction(realm.runtime, info, live);
+            return live;
+        }
         try prepareAutoInitNativeFunction(realm.runtime, info, materialized);
         return materialized;
     }

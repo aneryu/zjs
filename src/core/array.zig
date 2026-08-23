@@ -129,6 +129,20 @@ pub fn expectArray(value: JSValue) !*Object {
 /// (caller must NOT free them); on error they are untouched (the caller's
 /// cold route re-runs the op or frees them, covering qjs's fail-path frees).
 pub fn constructLiteralOwnedDenseFromShape(rt: *JSRuntime, values: []const JSValue, initial_shape: *shape_mod.Shape) !JSValue {
+    // Frameless `op_array_from` does not `syncSp` before this allocation.
+    // RC treats operand-stack refcounts as roots; STW must name the window.
+    if (comptime runtime.value_root_frames_enabled) {
+        var values_root: []JSValue = @constCast(values);
+        var root_slices = [_]runtime.ValueRootSlice{.{ .mutable = &values_root }};
+        var root_frame = runtime.ValueRootFrame{ .slices = &root_slices };
+        root_frame.activate(rt);
+        defer root_frame.deactivate(rt);
+        return constructLiteralOwnedDenseFromShapeWork(rt, values, initial_shape);
+    }
+    return constructLiteralOwnedDenseFromShapeWork(rt, values, initial_shape);
+}
+
+inline fn constructLiteralOwnedDenseFromShapeWork(rt: *JSRuntime, values: []const JSValue, initial_shape: *shape_mod.Shape) !JSValue {
     const object = try Object.createArrayFromInitialShape(rt, initial_shape);
     errdefer Object.destroyFromHeader(rt, &object.header);
     try object.initDenseArrayLiteralValuesOwnedTrusted(rt, values);
