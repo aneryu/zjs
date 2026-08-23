@@ -29,6 +29,21 @@ pub const Stats = struct {
     barrier_calls: usize = 0,
     barrier_young_owner: usize = 0,
     barrier_old_target: usize = 0,
+
+    /// Minor pause samples, kept separately from the major distribution: a
+    /// minor's whole purpose is to be short, so averaging it with whole-heap
+    /// pauses would hide exactly the number Stage 5 is judged on.
+    pause_ns_total: u64 = 0,
+    pause_ns_max: u64 = 0,
+    /// Young objects present when each minor started, summed. Divided by
+    /// `minor_collections` this is the average young-list size a minor had to
+    /// walk -- the scaling figure.
+    young_at_start_total: usize = 0,
+    young_at_start_max: usize = 0,
+    /// Young objects a minor kept only because their refcount was live rather
+    /// than because the trace reached them. This is the conservative-promotion
+    /// figure: high values mean roots are still missing.
+    survived_by_refcount: usize = 0,
 };
 
 pub const State = struct {

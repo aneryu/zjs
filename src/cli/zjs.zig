@@ -858,6 +858,14 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *const engine.core.gc
         st.barrier_young_owner,
         st.barrier_old_target,
     });
+    const mean_pause = if (st.minor_collections == 0) 0 else st.pause_ns_total / st.minor_collections;
+    const mean_young = if (st.minor_collections == 0) 0 else st.young_at_start_total / st.minor_collections;
+    try writer.print("gc: minor pause mean {d} ns, max {d} ns\n", .{ mean_pause, st.pause_ns_max });
+    try writer.print("gc: minor young-at-start mean {d}, max {d}, kept by refcount {d}\n", .{
+        mean_young,
+        st.young_at_start_max,
+        st.survived_by_refcount,
+    });
 }
 
 fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {

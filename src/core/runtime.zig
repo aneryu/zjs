@@ -2794,9 +2794,17 @@ pub const JSRuntime = struct {
                     if (freed > 0) {
                         self.gc.stats.collections += 1;
                         const ended = profile.nowNanos();
+                        const elapsed = if (ended > started) ended - started else 0;
+                        // Tracked separately from the major distribution: a
+                        // minor is judged on being short, and averaging it
+                        // with whole-heap pauses hides exactly that.
+                        self.gc.generation.stats.pause_ns_total += elapsed;
+                        if (elapsed > self.gc.generation.stats.pause_ns_max) {
+                            self.gc.generation.stats.pause_ns_max = elapsed;
+                        }
                         const result: gc.CollectionResult = .{
                             .freed_objects = freed,
-                            .duration_ns = if (ended > started) ended - started else 0,
+                            .duration_ns = elapsed,
                         };
                         self.gc.recordSuccess(result);
                         self.resetGCThreshold();

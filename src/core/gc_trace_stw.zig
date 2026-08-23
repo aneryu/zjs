@@ -169,6 +169,10 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     try collector.drain();
     try collector.ephemeronFixedPoint();
 
+    rt.gc.generation.stats.young_at_start_total += young_before;
+    if (young_before > rt.gc.generation.stats.young_at_start_max) {
+        rt.gc.generation.stats.young_at_start_max = young_before;
+    }
     const reclaimed = collector.sweepUnmarkedYoung();
     rt.gc.generation.promoteSurvivors(young_before - reclaimed);
     last_report.minor_reclaimed = reclaimed;
@@ -599,7 +603,10 @@ const Collector = struct {
             // count keeps a minor conservative in the safe direction -- it
             // leaks a young object until the next major rather than freeing
             // one a builtin is still using.
-            if (header.metaConst().rc > 0) continue;
+            if (header.metaConst().rc > 0) {
+                self.rt.gc.generation.stats.survived_by_refcount += 1;
+                continue;
+            }
             doomed.append(self.allocator(), header) catch return 0;
         }
         for (doomed.items) |header| {
