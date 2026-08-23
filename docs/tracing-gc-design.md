@@ -1673,11 +1673,27 @@ meaning for "a collection happened", and introducing a second, weaker one
 on the allocation path changes what every existing caller gets without
 their asking.
 
-So Stage 5's remaining work is a scheduling contract, not a constant:
-minors need a budget that is expressed in young objects rather than heap
-bytes, and callers need a way to say whether they need a full collection or
-merely progress. That belongs with §8.7's allocation-headroom model, which
-is where mark debt, sweep debt and headroom already live.
+The contract half of that is now in place. `GCPollMode.acceptsMinor`
+states which polls may be answered with young-only progress: `idle`,
+`safepoint` and `callback_boundary` can, while `normal` and `urgent` cannot
+— `normal` is the allocation threshold whose meaning must not weaken, and
+`urgent` has a caller who is out of headroom and needs the whole heap
+examined.
+
+The budget half is not. Driving a minor from object allocation was tried
+twice — once directly, once routed through the `.safepoint` contract — and
+both abort inside the suite. The contract was not the problem: gating on
+`acceptsMinor` alone leaves everything green, and the crash returns the
+moment a collection actually runs from the allocation path. Collecting
+mid-allocation, with a half-built object in flight and its caller holding
+raw pointers, is its own problem; §4.6's reserve/initialize/publish exists
+precisely because that window is hostile, and the minor would have to
+observe the same discipline.
+
+So the young budget needs a safepoint of its own rather than a hook on the
+allocation path. That is §8.7 work — mark debt, sweep debt and headroom
+already live there — and it is what stands between Stage 5's mechanism and
+its gate.
 
 ### Stage 6: concurrent major
 

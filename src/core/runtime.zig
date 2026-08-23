@@ -355,6 +355,21 @@ pub const GCPollMode = enum {
     idle,
     safepoint,
     urgent,
+
+    /// Whether this poll may be answered with a minor collection.
+    ///
+    /// A minor only proves young objects dead, so it is progress rather than
+    /// a full collection. Modes that exist to make progress can take it;
+    /// `urgent` cannot, because its caller is out of headroom and needs the
+    /// whole heap examined. `normal` cannot either: it is the allocation
+    /// threshold, and answering that with a young-only pass would quietly
+    /// weaken what every existing caller of a threshold collection receives.
+    pub fn acceptsMinor(self: GCPollMode) bool {
+        return switch (self) {
+            .idle, .safepoint, .callback_boundary => true,
+            .normal, .urgent => false,
+        };
+    }
 };
 
 pub const ValueRootSlice = union(enum) {
@@ -2771,7 +2786,7 @@ pub const JSRuntime = struct {
         // "collect everything", and answering it with a minor would silently
         // change what that call promises.
         if (comptime gc.generation_enabled) {
-            if (!self.gc_running and self.gc.shouldTryMinor()) {
+            if (mode.acceptsMinor() and !self.gc_running and self.gc.shouldTryMinor()) {
                 self.gc_running = true;
                 defer self.gc_running = false;
                 const started = profile.nowNanos();
