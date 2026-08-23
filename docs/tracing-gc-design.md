@@ -1410,6 +1410,25 @@ JSValue/Entry, union-arm stores, and Shape-discriminated `setEntryKindAndSlot`
 at runtime; `--gc-shadow-check` prints the hit inventory and does not fail on
 hits. Plugin-opaque DSO stores remain uninstrumented (ABI).
 
+**Driver verdict: Stage 2 gate PASSED.** Verified rather than accepted:
+the write-audit inventory re-run independently (205,339,239 bypassing heap
+stores on bench-v8 with unexplained still 0), 23 edge-parity and
+cycle-release guards present in the core suite, and `test-oom` 21/21. The
+gate sentence was not restated.
+
+The audit's value is the inventory, not the number being small. Slot
+bypasses cluster in exactly the places §5.2 predicted a compile-time census
+would miss: `object_prop_slot` at 187 M, property-values and dense
+`memcpy`, and the Shape-discriminated `setEntryKindAndSlot`. The lint's 169
+allowlisted *fields* and the audit's *operations on those fields* are
+complementary, and the operations are the Stage 6 barrier work-list.
+
+Recorded limits of this verdict: the hot-path A/B row is satisfied by
+identity rather than by a benchmark, because no Slot landed on the Object
+trunk or dense elements this stage — when Stage 6 puts barriers on those
+paths, that row needs a real A/B. `plugin_opaque` stays uninstrumented
+behind the host DSO ABI.
+
 ### Stage 3: stop-the-world tracing prototype
 
 Deliver:
