@@ -75,6 +75,12 @@ pub const candidate_validation = @import("gc_candidate.zig");
 /// a tracer is compiled; the marker thread that uses it arrives separately.
 pub const concurrent_enabled: bool = trace_stw_enabled;
 pub const concurrent = @import("gc_concurrent.zig");
+/// Bounded mark queue whose overflow downgrades to rescan rather than
+/// dropping work (§8.4).
+pub const mark_queue = @import("gc_mark_queue.zig");
+/// Marker worker thread (§8.6). Reads published objects and sets mark bits;
+/// never frees, allocates, or calls embedder code.
+pub const marker = @import("gc_marker.zig");
 const ConcurrentState = if (concurrent_enabled)
     concurrent.State
 else
@@ -822,6 +828,10 @@ pub const Registry = struct {
         if (sweep_model_enabled) .{} else {},
 
     /// 64 KiB block heap. Void unless `-Dzjs_gc=trace_stw`.
+    concurrent_queue: if (concurrent_enabled) mark_queue.Queue else void =
+        if (concurrent_enabled) .{} else {},
+    marker_worker: if (concurrent_enabled) marker.Worker else void =
+        if (concurrent_enabled) .{} else {},
     concurrent: if (concurrent_enabled) ConcurrentState else void =
         if (concurrent_enabled) .{} else {},
     generation: if (generation_enabled) GenerationState else void =

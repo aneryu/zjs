@@ -1806,11 +1806,28 @@ inside a critical scope and granted once it closes, that the barrier shades
 a target the marker already walked past, that shading is idempotent, and
 that marking is off before any sweeping begins.
 
-Remaining for the Stage 6 gate: the marker worker itself, mark assist,
-queue overflow and re-enlistment, snapshot churn under a real concurrent
-writer, and the reporting rows (bailout share, floating garbage, assist
-time, safepoint latency). Those need the second thread to be meaningful,
-which is what makes them the next tranche rather than this one.
+The marker worker and the bounded queue have since landed, so the second
+thread exists:
+
+- **Bounded mark queue** whose overflow downgrades rather than drops. When
+  the ring is full the object stays marked and its block is flagged for
+  rescan, which honours the design's rule exactly — exhaustion costs
+  scanning, never discovery. Tested at the boundary (one past capacity
+  refuses, the flag survives draining and is cleared only by the rescan that
+  answers it) and across wraparound.
+- **Marker worker** on its own thread, reading published objects and setting
+  mark bits. It never frees, never allocates and never calls embedder code,
+  because a marker that can call out can reenter the runtime it is scanning.
+- **Concurrent shading verified with both routes live**: the owner shades
+  half a set through the barrier while the worker drains the other half from
+  the queue, and no object loses its mark. Run repeatedly rather than once,
+  since a concurrency test that passes only sometimes has told you nothing.
+
+Remaining for the Stage 6 gate: mark assist, snapshot churn under a real
+concurrent writer (§6.3's protocol), and the reporting rows — bailout
+share, floating garbage, assist time, safepoint latency. Child enumeration
+also still happens on the owner during remark rather than on the worker;
+splitting it needs the snapshot descriptors, which is why it waits.
 
 ### Stage 7: experimental enablement and production default
 

@@ -13442,3 +13442,125 @@ test "the barrier shades a target the marker had already passed" {
     rt.gc.shadeForConcurrentMark(&target.header);
     try std.testing.expectEqual(shaded_before + 1, rt.gc.concurrent.stats.shaded);
 }
+
+test "mark queue overflow downgrades to rescan instead of dropping work" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const MarkQueue = core.gc.mark_queue;
+    var queue = MarkQueue.Queue{};
+
+    // A header-shaped address is all this test needs; the queue never
+    // dereferences what it carries.
+    var fake: [MarkQueue.capacity + 8]core.gc.Header = undefined;
+
+    var i: usize = 0;
+    while (i < MarkQueue.capacity) : (i += 1) {
+        try std.testing.expect(queue.push(&fake[i]));
+    }
+    try std.testing.expect(!queue.hasOverflowed());
+
+    // One past capacity: the push is refused and the overflow flag is raised.
+    // The design's rule is that this costs scanning, not discovery.
+    try std.testing.expect(!queue.push(&fake[MarkQueue.capacity]));
+    try std.testing.expect(queue.hasOverflowed());
+    try std.testing.expectEqual(@as(usize, 1), queue.stats.overflowed);
+
+    // Everything accepted is still retrievable in order; nothing the queue
+    // took was lost by the refusal.
+    var popped: usize = 0;
+    while (queue.pop()) |_| popped += 1;
+    try std.testing.expectEqual(MarkQueue.capacity, popped);
+    try std.testing.expectEqual(MarkQueue.capacity, queue.stats.high_water);
+
+    // The flag survives draining -- it is cleared by the rescan that answers
+    // it, not by the queue emptying.
+    try std.testing.expect(queue.hasOverflowed());
+    queue.clearOverflow();
+    try std.testing.expect(!queue.hasOverflowed());
+}
+
+test "mark queue wraps without losing entries" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const MarkQueue = core.gc.mark_queue;
+    var queue = MarkQueue.Queue{};
+    var fake: [16]core.gc.Header = undefined;
+
+    // Drive head and tail past the ring boundary several times over.
+    var round: usize = 0;
+    while (round < MarkQueue.capacity) : (round += 1) {
+        try std.testing.expect(queue.push(&fake[round % fake.len]));
+        try std.testing.expect(queue.pop() != null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), queue.len());
+    try std.testing.expect(!queue.hasOverflowed());
+    try std.testing.expectEqual(queue.stats.pushed, queue.stats.popped);
+}
+
+test "the marker worker marks queued objects on its own thread" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // Objects held by this frame so the test owns their lifetime; what is
+    // under test is the colour the worker gives them.
+    var held: [64]*core.Object = undefined;
+    for (&held) |*slot| {
+        slot.* = try core.Object.createPlainObject(rt, null);
+        slot.*.header.meta().flags.mark = false;
+    }
+    defer for (held) |obj| obj.value().free(rt);
+
+    rt.gc.concurrent_queue.reset();
+    for (held) |obj| try std.testing.expect(rt.gc.concurrent_queue.push(&obj.header));
+
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    try rt.gc.marker_worker.start(&rt.gc);
+
+    // Drain-and-join is the owner's side of the handshake: after join every
+    // mark the worker made is visible here, which is what lets final remark
+    // rescan roots without racing the marker.
+    while (rt.gc.concurrent_queue.len() != 0) std.Thread.yield() catch {};
+    rt.gc.marker_worker.join();
+    rt.gc.concurrent.major_marking_active.store(false, .release);
+
+    for (held) |obj| try std.testing.expect(obj.header.metaConst().flags.mark);
+    try std.testing.expectEqual(@as(usize, held.len), rt.gc.marker_worker.stats.marked);
+    try std.testing.expect(!rt.gc.marker_worker.running.load(.acquire));
+}
+
+test "the marker worker and a mutator can shade concurrently without losing marks" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    var held: [256]*core.Object = undefined;
+    for (&held) |*slot| {
+        slot.* = try core.Object.createPlainObject(rt, null);
+        slot.*.header.meta().flags.mark = false;
+    }
+    defer for (held) |obj| obj.value().free(rt);
+
+    rt.gc.concurrent_queue.reset();
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    try rt.gc.marker_worker.start(&rt.gc);
+
+    // The owner shades half directly (the barrier's path) while the worker
+    // drains the other half from the queue. Both routes set the same bit;
+    // neither may lose an object.
+    for (held, 0..) |obj, i| {
+        if (i % 2 == 0) {
+            rt.gc.shadeForConcurrentMark(&obj.header);
+        } else {
+            _ = rt.gc.concurrent_queue.push(&obj.header);
+        }
+    }
+
+    while (rt.gc.concurrent_queue.len() != 0) std.Thread.yield() catch {};
+    rt.gc.marker_worker.join();
+    rt.gc.concurrent.major_marking_active.store(false, .release);
+
+    for (held) |obj| try std.testing.expect(obj.header.metaConst().flags.mark);
+}
