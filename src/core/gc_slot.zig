@@ -7,17 +7,19 @@
 //! Public `JSValue` / `property.Slot` layouts and the plugin ABI fingerprint
 //! stay unchanged. A Slot here is the mutation protocol over existing fields,
 //! not a new 16-byte representation.
+//!
+//! Default `rc` erases this module (`core/root.zig`) so production `.text`
+//! carries no `gc_slot` symbols. Call sites that must stay identity-neutral
+//! keep a comptime `stats_enabled` branch whose rc arm is the original helper.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
 const gc = @import("gc.zig");
-const object_mod = @import("object.zig");
 const object_payloads = @import("object_payloads.zig");
 const runtime_mod = @import("runtime.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
-const Object = object_mod.Object;
 
 pub const stats_enabled = builtin.is_test or gc.shadow_tracer_enabled;
 
@@ -26,6 +28,7 @@ pub const Stats = struct {
     retains: usize = 0,
     publishes: usize = 0,
     releases: usize = 0,
+    bulk_calls: usize = 0,
 
     pub fn reset(self: *Stats) void {
         self.* = .{};
@@ -42,11 +45,20 @@ inline fn noteSet(retained_new: bool, released_old: bool) void {
     if (released_old) stats.releases += 1;
 }
 
+inline fn noteBulk() void {
+    if (comptime !stats_enabled) return;
+    stats.bulk_calls += 1;
+}
+
 /// Heap JSValue field. Storage remains a plain `JSValue` / `?JSValue`.
 pub const HeapValueSlot = struct {
     /// Caller has already retained `new_value` (ownership transfer), matching
     /// `Object.setOptionalValueSlot`. Retain-new is counted here because the
     /// caller dup is the Slot's retain step.
+    ///
+    /// Stage 6 barrier: after `slot.* = new_value` (the publish), call
+    /// `postWriteBarrier(owner, decodeExactHeapRef(new_value))`. The
+    /// retain-new happens before publish and needs no barrier.
     pub inline fn setOptionalOwned(rt: *JSRuntime, slot: *?JSValue, new_value: ?JSValue) void {
         const had_old = slot.* != null;
         noteSet(new_value != null, had_old);
@@ -57,6 +69,8 @@ pub const HeapValueSlot = struct {
 
     /// Borrowed `new_value`: Slot retains, publishes, then releases the old
     /// occupant. This is the §5.2 order spelled as one call.
+    ///
+    /// Stage 6 barrier: same as `setOptionalOwned` — after the publish store.
     pub inline fn set(rt: *JSRuntime, slot: *JSValue, new_value: JSValue) void {
         const retained = new_value.dup();
         noteSet(true, true);
@@ -65,6 +79,7 @@ pub const HeapValueSlot = struct {
         old_value.free(rt);
     }
 
+    /// Stage 6: no write barrier (no new exact target). Must not allocate.
     pub inline fn clearOptional(rt: *JSRuntime, slot: *?JSValue) void {
         noteSet(false, slot.* != null);
         const old_value = slot.*;
@@ -75,25 +90,36 @@ pub const HeapValueSlot = struct {
     pub inline fn loadForTrace(slot: *const JSValue) JSValue {
         return slot.*;
     }
+
+    /// Bulk destroy of named optional fields (Iterator/Ordinary/Proxy).
+    /// Stage 6: no write barrier; must not allocate after publication starts.
+    pub fn destroyOptionalFields(rt: *JSRuntime, slots: []const *?JSValue) void {
+        noteBulk();
+        for (slots) |slot| clearOptional(rt, slot);
+    }
 };
 
-/// Heap pointer to a GC header (`*Object`, `*Shape`, …). No atomics.
+/// Heap pointer to a GC header. No atomics.
 pub const GcPtrSlot = struct {
-    pub inline fn setObject(rt: *JSRuntime, slot: *?*Object, new_object: ?*Object) void {
-        if (new_object) |obj| obj.header.retain();
-        noteSet(new_object != null, slot.* != null);
-        const old_object = slot.*;
-        slot.* = new_object;
-        if (old_object) |obj| obj.value().free(rt);
+    /// Stage 6 barrier: after `slot.* = new_header`, `postWriteBarrier(owner, new_header)`.
+    pub inline fn setOptionalHeader(rt: *JSRuntime, slot: *?*gc.Header, new_header: ?*gc.Header) void {
+        if (new_header) |header| header.retain();
+        noteSet(new_header != null, slot.* != null);
+        const old_header = slot.*;
+        slot.* = new_header;
+        if (old_header) |header| JSValue.object(header).free(rt);
     }
 
-    pub inline fn loadForTrace(slot: *const ?*Object) ?*Object {
+    pub inline fn loadForTrace(slot: *const ?*gc.Header) ?*gc.Header {
         return slot.*;
     }
 };
 
 /// Owned `[]JSValue` buffer. `next_values` is already retained elementwise.
 pub const GcBuffer = struct {
+    /// Stage 6 barrier: after installing the slice pointer, shade every
+    /// initial strong target (`postWriteBarrier` per element, or one shade of
+    /// the unpublished backing then an atomic descriptor install — §5.5).
     pub inline fn setSlice(rt: *JSRuntime, slot: *[]JSValue, next_values: []JSValue) void {
         noteSet(next_values.len != 0, slot.len != 0);
         object_payloads.destroyValueSlice(rt, slot);
@@ -103,9 +129,83 @@ pub const GcBuffer = struct {
     pub inline fn loadForTrace(slot: *const []JSValue) []JSValue {
         return slot.*;
     }
+
+    /// Copy `src` into unpublished `dst`. Each element is retained.
+    ///
+    /// Stage 6 barrier: this loop publishes per-Slot. Either wrap each store
+    /// in `enterBarrierCriticalScope` + `postWriteBarrier(owner, dst[i])`, or
+    /// fill `dst` unpublished, shade every exact target, then atomically
+    /// install the backing descriptor (§5.5).
+    pub fn copyOwned(dst: []JSValue, src: []const JSValue) void {
+        std.debug.assert(dst.len == src.len);
+        noteBulk();
+        for (dst, src) |*to, from| to.* = from.dup();
+    }
+
+    /// Move ownership of `src` into `dst` and zero `src`. No extra retain.
+    ///
+    /// Stage 6 barrier: after each publish (or after the unpublished backing
+    /// is initialized), `postWriteBarrier` for every new exact target. No
+    /// retain of already-owned values.
+    pub fn moveOwned(dst: []JSValue, src: []JSValue) void {
+        std.debug.assert(dst.len == src.len);
+        noteBulk();
+        for (dst, src) |*to, *from| {
+            to.* = from.*;
+            from.* = JSValue.undefinedValue();
+        }
+    }
+
+    /// Grow or shrink a capacity-tracked buffer. Live prefix is copyOwned
+    /// onto a new allocation, then the old backing is destroyed.
+    ///
+    /// Stage 6: build an unpublished backing, publish its initialized Slots,
+    /// shade every initial strong target, then atomically install the backing
+    /// descriptor. Must not allocate after publication begins (§5.5).
+    pub fn resize(
+        rt: *JSRuntime,
+        slot: *[]JSValue,
+        capacity: *usize,
+        new_len: usize,
+    ) !void {
+        noteBulk();
+        if (new_len == slot.len) return;
+        if (new_len == 0) {
+            object_payloads.destroyValueSliceWithCapacity(rt, slot, capacity);
+            return;
+        }
+        const next = try rt.memory.alloc(JSValue, new_len);
+        const copy_len = @min(slot.len, new_len);
+        copyOwned(next[0..copy_len], slot.*[0..copy_len]);
+        if (new_len > copy_len) @memset(next[copy_len..], JSValue.undefinedValue());
+        object_payloads.destroyValueSliceWithCapacity(rt, slot, capacity);
+        slot.* = next[0..new_len];
+        capacity.* = new_len;
+    }
+
+    /// Stage 6: no write barrier (no new exact targets). Must not allocate.
+    pub fn destroy(rt: *JSRuntime, slot: *[]JSValue) void {
+        noteBulk();
+        object_payloads.destroyValueSlice(rt, slot);
+    }
+};
+
+/// One data-property install. Not wired to `Object.prop_values` or dense
+/// elements this stage (design §6.4 snapshot domain, Stage 6).
+///
+/// Stage 6 barrier: after the Entry.data store, `postWriteBarrier(owner,
+/// decodeExactHeapRef(value))`. Shape-flag publication of the arm is part of
+/// the same layout transaction as today.
+pub const PropertyInstall = struct {
+    pub fn installOwnedData(rt: *JSRuntime, slot: *JSValue, next_value: JSValue) void {
+        _ = rt;
+        noteBulk();
+        slot.* = next_value;
+    }
 };
 
 /// Weak identity (ephemeron / WeakRef). Not a strong retain.
+/// Stage 6: no strong write barrier; identity table update is mutator-only.
 pub const WeakIdentitySlot = struct {
     pub inline fn set(rt: *JSRuntime, slot: *?usize, new_identity: ?usize) void {
         if (slot.*) |old_identity| rt.releaseWeakIdentity(old_identity);
@@ -117,23 +217,3 @@ pub const WeakIdentitySlot = struct {
         slot.* = null;
     }
 };
-
-test "HeapValueSlot setOptionalOwned retains new then releases old" {
-    if (comptime !stats_enabled) return;
-    const rt = try JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const first = try Object.create(rt, @import("class.zig").ids.object, null);
-    const second = try Object.create(rt, @import("class.zig").ids.object, null);
-    const first_header = &first.header;
-    var slot: ?JSValue = first.value();
-    stats.reset();
-    HeapValueSlot.setOptionalOwned(rt, &slot, second.value());
-    try std.testing.expectEqual(@as(usize, 1), stats.set_calls);
-    try std.testing.expectEqual(@as(usize, 1), stats.retains);
-    try std.testing.expectEqual(@as(usize, 1), stats.publishes);
-    try std.testing.expectEqual(@as(usize, 1), stats.releases);
-    try std.testing.expect(slot != null);
-    try std.testing.expect(!rt.gc.containsHeader(first_header));
-    if (slot) |stored| stored.free(rt);
-}

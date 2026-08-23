@@ -1398,12 +1398,13 @@ retain/release counts and generated code identify the cost of Slot abstraction
 before atomics are enabled.
 
 Implementation 2026-08-23: `src/core/gc_slot.zig` defines `HeapValueSlot`,
-`GcPtrSlot`, `GcBuffer`, and `WeakIdentitySlot` without atomics. The pilot
-is `BoundFunctionPayload` (`Function.prototype.bind`): cold, closed
-payload, has both optional JSValue fields and a `[]JSValue` buffer so it
-stands in for later bulk migrations, and a failure is confined to `bind`.
-Writes use retain-new → publish → release-old inside the Slot. Default `rc`
-keeps the 16-byte `JSValue` layout.
+`GcPtrSlot`, `GcBuffer`, and `WeakIdentitySlot` without atomics, plus paired
+bulk copy/move/resize/destroy/property-install APIs whose comments name the
+Stage 6 barrier step. Default `rc` erases the module. Cold `gc-slot: heap`
+families: Iterator, Proxy, ObjectData, TypedArray.buffer, BoundFunction,
+Arguments.var_refs. Naked-field lint:
+`tools/architecture/check_gc_slots.js` (shrinking allowlist). Not wired to
+`Object.prop_values` or dense elements.
 
 ### Stage 3: stop-the-world tracing prototype
 

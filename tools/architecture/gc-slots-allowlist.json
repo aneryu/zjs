@@ -1,0 +1,1357 @@
+{
+  "baseline_count": 169,
+  "entries": [
+    {
+      "file": "src/bytecode.zig",
+      "struct": "FunctionBytecodeImpl",
+      "field": "cpool",
+      "type": "?[*]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/bytecode.zig",
+      "struct": "FunctionBytecodeImpl",
+      "field": "realm",
+      "type": "context.RealmRef",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/bytecode.zig",
+      "struct": "FunctionDefImpl",
+      "field": "cpool",
+      "type": "[]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/bytecode.zig",
+      "struct": "LegacyExecutionAdapter",
+      "field": "function",
+      "type": "FunctionBytecode",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/bytecode.zig",
+      "struct": "Pool",
+      "field": "values",
+      "type": "[]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/atom.zig",
+      "struct": "DynamicAtom",
+      "field": "str",
+      "type": "?*string.String",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "ActiveBacktraceSnapshot",
+      "field": "function_value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "BacktraceFrame",
+      "field": "function_value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "JSContext",
+      "field": "arguments_shape",
+      "type": "?*shape.Shape",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "JSContext",
+      "field": "array_shape",
+      "type": "?*shape.Shape",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "JSContext",
+      "field": "cached_function_proto",
+      "type": "?*Object",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "JSContext",
+      "field": "cached_promise_proto",
+      "type": "?*Object",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "JSContext",
+      "field": "class_prototypes",
+      "type": "[]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "JSContext",
+      "field": "eval_function",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "JSContext",
+      "field": "global",
+      "type": "?*Object",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "JSContext",
+      "field": "lexicals",
+      "type": "?*Object",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "JSContext",
+      "field": "mapped_arguments_shape",
+      "type": "?*shape.Shape",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "JSContext",
+      "field": "preallocated_oom_error",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "JSContext",
+      "field": "regexp_result_shape",
+      "type": "?*shape.Shape",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "JSContext",
+      "field": "regexp_shape",
+      "type": "?*shape.Shape",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "UnhandledRejectionEntry",
+      "field": "promise",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/context.zig",
+      "struct": "UnhandledRejectionEntry",
+      "field": "reason",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/descriptor.zig",
+      "struct": "Descriptor",
+      "field": "getter",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/descriptor.zig",
+      "struct": "Descriptor",
+      "field": "setter",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/descriptor.zig",
+      "struct": "Descriptor",
+      "field": "value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/exception.zig",
+      "struct": "ExceptionSlot",
+      "field": "value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/function.zig",
+      "struct": "BoundRecord",
+      "field": "args",
+      "type": "[]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/function.zig",
+      "struct": "BoundRecord",
+      "field": "target",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/function.zig",
+      "struct": "BoundRecord",
+      "field": "this_value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/function.zig",
+      "struct": "BytecodeRecord",
+      "field": "constants",
+      "type": "[]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/function.zig",
+      "struct": "FunctionRecord",
+      "field": "home_object",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "AsyncGeneratorRequest",
+      "field": "promise",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "AsyncGeneratorRequest",
+      "field": "reject",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "AsyncGeneratorRequest",
+      "field": "resolve",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "AsyncGeneratorRequest",
+      "field": "result",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "GeneratorExecutionState",
+      "field": "current_function",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "GeneratorExecutionState",
+      "field": "this_value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "GeneratorExecutionState",
+      "field": "yield_star_iterator",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "GeneratorPayload",
+      "field": "async_promise",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "SuspendedFrameStorage",
+      "field": "args",
+      "type": "[]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "SuspendedFrameStorage",
+      "field": "locals",
+      "type": "[]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "SuspendedFrameStorage",
+      "field": "open_var_refs",
+      "type": "[]?*var_ref_mod.VarRef",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "SuspendedFrameStorage",
+      "field": "storage",
+      "type": "[]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/generator_state.zig",
+      "struct": "SuspendedStackStorage",
+      "field": "values",
+      "type": "[]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/global_slots.zig",
+      "struct": "Slot",
+      "field": "value",
+      "type": "value.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/host_function.zig",
+      "struct": "ExternalCall",
+      "field": "func_obj",
+      "type": "*Object",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/host_function.zig",
+      "struct": "ExternalCall",
+      "field": "this_value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "AtomicsWaiterPayload",
+      "field": "context",
+      "type": "*core.JSContext",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "AtomicsWaiterPayload",
+      "field": "promise",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "DynamicImportPayload",
+      "field": "attributes",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "DynamicImportPayload",
+      "field": "basename",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "DynamicImportPayload",
+      "field": "context",
+      "type": "*core.JSContext",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "DynamicImportPayload",
+      "field": "reject",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "DynamicImportPayload",
+      "field": "resolve",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "DynamicImportPayload",
+      "field": "specifier",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "FinalizationPayload",
+      "field": "callback",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "FinalizationPayload",
+      "field": "held_value",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "Job",
+      "field": "realm",
+      "type": "core.RealmRef",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "PromisePayload",
+      "field": "value",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "PromiseReactionPayload",
+      "field": "reaction",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "PromiseReactionPayload",
+      "field": "value",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "PromiseSettlementPayload",
+      "field": "completion",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "PromiseSettlementPayload",
+      "field": "target",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "PromiseThenablePayload",
+      "field": "completion",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "PromiseThenablePayload",
+      "field": "resolving_reject",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "PromiseThenablePayload",
+      "field": "resolving_resolve",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "PromiseThenablePayload",
+      "field": "target",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "PromiseThenablePayload",
+      "field": "then_function",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/jobs.zig",
+      "struct": "PromiseThenablePayload",
+      "field": "thenable",
+      "type": "core.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "ExportEntry",
+      "field": "retained_cell",
+      "type": "?value_mod.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "Identity",
+      "field": "module",
+      "type": "*ModuleRecord",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "Iterator",
+      "field": "cursor",
+      "type": "?*ModuleRecord",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "ModuleRecord",
+      "field": "eval_exception",
+      "type": "?value_mod.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "ModuleRecord",
+      "field": "func_obj",
+      "type": "value_mod.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "ModuleRecord",
+      "field": "import_meta",
+      "type": "?value_mod.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "ModuleRecord",
+      "field": "link_stack_prev",
+      "type": "?*ModuleRecord",
+      "kind": "weak",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "ModuleRecord",
+      "field": "module_ns",
+      "type": "value_mod.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "ModuleRecord",
+      "field": "registry_next",
+      "type": "?*ModuleRecord",
+      "kind": "weak",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "ModuleRecord",
+      "field": "registry_prev",
+      "type": "?*ModuleRecord",
+      "kind": "weak",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "PendingDefinition",
+      "field": "func_obj",
+      "type": "value_mod.JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "Registry",
+      "field": "existing",
+      "type": "*ModuleRecord",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "Registry",
+      "field": "fresh",
+      "type": "*ModuleRecord",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "Registry",
+      "field": "head",
+      "type": "?*ModuleRecord",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "Registry",
+      "field": "tail",
+      "type": "?*ModuleRecord",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "ResolvedBinding",
+      "field": "entry",
+      "type": "Entry",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/module.zig",
+      "struct": "ResolvedBinding",
+      "field": "module",
+      "type": "*ModuleRecord",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object.zig",
+      "struct": "DenseArrayStorage",
+      "field": "values",
+      "type": "[*]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object.zig",
+      "struct": "FinalizingShapeStorage",
+      "field": "value",
+      "type": "shape.Shape",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object.zig",
+      "struct": "Object",
+      "field": "prop_values",
+      "type": "[*]property.Entry",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object.zig",
+      "struct": "Object",
+      "field": "shape_ref",
+      "type": "*shape.Shape",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object.zig",
+      "struct": "PropertyTemplate",
+      "field": "entries",
+      "type": "[]const property.Entry",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object.zig",
+      "struct": "PropertyTemplate",
+      "field": "shape_ref",
+      "type": "*shape.Shape",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "BytecodeFunctionAux",
+      "field": "home_object",
+      "type": "?*Object",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "BytecodeFunctionStorage",
+      "field": "function_bytecode",
+      "type": "?*FunctionBytecode",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "BytecodeFunctionStorage",
+      "field": "var_refs",
+      "type": "[*]?*var_ref_mod.VarRef",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "CollectionEntry",
+      "field": "key",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "CollectionEntry",
+      "field": "value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "DisposableResource",
+      "field": "method",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "DisposableResource",
+      "field": "value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "DisposableStackPayload",
+      "field": "async_dispose_error",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "DisposableStackPayload",
+      "field": "async_dispose_reject",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "DisposableStackPayload",
+      "field": "async_dispose_resolve",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FinalizationRegistryCell",
+      "field": "held_value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FinalizationRegistryPayload",
+      "field": "cleanup_callback",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FinalizationRegistryPayload",
+      "field": "realm",
+      "type": "context_mod.RealmRef",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FunctionRarePayload",
+      "field": "async_dispose_stack",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FunctionRarePayload",
+      "field": "async_function_continuation",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FunctionRarePayload",
+      "field": "promise_capability_slot",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FunctionRarePayload",
+      "field": "promise_combinator_state",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FunctionRarePayload",
+      "field": "promise_finally_callback",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FunctionRarePayload",
+      "field": "promise_finally_constructor",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FunctionRarePayload",
+      "field": "promise_finally_payload",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FunctionRarePayload",
+      "field": "promise_resolving_state",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FunctionRarePayload",
+      "field": "promise_resolving_target",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FunctionRarePayload",
+      "field": "proxy_revoke_target",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FunctionRarePayload",
+      "field": "realm_global",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "FunctionRarePayload",
+      "field": "source",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "GlobalPayload",
+      "field": "uninitialized_vars",
+      "type": "?*Object",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "NativeFields",
+      "field": "realm",
+      "type": "context_mod.RealmRef",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "callsite_file",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "callsite_function",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "error_stack",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "error_stack_sites",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "promise_capability_reject",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "promise_capability_resolve",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "promise_combinator_keys",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "promise_combinator_reject",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "promise_combinator_resolve",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "promise_combinator_values",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "promise_reaction_on_fulfilled",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "promise_reaction_on_rejected",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "promise_reaction_reject",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "OrdinaryPayload",
+      "field": "promise_reaction_resolve",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "PromisePayload",
+      "field": "reaction_arg",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "PromisePayload",
+      "field": "reaction_callback",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "PromisePayload",
+      "field": "reactions",
+      "type": "[]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "PromisePayload",
+      "field": "result",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "RealmRecordPayload",
+      "field": "realm",
+      "type": "context_mod.RealmRef",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "RegExpLegacyStatics",
+      "field": "input",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "RegExpLegacyStatics",
+      "field": "last_match",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "RegExpLegacyStatics",
+      "field": "last_paren",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "RegExpLegacyStatics",
+      "field": "left_context",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "RegExpLegacyStatics",
+      "field": "right_context",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "VarRefPayload",
+      "field": "value",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/object_payloads.zig",
+      "struct": "WeakCollectionEntry",
+      "field": "value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "ActiveCarve",
+      "field": "window",
+      "type": "[]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "CachedIteratorNextEntry",
+      "field": "object",
+      "type": "*Object",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "CachedIteratorNextEntry",
+      "field": "value",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "DeferredWeakValueFree",
+      "field": "value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "JSRuntime",
+      "field": "constructing_context_head",
+      "type": "?*context_mod.JSContext",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "JSRuntime",
+      "field": "constructing_context_tail",
+      "type": "?*context_mod.JSContext",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "JSRuntime",
+      "field": "context_head",
+      "type": "?*context_mod.JSContext",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "JSRuntime",
+      "field": "context_tail",
+      "type": "?*context_mod.JSContext",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "JSRuntime",
+      "field": "current_exception",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "JSRuntime",
+      "field": "empty_string",
+      "type": "?*string.String",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "JSRuntime",
+      "field": "weak_reference_holder_head",
+      "type": "?*Object",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "JSRuntime",
+      "field": "weak_reference_holder_tail",
+      "type": "?*Object",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "ObjectRootValue",
+      "field": "object",
+      "type": "*?*Object",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "RecentAtomString",
+      "field": "string",
+      "type": "*string.String",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "RecentTwoUnitString",
+      "field": "string",
+      "type": "*string.String",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "RootSlot",
+      "field": "value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "ValueRootBuffer",
+      "field": "values",
+      "type": "[]JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/runtime.zig",
+      "struct": "ValueRootValue",
+      "field": "value",
+      "type": "*JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/shape.zig",
+      "struct": "Registry",
+      "field": "shape_hash_buckets",
+      "type": "[]?*Shape",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/string.zig",
+      "struct": "StringRope",
+      "field": "left",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/string.zig",
+      "struct": "StringRope",
+      "field": "right",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/string.zig",
+      "struct": "StringValueIterator",
+      "field": "current",
+      "type": "?JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/var_ref.zig",
+      "struct": "VarRef",
+      "field": "pvalue",
+      "type": "*JSValue",
+      "kind": "borrowed",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    },
+    {
+      "file": "src/core/var_ref.zig",
+      "struct": "VarRef",
+      "field": "value",
+      "type": "JSValue",
+      "kind": "mutable",
+      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
+    }
+  ]
+}

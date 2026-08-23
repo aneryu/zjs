@@ -52,6 +52,11 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
         "tools/architecture/check_borrowed_atoms.js",
     });
 
+    const run_architecture_gc_slots = b.addSystemCommand(&.{
+        "node",
+        "tools/architecture/check_gc_slots.js",
+    });
+
     // Compiler-stage boundaries: the two explicit `noinline` stages that
     // made legacy deletion performance-stable. Checkpoint checks the
     // declarations. The production gate already compiles ReleaseFast `zjs`
@@ -98,6 +103,7 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     checkpoint_gate_step.dependOn(&run_architecture_deps.step);
     checkpoint_gate_step.dependOn(&run_architecture_oom_panics.step);
     checkpoint_gate_step.dependOn(&run_architecture_borrowed_atoms.step);
+    checkpoint_gate_step.dependOn(&run_architecture_gc_slots.step);
     checkpoint_gate_step.dependOn(&run_architecture_stage_source.step);
     // The public-API surface snapshot. It used to fire only on the production
     // gate, which is why four commits on 2026-08-20 grew `JSValue`'s public
@@ -114,6 +120,7 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     engine_production_gate_step.dependOn(&run_architecture_deps.step);
     engine_production_gate_step.dependOn(&run_architecture_oom_panics.step);
     engine_production_gate_step.dependOn(&run_architecture_borrowed_atoms.step);
+    engine_production_gate_step.dependOn(&run_architecture_gc_slots.step);
     engine_production_gate_step.dependOn(&run_architecture_stage_boundaries.step);
     engine_production_gate_step.dependOn(test262_check_step);
 }

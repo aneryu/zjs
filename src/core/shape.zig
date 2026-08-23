@@ -89,7 +89,7 @@ pub const Shape = extern struct {
     prop_size: u32 = 0,
     prop_count: u32 = 0,
     deleted_prop_count: u32 = 0,
-    registry_hash_next: ?*Shape = null,
+    registry_hash_next: ?*Shape = null, // gc-slot: weak
     proto: ?*Object = null,
     // Inline flexible array member follows at `@sizeOf(Shape)`:
     //   [props: Property × prop_size] [hash buckets: u32 × bucketCount()]

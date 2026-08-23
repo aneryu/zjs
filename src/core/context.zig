@@ -384,10 +384,10 @@ pub const JSContext = struct {
     runtime: *JSRuntime,
     /// Independent, non-owning membership in `JSRuntime.context_*`.  The GC
     /// header links above are reserved exclusively for the collector.
-    runtime_prev: ?*JSContext = null,
-    runtime_next: ?*JSContext = null,
-    construction_prev: ?*JSContext = null,
-    construction_next: ?*JSContext = null,
+    runtime_prev: ?*JSContext = null, // gc-slot: weak
+    runtime_next: ?*JSContext = null, // gc-slot: weak
+    construction_prev: ?*JSContext = null, // gc-slot: weak
+    construction_next: ?*JSContext = null, // gc-slot: weak
     publication_state: RealmPublicationState = .constructing,
     construction_complete: bool = false,
     /// Consumed by `destroy` / `tryDestroy` and by `RealmRef.takeOwned`.

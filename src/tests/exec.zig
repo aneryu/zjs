@@ -11152,9 +11152,10 @@ test "HeapValueSlot bind retain/release counts" {
         \\bind HeapValueSlot/GcBuffer: sets={d} retains={d} publishes={d} releases={d}
         \\
     , .{ slot_stats.set_calls, slot_stats.retains, slot_stats.publishes, slot_stats.releases });
-    try std.testing.expect(slot_stats.set_calls >= 2);
-    try std.testing.expect(slot_stats.retains >= 2);
-    try std.testing.expect(slot_stats.publishes >= 2);
+    try std.testing.expectEqual(@as(usize, 3), slot_stats.set_calls);
+    try std.testing.expectEqual(@as(usize, 3), slot_stats.retains);
+    try std.testing.expectEqual(@as(usize, 3), slot_stats.publishes);
+    try std.testing.expectEqual(@as(usize, 0), slot_stats.releases);
 }
 
 test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {

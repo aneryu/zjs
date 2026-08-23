@@ -110,7 +110,7 @@ independent Debug `zjs` module rooted at `src/root.zig` and hangs on
 | Suffix | Meaning | Examples |
 |---|---|---|
 | `-gate` | Aggregate validation gate | `quick-gate`, `checkpoint-gate`, `engine-production-gate` |
-| `-check` | Single check | `config-signature-check`, `test262-check` |
+| `-check` | Single check | `config-signature-check`, `test262-check`, `check_gc_slots.js` |
 | (none) | Build or run | `zjs`, `test`, `smoke`, `test-core` |
 
 ## What CI runs

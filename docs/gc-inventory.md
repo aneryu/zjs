@@ -162,13 +162,24 @@ traced from the realm, not from an object payload.
 
 ---
 
-## 2. Bare pointer exceptions (Stage 2 allowlist seed)
+## 2. Bare pointer exceptions (Stage 2 allowlist)
 
-Search: heap structs under `src/core/` and `src/bytecode.zig` that store
-`*Object`, `*Shape`, `*VarRef`, `*FunctionBytecode`, `RealmRef`/`?*JSContext`,
-or heap `JSValue` without going through a handle/Slot type. FAM slices of
-those types are included. Stack/`JSValue` public representation is out of
-scope (design §5.1).
+Lint: `node tools/architecture/check_gc_slots.js` (checkpoint + production
+gate). Heap `JSValue` / `*Object` / `*Shape` / `*VarRef` / `*FunctionBytecode`
+/ `RealmRef` fields must be tagged `gc-slot: heap|immutable|weak` or listed in
+`tools/architecture/gc-slots-allowlist.json`. The allowlist is shrinking-only
+(`baseline_count` is the recorded seed). Bulk Slot APIs live in
+`src/core/gc_slot.zig` with Stage 6 barrier comments on copy/move/resize/
+destroy/property-install; they are not wired to `Object.prop_values` or dense
+elements (§6.4).
+
+Migrated `gc-slot: heap` families (writes already go through
+`Object.setOptionalValueSlot` / `GcBuffer.setSlice`, the Slot-under-RC
+sequence): `IteratorPayload` (8), `ProxyPayload` (2), `ObjectDataPayload`,
+`TypedArrayPayload.buffer`, `BoundFunctionPayload`, `ArgumentsPayload.var_refs`.
+
+Inventory seed (tables below). Search: heap structs under `src/core/` and
+`src/bytecode.zig`.
 
 ### 2.1 Mutable after publish (must become Slots or a named bulk API)
 

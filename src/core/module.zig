@@ -42,7 +42,7 @@ pub const SyntheticKind = enum {
 /// their targets (matching QuickJS `JSReqModuleEntry.module`).
 pub const RequestEntry = struct {
     module_name: atom.Atom,
-    module: ?*ModuleRecord = null,
+    module: ?*ModuleRecord = null, // gc-slot: weak
 };
 
 pub const ImportEntry = struct {

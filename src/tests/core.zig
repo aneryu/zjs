@@ -7177,6 +7177,52 @@ test "shadow tracer reports a live realm as reachable" {
     }
 }
 
+test "HeapValueSlot setOptionalOwned retains new then releases old" {
+    if (comptime !core.gc_slot.stats_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const first = try core.Object.create(rt, core.class.ids.object, null);
+    const second = try core.Object.create(rt, core.class.ids.object, null);
+    const first_header = &first.header;
+    var slot: ?core.JSValue = first.value();
+    core.gc_slot.stats.reset();
+    core.gc_slot.HeapValueSlot.setOptionalOwned(rt, &slot, second.value());
+    try std.testing.expectEqual(@as(usize, 1), core.gc_slot.stats.set_calls);
+    try std.testing.expectEqual(@as(usize, 1), core.gc_slot.stats.retains);
+    try std.testing.expectEqual(@as(usize, 1), core.gc_slot.stats.publishes);
+    try std.testing.expectEqual(@as(usize, 1), core.gc_slot.stats.releases);
+    try std.testing.expect(slot != null);
+    try std.testing.expect(!rt.gc.containsHeader(first_header));
+    if (slot) |stored| stored.free(rt);
+}
+
+test "GcBuffer copyOwned moveOwned resize preserve live prefix" {
+    if (comptime !core.gc_slot.stats_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const a = try core.Object.create(rt, core.class.ids.object, null);
+    const b = try core.Object.create(rt, core.class.ids.object, null);
+    var src = [_]core.JSValue{ a.value(), b.value() };
+    const dst = try rt.memory.alloc(core.JSValue, 2);
+    core.gc_slot.stats.reset();
+    core.gc_slot.GcBuffer.copyOwned(dst, &src);
+    try std.testing.expect(core.gc_slot.stats.bulk_calls >= 1);
+    src[0].free(rt);
+    src[1].free(rt);
+
+    const moved = try rt.memory.alloc(core.JSValue, 2);
+    core.gc_slot.GcBuffer.moveOwned(moved, dst);
+    try std.testing.expect(dst[0].isUndefined());
+    rt.memory.free(core.JSValue, dst);
+
+    var slice: []core.JSValue = moved;
+    var cap: usize = 2;
+    try core.gc_slot.GcBuffer.resize(rt, &slice, &cap, 3);
+    try std.testing.expectEqual(@as(usize, 3), slice.len);
+    try core.gc_slot.GcBuffer.resize(rt, &slice, &cap, 0);
+    try std.testing.expectEqual(@as(usize, 0), slice.len);
+}
+
 test "pollGC runs pending collection and clears pending flag" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
