@@ -1587,6 +1587,24 @@ envelope rows cannot be measured on a live workload in this tranche, only
 on the heap's own tests. They move to the header sub-tranche with the rest
 of the representation work.
 
+**Driver verdict: Stage 4 gate PASSED for the tranches it covers**, with
+the header-dependent rows explicitly deferred rather than waved through.
+
+| Gate row | Evidence |
+|---|---|
+| interior-candidate lookup | page-radix registry resolves interior, prefix, header and one-past-end; `greatest lo` fixed a first-match SEGV found under load |
+| OOM | `test-oom` 21/21 in both rc and trace_stw, covering the new reserves |
+| sweep debt | four debt quantities reported; `needs_sweep` returns to zero after synchronous sweep, so §8.7's "no new cycle while debt is non-zero" holds |
+| frozen bench-v8 A/B | rc `.text` stayed inside its known basin for the space and sweep work; the registry tranche measured 0.9991 / 0.9987 / 1.0007 in a clean field |
+| allocator fragmentation / committed-memory envelope | **deferred** — measurable only once the heap serves GC nodes, which needs §4.5's header change |
+
+Also delivered here and worth naming because it was deferred twice before:
+strings and ropes now register their intervals with the address registry,
+so conservative scanning can resolve a stack-resident string candidate.
+They did not become intrusive nodes, and the four-byte refcount prefix is
+untouched — the representation constraint that made this look impossible
+in the Slot round was respected rather than routed around.
+
 ### Stage 5: sticky minor
 
 Deliver young lists, sticky survivor marks, remembered owners, weak remembered
