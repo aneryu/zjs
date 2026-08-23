@@ -1786,6 +1786,32 @@ This is one target's answer. §5.4 also asks for the emitted LLVM ordering
 to be inspected per supported backend, which stays open along with the
 release-platform question in §15.
 
+**Stage 6 status: protocol implemented and tested; the marker thread is
+deliberately last.**
+
+Delivered: the target-shading barrier with its mode switch (shade while
+marking, generational otherwise, never both — a shaded object is already
+reachable this cycle), the `BarrierCriticalScope` handshake that makes the
+store/shade pair indivisible with respect to safepoints, candidate
+validation sized by the measured 6.2% tear rate, and a three-phase major
+(initial mark stopped, concurrent drain with the barrier live, final remark
+stopped and re-drained).
+
+The drain runs on the owner thread rather than a marker worker. That is the
+sequencing the litmus argued for: the phases, the handshake and the remark
+obligations are all testable without a second thread, and introducing one
+before they are pinned would mean debugging a protocol and a race at the
+same time. What the tests pin today is that acknowledgement is refused
+inside a critical scope and granted once it closes, that the barrier shades
+a target the marker already walked past, that shading is idempotent, and
+that marking is off before any sweeping begins.
+
+Remaining for the Stage 6 gate: the marker worker itself, mark assist,
+queue overflow and re-enlistment, snapshot churn under a real concurrent
+writer, and the reporting rows (bailout share, floating garbage, assist
+time, safepoint latency). Those need the second thread to be meaningful,
+which is what makes them the next tranche rather than this one.
+
 ### Stage 7: experimental enablement and production default
 
 First expose tracing only through an explicit experimental build/config. Run

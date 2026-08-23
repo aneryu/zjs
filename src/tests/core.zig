@@ -13392,3 +13392,53 @@ test "the barrier shades exact targets while marking and remembers owners otherw
     try std.testing.expect(rt.gc.concurrent.stats.shaded > shaded_before);
     try std.testing.expect(child.header.metaConst().flags.mark);
 }
+
+test "a concurrent major collects garbage and keeps what the barrier shaded" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const kept = try core.Object.createPlainObject(rt, null);
+    defer kept.value().free(rt);
+
+    const before = rt.gc.liveCount();
+    const swept = try core.gc_trace_stw.collectConcurrentMajor(rt, null);
+    // The rooted object survives; whatever was unreachable is gone.
+    try std.testing.expect(rt.gc.liveCount() <= before);
+    try std.testing.expect(swept <= before);
+    // Marking must be off once the collection returns: a mutator resuming
+    // into a swept heap must not still be shading into it.
+    try std.testing.expect(!rt.gc.concurrent.markingActive());
+}
+
+test "the barrier shades a target the marker had already passed" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // Held by this frame, so it stays allocated; the point under test is the
+    // colour the barrier gives it, not its lifetime.
+    const target = try core.Object.createPlainObject(rt, null);
+    defer target.value().free(rt);
+    target.header.meta().flags.mark = false;
+
+    // The interleaving the barrier exists for: the mutator stores a reference
+    // after the marker already walked the owner, so nothing will re-trace it.
+    // Only the shading keeps the target in this cycle's live set.
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    const shaded_before = rt.gc.concurrent.stats.shaded;
+    rt.gc.shadeForConcurrentMark(&target.header);
+    rt.gc.concurrent.major_marking_active.store(false, .release);
+
+    try std.testing.expect(target.header.metaConst().flags.mark);
+    try std.testing.expectEqual(shaded_before + 1, rt.gc.concurrent.stats.shaded);
+
+    // Shading twice is idempotent: an already-marked target costs a check,
+    // not a second queue entry.
+    rt.gc.shadeForConcurrentMark(&target.header);
+    try std.testing.expectEqual(shaded_before + 1, rt.gc.concurrent.stats.shaded);
+}

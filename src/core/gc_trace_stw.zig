@@ -180,6 +180,64 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     return reclaimed;
 }
 
+/// Three-phase concurrent major (§8.6), driven to completion on the owner
+/// thread.
+///
+/// The phases are real and so is the protocol: initial mark stops the mutator
+/// and seeds roots, the concurrent phase drains with the barrier live so
+/// mutator writes shade their targets, and final remark stops again to rescan
+/// roots and drain what the barrier produced. What is not here yet is a
+/// separate marker thread -- the drain runs on the owner. That keeps the
+/// phase transitions, the barrier handshake and the remark obligations
+/// testable before a second thread is introduced, which is the order the
+/// litmus argued for: validate the protocol, then parallelise it.
+pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame) CollectError!usize {
+    if (comptime !gc.concurrent_enabled) return error.PayloadMarkFailed;
+
+    var collector = try Collector.init(rt, extra_roots);
+    defer collector.deinit();
+
+    // Initial mark, mutator stopped.
+    collector.clearMarks();
+    var live = rt.gc.objectIterator();
+    while (live.next()) |_| collector.report.allocated_before += 1;
+    try collector.seedRoots();
+    if (collector.conservative_on) try collector.seedConservativeRoots();
+
+    // Publish that marking is live before resuming: from here every strong
+    // write shades its target instead of taking the generational path.
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+
+    // Concurrent phase. The mutator is logically running here; the barrier is
+    // what keeps its writes visible to this drain.
+    try collector.drain();
+    collector.report.marked_exact = collector.countMarked();
+
+    // Final remark, mutator stopped again. Roots are rescanned because they
+    // moved while the mutator ran, and the drain repeats because rescanning
+    // and the barrier both produce work.
+    try collector.seedRoots();
+    if (collector.conservative_on) try collector.seedConservativeRoots();
+    try collector.drain();
+    try collector.ephemeronFixedPoint();
+
+    // Marking is over before anything is freed: a mutator that resumes mid
+    // sweep must not still be shading into a set being torn down.
+    rt.gc.concurrent.major_marking_active.store(false, .release);
+
+    collector.processWeak();
+    const swept = collector.sweepUnmarked();
+    last_report = collector.report;
+    last_report.swept = swept;
+    last_report.remaining = rt.gc.liveCount();
+    if (comptime gc.generation_enabled) {
+        // Everything that survived a major is old, and the remembered set it
+        // was built from is stale (§8.2).
+        rt.gc.generation.promoteSurvivors(rt.gc.liveCount());
+    }
+    return swept;
+}
+
 const Collector = struct {
     rt: *JSRuntime,
     extra_roots: ?*const runtime_mod.ValueRootFrame,
