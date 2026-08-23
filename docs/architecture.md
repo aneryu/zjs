@@ -57,6 +57,8 @@ runtime/context storage.
 | `object.zig` / `shape.zig` / `property.zig` | objects, shapes, properties |
 | `gc.zig` | registry, policy, external-memory accounting |
 | `gc_address_registry.zig` | Page-radix address → allocation map for conservative lookup (tests/shadow/STW; production `rc` erases it) |
+| `gc_space.zig` | Measured size-class table and publication histogram (tests/shadow/STW; no 64 KiB blocks) |
+| `gc_sweep_model.zig` | Logical 64 KiB window sweep state machine and four debt quantities (tests/shadow/STW) |
 | `gc_slot.zig` | Stage 2 Slot-under-RC mutation protocol (no atomics) |
 | `gc_write_audit.zig` | Shadow runtime write audit of Slot-bypassing heap stores |
 | `gc_trace_stw.zig` | Experimental STW mark/sweep over the compatibility heap (`-Dzjs_gc=trace_stw`) |

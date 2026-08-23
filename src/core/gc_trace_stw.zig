@@ -52,6 +52,16 @@ pub const Report = struct {
     weakrefs_cleared: usize = 0,
     finalization_enqueued: usize = 0,
     conservative: conservative.Metrics = .{},
+    mark_debt: usize = 0,
+    sweep_debt: usize = 0,
+    soft_headroom: usize = 0,
+    hard_headroom: usize = 0,
+    windows_active: usize = 0,
+    trans_fresh_to_active: usize = 0,
+    trans_active_to_needs_sweep: usize = 0,
+    trans_needs_sweep_to_sweeping: usize = 0,
+    trans_sweeping_to_swept: usize = 0,
+    trans_swept_to_active: usize = 0,
 
     pub fn format(self: Report, writer: anytype) !void {
         try writer.print(
@@ -59,6 +69,7 @@ pub const Report = struct {
             \\  allocated_before: {d}  marked_exact: {d}  conservative_extra: {d}  swept: {d}  remaining: {d}
             \\  ephemeron_rounds: {d}  ephemeron_values_shaded: {d}
             \\  weak_entries_dropped: {d}  weakrefs_cleared: {d}  finalization_enqueued: {d}
+            \\  debt mark: {d} sweep: {d} soft: {d} hard: {d} windows_active: {d}
             \\
         , .{
             self.allocated_before,
@@ -71,6 +82,11 @@ pub const Report = struct {
             self.weak_entries_dropped,
             self.weakrefs_cleared,
             self.finalization_enqueued,
+            self.mark_debt,
+            self.sweep_debt,
+            self.soft_headroom,
+            self.hard_headroom,
+            self.windows_active,
         });
     }
 };
@@ -126,6 +142,8 @@ const Collector = struct {
         var live = self.rt.gc.objectIterator();
         while (live.next()) |_| self.report.allocated_before += 1;
 
+        self.beginSweepModelMark();
+
         try self.seedRoots();
         try self.drain();
         self.exact_mark_count = self.countMarked();
@@ -140,7 +158,58 @@ const Collector = struct {
 
         try self.ephemeronFixedPoint();
         self.processWeak();
-        return self.sweepUnmarked();
+        self.endSweepModelMark();
+        self.beginSweepModelSweep();
+        const swept = self.sweepUnmarked();
+        self.endSweepModelSweep();
+        return swept;
+    }
+
+    fn liveHeapBytes(self: *Collector) usize {
+        return self.rt.gc.old_space.live_bytes +| self.rt.gc.large_space.live_bytes;
+    }
+
+    fn beginSweepModelMark(self: *Collector) void {
+        if (comptime !gc.sweep_model_enabled) return;
+        self.rt.gc.sweep_model.beginMark(self.liveHeapBytes());
+    }
+
+    fn endSweepModelMark(self: *Collector) void {
+        if (comptime !gc.sweep_model_enabled) return;
+        var unmarked_bytes: usize = 0;
+        var iterator = self.rt.gc.objectIterator();
+        while (iterator.next()) |header| {
+            if (header.metaConst().flags.mark) continue;
+            if (header.metaConst().flags.is_pinned) continue;
+            unmarked_bytes +|= gc.Registry.heapByteSizeFromHeader(self.rt, header);
+        }
+        self.rt.gc.sweep_model.endMark(unmarked_bytes);
+    }
+
+    fn beginSweepModelSweep(self: *Collector) void {
+        if (comptime !gc.sweep_model_enabled) return;
+        self.rt.gc.sweep_model.beginSweep();
+    }
+
+    fn endSweepModelSweep(self: *Collector) void {
+        if (comptime !gc.sweep_model_enabled) return;
+        self.rt.gc.sweep_model.endSweep();
+        self.rt.gc.sweep_model.refreshHeadroom(
+            self.liveHeapBytes(),
+            self.rt.gc.policy.major_debt_threshold,
+            self.rt.gc.stats.external_bytes,
+        );
+        const model = self.rt.gc.sweep_model;
+        self.report.mark_debt = model.debt.mark_debt;
+        self.report.sweep_debt = model.debt.sweep_debt;
+        self.report.soft_headroom = model.debt.soft_headroom;
+        self.report.hard_headroom = model.debt.hard_headroom;
+        self.report.windows_active = model.active;
+        self.report.trans_fresh_to_active = model.trans_fresh_to_active;
+        self.report.trans_active_to_needs_sweep = model.trans_active_to_needs_sweep;
+        self.report.trans_needs_sweep_to_sweeping = model.trans_needs_sweep_to_sweeping;
+        self.report.trans_sweeping_to_swept = model.trans_sweeping_to_swept;
+        self.report.trans_swept_to_active = model.trans_swept_to_active;
     }
 
     fn clearMarks(self: *Collector) void {

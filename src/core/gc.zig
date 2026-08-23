@@ -35,8 +35,26 @@ pub const trace_stw_enabled: bool = std.mem.eql(u8, build_options.zjs_gc, "trace
 /// layout and the allocation hot path stay the original body.
 pub const address_registry_enabled: bool = shadow_tracer_enabled or trace_stw_enabled or builtin.is_test;
 
+/// Publication-size histogram and measured size-class table (§4.2 / §4.3).
+/// Same compile gate as the address registry: tests/shadow/STW only.
+pub const space_model_enabled: bool = address_registry_enabled;
+
+/// Logical 64 KiB window sweep state machine and four scheduling quantities
+/// (§8.7). Same compile gate. Does not allocate 64 KiB blocks.
+pub const sweep_model_enabled: bool = address_registry_enabled;
+
 const AddressRegistryTable = if (address_registry_enabled)
     @import("gc_address_registry.zig").Table
+else
+    void;
+
+const SpaceHistogram = if (space_model_enabled)
+    @import("gc_space.zig").Histogram
+else
+    void;
+
+const SweepModel = if (sweep_model_enabled)
+    @import("gc_sweep_model.zig").Model
 else
     void;
 
@@ -753,6 +771,14 @@ pub const Registry = struct {
     address_registry: if (address_registry_enabled) AddressRegistryTable else void =
         if (address_registry_enabled) .{} else {},
 
+    /// Publication-size histogram for Stage 4 class freeze. Void in production `rc`.
+    space_histogram: if (space_model_enabled) SpaceHistogram else void =
+        if (space_model_enabled) .{} else {},
+
+    /// Logical 64 KiB window sweep machine. Void in production `rc`.
+    sweep_model: if (sweep_model_enabled) SweepModel else void =
+        if (sweep_model_enabled) .{} else {},
+
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
         return .{
             .memory = account,
@@ -904,6 +930,9 @@ pub const Registry = struct {
 
         if (comptime address_registry_enabled) {
             self.address_registry.deinit(addressRegistryAllocator());
+        }
+        if (comptime sweep_model_enabled) {
+            self.sweep_model.deinit(addressRegistryAllocator());
         }
 
         self.phase = .none;
@@ -1267,6 +1296,7 @@ pub const Registry = struct {
         if (comptime address_registry_enabled) {
             if (tracked) self.linkGcObjectTail(h);
             self.registerLiveAddress(h, bytes, tracked);
+            self.observeNewPublication(h, bytes);
         } else if (tracked) self.linkGcObjectTail(h);
     }
 
@@ -1288,6 +1318,7 @@ pub const Registry = struct {
         if (comptime address_registry_enabled) {
             self.linkGcObjectTail(h);
             self.registerLiveAddress(h, bytes, true);
+            self.observeNewPublication(h, bytes);
         } else self.linkGcObjectTail(h);
     }
 
@@ -1634,6 +1665,20 @@ pub const Registry = struct {
     inline fn unregisterLiveAddress(self: *Registry, header: *GCObjectHeader) void {
         if (comptime !address_registry_enabled) return;
         self.address_registry.remove(addressRegistryAllocator(), header);
+    }
+
+    /// Histogram and sweep-window observation for a first-time publication.
+    /// Restores do not call this (the object was already counted / windowed).
+    inline fn observeNewPublication(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
+        if (comptime space_model_enabled) self.space_histogram.record(bytes);
+        if (comptime sweep_model_enabled) {
+            self.sweep_model.noteAllocated(addressRegistryAllocator(), @intFromPtr(header));
+            self.sweep_model.refreshHeadroom(
+                self.old_space.live_bytes +| self.large_space.live_bytes,
+                self.policy.major_debt_threshold,
+                self.stats.external_bytes,
+            );
+        }
     }
 
     fn appendZeroRef(self: *Registry, header: *GCObjectHeader) void {

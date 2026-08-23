@@ -89,6 +89,22 @@ else
     struct {
         pub const enabled = false;
     };
+/// Measured size-class table and publication histogram. Default production
+/// `rc` erases the module.
+pub const gc_space = if (gc.space_model_enabled)
+    @import("gc_space.zig")
+else
+    struct {
+        pub const enabled = false;
+    };
+/// Logical 64 KiB window sweep machine and four debt quantities. Default
+/// production `rc` erases the module.
+pub const gc_sweep_model = if (gc.sweep_model_enabled)
+    @import("gc_sweep_model.zig")
+else
+    struct {
+        pub const enabled = false;
+    };
 /// Imported only when `-Dzjs_gc=trace_stw`. Default `rc` builds see an empty
 /// namespace so the reclaiming tracer is not part of the production compile.
 pub const gc_trace_stw = if (gc.trace_stw_enabled) @import("gc_trace_stw.zig") else struct {

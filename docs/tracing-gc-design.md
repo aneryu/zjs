@@ -1530,6 +1530,23 @@ census oracle. Default production `rc` erases the table (`void` field,
 no insert). This round does not introduce 64 KiB blocks, size classes,
 or header replacement.
 
+Implementation 2026-08-24 (class table + sweep plan, still no block
+allocator): `src/core/gc_space.zig` generates the §4.2 class table
+(16-byte linear through 128, then ~1.25 geometric, 16 cells per future
+64 KiB block). The maximum small class is
+`measured_max_small_payload` = 128, frozen from a mixed TestEngine + JS
+publication histogram (p50=64, p95=96, p99=128; 99% of sub-64 KiB
+sizes) — not a hard-coded 4 KiB. Publications above 128 and below 64 KiB
+classify as medium; ≥64 KiB classify as large. The 16-cell rule still
+allows geometric classes up to ~4 KiB; they are not in the measured
+table until a later histogram needs them. `src/core/gc_sweep_model.zig`
+is the §8.7 state machine over logical 64 KiB address windows
+(`fresh → active → needs_sweep → sweeping → swept → active`) plus the
+four quantities (mark debt, sweep debt, soft headroom, hard headroom).
+STW collect drives the transitions; after a synchronous sweep, sweep
+debt is zero. Default production `rc` erases both (`void` fields). No
+64 KiB block body, object-header replacement, or generations.
+
 ### Stage 5: sticky minor
 
 Deliver young lists, sticky survivor marks, remembered owners, weak remembered

@@ -403,6 +403,12 @@ pub fn main(init: std.process.Init) !void {
     if (commandRuntimeOptions(command).gc_stats) {
         try dumpGcStats(&stdout_writer.interface, runtime.runtime.gcStats());
         try dumpGcPauses(&stdout_writer.interface, runtime.runtime.gcPauseDistribution());
+        if (comptime engine.core.gc.space_model_enabled) {
+            try dumpGcSpaceStats(&stdout_writer.interface, &runtime.runtime.gc);
+        }
+        if (comptime engine.core.gc.sweep_model_enabled) {
+            try dumpGcSweepStats(&stdout_writer.interface, &runtime.runtime.gc);
+        }
         try stdout_writer.interface.flush();
     }
     if (comptime engine.core.gc.shadow_tracer_enabled) {
@@ -803,6 +809,44 @@ const OpcodeProfileRow = struct {
 /// Post-run GC counters. Every line here has a maintained write site in the
 /// collector; fields the engine does not instrument are simply absent rather
 /// than printed as zero.
+fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
+    if (comptime engine.core.gc.space_model_enabled) {
+        const space = engine.core.gc_space;
+        const hist = registry.space_histogram;
+        const p50 = hist.percentilePayloadBelowLarge(50);
+        const p95 = hist.percentilePayloadBelowLarge(95);
+        const p99 = hist.percentilePayloadBelowLarge(99);
+        try writer.print(
+            "gc: space histogram total {d}, bytes {d}, p50 {d}, p95 {d}, p99 {d}, max_small {d}, covered {d}/{d}, large {d}\n",
+            .{
+                hist.total,
+                hist.bytes_total,
+                p50,
+                p95,
+                p99,
+                space.max_small_payload,
+                hist.coveredByMaxSmall(),
+                hist.belowLarge(),
+                hist.large,
+            },
+        );
+    }
+}
+
+fn dumpGcSweepStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
+    if (comptime engine.core.gc.sweep_model_enabled) {
+        const model = registry.sweep_model;
+        try writer.print(
+            "gc: sweep windows fresh {d} active {d} needs_sweep {d} sweeping {d} swept {d}\n",
+            .{ model.fresh, model.active, model.needs_sweep, model.sweeping, model.swept },
+        );
+        try writer.print(
+            "gc: debt mark {d} sweep {d} soft {d} hard {d}\n",
+            .{ model.debt.mark_debt, model.debt.sweep_debt, model.debt.soft_headroom, model.debt.hard_headroom },
+        );
+    }
+}
+
 fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats) !void {
     try writer.print("gc: collection entries {d}, completed rounds {d}, failed {d}\n", .{
         stats.collections,

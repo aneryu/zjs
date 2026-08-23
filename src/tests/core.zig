@@ -7622,6 +7622,206 @@ test "address registry lookup cost stays with page occupants not live N" {
     });
 }
 
+test "size-class table follows §4.2 rules and is not a 4KiB hard-code" {
+    if (comptime !core.gc.space_model_enabled) return error.SkipZigTest;
+    const space = core.gc_space;
+    try std.testing.expect(space.class_count >= 8);
+    try std.testing.expectEqual(@as(usize, 16), space.classes[0]);
+    try std.testing.expectEqual(space.linear_limit_bytes, space.classes[7]);
+    var i: usize = 1;
+    while (i < 8) : (i += 1) {
+        try std.testing.expectEqual(space.classes[i - 1] + space.linear_step_bytes, space.classes[i]);
+    }
+    i = 8;
+    while (i < space.classes.len) : (i += 1) {
+        const prev = space.classes[i - 1];
+        const next = space.classes[i];
+        try std.testing.expect(next > prev);
+        try std.testing.expectEqual(@as(usize, 0), next % space.linear_step_bytes);
+        const ratio_num = next * space.geometric_den;
+        const ratio_den = prev * space.geometric_num;
+        // ~1.25, allowing the 16-byte snap (next is in [prev*5/4, prev*5/4 + 16]).
+        try std.testing.expect(ratio_num + space.linear_step_bytes * space.geometric_den >= ratio_den);
+        try std.testing.expect(ratio_num <= (prev + space.linear_step_bytes) * space.geometric_num);
+    }
+    for (space.classes) |payload| {
+        try std.testing.expect(space.payloadFitsSmallRule(payload));
+        try std.testing.expect(space.cellsPerFutureBlock(payload) >= space.min_cells_per_block);
+    }
+    try std.testing.expectEqual(space.measured_max_small_payload, space.max_small_payload);
+    try std.testing.expectEqual(space.linear_limit_bytes, space.max_small_payload);
+    try std.testing.expect(space.max_small_payload < 4096);
+    var fitting: [48]usize = undefined;
+    const all_fitting = space.generateAllFittingClasses(&fitting);
+    try std.testing.expect(all_fitting > space.class_count);
+    try std.testing.expectEqual(@as(usize, 160), fitting[8]);
+    try std.testing.expectEqual(@as(usize, 192), fitting[9]);
+    try std.testing.expectEqual(@as(usize, 240), fitting[10]);
+    try std.testing.expect(fitting[all_fitting - 1] < 4096);
+    try std.testing.expect(fitting[all_fitting - 1] > space.max_small_payload);
+    try std.testing.expectEqual(space.Space.small, space.classifyPayload(16));
+    try std.testing.expectEqual(space.Space.small, space.classifyPayload(space.max_small_payload));
+    if (space.max_small_payload + 1 < space.large_min_bytes) {
+        try std.testing.expectEqual(space.Space.medium, space.classifyPayload(space.max_small_payload + 1));
+        try std.testing.expectEqual(space.Space.medium, space.classifyPayload(space.large_min_bytes - 1));
+    }
+    try std.testing.expectEqual(space.Space.large, space.classifyPayload(space.large_min_bytes));
+    try std.testing.expectEqual(space.Space.large, space.classifyPayload(space.large_min_bytes * 2));
+}
+
+test "size-class table matches measured publication histogram" {
+    if (comptime !core.gc.space_model_enabled) return error.SkipZigTest;
+
+    var harness = try helpers.TestEngine.init(std.testing.allocator);
+    defer harness.deinit();
+
+    const mix =
+        \\function work() {
+        \\  const objs = [];
+        \\  for (let i = 0; i < 2000; i++) objs.push({ i: i, k: i & 7 });
+        \\  const arrs = [];
+        \\  for (let i = 0; i < 200; i++) arrs.push(new Array(i % 64).fill(i));
+        \\  const fns = [];
+        \\  for (let i = 0; i < 100; i++) fns.push(function (x) { return x + i; });
+        \\  const nested = JSON.parse('{"a":[1,2,{"b":3}],"c":{"d":[4,5,6]}}');
+        \\  const t = new Uint8Array(1024);
+        \\  const big = new Array(1024);
+        \\  for (let i = 0; i < 1024; i++) big[i] = { i: i };
+        \\  const m = new Map();
+        \\  for (let i = 0; i < 200; i++) m.set(i, { v: i });
+        \\  const s = new Set(objs.slice(0, 100));
+        \\  class C { constructor(n) { this.n = n; this.xs = [n, n + 1]; } m() { return this.n; } }
+        \\  const cs = [];
+        \\  for (let i = 0; i < 50; i++) cs.push(new C(i));
+        \\  return objs.length + arrs.length + fns.length + t.length + big.length + m.size + s.size + cs.length + nested.a.length;
+        \\}
+        \\work();
+    ;
+    const result = try harness.eval(mix);
+    result.free(harness.runtime);
+
+    const large_obj = try core.Object.createWithOwnPropertyCapacity(
+        harness.runtime,
+        core.class.ids.object,
+        null,
+        2048,
+    );
+    defer large_obj.value().free(harness.runtime);
+
+    const hist = harness.runtime.gc.space_histogram;
+    const space = core.gc_space;
+    const derived = space.cutoffForCoverage(hist, space.coverage_hundredths);
+    const p50 = hist.percentilePayloadBelowLarge(50);
+    const p95 = hist.percentilePayloadBelowLarge(95);
+    const p99 = hist.percentilePayloadBelowLarge(99);
+    const covered = hist.coveredByMaxSmall();
+    const pop = hist.belowLarge();
+
+    std.debug.print(
+        \\
+        \\size histogram (TestEngine bootstrap + JS mix):
+        \\  total={d} bytes={d} large={d} over_fine={d}
+        \\  p50={d} p95={d} p99={d} derived_cutoff={d} frozen={d}
+        \\  covered {d}/{d} classes={any}
+        \\
+    , .{
+        hist.total,
+        hist.bytes_total,
+        hist.large,
+        hist.over_fine,
+        p50,
+        p95,
+        p99,
+        derived,
+        space.measured_max_small_payload,
+        covered,
+        pop,
+        space.classes,
+    });
+
+    try std.testing.expect(hist.total >= 1000);
+    try std.testing.expect(pop > 0);
+    try std.testing.expect(covered * 100 >= pop * space.coverage_hundredths);
+    try std.testing.expectEqual(space.measured_max_small_payload, derived);
+    try std.testing.expect(space.classifyPayload(space.max_small_payload + 1) == .medium);
+}
+
+test "sweep window state machine and four debts" {
+    if (comptime !core.gc.sweep_model_enabled) return error.SkipZigTest;
+    const sweep = core.gc_sweep_model;
+    var model: sweep.Model = .{};
+    defer model.deinit(std.heap.page_allocator);
+
+    model.noteAllocated(std.heap.page_allocator, 0x1000);
+    model.noteAllocated(std.heap.page_allocator, 0x1000 + sweep.window_bytes);
+    try std.testing.expectEqual(@as(usize, 2), model.active);
+    try std.testing.expectEqual(@as(usize, 2), model.trans_fresh_to_active);
+    try std.testing.expectEqual(@as(usize, 0), model.fresh);
+
+    model.refreshHeadroom(1000, 4000, 50);
+    try std.testing.expectEqual(@as(usize, 3000), model.debt.soft_headroom);
+    try std.testing.expectEqual(@as(usize, 3050), model.debt.hard_headroom);
+
+    model.beginMark(1000);
+    try std.testing.expectEqual(@as(usize, 1000), model.debt.mark_debt);
+    model.endMark(200);
+    try std.testing.expectEqual(@as(usize, 0), model.debt.mark_debt);
+    try std.testing.expectEqual(@as(usize, 200), model.debt.sweep_debt);
+    try std.testing.expectEqual(@as(usize, 2), model.needs_sweep);
+    try std.testing.expectEqual(@as(usize, 2), model.trans_active_to_needs_sweep);
+
+    model.refreshHeadroom(800, 4000, 50);
+    try std.testing.expectEqual(@as(usize, 3200), model.debt.soft_headroom);
+    try std.testing.expectEqual(@as(usize, 3450), model.debt.hard_headroom);
+
+    model.beginSweep();
+    try std.testing.expectEqual(@as(usize, 2), model.sweeping);
+    try std.testing.expectEqual(@as(usize, 2), model.trans_needs_sweep_to_sweeping);
+    model.endSweep();
+    try std.testing.expectEqual(@as(usize, 0), model.debt.sweep_debt);
+    try std.testing.expectEqual(@as(usize, 2), model.active);
+    try std.testing.expectEqual(@as(usize, 2), model.trans_sweeping_to_swept);
+    try std.testing.expectEqual(@as(usize, 2), model.trans_swept_to_active);
+
+    model.noteAllocated(std.heap.page_allocator, 0x1000);
+    try std.testing.expectEqual(@as(usize, 2), model.active);
+}
+
+test "trace_stw sweep model reaches sweep_debt zero after collect" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.sweep_model_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var left = try core.Object.create(rt, core.class.ids.object, null);
+    var right = try core.Object.create(rt, core.class.ids.object, null);
+    const left_key = try rt.internAtom("sweep-left");
+    defer rt.atoms.free(left_key);
+    const right_key = try rt.internAtom("sweep-right");
+    defer rt.atoms.free(right_key);
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    left.value().free(rt);
+    right.value().free(rt);
+    dropGcPtr(&left);
+    dropGcPtr(&right);
+
+    try std.testing.expect(rt.gc.sweep_model.active >= 1);
+    const trans_before = rt.gc.sweep_model.trans_active_to_needs_sweep;
+    const swept = rt.runObjectCycleRemoval();
+    try std.testing.expect(swept >= 2);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.sweep_model.debt.mark_debt);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.sweep_model.debt.sweep_debt);
+    try std.testing.expectEqual(@as(usize, 0), core.gc_trace_stw.last_report.sweep_debt);
+    try std.testing.expect(rt.gc.sweep_model.trans_active_to_needs_sweep > trans_before);
+    try std.testing.expect(rt.gc.sweep_model.trans_needs_sweep_to_sweeping >= 1);
+    try std.testing.expect(rt.gc.sweep_model.trans_sweeping_to_swept >= 1);
+    try std.testing.expect(rt.gc.sweep_model.trans_swept_to_active >= 1);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.sweep_model.needs_sweep);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.sweep_model.sweeping);
+}
+
 test "pollGC runs pending collection and clears pending flag" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
