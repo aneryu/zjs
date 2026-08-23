@@ -1564,6 +1564,29 @@ them as `gc.Header`. STW increments
 mark bitmap. A new collection drains non-zero sweep debt before
 `beginMark`. Object headers are unchanged.
 
+**Driver note: the block heap cannot serve GC nodes until the header
+tranche.** Wiring `Heap.alloc` into `createRuntime` was tried and reverted.
+A GC object is not just its struct: `memory.zig` writes an 8-byte prefix
+ahead of every allocation and records the slab class in `alloc_info`, which
+`GCObjectHeader.meta()` reads back through. Cells handed out raw therefore
+produce headers whose `meta()` dereferences uninitialised memory — the
+experiment segfaulted in `addInitializedWithSizeNoFail`'s first assertion,
+which is where it should fail.
+
+That is not a defect in the block heap; it is §4.5's object-header
+representation change arriving early. Serving GC nodes requires the cell
+layout to carry that prefix, and §4.5 defers header replacement to its own
+sub-tranche with its own binary and performance gates. Until that lands,
+the heap is exercised by its own tests and reports its geometry, while the
+compatibility allocator keeps serving the collector — which is also why
+`--gc-stats` shows the block heap committed/live at zero on a real
+workload. The zero is honest: nothing allocates from it yet.
+
+Consequence for the Stage 4 gate: the fragmentation and committed-memory
+envelope rows cannot be measured on a live workload in this tranche, only
+on the heap's own tests. They move to the header sub-tranche with the rest
+of the representation work.
+
 ### Stage 5: sticky minor
 
 Deliver young lists, sticky survivor marks, remembered owners, weak remembered

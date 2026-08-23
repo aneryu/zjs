@@ -65,6 +65,11 @@ const SweepModel = if (sweep_model_enabled)
 else
     void;
 
+/// Max alignment the block heap can serve; `void`-safe for default `rc`.
+pub inline fn blockHeapMaxAlign() usize {
+    return if (block_heap_enabled) @import("gc_block_heap.zig").cell_alignment else 0;
+}
+
 const BlockHeap = if (block_heap_enabled)
     @import("gc_block_heap.zig").Heap
 else

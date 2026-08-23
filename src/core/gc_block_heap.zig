@@ -22,6 +22,29 @@ pub const page_bytes: usize = 4096;
 pub const pages_per_superblock: usize = superblock_bytes / page_bytes;
 pub const block_align: std.mem.Alignment = .fromByteUnits(block_bytes);
 pub const free_nil: u32 = std.math.maxInt(u32);
+
+/// Alignment every cell is guaranteed to satisfy. Blocks are 64 KiB aligned,
+/// `cells_offset` is aligned to 16, and every size class is a multiple of 16,
+/// so cell addresses inherit 16-byte alignment. Callers needing more must not
+/// use this heap.
+pub const cell_alignment: usize = 16;
+
+/// Why this heap does not yet serve `createRuntime`.
+///
+/// A GC object is not just its struct: `memory.zig` writes an 8-byte prefix in
+/// front of every allocation, and `alloc_info` in that prefix records which
+/// slab class the object came from. `GCObjectHeader.meta()` reads back through
+/// it. Handing out raw cells from here therefore produces headers whose
+/// `meta()` dereferences uninitialised memory — wiring it into the allocation
+/// funnel segfaults immediately, in `addInitializedWithSizeNoFail`'s first
+/// assertion, which is exactly where it should.
+///
+/// Serving GC nodes means the cell layout has to carry that prefix, which is
+/// the object-header representation change §4.5 defers to its own tranche with
+/// its own binary and performance gates. Until then this heap is exercised
+/// through its own tests and reports its geometry, and the compatibility
+/// allocator keeps serving the collector.
+pub const serves_gc_nodes = false;
 pub const block_magic: u64 = 0x5a4a53_424c4b_0001;
 
 const max_bitmap_words: usize = (block_bytes / space.min_class_bytes + 63) / 64;
