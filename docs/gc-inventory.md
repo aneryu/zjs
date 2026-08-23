@@ -609,7 +609,9 @@ already feeds `pollGC` / `shouldRunMajorAt` (`src/core/memory.zig`).
 4. `traceActiveRoots` passes `active_value_roots` and the exec Adapter when
    `value_root_frames_enabled`; default `rc` still calls `traceRoots(null, visitor)`.
 4b. Conservative native roots are shadow-only (`gc_conservative.zig`).
-    Generator/async is not a fiber scan.
+    Generator/async is not a fiber scan. Shadow CLI `--gc-shadow-check`
+    (gated out of default `rc`) prints the report after eval/jobs/quiesce
+    and exits non-zero when `unexplained != 0`.
 5. `pollGC` and `destroyRuntimeCyclesWithValueRoots` both `_ = roots;` —
    empty shell, not wired in this tranche.
 6. Plugin tracer symbol that blocks reclaiming tracing:
