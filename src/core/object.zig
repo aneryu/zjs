@@ -693,6 +693,28 @@ pub const Object = extern struct {
         return self;
     }
 
+    /// Pre-allocation GC for a constructor that already holds `shape_ref`.
+    /// Unpublished reserved shapes stay off `gc_obj_list` and need no mark
+    /// (sweep cannot see them). A hash-hit Shape is already listed, so it is
+    /// named as a header root for the window. Default `rc` keeps the original
+    /// collect-only body.
+    fn collectBeforeObjectAllocationPublishingShape(rt: *JSRuntime, shape_ref: *shape.Shape, alloc_size: usize) void {
+        if (comptime gc.trace_stw_enabled) {
+            if (shape_ref.header.meta().alloc_info.heap_accounted) {
+                var header_roots = [_]runtime_mod.HeaderRootValue{.{ .header = &shape_ref.header }};
+                var frame = runtime_mod.ValueRootFrame{ .headers = &header_roots };
+                frame.activate(rt);
+                defer frame.deactivate(rt);
+                rt.collectBeforeObjectAllocation(alloc_size);
+            } else {
+                rt.collectBeforeObjectAllocation(alloc_size);
+                rt.shapes.publish(shape_ref);
+            }
+            return;
+        }
+        rt.collectBeforeObjectAllocation(alloc_size);
+    }
+
     /// Allocate a bare plain object straight from the runtime's hashed root
     /// Shape for `prototype` — the zjs analogue of qjs `JS_NewObject` =
     /// `JS_NewObjectProtoClass(ctx, proto, JS_CLASS_OBJECT)` (quickjs.c:5847,
@@ -726,8 +748,10 @@ pub const Object = extern struct {
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
 
         const alloc_size = @sizeOf(Object);
-        rt.collectBeforeObjectAllocation(alloc_size);
-        if (comptime gc.trace_stw_enabled) rt.shapes.publish(shape_ref);
+        if (comptime gc.trace_stw_enabled)
+            collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size)
+        else
+            rt.collectBeforeObjectAllocation(alloc_size);
         const self = try rt.memory.createNoTrigger(Object);
         var initialized = false;
         errdefer if (initialized)
@@ -1128,9 +1152,13 @@ pub const Object = extern struct {
         // across the same boundary so a cache-miss allocation can make the
         // threshold request visible before a memory-limit check rejects Object.
         // §4.6: a freshly interned Shape stays off `gc_obj_list` until after
-        // this collection, then is published with the object.
-        rt.collectBeforeObjectAllocation(alloc_size);
-        if (comptime gc.trace_stw_enabled) rt.shapes.publish(shape_ref);
+        // this collection, then is published with the object. A hash-hit Shape
+        // is already published; name it across the GC window so exact mark
+        // cannot collect the interned identity the constructor still holds.
+        if (comptime gc.trace_stw_enabled)
+            collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size)
+        else
+            rt.collectBeforeObjectAllocation(alloc_size);
         const self = if (inline_layout) |layout| blk: {
             // The object-level threshold/force-GC hook just ran above. Enter
             // MemoryAccount directly so this same allocation does not request
@@ -8206,6 +8234,25 @@ pub const Object = extern struct {
         explicit_global: ?*Object,
         info: property.AutoInit,
     ) !property.AutoInitSlot {
+        // internAutoInit can collect before the AutoInitSlot retains the
+        // realm. Name the holder and explicit global for that window (§4.6).
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            var holder: ?*Object = self;
+            var global: ?*Object = explicit_global;
+            var obj_roots = runtime_mod.rootObjects(.{ &holder, &global });
+            obj_roots.activate(rt);
+            defer obj_roots.deactivate(rt);
+            return createPropAutoInitSlotWork(self, rt, explicit_global, info);
+        }
+        return createPropAutoInitSlotWork(self, rt, explicit_global, info);
+    }
+
+    inline fn createPropAutoInitSlotWork(
+        self: *Object,
+        rt: *JSRuntime,
+        explicit_global: ?*Object,
+        info: property.AutoInit,
+    ) !property.AutoInitSlot {
         const realm = try self.autoInitRealmForDefinition(rt, explicit_global);
         const stored = try property.internAutoInit(rt, info);
         return property.AutoInitSlot.retainProp(&realm.header, stored);
@@ -8544,6 +8591,26 @@ pub const Object = extern struct {
     }
 
     pub fn defineEmptyArrayAutoInitProperty(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        flags: property.Flags,
+        realm_global: *Object,
+    ) !void {
+        // Shape clone and AutoInit intern can collect before the replacement
+        // is installed. Name holder and realm global across that window (§4.6).
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            var holder: ?*Object = self;
+            var global: ?*Object = realm_global;
+            var obj_roots = runtime_mod.rootObjects(.{ &holder, &global });
+            obj_roots.activate(rt);
+            defer obj_roots.deactivate(rt);
+            return defineEmptyArrayAutoInitPropertyMut(self, rt, atom_id, flags, realm_global);
+        }
+        return defineEmptyArrayAutoInitPropertyMut(self, rt, atom_id, flags, realm_global);
+    }
+
+    inline fn defineEmptyArrayAutoInitPropertyMut(
         self: *Object,
         rt: *JSRuntime,
         atom_id: atom.Atom,
@@ -10079,6 +10146,25 @@ pub const Object = extern struct {
     /// property slot is assembled in registers rather than spilled through a
     /// by-pointer call boundary (the loadSlotAsIntPair store-forward hazard).
     pub noinline fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, data_value: JSValue) !void {
+        // §4.6 rooted construction: the over-hang value is excluded from
+        // `propertyEntries()` until the shape transition commits, and the
+        // holder is only a Zig `*Object`. Trial deletion treated the live RC
+        // as an external root; tracing needs the mutation window named.
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            var holder: ?*Object = self;
+            var in_flight = data_value;
+            var obj_roots = runtime_mod.rootObjects(.{&holder});
+            var val_roots = runtime_mod.rootValues(.{&in_flight});
+            obj_roots.activate(rt);
+            defer obj_roots.deactivate(rt);
+            val_roots.activate(rt);
+            defer val_roots.deactivate(rt);
+            return definePlainDataPropertyKnownFastMut(self, rt, atom_id, in_flight);
+        }
+        return definePlainDataPropertyKnownFastMut(self, rt, atom_id, data_value);
+    }
+
+    inline fn definePlainDataPropertyKnownFastMut(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, data_value: JSValue) !void {
         if (self.findPropertyIndexTrusted(atom_id)) |index| {
             const desc = descriptor.Descriptor.data(data_value, true, true, true);
             try self.materializeAutoInitEntryForMutation(index);
@@ -10108,12 +10194,10 @@ pub const Object = extern struct {
         // only COMMITS with the shape transition: `slot_borrowed_until_commit`
         // keeps the failure unwind from destroying the caller's ref (the cold
         // shell re-executes the opcode still owning the value — destroying it
-        // here would double-free a refcounted value on OOM mid-append). A
-        // refcounted value needs no explicit rooting across the shape alloc/GC
-        // window: its live refcount (held via the caller's stack slot) is
-        // unaccounted by trial-deletion cycle removal and therefore an
-        // external root — the same argument the over-hang comment in
-        // appendPreparedPropertyEntryImpl makes for the pending entry itself.
+        // here would double-free a refcounted value on OOM mid-append). Tracing
+        // names the in-flight value through the mutation-window roots in
+        // `definePlainDataPropertyKnownFast`. Trial deletion still treats the
+        // live RC as an external root.
         try self.appendPreparedPropertyEntryImpl(
             true, // caller_holds_atom_ref: the bytecode operand root (see above)
             true, // slot_borrowed_until_commit: consume-on-success contract (see above)
@@ -10159,6 +10243,40 @@ pub const Object = extern struct {
     /// matches qjs add_property's probe-free named add (quickjs.c:9884-9890)
     /// and must not `bl atomIsArrayIndex`.
     inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, comptime slot_borrowed_until_commit: bool, comptime named_put_no_index: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            var holder: ?*Object = self;
+            var in_flight: JSValue = if (entry_flags.kind == .data) slot.data else JSValue.undefinedValue();
+            var obj_roots = runtime_mod.rootObjects(.{&holder});
+            var val_roots = runtime_mod.rootValues(.{&in_flight});
+            obj_roots.activate(rt);
+            defer obj_roots.deactivate(rt);
+            val_roots.activate(rt);
+            defer val_roots.deactivate(rt);
+            const live_slot: property.Slot = if (entry_flags.kind == .data) .{ .data = in_flight } else slot;
+            return appendPreparedPropertyEntryWork(
+                caller_holds_atom_ref,
+                slot_borrowed_until_commit,
+                named_put_no_index,
+                self,
+                rt,
+                atom_id,
+                entry_flags,
+                live_slot,
+            );
+        }
+        return appendPreparedPropertyEntryWork(
+            caller_holds_atom_ref,
+            slot_borrowed_until_commit,
+            named_put_no_index,
+            self,
+            rt,
+            atom_id,
+            entry_flags,
+            slot,
+        );
+    }
+
+    inline fn appendPreparedPropertyEntryWork(comptime caller_holds_atom_ref: bool, comptime slot_borrowed_until_commit: bool, comptime named_put_no_index: bool, self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         // Root the atom across the shape allocations below unless the caller
         // already holds a live ref. The dup/free must span the WHOLE function
         // (defer at function scope), so gate via comptime rather than a runtime
@@ -10206,11 +10324,9 @@ pub const Object = extern struct {
         // Over-hang: write the value at index `old_len` (== current prop_count)
         // BEFORE adoptShapeForNewProperty below commits prop_count = old_len + 1.
         // Until that commit the entry is EXCLUDED from propertyEntries(); a GC
-        // triggered by the shape allocation skips it. Skipping cannot collect a
-        // refcounted pending value prematurely: cycle removal is trial deletion
-        // (gc_decref/gc_scan), so an UNTRACED edge leaves the value's refcount
-        // unaccounted — an external root that keeps it (and anything it
-        // references) alive for the whole collection.
+        // triggered by the shape allocation skips it. Tracing keeps the value
+        // through the mutation-window ValueRootFrame (§4.6). Trial deletion
+        // keeps it because the untraced RC is an external root.
         if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
             auditWrite(.fam_slice, .object_prop_slot);
             self.prop_values[old_len] = .{ .slot = slot };

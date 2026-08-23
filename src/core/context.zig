@@ -497,6 +497,10 @@ pub const JSContext = struct {
         }
         errdefer self.deinitClassPrototypeSlots();
         try rt.gc.addInitializedWithSize(&self.header, @sizeOf(JSContext));
+        // If a later step fails, createWithPublication still raw-frees via
+        // destroyRuntime (initialized=false). Unlink first so gc.deinit
+        // cannot destroyFromHeader the same cell.
+        errdefer rt.gc.unlinkObject(&self.header);
         rt.linkConstructingContext(self);
         errdefer rt.unlinkConstructingContext(self);
         // Host create-ref is a root (gc-invariants.md). Membership on

@@ -425,6 +425,21 @@ const corpus = [_]Snippet{
         .collect_cycles = true,
     },
     .{
+        // FinalizationRegistry.register reserves a job-queue slot (§9.3)
+        // before the cell is visible. Injected failure must roll back the
+        // reservation; a later cycle pass must still enqueue without allocating.
+        .name = "finalization-registry-register",
+        .source =
+        \\const held = { n: 1 };
+        \\const registry = new FinalizationRegistry(() => {});
+        \\const target = { peer: held };
+        \\registry.register(target, held);
+        \\held.n === 1 ? "fr-ok" : "fr-bad"
+        ,
+        .expect = .{ .string = "fr-ok" },
+        .collect_cycles = true,
+    },
+    .{
         .name = "rope-concat-flatten",
         .source =
         \\let s = "";

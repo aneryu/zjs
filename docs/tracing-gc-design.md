@@ -1463,9 +1463,9 @@ is reserved/initialized off `gc_obj_list`, the pre-allocation collection
 runs, then the Shape is published with the object. Temporary pin flags are
 not used. FinalizationRegistry cells reserve a job-queue slot at
 registration; sweep commits with `enqueueReserved` and does not allocate
-(§9.3). Remaining exact-mark `test-core` hole: force-GC during
-`definePlainDataPropertyKnownFast` does not name the in-flight value as a
-root (trial deletion kept it via RC).
+(§9.3). In-flight define values use rooted construction: a mutation-window
+`ValueRootFrame` names the holder and JSValue until the unique-shape
+`prop_count` commit makes the over-hang a child edge.
 
 ### Stage 4: block heap
 

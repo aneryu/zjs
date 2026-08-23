@@ -2250,11 +2250,17 @@ const ObjectConstructionOrderProbe = struct {
         const self: *@This() = @ptrCast(@alignCast(raw.?));
         if (size != @sizeOf(core.Object)) return;
         self.object_boundary_calls += 1;
-        self.shape_owned_at_object_boundary =
-            self.rt.gc.liveCountKind(.shape) == self.live_shape_count_before + 1 and
-            self.rt.shapes.shape_hash_count == self.shape_hash_count_before + 1 and
-            self.rt.gcStats().heap_live_bytes == self.heap_live_bytes_before + emptyRootShapeAllocationBytes() and
+        // RC publishes the Shape onto gc_obj_list before the object body.
+        // STW §4.6 reserves it (hashed, proto retained) without publishing.
+        const shape_reserved = self.rt.shapes.shape_hash_count == self.shape_hash_count_before + 1 and
             self.prototype.header.meta().rc == self.prototype_refs_before + 1;
+        const shape_published = if (comptime core.gc.trace_stw_enabled)
+            self.rt.gc.liveCountKind(.shape) == self.live_shape_count_before and
+                self.rt.gcStats().heap_live_bytes == self.heap_live_bytes_before
+        else
+            self.rt.gc.liveCountKind(.shape) == self.live_shape_count_before + 1 and
+                self.rt.gcStats().heap_live_bytes == self.heap_live_bytes_before + emptyRootShapeAllocationBytes();
+        self.shape_owned_at_object_boundary = shape_reserved and shape_published;
     }
 };
 
@@ -5106,18 +5112,28 @@ test "definePlainDataPropertyKnownFast refcounted define survives forced GC at e
     const key = try rt.internAtom("refcounted-literal-force-gc");
     defer rt.atoms.free(key);
 
-    // A two-object cycle whose ONLY external root is the value ref handed to
-    // the define: trial-deletion must treat the in-flight (unpublished /
-    // over-hang) ref as an external root and keep the pair alive mid-append.
-    const cyclic = try core.Object.create(rt, core.class.ids.object, null);
-    const partner = try core.Object.create(rt, core.class.ids.object, null);
+    // A two-object cycle whose only JS-heap root is the value handed to
+    // define. Trial deletion treats the live RC as an external root; tracing
+    // names the in-flight value through the mutation-window frame (§4.6).
+    var cyclic = try core.Object.create(rt, core.class.ids.object, null);
+    var partner = try core.Object.create(rt, core.class.ids.object, null);
     const partner_key = try rt.internAtom("refcounted-literal-partner");
     try cyclic.defineOwnProperty(rt, partner_key, core.Descriptor.data(partner.value(), true, true, true));
     try partner.defineOwnProperty(rt, partner_key, core.Descriptor.data(cyclic.value(), true, true, true));
     partner.value().free(rt);
+    dropGcPtr(&partner);
     rt.atoms.free(partner_key);
 
     const replacement = try core.Object.create(rt, core.class.ids.object, null);
+
+    // Exact mark does not treat Zig locals as roots. Name holder and
+    // replacement across the force-GC window; the in-flight define value is
+    // rooted by the mutation-window frame inside definePlainDataPropertyKnownFast.
+    var holder_slot: ?*core.Object = holder;
+    var replacement_slot: ?*core.Object = replacement;
+    var obj_roots = core.runtime.rootObjects(.{ &holder_slot, &replacement_slot });
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
 
     var probe = DefineFieldForceGcProbe{ .rt = rt };
     const saved_trigger = rt.memory.trigger_gc_fn;
@@ -5133,6 +5149,7 @@ test "definePlainDataPropertyKnownFast refcounted define survives forced GC at e
     try holder.definePlainDataPropertyKnownFast(rt, key, cyclic.value());
     try std.testing.expectEqual(&cyclic.header, holder.prop_values[0].slot.data.refHeader().?);
     try std.testing.expectEqual(baseline_live + 4, rt.gc.liveCountKind(.object));
+    dropGcPtr(&cyclic);
 
     // Duplicate-key replace leg under forced GC: consumes `replacement`,
     // destroys the displaced cycle root; the now-unrooted pair must be
@@ -7827,9 +7844,15 @@ test "weak persistent value clears object cycle target during gc" {
 
     try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
     try std.testing.expect(weak.get().isUndefined());
-    try std.testing.expectEqual(@as(usize, 0), clear_count);
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 1), clear_count);
+    if (comptime core.gc.trace_stw_enabled) {
+        // STW processWeak notifies in the same collection that unmarks the
+        // target. Trial deletion defers the callback to the next round.
+        try std.testing.expectEqual(@as(usize, 1), clear_count);
+    } else {
+        try std.testing.expectEqual(@as(usize, 0), clear_count);
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expectEqual(@as(usize, 1), clear_count);
+    }
 }
 
 test "weak persistent value clears unrooted symbol target during gc" {
@@ -8280,7 +8303,11 @@ test "class payload function bytecode constant object cycle is released by runti
     captured.value().free(rt);
 
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
-    try std.testing.expect(payload_mark_calls > 0);
+    if (comptime !core.gc.trace_stw_enabled) {
+        // Trial deletion visits doomed cycle candidates; STW only marks
+        // reachable objects, so an unrooted cycle is swept without payload_mark.
+        try std.testing.expect(payload_mark_calls > 0);
+    }
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(1));
@@ -9290,17 +9317,24 @@ test "dead weak collection key entry is swept when target is destroyed" {
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
     defer weakmap.value().free(rt);
-    const key = try core.Object.create(rt, core.class.ids.object, null);
+    var key = try core.Object.create(rt, core.class.ids.object, null);
     const value = try core.Object.create(rt, core.class.ids.object, null);
+    var weakmap_slot: ?*core.Object = weakmap;
+    var value_slot: ?*core.Object = value;
+    var live_roots = core.runtime.rootObjects(.{ &weakmap_slot, &value_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     try appendWeakCollectionEntry(rt, weakmap, key, value.value());
 
     key.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    dropGcPtr(&key);
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
     try std.testing.expectEqual(@as(i32, 1), value.header.meta().rc);
 
     value.value().free(rt);
+    value_slot = null;
 
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
@@ -9312,15 +9346,21 @@ test "dead weak collection key entry is swept without freeing live value" {
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
     defer weakmap.value().free(rt);
-    const key = try core.Object.create(rt, core.class.ids.object, null);
+    var key = try core.Object.create(rt, core.class.ids.object, null);
     const value = try core.Object.create(rt, core.class.ids.object, null);
     defer value.value().free(rt);
+    var weakmap_slot: ?*core.Object = weakmap;
+    var value_slot: ?*core.Object = value;
+    var live_roots = core.runtime.rootObjects(.{ &weakmap_slot, &value_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     try appendWeakCollectionEntry(rt, weakmap, key, value.value());
 
     key.value().free(rt);
+    dropGcPtr(&key);
 
-    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
     try std.testing.expectEqual(@as(i32, 1), value.header.meta().rc);
 }
@@ -9331,7 +9371,12 @@ test "live weak collection key preserves stored value" {
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
     const key = try core.Object.create(rt, core.class.ids.object, null);
-    const value = try core.Object.create(rt, core.class.ids.object, null);
+    var value = try core.Object.create(rt, core.class.ids.object, null);
+    var weakmap_slot: ?*core.Object = weakmap;
+    var key_slot: ?*core.Object = key;
+    var live_roots = core.runtime.rootObjects(.{ &weakmap_slot, &key_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     try appendWeakCollectionEntry(rt, weakmap, key, value.value());
     value.value().free(rt);
@@ -9339,9 +9384,12 @@ test "live weak collection key preserves stored value" {
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 1), weakmap.weakCollectionEntries().len);
     try std.testing.expectEqual(&value.header, weakmap.weakCollectionEntries()[0].value.refHeader().?);
+    dropGcPtr(&value);
 
     weakmap.value().free(rt);
+    weakmap_slot = null;
     key.value().free(rt);
+    key_slot = null;
 }
 
 test "weak ref target identity does not retain object target" {
@@ -9350,7 +9398,11 @@ test "weak ref target identity does not retain object target" {
 
     const weak_ref = try core.Object.create(rt, core.class.ids.weak_ref, null);
     defer weak_ref.value().free(rt);
-    const target = try core.Object.create(rt, core.class.ids.object, null);
+    var target = try core.Object.create(rt, core.class.ids.object, null);
+    var weak_ref_slot: ?*core.Object = weak_ref;
+    var live_roots = core.runtime.rootObjects(.{&weak_ref_slot});
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     try weak_ref.setWeakRefTarget(rt, target.value());
 
@@ -9359,8 +9411,13 @@ test "weak ref target identity does not retain object target" {
         defer live.free(rt);
         try std.testing.expectEqual(&target.header, live.refHeader().?);
     }
+    // Job-scoped [[KeptAlive]] from the deref above must not keep the target
+    // past the next collection (tracing-gc-design.md §9.2).
+    rt.clearWeakRefKeptAlive();
 
     target.value().free(rt);
+    dropGcPtr(&target);
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
 }
 
@@ -9492,6 +9549,36 @@ test "finalization registry append failure rolls back borrowed holder registrati
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
+}
+
+test "finalization registry job-queue reserve OOM rolls back the cell" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+    defer registry.value().free(rt);
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    defer target.value().free(rt);
+
+    // Cell storage is already reserved so the injected failure lands on
+    // job_queue.reserveEntries (the §9.3 slot promised at registration).
+    try registry.ensureFinalizationRegistryCellCapacity(rt, 1);
+    try rt.job_queue.ensureCapacity(4);
+    try rt.job_queue.reserveEntries(4);
+    defer rt.job_queue.releaseReservedEntries(rt.job_queue.reserved_entries);
+
+    const old_holder_count = rt.borrowed_reference_holders.len;
+    const reserved_before = rt.job_queue.reserved_entries;
+    rt.setMemoryLimit(rt.memory.allocated_bytes + borrowedHolderInitialAllocationBytes());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        appendFinalizationRegistryCell(rt, registry, target.value(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue()),
+    );
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(reserved_before, rt.job_queue.reserved_entries);
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
 }
 
@@ -9675,7 +9762,11 @@ test "weak map deep value chain releases without recursive destruction" {
 
     const map = try core.Object.create(rt, core.class.ids.weakmap, null);
     defer map.value().free(rt);
-    const head = try core.Object.create(rt, core.class.ids.object, null);
+    var map_slot: ?*core.Object = map;
+    var live_roots = core.runtime.rootObjects(.{&map_slot});
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
+    var head = try core.Object.create(rt, core.class.ids.object, null);
 
     var key = head;
     for (0..5_000) |_| {
@@ -9686,6 +9777,8 @@ test "weak map deep value chain releases without recursive destruction" {
     }
 
     head.value().free(rt);
+    dropGcPtr(&head);
+    dropGcPtr(&key);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), map.weakCollectionEntries().len);
     try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
@@ -9701,7 +9794,16 @@ test "weak map cycle sweep clears index after removing dead keys" {
     const self_key = try rt.internAtom("self");
     defer rt.atoms.free(self_key);
 
-    var keys: [8]*core.Object = undefined;
+    var keys: [8]?*core.Object = @splat(null);
+    var key_roots: [8]core.runtime.ObjectRootValue = undefined;
+    for (&key_roots, &keys) |*root, *slot| root.* = .{ .object = slot };
+    var map_slot: ?*core.Object = map;
+    var map_roots = core.runtime.rootObjects(.{&map_slot});
+    map_roots.activate(rt);
+    defer map_roots.deactivate(rt);
+    var key_frame = core.runtime.ValueRootFrame{ .objects = &key_roots };
+    key_frame.activate(rt);
+    defer key_frame.deactivate(rt);
     var key_count: usize = 0;
     var first_key_released = false;
     defer {
@@ -9709,7 +9811,8 @@ test "weak map cycle sweep clears index after removing dead keys" {
         while (index != 0) {
             index -= 1;
             if (index == 0 and first_key_released) continue;
-            keys[index].value().free(rt);
+            if (keys[index]) |key| key.value().free(rt);
+            keys[index] = null;
         }
     }
 
@@ -9727,7 +9830,8 @@ test "weak map cycle sweep clears index after removing dead keys" {
     try std.testing.expectEqual(@as(usize, 8), rt.gcStats().weak_ref_count);
     try std.testing.expect(map.collectionBucketHeads().len != 0);
 
-    keys[0].value().free(rt);
+    keys[0].?.value().free(rt);
+    keys[0] = null;
     first_key_released = true;
     try std.testing.expectEqual(@as(usize, single_object_self_cycle_reclaimed_count), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
@@ -9737,7 +9841,7 @@ test "weak map cycle sweep clears index after removing dead keys" {
 
     var index: usize = 1;
     while (index < key_count) : (index += 1) {
-        const value = try engine.exec.collection_ops.methodCall(rt, map.value(), 2, &.{keys[index].value()});
+        const value = try engine.exec.collection_ops.methodCall(rt, map.value(), 2, &.{keys[index].?.value()});
         defer value.free(rt);
         try std.testing.expectEqual(@as(?i32, @intCast(index)), value.asInt32());
     }
@@ -9749,17 +9853,24 @@ test "finalization registry dead target releases held value when target is destr
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
     defer registry.value().free(rt);
-    const target = try core.Object.create(rt, core.class.ids.object, null);
+    var target = try core.Object.create(rt, core.class.ids.object, null);
     const held = try core.Object.create(rt, core.class.ids.object, null);
+    var registry_slot: ?*core.Object = registry;
+    var held_slot: ?*core.Object = held;
+    var live_roots = core.runtime.rootObjects(.{ &registry_slot, &held_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     try appendFinalizationRegistryCell(rt, registry, target.value(), held.value(), core.JSValue.undefinedValue());
 
     target.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    dropGcPtr(&target);
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
     try std.testing.expectEqual(@as(i32, 1), held.header.meta().rc);
 
     held.value().free(rt);
+    held_slot = null;
 
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
@@ -9771,7 +9882,12 @@ test "finalization registry live target preserves held value" {
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
     const target = try core.Object.create(rt, core.class.ids.object, null);
-    const held = try core.Object.create(rt, core.class.ids.object, null);
+    var held = try core.Object.create(rt, core.class.ids.object, null);
+    var registry_slot: ?*core.Object = registry;
+    var target_slot: ?*core.Object = target;
+    var live_roots = core.runtime.rootObjects(.{ &registry_slot, &target_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     try appendFinalizationRegistryCell(rt, registry, target.value(), held.value(), core.JSValue.undefinedValue());
     held.value().free(rt);
@@ -9780,9 +9896,12 @@ test "finalization registry live target preserves held value" {
     try std.testing.expectEqual(@as(usize, 1), registry.finalizationRegistryCells().len);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().weak_ref_count);
     try std.testing.expectEqual(&held.header, registry.finalizationRegistryCells()[0].held_value.refHeader().?);
+    dropGcPtr(&held);
 
     registry.value().free(rt);
+    registry_slot = null;
     target.value().free(rt);
+    target_slot = null;
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().weak_ref_count);
 }
 
@@ -9800,8 +9919,18 @@ test "finalization registry unregister cannot remove queued cleanup cell" {
     defer registry_value.free(rt);
     const token = try core.Object.create(rt, core.class.ids.object, null);
     defer token.value().free(rt);
+    var registry_slot: ?*core.Object = registry;
+    var cleanup_slot: ?*core.Object = cleanup;
+    var token_slot: ?*core.Object = token;
+    var live_roots = core.runtime.rootObjects(.{ &registry_slot, &cleanup_slot, &token_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
-    const target = try core.Object.create(rt, core.class.ids.object, null);
+    var target = try core.Object.create(rt, core.class.ids.object, null);
+    var target_slot: ?*core.Object = target;
+    var target_roots = core.runtime.rootObjects(.{&target_slot});
+    target_roots.activate(rt);
+    defer target_roots.deactivate(rt);
     var target_value = target.value();
     const self_key = try rt.internAtom("gc-finalization-unregister-pending-self");
     defer rt.atoms.free(self_key);
@@ -9816,6 +9945,8 @@ test "finalization registry unregister cannot remove queued cleanup cell" {
     _ = try rt.tryRunObjectCycleRemoval();
     target_value.free(rt);
     target_value = core.JSValue.undefinedValue();
+    target_slot = null;
+    dropGcPtr(&target);
 
     const collected = try rt.tryRunObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, single_object_self_cycle_reclaimed_count), collected.freed_objects);
@@ -9905,8 +10036,8 @@ test "object allocation threshold triggers runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const left = try core.Object.create(rt, core.class.ids.object, null);
-    const right = try core.Object.create(rt, core.class.ids.object, null);
+    var left = try core.Object.create(rt, core.class.ids.object, null);
+    var right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("left");
     defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("right");
@@ -9916,10 +10047,16 @@ test "object allocation threshold triggers runtime cycle removal" {
     try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
     left.value().free(rt);
     right.value().free(rt);
+    dropGcPtr(&left);
+    dropGcPtr(&right);
 
     rt.setGCThreshold(0);
     const survivor = try core.Object.create(rt, core.class.ids.object, null);
     defer survivor.value().free(rt);
+    var survivor_slot: ?*core.Object = survivor;
+    var survivor_roots = core.runtime.rootObjects(.{&survivor_slot});
+    survivor_roots.activate(rt);
+    defer survivor_roots.deactivate(rt);
 
     try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
@@ -9937,12 +10074,17 @@ test "object allocation collects reclaimable cycles before memory-limit rejectio
     const shape_guard = try core.Object.create(rt, core.class.ids.object, null);
     var shape_guard_owned = true;
     defer if (shape_guard_owned) shape_guard.value().free(rt);
+    var shape_guard_slot: ?*core.Object = shape_guard;
+    var shape_guard_roots = core.runtime.rootObjects(.{&shape_guard_slot});
+    shape_guard_roots.activate(rt);
+    defer shape_guard_roots.deactivate(rt);
 
-    const object = try core.Object.create(rt, core.class.ids.object, null);
+    var object = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("gc-before-limit-self");
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(object.value(), true, true, true));
     object.value().free(rt);
+    dropGcPtr(&object);
 
     // Exactly the current logical heap leaves no room for a replacement object
     // unless the pending threshold collection runs before MemoryAccount checks
@@ -9951,9 +10093,11 @@ test "object allocation collects reclaimable cycles before memory-limit rejectio
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     defer rt.setMemoryLimit(null);
 
-    const replacement = try core.Object.create(rt, core.class.ids.object, null);
+    var replacement = try core.Object.create(rt, core.class.ids.object, null);
     replacement.value().free(rt);
+    dropGcPtr(&replacement);
     shape_guard.value().free(rt);
+    shape_guard_slot = null;
     shape_guard_owned = false;
     try expectNoLiveGc(rt);
 }
@@ -10037,7 +10181,8 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
     }
 
     // Permit exactly the cache-miss root Shape. The following Object allocation
-    // must fail after that Shape has been retained, registered and accounted.
+    // must fail after that Shape has been reserved (STW §4.6: hashed, not yet
+    // on gc_obj_list) or published (RC).
     rt.setMemoryLimit(allocated_bytes_before + root_shape_bytes);
     try std.testing.expectError(error.OutOfMemory, core.Object.create(rt, class_id, prototype));
     rt.setMemoryLimit(null);
@@ -10070,6 +10215,35 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
     try std.testing.expectEqual(retry_allocated_bytes_before, rt.memory.allocated_bytes);
     try std.testing.expectEqual(prototype_refs_before, prototype.header.meta().rc);
     rt.classes.unregisterDynamic(class_id);
+}
+
+test "shape reserve OOM does not publish or retain proto" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer prototype.value().free(rt);
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{ .class_name = "ShapeReserveOom" });
+    defer rt.classes.unregisterDynamic(class_id);
+
+    const live_shape_count_before = rt.gc.liveCountKind(.shape);
+    const shape_hash_count_before = rt.shapes.shape_hash_count;
+    const heap_live_bytes_before = rt.gcStats().heap_live_bytes;
+    const allocated_bytes_before = rt.memory.allocated_bytes;
+    const prototype_refs_before = prototype.header.meta().rc;
+
+    // Unique proto: cache miss, so createShapeReserved / createShape is the
+    // first allocation. Fail that reserve before publish.
+    rt.setMemoryLimit(allocated_bytes_before);
+    try std.testing.expectError(error.OutOfMemory, core.Object.create(rt, class_id, prototype));
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(live_shape_count_before, rt.gc.liveCountKind(.shape));
+    try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
+    try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
+    try std.testing.expectEqual(allocated_bytes_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(prototype_refs_before, prototype.header.meta().rc);
 }
 
 test "gc threshold API resets after scheduled collection and survives force-GC instrumentation" {
@@ -11590,6 +11764,13 @@ test "finalization registry pending jobs preserve callback and held symbols" {
     registry.finalizationRegistryCleanupCallbackSlot().* = cleanup_val.dup();
     var registry_val = registry.value();
     defer registry_val.free(rt);
+    var registry_slot: ?*core.Object = registry;
+    var obj_roots = core.runtime.rootObjects(.{&registry_slot});
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
+    var val_roots = core.runtime.rootValues(.{&target_val});
+    val_roots.activate(rt);
+    defer val_roots.deactivate(rt);
 
     try registry.appendFinalizationRegistryCell(rt, target_val, held_val, core.JSValue.undefinedValue());
     cleanup_val.free(rt);

@@ -450,6 +450,13 @@ pub const ObjectRootValue = struct {
     object: *?*Object,
 };
 
+/// A GC header (Shape, Module, VarRef, FunctionBytecode, realm) named as a
+/// root for a mutation or construction window. Tracing does not treat a Zig
+/// `*Shape` local as a root unless it is named here.
+pub const HeaderRootValue = struct {
+    header: *gc.Header,
+};
+
 /// Precise ValueRootFrame linking. Default `rc` production keeps this false
 /// so activate/deactivate erase at comptime (identity). Tests keep all-on
 /// because there is no conservative scanner yet. Shadow/STW CLI
@@ -482,6 +489,8 @@ pub const ValueRootFrame = struct {
     slices: []const ValueRootSlice = &.{},
     values: []const ValueRootValue = &.{},
     objects: []const ObjectRootValue = &.{},
+    headers: if (value_root_frames_enabled) []const HeaderRootValue else void =
+        if (value_root_frames_enabled) &.{} else {},
 
     /// True when this frame roots a native JSValue/cell array or window.
     /// Conservative scanning of the C stack sees the backing pointer, not the
@@ -2191,6 +2200,11 @@ pub const JSRuntime = struct {
         while (frame) |current| {
             for (current.objects) |root| {
                 try visitor.optionalObject(root.object);
+            }
+            if (comptime value_root_frames_enabled) {
+                for (current.headers) |root| {
+                    try visitor.constHeader(root.header);
+                }
             }
             for (current.values) |root| {
                 try visitor.value(root.value);
