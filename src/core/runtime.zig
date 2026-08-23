@@ -673,6 +673,17 @@ pub const ActiveInvocationTrace = struct {
     traceRoots: *const fn (invocation: *anyopaque, visitor: *RootVisitor) RootTraceError!void,
 };
 
+/// Exec-owned snapshot of the process-global Atomics.waitAsync waiter
+/// registry (design §7.1). Core calls this from `traceActiveRoots` when
+/// `value_root_frames_enabled`. Default `rc` stores `void`. Exec retains
+/// Promise roots under the waiter mutex, unlocks, then visits.
+pub const AtomicsWaitAsyncTrace = *const fn (rt: *anyopaque, visitor: *RootVisitor) RootTraceError!void;
+
+pub var trace_atomics_wait_async: if (value_root_frames_enabled)
+    ?AtomicsWaitAsyncTrace
+else
+    void = if (value_root_frames_enabled) null else {};
+
 pub const RootProvider = struct {
     context: *anyopaque,
     trace: *const fn (context: *anyopaque, visitor: *RootVisitor) RootTraceError!void,
@@ -2114,6 +2125,7 @@ pub const JSRuntime = struct {
                 const header: *const ActiveInvocationTrace = @ptrCast(@alignCast(invocation));
                 try header.traceRoots(invocation, visitor);
             }
+            if (trace_atomics_wait_async) |trace| try trace(@ptrCast(self), visitor);
         } else {
             try self.traceRoots(null, visitor);
         }

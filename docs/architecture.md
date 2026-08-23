@@ -56,6 +56,7 @@ runtime/context storage.
 | `value.zig` | `JSValue` representation and refcount entry |
 | `object.zig` / `shape.zig` / `property.zig` | objects, shapes, properties |
 | `gc.zig` | registry, policy, external-memory accounting |
+| `gc_slot.zig` | Stage 2 Slot-under-RC mutation protocol (no atomics) |
 | `host_function.zig` | native-function ABI (`NativeCProto`, records) |
 
 Lifetime model: non-atomic reference counting for immediate free; cycle
@@ -65,8 +66,9 @@ a `VmStackArena` and released with the frame; they are not individually linked
 as per-frame roots. When tracing roots are live (`value_root_frames_enabled`),
 the exec-owned `ActiveInvocationTrace` prefix exposes those semantic live
 windows without teaching core the VM layout; default `rc` erases the call at
-compile time. Host values that outlive a call must use public handles,
-not a raw `JSValue`.
+compile time. The same gated path snapshots `Atomics.waitAsync` waiter
+Promises through `trace_atomics_wait_async`. Host values that outlive a call
+must use public handles, not a raw `JSValue`.
 
 `JSValue` has a single representation: a 16-byte struct of payload plus a
 signed 8-byte tag. The alignment with QuickJS is semantic and ownership-level,

@@ -11090,6 +11090,73 @@ test "waitAsync completions enter one typed cross-realm FIFO after facade releas
     try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global_a)) == .success);
 }
 
+test "shadow census sees waitAsync waiter Promise as an exact root" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+        const rt = js.runtime;
+
+        _ = try js.eval(
+            \\globalThis.__waitSab = new SharedArrayBuffer(4);
+            \\globalThis.__waitView = new Int32Array(__waitSab);
+            \\globalThis.__waitResult = Atomics.waitAsync(__waitView, 0, 0);
+        );
+        const scheduled = try js.evalWithOptions("__waitResult.async === true", .{ .filename = "<repl>" });
+        defer scheduled.free(rt);
+        try std.testing.expectEqual(true, scheduled.asBool().?);
+
+        const result = try js.evalWithOptions("__waitResult", .{ .filename = "<repl>" });
+        const value_atom = try rt.internAtom("value");
+        defer rt.atoms.free(value_atom);
+        const result_object = core.value_semantics.objectFromValue(result) orelse return error.TypeError;
+        const promise_value = try result_object.getProperty(value_atom);
+        const promise_object = core.value_semantics.objectFromValue(promise_value) orelse return error.TypeError;
+        const promise_header = &promise_object.header;
+        promise_value.free(rt);
+        result.free(rt);
+        const cleared = try js.eval("__waitResult = undefined");
+        defer cleared.free(rt);
+
+        core.gc_shadow.quiesce(rt);
+        const exact = try core.gc_shadow.isExactReachable(rt, promise_header);
+        const report = try core.gc_shadow.run(rt);
+        var buf: [2048]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try report.format(&w);
+        std.debug.print(
+            \\
+            \\waitAsync hanging waiter (no notify):
+            \\  promise_exact={s}
+            \\{s}
+            \\
+        , .{ if (exact) "yes" else "no", w.buffered() });
+
+        try std.testing.expect(exact);
+        try std.testing.expectEqual(@as(usize, 0), report.unexplained);
+
+        engine.exec.atomics_ops.cleanupAtomicsWaitersForContext(js.context);
+    }
+}
+
+test "HeapValueSlot bind retain/release counts" {
+    if (comptime !core.gc_slot.stats_enabled) return error.SkipZigTest;
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    core.gc_slot.stats.reset();
+    const bound = try js.evalWithOptions("(function (a, b) { return a + b; }).bind({}, 1, 2)", .{ .filename = "<repl>" });
+    defer bound.free(js.runtime);
+    const slot_stats = core.gc_slot.stats;
+    std.debug.print(
+        \\
+        \\bind HeapValueSlot/GcBuffer: sets={d} retains={d} publishes={d} releases={d}
+        \\
+    , .{ slot_stats.set_calls, slot_stats.retains, slot_stats.publishes, slot_stats.releases });
+    try std.testing.expect(slot_stats.set_calls >= 2);
+    try std.testing.expect(slot_stats.retains >= 2);
+    try std.testing.expect(slot_stats.publishes >= 2);
+}
+
 test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

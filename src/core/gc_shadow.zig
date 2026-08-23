@@ -217,6 +217,17 @@ pub fn run(rt: *JSRuntime) ShadowError!Report {
     return try tracer.finish();
 }
 
+/// Precise-root membership after `seedRoots`+`drain`, before conservative
+/// capture. Used to prove a waiter Promise is an exact root, not a stack hit.
+pub fn isExactReachable(rt: *JSRuntime, header: *gc.Header) ShadowError!bool {
+    var tracer = try Tracer.init(rt);
+    defer tracer.deinit();
+    try tracer.seedRoots();
+    try tracer.drain();
+    try tracer.snapshotExact();
+    return tracer.exact.get(@intFromPtr(header)) != null;
+}
+
 const sample_cap: usize = 64;
 
 const Tracer = struct {

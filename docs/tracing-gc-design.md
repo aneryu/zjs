@@ -263,8 +263,8 @@ Gaps that still block a tracing cutover:
    reference counts. Shadow CLI links only container/window frames; scalar Zig
    locals wait for conservative capture.
 2. The global `Atomics.waitAsync` waiter registry owns Promise and Realm roots
-   under a cross-runtime mutex but has no snapshot Adapter. A tracer may not
-   call an allocating/reentrant visitor while holding that mutex.
+   under a cross-runtime mutex. Snapshot Adapter: retain under the mutex,
+   unlock, visit, release (`trace_atomics_wait_async`, 2026-08-23).
 3. A currently executing job has already left `job_queue`; idle-only shadow
    verification avoids that hole, but arbitrary safepoint collection still
    needs the active execution/native-root contract and conservative capture.
@@ -276,10 +276,11 @@ Gaps that still block a tracing cutover:
    set, so writing that consumer means building mark-from-roots — Stage 3's
    algorithm, not a parameter fix.
 
-Until conservative capture, the Atomics adapter, and in-flight job roots
-close, the reachable set a tracer computes is a strict subset of the truth
-outside a deliberately idle diagnostic point. Root completeness still cannot
-be validated by the current collector; the shadow tracer is the instrument.
+Until conservative capture and in-flight job roots close, the reachable set
+a tracer computes is a strict subset of the truth outside a deliberately
+idle diagnostic point. Root completeness still cannot be validated by the
+current collector; the shadow tracer is the instrument. The Atomics.waitAsync
+Adapter is no longer on that list.
 
 The root work is therefore an architectural requirement, not test scaffolding.
 The exec layer owns concrete frame layout; core must call it through a callback
@@ -838,8 +839,8 @@ linking is not assumed free.
 `Atomics.waitAsync` is a separate native-root Adapter, not part of the active
 Machine. Snapshotting it must not invoke a visitor while holding the global
 waiter mutex: reserve and retain Promise/Realm roots, unlock, then visit and
-release the snapshot. Until that Adapter lands, shadow verification is
-restricted to a checked quiescent state with no linked async waiters.
+release the snapshot. Landed 2026-08-23 as `trace_atomics_wait_async`
+(installed on first `atomicsLinkAsyncWaiter`, comptime-erased in default `rc`).
 
 The production root transition has two required checks:
 
@@ -1369,13 +1370,16 @@ bucket zero, 25 s. The gate sentence was not restated or narrowed to reach
 this.
 
 Two things this verdict does *not* claim, both recorded rather than
-smoothed over. The gate is about unexplained objects, and the following are
-Stage 1 deliverable gaps carried into Stage 2: the `Atomics.waitAsync`
-waiter registry has no root Adapter, and strings and BigInts stay outside
-`gc_obj_list`. Separately, shadow calls `opaquePayloadMark` for classes
-that ship a legacy tracer — that is a classification, not a pass: those
-classes remain disabled for reclaiming tracing (§6.1), and the plugin
-corpus is what demonstrated it rather than a design assertion.
+smoothed over. The gate is about unexplained objects. The `Atomics.waitAsync`
+waiter Adapter landed 2026-08-23 (snapshot retain/unlock/visit; hanging
+waiter Promises are exact roots). Strings and BigInts stay outside
+`gc_obj_list` by representation; they are not folded into the unexplained
+census (see inventory §7) — Stage 2 write-audit of that domain goes through
+rope `left`/`right` JSValue slots, not a live-string inventory. Separately,
+shadow calls `opaquePayloadMark` for classes that ship a legacy tracer —
+that is a classification, not a pass: those classes remain disabled for
+reclaiming tracing (§6.1), and the plugin corpus is what demonstrated it
+rather than a design assertion.
 
 ### Stage 2: Slot-under-RC
 
@@ -1392,6 +1396,14 @@ Gate: current cycle edge parity, family deletion probes, OOM, leak census,
 test262, shadow reachability/write audit, and required hot-path A/B. Dynamic
 retain/release counts and generated code identify the cost of Slot abstraction
 before atomics are enabled.
+
+Implementation 2026-08-23: `src/core/gc_slot.zig` defines `HeapValueSlot`,
+`GcPtrSlot`, `GcBuffer`, and `WeakIdentitySlot` without atomics. The pilot
+is `BoundFunctionPayload` (`Function.prototype.bind`): cold, closed
+payload, has both optional JSValue fields and a `[]JSValue` buffer so it
+stands in for later bulk migrations, and a failure is confined to `bind`.
+Writes use retain-new → publish → release-old inside the Slot. Default `rc`
+keeps the 16-byte `JSValue` layout.
 
 ### Stage 3: stop-the-world tracing prototype
 

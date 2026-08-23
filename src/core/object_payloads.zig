@@ -732,6 +732,9 @@ pub const RegExpPayload = extern struct {
     }
 };
 
+/// Cold Function.prototype.bind payload. Heap JSValue fields are written
+/// through `gc_slot.HeapValueSlot` / `GcBuffer` (Stage 2 Slot-under-RC
+/// pilot). Layout stays `?JSValue` / `[]JSValue`.
 pub const BoundFunctionPayload = struct {
     target: ?JSValue = null,
     this_value: ?JSValue = null,

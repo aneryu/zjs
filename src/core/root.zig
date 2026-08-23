@@ -9,6 +9,8 @@
 
 pub const subsystem_name = "core_runtime";
 
+const builtin = @import("builtin");
+
 pub const value = @import("value.zig");
 pub const value_semantics = @import("value_semantics.zig");
 pub const value_format = @import("value_format.zig");
@@ -16,6 +18,14 @@ pub const value_string = @import("value_string.zig");
 pub const number = @import("number.zig");
 pub const list = @import("list.zig");
 pub const gc = @import("gc.zig");
+/// Slot-under-RC protocol. Default `rc` erases the module so production
+/// `.text` does not grow a unused Slot Implementation.
+pub const gc_slot = if (builtin.is_test or gc.shadow_tracer_enabled)
+    @import("gc_slot.zig")
+else
+    struct {
+        pub const stats_enabled = false;
+    };
 pub const atom = @import("atom.zig");
 pub const string = @import("string.zig");
 pub const bigint = @import("bigint.zig");

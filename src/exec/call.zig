@@ -1736,8 +1736,13 @@ fn createBoundFunction(
 
     const object = try core.Object.create(rt, core.class.ids.bound_function, target_object.getPrototype());
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    try object.setOptionalValueSlot(rt, object.boundTargetSlot(), rooted_target.dup());
-    try object.setOptionalValueSlot(rt, object.boundThisSlot(), rooted_bound_this.dup());
+    if (comptime core.gc_slot.stats_enabled) {
+        core.gc_slot.HeapValueSlot.setOptionalOwned(rt, object.boundTargetSlot(), rooted_target.dup());
+        core.gc_slot.HeapValueSlot.setOptionalOwned(rt, object.boundThisSlot(), rooted_bound_this.dup());
+    } else {
+        try object.setOptionalValueSlot(rt, object.boundTargetSlot(), rooted_target.dup());
+        try object.setOptionalValueSlot(rt, object.boundThisSlot(), rooted_bound_this.dup());
+    }
     // Bound wrappers keep caller semantics. The recursive call selects a realm
     // only after it reaches the final bytecode/C-function target.
     if (rooted_bound_args.len != 0) {
@@ -1762,7 +1767,11 @@ fn createBoundFunction(
             rooted_owned_bound_args = owned_bound_args[0..initialized];
         }
         bound_args_owned = false;
-        object.boundArgsSlot().* = owned_bound_args;
+        if (comptime core.gc_slot.stats_enabled) {
+            core.gc_slot.GcBuffer.setSlice(rt, object.boundArgsSlot(), owned_bound_args);
+        } else {
+            object.boundArgsSlot().* = owned_bound_args;
+        }
         rooted_owned_bound_args = &.{};
     }
     try defineDataPropertyWithFlags(rt, object, core.atom.ids.name, name_value, false, false, true);

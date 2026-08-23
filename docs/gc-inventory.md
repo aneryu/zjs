@@ -297,9 +297,12 @@ synthetic providers. No plugin or job queue registers a `RootProvider`.
 8. every `root_providers` entry.
 
 When `value_root_frames_enabled` (tests and `-Dzjs_gc=shadow`),
-`traceActiveRoots` calls `traceRoots(self.active_value_roots, visitor)` and
+`traceActiveRoots` calls `traceRoots(self.active_value_roots, visitor)`,
 then the exec Adapter at `active_invocation` (first word is
-`ActiveInvocationTrace`). Default `rc` still compiles to
+`ActiveInvocationTrace`), then `trace_atomics_wait_async` if exec installed
+it (first `atomicsLinkAsyncWaiter`). That snapshot retains waiter Promises
+under `atomics_waiter_mutex`, unlocks, then visits — never a visitor while
+holding the mutex (design §7.1). Default `rc` still compiles to
 `traceRoots(null, visitor)` so production `.text` is unchanged.
 
 Covered via `JSContext.traceRoots` (provider): unhandled rejections, eval
@@ -635,7 +638,25 @@ already feeds `pollGC` / `shouldRunMajorAt` (`src/core/memory.zig`).
     mean_ns=1.52ms max_ns=152ms. Strategy A (full run) chosen because a
     single in-process census on a harnessed test was 0.16–0.35ms and the
     full-suite mean stayed ~1.5ms.
-7. Strings/ropes/BigInts are RC objects off `gc_obj_list`.
+6c. `Atomics.waitAsync` Adapter (2026-08-23): hanging waiter (no notify)
+    after dropping the JS result object has the waiter Promise in the
+    exact-reachable set (`gc_shadow.isExactReachable`). Not conservative-only.
+7. Strings/ropes/BigInts stay off `gc_obj_list` by representation, not by
+    accident. **Not folded into the unexplained census this round.**
+    - String: 4-byte `StringHeader` RC prefix at `payload-4` (qjs `__js_rc`).
+      An intrusive list would widen that prefix and break JSValue decoding.
+      A production side table on every string alloc is a hot-path identity
+      risk. Shadow-only pointer ledgers without extending `visitValue` and
+      conservative `AddressLookup` would dump live stack strings into
+      `unexplained` and break the Stage 1 re-zero gate.
+    - BigInt: already has unused `BlockHeader` prev/next, but
+      `cycleMarkHeader` ignores `Tag.big_int`, so linking it onto a census
+      list has the same unexplained problem until visitValue+lookup grow.
+    - Stage 2 write-audit alternative: StringRope `left`/`right` are JSValue
+      fields and take `HeapValueSlot` when that payload migrates; BigInt is a
+      leaf with no child slots. Complete live-string inventory waits for
+      Stage 4's allocation ledger + string-tag tracing, not a representation
+      change now.
 8. `createGeneratorShell` is the unpublished-construction prototype.
 
 When a later stage adds a Slot type or a root, update the corresponding
