@@ -1648,10 +1648,36 @@ exercise it. Recording it as a gate pass would make the Stage 5 rows
 (young-list scaling, minor pause distribution, memory amplification)
 measurements of a collector that is not doing the work.
 
-Remaining for the gate: migrate heap writes to owner-carrying stores so the
-barrier fires, then re-measure young-list scaling, minor pauses, false
-conservative promotion and memory amplification against a remembered set
-that is actually populated.
+Remaining for the gate: minor scheduling, and it is not a tuning problem.
+
+The barrier is now attached where owner and child are both available — the
+three property funnels and `Object.setOptionalValueSlot`, whose receiver is
+the owner. Instrumenting it settled the earlier `remembered owners 0`
+question: on a cycle workload the barrier is called 400k times and skips
+every one because the *owner* is young, which is correct (a minor scans
+young owners anyway). The probe was wrong, not the barrier.
+
+The real blocker is that a minor never gets to run often enough for
+anything to become old. A minor is attempted only from `pollGC`, and
+`pollGC` fires on the allocation-byte threshold, which is sized for
+whole-heap collections: minors run 18 times while the young set reaches
+59k. Objects therefore stay young indefinitely and the old-to-young
+frontier the barrier exists to record never forms.
+
+Giving the minor its own trigger at object allocation was tried and
+reverted. It breaks a load-bearing assumption in the existing suite: tests
+that request a collection and assert the heap drains to zero start seeing
+survivors, because a minor legitimately leaves old objects alone. That is
+not a test being precious — it says the engine currently has exactly one
+meaning for "a collection happened", and introducing a second, weaker one
+on the allocation path changes what every existing caller gets without
+their asking.
+
+So Stage 5's remaining work is a scheduling contract, not a constant:
+minors need a budget that is expressed in young objects rather than heap
+bytes, and callers need a way to say whether they need a full collection or
+merely progress. That belongs with §8.7's allocation-headroom model, which
+is where mark debt, sweep debt and headroom already live.
 
 ### Stage 6: concurrent major
 
