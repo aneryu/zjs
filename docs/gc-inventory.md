@@ -677,8 +677,10 @@ Stage 4 observation (2026-08-24): `gc_space.zig` classifies published
 compatibility-heap sizes with a measured small-class table (16–128 linear;
 max small class 128 from a 99% histogram p50=64/p95=96/p99=128, not 4 KiB).
 `gc_sweep_model.zig` records logical 64 KiB window states and the four
-§8.7 quantities. Neither allocates 64 KiB blocks or replaces headers.
-Default `rc` erases both.
+§8.7 quantities. `gc_block_heap.zig` is the 2 MiB superblock / 64 KiB
+block allocator, STW-only. Strings/ropes register intervals in
+`gc_address_registry` without widening the 4-byte RC prefix. Default
+`rc` keeps the existing allocator and does not import the block heap.
 
 When a later stage adds a Slot type or a root, update the corresponding
 section in the same change.

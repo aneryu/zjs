@@ -1547,6 +1547,23 @@ STW collect drives the transitions; after a synchronous sweep, sweep
 debt is zero. Default production `rc` erases both (`void` fields). No
 64 KiB block body, object-header replacement, or generations.
 
+Implementation 2026-08-24 (block heap + string/rope intervals, still no
+header replacement): `src/core/gc_block_heap.zig` obtains 2 MiB
+superblocks and splits them into 64 KiB-aligned classed blocks. Empty
+blocks return to a per-class free list; the mapping is released only as
+a whole superblock. Medium objects use page-granular runs inside a
+medium superblock (no 1:1 mapping). Large objects (≥64 KiB) use a
+dedicated page-aligned mapping. The heap is compiled only for
+`-Dzjs_gc=trace_stw`; default `rc` keeps `MemoryAccount`. String and
+rope *backing* stays on `MemoryAccount` so OOM injection and the
+compatibility allocator remain one sequence; they register
+`[base, base+len]` in the address registry without changing the 4-byte
+RC prefix. Conservative scan validates those hits and does not shade
+them as `gc.Header`. STW increments
+`mark_epoch` per collection; `ensureMarkEpoch` lazily clears a block's
+mark bitmap. A new collection drains non-zero sweep debt before
+`beginMark`. Object headers are unchanged.
+
 ### Stage 5: sticky minor
 
 Deliver young lists, sticky survivor marks, remembered owners, weak remembered

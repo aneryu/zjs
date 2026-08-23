@@ -7822,6 +7822,116 @@ test "trace_stw sweep model reaches sweep_debt zero after collect" {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.sweep_model.sweeping);
 }
 
+test "block heap splits a 2MiB superblock into 64KiB classed blocks" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const heap_mod = core.gc_block_heap;
+    var heap = heap_mod.Heap.init(std.testing.allocator);
+    defer heap.deinit();
+
+    const first = try heap.alloc(32);
+    try std.testing.expectEqual(@as(usize, 1), heap.stats.superblocks);
+    try std.testing.expectEqual(heap_mod.superblock_bytes, heap.stats.committed_bytes);
+    try std.testing.expectEqual(heap_mod.blocks_per_superblock, @as(usize, 32));
+    try std.testing.expect(heap.owns(first.ptr));
+    const block = heap.blockOf(first.ptr).?;
+    try std.testing.expectEqual(heap_mod.block_magic, block.magic);
+    try std.testing.expect(block.cell_count >= core.gc_space.min_cells_per_block);
+    try std.testing.expectEqual(core.gc_sweep_model.SweepState.active, block.sweep_state);
+
+    var n: usize = 1;
+    while (n < 40) : (n += 1) _ = try heap.alloc(32);
+    try std.testing.expectEqual(@as(usize, 1), heap.stats.superblocks);
+
+    const medium = try heap.alloc(200);
+    try std.testing.expect(medium.len == 200);
+    try std.testing.expect(heap.stats.medium_allocs >= 1);
+    heap.free(medium.ptr);
+
+    const large = try heap.alloc(core.gc_space.large_min_bytes);
+    try std.testing.expect(heap.stats.large_maps == 1);
+    heap.free(large.ptr);
+    try std.testing.expectEqual(@as(usize, 0), heap.stats.large_maps);
+
+    std.debug.print(
+        \\
+        \\block heap envelope: committed={d} live={d} milli={d} superblocks={d}
+        \\
+    , .{
+        heap.stats.committed_bytes,
+        heap.stats.live_bytes,
+        heap.committedLiveMilli(),
+        heap.stats.superblocks,
+    });
+    try std.testing.expect(heap.committedLiveMilli() >= 1000);
+}
+
+test "block heap reserve OOM is visible and not swallowed" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    var tiny: [128]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&tiny);
+    var heap = core.gc_block_heap.Heap.init(fba.allocator());
+    defer heap.deinit();
+    try std.testing.expectError(error.OutOfMemory, heap.alloc(32));
+    try std.testing.expect(heap.stats.failed_reserves >= 1);
+    try std.testing.expectError(error.OutOfMemory, heap.alloc(core.gc_space.large_min_bytes));
+}
+
+test "block heap mark epoch lazily clears the mark bitmap" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
+    defer heap.deinit();
+    const cell = try heap.alloc(16);
+    const block = heap.blockOf(cell.ptr).?;
+    const index = block.cellIndex(@intFromPtr(cell.ptr)).?;
+    heap.beginMajor();
+    try std.testing.expectEqual(@as(u64, 1), heap.mark_epoch);
+    try std.testing.expect(!block.isMarked(index, heap.mark_epoch));
+    block.setMark(index, heap.mark_epoch);
+    try std.testing.expect(block.isMarked(index, heap.mark_epoch));
+    heap.beginMajor();
+    try std.testing.expectEqual(@as(u64, 2), heap.mark_epoch);
+    try std.testing.expect(!block.isMarked(index, heap.mark_epoch));
+    block.ensureMarkEpoch(heap.mark_epoch);
+    try std.testing.expectEqual(heap.mark_epoch, block.mark_epoch);
+    try std.testing.expect(!block.isMarked(index, heap.mark_epoch));
+}
+
+test "string registry resolves interior pointers without changing the 4-byte prefix" {
+    if (comptime !core.gc.string_registry_enabled) return error.SkipZigTest;
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(core.gc.StringHeader));
+    try std.testing.expectEqual(@as(usize, 4), core.gc.string_rc_prefix_size);
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const s = try core.string.String.createAscii(rt, "block-heap-string");
+    defer s.value().free(rt);
+    const header = s.header();
+    const identity = @intFromPtr(header);
+    const hit = rt.gc.address_registry.resolveAny(identity).?;
+    try std.testing.expect(hit == .string);
+    try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(identity));
+    try std.testing.expect(rt.gc.address_registry.resolveAny(identity + 8) != null);
+    const rope = try core.string.String.createRopeOwned(
+        rt,
+        (try core.string.String.createAscii(rt, "left")).value(),
+        (try core.string.String.createAscii(rt, "right")).value(),
+    );
+    defer rope.value().free(rt);
+    const rope_hit = rt.gc.address_registry.resolveAny(@intFromPtr(rope.header())).?;
+    try std.testing.expect(rope_hit == .rope);
+}
+
+test "trace_stw sweep debt is drained before a new collection begins" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.gc.sweep_model.debt.sweep_debt = 77;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 77), core.gc_trace_stw.last_report.drained_sweep_debt);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.sweep_model.debt.sweep_debt);
+    try std.testing.expectEqual(@as(usize, 0), core.gc_trace_stw.last_report.sweep_debt);
+}
+
 test "pollGC runs pending collection and clears pending flag" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

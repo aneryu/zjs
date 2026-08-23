@@ -1,11 +1,10 @@
 //! Live address → allocation map for conservative candidate validation
 //! (tracing-gc-design.md §4.2 / §4.3 / §7.2).
 //!
-//! Independent of the block heap: this round indexes the compatibility
-//! allocator's published GC objects. Lookup is a page radix (4 KiB) plus a
-//! per-page occupant list, not a linear walk of live objects. Large extents
-//! occupy every overlapping page. Candidates are never dereferenced as guessed
-//! headers.
+//! Page radix (4 KiB) plus per-page occupant lists. GC objects, flat strings,
+//! and rope nodes are intervals in the same table; string/rope registration
+//! does not change the 4-byte RC prefix. Large extents occupy every
+//! overlapping page. Candidates are never dereferenced as guessed headers.
 //!
 //! Default `rc` production does not compile this module.
 
@@ -18,14 +17,33 @@ pub const enabled = gc.address_registry_enabled;
 pub const page_shift: u6 = 12;
 pub const page_size: usize = 1 << page_shift;
 
+pub const Kind = enum(u8) {
+    gc_object,
+    string,
+    rope,
+};
+
 pub const Occupant = struct {
     lo: usize,
     hi: usize,
-    header: *gc.Header,
+    kind: Kind,
+    ptr: usize,
+
+    pub fn gcHeader(self: Occupant) ?*gc.Header {
+        if (self.kind != .gc_object) return null;
+        return @ptrFromInt(self.ptr);
+    }
+};
+
+pub const Hit = union(Kind) {
+    gc_object: *gc.Header,
+    string: *gc.StringHeader,
+    rope: *gc.StringHeader,
 };
 
 pub const Stats = struct {
     live: usize = 0,
+    string_live: usize = 0,
     pages: usize = 0,
     register_calls: usize = 0,
     unregister_calls: usize = 0,
@@ -61,14 +79,32 @@ pub const Table = struct {
         const header_addr = @intFromPtr(header);
         const lo = header_addr - gc.metadata_prefix_size;
         const hi = header_addr + bytes + 1;
-        return .{ .lo = lo, .hi = hi, .header = header };
+        return .{ .lo = lo, .hi = hi, .kind = .gc_object, .ptr = header_addr };
+    }
+
+    pub fn rangeForBytes(kind: Kind, base: usize, bytes: usize, identity: usize) Occupant {
+        return .{ .lo = base, .hi = base + bytes + 1, .kind = kind, .ptr = identity };
     }
 
     pub fn insert(self: *Table, allocator: std.mem.Allocator, header: *gc.Header, bytes: usize) std.mem.Allocator.Error!void {
+        return self.insertOccupant(allocator, occupantFor(header, bytes));
+    }
+
+    pub fn insertRange(
+        self: *Table,
+        allocator: std.mem.Allocator,
+        kind: Kind,
+        base: usize,
+        bytes: usize,
+        identity: usize,
+    ) std.mem.Allocator.Error!void {
+        return self.insertOccupant(allocator, rangeForBytes(kind, base, bytes, identity));
+    }
+
+    fn insertOccupant(self: *Table, allocator: std.mem.Allocator, occupant: Occupant) std.mem.Allocator.Error!void {
         self.stats.register_calls += 1;
-        const key = @intFromPtr(header);
+        const key = occupant.ptr;
         if (self.by_header.contains(key)) return;
-        const occupant = occupantFor(header, bytes);
         try self.by_header.put(allocator, key, occupant);
         errdefer _ = self.by_header.remove(key);
 
@@ -87,12 +123,16 @@ pub const Table = struct {
             registered += 1;
         }
         self.stats.live += 1;
+        if (occupant.kind != .gc_object) self.stats.string_live += 1;
     }
 
     pub fn remove(self: *Table, allocator: std.mem.Allocator, header: *gc.Header) void {
+        self.removePtr(allocator, @intFromPtr(header));
+    }
+
+    pub fn removePtr(self: *Table, allocator: std.mem.Allocator, identity: usize) void {
         self.stats.unregister_calls += 1;
-        const key = @intFromPtr(header);
-        const occupant = self.by_header.fetchRemove(key) orelse return;
+        const occupant = self.by_header.fetchRemove(identity) orelse return;
         const range = occupant.value;
         const first_page = range.lo >> page_shift;
         const last_page = (range.hi - 1) >> page_shift;
@@ -101,7 +141,7 @@ pub const Table = struct {
             const bucket = self.pages.getPtr(page) orelse continue;
             var index: usize = 0;
             while (index < bucket.occupants.items.len) : (index += 1) {
-                if (bucket.occupants.items[index].header != header) continue;
+                if (bucket.occupants.items[index].ptr != identity) continue;
                 _ = bucket.occupants.swapRemove(index);
                 break;
             }
@@ -112,9 +152,17 @@ pub const Table = struct {
             }
         }
         self.stats.live -= 1;
+        if (range.kind != .gc_object) self.stats.string_live -= 1;
     }
 
     pub fn resolve(self: *Table, addr: usize) ?*gc.Header {
+        return switch (self.resolveAny(addr) orelse return null) {
+            .gc_object => |header| header,
+            .string, .rope => null,
+        };
+    }
+
+    pub fn resolveAny(self: *Table, addr: usize) ?Hit {
         self.stats.lookup_calls += 1;
         if (addr < 4096) return null;
         const bucket = self.pages.getPtr(addr >> page_shift) orelse return null;
@@ -128,7 +176,11 @@ pub const Table = struct {
         }
         if (best) |occupant| {
             self.stats.lookup_hits += 1;
-            return occupant.header;
+            return switch (occupant.kind) {
+                .gc_object => .{ .gc_object = @ptrFromInt(occupant.ptr) },
+                .string => .{ .string = @ptrFromInt(occupant.ptr) },
+                .rope => .{ .rope = @ptrFromInt(occupant.ptr) },
+            };
         }
         return null;
     }
@@ -152,7 +204,7 @@ pub const Table = struct {
         }) {
             const bucket = self.pages.getPtr(page) orelse continue;
             if (bucket.occupants.items.len != 0 and
-                bucket.occupants.items[bucket.occupants.items.len - 1].header == occupant.header)
+                bucket.occupants.items[bucket.occupants.items.len - 1].ptr == occupant.ptr)
             {
                 _ = bucket.occupants.pop();
             }

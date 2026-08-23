@@ -176,9 +176,12 @@ fn scanWords(
     while (addr + @sizeOf(usize) <= hi) : (addr += @sizeOf(usize)) {
         metrics.candidates += 1;
         const word = @as(*const usize, @ptrFromInt(addr)).*;
-        if (rt.gc.address_registry.resolve(word)) |header| {
+        if (rt.gc.address_registry.resolveAny(word)) |hit| {
             metrics.validated_hits += 1;
-            shade(shade_ctx, header);
+            switch (hit) {
+                .gc_object => |header| shade(shade_ctx, header),
+                .string, .rope => {},
+            }
         }
     }
 }

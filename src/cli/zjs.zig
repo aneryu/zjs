@@ -409,6 +409,9 @@ pub fn main(init: std.process.Init) !void {
         if (comptime engine.core.gc.sweep_model_enabled) {
             try dumpGcSweepStats(&stdout_writer.interface, &runtime.runtime.gc);
         }
+        if (comptime engine.core.gc.block_heap_enabled) {
+            try dumpGcBlockHeapStats(&stdout_writer.interface, &runtime.runtime.gc);
+        }
         try stdout_writer.interface.flush();
     }
     if (comptime engine.core.gc.shadow_tracer_enabled) {
@@ -828,6 +831,23 @@ fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Regi
                 hist.coveredByMaxSmall(),
                 hist.belowLarge(),
                 hist.large,
+            },
+        );
+    }
+}
+
+fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
+    if (comptime engine.core.gc.block_heap_enabled) {
+        const st = registry.block_heap.stats;
+        try writer.print(
+            "gc: block heap committed {d} live {d} milli {d} superblocks {d} large {d} epoch {d}\n",
+            .{
+                st.committed_bytes,
+                st.live_bytes,
+                st.committedLiveMilli(),
+                st.superblocks,
+                st.large_maps,
+                st.mark_epoch,
             },
         );
     }

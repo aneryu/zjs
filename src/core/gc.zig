@@ -40,8 +40,15 @@ pub const address_registry_enabled: bool = shadow_tracer_enabled or trace_stw_en
 pub const space_model_enabled: bool = address_registry_enabled;
 
 /// Logical 64 KiB window sweep state machine and four scheduling quantities
-/// (§8.7). Same compile gate. Does not allocate 64 KiB blocks.
+/// (§8.7). Same compile gate.
 pub const sweep_model_enabled: bool = address_registry_enabled;
+
+/// 64 KiB block heap. STW only so default `rc` keeps the existing allocator.
+pub const block_heap_enabled: bool = trace_stw_enabled;
+
+/// String/rope intervals in the address registry. Shadow/STW only: default
+/// `rc` tests keep `stats.live` as the cycle-list census.
+pub const string_registry_enabled: bool = shadow_tracer_enabled or trace_stw_enabled;
 
 const AddressRegistryTable = if (address_registry_enabled)
     @import("gc_address_registry.zig").Table
@@ -55,6 +62,11 @@ else
 
 const SweepModel = if (sweep_model_enabled)
     @import("gc_sweep_model.zig").Model
+else
+    void;
+
+const BlockHeap = if (block_heap_enabled)
+    @import("gc_block_heap.zig").Heap
 else
     void;
 
@@ -779,12 +791,20 @@ pub const Registry = struct {
     sweep_model: if (sweep_model_enabled) SweepModel else void =
         if (sweep_model_enabled) .{} else {},
 
+    /// 64 KiB block heap. Void unless `-Dzjs_gc=trace_stw`.
+    block_heap: if (block_heap_enabled) BlockHeap else void =
+        if (block_heap_enabled) .init(std.heap.page_allocator) else {},
+
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
         return .{
             .memory = account,
             .policy = policy,
             .old_space = .{},
             .large_space = .{},
+            .block_heap = if (comptime block_heap_enabled)
+                BlockHeap.init(account.backing_allocator)
+            else
+                {},
         };
     }
 
@@ -933,6 +953,9 @@ pub const Registry = struct {
         }
         if (comptime sweep_model_enabled) {
             self.sweep_model.deinit(addressRegistryAllocator());
+        }
+        if (comptime block_heap_enabled) {
+            self.block_heap.deinit();
         }
 
         self.phase = .none;
@@ -1665,6 +1688,32 @@ pub const Registry = struct {
     inline fn unregisterLiveAddress(self: *Registry, header: *GCObjectHeader) void {
         if (comptime !address_registry_enabled) return;
         self.address_registry.remove(addressRegistryAllocator(), header);
+    }
+
+    pub fn registerLiveStringRange(
+        self: *Registry,
+        is_rope: bool,
+        base: []const u8,
+        identity: usize,
+    ) void {
+        if (comptime string_registry_enabled) {
+            const Kind = @import("gc_address_registry.zig").Kind;
+            self.address_registry.insertRange(
+                addressRegistryAllocator(),
+                if (is_rope) Kind.rope else Kind.string,
+                @intFromPtr(base.ptr),
+                base.len,
+                identity,
+            ) catch {
+                self.address_registry.stats.failed_inserts += 1;
+            };
+        }
+    }
+
+    pub fn unregisterLiveStringRange(self: *Registry, identity: usize) void {
+        if (comptime string_registry_enabled) {
+            self.address_registry.removePtr(addressRegistryAllocator(), identity);
+        }
     }
 
     /// Histogram and sweep-window observation for a first-time publication.

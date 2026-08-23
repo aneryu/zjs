@@ -62,6 +62,12 @@ pub const Report = struct {
     trans_needs_sweep_to_sweeping: usize = 0,
     trans_sweeping_to_swept: usize = 0,
     trans_swept_to_active: usize = 0,
+    mark_epoch: u64 = 0,
+    committed_bytes: usize = 0,
+    block_live_bytes: usize = 0,
+    committed_live_milli: usize = 0,
+    string_live: usize = 0,
+    drained_sweep_debt: usize = 0,
 
     pub fn format(self: Report, writer: anytype) !void {
         try writer.print(
@@ -94,13 +100,33 @@ pub const Report = struct {
 pub var last_report: Report = .{};
 
 pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame) CollectError!usize {
+    var drained_sweep_debt: usize = 0;
+    if (comptime gc.sweep_model_enabled) {
+        if (rt.gc.sweep_model.debt.sweep_debt != 0) {
+            drained_sweep_debt = rt.gc.sweep_model.debt.sweep_debt;
+            rt.gc.sweep_model.beginSweep();
+            rt.gc.sweep_model.endSweep();
+        }
+        std.debug.assert(rt.gc.sweep_model.debt.sweep_debt == 0);
+    }
     rt.gc.stats.collections += 1;
+    if (comptime gc.block_heap_enabled) rt.gc.block_heap.beginMajor();
     var collector = try Collector.init(rt, extra_roots);
     defer collector.deinit();
     const swept = try collector.run();
     last_report = collector.report;
     last_report.swept = swept;
     last_report.remaining = rt.gc.liveCount();
+    last_report.drained_sweep_debt = drained_sweep_debt;
+    if (comptime gc.block_heap_enabled) {
+        last_report.mark_epoch = rt.gc.block_heap.mark_epoch;
+        last_report.committed_bytes = rt.gc.block_heap.stats.committed_bytes;
+        last_report.block_live_bytes = rt.gc.block_heap.stats.live_bytes;
+        last_report.committed_live_milli = rt.gc.block_heap.committedLiveMilli();
+    }
+    if (comptime gc.string_registry_enabled) {
+        last_report.string_live = rt.gc.address_registry.stats.string_live;
+    }
     return swept;
 }
 

@@ -105,6 +105,14 @@ else
     struct {
         pub const enabled = false;
     };
+/// 64 KiB block heap. Default production `rc` and default tests erase it;
+/// `-Dzjs_gc=trace_stw` is the only consumer.
+pub const gc_block_heap = if (gc.block_heap_enabled)
+    @import("gc_block_heap.zig")
+else
+    struct {
+        pub const enabled = false;
+    };
 /// Imported only when `-Dzjs_gc=trace_stw`. Default `rc` builds see an empty
 /// namespace so the reclaiming tracer is not part of the production compile.
 pub const gc_trace_stw = if (gc.trace_stw_enabled) @import("gc_trace_stw.zig") else struct {

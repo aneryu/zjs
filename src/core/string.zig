@@ -845,6 +845,11 @@ pub const String = struct {
         // 4-aligned; the rc prefix is 4 bytes, so the struct at `base + 4` keeps
         // `String`'s 4-byte alignment and the inline char FAM stays u16-aligned.
         const bytes = try rt.allocStringAlignedBytes(inline_layout.total_size, inline_layout.allocation_alignment);
+        if (comptime gc.string_registry_enabled) {
+            errdefer freeStringStorage(rt, bytes, inline_layout.allocation_alignment, @intFromPtr(bytes.ptr));
+        } else {
+            errdefer rt.memory.freeAlignedBytes(bytes, inline_layout.allocation_alignment);
+        }
         const rc_ptr: *gc.StringHeader = @ptrCast(@alignCast(bytes.ptr));
         rc_ptr.* = .{};
         const self: *String = @ptrCast(@alignCast(bytes.ptr + gc.string_rc_prefix_size));
@@ -853,6 +858,9 @@ pub const String = struct {
             .hash_meta = .{},
             .atom_id = no_atom_id,
         };
+        if (comptime gc.string_registry_enabled) {
+            rt.gc.registerLiveStringRange(false, bytes, @intFromPtr(rc_ptr));
+        }
         return self;
     }
 
@@ -865,7 +873,12 @@ pub const String = struct {
         // Free from the refcount prefix base (`stringPtr - 4`), the true
         // allocation start whose size includes the prefix.
         const base: [*]u8 = @ptrCast(self.header());
-        rt.memory.freeAlignedBytes(base[0..inline_layout.total_size], inline_layout.allocation_alignment);
+        const bytes = base[0..inline_layout.total_size];
+        if (comptime gc.string_registry_enabled) {
+            freeStringStorage(rt, bytes, inline_layout.allocation_alignment, @intFromPtr(self.header()));
+        } else {
+            rt.memory.freeAlignedBytes(bytes, inline_layout.allocation_alignment);
+        }
     }
 };
 
@@ -1463,8 +1476,16 @@ comptime {
 fn allocRopeNode(rt: *JSRuntime, with_accumulator_tail_slot: bool) !*StringRope {
     const alloc_size = if (with_accumulator_tail_slot) accumulator_rope_node_alloc_size else rope_node_alloc_size;
     const bytes = try rt.allocStringAlignedBytes(alloc_size, rope_node_alignment);
+    if (comptime gc.string_registry_enabled) {
+        errdefer freeStringStorage(rt, bytes, rope_node_alignment, @intFromPtr(bytes.ptr) + StringRope.rc_prefix_size - gc.string_rc_prefix_size);
+    } else {
+        errdefer rt.memory.freeAlignedBytes(bytes, rope_node_alignment);
+    }
     const node: *StringRope = @ptrCast(@alignCast(bytes.ptr + StringRope.rc_prefix_size));
     node.header().* = .{};
+    if (comptime gc.string_registry_enabled) {
+        rt.gc.registerLiveStringRange(true, bytes, @intFromPtr(node.header()));
+    }
     return node;
 }
 
@@ -1472,7 +1493,17 @@ fn allocRopeNode(rt: *JSRuntime, with_accumulator_tail_slot: bool) !*StringRope 
 fn freeRopeNode(rt: *JSRuntime, node: *StringRope) void {
     const base: [*]u8 = @as([*]u8, @ptrCast(node)) - StringRope.rc_prefix_size;
     const alloc_size = if (node.supportsTail()) accumulator_rope_node_alloc_size else rope_node_alloc_size;
-    rt.memory.freeAlignedBytes(base[0..alloc_size], rope_node_alignment);
+    const bytes = base[0..alloc_size];
+    if (comptime gc.string_registry_enabled) {
+        freeStringStorage(rt, bytes, rope_node_alignment, @intFromPtr(node.header()));
+    } else {
+        rt.memory.freeAlignedBytes(bytes, rope_node_alignment);
+    }
+}
+
+fn freeStringStorage(rt: *JSRuntime, bytes: []u8, alignment: std.mem.Alignment, identity: usize) void {
+    rt.gc.unregisterLiveStringRange(identity);
+    rt.memory.freeAlignedBytes(bytes, alignment);
 }
 
 /// Releases a rope's private tail buffer (no-op for tail-less ropes).
