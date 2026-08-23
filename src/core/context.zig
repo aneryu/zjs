@@ -588,6 +588,15 @@ pub const JSContext = struct {
 
     noinline fn pollInterruptSlow(self: *JSContext) bool {
         self.interrupt_counter = interrupt_counter_reset;
+        // The young budget's safepoint: the interpreter's own cadence, between
+        // instructions. Safe only because the builtin dispatch funnel roots
+        // receivers and arguments -- without that a minor here reclaims
+        // objects a running builtin is still walking.
+        if (comptime gc.generation_enabled) {
+            if (self.runtime.gc.shouldTryMinor()) {
+                _ = self.runtime.pollGC(null, .safepoint) catch {};
+            }
+        }
         return self.runtime.runInterruptHandler();
     }
 

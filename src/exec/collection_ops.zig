@@ -429,6 +429,15 @@ fn methodCallResolved(
     args: []const core.JSValue,
     host: CallbackHost,
 ) !core.JSValue {
+    // Collection methods reach the engine through this channel rather than
+    // the builtin dispatch funnel, so the receiver has to be rooted here too.
+    // A minor that runs mid-insert would otherwise reclaim the very
+    // collection the operation is walking.
+    var receiver: ?*core.Object = object;
+    var receiver_roots = core.runtime.rootObjects(.{&receiver});
+    receiver_roots.activate(rt);
+    defer receiver_roots.deactivate(rt);
+
     return switch (method) {
         1 => {
             const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();

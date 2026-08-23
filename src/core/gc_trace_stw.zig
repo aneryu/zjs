@@ -592,6 +592,14 @@ const Collector = struct {
             if (header.metaConst().flags.mark) continue;
             if (header.metaConst().flags.is_pinned) continue;
             if (header.metaConst().flags.kind != .object) continue;
+            // A minor runs while native frames are live, and this collector
+            // still shares the heap with refcounting: a young object the trace
+            // did not reach may nonetheless be held by native code that has
+            // not published a root. Refusing to condemn anything with a live
+            // count keeps a minor conservative in the safe direction -- it
+            // leaks a young object until the next major rather than freeing
+            // one a builtin is still using.
+            if (header.metaConst().rc > 0) continue;
             doomed.append(self.allocator(), header) catch return 0;
         }
         for (doomed.items) |header| {

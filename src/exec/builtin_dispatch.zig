@@ -691,6 +691,22 @@ noinline fn callTypedInternalRecordDirect(
     record: *const core.host_function.InternalRecord,
     args: []const core.JSValue,
 ) HostError!core.JSValue {
+    // Every builtin call passes through here, so this is where the receiver
+    // and arguments become exact roots for the duration of the call.
+    //
+    // Under refcounting they are already alive -- the caller holds counts --
+    // and this is dead weight, which is why it is comptime-gated. Under
+    // tracing they are not roots at all: a collection during a builtin can
+    // reclaim the very object the builtin is walking. `Set.prototype.add`
+    // losing its collection mid-insert is the case that made this concrete.
+    var receiver = this_value;
+    var call_roots = core.runtime.ValueRootFrame{
+        .values = &[_]core.runtime.ValueRootValue{.{ .value = &receiver }},
+        .slices = &[_]core.runtime.ValueRootSlice{.{ .borrowed = args }},
+    };
+    call_roots.activate(ctx.runtime);
+    defer call_roots.deactivate(ctx.runtime);
+
     const native = record.native_function orelse return error.TypeError;
     // `InternalRecord` is engine-owned and its table builder guarantees that
     // the function union tag equals `cproto`. QuickJS likewise stores an
