@@ -611,12 +611,30 @@ already feeds `pollGC` / `shouldRunMajorAt` (`src/core/memory.zig`).
 4b. Conservative native roots are shadow-only (`gc_conservative.zig`).
     Generator/async is not a fiber scan. Shadow CLI `--gc-shadow-check`
     (gated out of default `rc`) prints the report after eval/jobs/quiesce
-    and exits non-zero when `unexplained != 0`.
+    and exits non-zero when `unexplained != 0`. Shadow `run-test262
+    --gc-shadow-check` censuses each executed test in-process and exits
+    non-zero if any test has `unexplained != 0`.
 5. `pollGC` and `destroyRuntimeCyclesWithValueRoots` both `_ = roots;` —
    empty shell, not wired in this tranche.
 6. Plugin tracer symbol that blocks reclaiming tracing:
    `opaquePayloadMark` (`src/runtime/plugin.zig`), installed as
-   `payload_mark` on opaque host classes.
+   `payload_mark` on opaque host classes. Measured 2026-08-23 under
+   `-Dzjs_gc=shadow`:
+   - DSO `zjs-runtime-plugin-fixture` has no tracer (`opaquePayloadMark`
+     returns at `tracer orelse return`); allocated=251 unexplained=0.
+     Classification: edge-free payload.
+   - In-process host object with `tracer` holding a heap `JSValue`:
+     `shadow_trace_calls=1` during `gc_shadow.run` (shadow walks
+     `markClassPayload`); the child is reachable; unexplained=0.
+     Classification: legacy reentrant tracer. Reclaiming tracing stays
+     disabled for that class (design §6.1).
+6b. Full test262 shadow census (ReleaseFast, 20 workers, 25.25s wall):
+    prepared 49778, executed 44584 (5194 feature-skipped never create a
+    runtime), unexplained_tests=0 unexplained_objects=0, five
+    classification buckets all 0, census errors=0, max_allocated=8662,
+    mean_ns=1.52ms max_ns=152ms. Strategy A (full run) chosen because a
+    single in-process census on a harnessed test was 0.16–0.35ms and the
+    full-suite mean stayed ~1.5ms.
 7. Strings/ropes/BigInts are RC objects off `gc_obj_list`.
 8. `createGeneratorShell` is the unpublished-construction prototype.
 

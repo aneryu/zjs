@@ -1352,6 +1352,14 @@ the shadow checker becomes red.
 Gate: sustained zero unexplained objects across unit, test262, benchmark,
 plugin, OOM, and randomized stress corpora. Shadow mode never frees memory.
 
+Measured 2026-08-23 against that sentence (not a retune): unexplained=0 on
+Zig-local unit, full test262 (44584 executed), bench-v8, plugin DSO fixture
+plus a host object with a legacy `tracer`, CLI OOM, and tiny-heap stress.
+Shadow currently invokes `opaquePayloadMark` when a class has a tracer;
+that class still disables reclaiming tracing. `Atomics.waitAsync` still has
+no Adapter; those tests were in the 44584 and did not produce unexplained
+cycle-list objects.
+
 ### Stage 2: Slot-under-RC
 
 Deliver:
