@@ -13343,3 +13343,52 @@ test "candidate validation rejects the tear shapes the litmus measured" {
     try std.testing.expectEqual(@as(usize, 1), stats.rejected_misaligned);
     try std.testing.expectEqual(@as(usize, 1), stats.accepted);
 }
+
+test "a critical scope defers safepoint acknowledgement so a store and its shading stay indivisible" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const Concurrent = core.gc.concurrent;
+
+    // Outside a scope a mutator may park immediately.
+    try std.testing.expect(rt.gc.concurrent.mayAcknowledgeSafepoint());
+
+    // Inside one it may not, however urgently the collector asks. This is the
+    // property final remark relies on: it cannot stop the mutator between a
+    // heap store and the shading of what was stored.
+    const scope = Concurrent.CriticalScope.begin(&rt.gc.concurrent);
+    rt.gc.concurrent.safepoint_requested.store(true, .release);
+    try std.testing.expect(!rt.gc.concurrent.mayAcknowledgeSafepoint());
+    try std.testing.expect(rt.gc.concurrent.stats.deferred_acks >= 1);
+
+    scope.end();
+    // Once the scope closes the request can be honoured.
+    try std.testing.expect(rt.gc.concurrent.mayAcknowledgeSafepoint());
+}
+
+test "the barrier shades exact targets while marking and remembers owners otherwise" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const owner = try core.Object.createPlainObject(rt, null);
+    defer owner.value().free(rt);
+    const child = try core.Object.createPlainObject(rt, null);
+    defer child.value().free(rt);
+
+    // Marking inactive: the generational path runs, nothing is shaded.
+    const shaded_before = rt.gc.concurrent.stats.shaded;
+    rt.gc.generationalBarrier(&owner.header, &child.header);
+    try std.testing.expectEqual(shaded_before, rt.gc.concurrent.stats.shaded);
+
+    // Marking active: the same write shades its exact target instead.
+    child.header.meta().flags.mark = false;
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    defer rt.gc.concurrent.major_marking_active.store(false, .release);
+    rt.gc.generationalBarrier(&owner.header, &child.header);
+    try std.testing.expect(rt.gc.concurrent.stats.shaded > shaded_before);
+    try std.testing.expect(child.header.metaConst().flags.mark);
+}

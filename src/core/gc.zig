@@ -71,6 +71,15 @@ pub const generation_enabled: bool = trace_stw_enabled;
 /// tracer exists, since conservative scanning needs the same checks.
 pub const candidate_validation = @import("gc_candidate.zig");
 
+/// Concurrent-major barrier and safepoint handshake (§8.4). Present wherever
+/// a tracer is compiled; the marker thread that uses it arrives separately.
+pub const concurrent_enabled: bool = trace_stw_enabled;
+pub const concurrent = @import("gc_concurrent.zig");
+const ConcurrentState = if (concurrent_enabled)
+    concurrent.State
+else
+    void;
+
 /// Young objects required before a minor is worth its root scan. A starting
 /// value, not a tuned one: the histogram work that would justify a number
 /// lives with allocation headroom in a later tranche.
@@ -813,6 +822,8 @@ pub const Registry = struct {
         if (sweep_model_enabled) .{} else {},
 
     /// 64 KiB block heap. Void unless `-Dzjs_gc=trace_stw`.
+    concurrent: if (concurrent_enabled) ConcurrentState else void =
+        if (concurrent_enabled) .{} else {},
     generation: if (generation_enabled) GenerationState else void =
         if (generation_enabled) .{} else {},
     block_heap: if (block_heap_enabled) BlockHeap else void =
@@ -1694,6 +1705,20 @@ pub const Registry = struct {
         }
     }
 
+    /// Shade a target during concurrent marking (§8.4). Marking the object is
+    /// what publishes it to the marker; the work queue that would carry it is
+    /// the marker thread's business and arrives with it.
+    ///
+    /// Called only from inside a `CriticalScope`, so final remark cannot stop
+    /// the mutator between the heap store and this shading.
+    pub inline fn shadeForConcurrentMark(self: *Registry, target: *GCObjectHeader) void {
+        if (comptime !concurrent_enabled) return;
+        self.concurrent.stats.barrier_calls += 1;
+        if (target.meta().flags.mark) return;
+        target.meta().flags.mark = true;
+        self.concurrent.stats.shaded += 1;
+    }
+
     /// Whether a minor is worth attempting: enough young objects to be worth
     /// the root scan, and no full collection already in flight. Deliberately
     /// simple — the scheduling policy that replaces it belongs with the
@@ -1710,6 +1735,16 @@ pub const Registry = struct {
     pub inline fn generationalBarrier(self: *Registry, owner: *GCObjectHeader, child: ?*GCObjectHeader) void {
         if (comptime !generation_enabled) return;
         const target = child orelse return;
+        // §8.4: while a major is marking, every strong write shades its exact
+        // new target instead of taking the generational path. The two are
+        // alternatives, not a sequence -- a shaded object is reachable for
+        // this cycle, so remembering its owner as well would be redundant.
+        if (comptime concurrent_enabled) {
+            if (self.concurrent.markingActive()) {
+                self.shadeForConcurrentMark(target);
+                return;
+            }
+        }
         self.generation.stats.barrier_calls += 1;
         if (self.generation.isYoung(owner)) {
             self.generation.stats.barrier_young_owner += 1;
