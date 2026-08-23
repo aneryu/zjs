@@ -644,6 +644,14 @@ pub const RootVisitor = struct {
     }
 };
 
+/// First word of the exec-owned `active_invocation` record (design §7.1).
+/// Core only knows this prefix; the rest of the record is exec-private.
+/// Exec fills `traceRoots` with a no-fail live-window walk. Default `rc`
+/// erases the call at comptime so production `.text` stays identical.
+pub const ActiveInvocationTrace = struct {
+    traceRoots: *const fn (invocation: *anyopaque, visitor: *RootVisitor) RootTraceError!void,
+};
+
 pub const RootProvider = struct {
     context: *anyopaque,
     trace: *const fn (context: *anyopaque, visitor: *RootVisitor) RootTraceError!void,
@@ -2079,7 +2087,15 @@ pub const JSRuntime = struct {
     }
 
     pub fn traceActiveRoots(self: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
-        try self.traceRoots(null, visitor);
+        if (comptime value_root_frames_enabled) {
+            try self.traceRoots(self.active_value_roots, visitor);
+            if (self.active_invocation) |invocation| {
+                const header: *const ActiveInvocationTrace = @ptrCast(@alignCast(invocation));
+                try header.traceRoots(invocation, visitor);
+            }
+        } else {
+            try self.traceRoots(null, visitor);
+        }
     }
 
     fn traceValueRootFrames(self: *JSRuntime, roots: ?*const ValueRootFrame, visitor: *RootVisitor) RootTraceError!void {

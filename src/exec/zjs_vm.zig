@@ -23,6 +23,10 @@ const exception_ops = @import("exception_ops.zig");
 const exceptions = @import("exceptions.zig");
 const vm_gen_async = @import("vm_gen_async.zig");
 const inline_calls = @import("inline_calls.zig");
+const active_invocation_trace = if (core.runtime.value_root_frames_enabled)
+    @import("active_invocation_trace.zig")
+else
+    struct {};
 const vm_property_globals = @import("vm_property_globals.zig");
 const call_runtime = @import("call_runtime.zig");
 const tailcall_dispatch = @import("tailcall_dispatch.zig");
@@ -515,6 +519,10 @@ fn runWithArgsState(
         .machine = &machine,
         .current_backtrace_view = &root_backtrace_view,
     };
+    if (comptime core.runtime.value_root_frames_enabled) {
+        invocation.header = .{ .traceRoots = active_invocation_trace.traceRoots };
+        invocation.previous = inline_calls.activeInvocation(ctx.runtime);
+    }
     const previous_invocation = ctx.runtime.active_invocation;
     ctx.runtime.active_invocation = &invocation;
     defer ctx.runtime.active_invocation = previous_invocation;

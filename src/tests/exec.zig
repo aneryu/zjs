@@ -21601,3 +21601,166 @@ test "flat string strict-eq matches content across distinct objects" {
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
 }
+
+const ActiveInvocationRootProbe = struct {
+    allocator: std.mem.Allocator,
+    saw_live_local: bool = false,
+    unused_capacity_checked: bool = false,
+    unused_capacity_leaked: bool = false,
+
+    fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const rt = invocation.realm.runtime;
+        try std.testing.expect(rt.active_invocation != null);
+
+        const active = inline_calls.activeInvocation(rt) orelse return error.TestUnexpectedResult;
+        var seen = std.AutoHashMap(usize, void).init(self.allocator);
+        defer seen.deinit();
+
+        const Recorder = struct {
+            seen: *std.AutoHashMap(usize, void),
+
+            fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+                const recorder: *@This() = @ptrCast(@alignCast(context));
+                if (slot.cycleMarkHeader()) |header| {
+                    const addr = @intFromPtr(header);
+                    if (addr < 4096 or addr % @alignOf(core.gc.Header) != 0) return error.OutOfMemory;
+                    try recorder.seen.put(addr, {});
+                }
+            }
+
+            fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
+                const recorder: *@This() = @ptrCast(@alignCast(context));
+                const object = slot.* orelse return;
+                try recorder.seen.put(@intFromPtr(&object.header), {});
+            }
+        };
+        var recorder = Recorder{ .seen = &seen };
+        var visitor = core.runtime.RootVisitor{
+            .context = @ptrCast(&recorder),
+            .visit_value = Recorder.visitValue,
+            .visit_object = Recorder.visitObject,
+        };
+        try rt.traceActiveRoots(&visitor);
+
+        var live_local: ?*core.gc.Header = null;
+        try assertLiveWindowsVisited(active, &seen, &live_local);
+        self.saw_live_local = live_local != null;
+
+        const stack = active.machine.currentLevel().stack;
+        const unused = stack.backingValues()[stack.len()..];
+        if (unused.len != 0) {
+            self.unused_capacity_checked = true;
+            const orphan = try core.Object.create(rt, core.class.ids.object, null);
+            const saved = unused[0];
+            unused[0] = orphan.value();
+            defer unused[0] = saved;
+            defer orphan.value().free(rt);
+
+            seen.clearRetainingCapacity();
+            try rt.traceActiveRoots(&visitor);
+            if (seen.contains(@intFromPtr(&orphan.header))) {
+                self.unused_capacity_leaked = true;
+            }
+        }
+
+        // Heap-wide shadow tracing is a post-quiesce observer. A live native
+        // callback is not a quiesced heap (in-flight payloads can still hold
+        // uninit child slots). Live-window coverage is the visitor lockstep.
+
+        return core.JSValue.boolean(self.saw_live_local and !self.unused_capacity_leaked);
+    }
+};
+
+fn assertLiveWindowsVisited(
+    active: *inline_calls.ActiveInvocation,
+    seen: *std.AutoHashMap(usize, void),
+    live_local: *?*core.gc.Header,
+) !void {
+    var current: ?*inline_calls.ActiveInvocation = active;
+    while (current) |invocation| {
+        try expectFrameVisited(invocation.machine.l0.level.frame, seen, live_local);
+        try expectValueVisitedSlice(invocation.machine.l0.level.stack.liveValues(), seen);
+        var entry = invocation.machine.top;
+        while (entry) |current_entry| {
+            try expectFrameVisited(&current_entry.frame, seen, live_local);
+            try expectValueVisitedSlice(current_entry.stack.liveValues(), seen);
+            if (current_entry.teardown.has_native_caller or current_entry.teardown.constructor_completion) {
+                try expectValueVisited(&current_entry.native_caller, seen);
+            }
+            entry = current_entry.prev;
+        }
+        current = invocation.previous;
+    }
+}
+
+fn expectFrameVisited(
+    frame: *frame_mod.Frame,
+    seen: *std.AutoHashMap(usize, void),
+    live_local: *?*core.gc.Header,
+) !void {
+    try expectValueVisited(&frame.this_value, seen);
+    try expectValueVisited(&frame.current_function, seen);
+    try expectValueVisitedSlice(frame.args, seen);
+    try expectValueVisitedSlice(frame.locals, seen);
+    if (live_local.* == null) {
+        for (frame.locals) |*local| {
+            if (local.cycleMarkHeader()) |header| {
+                live_local.* = header;
+                break;
+            }
+        }
+    }
+    if (frame.cold) |cold| {
+        if (frame.ownership.new_target != .aliases_function) {
+            try expectValueVisited(&cold.new_target, seen);
+        }
+        try expectValueVisitedSlice(cold.original_args, seen);
+    }
+    for (frame.var_refs) |cell| {
+        var cell_value = cell.valueRef();
+        try expectValueVisited(&cell_value, seen);
+    }
+    for (frame.open_var_refs) |maybe_cell| {
+        const cell = maybe_cell orelse continue;
+        var cell_value = cell.valueRef();
+        try expectValueVisited(&cell_value, seen);
+    }
+}
+
+fn expectValueVisitedSlice(values: []core.JSValue, seen: *std.AutoHashMap(usize, void)) !void {
+    for (values) |*value| try expectValueVisited(value, seen);
+}
+
+fn expectValueVisited(value: *core.JSValue, seen: *std.AutoHashMap(usize, void)) !void {
+    const header = value.cycleMarkHeader() orelse return;
+    try std.testing.expect(seen.contains(@intFromPtr(header)));
+}
+
+test "active invocation Adapter traces live VM windows and not unused stack capacity" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var probe = ActiveInvocationRootProbe{ .allocator = std.testing.allocator };
+    try js.defineGlobalExternalHostFunction(
+        "activeInvocationProbe",
+        0,
+        &probe,
+        ActiveInvocationRootProbe.call,
+        null,
+    );
+
+    const result = try js.eval(
+        \\function holdHidden() {
+        \\    const hidden = { marker: 1 };
+        \\    const ok = activeInvocationProbe();
+        \\    return [ok, hidden];
+        \\}
+        \\holdHidden();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(probe.saw_live_local);
+    try std.testing.expect(probe.unused_capacity_checked);
+    try std.testing.expect(!probe.unused_capacity_leaked);
+}

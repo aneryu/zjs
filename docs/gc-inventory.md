@@ -296,9 +296,11 @@ synthetic providers. No plugin or job queue registers a `RootProvider`.
 7. `job_queue.traceRoots`;
 8. every `root_providers` entry.
 
-`traceActiveRoots` calls `traceRoots(null, visitor)` — it **does not** pass
-`self.active_value_roots`. Even the visitor API ignores the linked frame
-stack.
+When `value_root_frames_enabled` (tests and `-Dzjs_gc=shadow`),
+`traceActiveRoots` calls `traceRoots(self.active_value_roots, visitor)` and
+then the exec Adapter at `active_invocation` (first word is
+`ActiveInvocationTrace`). Default `rc` still compiles to
+`traceRoots(null, visitor)` so production `.text` is unchanged.
 
 Covered via `JSContext.traceRoots` (provider): unhandled rejections, eval
 function, OOM error, class/native-error prototypes, cached function/promise
@@ -312,12 +314,55 @@ node instead): `modules`, the five initial shapes.
 
 | Set | Where it lives | Today | Risk |
 |---|---|---|---|
-| Linked `ValueRootFrame`s | `JSRuntime.active_value_roots` | compiled out in production; visitor passes `null` even in tests | HIGH / SHELL |
+| Linked `ValueRootFrame`s | `JSRuntime.active_value_roots` | compiled out in production; tests/shadow `traceActiveRoots` now pass the list | HIGH / SHELL in default `rc` |
 | `pollGC` / cycle-collector `roots` argument | see §3.7 | discarded the whole way down | HIGH / SHELL |
-| Active bytecode invocation | `JSRuntime.active_invocation: ?*anyopaque`, published by `src/exec/zjs_vm.zig`; decoded in `src/exec/inline_calls.zig` | not traced; VM slots own RC | HIGH (design §2.2 gap 2) |
+| Active bytecode invocation | `JSRuntime.active_invocation: ?*anyopaque`, published by `src/exec/zjs_vm.zig`; decoded in `src/exec/inline_calls.zig` | tests/shadow: `ActiveInvocationTrace` prefix + `src/exec/active_invocation_trace.zig` walks live windows only; default `rc` erases the call | HIGH, gated Adapter landed (design §2.2 gap 2) |
 | Weak slots | `weak_root_slots` | correctly omitted from strong tracing; swept in `gcRemoveWeakObjects` | LOW |
 | Conservative native stack/registers | none | no scanner | HIGH (Stage 1 deliverable) |
 | Atoms that own GC values | `AtomTable` | unique-symbol atoms are kept by atom RC / dedicated tests, not by `traceRoots` | MED |
+
+### 3.4.1 Active-invocation live windows (gated Adapter)
+
+Authority: `src/exec/active_invocation_trace.zig`, invoked through
+`ActiveInvocation.header: ActiveInvocationTrace` at offset 0 when
+`value_root_frames_enabled`. Nested `runWithArgsState` is chained via
+`ActiveInvocation.previous` (tracing builds only; default `rc` keeps those
+fields as `void` so the publish path stays two pointers).
+
+| Class | Owner | Live range | Not visited |
+|---|---|---|---|
+| arguments | `Frame.args` | typed window length (`FrameSlab` partition `arg_count`) | `Frame.storage_values` unused tail |
+| original arguments | `Frame.cold.original_args` | typed window; absent when `cold == null` | unused slab capacity |
+| locals | `Frame.locals` | typed window length (`local_count`) | unused slab capacity |
+| operand stack | `Stack.liveValues()` | `top_ptr - values` (`Stack.len()`) | `Stack.backingValues()[len..capacity]` |
+| VarRef cells | `Frame.var_refs` | every element is a live cell by construction | unused pointer-region bytes in the slab |
+| open VarRef cells | `Frame.open_var_refs` | non-null slots only | nulls |
+| this | `Frame.this_value` | always | — |
+| current function | `Frame.current_function` plus `Frame.function` bytecode header | always | — |
+| new.target | `Frame.cold.new_target` | only when `ownership.new_target != .aliases_function` | the alias (already `current_function`) |
+| native caller / ctor fallback | `Entry.native_caller` | `teardown.has_native_caller` or `constructor_completion` | empty-leaf overlay (resume words, not a JSValue) |
+| running generator object | `L0State.generator_state` | resume only | — |
+| L0 frame + stack | `Machine.l0.level` | always, including when `depth > 0` | unused Entry chunk slots (`chunks` capacity) |
+| inline frames | `Machine.top` → `Entry.prev` | live chain only | unused chunk entries |
+
+Walks `Machine`, not `MachineBacktraceView`: a native fence freezes a view
+but does not hide the Entry chain from marking.
+
+**Suspended generator/async is not an invocation root.** Exact parked
+state lives on the heap object:
+
+- `GeneratorPayload` (`src/core/generator_state.zig`)
+- `GeneratorExecutionState.this_value` / `current_function` / `yield_star_iterator`
+- `SuspendedExecutionState.storage` (`SuspendedStackStorage.values` live
+  prefix, `SuspendedFrameStorage` locals/args/var_refs/open_var_refs)
+- `GeneratorPayload.traceChildEdges` walks those windows iff
+  `!execution.suspended.running_aliases`; while `running_aliases` is true
+  the live Frame/Stack owns the slots and the Adapter above walks them.
+- `async_promise` and `async_queue[]` stay payload child edges.
+- There is no stackful-fiber subsystem (design §7.2).
+
+`createGeneratorShell` unpublished construction remains a ValueRootFrame /
+RC window, not an `active_invocation` root.
 
 ### 3.5 Handle types (`JSValue.Scope` / `Local` / `Persistent` / `Weak`)
 
@@ -560,8 +605,9 @@ already feeds `pollGC` / `shouldRunMajorAt` (`src/core/memory.zig`).
 
 1. Eight `gc.RefKind`s, 21 `class.PayloadKind`s, 8 `Job.Payload` tags.
 2. One `RootProvider` production registrant: `JSContext`.
-3. `value_root_frames_enabled = builtin.is_test`.
-4. `traceActiveRoots` ignores `active_value_roots`.
+3. `value_root_frames_enabled = builtin.is_test or gc.shadow_tracer_enabled`.
+4. `traceActiveRoots` passes `active_value_roots` and the exec Adapter when
+   `value_root_frames_enabled`; default `rc` still calls `traceRoots(null, visitor)`.
 5. `pollGC` and `destroyRuntimeCyclesWithValueRoots` both `_ = roots;` —
    empty shell, not wired in this tranche.
 6. Plugin tracer symbol that blocks reclaiming tracing:

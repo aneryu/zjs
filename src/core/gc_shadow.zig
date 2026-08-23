@@ -162,9 +162,7 @@ pub const Report = struct {
         }
         try writer.print(
             \\  zero-unexplained still needs:
-            \\    - production ValueRootFrame (currently test-only)
-            \\    - exec active_invocation Adapter
-            \\    - conservative native stack/register scanner
+            \\    - conservative native stack/register scanner (scalar Zig locals)
             \\    - ephemeron fixed point (classified, not marked)
             \\
         , .{});
@@ -227,7 +225,11 @@ const Tracer = struct {
 
     fn shade(self: *Tracer, header: *gc.Header) void {
         if (self.err != null) return;
-        const gop = self.reachable.getOrPut(@intFromPtr(header)) catch |err| {
+        const addr = @intFromPtr(header);
+        // Precise roots should never produce this; keep the observer from
+        // chasing a tagged immediate that leaked into a JSValue window.
+        if (addr < 4096 or !std.mem.isAligned(addr, @alignOf(gc.Header))) return;
+        const gop = self.reachable.getOrPut(addr) catch |err| {
             self.err = err;
             return;
         };
@@ -316,9 +318,9 @@ const Tracer = struct {
             .visit_value = Adaptor.visitValue,
             .visit_object = Adaptor.visitObject,
         };
-        // Use the linked frame stack when test builds actually maintain it.
-        // Production keeps this null (`value_root_frames_enabled` is false).
-        try self.rt.traceRoots(self.rt.active_value_roots, &visitor);
+        // ValueRootFrames plus the exec active-invocation Adapter. Default
+        // `rc` comptime-erases both; shadow/tests pass the live lists.
+        try self.rt.traceActiveRoots(&visitor);
     }
 
     fn drain(self: *Tracer) ShadowError!void {
