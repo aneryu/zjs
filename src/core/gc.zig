@@ -1829,7 +1829,14 @@ pub const Registry = struct {
         // Independent of the JS heap allocator: NoFail publication must not
         // grow a new fallible allocation on the object allocator, and
         // conservative lookup must not recurse into collectBeforeObjectAllocation.
-        return std.heap.page_allocator;
+        //
+        // Independence is the requirement; going straight to the OS is not.
+        // This runs on every publication, and page_allocator turns each
+        // hash-map rehash and each page-bucket growth into an mmap/munmap
+        // syscall pair -- which profiled at 97% of the tracing build's time.
+        // A general-purpose allocator keeps the independence and amortizes
+        // the syscalls.
+        return std.heap.smp_allocator;
     }
 
     inline fn registerLiveAddress(self: *Registry, header: *GCObjectHeader, bytes: usize, tracked: bool) void {
