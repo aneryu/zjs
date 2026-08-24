@@ -85,6 +85,25 @@ pub fn runMutableVm(vm: *engine.exec.Vm, function: *const engine.bytecode.Byteco
     return vm.run(execution_adapter.init(function));
 }
 
+/// Reclaim whatever the test has just dropped its last reference to.
+///
+/// Under refcounting the drop itself destroys, so a test can assert on
+/// `liveCount()`, heap stats or a finalizer having run the instant it releases.
+/// Under the tracer nothing is reclaimed until a collection runs, and a test
+/// that asserts the refcounting timing would only be asserting that RC is still
+/// doing the work -- which is the thing being removed. Interposing a collection
+/// keeps one test body meaningful in both builds.
+///
+/// The scan is `declared_only` (via `runObjectCycleRemoval`), so anything the
+/// test still holds must be named in a `rootValues`/`rootObjects` frame. That
+/// is deliberate: it is the precise-scan discipline that makes these tests
+/// deterministic, and it is what turns a missing root into a test failure
+/// rather than into a conservative-scan accident.
+pub fn reclaimNow(rt: *core.JSRuntime) void {
+    if (comptime !core.gc.trace_stw_enabled) return;
+    _ = rt.runObjectCycleRemoval();
+}
+
 pub fn objectFromValue(value: core.JSValue) *core.Object {
     return core.value_semantics.objectFromValue(value).?;
 }

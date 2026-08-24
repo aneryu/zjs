@@ -2472,7 +2472,7 @@ pub const JSRuntime = struct {
     pub fn retainWeakIdentity(self: *JSRuntime, identity: usize) void {
         if ((identity & 1) == 0) {
             const object = self.objectFromWeakIdentity(identity) orelse return;
-            std.debug.assert(object.header.meta().rc > 0);
+            if (comptime !gc.trace_stw_enabled) std.debug.assert(object.header.meta().rc > 0);
             object.weakref_count += 1;
             return;
         }
@@ -2486,7 +2486,20 @@ pub const JSRuntime = struct {
             const object = self.objectFromWeakIdentity(identity) orelse return;
             std.debug.assert(object.weakref_count > 0);
             object.weakref_count -= 1;
-            if (object.weakref_count == 0 and object.header.meta().rc == 0 and !object.header.meta().flags.mark) {
+            // A husk is an object the collector already stripped of resources
+            // but kept allocated because a WeakRef still names it; dropping the
+            // last WeakRef is what finally frees the struct. Under refcounting
+            // `rc == 0 and !mark` identifies exactly that state. Under the
+            // tracer it does not: rc 0 is now the resting state of a perfectly
+            // live object, and freeing one here hands out a dangling struct
+            // that the next sweep then frees a second time. `finalizing` is the
+            // discriminator instead -- `drainCycleDeferredFrees` leaves it set
+            // on husks precisely so this test can read it.
+            const is_stripped_husk = if (comptime gc.trace_stw_enabled)
+                object.header.meta().flags.finalizing
+            else
+                object.header.meta().rc == 0 and !object.header.meta().flags.mark;
+            if (object.weakref_count == 0 and is_stripped_husk) {
                 Object.destroyDeadWeakHusk(self, object);
             }
             return;

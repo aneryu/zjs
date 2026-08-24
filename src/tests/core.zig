@@ -310,6 +310,7 @@ test "proven object release preserves generic JSValue ownership semantics" {
     retained.freeObjectAssumeObject(rt);
     try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
     value.freeObjectAssumeObject(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
 

@@ -561,7 +561,17 @@ pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
                 if (rt.gc.phase == .remove_cycles and obj.weakref_count != 0) {
                     h.meta().flags.mark = false;
                     h.meta().flags.cycle_visited = false;
-                    h.meta().flags.finalizing = false;
+                    // qjs clears `finalizing` here because under refcounting
+                    // `rc == 0` already identifies the husk. The tracer has no
+                    // such signal -- rc 0 is the resting state of a live object
+                    // -- so the bit stays set and becomes the husk marker that
+                    // `releaseWeakIdentity` reads. rc is forced to 0 to keep
+                    // `destroyDeadWeakHusk`'s preconditions meaningful.
+                    if (comptime gc.trace_stw_enabled) {
+                        h.meta().rc = 0;
+                    } else {
+                        h.meta().flags.finalizing = false;
+                    }
                 } else {
                     Object.freeCycleDeferredStruct(rt, obj);
                 }

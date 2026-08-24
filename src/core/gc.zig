@@ -509,7 +509,12 @@ pub const BlockHeader = extern struct {
 
     pub inline fn retain(self: *BlockHeader) void {
         const m = self.meta();
-        std.debug.assert(m.rc > 0);
+        // With the tracer owning reclamation, rc 0 no longer implies destroyed:
+        // an object whose last counted reference went away stays fully live
+        // until a collection condemns it, and the runtime still holds raw
+        // pointers to some of those (e.g. `context_head`). Re-retaining such an
+        // object is legal here and meaningless to liveness.
+        if (comptime !trace_stw_enabled) std.debug.assert(m.rc > 0);
         m.rc += 1;
     }
 
@@ -2285,6 +2290,20 @@ pub noinline fn destroyZeroRef(rt: anytype, header: *Header) align(32) void {
     // a live/shared shape's eager release here can never reach rc 0 during a cycle
     // round, so shape needs no gate.
     if (rt.gc.phase == .remove_cycles and zeroRefKindMatches(header.meta().flags.kind, .remove_cycles)) return;
+
+    // Under the tracing collector the trace owns the lifetime of every kind on
+    // `gc_obj_list`: `sweepUnmarked` (gc_trace_stw.zig) condemns all six
+    // cycle-candidate kinds on mark + pin alone and tears each one down in a
+    // safe order. A second, eager reclamation path keyed on rc is exactly what
+    // let a missing root or a missing barrier stay invisible, so during normal
+    // execution reaching rc 0 must mean nothing at all. Runtime teardown is
+    // excluded: `.deinit` still drains the heap through here for the kinds its
+    // own gate above does not claim. Strings, ropes and BigInt are NOT on
+    // `gc_obj_list` -- the tracer never sees them -- so they keep refcounting
+    // forever, which is why this gate is a kind test and not a blanket return.
+    if (comptime trace_stw_enabled) {
+        if (rt.gc.phase != .deinit and Registry.isCycleCandidate(header)) return;
+    }
 
     // qjs free_var_ref (quickjs.c:6164-6183) tears a dead cell down fully
     // synchronously: --ref_count -> JS_FreeValueRT(value) -> remove_gc_object
