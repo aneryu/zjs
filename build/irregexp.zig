@@ -8,6 +8,7 @@ const cxx_flags = [_][]const u8{
     "-fno-exceptions",
     "-fno-rtti",
     "-DCOMPILING_IRREGEXP_FOR_EXTERNAL_EMBEDDER",
+    "-DV8_ENABLE_REGEXP_INTERPRETER_THREADED_DISPATCH",
     "-Wno-unused-parameter",
     "-Wno-unused-variable",
     "-Wno-sign-compare",

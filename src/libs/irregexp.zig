@@ -731,6 +731,33 @@ test "Irregexp turns extreme nesting into StackOverflow" {
     try std.testing.expectError(error.StackOverflow, compilePatternAndFlags(std.testing.allocator, opens, ""));
 }
 
+test "Irregexp exec reuses isolate state across repeated matches" {
+    const allocator = std.testing.allocator;
+    var compiled = try compilePatternAndFlags(allocator, "a+", "");
+    defer compiled.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < 256) : (i += 1) {
+        const hit = try exec(allocator, compiled.bytecode, .{ .latin1 = "xxaaa" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 2), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 5), hit.match.end);
+
+        const miss = try exec(allocator, compiled.bytecode, .{ .latin1 = "xyz" }, 0);
+        try std.testing.expect(miss.result == .no_match);
+    }
+
+    const empty = try exec(allocator, compiled.bytecode, .{ .latin1 = "" }, 0);
+    try std.testing.expect(empty.result == .no_match);
+
+    var empty_pat = try compilePatternAndFlags(allocator, "(?:)", "");
+    defer empty_pat.deinit(allocator);
+    const empty_hit = try exec(allocator, empty_pat.bytecode, .{ .latin1 = "" }, 0);
+    try std.testing.expect(empty_hit.result == .match);
+    try std.testing.expectEqual(@as(usize, 0), empty_hit.match.start);
+    try std.testing.expectEqual(@as(usize, 0), empty_hit.match.end);
+}
+
 test "Irregexp matches UTF-16 subjects above Latin-1" {
     const allocator = std.testing.allocator;
     const han = [_]u16{0x4E2D};

@@ -142,3 +142,22 @@ test "JavaScript RegExp adapter preserves multiple named capture groups" {
         try std.testing.expectEqualStrings(name, status.match.captures[i].name.?);
     }
 }
+
+test "JavaScript RegExp adapter reuses the interpreter isolate across matches" {
+    var compiled = try compile(std.testing.allocator, "a+", "");
+    defer compiled.deinit(std.testing.allocator);
+
+    var i: usize = 0;
+    while (i < 256) : (i += 1) {
+        const hit = try irregexp.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxaaa" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 2), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 5), hit.match.end);
+
+        const miss = try irregexp.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xyz" }, 0);
+        try std.testing.expect(miss.result == .no_match);
+    }
+
+    const empty = try irregexp.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "" }, 0);
+    try std.testing.expect(empty.result == .no_match);
+}

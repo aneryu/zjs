@@ -5,6 +5,7 @@
 #define IRREGEXP_REGEXP_SHIM_H_
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cctype>
 #include <climits>
@@ -75,6 +76,15 @@
 #endif
 #ifndef V8_UNLIKELY
 #define V8_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#endif
+
+// Token-threaded Irregexp dispatch (computed goto) is a GNU C++ extension.
+#ifndef V8_HAS_COMPUTED_GOTO
+#if defined(__GNUC__) || defined(__clang__)
+#define V8_HAS_COMPUTED_GOTO 1
+#else
+#define V8_HAS_COMPUTED_GOTO 0
+#endif
 #endif
 
 #ifndef V8_TARGET_LITTLE_ENDIAN
@@ -348,18 +358,16 @@ inline int CountTrailingZeros(uint64_t x) {
   DCHECK_NE(x, 0u);
   return __builtin_ctzll(x);
 }
-inline int CountLeadingZeros(uint32_t x) {
-  DCHECK_NE(x, 0u);
-  return __builtin_clz(x);
+inline constexpr int CountLeadingZeros(uint32_t x) {
+  return x == 0 ? 32 : __builtin_clz(x);
 }
-inline int CountLeadingZeros(uint64_t x) {
-  DCHECK_NE(x, 0u);
-  return __builtin_clzll(x);
+inline constexpr int CountLeadingZeros(uint64_t x) {
+  return x == 0 ? 64 : __builtin_clzll(x);
 }
 inline int CountPopulation(uint32_t x) { return __builtin_popcount(x); }
 inline int CountPopulation(uint64_t x) { return __builtin_popcountll(x); }
 
-inline uint32_t RoundUpToPowerOfTwo32(uint32_t x) {
+inline constexpr uint32_t RoundUpToPowerOfTwo32(uint32_t x) {
   if (x <= 1) return 1;
   return static_cast<uint32_t>(1) << (32 - CountLeadingZeros(x - 1));
 }
@@ -1101,28 +1109,34 @@ class ByteArray : public HeapObject {
 
 class TrustedByteArray : public HeapObject {
  public:
-  explicit TrustedByteArray(uint32_t size) : data_(size, 0) {}
+  explicit TrustedByteArray(uint32_t size)
+      : owned_(size, 0), data_(owned_.data()), size_(size) {}
+  // View over caller-owned bytes. `data` must outlive this object.
+  TrustedByteArray(const uint8_t* data, uint32_t size)
+      : data_(data), size_(size) {}
   uint8_t get(int i) const {
     DCHECK_GE(i, 0);
-    DCHECK_LT(static_cast<size_t>(i), data_.size());
+    DCHECK_LT(static_cast<size_t>(i), size_);
     return data_[static_cast<size_t>(i)];
   }
   void set(int i, int value) {
     DCHECK_GE(i, 0);
-    DCHECK_LT(static_cast<size_t>(i), data_.size());
-    data_[static_cast<size_t>(i)] = static_cast<uint8_t>(value);
+    DCHECK_LT(static_cast<size_t>(i), size_);
+    DCHECK(!owned_.empty() || size_ == 0);
+    const_cast<uint8_t*>(data_)[static_cast<size_t>(i)] =
+        static_cast<uint8_t>(value);
   }
-  uint8_t* begin() { return data_.data(); }
-  const uint8_t* begin() const { return data_.data(); }
-  uint8_t* end() { return data_.data() + data_.size(); }
-  const uint8_t* end() const { return data_.data() + data_.size(); }
-  SafeHeapObjectSize length() const {
-    return SafeHeapObjectSize(static_cast<uint32_t>(data_.size()));
-  }
+  uint8_t* begin() { return const_cast<uint8_t*>(data_); }
+  const uint8_t* begin() const { return data_; }
+  uint8_t* end() { return const_cast<uint8_t*>(data_) + size_; }
+  const uint8_t* end() const { return data_ + size_; }
+  SafeHeapObjectSize length() const { return SafeHeapObjectSize(size_); }
   SafeHeapObjectSize ulength() const { return length(); }
 
  private:
-  std::vector<uint8_t> data_;
+  std::vector<uint8_t> owned_;
+  const uint8_t* data_ = nullptr;
+  uint32_t size_ = 0;
 };
 
 using ByteArrayData = ByteArray;
@@ -1320,10 +1334,9 @@ class String : public HeapObject {
   static constexpr uint32_t kMaxUtf16CodeUnitU = 0xffff;
   static constexpr int kMaxCodePoint = 0x10ffff;
 
-  String(const uint8_t* data, int length)
-      : is_one_byte_(true), length_(length), latin1_(data, data + length) {}
-  String(const base::uc16* data, int length)
-      : is_one_byte_(false), length_(length), utf16_(data, data + length) {}
+  // `copy=false` stores a view; `data` must outlive this String.
+  String(const uint8_t* data, int length, bool copy = false);
+  String(const base::uc16* data, int length, bool copy = false);
 
   uint32_t length() const { return static_cast<uint32_t>(length_); }
   bool IsFlat() const { return true; }
@@ -1342,11 +1355,11 @@ class String : public HeapObject {
     bool IsTwoByte() const { return !str_->is_one_byte_; }
     base::Vector<const uint8_t> ToOneByteVector() const {
       DCHECK(IsOneByte());
-      return base::Vector<const uint8_t>(str_->latin1_.data(), str_->length_);
+      return base::Vector<const uint8_t>(str_->latin1_, str_->length_);
     }
     base::Vector<const base::uc16> ToUC16Vector() const {
       DCHECK(IsTwoByte());
-      return base::Vector<const base::uc16>(str_->utf16_.data(), str_->length_);
+      return base::Vector<const base::uc16>(str_->utf16_, str_->length_);
     }
     void UnsafeDisableChecksumVerification() {}
 
@@ -1363,11 +1376,11 @@ class String : public HeapObject {
     if constexpr (sizeof(Char) == 1) {
       DCHECK(is_one_byte_);
       return base::Vector<const Char>(
-          reinterpret_cast<const Char*>(latin1_.data()), length_);
+          reinterpret_cast<const Char*>(latin1_), length_);
     } else {
       DCHECK(!is_one_byte_);
       return base::Vector<const Char>(
-          reinterpret_cast<const Char*>(utf16_.data()), length_);
+          reinterpret_cast<const Char*>(utf16_), length_);
     }
   }
 
@@ -1378,15 +1391,17 @@ class String : public HeapObject {
 
   const uint8_t* AddressOfCharacterAt(int index,
                                       const DisallowGarbageCollection&) const {
-    if (is_one_byte_) return latin1_.data() + index;
-    return reinterpret_cast<const uint8_t*>(utf16_.data() + index);
+    if (is_one_byte_) return latin1_ + index;
+    return reinterpret_cast<const uint8_t*>(utf16_ + index);
   }
 
  private:
-  bool is_one_byte_;
-  int length_;
-  std::vector<uint8_t> latin1_;
-  std::vector<base::uc16> utf16_;
+  bool is_one_byte_ = true;
+  int length_ = 0;
+  const uint8_t* latin1_ = nullptr;
+  const base::uc16* utf16_ = nullptr;
+  std::vector<uint8_t> latin1_owned_;
+  std::vector<base::uc16> utf16_owned_;
 };
 
 class ConsString : public String {
@@ -1538,6 +1553,7 @@ class Counters {
 class StackGuard {
  public:
   explicit StackGuard(Isolate* isolate);
+  void Recalibrate();
   uintptr_t real_climit() const { return climit_; }
   void set_climit(uintptr_t c) { climit_ = c; }
   Tagged<Object> HandleInterrupts();
@@ -1566,6 +1582,8 @@ class Isolate {
   ~Isolate();
 
   static Isolate* Current();
+  static void SetCurrent(Isolate* isolate);
+  void MakeCurrent() { current_ = this; }
 
   Factory* factory() { return &factory_; }
   class LocalHeapStub {

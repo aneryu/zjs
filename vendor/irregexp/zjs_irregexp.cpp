@@ -243,6 +243,63 @@ const char* PersistError(const char* msg) {
   return msg;
 }
 
+Isolate* ThreadExecIsolate() {
+  static thread_local Isolate isolate;
+  return &isolate;
+}
+
+class CurrentIsolateScope {
+ public:
+  explicit CurrentIsolateScope(Isolate* isolate)
+      : previous_(Isolate::Current()), isolate_(isolate) {
+    isolate_->MakeCurrent();
+  }
+  ~CurrentIsolateScope() { Isolate::SetCurrent(previous_); }
+
+  CurrentIsolateScope(const CurrentIsolateScope&) = delete;
+  CurrentIsolateScope& operator=(const CurrentIsolateScope&) = delete;
+
+ private:
+  Isolate* previous_;
+  Isolate* isolate_;
+};
+
+int MapExecResult(Isolate* isolate,
+                  v8::internal::regexp::IrregexpInterpreter::Result result) {
+  switch (result) {
+    case v8::internal::regexp::IrregexpInterpreter::SUCCESS:
+      return ZJS_IRREGEXP_OK;
+    case v8::internal::regexp::IrregexpInterpreter::FAILURE:
+      return ZJS_IRREGEXP_NO_MATCH;
+    case v8::internal::regexp::IrregexpInterpreter::EXCEPTION:
+      if (isolate->interrupted()) return ZJS_IRREGEXP_TIMEOUT;
+      return ZJS_IRREGEXP_STACK;
+    case v8::internal::regexp::IrregexpInterpreter::RETRY:
+      return ZJS_IRREGEXP_TIMEOUT;
+    default:
+      return ZJS_IRREGEXP_CORRUPT;
+  }
+}
+
+int ExecView(Isolate* isolate, const BlobHeader& h, bool exec_one_byte,
+             const uint8_t* bytecode, uint32_t bc_len, String* subject,
+             int32_t* registers, int registers_per_match, int total_regs,
+             size_t start_index) {
+  TrustedByteArray code(bytecode, bc_len);
+  IrRegExpData re_data;
+  re_data.set_flags(static_cast<JSRegExp::Flags>(0));
+  re_data.set_capture_count(static_cast<int>(h.capture_count) - 1);
+  re_data.set_max_register_count(static_cast<int>(h.register_count));
+  Tagged<TrustedByteArray> code_tagged(&code);
+  re_data.set_bytecode(exec_one_byte, code_tagged);
+  Tagged<String> subject_tagged(subject);
+  const auto result = v8::internal::regexp::IrregexpInterpreter::MatchInternal(
+      isolate, &code_tagged, &subject_tagged, registers, registers_per_match,
+      total_regs, static_cast<int>(start_index),
+      v8::internal::RegExp::kFromRuntime, 0);
+  return MapExecResult(isolate, result);
+}
+
 }  // namespace
 
 int zjs_irregexp_compile(const uint8_t* pattern, size_t pattern_len,
@@ -341,8 +398,14 @@ int zjs_irregexp_compile(const uint8_t* pattern, size_t pattern_len,
   std::vector<uint8_t> blob;
   blob.resize(sizeof(BlobHeader));
   blob.insert(blob.end(), names_section.begin(), names_section.end());
+  auto pad4 = [&]() {
+    while ((blob.size() & 3u) != 0) blob.push_back(0);
+  };
+  // Irregexp operand loads require 4-byte-aligned bytecode.
+  pad4();
   const uint32_t latin1_off = static_cast<uint32_t>(blob.size());
   blob.insert(blob.end(), latin1_bc.begin(), latin1_bc.end());
+  pad4();
   const uint32_t uc16_off = static_cast<uint32_t>(blob.size());
   blob.insert(blob.end(), uc16_bc.begin(), uc16_bc.end());
 
@@ -435,6 +498,7 @@ int zjs_irregexp_exec(const uint8_t* blob, size_t blob_len, const void* subject,
   if (!ParseHeader(blob, blob_len, &h)) return ZJS_IRREGEXP_CORRUPT;
   if (registers == nullptr && register_count != 0) return ZJS_IRREGEXP_CORRUPT;
   if (start_index > subject_len) return ZJS_IRREGEXP_NO_MATCH;
+  if (subject_len != 0 && subject == nullptr) return ZJS_IRREGEXP_CORRUPT;
 
   const bool want_latin1 = subject_width == ZJS_IRREGEXP_LATIN1;
   uint32_t bc_off = want_latin1 ? h.latin1_off : h.uc16_off;
@@ -459,60 +523,46 @@ int zjs_irregexp_exec(const uint8_t* blob, size_t blob_len, const void* subject,
     bc_off = h.uc16_off;
     bc_len = h.uc16_len;
   }
+  if (bc_len == 0) return ZJS_IRREGEXP_CORRUPT;
 
-  Isolate isolate;
-  isolate.set_interrupt(interrupt, interrupt_opaque);
-  HandleScope scope(&isolate);
+  // Empty Zig slices may pass an undefined pointer with length 0.
+  alignas(alignof(v8::base::uc16)) static const uint8_t kEmptySubject[2] = {0, 0};
+  if (exec_len == 0) exec_subject = kEmptySubject;
 
-  DirectHandle<TrustedByteArray> code(
-      isolate.Adopt<TrustedByteArray>(bc_len), &isolate);
-  if (bc_len != 0) {
-    std::memcpy(code->begin(), blob + bc_off, bc_len);
+  const uint8_t* bytecode = blob + bc_off;
+  std::vector<uint8_t> aligned_bc;
+  if ((reinterpret_cast<uintptr_t>(bytecode) & 3u) != 0) {
+    aligned_bc.assign(bytecode, bytecode + bc_len);
+    bytecode = aligned_bc.data();
   }
-
-  DirectHandle<String> subject_str;
-  if (exec_one_byte) {
-    subject_str = isolate.factory()->NewStringFromOneByte(v8::base::Vector<const uint8_t>(
-        static_cast<const uint8_t*>(exec_subject),
-        static_cast<int>(exec_len)));
-  } else {
-    subject_str = isolate.factory()->NewStringFromTwoByte(v8::base::Vector<const v8::base::uc16>(
-        static_cast<const v8::base::uc16*>(exec_subject),
-        static_cast<int>(exec_len)));
-  }
-
-  DirectHandle<IrRegExpData> re_data(isolate.Adopt<IrRegExpData>(), &isolate);
-  re_data->set_flags(static_cast<JSRegExp::Flags>(0));
-  re_data->set_capture_count(static_cast<int>(h.capture_count) - 1);
-  re_data->set_max_register_count(h.register_count);
-  re_data->set_bytecode(exec_one_byte, *code);
 
   const int captures_including_zero = static_cast<int>(h.capture_count);
   const int registers_per_match = captures_including_zero * 2;
-  const int total_regs = std::max(static_cast<int>(h.register_count),
-                                  registers_per_match);
+  const int total_regs =
+      std::max(static_cast<int>(h.register_count), registers_per_match);
   if (static_cast<int>(register_count) < registers_per_match) {
     return ZJS_IRREGEXP_CORRUPT;
   }
 
-  Tagged<TrustedByteArray> code_tagged = *code;
-  Tagged<String> subject_tagged = *subject_str;
-  const auto result = v8::internal::regexp::IrregexpInterpreter::MatchInternal(
-      &isolate, &code_tagged, &subject_tagged, registers, registers_per_match,
-      total_regs, static_cast<int>(start_index),
-      v8::internal::RegExp::kFromRuntime, 0);
+  Isolate* isolate = ThreadExecIsolate();
+  CurrentIsolateScope current(isolate);
+  isolate->clear_exception();
+  isolate->set_interrupt(interrupt, interrupt_opaque);
+  isolate->stack_guard()->Recalibrate();
 
-  switch (result) {
-    case v8::internal::regexp::IrregexpInterpreter::SUCCESS:
-      return ZJS_IRREGEXP_OK;
-    case v8::internal::regexp::IrregexpInterpreter::FAILURE:
-      return ZJS_IRREGEXP_NO_MATCH;
-    case v8::internal::regexp::IrregexpInterpreter::EXCEPTION:
-      if (isolate.interrupted()) return ZJS_IRREGEXP_TIMEOUT;
-      return ZJS_IRREGEXP_STACK;
-    case v8::internal::regexp::IrregexpInterpreter::RETRY:
-      return ZJS_IRREGEXP_TIMEOUT;
-    default:
-      return ZJS_IRREGEXP_CORRUPT;
+  int status;
+  if (exec_one_byte) {
+    String subject_str(static_cast<const uint8_t*>(exec_subject),
+                       static_cast<int>(exec_len));
+    status = ExecView(isolate, h, true, bytecode, bc_len, &subject_str,
+                      registers, registers_per_match, total_regs, start_index);
+  } else {
+    String subject_str(static_cast<const v8::base::uc16*>(exec_subject),
+                       static_cast<int>(exec_len));
+    status = ExecView(isolate, h, false, bytecode, bc_len, &subject_str,
+                      registers, registers_per_match, total_regs, start_index);
   }
+
+  isolate->set_interrupt(nullptr, nullptr);
+  return status;
 }

@@ -19,6 +19,8 @@ sources are present but must not be compiled into zjs.
 Compile with:
 
 - `-DCOMPILING_IRREGEXP_FOR_EXTERNAL_EMBEDDER`
+- `-DV8_ENABLE_REGEXP_INTERPRETER_THREADED_DISPATCH` (computed-goto dispatch
+  on GCC/Clang; same interpreter family as V8 `--jitless`)
 - no `V8_INTL_SUPPORT`
 - no `V8_ENABLE_REGEXP_DIAGNOSTICS`
 - `-fno-exceptions`
@@ -28,6 +30,10 @@ C ABI: `zjs_irregexp.h` / `zjs_irregexp.cpp`. Zig links this as static
 library `zjs_irregexp` (`build/irregexp.zig`) and wraps it in
 `src/libs/irregexp.zig`. The JS object layer still stores the blob as a
 latin1 string.
+
+Exec reuses a thread-local Isolate and runs against views of the IRRX
+bytecode slice and the caller's subject buffer. Native Irregexp codegen is
+still out of scope.
 
 Both Latin-1 and UC16 bytecode are compiled at pattern-compile time. Each
 width re-parses the source: V8's `EmitClassRanges` clamps shared AST

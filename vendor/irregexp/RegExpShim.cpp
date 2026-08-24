@@ -64,6 +64,28 @@ void PrintF(FILE* out, const char* format, ...) {
   va_end(args);
 }
 
+String::String(const uint8_t* data, int length, bool copy)
+    : is_one_byte_(true), length_(length), latin1_(data), utf16_(nullptr) {
+  if (copy && length > 0 && data != nullptr) {
+    latin1_owned_.assign(data, data + length);
+    latin1_ = latin1_owned_.data();
+  } else if (length <= 0) {
+    latin1_ = nullptr;
+    length_ = 0;
+  }
+}
+
+String::String(const base::uc16* data, int length, bool copy)
+    : is_one_byte_(false), length_(length), latin1_(nullptr), utf16_(data) {
+  if (copy && length > 0 && data != nullptr) {
+    utf16_owned_.assign(data, data + length);
+    utf16_ = utf16_owned_.data();
+  } else if (length <= 0) {
+    utf16_ = nullptr;
+    length_ = 0;
+  }
+}
+
 std::unique_ptr<char[]> String::ToCString() const {
   return ToCString(0, static_cast<uint32_t>(length_));
 }
@@ -118,13 +140,13 @@ Handle<ByteArray> Factory::NewByteArray(int size, AllocationType) {
 
 Handle<String> Factory::NewStringFromOneByte(base::Vector<const uint8_t> chars) {
   return Handle<String>(
-      isolate_->Adopt<String>(chars.begin(), chars.length()), isolate_);
+      isolate_->Adopt<String>(chars.begin(), chars.length(), true), isolate_);
 }
 
 Handle<String> Factory::NewStringFromTwoByte(
     base::Vector<const base::uc16> chars) {
   return Handle<String>(
-      isolate_->Adopt<String>(chars.begin(), chars.length()), isolate_);
+      isolate_->Adopt<String>(chars.begin(), chars.length(), true), isolate_);
 }
 
 DirectHandle<FixedUInt16Array> FixedUInt16Array::New(Isolate* isolate,
@@ -133,12 +155,14 @@ DirectHandle<FixedUInt16Array> FixedUInt16Array::New(Isolate* isolate,
       isolate->Adopt<FixedUInt16Array>(length), isolate);
 }
 
-StackGuard::StackGuard(Isolate* isolate) : isolate_(isolate) {
+void StackGuard::Recalibrate() {
   const uintptr_t now = GetCurrentStackPosition();
   // Stacks grow down. Leave ~1MiB before we report overflow.
   constexpr uintptr_t kSlack = 1 * 1024 * 1024;
   climit_ = now > kSlack ? now - kSlack : 0;
 }
+
+StackGuard::StackGuard(Isolate* isolate) : isolate_(isolate) { Recalibrate(); }
 
 Tagged<Object> StackGuard::HandleInterrupts() {
   if (isolate_->interrupt_fn() != nullptr) {
@@ -186,6 +210,8 @@ Isolate::~Isolate() {
 }
 
 Isolate* Isolate::Current() { return current_; }
+
+void Isolate::SetCurrent(Isolate* isolate) { current_ = isolate; }
 
 void Isolate::StackOverflow() { has_exception_ = true; }
 

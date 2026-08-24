@@ -11687,6 +11687,21 @@ test "RegExp dot matches UTF-16 subjects above Latin-1" {
         "a\n");
 }
 
+test "RegExp exec reuses interpreter state across repeated matches" {
+    try helpers.expectPrints(
+        \\var re = /a+/;
+        \\var n = 0;
+        \\for (var i = 0; i < 256; i++) {
+        \\  var hit = re.exec("xxaaa");
+        \\  if (hit && hit[0] === "aaa" && hit.index === 2) n++;
+        \\  re.lastIndex = 0;
+        \\  if (re.exec("xyz")) n = -1;
+        \\  re.lastIndex = 0;
+        \\}
+        \\print(n, /a+/.exec("") === null, /(?:)/.exec("")[0] === "");
+    , "256 true true\n");
+}
+
 test "RegExp compiler stack overflow is a catchable SyntaxError" {
     try helpers.expectPrints(
         \\try { new RegExp("(?:".repeat(40000)); print("no throw"); } catch(e) { print(e.name + ":" + e.message); }
