@@ -64,6 +64,12 @@ pub const Table = struct {
     pages: std.AutoHashMapUnmanaged(usize, PageBucket) = .empty,
     by_header: std.AutoHashMapUnmanaged(usize, Occupant) = .empty,
     stats: Stats = .{},
+    /// Union of every registered range, so a conservative candidate outside
+    /// the heap is rejected by two compares instead of a hash probe. The
+    /// bounds never shrink; a stale-wide window only costs a probe that
+    /// would have happened anyway.
+    bounds_lo: usize = std.math.maxInt(usize),
+    bounds_hi: usize = 0,
 
     pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
         var iterator = self.pages.iterator();
@@ -104,9 +110,16 @@ pub const Table = struct {
     fn insertOccupant(self: *Table, allocator: std.mem.Allocator, occupant: Occupant) std.mem.Allocator.Error!void {
         self.stats.register_calls += 1;
         const key = occupant.ptr;
-        if (self.by_header.contains(key)) return;
-        try self.by_header.put(allocator, key, occupant);
+        // One hash probe, not two: `contains` followed by `put` hashed the
+        // same key twice on every publication, which is the mutator's
+        // allocation path.
+        const entry = try self.by_header.getOrPut(allocator, key);
+        if (entry.found_existing) return;
+        entry.value_ptr.* = occupant;
         errdefer _ = self.by_header.remove(key);
+
+        if (occupant.lo < self.bounds_lo) self.bounds_lo = occupant.lo;
+        if (occupant.hi > self.bounds_hi) self.bounds_hi = occupant.hi;
 
         const first_page = occupant.lo >> page_shift;
         const last_page = (occupant.hi - 1) >> page_shift;
@@ -164,7 +177,7 @@ pub const Table = struct {
 
     pub fn resolveAny(self: *Table, addr: usize) ?Hit {
         self.stats.lookup_calls += 1;
-        if (addr < 4096) return null;
+        if (addr < self.bounds_lo or addr >= self.bounds_hi) return null;
         const bucket = self.pages.getPtr(addr >> page_shift) orelse return null;
         // One-past-end of object A can equal the metadata prefix of object B.
         // Census snapshot lookup picked the last range with `lo <= addr`
