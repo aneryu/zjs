@@ -13272,7 +13272,7 @@ test "minor collection reclaims young garbage and promotes survivors" {
     try std.testing.expect(rt.gc.liveCount() > 0);
 }
 
-test "a minor parks no deferred frees, and cannot yet reclaim young cycles" {
+test "the minor reclaims young cycles and parks no deferred frees" {
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -13309,16 +13309,13 @@ test "a minor parks no deferred frees, and cannot yet reclaim young cycles" {
     // returned without draining, so anything it condemned kept its memory.
     try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
 
-    // Pins the coexistence contract, and is expected to change: while
-    // refcounting owns liveness, `sweepUnmarkedYoung` deliberately refuses to
-    // condemn anything with `rc > 0`, so young cycles survive the minor and
-    // land in `survived_by_refcount`, to be reclaimed by trial deletion on
-    // the major path. A pure tracer needs no cycle strategy at all -- JSC's
-    // `MarkedBlock::Handle::isLive` is just allocated-or-marked -- so when the
-    // refcount backstop is removed this assertion inverts rather than
-    // disappearing: the minor becomes the young-cycle collector.
-    try std.testing.expectEqual(@as(usize, 0), reclaimed);
-    try std.testing.expect(rt.gc.generation.stats.survived_by_refcount >= 1000);
+    // The minor is now the young-cycle collector: the trace is the liveness
+    // authority, so both halves of an unreachable cycle are condemned even
+    // though each holds the other's count above zero. A pure tracer needs no
+    // cycle strategy at all -- JSC's `MarkedBlock::Handle::isLive` is just
+    // allocated-or-marked, and its heap carries no trial-deletion machinery.
+    try std.testing.expect(reclaimed >= 1000);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.stats.survived_by_refcount);
 }
 
 test "the young-suffix guard rejects a stranded anchor" {
@@ -13360,8 +13357,14 @@ test "old-to-young edge survives a minor only because the barrier remembered it"
     defer ctx.destroy();
 
     // Age an owner: after one minor everything that survived counts as old.
+    // The trace is the liveness authority now, so a Zig-local owner has to be
+    // declared or the minor will (correctly) condemn it.
     const owner = try core.Object.createPlainObject(rt, null);
     defer owner.value().free(rt);
+    var owner_slot: ?*core.Object = owner;
+    var owner_roots = core.runtime.rootObjects(.{&owner_slot});
+    owner_roots.activate(rt);
+    defer owner_roots.deactivate(rt);
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     try std.testing.expect(!rt.gc.generation.isYoung(&owner.header));
 

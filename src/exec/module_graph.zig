@@ -48,6 +48,79 @@ pub const ModuleEvalStep = union(enum) {
     },
 };
 
+
+/// A module continuation list holds JSValues inside a native array, which a
+/// declared-roots trace cannot see. Under refcounting that was harmless --
+/// the stored values carried counts -- but the tracing collector is the
+/// liveness authority, so the list has to announce itself. Registers for the
+/// scope of the list and traces both value fields of every live element.
+///
+/// Erased entirely in the default `rc` build, where no trace runs.
+const ContinuationRoots = struct {
+    runtime: *core.JSRuntime,
+    list: *std.ArrayList(ModuleContinuation),
+    registered: bool = false,
+
+    fn traceRoots(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        const self: *ContinuationRoots = @ptrCast(@alignCast(context));
+        for (self.list.items) |*entry| {
+            try visitor.value(&entry.continuation);
+            try visitor.value(&entry.awaited);
+        }
+    }
+
+    fn provider(self: *ContinuationRoots) core.runtime.RootProvider {
+        return .{ .context = @ptrCast(self), .trace = traceRoots };
+    }
+
+    fn activate(self: *ContinuationRoots) void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        self.runtime.registerRootProvider(self.provider()) catch return;
+        self.registered = true;
+    }
+
+    fn deactivate(self: *ContinuationRoots) void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        if (!self.registered) return;
+        self.runtime.unregisterRootProvider(self.provider());
+        self.registered = false;
+    }
+};
+
+
+/// Sibling of `ContinuationRoots` for the evaluation-waiter lists, which hold
+/// their `resolve`/`reject` functions in the same kind of native array.
+const WaiterRoots = struct {
+    runtime: *core.JSRuntime,
+    list: *std.ArrayList(ModuleEvaluationWaiter),
+    registered: bool = false,
+
+    fn traceRoots(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        const self: *WaiterRoots = @ptrCast(@alignCast(context));
+        for (self.list.items) |*entry| {
+            try visitor.value(&entry.resolve);
+            try visitor.value(&entry.reject);
+        }
+    }
+
+    fn provider(self: *WaiterRoots) core.runtime.RootProvider {
+        return .{ .context = @ptrCast(self), .trace = traceRoots };
+    }
+
+    fn activate(self: *WaiterRoots) void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        self.runtime.registerRootProvider(self.provider()) catch return;
+        self.registered = true;
+    }
+
+    fn deactivate(self: *WaiterRoots) void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        if (!self.registered) return;
+        self.runtime.unregisterRootProvider(self.provider());
+        self.registered = false;
+    }
+};
+
 pub const ModuleContinuation = struct {
     realm: core.RealmRef,
     path: []const u8,
@@ -797,8 +870,14 @@ pub fn evalFileModuleGraphWithOutput(
     );
     var continuations = std.ArrayList(ModuleContinuation).empty;
     defer freeModuleContinuations(runtime, allocator, &continuations);
+    var continuation_roots = ContinuationRoots{ .runtime = runtime, .list = &continuations };
+    continuation_roots.activate();
+    defer continuation_roots.deactivate();
     var module_waiters = std.ArrayList(ModuleEvaluationWaiter).empty;
     defer freeModuleEvaluationWaiters(runtime, allocator, &module_waiters);
+    var waiter_roots = WaiterRoots{ .runtime = runtime, .list = &module_waiters };
+    waiter_roots.activate();
+    defer waiter_roots.deactivate();
     var dynamic_import_state = DynamicImportState{
         .runtime = runtime,
         .output = output,
@@ -898,6 +977,9 @@ pub fn evalFileModuleGraphWithHostHooks(
 
     var continuations = std.ArrayList(ModuleContinuation).empty;
     defer freeModuleContinuations(runtime, allocator, &continuations);
+    var continuation_roots = ContinuationRoots{ .runtime = runtime, .list = &continuations };
+    continuation_roots.activate();
+    defer continuation_roots.deactivate();
 
     for (module_postorder.items) |path| {
         if (std.mem.eql(u8, path, filename)) continue;
@@ -1899,6 +1981,9 @@ fn evalDynamicImportModuleWithHostHooks(
 
     var continuations = std.ArrayList(ModuleContinuation).empty;
     defer freeModuleContinuations(runtime, allocator, &continuations);
+    var continuation_roots = ContinuationRoots{ .runtime = runtime, .list = &continuations };
+    continuation_roots.activate();
+    defer continuation_roots.deactivate();
 
     for (postorder.items) |path| {
         const module_atom = try runtime.internAtom(path);
