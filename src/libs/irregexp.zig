@@ -338,13 +338,91 @@ pub fn compilePatternAndFlagsWithOptions(
     return compilePatternWithFlagBitsAndOptions(allocator, pattern, try parseFlagBits(flags_str), options);
 }
 
+/// Nesting budget for the compile-time stack guard. V8's parser is largely
+/// iterative, so deep `(?:` / nested-`v` class trees do not overflow its C++
+/// stack the way the QuickJS-style recursive compiler did. JS still needs a
+/// catchable `SyntaxError: stack overflow` instead of an unbounded compile or
+/// an OS stack crash. 2048 covers the existing shallow-ok fixtures (1000
+/// groups, 200 nested classes) and rejects the overflow fixtures (40000
+/// groups, 4000 nested `v` classes).
+const compile_nest_limit: usize = 2048;
+const compile_nest_frame_bytes: usize = 256;
+
+fn checkCompileNesting(pattern: []const u8, re_flags: u16, options: CompileOptions) CompileError!void {
+    const unicode_sets = (re_flags & flags.unicode_sets) != 0;
+    var index: usize = 0;
+    var depth: usize = 0;
+    var class_depth: usize = 0;
+    while (index < pattern.len) {
+        const byte = pattern[index];
+        if (byte == '\\') {
+            index += if (index + 1 < pattern.len) @as(usize, 2) else 1;
+            continue;
+        }
+        if (class_depth == 0) {
+            if (byte == '(') {
+                try pushCompileNest(&depth, options);
+            } else if (byte == ')' and depth > 0) {
+                depth -= 1;
+            } else if (byte == '[') {
+                try pushCompileNest(&depth, options);
+                if (unicode_sets) {
+                    class_depth = 1;
+                } else if (skipCharacterClass(pattern, &index)) {
+                    if (depth > 0) depth -= 1;
+                    continue;
+                }
+            }
+        } else if (byte == '[' and unicode_sets) {
+            try pushCompileNest(&depth, options);
+            class_depth += 1;
+        } else if (byte == ']') {
+            class_depth -= 1;
+            if (depth > 0) depth -= 1;
+        }
+        index += 1;
+    }
+}
+
+fn pushCompileNest(depth: *usize, options: CompileOptions) CompileError!void {
+    depth.* += 1;
+    if (depth.* > compile_nest_limit) return error.StackOverflow;
+    const check = options.check_stack_overflow orelse return;
+    if (check(options.@"opaque", depth.* * compile_nest_frame_bytes)) return error.StackOverflow;
+}
+
+fn skipCharacterClass(pattern: []const u8, index: *usize) bool {
+    var i = index.* + 1;
+    if (i < pattern.len and pattern[i] == '^') i += 1;
+    while (i < pattern.len) {
+        if (pattern[i] == '\\') {
+            i += if (i + 1 < pattern.len) @as(usize, 2) else 1;
+            continue;
+        }
+        if (pattern[i] == ']') {
+            index.* = i + 1;
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn isV8StackOverflowMessage(message: ?[*:0]const u8) bool {
+    const ptr = message orelse return false;
+    const text = std.mem.span(ptr);
+    return std.mem.eql(u8, text, "Stack overflow") or
+        std.mem.eql(u8, text, "Maximum call stack size exceeded") or
+        std.mem.eql(u8, text, "Regular expression too large");
+}
+
 pub fn compilePatternWithFlagBitsAndOptions(
     allocator: std.mem.Allocator,
     pattern: []const u8,
     re_flags: u16,
     options: CompileOptions,
 ) !Compiled {
-    _ = options;
+    try checkCompileNesting(pattern, re_flags, options);
     // Keep the unicode-hook exports live so the linker does not drop them in
     // favor of the weak ASCII fallbacks in the C++ shim.
     std.mem.doNotOptimizeAway(&zjs_irregexp_canonicalize);
@@ -373,6 +451,9 @@ pub fn compilePatternWithFlagBitsAndOptions(
         zjsFlagsToV8(re_flags),
         &out,
     );
+    if (status != abi.OK and isV8StackOverflowMessage(out.error_message)) {
+        return error.StackOverflow;
+    }
     try compileStatus(status);
     const blob = out.blob orelse return error.OutOfMemory;
     defer abi.zjs_irregexp_free(blob);
@@ -643,4 +724,9 @@ test "Irregexp preserves multiple named capture groups" {
 
 test "Irregexp rejects an unclosed group as InvalidPattern" {
     try std.testing.expectError(error.InvalidPattern, compilePatternAndFlags(std.testing.allocator, "(", ""));
+}
+
+test "Irregexp turns extreme nesting into StackOverflow" {
+    const opens = "(?:" ** 3000;
+    try std.testing.expectError(error.StackOverflow, compilePatternAndFlags(std.testing.allocator, opens, ""));
 }
