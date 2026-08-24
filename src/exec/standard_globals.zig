@@ -162,8 +162,7 @@ fn comptimeInternalRecordExists(comptime encoded_id: i32) bool {
     const domain_index: usize = @intCast(@intFromEnum(native_ref.domain));
     if (domain_index >= internal_builtins.table.len) return false;
     const records = internal_builtins.table[domain_index];
-    if (native_ref.id >= records.len) return false;
-    return records[native_ref.id].hasCallable();
+    return records.get(native_ref.id) != null;
 }
 
 const NoRecordEntry = struct {

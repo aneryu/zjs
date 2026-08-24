@@ -2832,13 +2832,13 @@ const REParseState = struct {
             return;
         }
 
-        // Sort strings by descending length (stable, preserving insertion
-        // order between equal lengths per spec ordering). The empty string,
-        // if present, lands last. Equal-length strings are distinct and their
-        // order decides match preference, so this is one of the two sites that
-        // must keep the stable block sort rather than `std.sort.heap`.
+        // Sort strings by descending length. Distinct equal-length class-set
+        // strings cannot both match the same input, so their relative order is
+        // unobservable; duplicates are already coalesced. QuickJS likewise
+        // uses its ordinary rqsort with only a length comparator
+        // (libregexp.c:1308). Avoid a large stable block-sort instance here.
         const items = set.strings.items;
-        std.sort.block([]u21, items, {}, struct {
+        std.sort.heap([]u21, items, {}, struct {
             fn longerFirst(_: void, lhs: []u21, rhs: []u21) bool {
                 return lhs.len > rhs.len;
             }
