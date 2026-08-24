@@ -13272,6 +13272,37 @@ test "minor collection reclaims young garbage and promotes survivors" {
     try std.testing.expect(rt.gc.liveCount() > 0);
 }
 
+test "the young-suffix guard rejects a stranded anchor" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // Clear the suffix, then rebuild it so the anchor and at least one
+    // successor are unambiguous.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    const kept = try core.Object.createPlainObject(rt, null);
+    defer kept.value().free(rt);
+    const also = try core.Object.createPlainObject(rt, null);
+    defer also.value().free(rt);
+
+    const anchor = rt.gc.young_head orelse return error.TestUnexpectedResult;
+    const successor = anchor.next orelse return error.TestUnexpectedResult;
+    if (successor == &rt.gc.gc_obj_list) return error.TestUnexpectedResult;
+    try rt.gc.verifyIntrusiveList();
+
+    // Strand the anchor exactly as the pre-2026-08-25 `unlinkObjectWithBytes`
+    // did: the node it names leaves the suffix while still carrying the young
+    // bit. Membership alone would not catch this once a recycled slab put a
+    // live node back at the old address, so the guard checks the suffix shape.
+    rt.gc.young_head = successor;
+    try std.testing.expectError(error.DanglingYoungHead, rt.gc.verifyIntrusiveList());
+
+    rt.gc.young_head = anchor;
+    try rt.gc.verifyIntrusiveList();
+}
+
 test "old-to-young edge survives a minor only because the barrier remembered it" {
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);

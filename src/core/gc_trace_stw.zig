@@ -148,6 +148,12 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     const young_before = rt.gc.generation.stats.young_count;
     if (young_before == 0) return 0;
 
+    // The minor is the consumer of the young-suffix anchor, so verify it here
+    // rather than only at the major boundary: a stale `young_head` is
+    // otherwise unobservable until `clearYoungMarks` dereferences freed
+    // memory, one collection after the detach that stranded it.
+    if (builtin.mode == .Debug) rt.gc.verifyIntrusiveList() catch unreachable;
+
     var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
 

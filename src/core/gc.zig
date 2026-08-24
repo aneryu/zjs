@@ -644,6 +644,10 @@ pub const CollectionResult = struct {
 
 pub const InvariantError = error{
     CorruptGcList,
+    /// `young_head` no longer names a node on `gc_obj_list` -- a detach path
+    /// forgot the young-suffix anchor and the next minor would walk freed
+    /// memory (the `unlinkObjectWithBytes` hole, 2026-08-25).
+    DanglingYoungHead,
     NegativeRefCount,
     MarkBitLeftSet,
     DuplicateHeapAllocation,
@@ -1745,15 +1749,10 @@ pub const Registry = struct {
     /// with no head/tail null branches.
     fn removeGcObject(self: *Registry, header: *GCObjectHeader) void {
         if (header.prev == null) return;
+        // `unregisterLiveAddress` owns the young-suffix anchor fixup for every
+        // detach path; it runs before the `listDel` below so `header.next` is
+        // still the successor it needs.
         if (comptime address_registry_enabled) self.unregisterLiveAddress(header);
-        if (comptime generation_enabled) {
-            // Freeing the object the suffix starts at moves the start to its
-            // successor, which is still young: the suffix only shrinks here.
-            if (self.young_head == header) {
-                const next = header.next;
-                self.young_head = if (next == &self.gc_obj_list) null else next;
-            }
-        }
         listDel(header);
     }
 
@@ -1893,7 +1892,22 @@ pub const Registry = struct {
     inline fn unregisterLiveAddress(self: *Registry, header: *GCObjectHeader) void {
         if (comptime !address_registry_enabled) return;
         self.address_registry.remove(addressRegistryAllocator(), header);
-        if (comptime generation_enabled) self.generation.forget(header);
+        if (comptime generation_enabled) {
+            self.generation.forget(header);
+            // The young set is a SUFFIX of `gc_obj_list` anchored at
+            // `young_head`, so forgetting an object must also move the anchor
+            // off it -- otherwise the next minor's `clearYoungMarks` walks a
+            // freed header. Both gc_obj_list detach paths funnel through here
+            // (`removeGcObject` and `unlinkObjectWithBytes`, the ordinary
+            // mutator-side RC free used by shape replacement, var_ref release
+            // and the typed frees), and both still have `header.next` valid:
+            // the `listDel` follows this call. Freeing the anchor shrinks the
+            // suffix to its successor; the suffix never grows here.
+            if (self.young_head == header) {
+                const next = header.next;
+                self.young_head = if (next == &self.gc_obj_list) null else next;
+            }
+        }
     }
 
     pub fn registerLiveStringRange(
@@ -2037,10 +2051,25 @@ pub const Registry = struct {
             if (hare != &self.gc_obj_list and tortoise == hare) return error.CorruptGcList;
         }
 
+        var saw_young_head = false;
         var previous: *GCObjectHeader = &self.gc_obj_list;
         var current = self.gc_obj_list.next;
         while (current) |h| {
             if (h == &self.gc_obj_list) break;
+            if (comptime generation_enabled) {
+                // The young set is exactly the suffix starting at
+                // `young_head`. Checking membership alone is not enough: a
+                // stranded anchor whose slab has been recycled points at a
+                // live list member again, so "found it" proves nothing. The
+                // suffix shape does prove it -- a recycled anchor lands in
+                // the wrong place and one of the two halves fails.
+                if (self.young_head == h) saw_young_head = true;
+                const is_young = h.metaConst().flags.young;
+                if (self.young_head != null) {
+                    if (!saw_young_head and is_young) return error.DanglingYoungHead;
+                    if (saw_young_head and !is_young) return error.DanglingYoungHead;
+                } else if (is_young) return error.DanglingYoungHead;
+            }
             if (!isCycleCandidate(h)) return error.CorruptGcList;
             if (h.meta().rc < 0) return error.NegativeRefCount;
             // Trial deletion must leave every mark bit clear once a round
@@ -2058,6 +2087,12 @@ pub const Registry = struct {
         }
         if (previous.next != &self.gc_obj_list) return error.CorruptGcList;
         if (self.gc_obj_list.prev != previous) return error.CorruptGcList;
+        // Free-standing check rather than an assert at each detach: the walk
+        // above is already paying for the traversal, and a stale anchor is
+        // only observable as a crash one collection later.
+        if (comptime generation_enabled) {
+            if (self.young_head != null and !saw_young_head) return error.DanglingYoungHead;
+        }
     }
 
     pub fn verifyHeapAccounting(self: *const Registry, rt: anytype) InvariantError!void {
