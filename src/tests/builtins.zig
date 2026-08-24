@@ -760,6 +760,10 @@ test "standard Array prototype guard publication and invalidation are realm loca
     pinned_oom_shape.retain();
     defer js.runtime.shapes.release(pinned_oom_shape);
     const index_zero = core.atom.atomFromUInt32(0);
+    // Injecting an allocation failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    js.runtime.suppressLimitCollectionForTest(true);
+    defer js.runtime.suppressLimitCollectionForTest(false);
     js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
     defer js.runtime.setMemoryLimit(null);
     try std.testing.expectError(

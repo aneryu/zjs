@@ -334,6 +334,11 @@ test "JSBytes.Store transfers owned bytes to ArrayBuffer without copying" {
     try std.testing.expectEqual(@as(u8, 9), backing[2]);
 
     value.free(rt);
+    // The transferred store is released when the ArrayBuffer is torn down --
+    // a collection under the tracer rather than this release. `backing` is
+    // host memory, not a heap reference, so only the buffer object needs to
+    // die and nothing here needs rooting.
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), state.calls);
 }
 
@@ -416,6 +421,11 @@ test "JSBytes.Store transfers shared bytes to SharedArrayBuffer without copying"
     try std.testing.expectEqualSlices(u8, &.{ 12, 9, 10 }, after_detach.slice());
 
     value.free(rt);
+    // A shared store survives detach and is released only with the
+    // SharedArrayBuffer itself, which under the tracer means a collection
+    // rather than this release. Nothing here needs rooting -- the buffer
+    // object is the thing that must die.
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), state.calls);
 }
 

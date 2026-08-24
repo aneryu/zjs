@@ -456,7 +456,11 @@ pub const MemoryAccount = struct {
     /// allocation without collecting first reports OOM for a heap that is
     /// mostly garbage. Installed only by the tracing build; null elsewhere, so
     /// the refcounting limit behaviour is bit-for-bit what it was.
-    limit_gc_fn: ?*const fn (ctx: ?*anyopaque) void = null,
+    limit_gc_fn: ?*const fn (ctx: *anyopaque) void = null,
+    /// Deliberately separate from `trigger_gc_ctx`: tests repoint that one at
+    /// their own allocation probes, and this hook must keep reaching the
+    /// runtime.
+    limit_gc_ctx: ?*anyopaque = null,
 
     pub fn init(allocator: std.mem.Allocator) MemoryAccount {
         return .{ .allocator = allocator, .persistent_allocator = allocator, .backing_allocator = allocator };
@@ -1187,7 +1191,8 @@ pub const MemoryAccount = struct {
         const next = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         if (next <= limit) return;
         const collect = self.limit_gc_fn orelse return error.OutOfMemory;
-        collect(self.trigger_gc_ctx);
+        const ctx = self.limit_gc_ctx orelse return error.OutOfMemory;
+        collect(ctx);
         const retried = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         if (retried > limit) return error.OutOfMemory;
     }

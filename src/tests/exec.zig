@@ -41,6 +41,14 @@ const TailSetupOomArm = struct {
         self.calls += 1;
         if (self.exhaust) {
             const rt = invocation.realm.runtime;
+            // Injecting an allocation failure, not testing the collector: see
+            // `suppressLimitCollectionForTest`.
+            // No `defer` to undo it: this arm runs inside the call whose
+            // allocation must fail, so restoring on the way out of the arm
+            // would re-arm the collector before the failure happens -- and
+            // would clobber the enclosing test's own suppression. The flag is
+            // per-Runtime, so it dies with the fixture.
+            rt.suppressLimitCollectionForTest(true);
             rt.setMemoryLimit(rt.memory.allocated_bytes);
         }
         return core.JSValue.undefinedValue();
@@ -87,6 +95,14 @@ const InterruptOomArm = struct {
         if (self.exhaust) {
             invocation.realm.interrupt_counter = 1;
             const rt = invocation.realm.runtime;
+            // Injecting an allocation failure, not testing the collector: see
+            // `suppressLimitCollectionForTest`.
+            // No `defer` to undo it: this arm runs inside the call whose
+            // allocation must fail, so restoring on the way out of the arm
+            // would re-arm the collector before the failure happens -- and
+            // would clobber the enclosing test's own suppression. The flag is
+            // per-Runtime, so it dies with the fixture.
+            rt.suppressLimitCollectionForTest(true);
             rt.setMemoryLimit(rt.memory.allocated_bytes);
         }
         return core.JSValue.undefinedValue();
@@ -3004,6 +3020,11 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     defer js.runtime.setMemoryLimit(null);
+    // The subject is the unwind out of a faulting target setup, not whether a
+    // collection could have avoided the fault: see
+    // `suppressLimitCollectionForTest`.
+    js.runtime.suppressLimitCollectionForTest(true);
+    defer js.runtime.suppressLimitCollectionForTest(false);
 
     var arm = TailSetupOomArm{};
     try js.defineGlobalExternalHostFunction(
@@ -3939,6 +3960,10 @@ test "local growth rejects moving storage after an open binding is published" {
     exec_frame.open_var_refs = &open_refs;
     exec_frame.ownership.storage = .borrowed;
 
+    // Injecting an allocation failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    rt.suppressLimitCollectionForTest(true);
+    defer rt.suppressLimitCollectionForTest(false);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.InvalidBytecode, exec_frame.setLocal(&rt.memory, rt, 1, core.JSValue.int32(8)));
     rt.setMemoryLimit(null);
@@ -3963,6 +3988,10 @@ test "call-binding OOM leaves input references with the caller" {
     defer exec_frame.deinit(&rt.memory, rt);
     const initial_refs = held.header.meta().rc;
 
+    // Injecting an allocation failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    rt.suppressLimitCollectionForTest(true);
+    defer rt.suppressLimitCollectionForTest(false);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     const result = exec_frame.initCallBindings(rt, .{
         .initial_this_value = held.value(),
@@ -3996,6 +4025,10 @@ test "original-args cold-state OOM does not retain copied references" {
     defer exec_frame.deinit(&rt.memory, rt);
     const initial_refs = held.header.meta().rc;
 
+    // Injecting an allocation failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    rt.suppressLimitCollectionForTest(true);
+    defer rt.suppressLimitCollectionForTest(false);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     const result = exec_frame.initArgumentsBorrowedSlots(
         &rt.memory,
@@ -14350,6 +14383,10 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     try l0_stack.pushOwned(callable.dup());
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
+    // Injecting an allocation failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    rt.suppressLimitCollectionForTest(true);
+    defer rt.suppressLimitCollectionForTest(false);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     const failed = machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     rt.setMemoryLimit(null);
@@ -14766,9 +14803,13 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try l0_stack.pushOwned(callable.dup());
     region_start = l0_stack.topPtr() - 2;
     l0_stack.setTopPtr(region_start);
+    // Injecting the failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    rt.suppressLimitCollectionForTest(true);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     const failed = machine.pushEmptyLeafCall(.receiver, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     rt.setMemoryLimit(null);
+    rt.suppressLimitCollectionForTest(false);
     try std.testing.expectError(error.OutOfMemory, failed);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expect(region_start[0].isUndefined());

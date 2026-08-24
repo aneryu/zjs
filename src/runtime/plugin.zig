@@ -2572,6 +2572,14 @@ test "runtime Plugin synchronous opaque wrapper finalizers release traced payloa
     defer make_value.free(rt);
 
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
+    // `target` carries the installed plugin and owns `make_value`; both are
+    // held only by Zig locals, which the declared-roots scan does not see, so
+    // every collection here would sweep them and leave the frees below
+    // reading torn-down headers.
+    var target_slot: ?*core.Object = target;
+    var target_roots = core.runtime.rootObjects(.{&target_slot});
+    target_roots.activate(rt);
+    defer target_roots.deactivate(rt);
     // The wrapper is held only by this Zig local; the declared-roots
     // whole-heap collection below needs it named or the sweep finalizes it
     // early. Deactivated before the release phase whose finalizer-count
@@ -2588,6 +2596,10 @@ test "runtime Plugin synchronous opaque wrapper finalizers release traced payloa
     wrapper_roots.deactivate(rt);
     wrapper_roots_active = false;
     wrapper.free(rt);
+    // Refcounting ran the wrapper's finalizer inside this release; under the
+    // tracer the collection that now reaches the unrooted wrapper is what
+    // stands in for it.
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
     try std.testing.expect(state.slot.isUndefined());
@@ -2795,6 +2807,11 @@ test "runtime Plugin closes only after synchronous wrapper callbacks release the
     plugin.release();
     staging_owner_live = false;
     wrapper.free(rt);
+    // Releasing the last wrapper reference is what tore it down under
+    // refcounting, and the close is what that teardown unblocks; under the
+    // tracer the collection that reaches the now-unrooted wrapper is. Nothing
+    // needs naming -- the wrapper is the thing that must die.
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
 
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
@@ -2946,6 +2963,17 @@ test "runtime Plugin runtime destroy does not repeat synchronous opaque wrapper 
     const make_value = try target.getProperty(make_atom);
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
     wrapper.free(rt);
+    // The wrapper's finalizer ran inside that release under refcounting; under
+    // the tracer the collection that reaches the unrooted wrapper is what runs
+    // it, and the point of the test is that runtime teardown does not run it a
+    // second time. `target` owns the installed plugin and the `make` function
+    // and is held only by a Zig local, so the declared-roots scan needs it
+    // named or this collection sweeps it out from under the frees below.
+    var target_slot: ?*core.Object = target;
+    var target_roots = core.runtime.rootObjects(.{&target_slot});
+    target_roots.activate(rt);
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
+    target_roots.deactivate(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
 

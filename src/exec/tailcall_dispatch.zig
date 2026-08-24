@@ -666,7 +666,7 @@ fn applyForwardCallMethod(
     if (live_bytes < total * @sizeOf(JSValue)) return .threw;
     const region_start = sp - total;
     vm.frame.pc += 2;
-    vm.stack.setTopPtr(region_start);
+    vm.stack.retreatToCallRegion(region_start);
     const receiver = region_start[0];
     const method = region_start[1];
     const method_obj = object_ops.objectFromValue(method) orelse return .threw;
@@ -1525,7 +1525,7 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                 const region_start = sp - total;
                 const func = region_start[0];
                 if (inline_calls.resolveInlineFunction(vm.global, func)) |resolved| {
-                    vm.stack.setTopPtr(region_start);
+                    vm.stack.retreatToCallRegion(region_start);
                     const execution = resolved.call_facts.execution;
                     if (argc == 0 and execution.simple_inline_empty_leaf) {
                         if (comptime argc_source == .zero) {
@@ -1745,7 +1745,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             if (method_obj.class_id == core.class.ids.bytecode_function) {
                 if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_obj)) |resolved| {
                     vm.frame.pc += 2;
-                    vm.stack.setTopPtr(region_start);
+                    vm.stack.retreatToCallRegion(region_start);
                     const execution = resolved.call_facts.execution;
                     // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
                     // published leaf skips InlineTarget freight and the three-deep
@@ -1844,7 +1844,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                 // boundary, stack limit) changes nothing — restore the
                 // operand top and take the authoritative path below.
                 if (argc <= 1 and target.call_facts.execution.simple_inline_empty_leaf and this_arg.isUndefined()) {
-                    vm.stack.setTopPtr(region_start);
+                    vm.stack.retreatToCallRegion(region_start);
                     if (vm.machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, vm.global, vm.stack, target.fb, target.call_facts, region_start)) |entry| {
                         vm.frame.pc += 2;
                         return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
@@ -1908,7 +1908,7 @@ noinline fn pushDerivedConstructorEntry(
     region_start[0] = constructor_this;
     displaced_func.free(vm.rt);
     const target = candidate.resolved.bind(constructor_this, func);
-    vm.stack.setTopPtr(region_start);
+    vm.stack.retreatToCallRegion(region_start);
     const entry = vm.machine.pushDerivedConstructorCall(
         vm.global,
         vm.stack,
@@ -1949,7 +1949,7 @@ noinline fn pushSpreadDerivedConstructorEntry(
     region_start[0] = constructor_this;
     region_start[1] = constructor_func;
     const target = candidate.resolved.bind(constructor_this, func);
-    vm.stack.setTopPtr(region_start);
+    vm.stack.retreatToCallRegion(region_start);
     const entry = vm.machine.pushDerivedConstructorCall(
         vm.global,
         vm.stack,
@@ -2025,7 +2025,7 @@ fn enterSameMachineSpreadConstructor(
             region_start[0] = instance;
             region_start[1] = constructor_func;
             const target = candidate.resolved.bind(instance, func);
-            vm.stack.setTopPtr(region_start);
+            vm.stack.retreatToCallRegion(region_start);
             const entry = vm.machine.pushConstructorCall(
                 vm.global,
                 vm.stack,
@@ -2200,7 +2200,7 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                     region_start[0] = instance;
                     displaced_func.free(vm.rt);
                     const target = candidate.resolved.bind(instance, func);
-                    vm.stack.setTopPtr(region_start);
+                    vm.stack.retreatToCallRegion(region_start);
                     const entry = vm.machine.pushConstructorCall(
                         vm.global,
                         vm.stack,
@@ -3939,7 +3939,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
     // read, so normal return/throw resumes at the correct instruction.
     if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, getter)) |target| {
         const region_start = sp - 2;
-        vm.stack.setTopPtr(region_start);
+        vm.stack.retreatToCallRegion(region_start);
         return pushAndEnter(var_buf, vm, &target, region_start, 0, .method);
     }
     vm.stack.setTopPtr(sp);
@@ -5091,7 +5091,7 @@ fn internalMethodRemainderHandler(
             if (object_ops.objectFromValue(method)) |method_object| {
                 if (method_object.class_id == core.class.ids.bytecode_function) {
                     if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_object)) |resolved| {
-                        stack.setTopPtr(region_start);
+                        stack.retreatToCallRegion(region_start);
                         const execution = resolved.call_facts.execution;
                         const leaf_kind = execution.exact_args_leaf_kind;
                         if (leaf_kind != .none and argc == resolved.fb.arg_count) {

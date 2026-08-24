@@ -98,6 +98,10 @@ fn traceFrame(rt: *core.JSRuntime, frame: *frame_mod.Frame, visitor: *RootVisito
 
 fn traceStack(stack: *stack_mod.Stack, visitor: *RootVisitor) RootTraceError!void {
     try visitor.values(stack.liveValues());
+    // The in-flight call's operands, which sit above `top_ptr` between the
+    // region retreat and the frame push. See `Stack.pending_call_region`.
+    const pending = stack_mod.pendingCallRegion();
+    if (pending.len != 0) try visitor.values(pending);
 }
 
 fn traceEntryExtras(entry: *inline_calls.Entry, visitor: *RootVisitor) RootTraceError!void {

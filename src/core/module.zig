@@ -415,6 +415,15 @@ pub const ModuleRecord = struct {
         };
     }
 
+    /// Under the tracing collector this does nothing: `.module` is one of the
+    /// kinds in `gc.refCountRemoved`, so a record's lifetime is decided by
+    /// reachability alone. That is safe today only because every caller is a
+    /// test -- nothing in the engine or the embedding surface holds a record
+    /// across an allocation on the strength of this call. A host that needed
+    /// to would have no way to say so: `rootObjects` takes `?*Object` and
+    /// there is no header-rooting form. Adding one is the work if that
+    /// changes; silently counting again would not help, because the count no
+    /// longer keeps anything alive.
     pub fn retain(self: *ModuleRecord) void {
         gc.retain(&self.header);
     }

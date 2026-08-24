@@ -1341,6 +1341,7 @@ pub const JSRuntime = struct {
         rt.memory.trigger_gc_fn = null;
         rt.memory.trigger_gc_ctx = null;
         rt.memory.limit_gc_fn = null;
+        rt.memory.limit_gc_ctx = null;
         rt.memory.setLimit(options.memory_limit);
         rt.gc = gc.Registry.init(&rt.memory, options.gc_policy);
         rt.gc.initLists();
@@ -1457,7 +1458,10 @@ pub const JSRuntime = struct {
         rt.memory.enableSmallObjectSlab();
         rt.memory.trigger_gc_fn = JSRuntime.triggerGCOnAllocation;
         rt.memory.trigger_gc_ctx = rt;
-        if (comptime gc.trace_stw_enabled) rt.memory.limit_gc_fn = JSRuntime.collectBeforeLimitRejection;
+        if (comptime gc.trace_stw_enabled) {
+            rt.memory.limit_gc_fn = JSRuntime.collectBeforeLimitRejection;
+            rt.memory.limit_gc_ctx = rt;
+        }
     }
 
     pub fn setOpcodeProfile(self: *JSRuntime, opcode_profile: ?*profile.OpcodeProfile) void {
@@ -2962,6 +2966,23 @@ pub const JSRuntime = struct {
         self.memory.setLimit(limit);
     }
 
+    /// Test-only: stop an over-limit allocation from collecting before it is
+    /// rejected.
+    ///
+    /// The allocation-failure unwind paths are injected by setting the limit
+    /// to the current footprint and expecting the very next allocation to
+    /// fail. Under the tracer that allocation now gets one collection first,
+    /// which is the right production behaviour -- a memory limit should mean
+    /// "this much live", not "this much allocated since the last collection"
+    /// -- and useless as a fault injector, because freeing a single byte turns
+    /// the expected failure into a success. Tests that are exercising the
+    /// unwind rather than the collector suppress it around the injection.
+    pub fn suppressLimitCollectionForTest(self: *JSRuntime, suppressed: bool) void {
+        if (!builtin.is_test) @compileError("test-only helper");
+        if (comptime !gc.trace_stw_enabled) return;
+        self.memory.limit_gc_fn = if (suppressed) null else JSRuntime.collectBeforeLimitRejection;
+    }
+
     pub fn memoryLimit(self: JSRuntime) ?usize {
         return self.memory.getLimit();
     }
@@ -3228,7 +3249,7 @@ pub const JSRuntime = struct {
     /// still holding in Zig locals. Reentrancy is already handled:
     /// `tryRunObjectCycleRemovalWithValueRoots` returns immediately if a
     /// collection is in flight, so a collection that allocates cannot recurse.
-    fn collectBeforeLimitRejection(ctx: ?*anyopaque) void {
+    fn collectBeforeLimitRejection(ctx: *anyopaque) void {
         const self: *JSRuntime = @ptrCast(@alignCast(ctx));
         _ = self.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch return;
     }

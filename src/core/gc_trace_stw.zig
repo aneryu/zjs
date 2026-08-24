@@ -726,6 +726,7 @@ const Collector = struct {
             // must fail loudly rather than be masked by a count.
             doomed.append(self.allocator(), header) catch return 0;
         }
+        if (std.c.getenv("ZJS_MINOR_AUDIT") != null) self.auditCondemnedYoung(doomed.items);
         for (doomed.items) |header| {
             self.rt.gc.detachCycleCandidate(header);
             gc.listAddTail(&self.rt.gc.tmp_obj_list, header);
@@ -774,6 +775,110 @@ const Collector = struct {
         const garbage_count = self.destroyCondemned();
         if (!self.rt.hasPendingDeferredClassPayloadFinalizers()) object_gc.drainCycleDeferredFrees(self.rt);
         return garbage_count;
+    }
+
+    /// Diagnostic (`ZJS_MINOR_AUDIT=1`): report any live object still holding a
+    /// strong edge to something this minor is about to condemn.
+    ///
+    /// That combination is exactly a missing write barrier -- the trace could
+    /// not reach the child, so the owner must be old and unremembered -- and
+    /// this names the owner instead of leaving it to be guessed from the
+    /// eventual JS-visible symptom.
+    ///
+    /// Known blind spot, worth stating because it cost a day: this walks the
+    /// SAME `traceChildEdges` enumeration the collector does, so an edge the
+    /// tracer does not know about is equally invisible here. A clean run means
+    /// "no owner forgot to remember a child it does declare", not "no live
+    /// reference to the condemned set exists" -- native windows and undeclared
+    /// slots are outside it entirely, and that is where the bug it was built
+    /// to find actually was (`Stack.pending_call_region`).
+    fn auditCondemnedYoung(self: *Collector, doomed_items: []const *gc.Header) void {
+        const Audit = struct {
+            doomed: []const *gc.Header,
+            owner_kind: gc.GcKind = .object,
+            owner_class: u32 = 0,
+            owner_young: bool = false,
+            fn hit(a: *@This(), h: ?*gc.Header) void {
+                const child = h orelse return;
+                for (a.doomed) |d| {
+                    if (d != child) continue;
+                    const c: *Object = @alignCast(@fieldParentPtr("header", child));
+                    std.debug.print("MINOR-AUDIT owner={s}/class{d} young={} -> child class={d}/{s}\n", .{
+                        @tagName(a.owner_kind), a.owner_class, a.owner_young,
+                        c.class_id,             @tagName(c.flags.class_payload_kind),
+                    });
+                    return;
+                }
+            }
+            pub fn visitValue(a: *@This(), val: *JSValue) void {
+                a.hit(val.cycleMarkHeader());
+            }
+            pub fn visitObject(a: *@This(), obj_ptr: *?*Object) void {
+                if (obj_ptr.*) |o| a.hit(&o.header);
+            }
+            pub fn visitShape(a: *@This(), sh: *shape.Shape) void {
+                a.hit(&sh.header);
+            }
+            pub fn visitRealm(a: *@This(), ctx_ptr: *?*context_mod.RealmContext) void {
+                if (ctx_ptr.*) |c| a.hit(&c.header);
+            }
+            pub fn visitModule(a: *@This(), record: *module_mod.ModuleRecord) void {
+                a.hit(&record.header);
+            }
+            pub fn visitRealm2(a: *@This(), ctx_ptr: *?*context_mod.RealmContext) void {
+                if (ctx_ptr.*) |c| a.hit(&c.header);
+            }
+            pub fn visitWeakCollectionEntry(_: *@This(), _: *object_payloads.WeakCollectionEntry) void {}
+            pub fn visitFinalizationCell(_: *@This(), _: *object_payloads.FinalizationRegistryCell) void {}
+        };
+        var audit = Audit{ .doomed = doomed_items };
+        var it = self.rt.gc.objectIterator();
+        while (it.next()) |h| {
+            var condemned = false;
+            for (doomed_items) |d| {
+                if (d == h) {
+                    condemned = true;
+                    break;
+                }
+            }
+            if (condemned) continue;
+            audit.owner_kind = h.metaConst().flags.kind;
+            audit.owner_young = h.metaConst().flags.young;
+            switch (h.metaConst().flags.kind) {
+                .object => {
+                    const owner: *Object = @alignCast(@fieldParentPtr("header", h));
+                    audit.owner_class = owner.class_id;
+                    owner.traceChildEdgesFallible(self.rt, &audit) catch {};
+                },
+                .shape => {
+                    const sh: *shape.Shape = @alignCast(@fieldParentPtr("header", h));
+                    audit.owner_class = 0;
+                    sh.traceChildEdgesFallible(self.rt, &audit) catch {};
+                },
+                .var_ref => {
+                    const cell: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", h));
+                    audit.owner_class = 0;
+                    audit.visitValue(&cell.value);
+                },
+                .function_bytecode => {
+                    const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
+                    audit.owner_class = 0;
+                    audit.visitRealm(&fb.realm.ptr);
+                    for (fb.cpoolSlice()) |*stored| audit.visitValue(stored);
+                },
+                .realm_context => {
+                    const ctx: *context_mod.JSContext = @alignCast(@fieldParentPtr("header", h));
+                    audit.owner_class = 0;
+                    ctx.traceChildEdgesNoFail(&audit);
+                },
+                .module => {
+                    const record: *module_mod.ModuleRecord = @alignCast(@fieldParentPtr("header", h));
+                    audit.owner_class = 0;
+                    record.traceChildEdgesFallible(self.rt, &audit) catch {};
+                },
+                else => {},
+            }
+        }
     }
 
     /// Ordered teardown of everything condemned onto `tmp_obj_list`.

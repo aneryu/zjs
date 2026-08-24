@@ -1764,7 +1764,20 @@ pub fn typedArrayMapFilter(
         defer constructor_value.free(ctx.runtime);
         const out_value = try typedArrayCreateWithLength(ctx, output, global, constructor_value, length, caller_function, caller_frame);
         errdefer out_value.free(ctx.runtime);
-        const out = objectFromValue(out_value) orelse return error.TypeError;
+        // The callback below is arbitrary user JS: it allocates, and until this
+        // function returns the result array is reachable from nothing but this
+        // frame. A scalar root frame would not do -- production skips those and
+        // leaves scalars to conservative capture
+        // (`value_root_link_containers_only`) -- so the result is held in a
+        // one-element window and rooted as a container, the same shape the
+        // filter path below already uses for its kept values.
+        var out_window = [_]core.JSValue{out_value};
+        var rooted_out: []core.JSValue = out_window[0..1];
+        var out_slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &rooted_out }};
+        var out_frame = core.runtime.ValueRootFrame{ .slices = &out_slices };
+        out_frame.activate(ctx.runtime);
+        defer out_frame.deactivate(ctx.runtime);
+        const out = objectFromValue(out_window[0]) orelse return error.TypeError;
         var index: usize = 0;
         while (index < length) : (index += 1) {
             const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
@@ -1773,7 +1786,7 @@ pub fn typedArrayMapFilter(
             defer mapped.free(ctx.runtime);
             _ = try core.typed_array.typedArraySetIndex(ctx.runtime, out, @intCast(index), mapped);
         }
-        return out_value;
+        return out_window[0];
     }
 
     const kept = try ctx.runtime.memory.alloc(core.JSValue, length);

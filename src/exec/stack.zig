@@ -9,6 +9,36 @@ const std = @import("std");
 const memory = @import("../core/memory.zig");
 const runtime = @import("../core/runtime.zig");
 const JSValue = @import("../core/value.zig").JSValue;
+const gc = @import("../core/gc.zig");
+
+/// Operand slots a call site has retreated `top_ptr` past but has not yet
+/// moved into the callee frame.
+///
+/// `liveValues` stops at `top_ptr`, and this window lives in the heap-backed
+/// operand arena rather than on the native stack, so the conservative pass
+/// cannot see it either: for that span the arguments are invisible to the
+/// trace. The span is short, but a minor fires from the interpreter's own
+/// safepoint cadence, which lands inside it -- a TypedArray built as
+/// `f(a.map(g), new C([...]))` was reclaimed while sitting in it, and the
+/// surviving view then read a detached length.
+///
+/// Thread-local rather than a `Stack` field because `Stack` is embedded in
+/// `inline_calls.Entry`, whose 256-byte layout is asserted; and one is enough
+/// because only the innermost call site can be mid-retreat on a thread.
+/// Erased outside generational builds.
+threadlocal var pending_call_region: []JSValue = &.{};
+
+/// Publish the slots a call site has just retreated past. The top must already
+/// be at `region.ptr`; `setTopPtr` drops the window again on the next move.
+pub inline fn publishPendingCallRegion(region: []JSValue) void {
+    if (comptime !gc.generation_enabled) return;
+    pending_call_region = region;
+}
+
+pub inline fn pendingCallRegion() []JSValue {
+    if (comptime !gc.generation_enabled) return &.{};
+    return pending_call_region;
+}
 
 pub const Stack = struct {
     const Policy = runtime.VmStackWindowPolicy;
@@ -84,6 +114,25 @@ pub const Stack = struct {
         return (@intFromPtr(self.top_ptr) - @intFromPtr(self.values)) / @sizeOf(JSValue);
     }
 
+    /// Retreat the top to `region_start` and publish the operand slots left
+    /// above it as the in-flight call's region. Only valid where those slots
+    /// were just written by the operand pushes -- publishing a span of popped
+    /// or never-initialised slots would hand the tracer garbage.
+    pub inline fn retreatToCallRegion(self: *Stack, region_start: [*]JSValue) void {
+        const high = self.top_ptr;
+        self.setTopPtr(region_start);
+        if (comptime gc.generation_enabled) {
+            // Not every call site reaches here with operands still above the
+            // region: some arms retreat after an earlier arm already consumed
+            // them, and land at or below `region_start`. There is nothing to
+            // publish then, and publishing a span that is not the just-written
+            // operands would hand the tracer whatever those slots hold.
+            if (@intFromPtr(high) <= @intFromPtr(region_start)) return;
+            const count = (@intFromPtr(high) - @intFromPtr(region_start)) / @sizeOf(JSValue);
+            publishPendingCallRegion(region_start[0..count]);
+        }
+    }
+
     pub inline fn liveValues(self: *const Stack) []JSValue {
         return self.values[0..self.len()];
     }
@@ -103,6 +152,17 @@ pub const Stack = struct {
         std.debug.assert(top_addr >= base_addr);
         std.debug.assert(top_addr - base_addr <= self.capacity * @sizeOf(JSValue));
         std.debug.assert((top_addr - base_addr) % @sizeOf(JSValue) == 0);
+        // The pending region is meaningful only while the top sits exactly at
+        // its start: the retreat that opens the window sets the top there, and
+        // any other move either re-covers the slots (the callee frame is built
+        // over them, so `liveValues` reaches them again) or abandons them.
+        // Tying the lifetime to this one comparison keeps every exit path --
+        // including unwind -- from leaving a stale span behind.
+        if (comptime gc.generation_enabled) {
+            if (pending_call_region.len != 0 and new_top != pending_call_region.ptr) {
+                pending_call_region = &.{};
+            }
+        }
         self.top_ptr = new_top;
     }
 

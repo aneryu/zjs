@@ -842,12 +842,28 @@ fn dynamicImportRejectionValue(
 /// The state must outlive every job drain that may run an import job (the
 /// CLI keeps one alive for the whole process; the module-graph runners
 /// install a scoped one and drain before restoring).
-pub fn installDynamicImport(state: *DynamicImportState) core.runtime.DynamicImportLoaderScope {
+/// Pairs the installed loader with the state's root registration so the two
+/// cannot get out of step. They did: activation used to happen in
+/// `installDynamicImport` and deactivation only in `DynamicImportState.deinit`,
+/// which the static graph evaluator never calls -- its lists are owned by the
+/// caller -- so the provider outlived the stack frame holding the state and
+/// the next collection walked a poisoned pointer.
+pub const DynamicImportScope = struct {
+    loader: core.runtime.DynamicImportLoaderScope,
+    state: *DynamicImportState,
+
+    pub fn deinit(self: *DynamicImportScope) void {
+        self.loader.deinit();
+        self.state.deactivateRoots();
+    }
+};
+
+pub fn installDynamicImport(state: *DynamicImportState) DynamicImportScope {
     state.activateRoots();
-    return state.runtime.installDynamicImportLoader(.{
+    return .{ .state = state, .loader = state.runtime.installDynamicImportLoader(.{
         .callback = DynamicImportState.load,
         .userdata = state,
-    });
+    }) };
 }
 
 fn runJobs(runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer) !void {

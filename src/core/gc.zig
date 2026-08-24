@@ -110,10 +110,19 @@ pub var stress_cadence: i32 = 64;
 /// in one run instead of by inference.
 pub var stress_disable: bool = false;
 
+/// `ZJS_GC_NO_MINOR=1` runs majors only. Splits "a generational invariant --
+/// sticky marks, a missing write barrier, the young suffix" from "a root the
+/// trace never sees at all", which a full collection would miss too.
+pub var stress_no_minor: bool = false;
+
 /// Read once at `Registry.init`. "0" or empty disables; "1" enables at the
 /// default cadence; any other integer enables at that cadence.
 fn readStressFromEnv() void {
     if (comptime !trace_stw_enabled) return;
+    if (std.c.getenv("ZJS_GC_NO_MINOR")) |raw| {
+        const text = std.mem.span(raw);
+        stress_no_minor = text.len != 0 and !std.mem.eql(u8, text, "0");
+    }
     const raw = std.c.getenv("ZJS_GC_STRESS") orelse return;
     const text = std.mem.span(raw);
     if (text.len == 0 or std.mem.eql(u8, text, "0")) return;
@@ -1929,7 +1938,7 @@ pub const Registry = struct {
     pub inline fn shouldTryMinor(self: *const Registry) bool {
         if (comptime !generation_enabled) return false;
         if (self.phase != .none) return false;
-        if (stress_disable) return false;
+        if (stress_disable or stress_no_minor) return false;
         if (stress_collect) return self.generation.stats.young_count != 0;
         return self.generation.stats.young_count >= minor_young_threshold;
     }
