@@ -161,6 +161,41 @@ int main() {
     std::printf("ok utf16 /bar/ -> [%d,%d]\n", regs[0], regs[1]);
   }
 
+  // UTF-16 '.' must match non-Latin-1 code units and supplementary pairs.
+  {
+    auto blob = compile_or_die(".", 0);
+    const uint16_t han[] = {0x4E2D};
+    const uint16_t pair[] = {0xD834, 0xDF06};
+    std::vector<int32_t> regs(4, -1);
+    if (zjs_irregexp_exec(blob.data(), blob.size(), han, 1, ZJS_IRREGEXP_UTF16,
+                          0, regs.data(), regs.size(), nullptr, nullptr) !=
+            ZJS_IRREGEXP_OK ||
+        regs[0] != 0 || regs[1] != 1) {
+      fail("utf16 /./ on U+4E2D");
+    }
+    if (zjs_irregexp_exec(blob.data(), blob.size(), pair, 2, ZJS_IRREGEXP_UTF16,
+                          0, regs.data(), regs.size(), nullptr, nullptr) !=
+            ZJS_IRREGEXP_OK ||
+        regs[0] != 0 || regs[1] != 1) {
+      fail("utf16 /./ on surrogate pair");
+    }
+    std::printf("ok utf16 /./ non-latin1\n");
+  }
+
+  {
+    const uint32_t v8_unicode = 1u << 4;
+    auto blob = compile_or_die(".", v8_unicode);
+    const uint16_t pair[] = {0xD834, 0xDF06};
+    std::vector<int32_t> regs(4, -1);
+    if (zjs_irregexp_exec(blob.data(), blob.size(), pair, 2, ZJS_IRREGEXP_UTF16,
+                          0, regs.data(), regs.size(), nullptr, nullptr) !=
+            ZJS_IRREGEXP_OK ||
+        regs[0] != 0 || regs[1] != 2) {
+      fail("utf16 /./u on surrogate pair");
+    }
+    std::printf("ok utf16 /./u supplementary\n");
+  }
+
   std::printf("all smoke tests passed\n");
   return 0;
 }

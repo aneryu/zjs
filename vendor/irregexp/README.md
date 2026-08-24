@@ -29,6 +29,11 @@ library `zjs_irregexp` (`build/irregexp.zig`) and wraps it in
 `src/libs/irregexp.zig`. The JS object layer still stores the blob as a
 latin1 string.
 
+Both Latin-1 and UC16 bytecode are compiled at pattern-compile time. Each
+width re-parses the source: V8's `EmitClassRanges` clamps shared AST
+ranges to `0xFF` for one-byte subjects, so a reused tree would make UC16
+`.` reject every non-Latin-1 code unit.
+
 Unicode case-fold and identifier predicates are `extern "C"` hooks
 implemented in Zig; the shim provides weak ASCII fallbacks for bring-up.
 

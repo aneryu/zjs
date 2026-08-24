@@ -264,20 +264,29 @@ int zjs_irregexp_compile(const uint8_t* pattern, size_t pattern_len,
   DirectHandle<String> source =
       NewPatternString(&isolate, pattern, pattern_len, pattern_is_utf16);
 
-  v8::internal::regexp::CompileData data;
-  if (!v8::internal::regexp::Parser::ParseRegExpFromHeapString(
-          &isolate, &zone, source, flags, &data)) {
+  // Parse once per subject width. EmitClassRanges::ClampToOneByte rewrites
+  // the AST CharacterSet in place, so a shared tree compiled for Latin-1
+  // first would leave UC16 bytecode unable to match anything above 0xFF.
+  auto parse = [&](v8::internal::regexp::CompileData* data) -> int {
+    if (v8::internal::regexp::Parser::ParseRegExpFromHeapString(
+            &isolate, &zone, source, flags, data)) {
+      return ZJS_IRREGEXP_OK;
+    }
     out->error_message = PersistError(
-        v8::internal::regexp::ErrorString(data.error));
-    if (v8::internal::regexp::ErrorIsStackOverflow(data.error)) {
+        v8::internal::regexp::ErrorString(data->error));
+    if (v8::internal::regexp::ErrorIsStackOverflow(data->error)) {
       return ZJS_IRREGEXP_STACK;
     }
     return ZJS_IRREGEXP_SYNTAX;
-  }
+  };
+
+  v8::internal::regexp::CompileData latin1_data;
+  const int parse_status = parse(&latin1_data);
+  if (parse_status != ZJS_IRREGEXP_OK) return parse_status;
 
   DirectHandle<IrRegExpData> re_data(isolate.Adopt<IrRegExpData>(), &isolate);
   // Capture count in V8 CompileData excludes group 0.
-  re_data->set_capture_count(data.capture_count);
+  re_data->set_capture_count(latin1_data.capture_count);
   re_data->set_escaped_source(*source);
   re_data->set_flags(static_cast<JSRegExp::Flags>(v8_flags));
 
@@ -286,15 +295,23 @@ int zjs_irregexp_compile(const uint8_t* pattern, size_t pattern_len,
   int latin1_regs = 0;
   int uc16_regs = 0;
   const bool latin1_ok =
-      CompileOneWidth(&isolate, &zone, &data, flags, true, re_data, &latin1_bc,
-                      &latin1_regs);
+      CompileOneWidth(&isolate, &zone, &latin1_data, flags, true, re_data,
+                      &latin1_bc, &latin1_regs);
+
+  v8::internal::regexp::CompileData uc16_data;
+  const int parse_uc16 = parse(&uc16_data);
+  if (parse_uc16 != ZJS_IRREGEXP_OK) return parse_uc16;
   const bool uc16_ok =
-      CompileOneWidth(&isolate, &zone, &data, flags, false, re_data, &uc16_bc,
-                      &uc16_regs);
+      CompileOneWidth(&isolate, &zone, &uc16_data, flags, false, re_data,
+                      &uc16_bc, &uc16_regs);
   if (!latin1_ok && !uc16_ok) {
+    const auto err =
+        uc16_data.error != v8::internal::regexp::Error::kNone
+            ? uc16_data.error
+            : latin1_data.error;
     out->error_message = PersistError(
-        v8::internal::regexp::ErrorString(data.error));
-    if (v8::internal::regexp::ErrorIsStackOverflow(data.error)) {
+        v8::internal::regexp::ErrorString(err));
+    if (v8::internal::regexp::ErrorIsStackOverflow(err)) {
       return ZJS_IRREGEXP_STACK;
     }
     return ZJS_IRREGEXP_SYNTAX;
@@ -302,16 +319,16 @@ int zjs_irregexp_compile(const uint8_t* pattern, size_t pattern_len,
 
   const int register_count = std::max(latin1_regs, uc16_regs);
   const uint16_t capture_including_zero =
-      static_cast<uint16_t>(data.capture_count + 1);
-  const bool named =
-      data.named_captures != nullptr && !data.named_captures->empty();
+      static_cast<uint16_t>(latin1_data.capture_count + 1);
+  const bool named = latin1_data.named_captures != nullptr &&
+                     !latin1_data.named_captures->empty();
   const uint16_t zjs_flags = V8FlagsToZjs(flags, named);
 
   std::vector<uint8_t> names_section;
   uint16_t name_count = 0;
   if (named) {
     std::string utf8;
-    for (v8::internal::regexp::Capture* cap : *data.named_captures) {
+    for (v8::internal::regexp::Capture* cap : *latin1_data.named_captures) {
       if (cap == nullptr || cap->name() == nullptr) continue;
       Utf16NameToUtf8(cap->name(), &utf8);
       WriteU16(&names_section, static_cast<uint16_t>(cap->index()));

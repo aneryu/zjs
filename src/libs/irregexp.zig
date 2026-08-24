@@ -730,3 +730,42 @@ test "Irregexp turns extreme nesting into StackOverflow" {
     const opens = "(?:" ** 3000;
     try std.testing.expectError(error.StackOverflow, compilePatternAndFlags(std.testing.allocator, opens, ""));
 }
+
+test "Irregexp matches UTF-16 subjects above Latin-1" {
+    const allocator = std.testing.allocator;
+    const han = [_]u16{0x4E2D};
+    const pair = [_]u16{ 0xD834, 0xDF06 };
+    const xa = [_]u16{ 0x0078, 0x0061 };
+
+    {
+        var compiled = try compilePatternAndFlags(allocator, ".", "");
+        defer compiled.deinit(allocator);
+        const han_status = try exec(allocator, compiled.bytecode, .{ .utf16 = &han }, 0);
+        try std.testing.expect(han_status.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), han_status.match.start);
+        try std.testing.expectEqual(@as(usize, 1), han_status.match.end);
+
+        const pair_status = try exec(allocator, compiled.bytecode, .{ .utf16 = &pair }, 0);
+        try std.testing.expect(pair_status.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), pair_status.match.start);
+        try std.testing.expectEqual(@as(usize, 1), pair_status.match.end);
+    }
+
+    {
+        var compiled = try compilePatternAndFlags(allocator, ".", "u");
+        defer compiled.deinit(allocator);
+        const pair_status = try exec(allocator, compiled.bytecode, .{ .utf16 = &pair }, 0);
+        try std.testing.expect(pair_status.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), pair_status.match.start);
+        try std.testing.expectEqual(@as(usize, 2), pair_status.match.end);
+    }
+
+    {
+        var compiled = try compilePatternAndFlags(allocator, "a", "");
+        defer compiled.deinit(allocator);
+        const status = try exec(allocator, compiled.bytecode, .{ .utf16 = &xa }, 0);
+        try std.testing.expect(status.result == .match);
+        try std.testing.expectEqual(@as(usize, 1), status.match.start);
+        try std.testing.expectEqual(@as(usize, 2), status.match.end);
+    }
+}
