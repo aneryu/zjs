@@ -3958,7 +3958,7 @@ test "call-binding OOM leaves input references with the caller" {
     rt.setMemoryLimit(null);
 
     try std.testing.expectError(error.OutOfMemory, result);
-    try std.testing.expectEqual(initial_refs, held.header.meta().rc);
+    try helpers.expectRefCount(initial_refs, &held.header);
 }
 
 test "original-args cold-state OOM does not retain copied references" {
@@ -3993,7 +3993,7 @@ test "original-args cold-state OOM does not retain copied references" {
     rt.setMemoryLimit(null);
 
     try std.testing.expectError(error.OutOfMemory, result);
-    try std.testing.expectEqual(initial_refs, held.header.meta().rc);
+    try helpers.expectRefCount(initial_refs, &held.header);
 }
 
 test "strict generator resident frame supports qjs argument counts beyond u16 storage" {
@@ -4194,11 +4194,11 @@ test "frame setLocal handles self-assignment without dropping object" {
     try frame.setLocal(&rt.memory, rt, 0, object.value());
     object.value().free(rt);
 
-    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
+    try helpers.expectRefCount(1, &object.header);
     const current = frame.locals[0];
     try frame.setLocal(&rt.memory, rt, 0, current);
 
-    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
+    try helpers.expectRefCount(1, &object.header);
     try std.testing.expectEqual(&object.header, frame.locals[0].refHeader().?);
 }
 
@@ -5949,7 +5949,7 @@ test "bytecode calls execute directly from the shared function bytecode" {
     );
     defer first.free(js.runtime);
     try std.testing.expectEqual(@as(?i32, 2), first.asInt32());
-    try std.testing.expectEqual(function_bytecode_refs, fb.header.meta().rc);
+    try helpers.expectRefCount(function_bytecode_refs, &fb.header);
 
     const second_args = [_]core.JSValue{core.JSValue.int32(2)};
     const second = try engine.exec.call.callValueWithThisGlobalsAndGlobal(
@@ -5963,7 +5963,7 @@ test "bytecode calls execute directly from the shared function bytecode" {
     );
     defer second.free(js.runtime);
     try std.testing.expectEqual(@as(?i32, 3), second.asInt32());
-    try std.testing.expectEqual(function_bytecode_refs, fb.header.meta().rc);
+    try helpers.expectRefCount(function_bytecode_refs, &fb.header);
 
     const rerun = try js.eval(
         \\assert.sameValue(directFunctionBytecode(3), 4);
@@ -12333,8 +12333,8 @@ test "Engine eval balances refcounts for refcounted duplicate-key object literal
     // Every literal died (last = null): both source objects must be back at
     // their pre-loop refcounts — no per-iteration leak from the duplicate-key
     // replace, no over-free from the append move.
-    try std.testing.expectEqual(o1_baseline, o1.refHeader().?.meta().rc);
-    try std.testing.expectEqual(o2_baseline, o2.refHeader().?.meta().rc);
+    try helpers.expectRefCount(o1_baseline, o1.refHeader().?);
+    try helpers.expectRefCount(o2_baseline, o2.refHeader().?);
 }
 
 test "Engine eval executes compound assignment and update statements through quick parser" {
@@ -14717,9 +14717,9 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try std.testing.expect(first.frame.this_value.same(receiver));
     try std.testing.expect(first.frame.ownership.this_value == .owned);
     try std.testing.expect(region_start[0].isUndefined());
-    try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
+    try helpers.expectRefCount(baseline_rc + 1, &receiver_object.header);
     machine.popReturnedEmptyLeaf(ctx.runtime);
-    try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
+    try helpers.expectRefCount(baseline_rc, &receiver_object.header);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
@@ -14737,9 +14737,9 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try std.testing.expect(warm.frame.ownership.this_value == .owned);
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(create_calls, rt.memory.create_calls);
-    try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
+    try helpers.expectRefCount(baseline_rc + 1, &receiver_object.header);
     machine.popReturnedEmptyLeaf(ctx.runtime);
-    try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
+    try helpers.expectRefCount(baseline_rc, &receiver_object.header);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 
     // Setup failure must restore depth/watermark and release BOTH region
@@ -14759,7 +14759,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expect(region_start[0].isUndefined());
     try std.testing.expect(region_start[1].isUndefined());
-    try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
+    try helpers.expectRefCount(baseline_rc, &receiver_object.header);
     try std.testing.expectEqual(oversized_bytes, rt.memory.allocated_bytes);
     oversized.destroyUnpublishedFixture(rt);
     oversized_alive = false;
@@ -15419,7 +15419,7 @@ test "dense write leaf consumes reserved appends only inside the qjs capacity wi
     try std.testing.expectEqual(@as(u32, 1), array.fastArrayCount());
     try std.testing.expectEqual(@as(u32, 1), array.arrayLength());
     try std.testing.expectEqual(&stored.header, array.fastArrayElementAt(0).refHeader().?);
-    try std.testing.expectEqual(@as(i32, 2), stored.header.meta().rc);
+    try helpers.expectRefCount(2, &stored.header);
 
     const growth_array = try core.Object.createArray(rt, null);
     defer growth_array.value().free(rt);
@@ -15433,7 +15433,7 @@ test "dense write leaf consumes reserved appends only inside the qjs capacity wi
             retained.value(),
         ),
     );
-    try std.testing.expectEqual(@as(i32, 1), retained.header.meta().rc);
+    try helpers.expectRefCount(1, &retained.header);
     retained.value().free(rt);
 
     const shaped_array = try core.Object.createArray(rt, null);
@@ -15456,7 +15456,7 @@ test "dense write leaf consumes reserved appends only inside the qjs capacity wi
             shaped_retained.value(),
         ),
     );
-    try std.testing.expectEqual(@as(i32, 1), shaped_retained.header.meta().rc);
+    try helpers.expectRefCount(1, &shaped_retained.header);
     shaped_retained.value().free(rt);
 }
 

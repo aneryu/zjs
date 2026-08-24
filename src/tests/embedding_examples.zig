@@ -2,6 +2,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const zjs = @import("zjs");
+const helpers = @import("helpers.zig");
 const HostState = struct {
     value: i32,
 
@@ -249,6 +250,7 @@ test "embedding cookbook strings and bytes examples compile and run" {
 
     array_buffer.free(rt);
     array_buffer_live = false;
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), bytes_state.calls);
 }
 

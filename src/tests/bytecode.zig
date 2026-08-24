@@ -8,6 +8,7 @@ const compiler = zjs.compiler;
 const frame_mod = zjs.exec.frame;
 const parser = zjs.parser;
 const parser_tests = @import("parser.zig");
+const helpers = @import("helpers.zig");
 
 test "constant pool retains and releases values" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -416,7 +417,7 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
         try std.testing.expectEqual(@as(usize, 0), @intFromPtr(fb) % 8);
         try std.testing.expectEqual(@as(usize, 8), @intFromPtr(fb) - @intFromPtr(fb.header.meta()));
         try std.testing.expectEqual(core.gc.GcKind.function_bytecode, fb.header.meta().flags.kind);
-        try std.testing.expectEqual(@as(i32, 1), fb.header.meta().rc);
+        try helpers.expectRefCount(1, &fb.header);
         try std.testing.expect(!fb.header.meta().alloc_info.standalone);
 
         try std.testing.expect(fb.byte_code == null);
@@ -924,7 +925,7 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
     );
     try std.testing.expectEqual(@as(u16, 0), second.hotExtension().?.ctor_alloc.capacity);
     try std.testing.expectEqual(core.gc.GcKind.function_bytecode, second.header.meta().flags.kind);
-    try std.testing.expectEqual(@as(i32, 1), second.header.meta().rc);
+    try helpers.expectRefCount(1, &second.header);
 }
 
 test "published no-debug no-extension FunctionBytecode uses the deferred zero-FAM free path" {
@@ -1438,14 +1439,14 @@ test "parent finalization failure releases its published child realm owner" {
     const child_header = parent.cpool[0].objectHeader() orelse return error.TestExpectedEqual;
     const child_fb: *bytecode.FunctionBytecode = @alignCast(@fieldParentPtr("header", child_header));
     try std.testing.expectEqual(realm, child_fb.realmContext());
-    try std.testing.expectEqual(@as(i32, 2), realm.header.meta().rc);
+    try helpers.expectRefCount(2, &realm.header);
 
     // The failed parent FunctionDef still owns the installed cpool value.
     // Releasing that owner must drop the child's independent RealmRef exactly
     // once; no partially-created parent FB may retain another reference.
     parent.deinit(rt);
     parent_alive = false;
-    try std.testing.expectEqual(@as(i32, 1), realm.header.meta().rc);
+    try helpers.expectRefCount(1, &realm.header);
 }
 
 test "parent finalization moves an existing child FunctionBytecode cpool owner without rc churn" {
@@ -1480,12 +1481,12 @@ test "parent finalization moves an existing child FunctionBytecode cpool owner w
     defer if (parent_alive) core.JSValue.functionBytecode(&parent_fb.header).free(rt);
 
     try std.testing.expect(fd.cpool[0].isUndefined());
-    try std.testing.expectEqual(child_rc_before, child_fb.header.meta().rc);
+    try helpers.expectRefCount(child_rc_before, &child_fb.header);
     try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].objectHeader().?);
 
     fd.deinit(rt);
     fd_alive = false;
-    try std.testing.expectEqual(child_rc_before, child_fb.header.meta().rc);
+    try helpers.expectRefCount(child_rc_before, &child_fb.header);
     try std.testing.expectEqual(name, child_fb.funcName());
     try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].objectHeader().?);
 
@@ -1495,11 +1496,11 @@ test "parent finalization moves an existing child FunctionBytecode cpool owner w
     const realm_refs_before_parent_free = realm.header.meta().rc;
     core.JSValue.functionBytecode(&parent_fb.header).free(rt);
     parent_alive = false;
-    try std.testing.expectEqual(child_rc_before, child_fb.header.meta().rc);
-    try std.testing.expectEqual(realm_refs_before_parent_free - 1, realm.header.meta().rc);
+    try helpers.expectRefCount(child_rc_before, &child_fb.header);
+    try helpers.expectRefCount(realm_refs_before_parent_free - 1, &realm.header);
     held_child.free(rt);
     held_child_alive = false;
-    try std.testing.expectEqual(@as(i32, 1), realm.header.meta().rc);
+    try helpers.expectRefCount(1, &realm.header);
 }
 
 // ---- F10.1b: FunctionDef-driven local-slot lowering ----

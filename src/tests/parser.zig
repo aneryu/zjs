@@ -1,6 +1,7 @@
 //! Exercises lexer/parser semantics and emitted bytecode invariants.
 const std = @import("std");
 const zjs = @import("zjs");
+const helpers = @import("helpers.zig");
 const engine = zjs;
 const core = zjs.core;
 const parser = zjs.parser;
@@ -10178,13 +10179,13 @@ test "canonical root and child independently keep their compile realm alive" {
     const child = findFunctionConstantNamed(&parsed, rt, "child") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(realm, root.realmContext());
     try std.testing.expectEqual(realm, child.realmContext());
-    try std.testing.expectEqual(@as(i32, 3), realm.header.meta().rc);
+    try helpers.expectRefCount(3, &realm.header);
 
     // Drop the facade/public owner. The two finalized FBs must each keep their
     // own QuickJS-style JS_DupContext edge until their individual teardown.
     realm.destroy();
     realm_alive = false;
-    try std.testing.expectEqual(@as(i32, 2), realm.header.meta().rc);
+    try helpers.expectRefCount(2, &realm.header);
     try std.testing.expectEqual(realm, root.realmContext());
     try std.testing.expectEqual(realm, child.realmContext());
 

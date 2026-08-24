@@ -248,6 +248,7 @@ test "over-reserved property storage is freed by prop_size not prop_count" {
     try std.testing.expectEqual(@as(u32, 1), first.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 8), first.shape_ref.prop_size);
     first.value().free(rt);
+    helpers.reclaimNow(rt);
 
     // Shape hash may retain the resized root. The value buffer must not leak
     // across a second reserve/destroy cycle (free size = prop_size, not 1).
@@ -258,6 +259,7 @@ test "over-reserved property storage is freed by prop_size not prop_count" {
     try std.testing.expectEqual(@as(usize, 8), second.shape_ref.prop_size);
     try std.testing.expectEqual(@as(u32, 1), second.shape_ref.prop_count);
     second.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(mid, rt.memory.allocated_bytes);
 }
 
@@ -294,6 +296,7 @@ test "plain object destroy slim frees two data slots and the value buffer" {
     try std.testing.expectEqual(@as(u32, 0), pair.weakref_count);
 
     pair.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
 
@@ -305,10 +308,26 @@ test "proven object release preserves generic JSValue ownership semantics" {
     const object = try core.Object.create(rt, core.class.ids.object, null);
     const value = object.value();
     const retained = value.dup();
-    try std.testing.expectEqual(@as(i32, 2), object.header.meta().rc);
+    // The refcount steps are only meaningful where the count is the ownership
+    // record. Under the tracer an object's count is not maintained at all
+    // (`gc.refCountRemoved`), so what survives here is the part that is still
+    // a claim about ownership: dropping both references, and only both, must
+    // make the object collectable.
+    if (comptime !core.gc.trace_stw_enabled) {
+        try helpers.expectRefCount(2, &object.header);
+    }
 
     retained.freeObjectAssumeObject(rt);
-    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
+    if (comptime !core.gc.trace_stw_enabled) {
+        try helpers.expectRefCount(1, &object.header);
+    } else {
+        var kept: ?*core.Object = object;
+        var roots = core.runtime.rootObjects(.{&kept});
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        helpers.reclaimNow(rt);
+        try std.testing.expect(rt.gc.liveCount() > baseline_objects);
+    }
     value.freeObjectAssumeObject(rt);
     helpers.reclaimNow(rt);
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
@@ -326,8 +345,9 @@ test "active bytecode release preserves generic ownership" {
     const generic_value = generic_object.value();
     const generic_retained = generic_value.dup();
     generic_retained.freeDuringActiveBytecode(rt);
-    try std.testing.expectEqual(@as(i32, 1), generic_object.header.meta().rc);
+    try helpers.expectRefCount(1, &generic_object.header);
     generic_value.freeDuringActiveBytecode(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 
     core.JSValue.int32(1).freeDuringActiveBytecode(rt);
@@ -558,6 +578,12 @@ test "RealmContext is header-first and RealmRef owns independently of runtime li
     try std.testing.expectEqual(first, rt.firstContext().?);
 
     owner.deinit();
+    // No collection before this point: the host create-ref is what registers a
+    // Realm's root provider, so between `first.destroy()` and here `owner` is
+    // the only thing holding `first` and a `RealmRef` in a Zig local is not a
+    // declared root. Membership on `context_head` is deliberately not one
+    // either, which is exactly what the last assertion checks.
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -657,19 +683,26 @@ test "Runtime queues retain their originating Realm until owned jobs are release
     try rt.enqueueFinalizationJobForRealm(ctx, core.JSValue.int32(12), core.JSValue.int32(13));
 
     ctx.destroy();
+    // The host create-ref is gone, so from here on the queued jobs are the only
+    // thing keeping the Realm: each collection is asking the queue to prove its
+    // ownership, not asking `context_head` for membership.
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(ctx, rt.firstContext().?);
 
     var promise_job = rt.job_queue.takeFirst().?;
     promise_job.deinit();
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(ctx, rt.firstContext().?);
     var generic_job = rt.job_queue.takeFirst().?;
     const generic_result = generic_job.run();
     try std.testing.expect(!generic_result.isException());
     generic_result.free(rt);
     generic_job.deinit();
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(ctx, rt.firstContext().?);
     var finalization_job = rt.job_queue.takeFirst().?;
     finalization_job.deinit();
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -1005,10 +1038,10 @@ test "auto_init slot to another realm retains it across JSContext.destroy and cy
         try std.testing.expectEqual(core.property.Kind.auto_init, obj.propFlagsAt(proto_index).kind);
         const stored = obj.prop_values[proto_index].slot.auto_init.realm_and_id.realmHeader();
         try std.testing.expectEqual(&ctx_b.header, stored.?);
-        try std.testing.expectEqual(host_rc + 1, ctx_b.header.meta().rc);
+        try helpers.expectRefCount(host_rc + 1, &ctx_b.header);
 
         ctx_b.destroy();
-        try std.testing.expectEqual(host_rc, ctx_b.header.meta().rc);
+        try helpers.expectRefCount(host_rc, &ctx_b.header);
         try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
         _ = rt.runObjectCycleRemoval();
         try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
@@ -1030,13 +1063,17 @@ test "FinalizationRegistry RealmRef retains and releases its construction realm 
 
     const base_ref_count = ctx.header.meta().rc;
     const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
-    try std.testing.expectEqual(base_ref_count + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(base_ref_count + 1, &ctx.header);
     try std.testing.expectEqual(ctx, registry.finalizationRegistryRealmContext().?);
 
     registry.value().free(rt);
-    try std.testing.expectEqual(base_ref_count, ctx.header.meta().rc);
+    // The registry's realm ref is only given back when the registry itself is
+    // torn down; `ctx` survives this collection on its still-held create-ref.
+    helpers.reclaimNow(rt);
+    try helpers.expectRefCount(base_ref_count, &ctx.header);
     ctx.destroy();
     ctx_alive = false;
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -1302,6 +1339,7 @@ test "private brand property owns exactly one stored symbol value across replace
 
     object.value().free(rt);
     object_alive = false;
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.atoms.name(brand) == null);
 }
 
@@ -2635,6 +2673,7 @@ test "class construction pins its definition across reentrant unregister" {
     try std.testing.expect(object.flags.has_exotic_methods);
 
     object.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expect(!rt.classes.isRegistered(class_id));
     try std.testing.expect(!rt.classes.unregisterPending(class_id));
 }
@@ -2702,6 +2741,7 @@ test "inline class finalizer reentry keeps definition pinned while growing the t
     try object.defineOwnProperty(rt, property_atom, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try std.testing.expect(object.hasPropertyStorage());
     object.value().free(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), InlineClassFinalizerReentry.calls);
     try std.testing.expect(InlineClassFinalizerReentry.definition_visible_after_unregister);
@@ -2728,6 +2768,12 @@ test "inline class finalizer observes the live object allocation until callback 
     // differ only by the target object's lifecycle publication.
     const shape_guard = try core.Object.create(rt, core.class.ids.object, null);
     defer shape_guard.value().free(rt);
+    // The guard has to outlive the collection that runs the finalizer, and a
+    // plain Zig local is not a root under the declared-only scan.
+    var rooted_shape_guard: ?*core.Object = shape_guard;
+    var roots = core.runtime.rootObjects(.{&rooted_shape_guard});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
 
     const class_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(class_id, .{
@@ -2742,6 +2788,7 @@ test "inline class finalizer observes the live object allocation until callback 
     InlineObjectLifecycleProbe.expected_heap_live_bytes = rt.gcStats().heap_live_bytes;
     InlineObjectLifecycleProbe.expected_allocated_bytes = rt.memory.allocated_bytes;
     object.value().free(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), InlineObjectLifecycleProbe.calls);
     try std.testing.expect(InlineObjectLifecycleProbe.identity_matches);
@@ -2785,6 +2832,7 @@ test "external class finalizers run synchronously with original object identity 
     second.value().free(rt);
 
     holder.value().free(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 2), ExternalObjectLifecycleProbe.calls);
     try std.testing.expectEqual([_]u8{ 0, 1 }, ExternalObjectLifecycleProbe.events);
@@ -2819,6 +2867,7 @@ test "array teardown releases its unique prototype before its unique dense eleme
     element.value().free(rt);
 
     array.value().free(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 2), ExternalObjectLifecycleProbe.calls);
     try std.testing.expectEqual([_]u8{ 0, 1 }, ExternalObjectLifecycleProbe.events);
@@ -2844,13 +2893,37 @@ test "weak husk keeps its class definition after one synchronous finalizer" {
     payload_finalizer_calls = 0;
     rt.classes.unregisterDynamic(class_id);
     target.value().free(rt);
+    {
+        var kept_weak: ?*core.Object = weak_ref;
+        var weak_roots = core.runtime.rootObjects(.{&kept_weak});
+        weak_roots.activate(rt);
+        defer weak_roots.deactivate(rt);
+        helpers.reclaimNow(rt);
+    }
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expect(rt.classes.isRegistered(class_id));
-    try std.testing.expect(rt.classes.unregisterPending(class_id));
+    if (comptime !core.gc.trace_stw_enabled) {
+        // Refcounting leaves the stripped object allocated as a husk, because a
+        // WeakRef still names it, and the class definition must stay valid for
+        // as long as that husk can be reached.
+        try std.testing.expect(rt.classes.isRegistered(class_id));
+        try std.testing.expect(rt.classes.unregisterPending(class_id));
+    } else {
+        // The tracer clears weak identities in `processWeak`, which runs before
+        // the sweep that destroys the target, so no husk is ever formed and
+        // there is nothing left for the definition to stay valid for. The
+        // property the pin exists to protect -- a definition outlives every
+        // object observable under it, and not one step longer -- holds by the
+        // definition being released here rather than one WeakRef death later.
+        // This is JSC's shape too: weak handles are cleared inside the sweep of
+        // the block that owns the cell (MarkedBlock.cpp `m_weakSet.sweep()`).
+        try std.testing.expect(!rt.classes.isRegistered(class_id));
+        try std.testing.expect(!rt.classes.unregisterPending(class_id));
+    }
     try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
 
     weak_ref.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expect(!rt.classes.isRegistered(class_id));
     try std.testing.expect(!rt.classes.unregisterPending(class_id));
@@ -2923,6 +2996,7 @@ test "object destruction runs class payload finalizers synchronously without all
     const payloadless_create_calls = rt.memory.create_calls;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     payloadless.value().free(rt);
+    helpers.reclaimNow(rt);
     rt.setMemoryLimit(null);
     try std.testing.expectEqual(payloadless_alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(payloadless_create_calls, rt.memory.create_calls);
@@ -2946,6 +3020,7 @@ test "object destruction runs class payload finalizers synchronously without all
     const external_create_calls = rt.memory.create_calls;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     external.value().free(rt);
+    helpers.reclaimNow(rt);
     rt.setMemoryLimit(null);
     try std.testing.expectEqual(external_alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(external_create_calls, rt.memory.create_calls);
@@ -2967,6 +3042,13 @@ test "strong collection clear publishes empty state before synchronous finalizer
 
     const map = try core.Object.create(rt, core.class.ids.map, null);
     defer map.value().free(rt);
+    // The finalizer reads the map back out of a global and the test asserts on
+    // it afterwards, so the receiver must be a declared root: nothing else
+    // makes a plain Zig local reachable to the collection below.
+    var map_slot: ?*core.Object = map;
+    var map_roots = core.runtime.rootObjects(.{&map_slot});
+    map_roots.activate(rt);
+    defer map_roots.deactivate(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     const set_result = try engine.exec.collection_ops.methodCall(rt, map.value(), 1, &.{ core.JSValue.int32(1), value.value() });
     set_result.free(rt);
@@ -2982,6 +3064,7 @@ test "strong collection clear publishes empty state before synchronous finalizer
 
     const clear_result = try engine.exec.collection_ops.methodCall(rt, map.value(), 5, &.{});
     defer clear_result.free(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expect(clear_result.isUndefined());
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
@@ -3002,6 +3085,13 @@ test "dense array delete publishes sparse state before synchronous finalizer ree
 
     const array = try core.Object.createArray(rt, null);
     defer array.value().free(rt);
+    // The finalizer reads the array back out of a global and the test asserts
+    // on its storage afterwards, so the receiver must be a declared root:
+    // nothing else makes a plain Zig local reachable to the collection below.
+    var array_slot: ?*core.Object = array;
+    var array_roots = core.runtime.rootObjects(.{&array_slot});
+    array_roots.activate(rt);
+    defer array_roots.deactivate(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     try std.testing.expect(try array.defineDenseArrayDataProperty(rt, 0, value.value()));
     value.value().free(rt);
@@ -3015,6 +3105,7 @@ test "dense array delete publishes sparse state before synchronous finalizer ree
     }
 
     try std.testing.expect(array.deleteProperty(rt, core.atom.atomFromUInt32(0)));
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_array_delete_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
@@ -3035,6 +3126,13 @@ test "ordinary property delete publishes absence before synchronous finalizer re
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
     defer object.value().free(rt);
+    // The finalizer reads the receiver back out of a global and the test reads
+    // the property back afterwards, so the receiver must be a declared root:
+    // nothing else makes a plain Zig local reachable to the collection below.
+    var object_slot: ?*core.Object = object;
+    var object_roots = core.runtime.rootObjects(.{&object_slot});
+    object_roots.activate(rt);
+    defer object_roots.deactivate(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     const key = try rt.internAtom("reentrant_property_delete");
     defer rt.atoms.free(key);
@@ -3052,6 +3150,7 @@ test "ordinary property delete publishes absence before synchronous finalizer re
     }
 
     try std.testing.expect(object.deleteProperty(rt, key));
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_property_delete_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
@@ -3110,6 +3209,13 @@ test "regexp lastIndex set publishes replacement before synchronous finalizer re
 
     const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
     defer regexp.value().free(rt);
+    // The finalizer reads the receiver back out of a global and the test reads
+    // lastIndex back afterwards, so the receiver must be a declared root:
+    // nothing else makes a plain Zig local reachable to the collection below.
+    var regexp_slot: ?*core.Object = regexp;
+    var regexp_roots = core.runtime.rootObjects(.{&regexp_slot});
+    regexp_roots.activate(rt);
+    defer regexp_roots.deactivate(rt);
     try regexp.initializeRegExpLastIndex(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     try regexp.setProperty(rt, core.atom.ids.lastIndex, value.value());
@@ -3124,6 +3230,7 @@ test "regexp lastIndex set publishes replacement before synchronous finalizer re
     }
 
     try regexp.setProperty(rt, core.atom.ids.lastIndex, core.JSValue.int32(7));
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_regexp_last_index_calls);
@@ -3143,6 +3250,13 @@ test "regexp lastIndex define publishes replacement before synchronous finalizer
 
     const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
     defer regexp.value().free(rt);
+    // The finalizer reads the receiver back out of a global and the test reads
+    // lastIndex back afterwards, so the receiver must be a declared root:
+    // nothing else makes a plain Zig local reachable to the collection below.
+    var regexp_slot: ?*core.Object = regexp;
+    var regexp_roots = core.runtime.rootObjects(.{&regexp_slot});
+    regexp_roots.activate(rt);
+    defer regexp_roots.deactivate(rt);
     try regexp.initializeRegExpLastIndex(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     try regexp.setProperty(rt, core.atom.ids.lastIndex, value.value());
@@ -3161,6 +3275,7 @@ test "regexp lastIndex define publishes replacement before synchronous finalizer
         core.atom.ids.lastIndex,
         core.Descriptor.data(core.JSValue.int32(7), true, false, false),
     );
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_regexp_last_index_calls);
@@ -3197,7 +3312,17 @@ test "mapped arguments binding update publishes value before synchronous finaliz
         reentrant_mapped_arguments_calls = 0;
     }
 
+    // The reentry rides on the mapped value's payload finalizer, which the
+    // tracer only reaches through a collection. `arguments` is what the
+    // finalizer reenters and what the assertions read, and the declared-only
+    // scan does not see a plain Zig local, so it has to be named here.
+    var arguments_slot: ?*core.Object = arguments;
+    var arguments_roots = core.runtime.rootObjects(.{&arguments_slot});
+    arguments_roots.activate(rt);
+    defer arguments_roots.deactivate(rt);
+
     try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
@@ -3234,7 +3359,16 @@ test "mapped arguments var-ref update publishes value before synchronous finaliz
         reentrant_mapped_arguments_calls = 0;
     }
 
+    // Rooting `arguments` also keeps `cell` alive: the var-ref is reachable
+    // only through the mapped-arguments ref table, and the declared-only scan
+    // ignores the Zig local holding it.
+    var arguments_slot: ?*core.Object = arguments;
+    var arguments_roots = core.runtime.rootObjects(.{&arguments_slot});
+    arguments_roots.activate(rt);
+    defer arguments_roots.deactivate(rt);
+
     try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
@@ -3273,7 +3407,17 @@ test "mapped arguments binding delete publishes disconnection before synchronous
         reentrant_mapped_arguments_calls = 0;
     }
 
+    // The delete disconnects the binding and drops the var-ref; the payload
+    // finalizer behind the reentry only runs once a collection reaches the
+    // mapped value. `arguments` survives that collection and the assertions
+    // read it back, so it must be a declared root.
+    var arguments_slot: ?*core.Object = arguments;
+    var arguments_roots = core.runtime.rootObjects(.{&arguments_slot});
+    arguments_roots.activate(rt);
+    defer arguments_roots.deactivate(rt);
+
     try std.testing.expect(arguments.deleteProperty(rt, key));
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
@@ -3308,7 +3452,17 @@ test "cached iterator next clear publishes null before synchronous finalizer ree
         reentrant_cached_iterator_next_calls = 0;
     }
 
+    // Clearing the cache drops the last reference to the cached value, but the
+    // finalizer that reenters only runs when a collection reaches it. `object`
+    // is the reentry target and the subject of the assertion, so the
+    // declared-only scan has to be told about it.
+    var object_slot: ?*core.Object = object;
+    var object_roots = core.runtime.rootObjects(.{&object_slot});
+    object_roots.activate(rt);
+    defer object_roots.deactivate(rt);
+
     object.clearCachedIteratorNext(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_cached_iterator_next_calls);
@@ -3338,7 +3492,10 @@ test "exception slot clear publishes empty state before synchronous finalizer re
         reentrant_exception_slot_calls = 0;
     }
 
+    // The slot held the only reference; nothing the test reads afterwards is a
+    // heap object, so the collection needs no root frame here.
     slot.clear(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_exception_slot_calls);
@@ -3375,8 +3532,20 @@ test "array iterator target clear publishes null before synchronous finalizer re
         reentrant_array_iterator_calls = 0;
     }
 
-    const result = try engine.exec.array_builtin_ops.methodCall(rt, iterator.value(), 20, &.{});
+    var result = try engine.exec.array_builtin_ops.methodCall(rt, iterator.value(), 20, &.{});
     defer result.free(rt);
+    // The call clears the target, but the held payload's finalizer only runs
+    // when a collection reaches it. `iterator` is the reentry target and the
+    // subject of the assertion, and `result` is still owned by this frame; the
+    // declared-only scan sees neither Zig local unless it is named.
+    var iterator_slot: ?*core.Object = iterator;
+    var iterator_roots = core.runtime.rootObjects(.{&iterator_slot});
+    iterator_roots.activate(rt);
+    defer iterator_roots.deactivate(rt);
+    var result_roots = core.runtime.rootValues(.{&result});
+    result_roots.activate(rt);
+    defer result_roots.deactivate(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_array_iterator_calls);
@@ -3464,6 +3633,10 @@ test "synchronous class payload finalizer drains payload-owned zero-ref children
     payload_mark_calls = 0;
 
     wrapper.value().free(rt);
+    // Nothing here outlives the collection: the wrapper is what is being
+    // reclaimed and `child_header` is only read as an address that must no
+    // longer be owned.
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), payload_mark_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
@@ -3497,6 +3670,7 @@ test "synchronous external payload callback pins its generation through reentran
     child.value().free(rt);
 
     wrapper.value().free(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), ExternalClassFinalizerReentry.calls);
     try std.testing.expect(ExternalClassFinalizerReentry.identity_matches);
@@ -4335,7 +4509,7 @@ test "true C functions own their construction realm while data functions do not"
     const ctx = try core.RealmContext.create(rt);
     const function_proto = try core.Object.create(rt, core.class.ids.object, null);
     ctx.cached_function_proto = function_proto;
-    const native = try engine.core.function.nativeFunction(ctx, "native", 0);
+    var native = try engine.core.function.nativeFunction(ctx, "native", 0);
     const data = try engine.core.function.nativeDataFunctionWithPrototype(rt, function_proto, "data", 1);
 
     const native_object: *core.Object = @fieldParentPtr("header", native.refHeader().?);
@@ -4366,8 +4540,16 @@ test "true C functions own their construction realm while data functions do not"
     // function's direct construction-realm ownership below.
     data.free(rt);
     ctx.destroy();
+    // The realm outliving this collection is evidence of the native function's
+    // ownership only while the native function is itself a root -- the
+    // declared-only scan does not see the Zig local.
+    var native_roots = core.runtime.rootValues(.{&native});
+    native_roots.activate(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(ctx, rt.firstContext().?);
+    native_roots.deactivate(rt);
     native.free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -4786,7 +4968,7 @@ test "failed new property definition rolls back retained entry" {
     try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, e, core.Descriptor.data(retained.value(), true, true, true)));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(retained_refs, retained.header.meta().rc);
+    try helpers.expectRefCount(retained_refs, &retained.header);
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expect(!object.hasOwnProperty(e));
 
@@ -4923,9 +5105,10 @@ test "context lexicals property alias releases context strong reference" {
     const env_key = try rt.internAtom("env");
     defer rt.atoms.free(env_key);
     try global.defineOwnProperty(rt, env_key, core.Descriptor.data(env.value(), true, true, true));
-    try std.testing.expectEqual(@as(i32, 2), env.header.meta().rc);
+    try helpers.expectRefCount(2, &env.header);
 
     ctx.destroy();
+    helpers.reclaimNow(rt);
     try expectNoLiveGc(rt);
 }
 
@@ -5041,8 +5224,8 @@ test "property replacement preserves references under memory cap" {
     try object.defineOwnProperty(rt, key, core.Descriptor.data(replacement.value(), true, true, true));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(old_refs - 1, old_value.header.meta().rc);
-    try std.testing.expectEqual(replacement_refs + 1, replacement.header.meta().rc);
+    try helpers.expectRefCount(old_refs - 1, &old_value.header);
+    try helpers.expectRefCount(replacement_refs + 1, &replacement.header);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
@@ -5075,14 +5258,22 @@ test "definePlainDataPropertyKnownFast refcounted append and duplicate-key repla
     try holder.definePlainDataPropertyKnownFast(rt, key, first.value());
     try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.prop_count);
     try std.testing.expectEqual(&first.header, holder.prop_values[0].slot.data.refHeader().?);
-    try std.testing.expectEqual(@as(i32, 1), first.header.meta().rc);
+    try helpers.expectRefCount(1, &first.header);
 
     // Duplicate-key replace leg (`({a:o1,a:o2})`): `second` is consumed, the
     // displaced `first` is destroyed — rc must balance (slot + probe only).
     try holder.definePlainDataPropertyKnownFast(rt, key, second.value());
     try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.prop_count);
     try std.testing.expectEqual(&second.header, holder.prop_values[0].slot.data.refHeader().?);
-    try std.testing.expectEqual(@as(i32, 2), second.header.meta().rc);
+    try helpers.expectRefCount(2, &second.header);
+    // Exact mark does not treat Zig locals as roots, and `second` is only
+    // reachable through the slot, so `holder` has to be named for the count
+    // below to be about `first` rather than about missing roots.
+    var holder_slot: ?*core.Object = holder;
+    var obj_roots = core.runtime.rootObjects(.{&holder_slot});
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
+    helpers.reclaimNow(rt);
     // holder + second only: the replaced `first` must be gone (a leaked ref
     // from the pre-fix borrow/consume mismatch would keep it live).
     try std.testing.expectEqual(baseline_live + 2, rt.gc.liveCountKind(.object));
@@ -5194,13 +5385,13 @@ test "definePlainDataPropertyKnownFast OOM sweep leaves refcounted value owned b
             rt.setMemoryLimit(null);
             try std.testing.expectEqual(error.OutOfMemory, err);
             failures += 1;
-            try std.testing.expectEqual(@as(i32, 2), child.header.meta().rc);
+            try helpers.expectRefCount(2, &child.header);
             try std.testing.expectEqual(@as(usize, 0), holder.shape_ref.prop_count);
         }
     }
     try std.testing.expect(failures > 0);
     // Success consumed the caller's ref: slot + probe only.
-    try std.testing.expectEqual(@as(i32, 2), child.header.meta().rc);
+    try helpers.expectRefCount(2, &child.header);
     try std.testing.expectEqual(&child.header, holder.prop_values[0].slot.data.refHeader().?);
 
     // Same sweep over the duplicate-key replace leg: failures must not touch
@@ -5220,13 +5411,13 @@ test "definePlainDataPropertyKnownFast OOM sweep leaves refcounted value owned b
             rt.setMemoryLimit(null);
             try std.testing.expectEqual(error.OutOfMemory, err);
             replace_failures += 1;
-            try std.testing.expectEqual(@as(i32, 2), replacement.header.meta().rc);
-            try std.testing.expectEqual(@as(i32, 2), child.header.meta().rc);
+            try helpers.expectRefCount(2, &replacement.header);
+            try helpers.expectRefCount(2, &child.header);
             try std.testing.expectEqual(&child.header, holder.prop_values[0].slot.data.refHeader().?);
         }
     }
-    try std.testing.expectEqual(@as(i32, 2), replacement.header.meta().rc);
-    try std.testing.expectEqual(@as(i32, 1), child.header.meta().rc);
+    try helpers.expectRefCount(2, &replacement.header);
+    try helpers.expectRefCount(1, &child.header);
     try std.testing.expectEqual(&replacement.header, holder.prop_values[0].slot.data.refHeader().?);
     try std.testing.expectEqual(baseline_live + 3, rt.gc.liveCountKind(.object));
 }
@@ -5243,21 +5434,21 @@ test "object data property self-assignment keeps stored object alive" {
 
     try holder.defineOwnProperty(rt, key, core.Descriptor.data(stored.value(), true, true, true));
     stored.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
+    try helpers.expectRefCount(1, &stored.header);
 
     const own_value = holder.prop_values[0].slot.data;
     try std.testing.expect(try holder.setOwnWritableDataProperty(rt, key, own_value));
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
+    try helpers.expectRefCount(1, &stored.header);
     try std.testing.expectEqual(&stored.header, holder.prop_values[0].slot.data.refHeader().?);
 
     const property_value = holder.prop_values[0].slot.data;
     try holder.setProperty(rt, key, property_value);
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
+    try helpers.expectRefCount(1, &stored.header);
     try std.testing.expectEqual(&stored.header, holder.prop_values[0].slot.data.refHeader().?);
 
     const simple_value = holder.prop_values[0].slot.data;
     try std.testing.expect(try holder.setOrDefineOwnDataPropertyForSimpleSet(rt, key, simple_value));
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
+    try helpers.expectRefCount(1, &stored.header);
     try std.testing.expectEqual(&stored.header, holder.prop_values[0].slot.data.refHeader().?);
 }
 
@@ -5273,12 +5464,12 @@ test "json parse data property self-assignment keeps stored object alive" {
 
     try holder.defineJsonParseDataProperty(rt, key, stored.value());
     stored.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
+    try helpers.expectRefCount(1, &stored.header);
 
     const current = holder.prop_values[0].slot.data;
     try holder.defineJsonParseDataProperty(rt, key, current);
 
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
+    try helpers.expectRefCount(1, &stored.header);
     try std.testing.expectEqual(&stored.header, holder.prop_values[0].slot.data.refHeader().?);
 }
 
@@ -5293,12 +5484,12 @@ test "dense array element self-assignment keeps stored object alive" {
 
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, index, stored.value()));
     stored.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
+    try helpers.expectRefCount(1, &stored.header);
 
     const current = array.arrayElements()[0];
     try array.setProperty(rt, index, current);
 
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
+    try helpers.expectRefCount(1, &stored.header);
     try std.testing.expectEqual(&stored.header, array.arrayElements()[0].refHeader().?);
 }
 
@@ -5314,20 +5505,20 @@ test "owned dense array writes consume values only on success" {
     const index_0 = core.atom.atomFromUInt32(0);
 
     try std.testing.expect(try array.appendDenseArrayIndexOwned(rt, 0, index_0, initial.value()));
-    try std.testing.expectEqual(@as(i32, 2), initial.header.meta().rc);
+    try helpers.expectRefCount(2, &initial.header);
 
     const replacement = try core.Object.create(rt, core.class.ids.object, null);
     const replacement_witness = replacement.value().dup();
     defer replacement_witness.free(rt);
     try std.testing.expect(array.setFastArrayElementOwned(rt, 0, replacement.value()));
-    try std.testing.expectEqual(@as(i32, 1), initial.header.meta().rc);
-    try std.testing.expectEqual(@as(i32, 2), replacement.header.meta().rc);
+    try helpers.expectRefCount(1, &initial.header);
+    try helpers.expectRefCount(2, &replacement.header);
     try std.testing.expectEqual(&replacement.header, array.arrayElements()[0].refHeader().?);
 
     const rejected = try core.Object.create(rt, core.class.ids.object, null);
     try std.testing.expect(!array.setFastArrayElementOwned(rt, 2, rejected.value()));
     try std.testing.expect(!try array.appendDenseArrayIndexOwned(rt, 3, core.atom.atomFromUInt32(3), rejected.value()));
-    try std.testing.expectEqual(@as(i32, 1), rejected.header.meta().rc);
+    try helpers.expectRefCount(1, &rejected.header);
     rejected.value().free(rt);
 }
 
@@ -5384,7 +5575,7 @@ test "failed prototype replacement preserves prototype and refcounts" {
     rt.setMemoryLimit(null);
 
     try std.testing.expect(first.getPrototype() == null);
-    try std.testing.expectEqual(proto_refs, proto.header.meta().rc);
+    try helpers.expectRefCount(proto_refs, &proto.header);
     try std.testing.expectEqual(shared_shape, first.shape_ref);
     try std.testing.expectEqual(shared_shape, second.shape_ref);
     try std.testing.expectEqual(shape_refs, shared_shape.refCount());
@@ -5441,6 +5632,9 @@ test "shape transition cache releases chained shapes" {
     const shared_shape = objects[0].shape_ref;
     for (objects[1..]) |obj| try std.testing.expectEqual(shared_shape, obj.shape_ref);
     for (objects) |obj| obj.value().free(rt);
+    // Nothing below reads `objects` again, so the chain is unreachable and the
+    // collection stands in for the release cascade that used to unhook it.
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
 }
@@ -5915,6 +6109,7 @@ test "function bytecode registration is old-space accounted" {
 
     value.free(&rt);
     value_alive = false;
+    helpers.reclaimNow(&rt);
     try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(baseline_allocations, rt.memory.allocation_count);
     try std.testing.expectEqual(baseline_create_calls + 1, rt.memory.create_calls);
@@ -5988,6 +6183,7 @@ test "gc live heap stats drop when object is released" {
     try std.testing.expectEqual(@as(usize, 0), allocated.large_object_bytes);
 
     object.value().free(rt);
+    helpers.reclaimNow(rt);
 
     const released = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 0), released.total_allocated_bytes);
@@ -6132,6 +6328,9 @@ test "std file object destruction defers native close cleanup" {
     file_owned_by_test = false;
 
     object.value().free(&rt);
+    // The deferred close is enqueued by the object's teardown, so the queue
+    // only fills once something actually reclaims it.
+    helpers.reclaimNow(&rt);
 
     var stats = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredNativeCleanupCountForTest());
@@ -6242,6 +6441,7 @@ test "gc registry debug verifier accepts linked and unlinked list states" {
     try rt.gc.verifyIntrusiveList();
 
     obj.value().free(rt);
+    helpers.reclaimNow(rt);
     try rt.gc.verifyIntrusiveList();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
@@ -6405,7 +6605,7 @@ test "gc object release does not allocate after refcount reaches zero" {
     rt.setMemoryLimit(null);
 
     try std.testing.expect(did_release);
-    try std.testing.expectEqual(@as(i32, 0), obj.header.meta().rc);
+    try helpers.expectRefCount(0, &obj.header);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
 
     // Clean up manually since we released/unlinked it
@@ -6449,6 +6649,7 @@ test "zero-ref release drains a deep acyclic object chain iteratively" {
     const head = try createDeepOwnedPropertyChain(rt, key, deep_gc_chain_length);
 
     head.value().free(rt);
+    helpers.reclaimNow(rt);
     try expectNoLiveGc(rt);
 }
 
@@ -7268,6 +7469,13 @@ test "HeapValueSlot setOptionalOwned retains new then releases old" {
     try std.testing.expectEqual(@as(usize, 1), core.gc_slot.stats.publishes);
     try std.testing.expectEqual(@as(usize, 1), core.gc_slot.stats.releases);
     try std.testing.expect(slot != null);
+    // The slot's new occupant lives only in a Zig local from the exact scan's
+    // point of view; name it so the collection can only condemn `first`.
+    var second_slot: ?*core.Object = second;
+    var obj_roots = core.runtime.rootObjects(.{&second_slot});
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expect(!rt.gc.containsHeader(first_header));
     if (slot) |stored| stored.free(rt);
 }
@@ -8198,19 +8406,22 @@ test "native pin retains direct object and counts nested pins" {
 
     try std.testing.expect(object.header.pinned());
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
-    try std.testing.expectEqual(@as(i32, 3), object.header.meta().rc);
+    try helpers.expectRefCount(3, &object.header);
 
     value.free(rt);
-    try std.testing.expectEqual(@as(i32, 2), object.header.meta().rc);
+    try helpers.expectRefCount(2, &object.header);
     try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
 
     first_pin.deinit();
     try std.testing.expect(object.header.pinned());
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
-    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
+    try helpers.expectRefCount(1, &object.header);
 
     second_pin.deinit();
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().pinned_cell_count);
+    // Unpinned and unreferenced: the last pin drop is what makes the object
+    // condemnable, so the collection belongs here and not earlier.
+    helpers.reclaimNow(rt);
     try expectNoLiveGc(rt);
 }
 
@@ -8248,11 +8459,14 @@ test "weak persistent value does not retain direct object target" {
     }
 
     target.value().free(rt);
+    // Dropping the last strong reference must not deliver the callback: it is
+    // a collection-time notification, and nothing has collected yet.
+    try std.testing.expectEqual(@as(usize, 0), clear_count);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
     try std.testing.expect(!weak.isAlive());
     try std.testing.expect(weak.get().isUndefined());
-    try std.testing.expectEqual(@as(usize, 0), clear_count);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), clear_count);
 
@@ -8767,14 +8981,17 @@ test "realm context owns cached prototype references" {
     try function_proto.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
     try promise_proto.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
 
-    try std.testing.expectEqual(@as(i32, 3), global.header.meta().rc);
-    try std.testing.expectEqual(@as(i32, 2), function_proto.header.meta().rc);
-    try std.testing.expectEqual(@as(i32, 2), promise_proto.header.meta().rc);
+    try helpers.expectRefCount(3, &global.header);
+    try helpers.expectRefCount(2, &function_proto.header);
+    try helpers.expectRefCount(2, &promise_proto.header);
 
     ctx.destroy();
     function_proto.value().free(rt);
     promise_proto.value().free(rt);
+    helpers.reclaimNow(rt);
 
+    // Nothing may be left for a second pass: the cached protos and the global
+    // they point back at must already have gone with the context.
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
@@ -8809,9 +9026,20 @@ test "auto-init slot owns its Realm until the property is deleted" {
     try std.testing.expectEqual(ctx, rt.firstContext().?);
 
     try std.testing.expect(holder.deleteProperty(rt, lazy_key));
-    try std.testing.expectEqual(@as(?*core.RealmContext, null), rt.firstContext());
+    {
+        // The delete drops the slot's Realm edge; reclamation of the Realm is
+        // what that edge being the last one means. `holder` outlives the
+        // collection and no other edge reaches it, so it must be named.
+        var holder_slot: ?*core.Object = holder;
+        var holder_roots = core.runtime.rootObjects(.{&holder_slot});
+        holder_roots.activate(rt);
+        defer holder_roots.deactivate(rt);
+        helpers.reclaimNow(rt);
+        try std.testing.expectEqual(@as(?*core.RealmContext, null), rt.firstContext());
+    }
 
     holder.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
 }
 
@@ -8881,19 +9109,19 @@ test "MODULE_NS auto-init failure retains its slot Realm and retries once per re
     };
 
     try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(true, false, true), ctx, &fixture.owner);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
     try std.testing.expectError(error.OutOfMemory, holder.getProperty(key));
     try std.testing.expectEqual(@as(usize, 1), fixture.calls);
     try std.testing.expectEqual(core.property.Kind.auto_init, holder.propKindAt(0));
     try std.testing.expectEqual(&ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     const retried = try holder.getProperty(key);
     defer retried.free(rt);
     try std.testing.expectEqual(@as(?i32, 88), retried.asInt32());
     try std.testing.expectEqual(@as(usize, 2), fixture.calls);
     try std.testing.expectEqual(core.property.Kind.data, holder.propKindAt(0));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 }
 
 test "MODULE_NS auto-init reentry cannot overwrite the replacement property" {
@@ -8944,13 +9172,13 @@ test "auto-init slot clone and destroy retain and release the typed Realm edge e
     const baseline_realm_refs = ctx.header.meta().rc;
 
     try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(true, false, true), ctx, &fixture.owner);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
     var clone = holder.prop_values[0].slot.auto_init.clone();
-    try std.testing.expectEqual(baseline_realm_refs + 2, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 2, &ctx.header);
     clone.deinit(rt);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
     try std.testing.expect(holder.deleteProperty(rt, key));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 }
 
 test "unmaterialized MODULE_NS slot participates in Realm cycle marking" {
@@ -9228,6 +9456,16 @@ test "weak reference holders use a lifetime intrusive list" {
     const first = try core.Object.create(rt, core.class.ids.weakmap, null);
     const middle = try core.Object.create(rt, core.class.ids.weak_ref, null);
     const last = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+    // Each holder leaves the list when it is destroyed, so every step below
+    // needs a collection to stand where the last release used to. The holders
+    // that must still be readable across a given collection are named here;
+    // a slot is cleared exactly when its object is meant to become garbage.
+    var strong_map_slot: ?*core.Object = strong_map;
+    var first_slot: ?*core.Object = first;
+    var last_slot: ?*core.Object = last;
+    var live_roots = core.runtime.rootObjects(.{ &strong_map_slot, &first_slot, &last_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     // QuickJS registers every weak-capable holder for its full payload
     // lifetime, including an empty WeakMap / FinalizationRegistry. Strong
@@ -9242,14 +9480,19 @@ test "weak reference holders use a lifetime intrusive list" {
     try std.testing.expectEqual(@as(?*core.Object, null), last.weakReferenceHolderNext());
 
     middle.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(?*core.Object, last), first.weakReferenceHolderNext());
     try std.testing.expectEqual(@as(?*core.Object, first), last.weakReferenceHolderPrevious());
 
     first.value().free(rt);
+    first_slot = null;
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(last, rt.weak_reference_holder_head.?);
     try std.testing.expectEqual(last, rt.weak_reference_holder_tail.?);
 
     last.value().free(rt);
+    last_slot = null;
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(?*core.Object, null), rt.weak_reference_holder_head);
     try std.testing.expectEqual(@as(?*core.Object, null), rt.weak_reference_holder_tail);
     strong_map.value().free(rt);
@@ -9271,6 +9514,17 @@ test "weak collection borrowed holder cache supports reverse teardown" {
             key.* = null;
         }
     }
+    // The teardown loop collects after every release, and both arrays are read
+    // by the deferred cleanup afterwards. A holder slot is cleared at the point
+    // the loop means it to die; the keys stay named for the whole test.
+    var live_roots = core.runtime.rootObjects(.{
+        &holders[0], &holders[1], &holders[2], &holders[3],
+        &holders[4], &holders[5], &holders[6], &holders[7],
+        &keys[0],    &keys[1],    &keys[2],    &keys[3],
+        &keys[4],    &keys[5],    &keys[6],    &keys[7],
+    });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     for (&holders, &keys, 0..) |*holder_slot, *key_slot, index| {
         const holder = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -9292,6 +9546,7 @@ test "weak collection borrowed holder cache supports reverse teardown" {
         const holder = holders[remaining].?;
         holder.value().free(rt);
         holders[remaining] = null;
+        helpers.reclaimNow(rt);
         try std.testing.expectEqual(remaining, rt.borrowed_reference_holders.len);
     }
 }
@@ -9435,13 +9690,13 @@ test "data to auto-init replacement rolls back descriptor OOM and retries in sam
     try std.testing.expectEqual(core.property.Kind.data, holder.propFlagsAt(0).kind);
     try std.testing.expectEqual(original_flags.bits(), holder.propFlagsAt(0).bits());
     try std.testing.expectEqual(@as(?i32, 1), (try holder.getProperty(key)).asInt32());
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
     try std.testing.expectEqual(baseline_allocated_bytes, rt.memory.allocated_bytes);
 
     try holder.defineEmptyArrayAutoInitProperty(rt, key, flags, global);
     try std.testing.expectEqual(core.property.Kind.auto_init, holder.propFlagsAt(0).kind);
     try std.testing.expectEqual(flags.withKind(.auto_init).bits(), holder.propFlagsAt(0).bits());
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
     try std.testing.expectEqual(&ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
 
     const materialized = try holder.getProperty(key);
@@ -9450,7 +9705,7 @@ test "data to auto-init replacement rolls back descriptor OOM and retries in sam
     try std.testing.expectEqual(@as(u32, 0), materialized_array.arrayLength());
     try std.testing.expectEqual(core.property.Kind.data, holder.propFlagsAt(0).kind);
     try std.testing.expectEqual(flags.bits(), holder.propFlagsAt(0).bits());
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 }
 
 test "replacing auto-init transfers the owned Realm edge" {
@@ -9544,15 +9799,15 @@ test "replacing auto-init rolls back descriptor OOM and retries in same runtime"
 
     try std.testing.expectEqual(original_flags.bits(), holder.propFlagsAt(0).bits());
     try std.testing.expectEqual(&first_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
-    try std.testing.expectEqual(first_realm_refs, first_ctx.header.meta().rc);
-    try std.testing.expectEqual(second_realm_refs, second_ctx.header.meta().rc);
+    try helpers.expectRefCount(first_realm_refs, &first_ctx.header);
+    try helpers.expectRefCount(second_realm_refs, &second_ctx.header);
     try std.testing.expectEqual(baseline_allocated_bytes, rt.memory.allocated_bytes);
 
     try holder.replaceAutoInitPropertyWithRealmAndNative(rt, key, "oom-replace-realm-next", 0, next_flags, second_global, 0);
     try std.testing.expectEqual(next_flags.withKind(.auto_init).bits(), holder.propFlagsAt(0).bits());
     try std.testing.expectEqual(&second_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
-    try std.testing.expectEqual(first_realm_refs - 1, first_ctx.header.meta().rc);
-    try std.testing.expectEqual(second_realm_refs + 1, second_ctx.header.meta().rc);
+    try helpers.expectRefCount(first_realm_refs - 1, &first_ctx.header);
+    try helpers.expectRefCount(second_realm_refs + 1, &second_ctx.header);
 }
 
 test "deleting auto-init releases its owned Realm edge" {
@@ -9571,10 +9826,10 @@ test "deleting auto-init releases its owned Realm edge" {
 
     const baseline_realm_refs = ctx.header.meta().rc;
     try holder.definePerformanceAutoInitProperty(rt, key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     try std.testing.expect(holder.deleteProperty(rt, key));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 }
 
 test "ordinary auto-init replacement releases each owned Realm edge" {
@@ -9590,6 +9845,14 @@ test "ordinary auto-init replacement releases each owned Realm edge" {
     object_proto_slot.* = global.value().dup();
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     defer holder.value().free(rt);
+    // Each replacement below materializes the lazy value first, and that
+    // short-lived object carries the Realm edge the assertions are counting.
+    // Collecting it is what returns the count; `holder` is reachable from
+    // nothing else, so it has to be named across every collection.
+    var holder_slot: ?*core.Object = holder;
+    var holder_roots = core.runtime.rootObjects(.{&holder_slot});
+    holder_roots.activate(rt);
+    defer holder_roots.deactivate(rt);
     const define_key = try rt.internAtom("lazy_define_realm");
     defer rt.atoms.free(define_key);
     const set_key = try rt.internAtom("lazy_set_realm");
@@ -9601,28 +9864,32 @@ test "ordinary auto-init replacement releases each owned Realm edge" {
 
     const baseline_realm_refs = ctx.header.meta().rc;
     try holder.definePerformanceAutoInitProperty(rt, define_key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     try holder.defineOwnProperty(rt, define_key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    helpers.reclaimNow(rt);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 
     try holder.definePerformanceAutoInitProperty(rt, set_key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     try holder.setProperty(rt, set_key, core.JSValue.int32(2));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    helpers.reclaimNow(rt);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 
     try holder.definePerformanceAutoInitProperty(rt, own_set_key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     try std.testing.expect(try holder.setOwnWritableDataProperty(rt, own_set_key, core.JSValue.int32(3)));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    helpers.reclaimNow(rt);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 
     try holder.definePerformanceAutoInitProperty(rt, simple_set_key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     try std.testing.expect(try holder.setOrDefineOwnDataPropertyForSimpleSet(rt, simple_set_key, core.JSValue.int32(4)));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    helpers.reclaimNow(rt);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 }
 
 test "specialized auto-init producers retain the same typed Realm owner" {
@@ -9677,7 +9944,7 @@ test "specialized auto-init producers retain the same typed Realm owner" {
         try std.testing.expectEqual(core.property.AutoInitId.prop, slot.realm_and_id.id());
         try std.testing.expectEqual(&ctx.header, slot.realm_and_id.realmHeader().?);
     }
-    try std.testing.expectEqual(@as(i32, 1 + holders.len), ctx.header.meta().rc);
+    try helpers.expectRefCount(@intCast(1 + holders.len), &ctx.header);
 }
 
 test "auto-init descriptor interning reuses value-identical metadata" {
@@ -9742,6 +10009,7 @@ test "materialized auto-init true C function owns its construction realm" {
 
     function_value.free(rt);
     holder.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -9765,10 +10033,11 @@ test "dead weak collection key entry is swept when target is destroyed" {
     dropGcPtr(&key);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(i32, 1), value.header.meta().rc);
+    try helpers.expectRefCount(1, &value.header);
 
     value.value().free(rt);
     value_slot = null;
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
@@ -9796,7 +10065,7 @@ test "dead weak collection key entry is swept without freeing live value" {
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(i32, 1), value.header.meta().rc);
+    try helpers.expectRefCount(1, &value.header);
 }
 
 test "live weak collection key preserves stored value" {
@@ -10301,10 +10570,11 @@ test "finalization registry dead target releases held value when target is destr
     dropGcPtr(&target);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(@as(i32, 1), held.header.meta().rc);
+    try helpers.expectRefCount(1, &held.header);
 
     held.value().free(rt);
     held_slot = null;
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
@@ -10336,6 +10606,7 @@ test "finalization registry live target preserves held value" {
     registry_slot = null;
     target.value().free(rt);
     target_slot = null;
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().weak_ref_count);
 }
 
@@ -10535,6 +10806,7 @@ test "object allocation collects reclaimable cycles before memory-limit rejectio
     shape_guard.value().free(rt);
     shape_guard_slot = null;
     shape_guard_owned = false;
+    helpers.reclaimNow(rt);
     try expectNoLiveGc(rt);
 }
 
@@ -10589,6 +10861,13 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
 
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
     defer prototype.value().free(rt);
+    // The retry's teardown is measured against the pre-construction counts, so
+    // a collection has to stand where the retry's release used to. `prototype`
+    // is read after it and is reachable from nothing on the heap.
+    var prototype_slot: ?*core.Object = prototype;
+    var prototype_roots = core.runtime.rootObjects(.{&prototype_slot});
+    prototype_roots.activate(rt);
+    defer prototype_roots.deactivate(rt);
     const class_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(class_id, .{ .class_name = "PostShapeObjectOom" });
 
@@ -10630,7 +10909,7 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
     try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
     try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
     try std.testing.expectEqual(allocated_bytes_before, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(prototype_refs_before, prototype.header.meta().rc);
+    try helpers.expectRefCount(prototype_refs_before, &prototype.header);
 
     // A failed construction must release its dynamic definition pin completely.
     rt.classes.unregisterDynamic(class_id);
@@ -10646,11 +10925,12 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
     try std.testing.expect(probe.shape_owned_at_object_boundary);
     try std.testing.expectEqual(prototype, retry.getPrototype());
     retry.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(live_shape_count_before, rt.gc.liveCountKind(.shape));
     try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
     try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
     try std.testing.expectEqual(retry_allocated_bytes_before, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(prototype_refs_before, prototype.header.meta().rc);
+    try helpers.expectRefCount(prototype_refs_before, &prototype.header);
     rt.classes.unregisterDynamic(class_id);
 }
 
@@ -10680,7 +10960,7 @@ test "shape reserve OOM does not publish or retain proto" {
     try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
     try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
     try std.testing.expectEqual(allocated_bytes_before, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(prototype_refs_before, prototype.header.meta().rc);
+    try helpers.expectRefCount(prototype_refs_before, &prototype.header);
 }
 
 test "gc threshold API resets after scheduled collection and survives force-GC instrumentation" {
@@ -10755,10 +11035,11 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
     dropGcPtr(&left);
     dropGcPtr(&right);
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
-    try std.testing.expectEqual(@as(i32, 1), external.header.meta().rc);
+    try helpers.expectRefCount(1, &external.header);
     external.value().free(rt);
     ext_slot = null;
     dropGcPtr(&external);
+    helpers.reclaimNow(rt);
     try expectNoLiveGc(rt);
 }
 
@@ -11079,12 +11360,12 @@ test "module registry ownership is one-way and does not retain its realm" {
     defer rt.atoms.free(module_name);
     const realm_refs = ctx.header.meta().rc;
     const record = try publishEmptyModule(rt, &ctx.modules, module_name);
-    try std.testing.expectEqual(realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(realm_refs, &ctx.header);
 
     record.retain();
-    try std.testing.expectEqual(realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(realm_refs, &ctx.header);
     record.release(rt);
-    try std.testing.expectEqual(realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(realm_refs, &ctx.header);
 }
 
 test "module finalizer self-unlinks a still-linked realm registry node" {
@@ -11130,13 +11411,13 @@ test "externally retained module outlives realm registry teardown" {
     record_retained = true;
 
     try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
-    try std.testing.expectEqual(@as(i32, 2), record.header.meta().rc);
+    try helpers.expectRefCount(2, &record.header);
 
     ctx.destroy();
     ctx_alive = false;
     try std.testing.expect(rt.firstContext() == null);
     try std.testing.expect(record.registry == null);
-    try std.testing.expectEqual(@as(i32, 1), record.header.meta().rc);
+    try helpers.expectRefCount(1, &record.header);
     try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
 
     record.release(rt);

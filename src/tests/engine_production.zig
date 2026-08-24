@@ -2,6 +2,7 @@
 const std = @import("std");
 const zjs = @import("zjs");
 const public_zjs = @import("../root.zig");
+const helpers = @import("helpers.zig");
 const InterruptState = struct {
     hits: usize = 0,
 
@@ -540,6 +541,12 @@ test "production embedding can expose owned and shared byte stores" {
 
     owned_value.free(rt);
     owned_live = false;
+    // Dropping the embedder's last reference is what ends the buffer's life
+    // under refcounting; under the tracer it is what makes it collectable, and
+    // the store's `deinit` runs when the collection reaches it. This is an
+    // API-visible timing change for embedders that attach OS resources to a
+    // byte store.
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), owned_state.calls);
 
     var shared_state = BytesStoreState{ .allocator = std.testing.allocator };
@@ -566,6 +573,7 @@ test "production embedding can expose owned and shared byte stores" {
 
     shared_value.free(rt);
     shared_live = false;
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), shared_state.calls);
 }
 

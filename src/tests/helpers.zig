@@ -104,6 +104,21 @@ pub fn reclaimNow(rt: *core.JSRuntime) void {
     _ = rt.runObjectCycleRemoval();
 }
 
+/// Assert a refcount that is the ownership record under refcounting.
+///
+/// Under the tracer the count is not maintained at all for the kinds it owns
+/// (`core.gc.refCountRemoved`), so there is no arithmetic left to check and the
+/// assertion is skipped rather than deleted -- the refcounting build still
+/// guards exactly what it always did. Kinds the tracer does not own (strings,
+/// ropes, BigInt, and also shapes and realms, which keep their counts for
+/// copy-on-write and host-handle reasons) are checked in both builds.
+pub fn expectRefCount(expected: i32, header: *const core.gc.Header) !void {
+    if (comptime core.gc.trace_stw_enabled) {
+        if (core.gc.refCountRemoved(header.metaConst().flags.kind)) return;
+    }
+    try std.testing.expectEqual(expected, header.metaConst().rc);
+}
+
 pub fn objectFromValue(value: core.JSValue) *core.Object {
     return core.value_semantics.objectFromValue(value).?;
 }
