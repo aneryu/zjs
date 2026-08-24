@@ -430,6 +430,17 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     defer if (function_alive) function_value.free(rt);
     const function_object = objectFromValue(function_value) orelse return error.TypeError;
 
+    // Root only the FUNCTION for the quiescent whole-heap collections below:
+    // the mid-phase assertions observe state/symbols surviving through the
+    // function's own stored edges, which is the behavior under test. (The
+    // paced threshold collections during creation scan engine-active and
+    // cover the stack-held locals conservatively.)
+    var function_slot: ?*core.Object = function_object;
+    var live_roots = core.runtime.rootObjects(.{&function_slot});
+    live_roots.activate(rt);
+    var live_roots_active = true;
+    defer if (live_roots_active) live_roots.deactivate(rt);
+
     try std.testing.expect(rt.atoms.name(promise_symbol) != null);
     try std.testing.expect(rt.atoms.name(state_symbol) != null);
     try std.testing.expectEqual(promise_symbol, function_object.functionPromiseResolvingTarget().?.asSymbolAtom().?);
@@ -448,6 +459,8 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
         try std.testing.expectEqual(state_symbol, marker_value.asSymbolAtom().?);
     }
 
+    live_roots.deactivate(rt);
+    live_roots_active = false;
     function_value.free(rt);
     function_alive = false;
     _ = rt.runObjectCycleRemoval();
@@ -621,6 +634,18 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     reaction_payload.free(rt);
     reaction_payload_alive = false;
 
+    // The holder under test is the native Job struct; its JSValue refs are
+    // invisible to a declared-roots tracing sweep, so name the job's slots
+    // directly. Deactivated before the death phase.
+    var job_roots_storage = [_]core.runtime.ValueRootValue{
+        .{ .value = &job.payload.promise_reaction.reaction },
+        .{ .value = &job.payload.promise_reaction.value },
+    };
+    var job_roots = core.runtime.ValueRootFrame{ .values = &job_roots_storage };
+    job_roots.activate(rt);
+    var job_roots_active = true;
+    defer if (job_roots_active) job_roots.deactivate(rt);
+
     try std.testing.expect(rt.atoms.name(reaction_symbol) != null);
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
     try std.testing.expectEqual(value_symbol, job.payload.promise_reaction.value.asSymbolAtom().?);
@@ -639,6 +664,8 @@ test "promiseReactionJob roots reaction and value while allocating job" {
         try std.testing.expectEqual(reaction_symbol, marker_value.asSymbolAtom().?);
     }
 
+    job_roots.deactivate(rt);
+    job_roots_active = false;
     job.deinit();
     job_alive = false;
     _ = rt.runObjectCycleRemoval();
@@ -1962,6 +1989,14 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     defer if (result_alive) result_value.free(rt);
     const result = objectFromValue(result_value) orelse return error.TypeError;
 
+    // Root the RESULT (the holder under test) for the quiescent collections;
+    // the symbol's mid-phase survival must come via its stored property.
+    var result_slot: ?*core.Object = result;
+    var result_roots = core.runtime.rootObjects(.{&result_slot});
+    result_roots.activate(rt);
+    var result_roots_active = true;
+    defer if (result_roots_active) result_roots.deactivate(rt);
+
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
     values.value().free(rt);
     values_alive = false;
@@ -1977,6 +2012,8 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
         try std.testing.expectEqual(value_symbol, stored.asSymbolAtom().?);
     }
 
+    result_roots.deactivate(rt);
+    result_roots_active = false;
     result_value.free(rt);
     result_alive = false;
     _ = rt.runObjectCycleRemoval();

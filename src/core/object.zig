@@ -10981,9 +10981,20 @@ test "object value refs keep nested symbol bodies without external symbol roots"
     try object.defineOwnProperty(rt, key, descriptor.Descriptor.data(nested_value, true, true, true));
     nested_value.free(rt);
 
+    // The owner object is held only by this Zig local; the tracing sweep
+    // needs it declared for the keep phase. Deactivated before the release
+    // phase so the second collection can observe the symbol body dropping.
+    var object_slot: ?*Object = object;
+    var live_roots = runtime_mod.rootObjects(.{&object_slot});
+    live_roots.activate(rt);
+    var roots_active = true;
+    defer if (roots_active) live_roots.deactivate(rt);
+
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(nested_symbol) != null);
 
+    live_roots.deactivate(rt);
+    roots_active = false;
     object_value.free(rt);
     object_value = JSValue.undefinedValue();
     _ = rt.runObjectCycleRemoval();

@@ -5098,7 +5098,7 @@ const DefineFieldForceGcProbe = struct {
         // Full cycle removal before every allocation — the force-GC shape of
         // `-Dzjs_force_gc=true` — so the collection lands inside the append
         // over-hang and the replace-branch shape mutation.
-        _ = self.rt.runObjectCycleRemoval();
+        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
     }
 };
 

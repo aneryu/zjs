@@ -1389,7 +1389,7 @@ test "appendValue roots existing values and incoming value during growth" {
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            _ = self.rt.runObjectCycleRemoval();
+            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
             self.saw_first = self.rt.atoms.name(self.first_atom) != null;
             self.saw_second = self.rt.atoms.name(self.second_atom) != null;
         }

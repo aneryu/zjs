@@ -18074,6 +18074,14 @@ test "FinalizationRegistry cleanup job keeps registry realm before invoking call
     );
     defer registry_value.free(rt);
     const registry = try core.Object.expect(registry_value);
+    // The registry is held only by this Zig local once both facades are
+    // destroyed (deliberately — the test observes the registry keeping its
+    // realms alive on its own). Name it for the tracing sweep; `target`
+    // stays unrooted because its collection is the event under test.
+    var registry_slot: ?*core.Object = registry;
+    var registry_roots = core.runtime.rootObjects(.{&registry_slot});
+    registry_roots.activate(rt);
+    defer registry_roots.deactivate(rt);
     try std.testing.expectEqual(registry_realm, registry.finalizationRegistryRealmContext().?);
     try std.testing.expectEqual(callback_realm, callback_object.nativeFunctionRealm().?);
 
@@ -20028,7 +20036,11 @@ const ReflectActiveRootSymbolProbe = struct {
             self.rt.memory.trigger_gc_fn = saved_trigger_fn;
             self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
         }
-        _ = self.rt.runObjectCycleRemoval();
+        // The trigger models an allocation-point collection, which is an
+        // engine-frames-active trigger: scan conservative so natively held
+        // in-flight construction state survives, exactly as the production
+        // pollGC(.normal) path behaves.
+        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
         self.saw_symbol = self.rt.atoms.name(self.atom_id) != null;
     }
 };
@@ -20051,6 +20063,15 @@ test "reflect construct roots argument list while resolving prototype" {
     const realm_global = try core.Object.create(rt, core.class.ids.object, null);
     _ = try realm_global.ensureRealmPayload(rt);
     defer realm_global.value().free(rt);
+    // The installed realm graph hangs off this Zig local; the probe below
+    // runs whole-heap cycle removal on every allocation, so the tracing
+    // sweep needs the global named as a root or the intrinsics vanish and
+    // prototype resolution throws InvalidBuiltinRegistry. The behavior under
+    // test — engine-side rooting of the argument list — is unaffected.
+    var realm_global_slot: ?*core.Object = realm_global;
+    var realm_roots = core.runtime.rootObjects(.{&realm_global_slot});
+    realm_roots.activate(rt);
+    defer realm_roots.deactivate(rt);
     engine.exec.standard_globals.configureRuntime(rt);
     try rt.installStandardGlobals(realm_global);
 

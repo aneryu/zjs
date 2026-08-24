@@ -190,7 +190,7 @@ pub const StringRope = struct {
     /// memory and retries once; a second failure is fatal.
     pub fn flattenInfallible(self: *StringRope) *String {
         return self.flatten() catch {
-            _ = self.rt.runObjectCycleRemoval();
+            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
             return self.flatten() catch @panic("zjs: out of memory while flattening string rope");
         };
     }

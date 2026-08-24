@@ -2572,10 +2572,21 @@ test "runtime Plugin synchronous opaque wrapper finalizers release traced payloa
     defer make_value.free(rt);
 
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
+    // The wrapper is held only by this Zig local; the declared-roots
+    // whole-heap collection below needs it named or the sweep finalizes it
+    // early. Deactivated before the release phase whose finalizer-count
+    // assertions are the behavior under test.
+    var wrapper_slot: ?*core.Object = core.value_semantics.objectFromValue(wrapper).?;
+    var wrapper_roots = core.runtime.rootObjects(.{&wrapper_slot});
+    wrapper_roots.activate(rt);
+    var wrapper_roots_active = true;
+    defer if (wrapper_roots_active) wrapper_roots.deactivate(rt);
     _ = try rt.forceMajorGC(null);
     try std.testing.expect(state.trace_calls > 0);
     try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
 
+    wrapper_roots.deactivate(rt);
+    wrapper_roots_active = false;
     wrapper.free(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
@@ -3004,10 +3015,18 @@ test "runtime Plugin host-owned opaque wrappers can trace without taking ownersh
     defer make_value.free(rt);
 
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
+    // Same declared-roots contract as the sibling finalizer test above.
+    var wrapper_slot: ?*core.Object = core.value_semantics.objectFromValue(wrapper).?;
+    var wrapper_roots = core.runtime.rootObjects(.{&wrapper_slot});
+    wrapper_roots.activate(rt);
+    var wrapper_roots_active = true;
+    defer if (wrapper_roots_active) wrapper_roots.deactivate(rt);
     _ = try rt.forceMajorGC(null);
     try std.testing.expect(state.trace_calls > 0);
     const live_trace_calls = state.trace_calls;
 
+    wrapper_roots.deactivate(rt);
+    wrapper_roots_active = false;
     wrapper.free(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
 

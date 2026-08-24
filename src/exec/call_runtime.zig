@@ -1553,7 +1553,7 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
                 self.rt.memory.trigger_gc_fn = saved_trigger_fn;
                 self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
             }
-            _ = self.rt.runObjectCycleRemoval();
+            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
             self.saw_arg = self.rt.atoms.name(self.atom_id) != null;
         }
     };
@@ -3624,7 +3624,7 @@ pub const ActiveRootValueProbe = struct {
             self.rt.memory.trigger_gc_fn = saved_trigger_fn;
             self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
         }
-        _ = self.rt.runObjectCycleRemoval();
+        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
     }
 };
 
@@ -3675,7 +3675,7 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
                 self.rt.memory.trigger_gc_fn = saved_trigger_fn;
                 self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
             }
-            _ = self.rt.runObjectCycleRemoval();
+            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
             self.saw_symbol = self.rt.atoms.name(self.atom_id) != null;
         }
     };
