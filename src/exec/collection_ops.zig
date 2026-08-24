@@ -578,6 +578,9 @@ fn mapSetNoResult(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, 
         const next_value = value.dup();
         const old_value = entry.value;
         entry.value = next_value;
+        // Overwriting an existing entry stores into the payload slice, which
+        // no property-store barrier covers.
+        rt.gc.generationalBarrier(&object.header, next_value.cycleMarkHeader());
         old_value.free(rt);
     } else {
         const entry = core.object.CollectionEntry{ .key = canonical_key.dup(), .value = value.dup() };

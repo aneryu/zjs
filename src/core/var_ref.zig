@@ -196,6 +196,13 @@ pub const VarRef = struct {
         }
         const old_value = self.pvalue.*;
         self.pvalue.* = next_value;
+        // A closure cell is a traced object owning one value slot, so storing
+        // a fresh value into a long-lived cell is an old-to-young edge the
+        // minor cannot rediscover: its sticky marks stop the trace at the old
+        // cell. `pvalue` may alias a frame slot rather than `value`, but the
+        // owner recorded here is always the cell itself, which is what the
+        // remembered set re-traces.
+        rt.gc.generationalBarrier(&self.header, next_value.cycleMarkHeader());
         old_value.free(rt);
     }
 

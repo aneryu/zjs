@@ -1849,6 +1849,25 @@ pub const Registry = struct {
     /// Generational write barrier (§8.3). Lives on the Registry because the
     /// state and its allocator are private here; callers pass owner and child
     /// headers and stay out of the generation representation.
+    /// Remember `owner` if it is old, without inspecting what is being stored.
+    ///
+    /// The value-shaped `generationalBarrier` has to be spelled at every store,
+    /// and dense-array appends reach the storage through four different
+    /// callers that each write the slot themselves. Guarding the one function
+    /// that hands out a fresh dense slot covers all of them, and covers the
+    /// fifth one nobody has written yet. Remembering an owner whose stored
+    /// value turns out to be old or primitive costs one re-trace of an object
+    /// the minor would otherwise skip; missing one frees a live object.
+    ///
+    /// The concurrent arm is deliberately absent: shading needs the exact
+    /// target, which a choke point does not have. Callers on that path must
+    /// still shade per value once the marker thread is wired (§8.4).
+    pub inline fn rememberOwnerForBulkWrite(self: *Registry, owner: *GCObjectHeader) void {
+        if (comptime !generation_enabled) return;
+        if (self.generation.isYoung(owner)) return;
+        self.generation.rememberOwner(addressRegistryAllocator(), owner);
+    }
+
     pub inline fn generationalBarrier(self: *Registry, owner: *GCObjectHeader, child: ?*GCObjectHeader) void {
         if (comptime !generation_enabled) return;
         const target = child orelse return;

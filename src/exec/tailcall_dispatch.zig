@@ -3618,6 +3618,12 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
                         const slot = object.fastArraySlotAssumeCapacity(index);
                         const old_value = loadValueAsIntPair(slot);
                         storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
+                        // This arm writes the dense slot itself rather than
+                        // going through `setFastArrayElement*`, so it needs its
+                        // own barrier: `a[i] = obj` on a long-lived array is an
+                        // old-to-young edge, and the minor's sticky marks stop
+                        // the trace at the array.
+                        rt.gc.generationalBarrier(&object.header, (sp - 1)[0].cycleMarkHeader());
                         if (old_value.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {
                             // Park the dying element in the now-dead value
                             // slot so the tail completes both releases off
@@ -3644,6 +3650,7 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
                         {
                             const slot = object.fastArraySlotAssumeCapacity(index);
                             storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
+                            vm.ctx.runtime.gc.generationalBarrier(&object.header, (sp - 1)[0].cycleMarkHeader());
                             object.u.array.count = new_count;
                             if (new_count > object.u.array.length)
                                 object.u.array.length = new_count;

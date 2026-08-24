@@ -550,6 +550,10 @@ fn setGlobalOwnWritableDataPropertyAt(rt: *core.JSRuntime, global: *core.Object,
     const next_value = core.object.dupPropertyDataValue(&rt.atoms, atom_id, new_value);
     const old_slot = slot.entry.slot;
     slot.entry.slot = .{ .data = next_value };
+    // Updating an existing global var is a heap store like any other: the
+    // global object is long-lived, so a fresh value stored into it is an
+    // old-to-young edge the minor cannot see without the remembered set.
+    rt.gc.generationalBarrier(&global.header, next_value.cycleMarkHeader());
     core.object.destroyPropertySlot(rt, atom_id, data_flags, old_slot);
     return true;
 }
@@ -558,6 +562,7 @@ fn setGlobalOwnWritableDataPropertyAtOwned(rt: *core.JSRuntime, global: *core.Ob
     const slot = writableDataSlotAt(global, index, atom_id) orelse return false;
     const old_slot = slot.entry.slot;
     slot.entry.slot = .{ .data = new_value };
+    rt.gc.generationalBarrier(&global.header, new_value.cycleMarkHeader());
     core.object.destroyPropertySlot(rt, atom_id, data_flags, old_slot);
     return true;
 }

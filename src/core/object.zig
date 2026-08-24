@@ -2808,6 +2808,11 @@ pub const Object = extern struct {
         } else {
             refreshed_entries.*[index] = entry;
         }
+        // Map/Set entries live in a payload slice, not in property slots, so
+        // they miss every property-store barrier. This is the single point
+        // every strong entry is appended through.
+        rt.gc.generationalBarrier(&self.header, entry.key.cycleMarkHeader());
+        rt.gc.generationalBarrier(&self.header, entry.value.cycleMarkHeader());
         return index;
     }
 
@@ -3967,6 +3972,7 @@ pub const Object = extern struct {
         } else {
             slot.* = new_value.dup();
         }
+        rt.gc.generationalBarrier(&self.header, new_value.cycleMarkHeader());
         old.free(rt);
         return true;
     }
@@ -3982,6 +3988,7 @@ pub const Object = extern struct {
         } else {
             replaceOwnedValue(rt, &self.u.array.values[@intCast(index)], new_value);
         }
+        rt.gc.generationalBarrier(&self.header, new_value.cycleMarkHeader());
         return true;
     }
 
@@ -3999,6 +4006,7 @@ pub const Object = extern struct {
         } else {
             slot.* = new_value;
         }
+        rt.gc.generationalBarrier(&self.header, new_value.cycleMarkHeader());
         old_value.freeDuringActiveBytecode(rt);
         return true;
     }
@@ -4179,6 +4187,12 @@ pub const Object = extern struct {
         try self.ensureArrayBufferCapacity(rt, @as(usize, @intCast(index)) + 1);
         self.u.array.count = index + 1;
         self.flags.fast_array = true;
+        // Every dense append reaches its storage through here and then writes
+        // the slot itself, in four different callers. Remembering the owner at
+        // the one shared point is what keeps a young element reachable from an
+        // old array visible to the minor, whose sticky marks stop the trace at
+        // the array.
+        rt.gc.rememberOwnerForBulkWrite(&self.header);
         return &self.u.array.values[@intCast(index)];
     }
 
@@ -7233,6 +7247,7 @@ pub const Object = extern struct {
         const replacement = try rt.shapes.createObjectRoot(prototype);
         const previous = self.shape_ref;
         self.shape_ref = replacement;
+        rt.gc.generationalBarrier(&self.header, &replacement.header);
         rt.shapes.release(previous);
         self.flags.is_std_array_prototype = false;
     }
@@ -8825,6 +8840,9 @@ pub const Object = extern struct {
                 self.u.array.values[element_index] = item.dup();
                 element_index += 1;
             }
+        }
+        if (comptime gc.generation_enabled) {
+            for (values) |item| rt.gc.generationalBarrier(&self.header, item.cycleMarkHeader());
         }
         self.setFastArrayCountAssumeCapacity(new_len);
         if (new_len > self.u.array.length) self.u.array.length = new_len;
@@ -10437,9 +10455,16 @@ pub const Object = extern struct {
         if (is_array_index) {
             try self.ensureUniqueShapeForMutation(rt);
             try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
+            rt.gc.generationalBarrier(&self.header, &self.shape_ref.header);
             return;
         }
         try rt.shapes.transitionPropertyUncached(&self.shape_ref, atom_id, flags, property_capacity);
+        // A Shape is a traced heap object like any other, and a long-lived
+        // object adopting a freshly created one is an old-to-young edge. The
+        // minor's sticky marks stop the trace at the old owner, so without
+        // this the new Shape is swept and the next property read walks a
+        // destroyed `props()` array.
+        rt.gc.generationalBarrier(&self.header, &self.shape_ref.header);
     }
 
     fn ensurePropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {
