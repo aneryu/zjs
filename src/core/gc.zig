@@ -86,6 +86,37 @@ else
 
 pub const generation_enabled: bool = trace_stw_enabled;
 
+/// Set from the `ZJS_GC_STRESS` environment variable. Collect at every
+/// safepoint that has anything young, instead of waiting for the young
+/// threshold, and shorten the safepoint cadence itself
+/// (`JSContext.pollInterruptSlow`).
+///
+/// This exists because a missing root or a missing write barrier is only
+/// observable when a collection lands inside the exact window the reference is
+/// unreachable from the trace. At the production cadence that window is hit by
+/// accident, so the same binary passes or fails depending on allocation
+/// history, and adding a `print` to find out where moves the collection and the
+/// failure disappears. Under stress the window is hit every time.
+pub var stress_collect: bool = false;
+
+/// Safepoint cadence under stress, in interpreter ticks. `ZJS_GC_STRESS=1`
+/// takes the default; `ZJS_GC_STRESS=<n>` for n > 1 sets it directly, which is
+/// how a full test262 sweep stays affordable -- 64 is thorough but roughly two
+/// orders of magnitude slower than the production 10_000.
+pub var stress_cadence: i32 = 64;
+
+/// Read once at `Registry.init`. "0" or empty disables; "1" enables at the
+/// default cadence; any other integer enables at that cadence.
+fn readStressFromEnv() void {
+    if (comptime !trace_stw_enabled) return;
+    const raw = std.c.getenv("ZJS_GC_STRESS") orelse return;
+    const text = std.mem.span(raw);
+    if (text.len == 0 or std.mem.eql(u8, text, "0")) return;
+    stress_collect = true;
+    const parsed = std.fmt.parseInt(i32, text, 10) catch return;
+    if (parsed > 1) stress_cadence = parsed;
+}
+
 /// Candidate validation for torn concurrent reads (§5.4). Compiled wherever a
 /// tracer exists, since conservative scanning needs the same checks.
 pub const candidate_validation = @import("gc_candidate.zig");
@@ -294,6 +325,26 @@ comptime {
 }
 
 pub const GcKind = RefKind;
+
+/// Kinds whose lifetime the tracer owns outright under `trace_stw`, so their
+/// refcount is not maintained at all -- retain and release are no-ops and the
+/// word keeps whatever value it was born with.
+///
+/// `.shape` and `.realm_context` are traced too but keep their counts, for
+/// reasons that have nothing to do with liveness. A Shape's `rc == 1` is the
+/// exclusive-ownership test that licenses mutating a shape in place instead of
+/// splitting it copy-on-write; freezing it would silently license mutating a
+/// shared one. A Realm is a host handle with an explicit `JSContext.destroy`
+/// API and a teardown-order contract (`context_head == null`) that the runtime
+/// asserts. Strings, ropes, symbols and BigInt are not traced at all, so their
+/// counts are the only thing keeping them alive.
+pub inline fn refCountRemoved(kind: GcKind) bool {
+    if (comptime !trace_stw_enabled) return false;
+    return switch (kind) {
+        .object, .function_bytecode, .var_ref, .module => true,
+        else => false,
+    };
+}
 pub const Phase = enum {
     none,
     decref,
@@ -509,12 +560,10 @@ pub const BlockHeader = extern struct {
 
     pub inline fn retain(self: *BlockHeader) void {
         const m = self.meta();
-        // With the tracer owning reclamation, rc 0 no longer implies destroyed:
-        // an object whose last counted reference went away stays fully live
-        // until a collection condemns it, and the runtime still holds raw
-        // pointers to some of those (e.g. `context_head`). Re-retaining such an
-        // object is legal here and meaningless to liveness.
-        if (comptime !trace_stw_enabled) std.debug.assert(m.rc > 0);
+        if (comptime trace_stw_enabled) {
+            if (refCountRemoved(m.flags.kind)) return;
+        }
+        std.debug.assert(m.rc > 0);
         m.rc += 1;
     }
 
@@ -839,6 +888,16 @@ pub const Registry = struct {
     // `containsHeader` includes this slot so synchronous class finalizers see
     // the same live-object lifetime as qjs `free_object`.
     zero_ref_current: ?*GCObjectHeader = null,
+    /// The header the tracing sweep has unlinked and is destroying right now.
+    ///
+    /// The refcounting path publishes the same fact as `zero_ref_current`, and
+    /// `containsHeader` reads it so a synchronous class payload finalizer
+    /// asking `JSRuntime.ownsObject` about its own object gets `true` while its
+    /// callback runs. The sweep had no such window: it unlinks from
+    /// `gc_obj_list` and destroys, so a host finalizer invoked from a
+    /// collection was told the engine did not own the object it was being
+    /// handed. Nothing else distinguishes the two paths to a host callback.
+    sweep_current: ?*GCObjectHeader = null,
     external_tokens: []ExternalTokenEntry = &.{},
     external_tokens_capacity: usize = 0,
     next_external_token_id: u64 = 1,
@@ -858,6 +917,15 @@ pub const Registry = struct {
     // in the batch has run, so a sibling finalizer/decref never dereferences a
     // freed struct. The batch driver drains this list after the resource pass.
     cycle_deferred_frees: HeaderList = .{},
+    /// Set only around `JSRuntime.deinit`'s teardown collections. The host has
+    /// by contract released every handle and no mutator frame is live, so those
+    /// collections are entitled to the precise root scan that
+    /// `runObjectCycleRemovalWithValueRoots` already asks for -- production
+    /// otherwise forces the conservative pass, and a stale native-stack slot
+    /// pointing at a host-released Realm keeps it marked, which breaks the
+    /// `context_head == null` teardown invariant once the tracer rather than
+    /// refcounting owns object lifetime.
+    host_quiescent: bool = false,
 
     /// Page-radix map of published GC objects. Void in production `rc`.
     address_registry: if (address_registry_enabled) AddressRegistryTable else void =
@@ -893,6 +961,7 @@ pub const Registry = struct {
         if (block_heap_enabled) .init(std.heap.page_allocator) else {},
 
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
+        readStressFromEnv();
         return .{
             .memory = account,
             .policy = policy,
@@ -1848,6 +1917,7 @@ pub const Registry = struct {
     pub inline fn shouldTryMinor(self: *const Registry) bool {
         if (comptime !generation_enabled) return false;
         if (self.phase != .none) return false;
+        if (stress_collect) return self.generation.stats.young_count != 0;
         return self.generation.stats.young_count >= minor_young_threshold;
     }
 
@@ -2214,6 +2284,15 @@ pub const Registry = struct {
 
     pub fn containsHeader(self: *const Registry, header: *const GCObjectHeader) bool {
         if (self.zero_ref_current == header) return true;
+        if (self.sweep_current == header) return true;
+        // Condemned-but-not-yet-destroyed nodes are the sweep's analogue of
+        // `zero_ref_list`: still owned, resources still intact.
+        var condemned = self.tmp_obj_list.next;
+        while (condemned) |candidate| {
+            if (candidate == &self.tmp_obj_list) break;
+            if (candidate == header) return true;
+            condemned = candidate.next;
+        }
         var queued = self.zero_ref_list.next;
         while (queued) |candidate| {
             if (candidate == &self.zero_ref_list) break;
@@ -2240,6 +2319,9 @@ pub inline fn release(rt: anytype, header: anytype) void {
     if (comptime @TypeOf(header.*) == StringHeader) {
         string.String.releaseFromHeader(rt, header);
         return;
+    }
+    if (comptime trace_stw_enabled) {
+        if (refCountRemoved(header.meta().flags.kind)) return;
     }
     std.debug.assert(header.meta().rc > 0);
     header.meta().rc -= 1;
@@ -2302,7 +2384,18 @@ pub noinline fn destroyZeroRef(rt: anytype, header: *Header) align(32) void {
     // `gc_obj_list` -- the tracer never sees them -- so they keep refcounting
     // forever, which is why this gate is a kind test and not a blanket return.
     if (comptime trace_stw_enabled) {
-        if (rt.gc.phase != .deinit and Registry.isCycleCandidate(header)) return;
+        // `.realm_context` is deliberately NOT in this set. A Realm is a host
+        // handle with an explicit `JSContext.destroy` API and a teardown-order
+        // contract the runtime asserts (`context_head == null` in
+        // JSRuntime.deinit): the host promises every Realm is gone before the
+        // Runtime is. Handing Realms to the tracer breaks that promise, because
+        // production collections always add the conservative stack pass and the
+        // host's own now-dead `ctx` local keeps the released Realm marked --
+        // observed as the `context_head` assert firing across the staging/sm
+        // TypedArray directory. JSC draws the same line: cells are traced, but
+        // the API-level JSGlobalContext keeps a retain count.
+        const kind = header.meta().flags.kind;
+        if (rt.gc.phase != .deinit and Registry.isCycleCandidate(header) and kind != .realm_context) return;
     }
 
     // qjs free_var_ref (quickjs.c:6164-6183) tears a dead cell down fully

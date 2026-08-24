@@ -483,8 +483,25 @@ pub const JSValue = extern struct {
         return ptrFromPayload(gc.Header, self.repr.payload);
     }
 
+    /// Whether the tracing collector owns this value's lifetime: exactly the
+    /// tag range `cycleMarkHeader` accepts, i.e. everything that lives on
+    /// `gc_obj_list`. Strings, ropes, symbols and BigInt fall outside it and
+    /// keep their counts forever -- the tracer never sees them.
+    pub inline fn isTracerOwned(self: JSValue) bool {
+        const tag = self.repr.tag;
+        return tag >= Tag.module and tag <= Tag.object;
+    }
+
     pub inline fn dup(self: JSValue) JSValue {
         if (!self.requiresRefCount()) return self;
+        // Under the tracer the count carries no information: liveness is the
+        // mark bit, so nothing reads it and keeping it only produces drift --
+        // a release from a dying owner can legitimately outnumber the retains
+        // once the owner's own death is decided by the trace, which underflowed
+        // the word and tripped `rc > 0` asserts inside the sweep itself.
+        if (comptime gc.trace_stw_enabled) {
+            if (self.isTracerOwned()) return self;
+        }
         gc.retain(self.refCountWordAssumeRefCounted());
         return self;
     }
@@ -536,6 +553,7 @@ pub const JSValue = extern struct {
     pub inline fn freeObjectAssumeObject(self: JSValue, rt: anytype) void {
         std.debug.assert(self.tagOf() == Tag.object);
         if (rt.gc.phase == .deinit) return;
+        if (comptime gc.trace_stw_enabled) return;
         if (comptime value_free_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
@@ -555,6 +573,7 @@ pub const JSValue = extern struct {
         std.debug.assert(self.tagOf() == Tag.object);
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
+        if (comptime gc.trace_stw_enabled) return;
         if (comptime value_free_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
@@ -576,6 +595,9 @@ pub const JSValue = extern struct {
     /// through `JSValue.destroyZeroRef` + `gc.destroyZeroRef`.
     pub inline fn freeFromPlainObjectDestroy(self: JSValue, rt: anytype) void {
         if (!self.requiresRefCount()) return;
+        if (comptime gc.trace_stw_enabled) {
+            if (self.isTracerOwned()) return;
+        }
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         hdr.rc -= 1;
@@ -623,6 +645,7 @@ pub const JSValue = extern struct {
     pub inline fn releaseObjectAssumeObjectNeedsDestroy(self: JSValue, rt: anytype) bool {
         std.debug.assert(self.tagOf() == Tag.object);
         if (rt.gc.phase == .deinit) return false;
+        if (comptime gc.trace_stw_enabled) return false;
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         if (hdr.rc == 1) return true;
@@ -644,6 +667,9 @@ pub const JSValue = extern struct {
     /// complete the release exactly once (e.g. `value.free(rt)`).
     pub inline fn releaseRefCountedNeedsDestroy(self: JSValue, rt: anytype) bool {
         if (!self.requiresRefCount()) return false;
+        if (comptime gc.trace_stw_enabled) {
+            if (self.isTracerOwned()) return false;
+        }
         const tag = self.tagOf();
         if (rt.gc.phase == .deinit and tag >= Tag.module and tag <= Tag.object) return false;
         const hdr = self.refCountWordAssumeRefCounted();
@@ -664,6 +690,7 @@ pub const JSValue = extern struct {
         std.debug.assert(self.tagOf() == Tag.object);
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
+        if (comptime gc.trace_stw_enabled) return false;
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         if (hdr.rc == 1) return true;
@@ -680,6 +707,9 @@ pub const JSValue = extern struct {
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
         if (!self.requiresRefCount()) return false;
+        if (comptime gc.trace_stw_enabled) {
+            if (self.isTracerOwned()) return false;
+        }
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         if (hdr.rc == 1) return true;
@@ -696,6 +726,9 @@ pub const JSValue = extern struct {
     }
 
     inline fn releaseCommonRefCount(self: JSValue, rt: anytype) void {
+        if (comptime gc.trace_stw_enabled) {
+            if (self.isTracerOwned()) return;
+        }
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         hdr.rc -= 1;

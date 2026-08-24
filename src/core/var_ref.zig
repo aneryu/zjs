@@ -78,6 +78,12 @@ pub const VarRef = struct {
     pub fn freeVarRef(rt: anytype, var_ref: ?*VarRef) void {
         const cell = var_ref orelse return;
         if (rt.gc.phase == .deinit) return;
+        // The tracer owns cells now (`destroyCondemned` frees them in the same
+        // ordered pass as everything else), so the count is not maintained and
+        // a release must not touch it: a function object dying in the sweep
+        // releases captures whose cells are already condemned, which underflows
+        // a word nothing reads.
+        if (comptime gc.trace_stw_enabled) return;
         std.debug.assert(cell.header.meta().rc > 0);
         cell.header.meta().rc -= 1;
         if (cell.header.meta().rc != 0) return;

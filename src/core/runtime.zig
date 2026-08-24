@@ -1533,6 +1533,7 @@ pub const JSRuntime = struct {
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         self.releaseNativeFunctionRealmsForTeardown();
+        self.gc.host_quiescent = true;
         _ = self.runObjectCycleRemoval();
         self.drainDeferredWeakValueFrees();
         self.drainDeferredNativeCleanups();
@@ -1540,6 +1541,7 @@ pub const JSRuntime = struct {
         self.clearPendingFinalizationJobs();
         Object.releaseCallbackOwnedFunctionBytecodeCycles(self);
         _ = self.runObjectCycleRemoval();
+        self.gc.host_quiescent = false;
         self.drainDeferredWeakValueFrees();
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();

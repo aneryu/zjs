@@ -299,7 +299,7 @@ const Collector = struct {
             // triggers stay precise so liveness tests are deterministic and
             // a missing test-side root still fails loudly.
             .conservative_on = if (!builtin.is_test)
-                true
+                !rt.gc.host_quiescent
             else
                 (rt.test_root_scan_override orelse scan) == .engine_active,
         };
@@ -709,7 +709,10 @@ const Collector = struct {
         while (young_it.next()) |header| {
             if (header.metaConst().flags.mark) continue;
             if (header.metaConst().flags.is_pinned) continue;
-            if (header.metaConst().flags.kind != .object) continue;
+            // Every condemned kind is freed, not just `.object` -- see
+            // `destroyCondemned`. A young var_ref or shape the trace did not
+            // reach is exactly as dead as a young object it did not reach, and
+            // leaving it linked leaves it pointing at freed children.
             // The trace is the liveness authority. This used to skip anything
             // with `rc > 0`, which made the minor unable to reclaim the only
             // garbage it could add value on -- a young cycle holds both halves
@@ -732,16 +735,7 @@ const Collector = struct {
         self.rt.gc.phase = .remove_cycles;
         defer self.rt.gc.phase = old_phase;
 
-        var reclaimed: usize = 0;
-        var cursor = self.rt.gc.tmp_obj_list.next;
-        while (cursor) |h| {
-            if (h == &self.rt.gc.tmp_obj_list) break;
-            const next = h.next;
-            gc.listDel(h);
-            reclaimed += 1;
-            Object.destroyFromHeader(self.rt, h);
-            cursor = next;
-        }
+        const reclaimed = self.destroyCondemned();
         gc.listInit(&self.rt.gc.tmp_obj_list);
 
         // Destroying under `.remove_cycles` parks every struct free on
@@ -777,6 +771,28 @@ const Collector = struct {
         self.rt.gc.phase = .remove_cycles;
         defer self.rt.gc.phase = old_phase;
 
+        const garbage_count = self.destroyCondemned();
+        if (!self.rt.hasPendingDeferredClassPayloadFinalizers()) object_gc.drainCycleDeferredFrees(self.rt);
+        return garbage_count;
+    }
+
+    /// Ordered teardown of everything condemned onto `tmp_obj_list`.
+    ///
+    /// The order is load-bearing (qjs `gc_free_cycles`): objects first, then
+    /// realms, modules and function bytecode, and only then the cells and
+    /// shapes whose contents those releases were still reading. Destroying
+    /// under `.remove_cycles` parks every struct free, so a destructor
+    /// dereferencing a sibling already torn down in an earlier pass reads
+    /// stripped-but-allocated memory rather than freed memory.
+    ///
+    /// Both sweeps share this. They did not: the minor condemned and destroyed
+    /// only `.object`, so a young var_ref that was equally unreachable survived
+    /// the minor while the object it held was freed, and the next major's
+    /// var_ref teardown released a refcount through a dangling pointer. The
+    /// condemned set has to be closed under "reachable only from other
+    /// condemned nodes", and the only way to keep it closed is to free every
+    /// kind the trace condemned, not a subset.
+    fn destroyCondemned(self: *Collector) usize {
         var garbage_count: usize = 0;
         var cursor = self.rt.gc.tmp_obj_list.next;
         while (cursor) |h| {
@@ -785,7 +801,9 @@ const Collector = struct {
             if (h.meta().flags.kind == .object) {
                 gc.listDel(h);
                 garbage_count += 1;
+                self.rt.gc.sweep_current = h;
                 Object.destroyFromHeader(self.rt, h);
+                self.rt.gc.sweep_current = null;
             }
             cursor = next;
         }
@@ -797,7 +815,9 @@ const Collector = struct {
                 gc.listDel(h);
                 garbage_count += 1;
                 self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
+                self.rt.gc.sweep_current = h;
                 context_mod.JSContext.destroyFromHeader(self.rt, h);
+                self.rt.gc.sweep_current = null;
             }
             cursor = next;
         }
@@ -809,7 +829,9 @@ const Collector = struct {
                 gc.listDel(h);
                 garbage_count += 1;
                 self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
+                self.rt.gc.sweep_current = h;
                 module_mod.ModuleRecord.destroyFromHeader(self.rt, h);
+                self.rt.gc.sweep_current = null;
             }
             cursor = next;
         }
@@ -820,7 +842,9 @@ const Collector = struct {
             if (h.meta().flags.kind == .function_bytecode) {
                 gc.listDel(h);
                 self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
+                self.rt.gc.sweep_current = h;
                 function_bytecode_mod.destroyFromHeader(self.rt, h);
+                self.rt.gc.sweep_current = null;
             }
             cursor = next;
         }
@@ -830,7 +854,9 @@ const Collector = struct {
                 .var_ref => {
                     garbage_count += 1;
                     self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
+                    self.rt.gc.sweep_current = h;
                     var_ref_mod.VarRef.destroyFromHeader(self.rt, h);
+                    self.rt.gc.sweep_current = null;
                 },
                 .shape => {
                     garbage_count += 1;
@@ -840,7 +866,6 @@ const Collector = struct {
             }
         }
 
-        if (!self.rt.hasPendingDeferredClassPayloadFinalizers()) object_gc.drainCycleDeferredFrees(self.rt);
         return garbage_count;
     }
 };

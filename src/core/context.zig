@@ -596,6 +596,9 @@ pub const JSContext = struct {
             if (self.runtime.gc.shouldTryMinor()) {
                 _ = self.runtime.pollGC(null, .safepoint) catch {};
             }
+            // Stress mode wants the collection window everywhere, not once per
+            // 10k ticks; the cadence is the other half of the knob.
+            if (gc.stress_collect) self.interrupt_counter = gc.stress_cadence;
         }
         return self.runtime.runInterruptHandler();
     }
