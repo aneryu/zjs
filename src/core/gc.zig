@@ -105,6 +105,11 @@ pub var stress_collect: bool = false;
 /// orders of magnitude slower than the production 10_000.
 pub var stress_cadence: i32 = 64;
 
+/// `ZJS_GC_STRESS=off` suppresses collection entirely. Diagnostic only: it is
+/// how you answer "is this failure caused by a collection landing here at all?"
+/// in one run instead of by inference.
+pub var stress_disable: bool = false;
+
 /// Read once at `Registry.init`. "0" or empty disables; "1" enables at the
 /// default cadence; any other integer enables at that cadence.
 fn readStressFromEnv() void {
@@ -112,6 +117,10 @@ fn readStressFromEnv() void {
     const raw = std.c.getenv("ZJS_GC_STRESS") orelse return;
     const text = std.mem.span(raw);
     if (text.len == 0 or std.mem.eql(u8, text, "0")) return;
+    if (std.mem.eql(u8, text, "off")) {
+        stress_disable = true;
+        return;
+    }
     stress_collect = true;
     const parsed = std.fmt.parseInt(i32, text, 10) catch return;
     if (parsed > 1) stress_cadence = parsed;
@@ -1304,6 +1313,9 @@ pub const Registry = struct {
     }
 
     pub fn shouldRunMajorAt(self: Registry, point: SchedulerPoint, over_threshold: bool) bool {
+        if (comptime trace_stw_enabled) {
+            if (stress_disable) return false;
+        }
         if (point == .urgent or over_threshold) return true;
         const request = self.pendingMajorRequest() orelse return false;
         return switch (point) {
@@ -1917,6 +1929,7 @@ pub const Registry = struct {
     pub inline fn shouldTryMinor(self: *const Registry) bool {
         if (comptime !generation_enabled) return false;
         if (self.phase != .none) return false;
+        if (stress_disable) return false;
         if (stress_collect) return self.generation.stats.young_count != 0;
         return self.generation.stats.young_count >= minor_young_threshold;
     }

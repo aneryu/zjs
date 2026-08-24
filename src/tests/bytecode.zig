@@ -166,6 +166,11 @@ test "script or module metadata owns each bytecode transfer" {
 
     core.JSValue.functionBytecode(&fb.header).free(rt);
     fb_alive = false;
+    // The published FB is the referrer atom's second owner, and the atom table
+    // only balances when the FB is torn down -- which the tracer defers to a
+    // collection. Nothing names the FB from here on, so the collection reaches
+    // it; `function` and `fd` are native-stack carriers the sweep never visits.
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(base_ref_count + 1, rt.atoms.refCount(referrer).?);
 
     fd.deinit(rt);
@@ -1446,6 +1451,11 @@ test "parent finalization failure releases its published child realm owner" {
     // once; no partially-created parent FB may retain another reference.
     parent.deinit(rt);
     parent_alive = false;
+    // The child's RealmRef is dropped by the child's own teardown, not by the
+    // cpool release that orphans it, so under the tracer the drop lands in the
+    // collection. The realm survives it as a live host handle on the runtime's
+    // context list; the orphaned child is named by nothing and is reclaimed.
+    helpers.reclaimNow(rt);
     try helpers.expectRefCount(1, &realm.header);
 }
 
@@ -1494,12 +1504,26 @@ test "parent finalization moves an existing child FunctionBytecode cpool owner w
     var held_child_alive = true;
     defer if (held_child_alive) held_child.free(rt);
     const realm_refs_before_parent_free = realm.header.meta().rc;
-    core.JSValue.functionBytecode(&parent_fb.header).free(rt);
-    parent_alive = false;
-    try helpers.expectRefCount(child_rc_before, &child_fb.header);
-    try helpers.expectRefCount(realm_refs_before_parent_free - 1, &realm.header);
+    {
+        // `held_child` is the child's only remaining owner once the parent is
+        // gone, and it is a Zig local the declared_only scan cannot see.
+        // Without this frame the collection that stands in for the parent's
+        // teardown would take the child with it, and both realm references
+        // would come off at once instead of one per owner.
+        var child_roots = [_]core.runtime.HeaderRootValue{.{ .header = &child_fb.header }};
+        var child_frame = core.runtime.ValueRootFrame{ .headers = &child_roots };
+        child_frame.activate(rt);
+        defer child_frame.deactivate(rt);
+
+        core.JSValue.functionBytecode(&parent_fb.header).free(rt);
+        parent_alive = false;
+        helpers.reclaimNow(rt);
+        try helpers.expectRefCount(child_rc_before, &child_fb.header);
+        try helpers.expectRefCount(realm_refs_before_parent_free - 1, &realm.header);
+    }
     held_child.free(rt);
     held_child_alive = false;
+    helpers.reclaimNow(rt);
     try helpers.expectRefCount(1, &realm.header);
 }
 
@@ -2882,6 +2906,10 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
 
     core.JSValue.functionBytecode(&fb.header).free(rt);
     fb_alive = false;
+    // Large-space accounting is unwound by the FB's teardown, which the tracer
+    // defers to a collection. `fd` handed its owners to the FB and holds no
+    // heap bytes of its own, so the ledger is expected to reach zero here.
+    helpers.reclaimNow(rt);
     const after_free = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 0), after_free.total_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 0), after_free.peak_allocated_bytes);
@@ -3216,6 +3244,11 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
         ownership.dump(shape.*, "compile-only", "B4-artifact-only", b4);
 
         window.releaseArtifact();
+        // The emit residual lives inside the published child FunctionBytecodes,
+        // whose atom owners are released by their teardown rather than by the
+        // artifact release that orphans them. Under the tracer that teardown is
+        // this collection, and only after it does the atom table balance.
+        helpers.reclaimNow(rt);
         var terminal = try window.sampleNext(.final, &b4);
         ownership.setBuilderCommitted(&terminal, 0);
         try ownership.expectTerminal(terminal);

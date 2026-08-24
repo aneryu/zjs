@@ -10191,6 +10191,10 @@ test "canonical root and child independently keep their compile realm alive" {
 
     parsed.deinit();
     parsed_alive = false;
+    // The realm outlives its last release for as long as the two
+    // FunctionBytecodes holding its JS_DupContext edges are unreclaimed, and
+    // reclaiming a FunctionBytecode is the tracer's decision, not the drop's.
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -10263,6 +10267,10 @@ test "module nested function independently keeps its compile realm alive" {
     try std.testing.expectEqual(realm, nested.realmContext());
     parsed.deinit();
     parsed_alive = false;
+    // Same edge as the script case: the module root and the nested
+    // FunctionBytecode each hold the realm, so the realm's last edge falls
+    // only when those two are reclaimed.
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -12847,6 +12855,13 @@ test "parser releases identifier and private-name token atoms" {
         defer warmup.deinit();
         try std.testing.expect(warmup.syntax_error == null);
     }
+    // The compile product's atom retains are owned by its FunctionBytecodes,
+    // which the tracer reclaims on its own schedule rather than at the release
+    // above. Both the baseline and the measurement therefore have to be taken
+    // after a collection, or `before` still carries the warm-up's retains and
+    // `after` carries two compiles' worth. Nothing here is held past the
+    // release, so the compile products are unreachable and need no root frame.
+    helpers.reclaimNow(rt);
 
     const before = atomStrongRefTotal(rt);
     {
@@ -12854,6 +12869,7 @@ test "parser releases identifier and private-name token atoms" {
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error == null);
     }
+    helpers.reclaimNow(rt);
     const after = atomStrongRefTotal(rt);
     try std.testing.expectEqual(before, after);
 }
@@ -12880,6 +12896,9 @@ test "parser releases module and import-attribute token atoms" {
         defer warmup.deinit();
         try std.testing.expect(warmup.syntax_error == null);
     }
+    // Module records own atoms too, and are equally reclaimed by the trace
+    // rather than by the release above; both samples bracket a collection.
+    helpers.reclaimNow(rt);
 
     const before = atomStrongRefTotal(rt);
     {
@@ -12887,6 +12906,7 @@ test "parser releases module and import-attribute token atoms" {
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error == null);
     }
+    helpers.reclaimNow(rt);
     const after = atomStrongRefTotal(rt);
     try std.testing.expectEqual(before, after);
 }
@@ -12925,12 +12945,17 @@ test "parser returns the atom table to balance across every token-bearing constr
             defer warmup.deinit();
             try std.testing.expect(warmup.syntax_error == null);
         }
+        // Both samples bracket a collection: the atoms are owned by the
+        // compile product's FunctionBytecodes and module record, which the
+        // tracer -- not the release above -- decides to reclaim.
+        helpers.reclaimNow(rt);
         const before = atomStrongRefTotal(rt);
         {
             var parsed = try compileForTest(rt, c.src, options);
             defer parsed.deinit();
             try std.testing.expect(parsed.syntax_error == null);
         }
+        helpers.reclaimNow(rt);
         const after = atomStrongRefTotal(rt);
         if (before != after) {
             std.debug.print("atom balance case {d} ({s}): before={d} after={d}\n", .{ index, c.file, before, after });

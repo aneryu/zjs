@@ -906,6 +906,11 @@ test "JSObject payload explicit deinit releases persistent value roots" {
     handle = .{};
 
     value.free(rt);
+    // The payload's `deinit`, and with it the release of the persistent handle
+    // the payload owns, runs during the object's teardown -- a collection
+    // under the tracer rather than this release. Without it the handle
+    // outlives the Runtime and teardown refuses.
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
     rt.drainDeferredClassPayloadFinalizers();
     try std.testing.expectEqual(@as(usize, 1), deinit_count);
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());

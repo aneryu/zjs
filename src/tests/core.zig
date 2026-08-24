@@ -2291,8 +2291,15 @@ const ObjectConstructionOrderProbe = struct {
         self.object_boundary_calls += 1;
         // RC publishes the Shape onto gc_obj_list before the object body.
         // STW §4.6 reserves it (hashed, proto retained) without publishing.
-        const shape_reserved = self.rt.shapes.shape_hash_count == self.shape_hash_count_before + 1 and
+        // The reserve takes ownership of the proto. Under the tracer that
+        // ownership is the Shape's edge and leaves no count for a probe to
+        // read, so the retain is only observable in the build that counts.
+        const proto_owned_by_shape = if (comptime core.gc.refCountRemoved(.object))
+            true
+        else
             self.prototype.header.meta().rc == self.prototype_refs_before + 1;
+        const shape_reserved = self.rt.shapes.shape_hash_count == self.shape_hash_count_before + 1 and
+            proto_owned_by_shape;
         const shape_published = if (comptime core.gc.trace_stw_enabled)
             self.rt.gc.liveCountKind(.shape) == self.live_shape_count_before and
                 self.rt.gcStats().heap_live_bytes == self.heap_live_bytes_before
@@ -10409,6 +10416,12 @@ test "finalization registry dead target cleanup tolerates held value reentry" {
     first_target.value().free(rt);
     dropGcPtr(&first_target);
     _ = rt.runObjectCycleRemoval();
+    // The first cell's held value is the second cell's target, and a held
+    // value is a strong edge: the second target is still reachable while the
+    // first cell exists, so it can only be cleaned by a later collection --
+    // one per link in the chain. Refcounting unwinds the whole chain inside
+    // the first release instead.
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
@@ -11386,11 +11399,28 @@ test "module finalizer self-unlinks a still-linked realm registry node" {
     // pattern; it verifies ModuleRecord.destroyFromHeader splices itself before
     // Realm teardown later sees the now-empty registry.
     record.release(rt);
-    try std.testing.expect(ctx.modules.head == null);
-    try std.testing.expect(ctx.modules.tail == null);
-    try std.testing.expectEqual(@as(usize, 0), ctx.modules.count);
-    try std.testing.expect(ctx.modules.find(module_name) == null);
-    try std.testing.expectEqual(owner_atom_refs, rt.atoms.refCount(module_name).?);
+    if (comptime !core.gc.trace_stw_enabled) {
+        try std.testing.expect(ctx.modules.head == null);
+        try std.testing.expect(ctx.modules.tail == null);
+        try std.testing.expectEqual(@as(usize, 0), ctx.modules.count);
+        try std.testing.expect(ctx.modules.find(module_name) == null);
+        try std.testing.expectEqual(owner_atom_refs, rt.atoms.refCount(module_name).?);
+    } else {
+        // The state this probes cannot be built under the tracer, and that is
+        // the guarantee rather than a gap: registry membership is a strong
+        // traced edge from the live Realm (`Collector.visitModule` via
+        // `JSContext.traceChildEdges`), so consuming the base ref cannot leave
+        // a linked node condemned. A collection here proves the record is
+        // still reached through the Realm, which is why the self-unlink in
+        // `ModuleRecord.destroyFromHeader` is unreachable: a condemned Realm is
+        // destroyed before the module pass in `destroyCondemned`, and
+        // `JSContext.destroyFromHeader` unlinks every record on its way out.
+        helpers.reclaimNow(rt);
+        try std.testing.expect(ctx.modules.head != null);
+        try std.testing.expectEqual(@as(usize, 1), ctx.modules.count);
+        try std.testing.expect(ctx.modules.find(module_name) != null);
+        try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
+    }
     try rt.gc.verifyHeapAccounting(rt);
 }
 
@@ -11422,6 +11452,10 @@ test "externally retained module outlives realm registry teardown" {
 
     record.release(rt);
     record_retained = false;
+    // The name Atom is owned by the record, not by this handle, so it comes
+    // back when the record is torn down. The realm registry has already let
+    // go and no root frame names the record, so the collection reaches it.
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(owner_atom_refs, rt.atoms.refCount(module_name).?);
 }
 
@@ -11532,6 +11566,10 @@ test "runtime memory usage counts linked and realm-unlinked retained modules" {
 
     record.release(rt);
     record_retained = false;
+    // The realm registry unlinked at `ctx.destroy`, so this drops the last
+    // handle to a record nothing else names; its module bytes are returned by
+    // the collection that stands where refcounting's destroy stood.
+    helpers.reclaimNow(rt);
     const released = rt.memoryUsage();
     try std.testing.expectEqual(@as(usize, 0), released.module_count);
     try std.testing.expectEqual(@as(usize, 0), released.module_bytes);
@@ -12510,6 +12548,10 @@ test "finalization registry pending jobs preserve callback and held symbols" {
 
     registry_val.free(rt);
     registry_val = core.JSValue.undefinedValue();
+    // The root frame is the last thing naming the registry once its value is
+    // dropped, and the cleanup-callback and held-value Symbols are only
+    // released by the registry's own teardown.
+    registry_slot = null;
 
     rt.clearPendingFinalizationJobs();
 

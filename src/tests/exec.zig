@@ -3013,8 +3013,15 @@ test "tail target setup OOM remains catchable in the retiring caller" {
         TailSetupOomArm.call,
         null,
     );
+    // The handler runs with the account still clamped, so it has to be
+    // allocation-free: a string literal in the catch body would need a fresh
+    // string and fail a second time, this time with nothing left to catch it.
+    // The expected texts are therefore built before the clamp; `===` compares
+    // them by content, so the assertion is the same one.
     const setup = try js.eval(
         \\globalThis.__w2TailSetupBodyRuns = 0;
+        \\globalThis.__w2TailSetupOomName = "InternalError";
+        \\globalThis.__w2TailSetupOomMessage = "out of memory";
         \\function __w2TailSetupOomTarget(value) {
         \\    "use strict";
         \\    __w2TailSetupBodyRuns++;
@@ -3030,8 +3037,8 @@ test "tail target setup OOM remains catchable in the retiring caller" {
         \\            __w2TailSetupOomTarget
         \\        );
         \\    } catch (error) {
-        \\        return error.name === "InternalError" &&
-        \\            error.message === "out of memory" ? 100 : -1000;
+        \\        return error.name === __w2TailSetupOomName &&
+        \\            error.message === __w2TailSetupOomMessage ? 100 : -1000;
         \\    }
         \\}
     );
@@ -3102,6 +3109,11 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
     try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    // The two metrics below are live-allocation metrics, so both the reading
+    // taken here and every reading compared against it have to be taken with
+    // the debris of the failed attempt already returned to the account -- which
+    // is what unwinding did on its own under refcounting.
+    helpers.reclaimNow(js.runtime);
     const stable_allocated_bytes = js.runtime.memory.allocated_bytes;
     const stable_allocation_count = js.runtime.memory.allocation_count;
 
@@ -3131,6 +3143,7 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
     try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
     try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    helpers.reclaimNow(js.runtime);
     try std.testing.expectEqual(stable_allocated_bytes, js.runtime.memory.allocated_bytes);
     try std.testing.expectEqual(stable_allocation_count, js.runtime.memory.allocation_count);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
@@ -3154,6 +3167,7 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
     try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
     try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    helpers.reclaimNow(js.runtime);
     try std.testing.expectEqual(stable_allocated_bytes, js.runtime.memory.allocated_bytes);
     try std.testing.expectEqual(stable_allocation_count, js.runtime.memory.allocation_count);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());

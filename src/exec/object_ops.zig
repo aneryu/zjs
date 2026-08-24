@@ -1110,6 +1110,15 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
     const prototype = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     var prototype_raw_owned = true;
     errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(rt, &prototype.header);
+    // Every step below allocates -- six native method objects, their shape
+    // transitions, the property array growth -- and any of them can trigger a
+    // collection. Until `storeRealmValue` publishes it, this half-built
+    // prototype is reachable from nothing but this Zig local, which the trace
+    // does not consider a root.
+    var rooted_prototype: ?*core.Object = prototype;
+    var prototype_roots = core.runtime.rootObjects(.{&rooted_prototype});
+    prototype_roots.activate(rt);
+    defer prototype_roots.deactivate(rt);
 
     const methods = [_]struct { name: []const u8, id: core.function.HostGlobalMethod }{
         .{ .name = "getFunction", .id = .callsite_get_function },
@@ -4818,6 +4827,11 @@ test "private brand atom is released with home object" {
     try std.testing.expectEqual(core.atom.AtomKind.private, rt.atoms.kind(brand_atom).?);
 
     home.value().free(rt);
+    // The brand Atom is owned by the home object and comes back when the home
+    // object is torn down; under the tracer that is a collection rather than
+    // the last release. Nothing here needs rooting -- `home` is the thing that
+    // must die.
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(brand_atom) == null);
 }
 

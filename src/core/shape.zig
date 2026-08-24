@@ -461,7 +461,23 @@ pub const Registry = struct {
     pub fn transitionPropertyUncached(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) !void {
         const parent = shape_ptr.*;
         if (parent.header.meta().rc != 1) {
-            var child = try self.cloneShape(parent, parent.proto, @max(parent.prop_size, property_capacity), true);
+            // `prop_size` is not merely this Shape's own array capacity: it IS
+            // the record of the owning object's value-array capacity, which is
+            // all `Object.propertyStorageCapacity` reads. Sizing the child to
+            // `@max(parent.prop_size, property_capacity)` therefore hands the
+            // object a shape claiming more slots than it owns, and nothing
+            // reconciles them afterwards -- the object has no capacity field of
+            // its own to disagree with. The next append then reads the inflated
+            // capacity, skips the growth it needed, writes one past the end of
+            // its value array and finally frees that array at the wrong size
+            // class. A shared EMPTY shape is the case that reaches this: it can
+            // carry a `prop_size` grown by whichever owner last mutated it in
+            // place, while a fresh object adopting it has just sized its own
+            // storage from `prop_count + 1`. The caller's capacity is the only
+            // truth here, and it always covers the child's own props array
+            // because the caller grew it to at least `prop_count + 1`.
+            std.debug.assert(property_capacity >= parent.prop_count + 1);
+            var child = try self.cloneShape(parent, parent.proto, property_capacity, true);
             var child_owned = true;
             errdefer if (child_owned) self.release(child);
             // appendProperty may relocate `child` (inline FAM grow moves the

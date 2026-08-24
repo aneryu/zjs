@@ -681,6 +681,7 @@ fn runOneTest(
     stderr_out: *[]const u8,
 ) !TestRunResult {
     const started = std.Io.Clock.Timestamp.now(io, .awake);
+    if (std.c.getenv("ZJS_T262_TRACE") != null) std.debug.print("[{d}] {s}\n", .{ test_index, test_path });
     const test_source = try readTestSource(allocator, io, test_path);
     defer allocator.free(test_source);
 

@@ -1092,6 +1092,17 @@ test "Object.groupBy new group define failure releases group once" {
         error.TypeError,
         appendObjectGroupByValue(ctx, null, global, out.value(), out, key, core.JSValue.int32(1), null, null),
     );
+    // The failed append leaves a half-built group object behind; the claim is
+    // that it is released exactly once and nothing else leaks. Under the
+    // tracer that release is a collection, and `global`/`out` are held only by
+    // Zig locals, which the precise root scan does not see -- they have to be
+    // named or the collection sweeps the objects the test is still counting.
+    var kept_global: ?*core.Object = global;
+    var kept_out: ?*core.Object = out;
+    var roots = core.runtime.rootObjects(.{ &kept_global, &kept_out });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
     // RealmContext and Shapes are GC objects: global and out share one live
     // empty root shape, alongside their owning context.
     try std.testing.expectEqual(@as(usize, 4), rt.gc.liveCount());
