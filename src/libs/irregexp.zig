@@ -29,7 +29,7 @@ const irrx_magic: u32 = 0x58525249;
 const irrx_version: u16 = 1;
 const header_len: usize = 32;
 
-const c = struct {
+const abi = struct {
     pub const OK: c_int = 0;
     pub const NO_MATCH: c_int = 1;
     pub const SYNTAX: c_int = 2;
@@ -317,10 +317,10 @@ fn encodePattern(allocator: std.mem.Allocator, pattern: []const u8) !EncodedPatt
 
 fn compileStatus(status: c_int) CompileError!void {
     return switch (status) {
-        c.OK => {},
-        c.SYNTAX, c.CORRUPT => error.InvalidPattern,
-        c.STACK => error.StackOverflow,
-        c.OOM => error.OutOfMemory,
+        abi.OK => {},
+        abi.SYNTAX, abi.CORRUPT => error.InvalidPattern,
+        abi.STACK => error.StackOverflow,
+        abi.OOM => error.OutOfMemory,
         else => error.InvalidPattern,
     };
 }
@@ -356,7 +356,7 @@ pub fn compilePatternWithFlagBitsAndOptions(
     var encoded = try encodePattern(allocator, pattern);
     defer encoded.deinit(allocator);
 
-    var out = c.CompileOut{
+    var out = abi.CompileOut{
         .blob = null,
         .blob_len = 0,
         .error_message = null,
@@ -366,7 +366,7 @@ pub fn compilePatternWithFlagBitsAndOptions(
         &empty_pattern
     else
         encoded.bytes.ptr;
-    const status = c.zjs_irregexp_compile(
+    const status = abi.zjs_irregexp_compile(
         pattern_ptr,
         encoded.bytes.len,
         if (encoded.is_utf16) @as(c_int, 1) else 0,
@@ -375,7 +375,7 @@ pub fn compilePatternWithFlagBitsAndOptions(
     );
     try compileStatus(status);
     const blob = out.blob orelse return error.OutOfMemory;
-    defer c.zjs_irregexp_free(blob);
+    defer abi.zjs_irregexp_free(blob);
     const copy = try allocator.dupe(u8, blob[0..out.blob_len]);
     return .{ .bytecode = copy };
 }
@@ -392,11 +392,11 @@ fn interruptThunk(opaque_ptr: ?*anyopaque) callconv(.c) c_int {
 
 fn execStatus(status: c_int) !ExecResult {
     return switch (status) {
-        c.OK => .match,
-        c.NO_MATCH => .no_match,
-        c.TIMEOUT => error.Timeout,
-        c.CORRUPT, c.STACK => error.BytecodeCorrupt,
-        c.OOM => error.OutOfMemory,
+        abi.OK => .match,
+        abi.NO_MATCH => .no_match,
+        abi.TIMEOUT => error.Timeout,
+        abi.CORRUPT, abi.STACK => error.BytecodeCorrupt,
+        abi.OOM => error.OutOfMemory,
         else => error.BytecodeCorrupt,
     };
 }
@@ -444,7 +444,7 @@ pub fn execCaptureSlotsSliceTrustedWithOptions(
     @memset(regs, -1);
 
     var interrupt_ctx: InterruptContext = undefined;
-    var interrupt_fn: c.InterruptFn = null;
+    var interrupt_fn: abi.InterruptFn = null;
     var interrupt_opaque: ?*anyopaque = null;
     if (options.check_timeout) |check| {
         interrupt_ctx = .{
@@ -456,24 +456,24 @@ pub fn execCaptureSlotsSliceTrustedWithOptions(
     }
 
     const status = switch (input) {
-        .latin1 => |bytes| c.zjs_irregexp_exec(
+        .latin1 => |bytes| abi.zjs_irregexp_exec(
             bytecode.ptr,
             bytecode.len,
             bytes.ptr,
             bytes.len,
-            c.LATIN1,
+            abi.LATIN1,
             start_index,
             regs.ptr,
             regs.len,
             interrupt_fn,
             interrupt_opaque,
         ),
-        .utf16 => |units| c.zjs_irregexp_exec(
+        .utf16 => |units| abi.zjs_irregexp_exec(
             bytecode.ptr,
             bytecode.len,
             units.ptr,
             units.len,
-            c.UTF16,
+            abi.UTF16,
             start_index,
             regs.ptr,
             regs.len,
@@ -562,17 +562,17 @@ pub fn testMatchTrustedWithOptions(
     };
 }
 
-fn clampCodePoint(c: u32) ?u21 {
-    if (c > 0x10ffff) return null;
-    return @intCast(c);
+fn clampCodePoint(code_point: u32) ?u21 {
+    if (code_point > 0x10ffff) return null;
+    return @intCast(code_point);
 }
 
-export fn zjs_irregexp_canonicalize(c: u32, unicode_flag: c_int) u32 {
-    const cp = clampCodePoint(c) orelse return c;
+export fn zjs_irregexp_canonicalize(code_point: u32, unicode_flag: c_int) u32 {
+    const cp = clampCodePoint(code_point) orelse return code_point;
     return unicode.regexpCanonicalize(cp, unicode_flag != 0);
 }
 
-export fn zjs_irregexp_uncanonicalize(c: u32, out: [*c]u32, max_out: c_int) c_int {
+export fn zjs_irregexp_uncanonicalize(code_point: u32, out: [*c]u32, max_out: c_int) c_int {
     if (max_out < 1 or out == null) return 0;
     const dest = out[0..@intCast(max_out)];
     var n: usize = 0;
@@ -587,8 +587,8 @@ export fn zjs_irregexp_uncanonicalize(c: u32, out: [*c]u32, max_out: c_int) c_in
         }
     }.run;
 
-    add(dest, &n, c);
-    if (clampCodePoint(c)) |cp| {
+    add(dest, &n, code_point);
+    if (clampCodePoint(code_point)) |cp| {
         const lower = unicode.caseConvert(cp, true);
         const upper = unicode.caseConvert(cp, false);
         if (lower.len > 0 and lower.codepoints[0] <= 0x10ffff) add(dest, &n, lower.codepoints[0]);
@@ -599,18 +599,18 @@ export fn zjs_irregexp_uncanonicalize(c: u32, out: [*c]u32, max_out: c_int) c_in
     return @intCast(n);
 }
 
-export fn zjs_irregexp_is_identifier_start(c: u32) c_int {
-    const cp = clampCodePoint(c) orelse return 0;
+export fn zjs_irregexp_is_identifier_start(code_point: u32) c_int {
+    const cp = clampCodePoint(code_point) orelse return 0;
     return if (unicode.isIdentifierStart(cp)) 1 else 0;
 }
 
-export fn zjs_irregexp_is_identifier_part(c: u32) c_int {
-    const cp = clampCodePoint(c) orelse return 0;
+export fn zjs_irregexp_is_identifier_part(code_point: u32) c_int {
+    const cp = clampCodePoint(code_point) orelse return 0;
     return if (unicode.isIdentifierContinue(cp)) 1 else 0;
 }
 
-export fn zjs_irregexp_is_letter(c: u32) c_int {
-    const cp = clampCodePoint(c) orelse return 0;
+export fn zjs_irregexp_is_letter(code_point: u32) c_int {
+    const cp = clampCodePoint(code_point) orelse return 0;
     return if (regexp_properties.isUnicodePropertyMatches(cp, "L")) 1 else 0;
 }
 
