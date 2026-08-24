@@ -1297,7 +1297,7 @@ pub const JSRuntime = struct {
     /// `internalBuiltinRecord` with no compile-time knowledge of individual
     /// builtins. Empty until standard globals are installed, which is also
     /// the only path that creates native function objects carrying these ids.
-    internal_builtins: []const []const host_function.InternalRecord = &.{},
+    internal_builtins: []const host_function.InternalRecordTable = &.{},
     pub fn init(self: *JSRuntime, allocator: std.mem.Allocator, options: RuntimeOptions) !void {
         const account = if (options.trace_writer) |writer|
             memory.MemoryAccount.initWithTrace(allocator, writer)
@@ -2697,11 +2697,7 @@ pub const JSRuntime = struct {
     /// no hashing or string compares.
     pub fn internalBuiltinRecord(self: *const JSRuntime, domain_index: usize, id: u32) ?*const host_function.InternalRecord {
         if (domain_index >= self.internal_builtins.len) return null;
-        const records = self.internal_builtins[domain_index];
-        if (id >= records.len) return null;
-        const record = &records[id];
-        if (!record.hasCallable()) return null;
-        return record;
+        return self.internal_builtins[domain_index].get(id);
     }
 
     pub fn replaceExternalHostFunction(self: *JSRuntime, id: u32, record: host_function.ExternalRecord) ?host_function.ExternalRecord {

@@ -329,7 +329,7 @@ for (const retiredFacadeToken of ['cachedDataPropertyValueForFastPath']) {
 
 const internalBuiltinsSource = fs.readFileSync(path.join(repoRoot, 'src/exec/internal_builtins.zig'), 'utf8');
 for (const completedDomain of ['atomics', 'performance', 'promise']) {
-  const tableContribution = `NativeBuiltinDomain.${completedDomain})] = denseRecords`;
+  const tableContribution = `NativeBuiltinDomain.${completedDomain})] = recordTable`;
   if (!internalBuiltinsSource.includes(tableContribution)) {
     fail(`completed standard-native domain lost its typed record table: ${completedDomain}`);
   }

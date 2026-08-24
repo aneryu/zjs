@@ -1257,7 +1257,10 @@ pub const Registry = struct {
         var scratch: [pause_sample_capacity]u64 = undefined;
         @memcpy(scratch[0..retained], self.stats.pause_samples[0..retained]);
         const window = scratch[0..retained];
-        std.mem.sort(u64, window, {}, std.sort.asc(u64));
+        // Percentiles depend only on value order; equal samples have no
+        // identity, so the large stable block-sort implementation buys no
+        // observable behavior on this cold diagnostic path.
+        std.sort.heap(u64, window, {}, std.sort.asc(u64));
         return .{
             .samples = self.stats.pause_sample_count,
             .p50_ns = window[percentileIndex(retained, 50)],

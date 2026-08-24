@@ -1170,7 +1170,7 @@ inline fn storeValueAsIntPair(slot: *JSValue, value: JSValue) void {
 /// quickjs.c:20709), deliver the result into the caller's operand stack,
 /// resume the caller — all in the handler. Frame ownership and the
 /// simple/general teardown choice stay behind Machine.popFrame.
-inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
+inline fn popAndResume(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm, value: JSValue) Outcome {
     const machine = vm.machine;
     // Read the dying frame's Entry through the register-resident vm.frame
     // mirror instead of the machine→top dependent chain. Every vm.frame
@@ -1292,12 +1292,18 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         const return_action = dying.return_action;
         std.debug.assert(return_action == .next or return_action == .to_boolean);
         const delivered_value = if (return_action == .to_boolean) blk: {
+            @branchHint(.unlikely);
             const boolean = JSValue.boolean(coercion_ops.valueTruthy(value));
             value.free(vm.rt);
             break :blk boolean;
         } else value;
         machine.popReturnedExactArgsLeaf(vm.rt);
         if (caller_opt) |caller| {
+            // Direct calls from the L0 driver have no Entry predecessor. Keep
+            // that common non-recursive leg linear into result delivery;
+            // recursive/nested callers retain the same branch count on their
+            // taken leg.
+            @branchHint(.unlikely);
             std.debug.assert(caller == machine.top.?);
             const caller_function = caller.frame.function;
             std.debug.assert(resume_pc == caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc);
@@ -1318,6 +1324,33 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
+    // The remaining completion shapes are materially larger and much colder
+    // than ordinary and leaf returns. Carry the result through the frame's
+    // guaranteed stack_size + 1 scratch slot and tail into one shared Handler
+    // body. The exported slot is an optimization barrier: without it LLVM
+    // folds the slow body back into both return handlers.
+    storeValueAsIntPair(&sp[0], value);
+    return @call(.always_tail, zjs_op_return_slow_tail, .{ pc, sp + 1, vb, vm });
+}
+
+/// Shared completion tail for special, constructor, and general frames. The
+/// caller has already ruled out ordinary and hot leaf shapes and placed the
+/// owned result in the otherwise-dead extra operand slot.
+fn op_return_slow(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    _ = pc;
+    _ = vb;
+    std.debug.assert(@intFromPtr(sp) > @intFromPtr(vm.stack.values));
+    const result_sp = sp - 1;
+    const value = loadValueAsIntPair(&result_sp[0]);
+    vm.syncSp(result_sp);
+
+    const machine = vm.machine;
+    const dying: *inline_calls.Entry = @alignCast(@fieldParentPtr("frame", vm.frame));
+    std.debug.assert(dying == machine.topEntry());
+    var pc2: [*]const u8 = undefined;
+    var sp2: [*]JSValue = undefined;
+    var vb2: [*]JSValue = undefined;
+
     if (dying.hasSpecialReturn()) {
         if (dying.isNativeBoundaryReturn()) {
             machine.popReturnedNativeBoundary(vm.rt);
@@ -1393,6 +1426,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     continuation.payload = 0;
     return @call(.always_tail, op_post_call_continuation, .{ pc2, sp2, vb2, vm });
 }
+export var zjs_op_return_slow_tail: Handler = op_return_slow;
 
 // Same I-cache pin as opCall/op_call_method: every call benchmark's return
 // rides this handler, and the O1 exact-args arm grew its body — without the
@@ -1411,7 +1445,7 @@ fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64)
     // ordinary and derived frames keep the hot leg's plain JSValue flow into
     // popAndResume.
     if (vm.machine.depth == 0)
-        return @call(.always_tail, op_return_cold, .{ pc, sp, vb, vm });
+        return @call(.always_tail, zjs_op_return_depth0_tail, .{ pc, sp, vb, vm });
     // qjs moves the result out of the operand region before the done: cleanup
     // with the check-free `ret_val = *--sp` (quickjs.c:18266). Valid `return`
     // bytecode always has one result; valueless returns use `return_undef`.
@@ -1421,48 +1455,42 @@ fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64)
     const result_sp = sp - 1;
     const value = loadValueAsIntPair(&result_sp[0]);
     vm.syncSp(result_sp);
-    return popAndResume(vm, value);
+    return popAndResume(pc, result_sp, vb, vm, value);
 }
-/// Cold sibling of op_return — the depth-0 exit (generator done-slot + driver
-/// hand-off) and the derived-ctor return-legality machinery (qjs
-/// OP_check_ctor_return, quickjs.c:18273; a flag-guarded cold handler here
-/// because zjs has no separate opcode). Reached by tail call. (No `noinline`
-/// keyword — it would change the fn type and break the always_tail match.
-/// LLVM inlines it back as the flag-taken branch, which is fine: disassembly
-/// shows the error-union spill slots confined to the cold branch while the
-/// hot leg's value rides x8/x9 into the teardown with no strh/q0 round-trip.)
-fn op_return_cold(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+/// Depth-0 sibling of op_return: finish the optional generator, publish the
+/// value, and hand control back to the driver. Calling through the exported
+/// Handler slot keeps this error-union path outside the hot handler while
+/// preserving always_tail's exact ABI.
+fn op_return_depth0(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     _ = vb;
     vm.publish(pc, sp);
-    const depth0 = vm.machine.depth == 0;
-    const value = vm_control.returnTop(vm.ctx, vm.stack, vm.frame, if (depth0) vm.machine.l0.generator_state else null) catch |e| return vm.fail(e);
-    if (depth0) {
-        vm.return_value = value;
-        return .returned; // L0 exit stays on the driver
-    }
-    return popAndResume(vm, value);
+    const value = vm_control.returnTop(vm.ctx, vm.stack, vm.frame, vm.machine.l0.generator_state) catch |e| return vm.fail(e);
+    vm.return_value = value;
+    return .returned; // L0 exit stays on the driver
 }
+export var zjs_op_return_depth0_tail: Handler = op_return_depth0;
 /// Pinned with op_return above (same rationale).
 fn op_return_undef(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
     // Same split as op_return — qjs OP_return_undef (quickjs.c:18270) is
     // `ret_val = JS_UNDEFINED; goto done;`, check-free and infallible.
     if (vm.machine.depth == 0)
-        return @call(.always_tail, op_return_undef_cold, .{ pc, sp, vb, vm });
+        return @call(.always_tail, zjs_op_return_undef_depth0_tail, .{ pc, sp, vb, vm });
+
     vm.syncSp(sp);
-    return popAndResume(vm, JSValue.undefinedValue());
+    return popAndResume(pc, sp, vb, vm, JSValue.undefinedValue());
 }
-/// Cold sibling of op_return_undef (see op_return_cold).
-fn op_return_undef_cold(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+/// Depth-0 sibling of op_return_undef. Keep this body outside the handler
+/// island: calling through the exported Handler slot prevents LLVM from
+/// folding it back into the hot handler while preserving always_tail's exact
+/// ABI. Only op_return_undef's proven depth-0 edge reaches this function.
+fn op_return_undef_depth0(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     _ = vb;
     vm.publish(pc, sp);
-    const depth0 = vm.machine.depth == 0;
-    const value = vm_control.returnUndefined(vm.ctx, vm.frame, if (depth0) vm.machine.l0.generator_state else null) catch |e| return vm.fail(e);
-    if (depth0) {
-        vm.return_value = value;
-        return .returned;
-    }
-    return popAndResume(vm, value);
+    const value = vm_control.returnUndefined(vm.ctx, vm.frame, vm.machine.l0.generator_state) catch |e| return vm.fail(e);
+    vm.return_value = value;
+    return .returned;
 }
+export var zjs_op_return_undef_depth0_tail: Handler = op_return_undef_depth0;
 
 const CallArgcSource = enum { operand, zero, one, two, three };
 

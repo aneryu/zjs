@@ -235,9 +235,36 @@ pub const InternalRecord = struct {
     }
 };
 
+/// A stable high method id that would otherwise force a domain's direct-index
+/// table to materialize hundreds of empty `InternalRecord` slots.
+pub const SparseInternalRecord = struct {
+    id: u32,
+    record: InternalRecord,
+};
+
+/// Per-domain builtin records. Common low ids retain the original direct
+/// bounds-check + indexed-load path; only ids beyond a size-selected split
+/// search the sparse tail. This preserves externally stable method ids without
+/// making every gap cost `@sizeOf(InternalRecord)` bytes.
+pub const InternalRecordTable = struct {
+    dense: []const InternalRecord = &.{},
+    sparse: []const SparseInternalRecord = &.{},
+
+    pub inline fn get(self: InternalRecordTable, id: u32) ?*const InternalRecord {
+        if (id < self.dense.len) {
+            const record = &self.dense[id];
+            return if (record.hasCallable()) record else null;
+        }
+        for (self.sparse) |*entry| {
+            if (entry.id == id) return &entry.record;
+        }
+        return null;
+    }
+};
+
 /// Declaration-side entry: what a standard-global function-list table exports
-/// per method. The comptime table builder densifies these into `InternalRecord`
-/// slots indexed by `id`, and the install path consumes `name`/`length`/`id`
+/// per method. The comptime builder maps these into a direct low-id prefix plus
+/// sparse high-id records, and the install path consumes `name`/`length`/`id`
 /// directly (QuickJS declares the same data in its JSCFunctionListEntry arrays).
 pub const InternalEntry = struct {
     name: []const u8,
@@ -670,7 +697,7 @@ pub const builtin_method_ids = struct {
 
         pub const ConstructorMethod = enum(u32) {
             // `Object(value)` call entry. Kept immediately below the
-            // prototype-method range (101+) so the domain table stays dense.
+            // prototype-method range (101+) so the namespace stays contiguous.
             // Like QuickJS's `JS_CFUNC_constructor_or_func`, this record also
             // handles direct `new Object(...)`; custom-new-target construction
             // is intercepted before the record and keeps its distinct branch.

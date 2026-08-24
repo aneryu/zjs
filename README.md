@@ -31,35 +31,49 @@ explicit ownership and runtime control. Choose another runtime when the
 application needs Node.js packages and APIs, browser APIs, a security boundary
 for untrusted code, the QuickJS C ABI, or complete TypeScript language support.
 
-## Performance Compared With QuickJS
+## Performance: bench-v8
 
-The public comparison uses **bench-v8** — the V8 benchmark suite version 7
+The public comparison uses **bench-v8**, the V8 benchmark suite version 7
 that upstream QuickJS publishes its own scores with. The suite is vendored
 in this repository (`tools/perf/bench_v8/`). Scores are the suite's
-self-reported numbers (higher is better); the ratio is
-`zjs score / QuickJS score`.
+self-reported numbers (higher is better); the ratio below is relative to
+QuickJS.
 
-| Benchmark | zjs | QuickJS | zjs / QuickJS |
-| --- | ---: | ---: | ---: |
-| EarleyBoyer | 3,950 | 4,492 | 0.879 |
-| Splay | 7,346 | 7,208 | 1.019 |
-| DeltaBlue | 1,457 | 1,411 | 1.033 |
-| Richards | 1,700 | 1,614 | 1.054 |
-| Crypto | 2,346 | 2,198 | 1.068 |
-| RayTrace | 3,687 | 3,367 | 1.095 |
-| NavierStokes | 4,792 | 4,307 | 1.113 |
-| RegExp | 976 | 854 | 1.144 |
-| **Composite Score (version 7)** | **2,706** | **2,586** | **1.0464** |
+Current-head preservation check (2026-08-24): ReleaseFast `71505d11` versus
+its direct parent `7f9873e6` measured **0.9965** (protocol-local composite
+medians 2,575 / 2,584). The repository runner used 8 samples per binary on
+parallel CPU clusters `5-9` and `15-19`, swapping the engine-to-cluster
+assignment halfway. This clears the `0.995` refactor gate, and all 8 suite
+ratios remain within their historical dispersion envelopes. Only the ratio is
+comparable under this parallel protocol; the absolute public comparison below
+remains serial.
 
-The comparison used zjs commit `da875a7d`, Bellard QuickJS commit `04be246`,
-and 8 pinned interleaved samples per engine (medians). Of the 8 benchmarks,
-7 have a ratio at or above `1.0`.
+Published cross-engine snapshot from 2026-08-21, using 8 samples per engine
+and medians:
 
-Measurements were collected on an ARM Cortex-X925 Linux host with a pinned
-CPU. The QuickJS reference used its upstream release build. Protocol,
-machine details, current results, and reproduction notes are recorded in
-[docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md) and
-[STATUS.md](STATUS.md).
+| Engine | Build / revision | Composite Score | vs QuickJS |
+| --- | --- | ---: | ---: |
+| zjs | ReleaseFast / `47cf81ef` | 2,714 | 1.0469 |
+| QuickJS | release / `04be2460` | 2,592.5 | 1.0000 |
+| V8 | `--jitless` / `999f1b39` | 4,048 | 1.5614 |
+| Hermes | Release / `dac0be31` | 4,241 | 1.6359 |
+
+| Benchmark | zjs | QuickJS | V8 `--jitless` | Hermes |
+| --- | ---: | ---: | ---: | ---: |
+| Richards | 1,693 | 1,617 | 2,120 | 2,540 |
+| DeltaBlue | 1,461 | 1,415 | 2,019 | 2,448.5 |
+| Crypto | 2,341 | 2,200.5 | 1,736.5 | 3,888.5 |
+| RayTrace | 3,657.5 | 3,382 | 6,942 | 8,960.5 |
+| EarleyBoyer | 3,995 | 4,507 | 10,035 | 9,346 |
+| RegExp | 994 | 844.5 | 6,627 | 1,191.5 |
+| Splay | 7,306 | 7,297.5 | 7,994.5 | 6,530.5 |
+| NavierStokes | 4,860.5 | 4,307 | 2,631.5 | 6,685.5 |
+
+This is a single-machine snapshot, not a portable ranking. Measurements used
+serial CPU-19 execution under the exclusive host lock, with forward/reverse
+engine ordering to reduce drift. All 32 invocations exited successfully and
+produced all 8 benchmark results. The detailed protocol and QuickJS baseline
+are recorded in [docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md).
 
 ## Compatibility
 

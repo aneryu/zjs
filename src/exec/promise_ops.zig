@@ -2163,18 +2163,36 @@ pub fn promiseRejectCapability(
     result.free(ctx.runtime);
 }
 
-pub fn promiseRejectCapabilityForError(
+pub noinline fn promiseRejectCapabilityForError(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     reject_value: core.JSValue,
-    err: anytype,
+    err: anyerror,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const reason = try promiseErrorValue(ctx, global, err);
     defer reason.free(ctx.runtime);
     try promiseRejectCapability(ctx, output, global, reject_value, reason, caller_function, caller_frame);
+}
+
+/// Promise combinators turn most abrupt completions into a rejection of the
+/// capability they have already created. Keep that fail-reject epilogue in
+/// one cold body, matching QuickJS's `js_promise_all` `fail_reject` label,
+/// instead of cloning error conversion, rejection, and callback release into
+/// every observable operation in the combinator loop.
+noinline fn rejectCombinatorAndRelease(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    capability: *PromiseCapabilityVm,
+    err: anyerror,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    try promiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
+    return capability.releaseCallbacks(ctx.runtime);
 }
 
 pub fn promiseResolveIdentity(
@@ -2277,60 +2295,36 @@ pub fn promiseCombinatorCall(
     const resolve_key = try ctx.runtime.internAtom("resolve");
     defer ctx.runtime.atoms.free(resolve_key);
     const promise_resolve = getValueProperty(ctx, output, global, constructor_value, resolve_key, caller_function, caller_frame) catch |err| {
-        const reason = try promiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
     defer promise_resolve.free(ctx.runtime);
     if (!isCallableValue(promise_resolve)) {
-        const reason = try promiseErrorValue(ctx, global, error.TypeError);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
     }
 
     const iterable = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const iterator_method = getIteratorMethod(ctx, output, global, iterable) catch |err| {
-        const reason = try promiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
     defer iterator_method.free(ctx.runtime);
     if (!isCallableValue(iterator_method)) {
-        const reason = try promiseErrorValue(ctx, global, error.TypeError);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
     }
     const iterator_value = callValueOrBytecodeRoot(ctx, output, global, iterable, iterator_method, &.{}, caller_function, caller_frame) catch |err| {
-        const reason = try promiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
     defer iterator_value.free(ctx.runtime);
     _ = property_ops.expectObject(iterator_value) catch |err| {
-        const reason = try promiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
     const next_key = try ctx.runtime.internAtom("next");
     defer ctx.runtime.atoms.free(next_key);
     const iterator_next = getValueProperty(ctx, output, global, iterator_value, next_key, caller_function, caller_frame) catch |err| {
-        const reason = try promiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
     defer iterator_next.free(ctx.runtime);
     if (!isCallableValue(iterator_next)) {
-        const reason = try promiseErrorValue(ctx, global, error.TypeError);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
     }
     const done_key = core.atom.predefinedId("done", .string).?;
     const value_key = core.atom.predefinedId("value", .string).?;
@@ -2350,23 +2344,14 @@ pub fn promiseCombinatorCall(
     var index: u32 = 0;
     while (true) {
         const next_result_value = callValueOrBytecodeRoot(ctx, output, global, iterator_value, iterator_next, &.{}, caller_function, caller_frame) catch |err| {
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         defer next_result_value.free(ctx.runtime);
         const next_result = property_ops.expectObject(next_result_value) catch |err| {
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         const done_value = getValueProperty(ctx, output, global, next_result.value(), done_key, null, null) catch |err| {
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         defer done_value.free(ctx.runtime);
         if (value_ops.isTruthy(done_value)) {
@@ -2374,10 +2359,7 @@ pub fn promiseCombinatorCall(
             break;
         }
         const step_value = getValueProperty(ctx, output, global, next_result.value(), value_key, null, null) catch |err| {
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         defer step_value.free(ctx.runtime);
 
@@ -2389,10 +2371,7 @@ pub fn promiseCombinatorCall(
 
         const next_promise = callValueOrBytecodeRoot(ctx, output, global, constructor_value, promise_resolve, &.{step_value}, caller_function, caller_frame) catch |err| {
             if (!iterator_done) closeIteratorForAbruptCompletion(ctx, output, global, iterator_value);
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         defer next_promise.free(ctx.runtime);
 
@@ -2400,18 +2379,12 @@ pub fn promiseCombinatorCall(
         defer ctx.runtime.atoms.free(then_key);
         const then_value = getValueProperty(ctx, output, global, next_promise, then_key, caller_function, caller_frame) catch |err| {
             if (!iterator_done) closeIteratorForAbruptCompletion(ctx, output, global, iterator_value);
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         defer then_value.free(ctx.runtime);
         if (!isCallableValue(then_value)) {
             if (!iterator_done) closeIteratorForAbruptCompletion(ctx, output, global, iterator_value);
-            const reason = try promiseErrorValue(ctx, global, error.TypeError);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
         }
 
         const on_fulfilled = switch (mode) {
@@ -2437,10 +2410,7 @@ pub fn promiseCombinatorCall(
 
         const then_result = callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
             if (!iterator_done) closeIteratorForAbruptCompletion(ctx, output, global, iterator_value);
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         then_result.free(ctx.runtime);
         index += 1;
@@ -2454,10 +2424,7 @@ pub fn promiseCombinatorCall(
             switch (mode) {
                 .all, .all_settled => {
                     const result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{values.?.value()}, caller_function, caller_frame) catch |err| {
-                        const reason = try promiseErrorValue(ctx, global, err);
-                        defer reason.free(ctx.runtime);
-                        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-                        return capability.releaseCallbacks(ctx.runtime);
+                        return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
                     };
                     result.free(ctx.runtime);
                 },
@@ -2493,32 +2460,20 @@ pub fn promiseKeyedCombinatorCall(
     const resolve_key = try ctx.runtime.internAtom("resolve");
     defer ctx.runtime.atoms.free(resolve_key);
     const promise_resolve = getValueProperty(ctx, output, global, constructor_value, resolve_key, caller_function, caller_frame) catch |err| {
-        const reason = try promiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
     defer promise_resolve.free(ctx.runtime);
     if (!isCallableValue(promise_resolve)) {
-        const reason = try promiseErrorValue(ctx, global, error.TypeError);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
     }
 
     const promises_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const promises = objectFromValue(promises_value) orelse {
-        const reason = try promiseErrorValue(ctx, global, error.TypeError);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
     };
 
     const own_keys = objectRestOwnKeys(ctx, output, global, promises) catch |err| {
-        const reason = try promiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
-        try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
     defer core.Object.freeKeys(ctx.runtime, own_keys);
 
@@ -2535,27 +2490,18 @@ pub fn promiseKeyedCombinatorCall(
     var index: u32 = 0;
     for (own_keys) |key| {
         const desc = proxyAwareOwnPropertyDescriptor(ctx, output, global, promises, key, caller_function, caller_frame) catch |err| {
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         } orelse continue;
         defer desc.destroy(ctx.runtime);
         if (desc.enumerable != true) continue;
 
         const step_value = getValueProperty(ctx, output, global, promises_value, key, caller_function, caller_frame) catch |err| {
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         defer step_value.free(ctx.runtime);
 
         const key_value = proxyTrapKeyValue(ctx.runtime, key) catch |err| {
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         defer key_value.free(ctx.runtime);
         try promiseSetArrayIndex(ctx.runtime, keys, index, key_value);
@@ -2565,27 +2511,18 @@ pub fn promiseKeyedCombinatorCall(
         (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = remaining + 1;
 
         const next_promise = callValueOrBytecodeRoot(ctx, output, global, constructor_value, promise_resolve, &.{step_value}, caller_function, caller_frame) catch |err| {
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         defer next_promise.free(ctx.runtime);
 
         const then_key = try ctx.runtime.internAtom("then");
         defer ctx.runtime.atoms.free(then_key);
         const then_value = getValueProperty(ctx, output, global, next_promise, then_key, caller_function, caller_frame) catch |err| {
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         defer then_value.free(ctx.runtime);
         if (!isCallableValue(then_value)) {
-            const reason = try promiseErrorValue(ctx, global, error.TypeError);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
         }
 
         const on_fulfilled = if (all_settled)
@@ -2600,10 +2537,7 @@ pub fn promiseKeyedCombinatorCall(
         defer on_rejected.free(ctx.runtime);
 
         const then_result = callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         then_result.free(ctx.runtime);
         index += 1;
@@ -2616,10 +2550,7 @@ pub fn promiseKeyedCombinatorCall(
         const keyed_result = try promiseKeyedResult(ctx.runtime, keys, values);
         defer keyed_result.free(ctx.runtime);
         const result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{keyed_result}, caller_function, caller_frame) catch |err| {
-            const reason = try promiseErrorValue(ctx, global, err);
-            defer reason.free(ctx.runtime);
-            try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-            return capability.releaseCallbacks(ctx.runtime);
+            return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         result.free(ctx.runtime);
     }
