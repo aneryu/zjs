@@ -1866,6 +1866,54 @@ measurement contract, and a rollback plan at the build/release level. Removing
 RC is a later decision after at least one stable release; it is not part of the
 default switch.
 
+### Stage 7 status: experimental enablement met; production default refused
+
+**The experimental half is done.** Tracing is reachable only through
+`-Dzjs_gc=trace_stw`, rc remains the shipped default and is continuously
+tested, and the corpora Stage 7 names have been run:
+
+| Corpus | Result |
+|---|---|
+| repeated test262 | `0/49778` on consecutive full passes under tracing |
+| long-lived event loop | 3000 generations, retained set flat at 300, live bytes flat, minor pauses p99 197 µs / max 314 µs |
+| randomized object graphs | 60k nodes with random cross-references, clean |
+| OOM | 21/21 in both rc and trace_stw, including the Realm rollback canary |
+| multiple independent runtimes | eight runtimes, collecting in each in turn, no live-count disturbance in the others (§3.1) |
+| plugin/host | DSO fixture edge-free; a class with a legacy tracer is classified and keeps reclaiming tracing disabled (§6.1) |
+| release-fast stress | all of the above under ReleaseFast |
+
+**The production default is refused, and the numbers are why.** On the V8
+suite:
+
+| | rc | trace_stw |
+|---|---:|---:|
+| Score (version 7) | 2,714 | **708** |
+| Major pause p50 | 688 µs | 2.28 ms |
+| Major pause p99 | 1.96 ms | **19.4 ms** |
+| Major pause max | 42.5 ms | 52.8 ms |
+| Live bytes at exit | 1,213,561 | 1,213,625 |
+
+Throughput is 0.26× and the major pause distribution is worse at every
+percentile. Stage 7's bar is "all correctness gates, the declared pause and
+memory envelopes, no performance regression under the current measurement
+contract, and a rollback plan" — this clears the first and last and fails
+the middle two by a wide margin.
+
+That is not a surprise given what has and has not been built. The collector
+marks the whole heap on the owner thread every major: the marker worker
+exists but no production path starts it, child enumeration has not moved to
+it, and there is no incremental or concurrent draining in the default path.
+Generations do work — 9,706 minors with p99 197 µs on the long-lived
+corpus — but a major that traces everything synchronously dominates the
+distribution.
+
+The honest reading is that Stage 7's *enablement* is reachable now and its
+*default switch* is gated on Stage 6's remaining tranche (worker-driven
+concurrent marking with child enumeration) plus the block heap actually
+serving GC nodes, which needs §4.5's header change. Recording a passing
+default here would mean shipping a 4× throughput regression on the strength
+of a checklist.
+
 ## 14. Validation matrix
 
 | Area | Required tests |

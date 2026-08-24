@@ -13687,3 +13687,51 @@ test "snapshot capture bails out rather than spinning against a busy writer" {
     try std.testing.expect(snap.stats.bailouts >= 1);
     try std.testing.expect(snap.stats.captures == 0);
 }
+
+test "independent runtimes collect without touching each other" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    // §3.1's first invariants: every GC object belongs to exactly one runtime
+    // and no heap pointer crosses between them. A collector that violated
+    // either would show up here as one runtime's collection disturbing
+    // another's live count.
+    var runtimes: [8]*core.JSRuntime = undefined;
+    var contexts: [8]*core.JSContext = undefined;
+    for (&runtimes, &contexts) |*rt_slot, *ctx_slot| {
+        rt_slot.* = try core.JSRuntime.create(std.testing.allocator);
+        ctx_slot.* = try core.JSContext.create(rt_slot.*);
+    }
+    defer for (runtimes, contexts) |rt, ctx| {
+        ctx.destroy();
+        rt.destroy();
+    };
+
+    // Give each runtime its own garbage and its own retained object.
+    var retained: [8]*core.Object = undefined;
+    for (runtimes, &retained) |rt, *slot| {
+        slot.* = try core.Object.createPlainObject(rt, null);
+        var i: usize = 0;
+        while (i < 64) : (i += 1) {
+            const garbage = try core.Object.createPlainObject(rt, null);
+            garbage.value().free(rt);
+        }
+    }
+    defer for (runtimes, retained) |rt, obj| obj.value().free(rt);
+
+    // Collect in one runtime and check the others are untouched. Doing it for
+    // each in turn catches a collector that reaches a neighbour through any
+    // shared structure, not just the first one.
+    for (runtimes, 0..) |rt, index| {
+        var before: [8]usize = undefined;
+        for (runtimes, &before) |other, *slot| slot.* = other.gc.liveCount();
+
+        _ = try core.gc_trace_stw.collectCycles(rt, null);
+
+        for (runtimes, before, 0..) |other, prior, other_index| {
+            if (other_index == index) continue;
+            try std.testing.expectEqual(prior, other.gc.liveCount());
+        }
+        // The collecting runtime keeps what is rooted here.
+        try std.testing.expect(rt.gc.liveCount() > 0);
+    }
+}
