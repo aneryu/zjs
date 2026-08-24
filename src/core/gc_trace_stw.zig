@@ -744,6 +744,17 @@ const Collector = struct {
         }
         gc.listInit(&self.rt.gc.tmp_obj_list);
 
+        // Destroying under `.remove_cycles` parks every struct free on
+        // `cycle_deferred_frees` so a finalizer cannot observe a sibling's
+        // memory being reused mid-pass. The major sweep drains that queue
+        // before it returns; the minor did not, so a minor reported N
+        // reclaimed objects while returning zero bytes to the allocator --
+        // and `pollGC` then recomputed the major threshold from an
+        // `allocated_bytes` that had not moved, ratcheting it up by half on
+        // every minor. Drain inside the `.remove_cycles` scope, on the same
+        // pending-finalizer condition the major uses.
+        if (!self.rt.hasPendingDeferredClassPayloadFinalizers()) object_gc.drainCycleDeferredFrees(self.rt);
+
         // Survivors keep their marks: that is what makes them old.
         return reclaimed;
     }

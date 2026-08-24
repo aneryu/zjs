@@ -13272,6 +13272,55 @@ test "minor collection reclaims young garbage and promotes survivors" {
     try std.testing.expect(rt.gc.liveCount() > 0);
 }
 
+test "a minor parks no deferred frees, and cannot yet reclaim young cycles" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const left_key = try rt.internAtom("minor-drain-left");
+    defer rt.atoms.free(left_key);
+    const right_key = try rt.internAtom("minor-drain-right");
+    defer rt.atoms.free(right_key);
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    const bytes_before = rt.memory.allocated_bytes;
+
+    // Build young cyclic garbage: each half keeps the other's count above
+    // zero, so refcount alone cannot reclaim it. Today that is trial
+    // deletion's job on the major path, not the minor's.
+    var pairs: usize = 0;
+    while (pairs < 500) : (pairs += 1) {
+        const left = try core.Object.create(rt, core.class.ids.object, null);
+        const right = try core.Object.create(rt, core.class.ids.object, null);
+        try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
+        try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+        left.value().free(rt);
+        right.value().free(rt);
+    }
+    try std.testing.expect(rt.memory.allocated_bytes > bytes_before);
+
+    const reclaimed = (try core.gc_trace_stw.collectMinor(rt, null, .declared_only)).?;
+
+    // Invariant the 2026-08-25 fix restores: the minor destroys under
+    // `.remove_cycles`, which parks every struct free on
+    // `cycle_deferred_frees`. The major sweep drained that queue; the minor
+    // returned without draining, so anything it condemned kept its memory.
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
+
+    // Pins the coexistence contract, and is expected to change: while
+    // refcounting owns liveness, `sweepUnmarkedYoung` deliberately refuses to
+    // condemn anything with `rc > 0`, so young cycles survive the minor and
+    // land in `survived_by_refcount`, to be reclaimed by trial deletion on
+    // the major path. A pure tracer needs no cycle strategy at all -- JSC's
+    // `MarkedBlock::Handle::isLive` is just allocated-or-marked -- so when the
+    // refcount backstop is removed this assertion inverts rather than
+    // disappearing: the minor becomes the young-cycle collector.
+    try std.testing.expectEqual(@as(usize, 0), reclaimed);
+    try std.testing.expect(rt.gc.generation.stats.survived_by_refcount >= 1000);
+}
+
 test "the young-suffix guard rejects a stranded anchor" {
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
