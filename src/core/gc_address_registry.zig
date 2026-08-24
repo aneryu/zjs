@@ -175,6 +175,37 @@ pub const Table = struct {
         };
     }
 
+    /// Every occupant containing `addr`, not just the greatest-`lo` one.
+    ///
+    /// `resolveAny` has to pick a single winner, and picks the greatest `lo`
+    /// so that a metadata-prefix hit beats the neighbour whose one-past-end
+    /// coincides with it. For a conservative root scan that choice is unsafe
+    /// in the other direction: a native one-past-end pointer to object A is a
+    /// real reference to A, and returning only B leaves A unshaded and
+    /// sweepable. JSC probes and marks both sides for exactly this case
+    /// (ConservativeRoots.cpp:135-146, and :162-166 refuses to return early
+    /// for kinds that can be pointed past). Shading a few extra objects is
+    /// the conservative direction; missing one is a use-after-free.
+    pub fn forEachGcObjectAt(
+        self: *Table,
+        addr: usize,
+        context: *anyopaque,
+        visit: *const fn (*anyopaque, *gc.Header) void,
+    ) usize {
+        self.stats.lookup_calls += 1;
+        if (addr < self.bounds_lo or addr >= self.bounds_hi) return 0;
+        const bucket = self.pages.getPtr(addr >> page_shift) orelse return 0;
+        var hits: usize = 0;
+        for (bucket.occupants.items) |occupant| {
+            if (addr < occupant.lo or addr >= occupant.hi) continue;
+            if (occupant.kind != .gc_object) continue;
+            hits += 1;
+            visit(context, @ptrFromInt(occupant.ptr));
+        }
+        if (hits != 0) self.stats.lookup_hits += 1;
+        return hits;
+    }
+
     pub fn resolveAny(self: *Table, addr: usize) ?Hit {
         self.stats.lookup_calls += 1;
         if (addr < self.bounds_lo or addr >= self.bounds_hi) return null;

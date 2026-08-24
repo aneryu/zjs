@@ -43,12 +43,31 @@ pub const space_model_enabled: bool = address_registry_enabled;
 /// (§8.7). Same compile gate.
 pub const sweep_model_enabled: bool = address_registry_enabled;
 
+/// Sweep-model observation on the allocation path. Everything the state
+/// machine produces is read only by `--gc-stats` and by tests; nothing in the
+/// collector or allocator branches on it, and `refreshHeadroom`'s
+/// per-publication result is overwritten by `endSweepModelSweep` before the
+/// report reads it. So the per-object hash insert is instrumentation and
+/// carries an instrument's gate, matching `gc_slot.stats_enabled`.
+pub const sweep_model_stats_enabled: bool =
+    sweep_model_enabled and (builtin.is_test or shadow_tracer_enabled);
+
 /// 64 KiB block heap. STW only so default `rc` keeps the existing allocator.
 pub const block_heap_enabled: bool = trace_stw_enabled;
 
 /// String/rope intervals in the address registry. Shadow/STW only: default
 /// `rc` tests keep `stats.live` as the cycle-list census.
-pub const string_registry_enabled: bool = shadow_tracer_enabled or trace_stw_enabled;
+/// Shadow only. The reclaiming tracer does not consume string intervals:
+/// `gc_conservative.scanWords` discards every `.string`/`.rope` hit,
+/// `traceHeader` treats strings as leaves, and `JSValue.cycleMarkHeader` can
+/// never yield a string header, so under `trace_stw` every flat string and
+/// rope node was paying a `by_header` insert plus a page-bucket append per
+/// spanned page on allocation, and a per-page linear scan on free, to produce
+/// a fact nothing reads. Strings stay refcount-owned under both collectors, so
+/// a native frame holding one holds a count; conservative retention of strings
+/// covers nothing (§7.2). Dropping them also shortens exactly the occupant
+/// lists the candidate scan walks.
+pub const string_registry_enabled: bool = shadow_tracer_enabled;
 
 const AddressRegistryTable = if (address_registry_enabled)
     @import("gc_address_registry.zig").Table
@@ -1940,7 +1959,7 @@ pub const Registry = struct {
     /// Restores do not call this (the object was already counted / windowed).
     inline fn observeNewPublication(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
         if (comptime space_model_enabled) self.space_histogram.record(bytes);
-        if (comptime sweep_model_enabled) {
+        if (comptime sweep_model_stats_enabled) {
             self.sweep_model.noteAllocated(addressRegistryAllocator(), @intFromPtr(header));
             self.sweep_model.refreshHeadroom(
                 self.old_space.live_bytes +| self.large_space.live_bytes,

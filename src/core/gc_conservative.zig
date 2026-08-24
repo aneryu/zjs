@@ -18,6 +18,21 @@ const JSRuntime = runtime_mod.JSRuntime;
 
 pub const target_supported = builtin.cpu.arch == .aarch64 and builtin.os.tag == .linux;
 
+comptime {
+    // A reclaiming tracer that cannot scan the native stack will free objects
+    // whose only reference is a machine word. Degrading to precise-only on an
+    // unimplemented ABI is not a lighter configuration, it is an unsound one,
+    // and it used to happen silently: `spillRegistersAndScan` set
+    // `metrics.supported = false` and returned, so no gate went red. Refuse at
+    // build time instead. The shadow tracer is exempt because it never
+    // reclaims -- there a missing root is a census discrepancy, which is
+    // exactly what the shadow build exists to report.
+    if (gc.trace_stw_enabled and !target_supported) {
+        @compileError("-Dzjs_gc=trace_stw needs a conservative stack scanner for this target; " ++
+            "see `missing_abis` below. Reclaiming without one frees natively-held objects.");
+    }
+}
+
 pub const missing_abis = [_][]const u8{
     "x86_64-linux (SysV)",
     "x86_64-windows",
@@ -176,13 +191,14 @@ fn scanWords(
     while (addr + @sizeOf(usize) <= hi) : (addr += @sizeOf(usize)) {
         metrics.candidates += 1;
         const word = @as(*const usize, @ptrFromInt(addr)).*;
-        if (rt.gc.address_registry.resolveAny(word)) |hit| {
-            metrics.validated_hits += 1;
-            switch (hit) {
-                .gc_object => |header| shade(shade_ctx, header),
-                .string, .rope => {},
-            }
-        }
+        // Shade every gc object the word lands inside, not just one. A word
+        // sitting where object A's one-past-end meets object B's metadata
+        // prefix is a live reference to whichever of the two the native code
+        // meant, and the registry cannot tell; shading both is the only safe
+        // reading. String and rope hits are still discarded -- they are
+        // refcount-owned and the tracer does not sweep them.
+        const hits = rt.gc.address_registry.forEachGcObjectAt(word, shade_ctx, shade);
+        if (hits != 0) metrics.validated_hits += 1;
     }
 }
 
