@@ -1,6 +1,7 @@
 const std = @import("std");
 const build_config = @import("config.zig");
 const artifacts_mod = @import("artifacts.zig");
+const irregexp = @import("irregexp.zig");
 
 pub const TestGraph = struct {
     test_step: *std.Build.Step,
@@ -36,6 +37,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
             .link_libc = true,
         }),
     });
+    irregexp.link(unified_tests.root_module, artifacts.irregexp.follow);
     forceLlvmBackendOnDebug(unified_tests);
     unified_tests.test_runner = .{
         .path = b.path("tools/timing_test_runner.zig"),
@@ -126,6 +128,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .link_libc = true,
     });
     scoped_test_engine_mod.addOptions("build_options", scoped_test_options);
+    irregexp.link(scoped_test_engine_mod, artifacts.irregexp.debug);
     const ScopedTestConfig = struct {
         name: []const u8,
         description: []const u8,
@@ -215,6 +218,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .link_libc = true,
     });
     embedding_zjs_mod.addOptions("build_options", embedding_engine_options);
+    irregexp.link(embedding_zjs_mod, artifacts.irregexp.debug);
     const embedding_test_options = addEngineOptions(b, engine_option_inputs.withExpect(expect_config_debug));
     embedding_test_options.addOption([]const u8, "runtime_plugin_fixture_path", b.getInstallPath(.lib, runtime_plugin_fixture.out_filename));
     embedding_test_options.addOption([]const u8, "runtime_empty_plugin_fixture_path", b.getInstallPath(.lib, runtime_empty_plugin_fixture.out_filename));
@@ -260,6 +264,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .link_libc = true,
     });
     oom_engine_mod.addOptions("build_options", engine_options);
+    irregexp.link(oom_engine_mod, artifacts.irregexp.follow);
     const oom_tests = b.addTest(.{
         .name = "oom-tests",
         .root_module = b.createModule(.{

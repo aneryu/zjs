@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("config.zig");
+const irregexp = @import("irregexp.zig");
 
 pub const Artifacts = struct {
     engine_mod: *std.Build.Module,
@@ -18,6 +19,7 @@ pub const Artifacts = struct {
     install_run_test262: *std.Build.Step.InstallArtifact,
     run_test262_dev_exe: *std.Build.Step.Compile,
     install_run_test262_dev: *std.Build.Step.InstallArtifact,
+    irregexp: irregexp.Libs,
 };
 
 pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
@@ -32,6 +34,8 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
     const addEngineOptions = config.addEngineOptions;
     const forceLlvmBackendOnDebug = config.forceLlvmBackendOnDebug;
 
+    const irregexp_libs = irregexp.addLibraries(b, target, optimize);
+
     const engine_mod = b.addModule("zjs", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -39,6 +43,7 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
         .link_libc = true,
     });
     engine_mod.addOptions("build_options", engine_options);
+    irregexp.link(engine_mod, irregexp_libs.follow);
 
     // Separate options object (not a reuse of engine_options) so the same
     // generated file is not registered under two module names; follows
@@ -51,6 +56,7 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
         .link_libc = true,
     });
     plugin_fixture_zjs_mod.addOptions("build_options", plugin_fixture_options);
+    irregexp.link(plugin_fixture_zjs_mod, irregexp_libs.follow);
     const runtime_plugin_fixture_mod = b.createModule(.{
         .root_source_file = b.path("tests/fixtures/runtime_plugin_fixture.zig"),
         .target = target,
@@ -96,6 +102,7 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
         .omit_frame_pointer = true, // EXPERIMENT: measure per-op prologue (stp/ldp) cost
     });
     internal_fast_mod.addOptions("build_options", engine_options_fast);
+    irregexp.link(internal_fast_mod, irregexp_libs.fast);
     const zjs_cli_mod = b.createModule(.{
         .root_source_file = b.path("src/cli/zjs.zig"),
         .target = target,
@@ -139,6 +146,7 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
         .omit_frame_pointer = true,
     });
     internal_profile_mod.addOptions("build_options", profile_engine_options);
+    irregexp.link(internal_profile_mod, irregexp_libs.fast);
     const zjs_profile_cli_mod = b.createModule(.{
         .root_source_file = b.path("src/cli/zjs.zig"),
         .target = target,
@@ -173,6 +181,7 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
         .link_libc = true,
     });
     internal_dev_mod.addOptions("build_options", engine_options_dev);
+    irregexp.link(internal_dev_mod, irregexp_libs.debug);
     const zjs_dev_cli_mod = b.createModule(.{
         .root_source_file = b.path("src/cli/zjs.zig"),
         .target = target,
@@ -242,5 +251,6 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
         .install_run_test262 = install_run_test262,
         .run_test262_dev_exe = run_test262_dev_exe,
         .install_run_test262_dev = install_run_test262_dev,
+        .irregexp = irregexp_libs,
     };
 }

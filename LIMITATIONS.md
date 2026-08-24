@@ -59,6 +59,20 @@ are supported within the local validation boundary. CommonJS `require`,
 `node_modules` resolution, package exports/import maps, and hybrid Node-style
 module loading are not supported.
 
+## Regular Expressions
+
+JS `RegExp` compile and exec use a standalone V8 Irregexp interpreter (no
+native JIT, no ICU). The JS object layer (lastIndex, species, match arrays)
+is unchanged. Known engine-side gaps versus the previous QuickJS-style
+matcher and versus a full V8/ICU build:
+
+- Unicode property escapes (`\p{}` / `\P{}`) are not expanded; they fail at
+  compile time until property tables are wired through the shim.
+- `/ui` and `/vi` character-class case-fold close-over is incomplete without
+  ICU. `/i` uses the Zig unicode case-fold hooks.
+- Named-group and capture metadata are stored in the zjs `IRRX` blob, not
+  V8 heap objects.
+
 ## Proper Tail Calls
 
 - Proper tail calls are **strict-mode only** (per ES2015 14.6) and cover

@@ -298,7 +298,7 @@ pub const parser_core = struct {
     const atom_module = @import("core/atom.zig");
     const core_bigint = @import("core/bigint.zig");
     const core = @import("core/root.zig");
-    const regexp_lib = @import("libs/regexp.zig");
+    const irregexp = @import("libs/irregexp.zig");
 
     fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool {
         // qjs:quickjs.c:48000 lre_check_stack_overflow -> js_check_stack_overflow(ctx->rt, alloca_size)
@@ -6758,7 +6758,7 @@ pub const parser_core = struct {
         };
         try Emitter.pushConstOwned(s, pattern_string.value());
 
-        var compiled = regexp_lib.compilePatternAndFlagsWithOptions(s.function.memory.allocator, pattern, flags, .{
+        var compiled = irregexp.compilePatternAndFlagsWithOptions(s.function.memory.allocator, pattern, flags, .{
             .@"opaque" = s.runtime.?,
             .check_stack_overflow = lreCheckStackOverflow,
         }) catch |err| switch (err) {

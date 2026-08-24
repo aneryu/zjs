@@ -24,7 +24,10 @@ Compile with:
 - `-fno-exceptions`
 - include path `vendor/` so `#include "irregexp/RegExpShim.h"` resolves
 
-C ABI: `zjs_irregexp.h` / `zjs_irregexp.cpp`.
+C ABI: `zjs_irregexp.h` / `zjs_irregexp.cpp`. Zig links this as static
+library `zjs_irregexp` (`build/irregexp.zig`) and wraps it in
+`src/libs/irregexp.zig`. The JS object layer still stores the blob as a
+latin1 string.
 
 Unicode case-fold and identifier predicates are `extern "C"` hooks
 implemented in Zig; the shim provides weak ASCII fallbacks for bring-up.

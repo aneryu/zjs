@@ -1,32 +1,34 @@
-//! Runtime-aware adapter over the allocation-only regular-expression library.
+//! Runtime-aware adapter over the Irregexp compile/exec library.
 //!
 //! It bridges flat JS string storage, runtime stack-overflow/timeout checks,
-//! capture slots, and canonical flags to `libs/regexp.zig`. Compiled handles
-//! and caller-provided capture buffers retain their existing library ownership.
+//! capture slots, and canonical flags to `libs/irregexp.zig`. Flag-bit
+//! constants stay on the historical `libs/regexp.zig` layout. Compiled handles
+//! and caller-provided capture buffers retain their existing ownership.
 
 const core = @import("../core/root.zig");
 const regexp_lib = @import("../libs/regexp.zig");
-const regexp_bytecode = regexp_lib;
+const irregexp = @import("../libs/irregexp.zig");
+const regexp_bytecode = irregexp;
 const std = @import("std");
 
 pub const max_captures = regexp_bytecode.max_captures;
 pub const max_exec_slots = regexp_bytecode.max_exec_slots;
 pub const small_exec_slots = regexp_bytecode.small_exec_slots;
-pub const flag_bits = regexp_bytecode.flags;
+pub const flag_bits = regexp_lib.flags;
 pub const Capture = regexp_bytecode.Capture;
 pub const Match = regexp_bytecode.Match;
 pub const ExecStatus = regexp_bytecode.ExecStatus;
 pub const ExecResult = regexp_bytecode.ExecResult;
 pub const ExecError = error{ OutOfMemory, BytecodeCorrupt, Timeout };
 
-pub const Compiled = regexp_lib.Compiled;
+pub const Compiled = irregexp.Compiled;
 
 pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags: []const u8) !Compiled {
-    return regexp_lib.compilePatternAndFlags(allocator, pattern, flags);
+    return irregexp.compilePatternAndFlags(allocator, pattern, flags);
 }
 
 pub fn compileWithRuntime(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8) !Compiled {
-    return regexp_lib.compilePatternAndFlagsWithOptions(rt.memory.allocator, pattern, flags, .{
+    return irregexp.compilePatternAndFlagsWithOptions(rt.memory.allocator, pattern, flags, .{
         .@"opaque" = rt,
         .check_stack_overflow = lreCheckStackOverflow,
     });
@@ -119,7 +121,7 @@ pub fn flagsStringValueFromBytecode(rt: *core.JSRuntime, bytecode: []const u8) !
 test "JavaScript RegExp adapter compilation and execution" {
     var compiled = try compile(std.testing.allocator, "abc", "i");
     defer compiled.deinit(std.testing.allocator);
-    const status = try regexp_bytecode.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxAbCy" }, 0);
+    const status = try irregexp.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxAbCy" }, 0);
     try std.testing.expect(status.result == .match);
     try std.testing.expectEqual(@as(usize, 2), status.match.start);
     try std.testing.expectEqual(@as(usize, 5), status.match.end);
@@ -129,7 +131,7 @@ test "JavaScript RegExp adapter preserves multiple named capture groups" {
     var compiled = try compile(std.testing.allocator, "(?<a>.)(?<b>.)(?<c>.)(?<d>.)", "");
     defer compiled.deinit(std.testing.allocator);
 
-    const status = try regexp_bytecode.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "wxyz" }, 0);
+    const status = try irregexp.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "wxyz" }, 0);
     try std.testing.expect(status.result == .match);
     try std.testing.expectEqual(@as(usize, 4), status.match.capture_count);
 
