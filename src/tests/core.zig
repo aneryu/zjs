@@ -13515,23 +13515,25 @@ test "the marker worker marks queued objects on its own thread" {
     }
     defer for (held) |obj| obj.value().free(rt);
 
-    rt.gc.ensureConcurrentQueue();
-    rt.gc.concurrent_queue.reset();
-    for (held) |obj| try std.testing.expect(rt.gc.concurrent_queue.push(&obj.header));
+    var queue = core.gc.mark_queue.Queue{};
+    queue.ensureCapacity(std.testing.allocator);
+    defer queue.deinit(std.testing.allocator);
+    var worker = core.gc.marker.Worker{};
+    for (held) |obj| try std.testing.expect(queue.push(&obj.header));
 
     rt.gc.concurrent.major_marking_active.store(true, .release);
-    try rt.gc.marker_worker.start(&rt.gc);
+    try worker.start(&rt.gc, &queue);
 
     // Drain-and-join is the owner's side of the handshake: after join every
     // mark the worker made is visible here, which is what lets final remark
     // rescan roots without racing the marker.
-    while (rt.gc.concurrent_queue.len() != 0) std.Thread.yield() catch {};
-    rt.gc.marker_worker.join();
+    while (queue.len() != 0) std.Thread.yield() catch {};
+    worker.join();
     rt.gc.concurrent.major_marking_active.store(false, .release);
 
     for (held) |obj| try std.testing.expect(obj.header.metaConst().flags.mark);
-    try std.testing.expectEqual(@as(usize, held.len), rt.gc.marker_worker.stats.marked);
-    try std.testing.expect(!rt.gc.marker_worker.running.load(.acquire));
+    try std.testing.expectEqual(@as(usize, held.len), worker.stats.marked);
+    try std.testing.expect(!worker.running.load(.acquire));
 }
 
 test "the marker worker and a mutator can shade concurrently without losing marks" {
@@ -13548,10 +13550,12 @@ test "the marker worker and a mutator can shade concurrently without losing mark
     }
     defer for (held) |obj| obj.value().free(rt);
 
-    rt.gc.ensureConcurrentQueue();
-    rt.gc.concurrent_queue.reset();
+    var queue = core.gc.mark_queue.Queue{};
+    queue.ensureCapacity(std.testing.allocator);
+    defer queue.deinit(std.testing.allocator);
+    var worker = core.gc.marker.Worker{};
     rt.gc.concurrent.major_marking_active.store(true, .release);
-    try rt.gc.marker_worker.start(&rt.gc);
+    try worker.start(&rt.gc, &queue);
 
     // The owner shades half directly (the barrier's path) while the worker
     // drains the other half from the queue. Both routes set the same bit;
@@ -13560,12 +13564,12 @@ test "the marker worker and a mutator can shade concurrently without losing mark
         if (i % 2 == 0) {
             rt.gc.shadeForConcurrentMark(&obj.header);
         } else {
-            _ = rt.gc.concurrent_queue.push(&obj.header);
+            _ = queue.push(&obj.header);
         }
     }
 
-    while (rt.gc.concurrent_queue.len() != 0) std.Thread.yield() catch {};
-    rt.gc.marker_worker.join();
+    while (queue.len() != 0) std.Thread.yield() catch {};
+    worker.join();
     rt.gc.concurrent.major_marking_active.store(false, .release);
 
     for (held) |obj| try std.testing.expect(obj.header.metaConst().flags.mark);
@@ -13585,28 +13589,29 @@ test "mark assist is bounded and only runs while marking" {
     }
     defer for (held) |obj| obj.value().free(rt);
 
-    rt.gc.ensureConcurrentQueue();
-    rt.gc.concurrent_queue.reset();
-    for (held) |obj| _ = rt.gc.concurrent_queue.push(&obj.header);
+    var queue = core.gc.mark_queue.Queue{};
+    queue.ensureCapacity(std.testing.allocator);
+    defer queue.deinit(std.testing.allocator);
+    for (held) |obj| _ = queue.push(&obj.header);
 
     // Not marking: an assist must do nothing at all, or every allocation in
     // an idle runtime would pay for a collector that is not running.
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.markAssist(64));
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.markAssist(&queue, 64));
 
     rt.gc.concurrent.major_marking_active.store(true, .release);
     defer rt.gc.concurrent.major_marking_active.store(false, .release);
 
     // Marking: the assist takes its budget and no more. The bound is what
     // keeps one allocation from becoming an arbitrary pause.
-    try std.testing.expectEqual(@as(usize, 10), rt.gc.markAssist(10));
+    try std.testing.expectEqual(@as(usize, 10), rt.gc.markAssist(&queue, 10));
     try std.testing.expectEqual(@as(usize, 10), rt.gc.concurrent.stats.assist_marked);
-    try std.testing.expectEqual(@as(usize, held.len - 10), rt.gc.concurrent_queue.len());
+    try std.testing.expectEqual(@as(usize, held.len - 10), queue.len());
 
     // Draining past the end returns what was actually available, not the
     // budget: an assist reports work done, never work intended.
-    const rest = rt.gc.markAssist(1000);
+    const rest = rt.gc.markAssist(&queue, 1000);
     try std.testing.expectEqual(@as(usize, held.len - 10), rest);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.concurrent_queue.len());
+    try std.testing.expectEqual(@as(usize, 0), queue.len());
     for (held) |obj| try std.testing.expect(obj.header.metaConst().flags.mark);
 }
 

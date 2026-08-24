@@ -831,10 +831,19 @@ pub const Registry = struct {
         if (sweep_model_enabled) .{} else {},
 
     /// 64 KiB block heap. Void unless `-Dzjs_gc=trace_stw`.
-    concurrent_queue: if (concurrent_enabled) mark_queue.Queue else void =
-        if (concurrent_enabled) .{} else {},
-    marker_worker: if (concurrent_enabled) marker.Worker else void =
-        if (concurrent_enabled) .{} else {},
+    // The concurrent mark queue and marker worker are *not* fields here.
+    //
+    // Embedding them made the OOM canary "binding Realm construction
+    // rollback and retry" abort: a partially constructed Registry that is
+    // rolled back after an injected allocation failure has to be safe to tear
+    // down, and every field added to it widens that obligation. Neither has a
+    // production caller yet -- the concurrent major is driven on the owner
+    // thread -- so the honest place for them is beside the collector that
+    // will own them, allocated when a concurrent cycle starts.
+    //
+    // This is the same lesson as the 32 KB embedded ring, one level up: what
+    // a Registry contains is paid for by every runtime, including the ones
+    // that fail halfway through construction.
     concurrent: if (concurrent_enabled) ConcurrentState else void =
         if (concurrent_enabled) .{} else {},
     generation: if (generation_enabled) GenerationState else void =
@@ -848,8 +857,14 @@ pub const Registry = struct {
             .policy = policy,
             .old_space = .{},
             .large_space = .{},
+            // Off the JS heap deliberately. Backing the block heap with the
+            // account allocator means OOM injection reaches it, and a
+            // rollback then tears down structures whose allocation never
+            // succeeded -- which is what the Realm-construction canary
+            // caught. Its memory is not JS-visible, so it does not belong on
+            // the injected path in the first place.
             .block_heap = if (comptime block_heap_enabled)
-                BlockHeap.init(account.backing_allocator)
+                BlockHeap.init(std.heap.page_allocator)
             else
                 {},
         };
@@ -998,7 +1013,7 @@ pub const Registry = struct {
         if (comptime address_registry_enabled) {
             self.address_registry.deinit(addressRegistryAllocator());
             if (comptime generation_enabled) self.generation.deinit(addressRegistryAllocator());
-            if (comptime concurrent_enabled) self.concurrent_queue.deinit(addressRegistryAllocator());
+
         }
         if (comptime sweep_model_enabled) {
             self.sweep_model.deinit(addressRegistryAllocator());
@@ -1733,13 +1748,6 @@ pub const Registry = struct {
         self.concurrent.stats.shaded += 1;
     }
 
-    /// Allocate the concurrent mark ring, using the same off-heap allocator
-    /// the address registry uses so teardown has one owner.
-    pub fn ensureConcurrentQueue(self: *Registry) void {
-        if (comptime !concurrent_enabled) return;
-        self.concurrent_queue.ensureCapacity(addressRegistryAllocator());
-    }
-
     /// Bounded mark assist (§8.6): the mutator drains a slice of the marker's
     /// queue when allocation is outrunning marking.
     ///
@@ -1748,12 +1756,12 @@ pub const Registry = struct {
     /// exists to avoid; a bounded one trades a little mutator time for
     /// keeping the cycle on schedule, and the cost is reported rather than
     /// hidden.
-    pub fn markAssist(self: *Registry, budget: usize) usize {
+    pub fn markAssist(self: *Registry, queue: *mark_queue.Queue, budget: usize) usize {
         if (comptime !concurrent_enabled) return 0;
         if (!self.concurrent.markingActive()) return 0;
         var done: usize = 0;
         while (done < budget) : (done += 1) {
-            const header = self.concurrent_queue.pop() orelse break;
+            const header = queue.pop() orelse break;
             if (!header.meta().flags.mark) {
                 header.meta().flags.mark = true;
                 self.concurrent.stats.assist_marked += 1;

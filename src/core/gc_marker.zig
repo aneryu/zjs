@@ -33,12 +33,12 @@ pub const Worker = struct {
     /// Start marking. The queue must already be seeded and
     /// `major_marking_active` published, so the worker cannot observe a
     /// half-initialised phase.
-    pub fn start(self: *Worker, registry: *gc.Registry) !void {
+    pub fn start(self: *Worker, registry: *gc.Registry, queue: *gc.mark_queue.Queue) !void {
         std.debug.assert(self.thread == null);
         self.stop.store(false, .release);
         self.running.store(true, .release);
         self.stats.started += 1;
-        self.thread = try std.Thread.spawn(.{}, run, .{ self, registry });
+        self.thread = try std.Thread.spawn(.{}, run, .{ self, registry, queue });
     }
 
     /// Ask the worker to stop and wait for it. Called from the owner thread at
@@ -52,10 +52,11 @@ pub const Worker = struct {
         self.stats.finished += 1;
     }
 
-    fn run(self: *Worker, registry: *gc.Registry) void {
+    fn run(self: *Worker, registry: *gc.Registry, queue: *gc.mark_queue.Queue) void {
         defer self.running.store(false, .release);
         while (!self.stop.load(.acquire)) {
-            const header = registry.concurrent_queue.pop() orelse {
+            _ = registry;
+            const header = queue.pop() orelse {
                 self.stats.idle_spins += 1;
                 std.Thread.yield() catch {};
                 continue;

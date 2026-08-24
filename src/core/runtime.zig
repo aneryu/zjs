@@ -3154,17 +3154,6 @@ pub const JSRuntime = struct {
         // Bounded is the whole point -- an unbounded assist turns one
         // allocation into an arbitrary pause, which is what a concurrent
         // collector exists to prevent.
-        if (comptime gc.concurrent_enabled) {
-            if (self.gc.concurrent.markingActive()) {
-                const started = profile.nowNanos();
-                const assisted = self.gc.markAssist(assist_budget);
-                if (assisted != 0) {
-                    const ended = profile.nowNanos();
-                    self.gc.concurrent.stats.assist_ns_total +=
-                        if (ended > started) ended - started else 0;
-                }
-            }
-        }
         if (self.gc_running or self.gc.phase != .none or !self.gc.hasPendingMajorRequest()) return;
         _ = self.pollGC(null, .normal) catch {};
     }
