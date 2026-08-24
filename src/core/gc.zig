@@ -794,6 +794,11 @@ pub const Registry = struct {
     // Each is a cyclic sentinel (list.h). Call `initLists` after the Registry
     // reaches its stable address — sentinels are self-referential.
     gc_obj_list: Header = .{},
+
+    /// First young object in `gc_obj_list`, or null when nothing is young.
+    /// See `youngIterator` for why the young set is a suffix.
+    young_head: if (generation_enabled) ?*Header else void =
+        if (generation_enabled) null else {},
     tmp_obj_list: Header = .{},
     zero_ref_list: Header = .{},
     // No live-object counter: qjs add_gc_object/remove_gc_object
@@ -1670,6 +1675,21 @@ pub const Registry = struct {
         };
     }
 
+    /// Iterate only the young objects.
+    ///
+    /// Publication appends at the tail and promotion clears the whole young
+    /// set at once, so the young objects are always a contiguous suffix of
+    /// the allocation-ordered list. `young_head` names where that suffix
+    /// starts, which is what lets a minor cost O(young) instead of O(heap) --
+    /// the difference between a nursery collection and a whole-heap walk that
+    /// happens to ignore most of what it visits.
+    pub fn youngIterator(self: *const Registry) GcObjectIterator {
+        return .{
+            .cursor = self.young_head,
+            .sentinel = &self.gc_obj_list,
+        };
+    }
+
     /// Non-reclaiming census of the intrusive RC registry. One Adapter for a
     /// future CompositeHeapCensus, not a complete heap census: String/Rope
     /// and BigInt need the allocation-ledger Adapter in `ref_kind_catalog`.
@@ -1723,6 +1743,14 @@ pub const Registry = struct {
     fn removeGcObject(self: *Registry, header: *GCObjectHeader) void {
         if (header.prev == null) return;
         if (comptime address_registry_enabled) self.unregisterLiveAddress(header);
+        if (comptime generation_enabled) {
+            // Freeing the object the suffix starts at moves the start to its
+            // successor, which is still young: the suffix only shrinks here.
+            if (self.young_head == header) {
+                const next = header.next;
+                self.young_head = if (next == &self.gc_obj_list) null else next;
+            }
+        }
         listDel(header);
     }
 
@@ -1853,6 +1881,9 @@ pub const Registry = struct {
         if (comptime generation_enabled) {
             header.meta().flags.young = true;
             self.generation.stats.young_count += 1;
+            // This object was just appended at the tail, so if no suffix was
+            // open it starts here.
+            if (self.young_head == null) self.young_head = header;
         }
     }
 

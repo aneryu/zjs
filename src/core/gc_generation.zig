@@ -90,11 +90,19 @@ pub const State = struct {
     /// the collector clearing each survivor's bit as it walks; this records
     /// the accounting side and resets the remembered set, which is stale once
     /// nothing is young (§8.3).
-    pub fn promoteSurvivors(self: *State, survivors: usize) void {
-        self.stats.promoted += survivors;
+    /// Drop the young set and the remembered set built from it, without
+    /// claiming a collection happened. A major promotes everything too, and
+    /// counting that as a minor would corrupt the pause statistics that
+    /// separate the two.
+    pub fn retireYoungSet(self: *State) void {
         self.remembered.clearRetainingCapacity();
         self.stats.young_count = 0;
         self.stats.remembered_owners = 0;
+    }
+
+    pub fn promoteSurvivors(self: *State, survivors: usize) void {
+        self.stats.promoted += survivors;
+        self.retireYoungSet();
         self.stats.minor_collections += 1;
     }
 

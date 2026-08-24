@@ -117,6 +117,7 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
     var collector = try Collector.init(rt, extra_roots);
     defer collector.deinit();
     const swept = try collector.run();
+    clearYoungState(rt);
     last_report = collector.report;
     last_report.swept = swept;
     last_report.remaining = rt.gc.liveCount();
@@ -150,7 +151,7 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     var collector = try Collector.init(rt, extra_roots);
     defer collector.deinit();
 
-    collector.clearMarks();
+    collector.clearYoungMarks();
     try collector.seedRoots();
     if (collector.conservative_on) try collector.seedConservativeRoots();
 
@@ -179,10 +180,11 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     // after the sweep survived this collection, so it is old now. Clearing
     // the bit here is what makes a later write to it hit the remembered-set
     // path instead of being skipped as "the minor will see it anyway".
-    var survivors = rt.gc.objectIterator();
+    var survivors = rt.gc.youngIterator();
     while (survivors.next()) |header| {
-        if (header.metaConst().flags.young) header.meta().flags.young = false;
+        header.meta().flags.young = false;
     }
+    rt.gc.young_head = null;
     rt.gc.generation.promoteSurvivors(young_before -| reclaimed);
     last_report.minor_reclaimed = reclaimed;
     last_report.minor_young_before = young_before;
@@ -241,10 +243,25 @@ pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     last_report.remaining = rt.gc.liveCount();
     if (comptime gc.generation_enabled) {
         // Everything that survived a major is old, and the remembered set it
-        // was built from is stale (§8.2).
+        // was built from is stale (§8.2). Clearing the bits and the suffix
+        // cursor is what makes that true rather than merely intended: a
+        // survivor that kept its young bit would be swept by the next minor
+        // on the strength of a trace that never looked at its incoming edges.
+        clearYoungState(rt);
         rt.gc.generation.promoteSurvivors(rt.gc.liveCount());
     }
     return swept;
+}
+
+/// Retire the young set after a whole-heap collection. Walks the full list
+/// rather than the suffix because a major has already swept, which can free
+/// the object the suffix cursor names.
+fn clearYoungState(rt: *JSRuntime) void {
+    if (comptime !gc.generation_enabled) return;
+    var it = rt.gc.objectIterator();
+    while (it.next()) |header| header.meta().flags.young = false;
+    rt.gc.young_head = null;
+    rt.gc.generation.retireYoungSet();
 }
 
 const Collector = struct {
@@ -357,6 +374,21 @@ const Collector = struct {
 
     fn clearMarks(self: *Collector) void {
         var iterator = self.rt.gc.objectIterator();
+        while (iterator.next()) |header| {
+            header.meta().flags.mark = false;
+        }
+    }
+
+    /// Clear marks over the young suffix only.
+    ///
+    /// A minor must not touch old marks for two separate reasons, and both
+    /// matter: under the sticky rule an old object's mark is what tells the
+    /// remembered-owner walk that it has already been accounted for (§8.5),
+    /// and clearing the whole heap would make a nursery collection cost
+    /// O(heap) -- which is how a large live set turns frequent minors
+    /// quadratic.
+    fn clearYoungMarks(self: *Collector) void {
+        var iterator = self.rt.gc.youngIterator();
         while (iterator.next()) |header| {
             header.meta().flags.mark = false;
         }
@@ -657,9 +689,8 @@ const Collector = struct {
 
         var doomed: std.ArrayList(*gc.Header) = .empty;
         defer doomed.deinit(self.allocator());
-        var young_it = self.rt.gc.objectIterator();
+        var young_it = self.rt.gc.youngIterator();
         while (young_it.next()) |header| {
-            if (!header.metaConst().flags.young) continue;
             if (header.metaConst().flags.mark) continue;
             if (header.metaConst().flags.is_pinned) continue;
             if (header.metaConst().flags.kind != .object) continue;
