@@ -481,7 +481,16 @@ fn runWithArgsState(
         );
     } else frame_mod.Frame.init(entry_function);
     defer {
-        if (break_var_ref_cycles_on_exit) _ = ctx.runtime.runObjectCycleRemoval();
+        // This collection fires while engine native frames are live — most
+        // importantly while the invocation's RETURN VALUE is held only by
+        // native locals on its way out. The tracing collector must scan
+        // engine-active here (conservative in test builds too), or a precise
+        // sweep reclaims the value being returned (watchpoint-proven: the
+        // constructed Map was destroyFromHeader'd by this very collection).
+        // Runtime teardown and host-explicit cycle removal keep the
+        // declared-roots contract; this exit seam is the engine-active case.
+        if (break_var_ref_cycles_on_exit)
+            _ = ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
     }
     defer {
         if (entry_generator_state == null or !frame_storage.isEmptyResidentExecutionShell()) {

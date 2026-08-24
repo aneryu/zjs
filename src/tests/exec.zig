@@ -7909,6 +7909,16 @@ test "constructValue AggregateError releases copied errors array owner" {
     source.setArrayLength(2);
     try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, false));
 
+    // `constructor` and `source` are held only by Zig locals (no heap edge).
+    // RC's cycle removal never touched rc-held stack objects, but the tracing
+    // collector treats the same call as a whole-heap mark-sweep with declared
+    // roots only — name them, or the sweep reclaims live test state.
+    var constructor_slot: ?*core.Object = helpers.objectFromValue(constructor);
+    var source_slot: ?*core.Object = source;
+    var live_roots = core.runtime.rootObjects(.{ &constructor_slot, &source_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
+
     const baseline_objects = rt.gc.liveCount();
     const result = try engine.exec.construct.constructValue(ctx, constructor, &.{source.value()}, &.{});
     result.free(rt);
@@ -11544,6 +11554,15 @@ test "job queue symbol roots preserve weak map values" {
 
     const weak_map = try core.Object.create(rt, core.class.ids.weakmap, null);
     defer weak_map.value().free(rt);
+    // The map is held only by this Zig local. The tracing collector treats
+    // the host-explicit cycle removal below as a whole-heap mark-sweep with
+    // declared roots, so name the TABLE; the entry value must stay alive
+    // through ephemeron semantics alone (symbol key live via the queued
+    // atom ref), which is exactly what this test exists to observe.
+    var weak_map_slot: ?*core.Object = weak_map;
+    var live_roots = core.runtime.rootObjects(.{&weak_map_slot});
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     const value = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-job-queue-weak-key");
