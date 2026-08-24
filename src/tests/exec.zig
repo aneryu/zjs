@@ -11671,6 +11671,22 @@ test "RegExp exec result template preserves metadata groups and indices" {
     , "1|a|1|ba|true\n2|a|a|1|ba|a|1|2|1|2\n");
 }
 
+test "RegExp dot matches UTF-16 subjects above Latin-1" {
+    try helpers.expectPrints(
+        \\var pair = "\uD834\uDF06";
+        \\var unit = /./.exec(pair);
+        \\print(unit[0].length, unit[0].charCodeAt(0).toString(16));
+        \\var point = /./u.exec(pair);
+        \\print(point[0].length, point.index, point[0].charCodeAt(0).toString(16), point[0].charCodeAt(1).toString(16));
+        \\var han = /./.exec("\u4E2D");
+        \\print(han[0], han[0].length);
+        \\print(/./u.exec("a")[0]);
+    , "1 d834\n" ++
+        "2 0 d834 df06\n" ++
+        "中 1\n" ++
+        "a\n");
+}
+
 test "RegExp compiler stack overflow is a catchable SyntaxError" {
     try helpers.expectPrints(
         \\try { new RegExp("(?:".repeat(40000)); print("no throw"); } catch(e) { print(e.name + ":" + e.message); }
