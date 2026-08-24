@@ -10297,6 +10297,19 @@ test "canonical root and child survive parser arena release allocation churn and
     // before reading every published slice again. Arena-backed FB storage would
     // now be overwritten or freed; the Result's owned FB ref keeps root+child
     // alive without materialising a second heap bytecode representation.
+    //
+    // Tests trace precise-only (no conservative scan), so the Result's
+    // native-stack ownership is invisible to the tracer: root the two FB
+    // headers explicitly for the survival window. Deactivated before the
+    // final release so the freeing assertion still observes the sweep.
+    var fb_roots = [_]core.runtime.HeaderRootValue{
+        .{ .header = @constCast(&root.header) },
+        .{ .header = @constCast(&child.header) },
+    };
+    var fb_frame = core.runtime.ValueRootFrame{ .headers = &fb_roots };
+    var fb_frame_active = true;
+    fb_frame.activate(rt);
+    defer if (fb_frame_active) fb_frame.deactivate(rt);
     var iteration: usize = 0;
     while (iteration < 32) : (iteration += 1) {
         const size = 4096 + iteration * 257;
@@ -10312,6 +10325,8 @@ test "canonical root and child survive parser arena release allocation churn and
     try std.testing.expectEqualStrings("child", rt.atoms.name(child.func_name).?);
     try std.testing.expectEqualSlices(u8, root.byteCode(), parsed.byteCode());
 
+    fb_frame.deactivate(rt);
+    fb_frame_active = false;
     parsed.deinit();
     parsed_owned = false;
     _ = try rt.forceGC(null);

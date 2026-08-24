@@ -102,7 +102,7 @@ pub const Report = struct {
 
 pub var last_report: Report = .{};
 
-pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame) CollectError!usize {
+pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
     var drained_sweep_debt: usize = 0;
     if (comptime gc.sweep_model_enabled) {
         if (rt.gc.sweep_model.debt.sweep_debt != 0) {
@@ -114,7 +114,7 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
     }
     rt.gc.stats.collections += 1;
     if (comptime gc.block_heap_enabled) rt.gc.block_heap.beginMajor();
-    var collector = try Collector.init(rt, extra_roots);
+    var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
     const swept = try collector.run();
     clearYoungState(rt);
@@ -143,12 +143,12 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
 ///
 /// Returns the number of young objects reclaimed, or null when there is no
 /// generational state to work with.
-pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame) CollectError!?usize {
+pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!?usize {
     if (comptime !gc.generation_enabled) return null;
     const young_before = rt.gc.generation.stats.young_count;
     if (young_before == 0) return 0;
 
-    var collector = try Collector.init(rt, extra_roots);
+    var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
 
     collector.clearYoungMarks();
@@ -202,10 +202,10 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
 /// phase transitions, the barrier handshake and the remark obligations
 /// testable before a second thread is introduced, which is the order the
 /// litmus argued for: validate the protocol, then parallelise it.
-pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame) CollectError!usize {
+pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
     if (comptime !gc.concurrent_enabled) return error.PayloadMarkFailed;
 
-    var collector = try Collector.init(rt, extra_roots);
+    var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
 
     // Initial mark, mutator stopped.
@@ -274,7 +274,7 @@ const Collector = struct {
     exact_mark_count: usize = 0,
     conservative_on: bool,
 
-    fn init(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame) std.mem.Allocator.Error!Collector {
+    fn init(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) std.mem.Allocator.Error!Collector {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         errdefer arena.deinit();
         return .{
@@ -282,10 +282,20 @@ const Collector = struct {
             .extra_roots = extra_roots,
             .arena = arena,
             .work = .empty,
-            // Tests link every ValueRootFrame; conservative scan would add
-            // non-deterministic stack hits. CLI STW uses containers-only
-            // frames plus the conservative scanner (same split as shadow).
-            .conservative_on = !builtin.is_test,
+            // CLI STW always adds the conservative pass over containers-only
+            // frames (same split as shadow). Tests honour the trigger's scan
+            // policy: engine-internal triggers (allocation threshold,
+            // safepoint, callback boundary) run with mutator native frames
+            // live — frames entitled to hold rc refs without a
+            // ValueRootFrame, conservative is their covering mechanism — so
+            // precision there is unsound (first caught by Error().stack
+            // assembly being swept mid-construction). Host-quiescent
+            // triggers stay precise so liveness tests are deterministic and
+            // a missing test-side root still fails loudly.
+            .conservative_on = if (!builtin.is_test)
+                true
+            else
+                (rt.test_root_scan_override orelse scan) == .engine_active,
         };
     }
 

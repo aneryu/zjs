@@ -7935,6 +7935,7 @@ test "trace_stw sweep debt is drained before a new collection begins" {
 test "pollGC runs pending collection and clears pending flag" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
 
     var left = try core.Object.create(rt, core.class.ids.object, null);
     var right = try core.Object.create(rt, core.class.ids.object, null);
@@ -10467,6 +10468,7 @@ test "finalization registry cleanup enqueue does not allocate after registration
 test "object allocation threshold triggers runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
 
     var left = try core.Object.create(rt, core.class.ids.object, null);
     var right = try core.Object.create(rt, core.class.ids.object, null);
@@ -10499,6 +10501,7 @@ test "object allocation collects reclaimable cycles before memory-limit rejectio
         .gc_threshold = 256 * 1024 * 1024,
     });
     defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
 
     // Keep the shared null-prototype root Shape alive. QuickJS acquires that
     // owned Shape before JS_NewObjectFromShape's object-allocation GC boundary;
@@ -10539,6 +10542,7 @@ test "cache-miss root shape is owned before the object allocation GC boundary" {
         .gc_threshold = 256 * 1024 * 1024,
     });
     defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
 
     // Warm the shape-hash buckets while keeping this prototype unique: creating
     // the replacement below must allocate a new root Shape for `prototype`.
@@ -13259,7 +13263,7 @@ test "minor collection reclaims young garbage and promotes survivors" {
     const young_before = rt.gc.generation.stats.young_count;
     try std.testing.expect(young_before > 0);
 
-    const reclaimed = (try core.gc_trace_stw.collectMinor(rt, null)).?;
+    const reclaimed = (try core.gc_trace_stw.collectMinor(rt, null, .declared_only)).?;
     // Survivors leave the young set; the set is rebuilt by later allocation.
     try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.stats.young_count);
     try std.testing.expect(rt.gc.generation.stats.minor_collections >= 1);
@@ -13278,7 +13282,7 @@ test "old-to-young edge survives a minor only because the barrier remembered it"
     // Age an owner: after one minor everything that survived counts as old.
     const owner = try core.Object.createPlainObject(rt, null);
     defer owner.value().free(rt);
-    _ = try core.gc_trace_stw.collectMinor(rt, null);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     try std.testing.expect(!rt.gc.generation.isYoung(&owner.header));
 
     // A young child reachable only through that old owner.
@@ -13404,7 +13408,7 @@ test "a concurrent major collects garbage and keeps what the barrier shaded" {
     defer kept.value().free(rt);
 
     const before = rt.gc.liveCount();
-    const swept = try core.gc_trace_stw.collectConcurrentMajor(rt, null);
+    const swept = try core.gc_trace_stw.collectConcurrentMajor(rt, null, .declared_only);
     // The rooted object survives; whatever was unreachable is gone.
     try std.testing.expect(rt.gc.liveCount() <= before);
     try std.testing.expect(swept <= before);
@@ -13725,7 +13729,7 @@ test "independent runtimes collect without touching each other" {
         var before: [8]usize = undefined;
         for (runtimes, &before) |other, *slot| slot.* = other.gc.liveCount();
 
-        _ = try core.gc_trace_stw.collectCycles(rt, null);
+        _ = try core.gc_trace_stw.collectCycles(rt, null, .declared_only);
 
         for (runtimes, before, 0..) |other, prior, other_index| {
             if (other_index == index) continue;

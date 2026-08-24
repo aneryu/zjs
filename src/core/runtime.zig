@@ -370,7 +370,26 @@ pub const GCPollMode = enum {
             .normal, .urgent => false,
         };
     }
+
+    /// Root-scan policy for the collection this poll may run. Engine-internal
+    /// triggers fire with mutator native frames live on the stack; those
+    /// frames are entitled to hold rc references without a ValueRootFrame
+    /// (the conservative scanner is the covering mechanism), so they must
+    /// scan conservatively even in test builds. Host-quiescent triggers
+    /// (explicit forceGC, event-loop idle) keep the precise-only test split
+    /// that makes liveness tests deterministic and keeps the missing-root
+    /// forcing function alive.
+    pub fn rootScan(self: GCPollMode) GCRootScan {
+        return switch (self) {
+            .normal, .safepoint, .callback_boundary => .engine_active,
+            .urgent, .idle => .declared_only,
+        };
+    }
 };
+
+/// See `GCPollMode.rootScan`. `declared_only` is only honoured in test
+/// builds; CLI/production collections always add the conservative pass.
+pub const GCRootScan = enum { engine_active, declared_only };
 
 pub const ValueRootSlice = union(enum) {
     mutable: *const []JSValue,
@@ -1151,6 +1170,14 @@ pub const JSRuntime = struct {
         if (gc.trace_stw_enabled) &.{} else {},
     weakref_kept_alive_capacity: if (gc.trace_stw_enabled) usize else void =
         if (gc.trace_stw_enabled) 0 else {},
+    /// Test-only root-scan override (`forcePreciseRootScanForTest`). Pacing
+    /// MACHINERY tests call the engine-trigger entry points from a quiescent
+    /// test frame with dropGcPtr-scrubbed locals; the mode-derived
+    /// `.engine_active` policy would conservatively retain their ghosts and
+    /// break deterministic reclamation assertions. Production layout is
+    /// untouched (void outside test builds).
+    test_root_scan_override: if (builtin.is_test) ?GCRootScan else void =
+        if (builtin.is_test) null else {},
     /// Cross-thread, allocation-free wake signal for host completions that
     /// must be consumed on this Runtime's owner thread. Atomics.waitAsync is
     /// the first producer; the signal carries no JS state and is reset only
@@ -1355,6 +1382,7 @@ pub const JSRuntime = struct {
             rt.weakref_kept_alive = &.{};
             rt.weakref_kept_alive_capacity = 0;
         }
+        if (comptime builtin.is_test) rt.test_root_scan_override = null;
         rt.deferred_native_cleanups = &.{};
         rt.deferred_native_cleanups_capacity = 0;
         rt.draining_deferred_native_cleanups = false;
@@ -2708,17 +2736,22 @@ pub const JSRuntime = struct {
 
     pub fn runObjectCycleRemovalWithValueRoots(self: *JSRuntime, roots: ?*const ValueRootFrame) usize {
         self.assertOwnerThread();
-        const result = self.tryRunObjectCycleRemovalWithValueRoots(roots) catch return 0;
+        // Host-explicit "collect everything" (including runtime teardown):
+        // the caller's contract is a quiescent engine, and teardown
+        // correctness requires ignoring stale test-stack slots so the final
+        // sweep can actually reclaim host-released realms.
+        const result = self.tryRunObjectCycleRemovalWithValueRoots(roots, .declared_only) catch return 0;
         return result.freed_objects;
     }
 
     pub fn tryRunObjectCycleRemoval(self: *JSRuntime) gc.CollectionError!gc.CollectionResult {
-        return self.tryRunObjectCycleRemovalWithValueRoots(null);
+        return self.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
     }
 
     pub fn tryRunObjectCycleRemovalWithValueRoots(
         self: *JSRuntime,
         roots: ?*const ValueRootFrame,
+        scan: GCRootScan,
     ) gc.CollectionError!gc.CollectionResult {
         self.assertOwnerThread();
         // `gc_running` covers the major driver. The refcount/cycle phases also
@@ -2738,7 +2771,7 @@ pub const JSRuntime = struct {
 
         self.gc.beginMajorCycle(self.gc.activeMajorReason() orelse .manual);
         const freed = if (comptime gc.trace_stw_enabled)
-            @import("gc_trace_stw.zig").collectCycles(self, roots) catch |err| {
+            @import("gc_trace_stw.zig").collectCycles(self, roots, scan) catch |err| {
                 const mapped: gc.CollectionError = switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.PayloadMarkFailed => error.PayloadMarkFailed,
@@ -2790,7 +2823,7 @@ pub const JSRuntime = struct {
                 self.gc_running = true;
                 defer self.gc_running = false;
                 const started = profile.nowNanos();
-                if (@import("gc_trace_stw.zig").collectMinor(self, roots) catch null) |freed| {
+                if (@import("gc_trace_stw.zig").collectMinor(self, roots, mode.rootScan()) catch null) |freed| {
                     if (freed > 0) {
                         self.gc.stats.collections += 1;
                         const ended = profile.nowNanos();
@@ -2838,7 +2871,7 @@ pub const JSRuntime = struct {
         else
             gc.RequestReason.manual;
         self.gc.beginMajorCycle(reason);
-        return try self.tryRunObjectCycleRemovalWithValueRoots(null);
+        return try self.tryRunObjectCycleRemovalWithValueRoots(null, mode.rootScan());
     }
 
     /// Host-facing checked form of `pollGC`. Internal engine paths use the
@@ -2885,6 +2918,14 @@ pub const JSRuntime = struct {
         if (!builtin.is_test) @compileError("test-only helper");
         self.assertOwnerThread();
         self.gc.requestGC(.manual, .soon);
+    }
+
+    /// Declare that this test keeps every collectable reference either in a
+    /// linked ValueRootFrame or scrubbed (dropGcPtr), so even engine-trigger
+    /// collection entries may scan precisely. See `test_root_scan_override`.
+    pub fn forcePreciseRootScanForTest(self: *JSRuntime) void {
+        if (!builtin.is_test) @compileError("test-only helper");
+        self.test_root_scan_override = .declared_only;
     }
 
     pub fn gcPendingForTest(self: JSRuntime) bool {
