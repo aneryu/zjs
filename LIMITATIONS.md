@@ -61,10 +61,12 @@ module loading are not supported.
 
 ## Regular Expressions
 
-JS `RegExp` compile and exec use a standalone V8 Irregexp interpreter (no
-native JIT, no ICU). The JS object layer (lastIndex, species, match arrays)
-is unchanged. Known engine-side gaps versus the previous QuickJS-style
-matcher and versus a full V8/ICU build:
+JS `RegExp` compile still uses the standalone V8 Irregexp bytecode compiler
+(no native JIT, no ICU). Exec runs a Zig interpreter over that bytecode; the
+C++ interpreter remains linked as a compile-time island and a parity check.
+The JS object layer (lastIndex, species, match arrays) is unchanged. Known
+engine-side gaps versus the previous QuickJS-style matcher and versus a full
+V8/ICU build:
 
 - Unicode property escapes (`\p{}` / `\P{}`) are not expanded; they fail at
   compile time until property tables are wired through the shim.

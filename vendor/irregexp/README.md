@@ -31,9 +31,10 @@ library `zjs_irregexp` (`build/irregexp.zig`) and wraps it in
 `src/libs/irregexp.zig`. The JS object layer still stores the blob as a
 latin1 string.
 
-Exec reuses a thread-local Isolate and runs against views of the IRRX
-bytecode slice and the caller's subject buffer. Native Irregexp codegen is
-still out of scope.
+Compile stays in the C++ island. Exec is `src/libs/irregexp_interp.zig`, a
+Zig translation of V8's interpreter over the same IRRX bytecode. The C++
+`zjs_irregexp_exec` entry remains for bring-up and differential checks.
+Native Irregexp codegen is still out of scope.
 
 Both Latin-1 and UC16 bytecode are compiled at pattern-compile time. Each
 width re-parses the source: V8's `EmitClassRanges` clamps shared AST

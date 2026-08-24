@@ -8,6 +8,7 @@ const std = @import("std");
 const unicode = @import("unicode.zig");
 const regexp_properties = unicode.regexp_properties;
 const regexp_lib = @import("regexp.zig");
+const interp = @import("irregexp_interp.zig");
 
 pub const max_captures = regexp_lib.max_captures;
 pub const max_exec_slots = regexp_lib.max_exec_slots;
@@ -524,45 +525,36 @@ pub fn execCaptureSlotsSliceTrustedWithOptions(
     };
     @memset(regs, -1);
 
-    var interrupt_ctx: InterruptContext = undefined;
-    var interrupt_fn: abi.InterruptFn = null;
-    var interrupt_opaque: ?*anyopaque = null;
-    if (options.check_timeout) |check| {
-        interrupt_ctx = .{
-            .@"opaque" = options.@"opaque",
-            .check_timeout = check,
-        };
-        interrupt_fn = interruptThunk;
-        interrupt_opaque = @ptrCast(&interrupt_ctx);
-    }
+    var widened: []u16 = &.{};
+    defer if (widened.len != 0) allocator.free(widened);
 
-    const status = switch (input) {
-        .latin1 => |bytes| abi.zjs_irregexp_exec(
-            bytecode.ptr,
-            bytecode.len,
-            bytes.ptr,
-            bytes.len,
-            abi.LATIN1,
-            start_index,
-            regs.ptr,
-            regs.len,
-            interrupt_fn,
-            interrupt_opaque,
-        ),
-        .utf16 => |units| abi.zjs_irregexp_exec(
-            bytecode.ptr,
-            bytecode.len,
-            units.ptr,
-            units.len,
-            abi.UTF16,
-            start_index,
-            regs.ptr,
-            regs.len,
-            interrupt_fn,
-            interrupt_opaque,
-        ),
+    const interrupt = interp.Interrupt{
+        .check = options.check_timeout,
+        .ctx = options.@"opaque",
     };
-    const result = try execStatus(status);
+
+    const zig_result = switch (input) {
+        .latin1 => |bytes| blk: {
+            if (header.latin1_len != 0) {
+                const code = bytecode[header.latin1_off..][0..header.latin1_len];
+                break :blk try interp.execLatin1(allocator, code, bytes, start_index, regs, interrupt);
+            }
+            if (header.uc16_len == 0) return error.BytecodeCorrupt;
+            widened = try allocator.alloc(u16, bytes.len);
+            for (bytes, 0..) |b, i| widened[i] = b;
+            const code = bytecode[header.uc16_off..][0..header.uc16_len];
+            break :blk try interp.execUtf16(allocator, code, widened, start_index, regs, interrupt);
+        },
+        .utf16 => |units| blk: {
+            if (header.uc16_len == 0) return error.BytecodeCorrupt;
+            const code = bytecode[header.uc16_off..][0..header.uc16_len];
+            break :blk try interp.execUtf16(allocator, code, units, start_index, regs, interrupt);
+        },
+    };
+    const result: ExecResult = switch (zig_result) {
+        .success => .match,
+        .failure => .no_match,
+    };
     if (result == .match) {
         copyRegisters(capture, regs, registers_per_match);
     }
@@ -794,5 +786,62 @@ test "Irregexp matches UTF-16 subjects above Latin-1" {
         try std.testing.expect(status.result == .match);
         try std.testing.expectEqual(@as(usize, 1), status.match.start);
         try std.testing.expectEqual(@as(usize, 2), status.match.end);
+    }
+}
+
+test "Zig Irregexp interpreter matches C++ exec on representative patterns" {
+    const allocator = std.testing.allocator;
+    const Case = struct { pattern: []const u8, flags_str: []const u8, subject: []const u8, start: usize };
+    const cases = [_]Case{
+        .{ .pattern = "a+", .flags_str = "", .subject = "xxaaa", .start = 0 },
+        .{ .pattern = "a+", .flags_str = "", .subject = "xyz", .start = 0 },
+        .{ .pattern = "(?:)", .flags_str = "", .subject = "", .start = 0 },
+        .{ .pattern = "abc", .flags_str = "i", .subject = "xxAbCy", .start = 0 },
+        .{ .pattern = "(a+)(b+)", .flags_str = "", .subject = "aaabbb", .start = 0 },
+        .{ .pattern = "\\d+", .flags_str = "", .subject = "ab12cd", .start = 0 },
+        .{ .pattern = "[aeiou]+", .flags_str = "", .subject = "xxooi", .start = 0 },
+        .{ .pattern = "^foo", .flags_str = "", .subject = "foo bar", .start = 0 },
+        .{ .pattern = "foo$", .flags_str = "", .subject = "bar foo", .start = 0 },
+        .{ .pattern = "a|b", .flags_str = "", .subject = "xb", .start = 0 },
+        .{ .pattern = "(a)\\1", .flags_str = "", .subject = "aa", .start = 0 },
+        .{ .pattern = "a{2,4}", .flags_str = "", .subject = "caaaad", .start = 0 },
+        .{ .pattern = ".", .flags_str = "s", .subject = "\n", .start = 0 },
+        .{ .pattern = "\\bword\\b", .flags_str = "", .subject = "a word here", .start = 0 },
+        .{ .pattern = "end", .flags_str = "", .subject = "the end", .start = 4 },
+    };
+
+    for (cases) |case| {
+        var compiled = try compilePatternAndFlags(allocator, case.pattern, case.flags_str);
+        defer compiled.deinit(allocator);
+        const header = parseHeader(compiled.bytecode) orelse return error.BytecodeCorrupt;
+        const registers_per_match = header.capture_count * 2;
+        const need = @max(registers_per_match, header.register_count);
+        const zig_slots = try allocator.alloc(usize, registers_per_match);
+        defer allocator.free(zig_slots);
+        const cpp_slots = try allocator.alloc(usize, registers_per_match);
+        defer allocator.free(cpp_slots);
+        const zig = try execCaptureSlotsSliceTrustedWithOptions(allocator, compiled.bytecode, .{ .latin1 = case.subject }, case.start, .{}, zig_slots);
+
+        const cpp_regs = try allocator.alloc(i32, need);
+        defer allocator.free(cpp_regs);
+        @memset(cpp_regs, -1);
+        const cpp_status = abi.zjs_irregexp_exec(
+            compiled.bytecode.ptr,
+            compiled.bytecode.len,
+            case.subject.ptr,
+            case.subject.len,
+            abi.LATIN1,
+            case.start,
+            cpp_regs.ptr,
+            cpp_regs.len,
+            null,
+            null,
+        );
+        const cpp = try execStatus(cpp_status);
+        if (cpp == .match) copyRegisters(cpp_slots, cpp_regs, registers_per_match);
+        try std.testing.expectEqual(cpp, zig);
+        if (zig == .match) {
+            try std.testing.expectEqualSlices(usize, cpp_slots, zig_slots);
+        }
     }
 }
