@@ -1,9 +1,9 @@
-//! Zig boundary over the standalone V8 Irregexp C ABI.
+//! Zig boundary over standalone V8 Irregexp.
 //!
-//! Compiled blobs are zjs-owned (`IRRX` header + V8 bytecode). The JS object
-//! layer still stores that blob as a latin1 `JSString`. Flag parsing and
-//! character-class helpers stay in `regexp.zig`; this module owns compile and
-//! exec for the production JS path.
+//! Compile still goes through the C ABI (`IRRX` header + V8 bytecode). Exec
+//! is a Zig interpreter of that bytecode (`irregexp_interp.zig`). The JS
+//! object layer still stores the blob as a latin1 `JSString`. Flag parsing
+//! and character-class helpers stay in `regexp.zig`.
 const std = @import("std");
 const unicode = @import("unicode.zig");
 const regexp_properties = unicode.regexp_properties;
