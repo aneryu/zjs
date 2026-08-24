@@ -126,6 +126,41 @@ int main() {
     std::printf("ok /Foo/i -> [%d,%d]\n", regs[0], regs[1]);
   }
 
+  // sticky /y does not search forward
+  {
+    const uint32_t v8_sticky = 1u << 3;  // Flag::kSticky
+    auto blob = compile_or_die("foo", v8_sticky);
+    std::vector<int32_t> regs;
+    if (exec_latin1(blob, "xxfoo", 0, &regs) != ZJS_IRREGEXP_NO_MATCH) {
+      fail("sticky /foo/y should miss at index 0");
+    }
+    if (exec_latin1(blob, "xxfoo", 2, &regs) != ZJS_IRREGEXP_OK ||
+        regs[0] != 2 || regs[1] != 5) {
+      fail("sticky /foo/y at index 2");
+    }
+    std::printf("ok /foo/y sticky\n");
+  }
+
+  // UTF-16 subject
+  {
+    auto blob = compile_or_die("bar", 0);
+    const uint16_t subject[] = {'x', 'b', 'a', 'r', 'y'};
+    const uint16_t captures =
+        zjs_irregexp_blob_capture_count(blob.data(), blob.size());
+    const uint16_t total =
+        zjs_irregexp_blob_register_count(blob.data(), blob.size());
+    const size_t need =
+        std::max<size_t>(static_cast<size_t>(captures) * 2, total);
+    std::vector<int32_t> regs(need, -1);
+    const int st = zjs_irregexp_exec(
+        blob.data(), blob.size(), subject, 5, ZJS_IRREGEXP_UTF16, 0,
+        regs.data(), regs.size(), nullptr, nullptr);
+    if (st != ZJS_IRREGEXP_OK || regs[0] != 1 || regs[1] != 4) {
+      fail("utf16 /bar/");
+    }
+    std::printf("ok utf16 /bar/ -> [%d,%d]\n", regs[0], regs[1]);
+  }
+
   std::printf("all smoke tests passed\n");
   return 0;
 }

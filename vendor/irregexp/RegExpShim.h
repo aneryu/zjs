@@ -412,8 +412,12 @@ class Flags {
   constexpr bool without_any_of(Flags o) const {
     return (mask_ & o.mask_) == 0;
   }
-  constexpr bool operator==(mask_type o) const { return mask_ == o; }
-  constexpr bool operator!=(mask_type o) const { return mask_ != o; }
+  constexpr bool operator==(int o) const {
+    return static_cast<int>(mask_) == o;
+  }
+  constexpr bool operator!=(int o) const {
+    return static_cast<int>(mask_) != o;
+  }
   constexpr explicit operator bool() const { return mask_ != 0; }
   constexpr mask_type bits() const { return mask_; }
   void set(Enum flag, bool value) {
@@ -428,33 +432,21 @@ class Flags {
   mask_type mask_;
 };
 
-#define DEFINE_OPERATORS_FOR_FLAGS(Type)                                      \
-  inline constexpr Type operator|(Type::flag_type a, Type::flag_type b) {     \
-    return Type(a) | Type(b);                                                 \
-  }                                                                           \
-  inline constexpr Type operator|(Type a, Type::flag_type b) {                \
-    return a | Type(b);                                                       \
-  }                                                                           \
-  inline constexpr Type operator|(Type::flag_type a, Type b) {                \
-    return Type(a) | b;                                                       \
-  }                                                                           \
-  inline constexpr Type operator&(Type a, Type::flag_type b) {                \
-    return a & Type(b);                                                       \
-  }                                                                           \
-  inline constexpr Type operator&(Type::flag_type a, Type b) {                \
-    return Type(a) & b;                                                       \
-  }                                                                           \
-  inline constexpr bool operator==(Type a, Type::flag_type b) {               \
-    return a == Type(b);                                                      \
-  }                                                                           \
-  inline constexpr bool operator==(Type::flag_type a, Type b) {               \
-    return Type(a) == b;                                                      \
-  }                                                                           \
-  inline constexpr bool operator!=(Type a, Type::flag_type b) {               \
-    return a != Type(b);                                                      \
-  }                                                                           \
-  inline constexpr bool operator!=(Type::flag_type a, Type b) {               \
-    return Type(a) != b;                                                      \
+#define DEFINE_OPERATORS_FOR_FLAGS(Type)                                  \
+  inline constexpr Type operator|(Type::flag_type a, Type::flag_type b) { \
+    return Type(a) | Type(b);                                             \
+  }                                                                       \
+  inline constexpr Type operator|(Type::flag_type a, Type b) {            \
+    return Type(a) | b;                                                   \
+  }                                                                       \
+  inline constexpr Type operator&(Type::flag_type a, Type b) {            \
+    return Type(a) & b;                                                   \
+  }                                                                       \
+  inline constexpr bool operator==(Type::flag_type a, Type b) {           \
+    return Type(a) == b;                                                  \
+  }                                                                       \
+  inline constexpr bool operator!=(Type::flag_type a, Type b) {           \
+    return Type(a) != b;                                                  \
   }
 
 template <typename T, int shift, int size, typename U = uint32_t>
