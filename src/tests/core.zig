@@ -13447,6 +13447,8 @@ test "mark queue overflow downgrades to rescan instead of dropping work" {
     if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const MarkQueue = core.gc.mark_queue;
     var queue = MarkQueue.Queue{};
+    queue.ensureCapacity(std.testing.allocator);
+    defer queue.deinit(std.testing.allocator);
 
     // A header-shaped address is all this test needs; the queue never
     // dereferences what it carries.
@@ -13482,6 +13484,8 @@ test "mark queue wraps without losing entries" {
     if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const MarkQueue = core.gc.mark_queue;
     var queue = MarkQueue.Queue{};
+    queue.ensureCapacity(std.testing.allocator);
+    defer queue.deinit(std.testing.allocator);
     var fake: [16]core.gc.Header = undefined;
 
     // Drive head and tail past the ring boundary several times over.
@@ -13511,6 +13515,7 @@ test "the marker worker marks queued objects on its own thread" {
     }
     defer for (held) |obj| obj.value().free(rt);
 
+    rt.gc.ensureConcurrentQueue();
     rt.gc.concurrent_queue.reset();
     for (held) |obj| try std.testing.expect(rt.gc.concurrent_queue.push(&obj.header));
 
@@ -13543,6 +13548,7 @@ test "the marker worker and a mutator can shade concurrently without losing mark
     }
     defer for (held) |obj| obj.value().free(rt);
 
+    rt.gc.ensureConcurrentQueue();
     rt.gc.concurrent_queue.reset();
     rt.gc.concurrent.major_marking_active.store(true, .release);
     try rt.gc.marker_worker.start(&rt.gc);
@@ -13562,5 +13568,44 @@ test "the marker worker and a mutator can shade concurrently without losing mark
     rt.gc.marker_worker.join();
     rt.gc.concurrent.major_marking_active.store(false, .release);
 
+    for (held) |obj| try std.testing.expect(obj.header.metaConst().flags.mark);
+}
+
+test "mark assist is bounded and only runs while marking" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    var held: [200]*core.Object = undefined;
+    for (&held) |*slot| {
+        slot.* = try core.Object.createPlainObject(rt, null);
+        slot.*.header.meta().flags.mark = false;
+    }
+    defer for (held) |obj| obj.value().free(rt);
+
+    rt.gc.ensureConcurrentQueue();
+    rt.gc.concurrent_queue.reset();
+    for (held) |obj| _ = rt.gc.concurrent_queue.push(&obj.header);
+
+    // Not marking: an assist must do nothing at all, or every allocation in
+    // an idle runtime would pay for a collector that is not running.
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.markAssist(64));
+
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    defer rt.gc.concurrent.major_marking_active.store(false, .release);
+
+    // Marking: the assist takes its budget and no more. The bound is what
+    // keeps one allocation from becoming an arbitrary pause.
+    try std.testing.expectEqual(@as(usize, 10), rt.gc.markAssist(10));
+    try std.testing.expectEqual(@as(usize, 10), rt.gc.concurrent.stats.assist_marked);
+    try std.testing.expectEqual(@as(usize, held.len - 10), rt.gc.concurrent_queue.len());
+
+    // Draining past the end returns what was actually available, not the
+    // budget: an assist reports work done, never work intended.
+    const rest = rt.gc.markAssist(1000);
+    try std.testing.expectEqual(@as(usize, held.len - 10), rest);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.concurrent_queue.len());
     for (held) |obj| try std.testing.expect(obj.header.metaConst().flags.mark);
 }

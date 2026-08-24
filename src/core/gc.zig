@@ -995,6 +995,7 @@ pub const Registry = struct {
         if (comptime address_registry_enabled) {
             self.address_registry.deinit(addressRegistryAllocator());
             if (comptime generation_enabled) self.generation.deinit(addressRegistryAllocator());
+            if (comptime concurrent_enabled) self.concurrent_queue.deinit(addressRegistryAllocator());
         }
         if (comptime sweep_model_enabled) {
             self.sweep_model.deinit(addressRegistryAllocator());
@@ -1727,6 +1728,44 @@ pub const Registry = struct {
         if (target.meta().flags.mark) return;
         target.meta().flags.mark = true;
         self.concurrent.stats.shaded += 1;
+    }
+
+    /// Allocate the concurrent mark ring, using the same off-heap allocator
+    /// the address registry uses so teardown has one owner.
+    pub fn ensureConcurrentQueue(self: *Registry) void {
+        if (comptime !concurrent_enabled) return;
+        self.concurrent_queue.ensureCapacity(addressRegistryAllocator());
+    }
+
+    /// Bounded mark assist (§8.6): the mutator drains a slice of the marker's
+    /// queue when allocation is outrunning marking.
+    ///
+    /// Bounded on purpose. An unbounded assist turns an allocation into an
+    /// arbitrary pause, which is the failure mode a concurrent collector
+    /// exists to avoid; a bounded one trades a little mutator time for
+    /// keeping the cycle on schedule, and the cost is reported rather than
+    /// hidden.
+    pub fn markAssist(self: *Registry, budget: usize) usize {
+        if (comptime !concurrent_enabled) return 0;
+        if (!self.concurrent.markingActive()) return 0;
+        var done: usize = 0;
+        while (done < budget) : (done += 1) {
+            const header = self.concurrent_queue.pop() orelse break;
+            if (!header.meta().flags.mark) {
+                header.meta().flags.mark = true;
+                self.concurrent.stats.assist_marked += 1;
+            }
+        }
+        if (done != 0) self.concurrent.stats.assist_batches += 1;
+        return done;
+    }
+
+    /// Count objects left marked but unreachable once a cycle ends. This is
+    /// the floating-garbage row, and it is measured by comparing the mark set
+    /// against what a fresh trace would reach.
+    pub fn recordFloatingGarbage(self: *Registry, reachable: usize, marked: usize) void {
+        if (comptime !concurrent_enabled) return;
+        if (marked > reachable) self.concurrent.stats.floating_garbage += marked - reachable;
     }
 
     /// Whether a minor is worth attempting: enough young objects to be worth

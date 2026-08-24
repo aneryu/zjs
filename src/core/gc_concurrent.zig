@@ -25,6 +25,28 @@ pub const Stats = struct {
     /// too coarse and time-to-safepoint suffers (§1.3's latency row).
     deferred_acks: usize = 0,
     critical_depth_max: usize = 0,
+
+    /// Stage 6 reporting rows (§13). Each is measured rather than estimated
+    /// because the design asks for them by name.
+    ///
+    /// Work the mutator did on the marker's behalf when allocation outran
+    /// marking. High assist time means the marker is losing the race and the
+    /// mutator is paying for it — the number a throughput claim has to
+    /// disclose.
+    assist_batches: usize = 0,
+    assist_marked: usize = 0,
+    assist_ns_total: u64 = 0,
+    /// Objects that stayed marked at the end of a cycle without being
+    /// reachable — the cost of an incremental-update barrier that shades
+    /// through owners which may themselves be dead (§8.4).
+    floating_garbage: usize = 0,
+    /// Objects handed to the owner thread because the marker could not take
+    /// them (mutator-only types, exhausted snapshots).
+    bailouts: usize = 0,
+    /// Request-to-acknowledge latency at safepoints (§1.3's row).
+    safepoint_wait_ns_total: u64 = 0,
+    safepoint_wait_ns_max: u64 = 0,
+    safepoint_acks: usize = 0,
 };
 
 pub const State = struct {
@@ -65,6 +87,18 @@ pub const State = struct {
             return false;
         }
         return true;
+    }
+
+    /// Record how long a safepoint request waited to be acknowledged. The
+    /// design's latency row is about the tail, so the maximum is kept
+    /// alongside the total -- a good mean with a bad maximum is exactly the
+    /// shape a pause target is meant to catch.
+    pub fn noteSafepointAck(self: *State, waited_ns: u64) void {
+        self.stats.safepoint_acks += 1;
+        self.stats.safepoint_wait_ns_total += waited_ns;
+        if (waited_ns > self.stats.safepoint_wait_ns_max) {
+            self.stats.safepoint_wait_ns_max = waited_ns;
+        }
     }
 };
 

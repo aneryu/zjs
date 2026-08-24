@@ -866,6 +866,27 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *const engine.core.gc
         st.young_at_start_max,
         st.survived_by_refcount,
     });
+    if (comptime engine.core.gc.concurrent_enabled) {
+        const cs = registry.concurrent.stats;
+        const mean_assist = if (cs.assist_batches == 0) 0 else cs.assist_ns_total / cs.assist_batches;
+        const mean_ack = if (cs.safepoint_acks == 0) 0 else cs.safepoint_wait_ns_total / cs.safepoint_acks;
+        try writer.print("gc: shaded {d}, bailouts {d}, floating garbage {d}\n", .{
+            cs.shaded,
+            cs.bailouts,
+            cs.floating_garbage,
+        });
+        try writer.print("gc: assist batches {d} marked {d} mean {d} ns\n", .{
+            cs.assist_batches,
+            cs.assist_marked,
+            mean_assist,
+        });
+        try writer.print("gc: safepoint acks {d}, wait mean {d} ns, max {d} ns, deferred {d}\n", .{
+            cs.safepoint_acks,
+            mean_ack,
+            cs.safepoint_wait_ns_max,
+            cs.deferred_acks,
+        });
+    }
 }
 
 fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {

@@ -3150,9 +3150,29 @@ pub const JSRuntime = struct {
         if (prospective <= self.malloc_gc_threshold) {
             _ = self.gc.clearStaleAllocationThresholdRequest();
         }
+        // §8.6: allocation debt buys a bounded slice of the marker's work.
+        // Bounded is the whole point -- an unbounded assist turns one
+        // allocation into an arbitrary pause, which is what a concurrent
+        // collector exists to prevent.
+        if (comptime gc.concurrent_enabled) {
+            if (self.gc.concurrent.markingActive()) {
+                const started = profile.nowNanos();
+                const assisted = self.gc.markAssist(assist_budget);
+                if (assisted != 0) {
+                    const ended = profile.nowNanos();
+                    self.gc.concurrent.stats.assist_ns_total +=
+                        if (ended > started) ended - started else 0;
+                }
+            }
+        }
         if (self.gc_running or self.gc.phase != .none or !self.gc.hasPendingMajorRequest()) return;
         _ = self.pollGC(null, .normal) catch {};
     }
+
+    /// Objects a single allocation may mark on the collector's behalf. Small
+    /// enough that the assist stays invisible next to the allocation itself;
+    /// tuning it belongs with the headroom model, not here.
+    const assist_budget: usize = 32;
 
     fn triggerGCOnAllocation(ctx: ?*anyopaque, size: usize) void {
         const self: *JSRuntime = @ptrCast(@alignCast(ctx));

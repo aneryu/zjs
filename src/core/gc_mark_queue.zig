@@ -24,13 +24,31 @@ pub const Stats = struct {
 };
 
 pub const Queue = struct {
-    buffer: [capacity]?*gc.Header = @splat(null),
+    /// Heap-allocated rather than embedded. At 4096 entries the ring is 32 KB,
+    /// and a `Registry` lives inside every `JSRuntime`: embedding it made
+    /// runtime construction 32 KB heavier, which is fine once and fatal when a
+    /// corpus builds tens of thousands of runtimes. Allocated lazily so a
+    /// runtime that never marks concurrently never pays for it.
+    buffer: ?[]?*gc.Header = null,
     head: std.atomic.Value(usize) = .init(0),
     tail: std.atomic.Value(usize) = .init(0),
     /// Set when a push found the ring full. Cleared only by a full overflow
     /// sweep, so it cannot be lost by a racing push.
     overflowed: std.atomic.Value(bool) = .init(false),
     stats: Stats = .{},
+
+    /// Allocate the ring on first use. Failure is not fatal: a queue with no
+    /// buffer reports every push as overflow, which downgrades to rescan --
+    /// the same safe path exhaustion already takes.
+    pub fn ensureCapacity(self: *Queue, allocator: std.mem.Allocator) void {
+        if (self.buffer != null) return;
+        self.buffer = allocator.alloc(?*gc.Header, capacity) catch null;
+    }
+
+    pub fn deinit(self: *Queue, allocator: std.mem.Allocator) void {
+        if (self.buffer) |buf| allocator.free(buf);
+        self.buffer = null;
+    }
 
     pub fn reset(self: *Queue) void {
         self.head.store(0, .release);
@@ -49,6 +67,11 @@ pub const Queue = struct {
     /// "work lost": the object is already marked, and the overflow flag makes
     /// it findable by rescan.
     pub fn push(self: *Queue, header: *gc.Header) bool {
+        const buf = self.buffer orelse {
+            self.overflowed.store(true, .release);
+            self.stats.overflowed += 1;
+            return false;
+        };
         const t = self.tail.load(.monotonic);
         const h = self.head.load(.acquire);
         if (t -% h >= capacity) {
@@ -56,7 +79,7 @@ pub const Queue = struct {
             self.stats.overflowed += 1;
             return false;
         }
-        self.buffer[t % capacity] = header;
+        buf[t % capacity] = header;
         self.tail.store(t +% 1, .release);
         self.stats.pushed += 1;
         const depth = t -% h + 1;
@@ -65,10 +88,11 @@ pub const Queue = struct {
     }
 
     pub fn pop(self: *Queue) ?*gc.Header {
+        const buf = self.buffer orelse return null;
         const h = self.head.load(.monotonic);
         const t = self.tail.load(.acquire);
         if (h == t) return null;
-        const item = self.buffer[h % capacity];
+        const item = buf[h % capacity];
         self.head.store(h +% 1, .release);
         self.stats.popped += 1;
         return item;
