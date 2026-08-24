@@ -1340,6 +1340,7 @@ pub const JSRuntime = struct {
         rt.memory.activateRuntimeAccounting();
         rt.memory.trigger_gc_fn = null;
         rt.memory.trigger_gc_ctx = null;
+        rt.memory.limit_gc_fn = null;
         rt.memory.setLimit(options.memory_limit);
         rt.gc = gc.Registry.init(&rt.memory, options.gc_policy);
         rt.gc.initLists();
@@ -1456,6 +1457,7 @@ pub const JSRuntime = struct {
         rt.memory.enableSmallObjectSlab();
         rt.memory.trigger_gc_fn = JSRuntime.triggerGCOnAllocation;
         rt.memory.trigger_gc_ctx = rt;
+        if (comptime gc.trace_stw_enabled) rt.memory.limit_gc_fn = JSRuntime.collectBeforeLimitRejection;
     }
 
     pub fn setOpcodeProfile(self: *JSRuntime, opcode_profile: ?*profile.OpcodeProfile) void {
@@ -3217,6 +3219,18 @@ pub const JSRuntime = struct {
     fn triggerGCOnAllocation(ctx: ?*anyopaque, size: usize) void {
         const self: *JSRuntime = @ptrCast(@alignCast(ctx));
         self.requestGCForAllocation(size);
+    }
+
+    /// Last chance before an allocation is rejected for crossing the memory
+    /// limit. The mutator's native frames are live here -- this runs from the
+    /// middle of an arbitrary allocation -- so the scan must be the
+    /// conservative one; `declared_only` would sweep objects the caller is
+    /// still holding in Zig locals. Reentrancy is already handled:
+    /// `tryRunObjectCycleRemovalWithValueRoots` returns immediately if a
+    /// collection is in flight, so a collection that allocates cannot recurse.
+    fn collectBeforeLimitRejection(ctx: ?*anyopaque) void {
+        const self: *JSRuntime = @ptrCast(@alignCast(ctx));
+        _ = self.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch return;
     }
 
     fn resetGCThreshold(self: *JSRuntime) void {

@@ -193,6 +193,15 @@ pub const DynamicImportState = struct {
     waiters: ?*std.ArrayList(ModuleEvaluationWaiter) = null,
     owned_continuations: std.ArrayList(ModuleContinuation) = .empty,
     owned_waiters: std.ArrayList(ModuleEvaluationWaiter) = .empty,
+    /// Root scopes over whichever lists this state schedules through, held for
+    /// the state's whole lifetime rather than only while jobs drain. A module
+    /// that suspends on top-level await parks its continuation during
+    /// evaluation, long before anything calls `runJobs`, and a collection in
+    /// that window has no other way to see the generator object the
+    /// continuation names.
+    continuation_roots: ContinuationRoots = undefined,
+    waiter_roots: WaiterRoots = undefined,
+    roots_active: bool = false,
     /// Load-relevant import attribute (`type`) for the job currently being
     /// dispatched, set by dynamicImportJobCall before invoking the callback
     /// (jobs run one at a time on this thread, so a single slot suffices —
@@ -225,9 +234,31 @@ pub const DynamicImportState = struct {
         };
     }
 
+    /// Announce the scheduling lists to the tracer. Called from
+    /// `installDynamicImport`, which every construction site already goes
+    /// through, and undone by `deinit`. Registering an externally-owned list
+    /// that its owner also registers is harmless: a provider only contributes
+    /// edges.
+    fn activateRoots(self: *DynamicImportState) void {
+        if (self.roots_active) return;
+        self.continuation_roots = .{ .runtime = self.runtime, .list = self.continuationList() };
+        self.continuation_roots.activate();
+        self.waiter_roots = .{ .runtime = self.runtime, .list = self.waiterList() };
+        self.waiter_roots.activate();
+        self.roots_active = true;
+    }
+
+    fn deactivateRoots(self: *DynamicImportState) void {
+        if (!self.roots_active) return;
+        self.waiter_roots.deactivate();
+        self.continuation_roots.deactivate();
+        self.roots_active = false;
+    }
+
     /// Release only state-owned scheduling data. Static module graph runners
     /// pass external lists whose lifetime they continue to manage themselves.
     pub fn deinit(self: *DynamicImportState) void {
+        self.deactivateRoots();
         freeModuleContinuations(self.runtime, self.allocator, &self.owned_continuations);
         freeModuleEvaluationWaiters(self.runtime, self.allocator, &self.owned_waiters);
     }
@@ -812,6 +843,7 @@ fn dynamicImportRejectionValue(
 /// CLI keeps one alive for the whole process; the module-graph runners
 /// install a scoped one and drain before restoring).
 pub fn installDynamicImport(state: *DynamicImportState) core.runtime.DynamicImportLoaderScope {
+    state.activateRoots();
     return state.runtime.installDynamicImportLoader(.{
         .callback = DynamicImportState.load,
         .userdata = state,
@@ -1526,6 +1558,16 @@ fn drainOneModuleContinuation(
     var current = continuations.orderedRemove(index);
     var restore_current = true;
     errdefer if (restore_current) continuations.insertAssumeCapacity(index, current);
+    // Taking the entry out of the list takes it out of `ContinuationRoots`'
+    // view: from here until it is reinserted or consumed, its continuation and
+    // awaited promise live only in this frame. Everything below allocates --
+    // the promise result dup, the module step, the resumed evaluation -- so
+    // without this the generator object backing the continuation is reclaimed
+    // and `setGeneratorResumeCompletionType` writes into whatever reused its
+    // allocation.
+    var current_roots = core.runtime.rootValues(.{ &current.continuation, &current.awaited });
+    current_roots.activate(runtime);
+    defer current_roots.deactivate(runtime);
     const context = current.realm.borrow() orelse unreachable;
     std.debug.assert(context.runtime == runtime);
 

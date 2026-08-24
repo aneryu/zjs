@@ -448,6 +448,15 @@ pub const MemoryAccount = struct {
     profile_alloc_count: ?*u64 = null,
     trigger_gc_fn: ?*const fn (ctx: ?*anyopaque, size: usize) void = null,
     trigger_gc_ctx: ?*anyopaque = null,
+    /// Collect-and-retry hook for an allocation that would cross `limit`.
+    ///
+    /// Under refcounting, crossing the limit really does mean out of memory:
+    /// everything unreachable has already been freed. Under the tracer,
+    /// garbage accumulates by design until a collection runs, so rejecting the
+    /// allocation without collecting first reports OOM for a heap that is
+    /// mostly garbage. Installed only by the tracing build; null elsewhere, so
+    /// the refcounting limit behaviour is bit-for-bit what it was.
+    limit_gc_fn: ?*const fn (ctx: ?*anyopaque) void = null,
 
     pub fn init(allocator: std.mem.Allocator) MemoryAccount {
         return .{ .allocator = allocator, .persistent_allocator = allocator, .backing_allocator = allocator };
@@ -1170,13 +1179,17 @@ pub const MemoryAccount = struct {
         return self.limit;
     }
 
-    fn checkAllocation(self: MemoryAccount, bytes: usize) !void {
+    fn checkAllocation(self: *MemoryAccount, bytes: usize) !void {
         const limit = self.limit orelse {
             @branchHint(.likely);
             return;
         };
         const next = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
-        if (next > limit) return error.OutOfMemory;
+        if (next <= limit) return;
+        const collect = self.limit_gc_fn orelse return error.OutOfMemory;
+        collect(self.trigger_gc_ctx);
+        const retried = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
+        if (retried > limit) return error.OutOfMemory;
     }
 
     inline fn triggerGCBeforeAllocation(self: *MemoryAccount, byte_count: usize) void {
