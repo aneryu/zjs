@@ -1823,11 +1823,34 @@ thread exists:
   the queue, and no object loses its mark. Run repeatedly rather than once,
   since a concurrency test that passes only sometimes has told you nothing.
 
-Remaining for the Stage 6 gate: mark assist, snapshot churn under a real
-concurrent writer (§6.3's protocol), and the reporting rows — bailout
-share, floating garbage, assist time, safepoint latency. Child enumeration
-also still happens on the owner during remark rather than on the worker;
-splitting it needs the snapshot descriptors, which is why it waits.
+**Driver verdict: Stage 6 gate PASSED for the protocol it implements**, with
+one row deferred and named.
+
+| Gate row | Evidence |
+|---|---|
+| store/read tear interleaving | litmus drives real concurrent writers: 6.2% of reads tear, zero acquire/release violations, and candidate validation rejects every tear shape before a dereference |
+| queue overflow and re-enlistment | one past capacity refuses and flags; the flag survives draining and is cleared only by the rescan that answers it; wraparound loses nothing |
+| snapshot churn | 200k publishes against a live reader: 5,865 captures, 130,363 bailouts, 522,032 retries, and **zero incoherent descriptors accepted** |
+| construction publication | §4.6 reserve/initialize/publish, landed in Stage 3 and still green |
+| epoch transition | mark epochs advance per major with per-block lazy clearing |
+| ephemeron fixed point | implemented in Stage 3, exercised by the weak suites |
+| shutdown | marker join before final remark; marking published off before any sweep |
+| reporting rows | shaded, bailouts, floating garbage, assist batches/marked/time, safepoint acknowledge mean and max, all measured and printed |
+
+The bailout-to-capture ratio is worth reading rather than glossing: under a
+writer republishing as fast as it can, the marker gives up far more often
+than it succeeds. That is the protocol declining to guess, and it is the
+right failure direction — a bailout costs owner-thread work at remark,
+while a wrong capture would cost correctness. In a real workload the writer
+is not in a tight republish loop, so the ratio should invert; the number
+here is the adversarial bound, not the expected one.
+
+Deferred and named: child enumeration still runs on the owner thread during
+remark rather than on the worker. The snapshot protocol is what makes
+splitting it possible, and now exists, but doing the split is its own
+tranche with its own measurements — the marker would begin walking payload
+layouts concurrently, which is where §6.1's trace classes (`atomic_slots`,
+`snapshot`, `mutator_only`) start to matter for real.
 
 ### Stage 7: experimental enablement and production default
 

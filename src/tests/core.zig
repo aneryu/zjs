@@ -13609,3 +13609,76 @@ test "mark assist is bounded and only runs while marking" {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.concurrent_queue.len());
     for (held) |obj| try std.testing.expect(obj.header.metaConst().flags.mark);
 }
+
+test "snapshot capture never returns a descriptor assembled across two publishes" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const Snap = core.gc.layout_snapshot;
+    var snap = Snap.Snapshot{};
+
+    // A writer thread republishes a self-consistent descriptor: every field
+    // carries the same generation number, so a torn capture is detectable by
+    // the fields disagreeing with each other.
+    var stop = std.atomic.Value(bool).init(false);
+    const Writer = struct {
+        fn run(s: *Snap.Snapshot, done: *std.atomic.Value(bool)) void {
+            var gen: usize = 1;
+            while (gen <= 200_000) : (gen += 1) {
+                s.publish(.{
+                    .backing = 0x1000 + gen,
+                    .length = gen,
+                    .capacity = gen,
+                    .kind = gen,
+                });
+            }
+            done.store(true, .release);
+        }
+    };
+    const writer = try std.Thread.spawn(.{}, Writer.run, .{ &snap, &stop });
+    defer writer.join();
+
+    var captures: usize = 0;
+    var torn: usize = 0;
+    var bailouts: usize = 0;
+    while (!stop.load(.acquire)) {
+        var desc: Snap.Descriptor = .{};
+        switch (snap.captureWithRetries(&desc)) {
+            .captured => {
+                captures += 1;
+                // The initial state is all zeros and predates the writer; only
+                // published descriptors carry the coherence invariant.
+                if (desc.length == 0) continue;
+                // The invariant under test: an accepted capture is coherent.
+                // Fields from different publishes would disagree here.
+                if (desc.length != desc.capacity or desc.kind != desc.length) torn += 1;
+                if (desc.backing != 0x1000 + desc.length) torn += 1;
+            },
+            .bailout => bailouts += 1,
+            .retry => unreachable,
+        }
+    }
+
+    try std.testing.expect(captures > 0);
+    // Not one accepted descriptor may be incoherent. Bailouts are fine -- they
+    // are the protocol declining rather than guessing.
+    try std.testing.expectEqual(@as(usize, 0), torn);
+    std.debug.print(
+        "\n[snapshot churn] captures={d} bailouts={d} retries={d}\n",
+        .{ captures, bailouts, snap.stats.retries },
+    );
+}
+
+test "snapshot capture bails out rather than spinning against a busy writer" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const Snap = core.gc.layout_snapshot;
+    var snap = Snap.Snapshot{};
+
+    // Leave the sequence odd: a writer is mid-publish and never finishes.
+    _ = snap.layout_seq.fetchAdd(1, .acq_rel);
+
+    var desc: Snap.Descriptor = .{};
+    // The marker must give up after a bounded number of attempts and hand the
+    // object to the owner thread, not spin.
+    try std.testing.expectEqual(Snap.Outcome.bailout, snap.captureWithRetries(&desc));
+    try std.testing.expect(snap.stats.bailouts >= 1);
+    try std.testing.expect(snap.stats.captures == 0);
+}

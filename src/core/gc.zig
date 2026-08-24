@@ -81,6 +81,9 @@ pub const mark_queue = @import("gc_mark_queue.zig");
 /// Marker worker thread (§8.6). Reads published objects and sets mark bits;
 /// never frees, allocates, or calls embedder code.
 pub const marker = @import("gc_marker.zig");
+/// Seqlock snapshot for dynamic layouts, so a marker can read a descriptor
+/// beside a mutator that is replacing it (§6.3).
+pub const layout_snapshot = @import("gc_snapshot.zig");
 const ConcurrentState = if (concurrent_enabled)
     concurrent.State
 else
