@@ -13256,12 +13256,12 @@ test "minor collection reclaims young garbage and promotes survivors" {
     var roots = core.runtime.rootValues(.{});
     _ = &roots;
 
-    const young_before = rt.gc.generation.young.count();
+    const young_before = rt.gc.generation.stats.young_count;
     try std.testing.expect(young_before > 0);
 
     const reclaimed = (try core.gc_trace_stw.collectMinor(rt, null)).?;
     // Survivors leave the young set; the set is rebuilt by later allocation.
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.young.count());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.stats.young_count);
     try std.testing.expect(rt.gc.generation.stats.minor_collections >= 1);
     try std.testing.expect(reclaimed <= young_before);
     // The rooted object must have survived.

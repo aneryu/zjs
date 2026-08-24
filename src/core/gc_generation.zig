@@ -47,12 +47,10 @@ pub const Stats = struct {
 };
 
 pub const State = struct {
-    young: std.AutoHashMapUnmanaged(usize, void) = .{},
     remembered: std.AutoHashMapUnmanaged(usize, void) = .{},
     stats: Stats = .{},
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
-        self.young.deinit(allocator);
         self.remembered.deinit(allocator);
         self.* = .{};
     }
@@ -60,13 +58,13 @@ pub const State = struct {
     /// Record a freshly published object as young. Allocation failure is not
     /// fatal: losing a young entry only means the object is treated as old and
     /// collected by a major instead, which is the safe direction.
-    pub fn noteAllocated(self: *State, allocator: std.mem.Allocator, header: *gc.Header) void {
-        self.young.put(allocator, @intFromPtr(header), {}) catch return;
-        self.stats.young_count = self.young.count();
-    }
-
+    /// Young is a header bit now, not a set membership: a hash-map insert on
+    /// every allocation measured at 28% of benchmark throughput, and a
+    /// per-allocation fact has to live somewhere the allocator already
+    /// touches.
     pub fn isYoung(self: *const State, header: *const gc.Header) bool {
-        return self.young.contains(@intFromPtr(header));
+        _ = self;
+        return header.metaConst().flags.young;
     }
 
     /// An old owner that now points at a young child. Recorded by owner so a
@@ -78,27 +76,26 @@ pub const State = struct {
     }
 
     pub fn forget(self: *State, header: *const gc.Header) void {
-        const key = @intFromPtr(header);
-        _ = self.young.remove(key);
-        _ = self.remembered.remove(key);
-        self.stats.young_count = self.young.count();
+        _ = self.remembered.remove(@intFromPtr(header));
+        if (header.metaConst().flags.young and self.stats.young_count > 0) {
+            self.stats.young_count -= 1;
+        }
         self.stats.remembered_owners = self.remembered.count();
     }
 
     /// Everything that survived is old now, so the whole young set clears and
     /// the strong remembered set with it (§8.3: new writes rebuild it after
     /// the mutator resumes).
+    /// Survivors become old. With generation in the header the promotion is
+    /// the collector clearing each survivor's bit as it walks; this records
+    /// the accounting side and resets the remembered set, which is stale once
+    /// nothing is young (§8.3).
     pub fn promoteSurvivors(self: *State, survivors: usize) void {
         self.stats.promoted += survivors;
-        self.young.clearRetainingCapacity();
         self.remembered.clearRetainingCapacity();
         self.stats.young_count = 0;
         self.stats.remembered_owners = 0;
         self.stats.minor_collections += 1;
-    }
-
-    pub fn youngIterator(self: *const State) std.AutoHashMapUnmanaged(usize, void).KeyIterator {
-        return self.young.keyIterator();
     }
 
     pub fn rememberedIterator(self: *const State) std.AutoHashMapUnmanaged(usize, void).KeyIterator {

@@ -144,8 +144,8 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
 /// generational state to work with.
 pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame) CollectError!?usize {
     if (comptime !gc.generation_enabled) return null;
-    if (rt.gc.generation.young.count() == 0) return 0;
-    const young_before = rt.gc.generation.young.count();
+    const young_before = rt.gc.generation.stats.young_count;
+    if (young_before == 0) return 0;
 
     var collector = try Collector.init(rt, extra_roots);
     defer collector.deinit();
@@ -174,7 +174,16 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
         rt.gc.generation.stats.young_at_start_max = young_before;
     }
     const reclaimed = collector.sweepUnmarkedYoung();
-    rt.gc.generation.promoteSurvivors(young_before - reclaimed);
+
+    // Promotion is the sticky rule made concrete: everything still young
+    // after the sweep survived this collection, so it is old now. Clearing
+    // the bit here is what makes a later write to it hit the remembered-set
+    // path instead of being skipped as "the minor will see it anyway".
+    var survivors = rt.gc.objectIterator();
+    while (survivors.next()) |header| {
+        if (header.metaConst().flags.young) header.meta().flags.young = false;
+    }
+    rt.gc.generation.promoteSurvivors(young_before -| reclaimed);
     last_report.minor_reclaimed = reclaimed;
     last_report.minor_young_before = young_before;
     return reclaimed;
@@ -648,9 +657,9 @@ const Collector = struct {
 
         var doomed: std.ArrayList(*gc.Header) = .empty;
         defer doomed.deinit(self.allocator());
-        var young_it = self.rt.gc.generation.youngIterator();
-        while (young_it.next()) |addr| {
-            const header: *gc.Header = @ptrFromInt(addr.*);
+        var young_it = self.rt.gc.objectIterator();
+        while (young_it.next()) |header| {
+            if (!header.metaConst().flags.young) continue;
             if (header.metaConst().flags.mark) continue;
             if (header.metaConst().flags.is_pinned) continue;
             if (header.metaConst().flags.kind != .object) continue;

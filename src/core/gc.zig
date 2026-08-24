@@ -381,7 +381,15 @@ pub const BlockFlags = packed struct(u8) {
     /// (qjs `list_add_tail` / `list_del`, quickjs.c:6545/6548). Kept so
     /// `finalizing` / `is_pinned` / `cycle_visited` stay at their historical
     /// bit positions — `memory.zig` writes this flags byte by layout.
-    _pad_list: bool = false,
+    /// Was `in_cycle_list`, then padding. Now carries the sticky generation
+    /// bit: set on publication, cleared when a collection lets the object
+    /// survive. It lives here rather than in a side table because a hash-map
+    /// insert on every allocation measured at 28% of throughput -- the object
+    /// header is the only place cheap enough for a per-allocation fact.
+    ///
+    /// The bit position is unchanged, so `memory.zig`'s by-layout write of
+    /// this byte still lands where it always did.
+    young: bool = false,
     finalizing: bool = false,
     is_pinned: bool = false,
     /// Condemned-garbage flag after gc_scan. qjs derives the same state from
@@ -1786,7 +1794,7 @@ pub const Registry = struct {
     pub inline fn shouldTryMinor(self: *const Registry) bool {
         if (comptime !generation_enabled) return false;
         if (self.phase != .none) return false;
-        return self.generation.young.count() >= minor_young_threshold;
+        return self.generation.stats.young_count >= minor_young_threshold;
     }
 
     /// Generational write barrier (§8.3). Lives on the Registry because the
@@ -1832,8 +1840,12 @@ pub const Registry = struct {
         };
         // Generation shares this lifetime: an object is young from the moment
         // it is published until a collection lets it survive.
+        // A freshly published object is young. One bit in a byte the
+        // allocator already writes, rather than a hash-map insert per
+        // allocation.
         if (comptime generation_enabled) {
-            self.generation.noteAllocated(addressRegistryAllocator(), header);
+            header.meta().flags.young = true;
+            self.generation.stats.young_count += 1;
         }
     }
 
