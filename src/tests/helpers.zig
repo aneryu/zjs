@@ -69,6 +69,18 @@ pub fn runFunction(rt: *core.JSRuntime, ctx: *core.JSContext, function: *const e
 }
 
 pub fn runMutableVm(vm: *engine.exec.Vm, function: *const engine.bytecode.Bytecode) !core.JSValue {
+    // Fixture top-level Bytecode lives on the native stack (it is not a
+    // registered gc object), and its malloc'd cpool array holds the only
+    // strong refs to child FunctionBytecodes. Neither precise roots nor the
+    // conservative stack scan can reach those children (the scan does not
+    // chase malloc'd arrays), so a tracing collection during the run would
+    // sweep them mid-execution (wide-fclosure autopsy, 2026-08-24). Root the
+    // cpool window for the duration of the run; default `rc` erases this.
+    const rt = vm.ctx.runtime;
+    var cpool_roots = [_]core.runtime.ValueRootSlice{.{ .borrowed = function.cpoolSlice() }};
+    var fixture_frame = core.runtime.ValueRootFrame{ .slices = &cpool_roots };
+    fixture_frame.activate(rt);
+    defer fixture_frame.deactivate(rt);
     var execution_adapter: engine.bytecode.LegacyExecutionAdapter = undefined;
     return vm.run(execution_adapter.init(function));
 }

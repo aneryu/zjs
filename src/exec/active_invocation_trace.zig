@@ -32,24 +32,51 @@ pub fn traceRoots(invocation_ptr: *anyopaque, visitor: *RootVisitor) RootTraceEr
 }
 
 fn traceMachine(machine: *inline_calls.Machine, visitor: *RootVisitor) RootTraceError!void {
-    try traceFrame(machine.l0.level.frame, visitor);
+    const rt = machine.ctx.runtime;
+    try traceFrame(rt, machine.l0.level.frame, visitor);
     try traceStack(machine.l0.level.stack, visitor);
-    try visitor.constOptionalObject(machine.l0.generator_state);
+    // A generator/module shell stays deliberately unpublished (off
+    // gc_obj_list, not in the address registry) through parameter init
+    // (`createGeneratorObject` -> `runGeneratorParameterInit` ->
+    // `finishGeneratorShell`). The sweep cannot reach an unpublished
+    // object, so the slot needs no root protection in that window — and
+    // the shell's body (shape_ref) is not initialized yet, so tracing it
+    // walks undefined memory (0xaa autopsy, 2026-08-24). Trace the slot
+    // only once the object is published; `prev != null` is the linked
+    // (published) predicate, and seedRoots never runs while sweep-side
+    // detachment transiently unlinks live headers. The shell's children
+    // are independently covered: the init sub-invocation's own
+    // frame/stack windows are traced above.
+    if (machine.l0.generator_state) |generator_state| {
+        if (generator_state.header.prev != null) {
+            try visitor.constOptionalObject(generator_state);
+        }
+    }
 
     var entry = machine.top;
     while (entry) |current| {
-        try traceFrame(&current.frame, visitor);
+        try traceFrame(rt, &current.frame, visitor);
         try traceStack(&current.stack, visitor);
         try traceEntryExtras(current, visitor);
         entry = current.prev;
     }
 }
 
-fn traceFrame(frame: *frame_mod.Frame, visitor: *RootVisitor) RootTraceError!void {
+fn traceFrame(rt: *core.JSRuntime, frame: *frame_mod.Frame, visitor: *RootVisitor) RootTraceError!void {
     try visitor.value(&frame.this_value);
     try visitor.value(&frame.current_function);
-    var function_bytecode = core.JSValue.functionBytecode(@constCast(&frame.function.header));
-    try visitor.value(&function_bytecode);
+    // A fixture top-level Bytecode is stack-resident, not a gc object:
+    // reporting it as an FB-tagged value would shade native stack memory
+    // (mark-bit write into a Zig local) and then trace garbage. The address
+    // registry is the published-gc-object oracle — the stack struct's
+    // `header` bytes are uninitialized garbage, so no header-field predicate
+    // is reliable here. Registry membership covers every published FB
+    // (`addInitializedWithSizeNoFail` registers unconditionally in the
+    // configs that compile this module).
+    if (rt.gc.address_registry.containsHeader(&frame.function.header)) {
+        var function_bytecode = core.JSValue.functionBytecode(@constCast(&frame.function.header));
+        try visitor.value(&function_bytecode);
+    }
     try visitor.values(frame.args);
     try visitor.values(frame.locals);
     if (frame.cold) |cold| {
