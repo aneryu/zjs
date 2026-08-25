@@ -2,6 +2,8 @@
 //!
 //! The C++ island still compiles patterns into IRRX blobs. Exec no longer
 //! crosses into Isolate / Handle / C ABI machinery on the match hot path.
+//! Dispatch is a labeled `switch` (`continue :dispatch next_opcode`), Zig's
+//! structured analog of V8's computed-goto interpreter.
 const std = @import("std");
 const builtin = @import("builtin");
 const unicode = @import("unicode.zig");
@@ -207,6 +209,26 @@ fn load4(subject: []const u8, index: i32) u32 {
     return std.mem.littleToNative(u32, ptr.*);
 }
 
+inline fn decode(code: []const u8, pc: usize) error{BytecodeCorrupt}!Opcode {
+    if (!trusted_code) {
+        if (pc >= code.len) return error.BytecodeCorrupt;
+        const raw = code.ptr[pc];
+        if (raw >= bc.opcode_count) return error.BytecodeCorrupt;
+        const op: Opcode = @enumFromInt(raw);
+        if (pc + bc.opcode_size[@intFromEnum(op)] > code.len) return error.BytecodeCorrupt;
+        return op;
+    }
+    return @enumFromInt(code.ptr[pc]);
+}
+
+inline fn sizeAt(code: []const u8, pc: usize) usize {
+    return bc.opcode_size[code.ptr[pc]];
+}
+
+inline fn opcodeAt(code: []const u8, pc: usize) Opcode {
+    return @enumFromInt(code.ptr[pc]);
+}
+
 pub fn execLatin1(
     allocator: std.mem.Allocator,
     code: []const u8,
@@ -269,553 +291,591 @@ fn execGeneric(
         }
     };
 
-    dispatch: while (true) {
-        if (!trusted_code) {
-            if (pc >= code.len) return error.BytecodeCorrupt;
-        }
-        const raw = code.ptr[pc];
-        if (!trusted_code) {
-            if (raw >= bc.opcode_count) return error.BytecodeCorrupt;
-        }
-        const op: Opcode = @enumFromInt(raw);
-        const sz: usize = bc.opcode_size[@intFromEnum(op)];
-        if (!trusted_code) {
-            if (pc + sz > code.len) return error.BytecodeCorrupt;
-        }
-
-        switch (op) {
-            .break_ => return error.BytecodeCorrupt,
-            .push_current_position => {
-                try backtrack.push(current);
-                pc += sz;
-            },
-            .push_backtrack => {
-                try backtrack.push(@bitCast(readU32(code, pc, Off.push_backtrack.label)));
-                pc += sz;
-            },
-            .push_register => {
-                const index = readU16(code, pc, Off.push_register.register_index);
-                try backtrack.push(try getReg.get(registers, index));
-                pc += sz;
-            },
-            .set_register => {
-                const index = readU16(code, pc, Off.set_register.register_index);
-                const value = readI32(code, pc, Off.set_register.value);
-                (try getReg.ptr(registers, index)).* = value;
-                pc += sz;
-            },
-            .clear_registers => {
-                const from_reg = readU16(code, pc, Off.clear_registers.from_register);
-                const to_reg = readU16(code, pc, Off.clear_registers.to_register);
-                if (from_reg > to_reg) return error.BytecodeCorrupt;
-                if (!trusted_code and @as(usize, to_reg) >= registers.len) return error.BytecodeCorrupt;
-                const from: usize = from_reg;
-                const to_exclusive: usize = @as(usize, to_reg) + 1;
-                @memset(registers.ptr[from..to_exclusive], -1);
-                pc += sz;
-            },
-            .advance_register => {
-                const index = readU16(code, pc, Off.advance_register.register_index);
-                const by = readI16(code, pc, Off.advance_register.by);
-                (try getReg.ptr(registers, index)).* += by;
-                pc += sz;
-            },
-            .write_current_position_to_register => {
-                const index = readU16(code, pc, Off.write_current_position_to_register.register_index);
-                const cp_offset = readI16(code, pc, Off.write_current_position_to_register.cp_offset);
-                (try getReg.ptr(registers, index)).* = current + cp_offset;
-                pc += sz;
-            },
-            .read_current_position_from_register => {
-                const index = readU16(code, pc, Off.read_current_position_from_register.register_index);
-                current = try getReg.get(registers, index);
-                pc += sz;
-            },
-            .write_stack_pointer_to_register => {
-                const index = readU16(code, pc, Off.write_stack_pointer_to_register.register_index);
-                (try getReg.ptr(registers, index)).* = @intCast(backtrack.len);
-                pc += sz;
-            },
-            .read_stack_pointer_from_register => {
-                const index = readU16(code, pc, Off.read_stack_pointer_from_register.register_index);
-                const new_sp = try getReg.get(registers, index);
-                if (new_sp < 0 or @as(usize, @intCast(new_sp)) > backtrack.len) return error.BytecodeCorrupt;
-                backtrack.truncate(@intCast(new_sp));
-                pc += sz;
-            },
-            .pop_current_position => {
-                current = backtrack.pop() orelse return error.BytecodeCorrupt;
-                pc += sz;
-            },
-            .backtrack => {
-                if (interrupt.check) |check| {
-                    if (check(interrupt.ctx)) return error.Timeout;
-                }
-                pc = @intCast(backtrack.pop() orelse return error.BytecodeCorrupt);
-            },
-            .pop_register => {
-                const index = readU16(code, pc, Off.pop_register.register_index);
-                (try getReg.ptr(registers, index)).* = backtrack.pop() orelse return error.BytecodeCorrupt;
-                pc += sz;
-            },
-            .fail => return .failure,
-            .succeed => return .success,
-            .advance_current_position => {
-                current += readI16(code, pc, Off.advance_current_position.by);
-                pc += sz;
-            },
-            .go_to => {
-                pc = try jump(code, pc, Off.go_to.label);
-            },
-            .advance_cp_and_goto => {
-                const by = readI16(code, pc, Off.advance_cp_and_goto.by);
-                pc = try jump(code, pc, Off.advance_cp_and_goto.on_goto);
-                current += by;
-            },
-            .check_fixed_length_loop => {
-                const tos = backtrack.peek() orelse return error.BytecodeCorrupt;
-                if (current == tos) {
-                    pc = try jump(code, pc, Off.check_fixed_length_loop.on_tos_equals_current_position);
-                    _ = backtrack.pop();
-                } else {
-                    pc += sz;
-                }
-            },
-            .load_current_character => {
-                const bounds = readI32(code, pc, Off.load_current_character.bounds_check_offset);
-                if (!indexInBounds(current + bounds, length)) {
-                    pc = try jump(code, pc, Off.load_current_character.on_failure);
-                } else {
-                    const cp_offset = readI16(code, pc, Off.load_current_character.cp_offset);
-                    current_char = subject[@intCast(current + cp_offset)];
-                    pc += sz;
-                }
-            },
-            .load_current_character_unchecked => {
-                const cp_offset = readI16(code, pc, Off.load_current_character_unchecked.cp_offset);
+    dispatch: switch (try decode(code, pc)) {
+        .break_ => return error.BytecodeCorrupt,
+        .push_current_position => {
+            try backtrack.push(current);
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .push_backtrack => {
+            try backtrack.push(@bitCast(readU32(code, pc, Off.push_backtrack.label)));
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .push_register => {
+            const index = readU16(code, pc, Off.push_register.register_index);
+            try backtrack.push(try getReg.get(registers, index));
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .set_register => {
+            const index = readU16(code, pc, Off.set_register.register_index);
+            const value = readI32(code, pc, Off.set_register.value);
+            (try getReg.ptr(registers, index)).* = value;
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .clear_registers => {
+            const from_reg = readU16(code, pc, Off.clear_registers.from_register);
+            const to_reg = readU16(code, pc, Off.clear_registers.to_register);
+            if (from_reg > to_reg) return error.BytecodeCorrupt;
+            if (!trusted_code and @as(usize, to_reg) >= registers.len) return error.BytecodeCorrupt;
+            const from: usize = from_reg;
+            const to_exclusive: usize = @as(usize, to_reg) + 1;
+            @memset(registers.ptr[from..to_exclusive], -1);
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .advance_register => {
+            const index = readU16(code, pc, Off.advance_register.register_index);
+            const by = readI16(code, pc, Off.advance_register.by);
+            (try getReg.ptr(registers, index)).* += by;
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .write_current_position_to_register => {
+            const index = readU16(code, pc, Off.write_current_position_to_register.register_index);
+            const cp_offset = readI16(code, pc, Off.write_current_position_to_register.cp_offset);
+            (try getReg.ptr(registers, index)).* = current + cp_offset;
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .read_current_position_from_register => {
+            const index = readU16(code, pc, Off.read_current_position_from_register.register_index);
+            current = try getReg.get(registers, index);
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .write_stack_pointer_to_register => {
+            const index = readU16(code, pc, Off.write_stack_pointer_to_register.register_index);
+            (try getReg.ptr(registers, index)).* = @intCast(backtrack.len);
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .read_stack_pointer_from_register => {
+            const index = readU16(code, pc, Off.read_stack_pointer_from_register.register_index);
+            const new_sp = try getReg.get(registers, index);
+            if (new_sp < 0 or @as(usize, @intCast(new_sp)) > backtrack.len) return error.BytecodeCorrupt;
+            backtrack.truncate(@intCast(new_sp));
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .pop_current_position => {
+            current = backtrack.pop() orelse return error.BytecodeCorrupt;
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .backtrack => {
+            if (interrupt.check) |check| {
+                if (check(interrupt.ctx)) return error.Timeout;
+            }
+            pc = @intCast(backtrack.pop() orelse return error.BytecodeCorrupt);
+            continue :dispatch try decode(code, pc);
+        },
+        .pop_register => {
+            const index = readU16(code, pc, Off.pop_register.register_index);
+            (try getReg.ptr(registers, index)).* = backtrack.pop() orelse return error.BytecodeCorrupt;
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .fail => return .failure,
+        .succeed => return .success,
+        .advance_current_position => {
+            current += readI16(code, pc, Off.advance_current_position.by);
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .go_to => {
+            pc = try jump(code, pc, Off.go_to.label);
+            continue :dispatch try decode(code, pc);
+        },
+        .advance_cp_and_goto => {
+            const by = readI16(code, pc, Off.advance_cp_and_goto.by);
+            pc = try jump(code, pc, Off.advance_cp_and_goto.on_goto);
+            current += by;
+            continue :dispatch try decode(code, pc);
+        },
+        .check_fixed_length_loop => {
+            const tos = backtrack.peek() orelse return error.BytecodeCorrupt;
+            if (current == tos) {
+                pc = try jump(code, pc, Off.check_fixed_length_loop.on_tos_equals_current_position);
+                _ = backtrack.pop();
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .load_current_character => {
+            const bounds = readI32(code, pc, Off.load_current_character.bounds_check_offset);
+            if (!indexInBounds(current + bounds, length)) {
+                pc = try jump(code, pc, Off.load_current_character.on_failure);
+            } else {
+                const cp_offset = readI16(code, pc, Off.load_current_character.cp_offset);
                 current_char = subject[@intCast(current + cp_offset)];
-                pc += sz;
-            },
-            .load2_current_chars => {
-                const bounds = readI32(code, pc, Off.load2_current_chars.bounds_check_offset);
-                if (!indexInBounds(current + bounds, length)) {
-                    pc = try jump(code, pc, Off.load2_current_chars.on_failure);
-                } else {
-                    const cp_offset = readI16(code, pc, Off.load2_current_chars.cp_offset);
-                    current_char = load2(Char, subject, current + cp_offset);
-                    pc += sz;
-                }
-            },
-            .load2_current_chars_unchecked => {
-                const cp_offset = readI16(code, pc, Off.load2_current_chars_unchecked.cp_offset);
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .load_current_character_unchecked => {
+            const cp_offset = readI16(code, pc, Off.load_current_character_unchecked.cp_offset);
+            current_char = subject[@intCast(current + cp_offset)];
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .load2_current_chars => {
+            const bounds = readI32(code, pc, Off.load2_current_chars.bounds_check_offset);
+            if (!indexInBounds(current + bounds, length)) {
+                pc = try jump(code, pc, Off.load2_current_chars.on_failure);
+            } else {
+                const cp_offset = readI16(code, pc, Off.load2_current_chars.cp_offset);
                 current_char = load2(Char, subject, current + cp_offset);
-                pc += sz;
-            },
-            .load4_current_chars => {
-                if (Char != u8) return error.BytecodeCorrupt;
-                const bounds = readI32(code, pc, Off.load4_current_chars.bounds_check_offset);
-                if (!indexInBounds(current + bounds, length)) {
-                    pc = try jump(code, pc, Off.load4_current_chars.on_failure);
-                } else {
-                    const cp_offset = readI16(code, pc, Off.load4_current_chars.cp_offset);
-                    current_char = load4(subject, current + cp_offset);
-                    pc += sz;
-                }
-            },
-            .load4_current_chars_unchecked => {
-                if (Char != u8) return error.BytecodeCorrupt;
-                const cp_offset = readI16(code, pc, Off.load4_current_chars_unchecked.cp_offset);
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .load2_current_chars_unchecked => {
+            const cp_offset = readI16(code, pc, Off.load2_current_chars_unchecked.cp_offset);
+            current_char = load2(Char, subject, current + cp_offset);
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .load4_current_chars => {
+            if (Char != u8) return error.BytecodeCorrupt;
+            const bounds = readI32(code, pc, Off.load4_current_chars.bounds_check_offset);
+            if (!indexInBounds(current + bounds, length)) {
+                pc = try jump(code, pc, Off.load4_current_chars.on_failure);
+            } else {
+                const cp_offset = readI16(code, pc, Off.load4_current_chars.cp_offset);
                 current_char = load4(subject, current + cp_offset);
-                pc += sz;
-            },
-            .check4_chars => {
-                if (readU32(code, pc, Off.check4_chars.characters) == current_char) {
-                    pc = try jump(code, pc, Off.check4_chars.on_equal);
-                } else {
-                    pc += sz;
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .load4_current_chars_unchecked => {
+            if (Char != u8) return error.BytecodeCorrupt;
+            const cp_offset = readI16(code, pc, Off.load4_current_chars_unchecked.cp_offset);
+            current_char = load4(subject, current + cp_offset);
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .check4_chars => {
+            if (readU32(code, pc, Off.check4_chars.characters) == current_char) {
+                pc = try jump(code, pc, Off.check4_chars.on_equal);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_character => {
+            if (readU16(code, pc, Off.check_character.character) == current_char) {
+                pc = try jump(code, pc, Off.check_character.on_equal);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_not4_chars => {
+            if (readU32(code, pc, Off.check_not4_chars.characters) != current_char) {
+                pc = try jump(code, pc, Off.check_not4_chars.on_not_equal);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_not_character => {
+            if (readU16(code, pc, Off.check_not_character.character) != current_char) {
+                pc = try jump(code, pc, Off.check_not_character.on_not_equal);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .and_check4_chars => {
+            const mask = readU32(code, pc, Off.and_check4_chars.mask);
+            if (readU32(code, pc, Off.and_check4_chars.characters) == (current_char & mask)) {
+                pc = try jump(code, pc, Off.and_check4_chars.on_equal);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_character_after_and => {
+            const mask = readU32(code, pc, Off.check_character_after_and.mask);
+            if (readU16(code, pc, Off.check_character_after_and.character) == (current_char & mask)) {
+                pc = try jump(code, pc, Off.check_character_after_and.on_equal);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .and_check_not4_chars => {
+            const mask = readU32(code, pc, Off.and_check_not4_chars.mask);
+            if (readU32(code, pc, Off.and_check_not4_chars.characters) != (current_char & mask)) {
+                pc = try jump(code, pc, Off.and_check_not4_chars.on_not_equal);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_not_character_after_and => {
+            const mask = readU32(code, pc, Off.check_not_character_after_and.mask);
+            if (readU16(code, pc, Off.check_not_character_after_and.character) != (current_char & mask)) {
+                pc = try jump(code, pc, Off.check_not_character_after_and.on_not_equal);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_not_character_after_minus_and => {
+            const minus = readU16(code, pc, Off.check_not_character_after_minus_and.minus);
+            const mask = readU16(code, pc, Off.check_not_character_after_minus_and.mask);
+            const character = readU16(code, pc, Off.check_not_character_after_minus_and.character);
+            if (character != ((current_char -% minus) & mask)) {
+                pc = try jump(code, pc, Off.check_not_character_after_minus_and.on_not_equal);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_character_in_range => {
+            const from = readU16(code, pc, Off.check_character_in_range.from);
+            const to = readU16(code, pc, Off.check_character_in_range.to);
+            if (from <= current_char and current_char <= to) {
+                pc = try jump(code, pc, Off.check_character_in_range.on_in_range);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_character_not_in_range => {
+            const from = readU16(code, pc, Off.check_character_not_in_range.from);
+            const to = readU16(code, pc, Off.check_character_not_in_range.to);
+            if (from > current_char or current_char > to) {
+                pc = try jump(code, pc, Off.check_character_not_in_range.on_not_in_range);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_bit_in_table => {
+            const table = readTable(code, pc, Off.check_bit_in_table.table);
+            if (checkBitInTable(current_char, table)) {
+                pc = try jump(code, pc, Off.check_bit_in_table.on_bit_set);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_character_lt => {
+            if (current_char < readU16(code, pc, Off.check_character_lt.limit)) {
+                pc = try jump(code, pc, Off.check_character_lt.on_less);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_character_gt => {
+            if (current_char > readU16(code, pc, Off.check_character_gt.limit)) {
+                pc = try jump(code, pc, Off.check_character_gt.on_greater);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .if_register_lt => {
+            const index = readU16(code, pc, Off.if_register_lt.register_index);
+            const comparand = readI32(code, pc, Off.if_register_lt.comparand);
+            if ((try getReg.get(registers, index)) < comparand) {
+                pc = try jump(code, pc, Off.if_register_lt.on_less_than);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .if_register_ge => {
+            const index = readU16(code, pc, Off.if_register_ge.register_index);
+            const comparand = readI32(code, pc, Off.if_register_ge.comparand);
+            if ((try getReg.get(registers, index)) >= comparand) {
+                pc = try jump(code, pc, Off.if_register_ge.on_greater_or_equal);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .if_register_eq_pos => {
+            const index = readU16(code, pc, Off.if_register_eq_pos.register_index);
+            if ((try getReg.get(registers, index)) == current) {
+                pc = try jump(code, pc, Off.if_register_eq_pos.on_eq);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_not_back_ref,
+        .check_not_back_ref_no_case,
+        .check_not_back_ref_no_case_unicode,
+        => {
+            const start_reg = readU16(code, pc, Off.check_not_back_ref.start_reg);
+            const from = try getReg.get(registers, start_reg);
+            const end = try getReg.get(registers, start_reg + 1);
+            const len = end - from;
+            if (from >= 0 and len > 0) {
+                if (current + len > length or from + len > length) {
+                    pc = try jump(code, pc, Off.check_not_back_ref.on_not_equal);
+                    continue :dispatch try decode(code, pc);
                 }
-            },
-            .check_character => {
-                if (readU16(code, pc, Off.check_character.character) == current_char) {
-                    pc = try jump(code, pc, Off.check_character.on_equal);
-                } else {
-                    pc += sz;
+                const src = subject[@intCast(from)..][0..@intCast(len)];
+                const dst = subject[@intCast(current)..][0..@intCast(len)];
+                const equal = switch (opcodeAt(code, pc)) {
+                    .check_not_back_ref => charsEqual(Char, src, dst),
+                    .check_not_back_ref_no_case => charsEqualNoCase(Char, src, dst, false),
+                    .check_not_back_ref_no_case_unicode => charsEqualNoCase(Char, src, dst, true),
+                    else => unreachable,
+                };
+                if (!equal) {
+                    pc = try jump(code, pc, Off.check_not_back_ref.on_not_equal);
+                    continue :dispatch try decode(code, pc);
                 }
-            },
-            .check_not4_chars => {
-                if (readU32(code, pc, Off.check_not4_chars.characters) != current_char) {
-                    pc = try jump(code, pc, Off.check_not4_chars.on_not_equal);
-                } else {
-                    pc += sz;
+                current += len;
+            }
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .check_not_back_ref_backward,
+        .check_not_back_ref_no_case_backward,
+        .check_not_back_ref_no_case_unicode_backward,
+        => {
+            const start_reg = readU16(code, pc, Off.check_not_back_ref_backward.start_reg);
+            const from = try getReg.get(registers, start_reg);
+            const end = try getReg.get(registers, start_reg + 1);
+            const len = end - from;
+            if (from >= 0 and len > 0) {
+                if (current - len < 0 or from + len > length) {
+                    pc = try jump(code, pc, Off.check_not_back_ref_backward.on_not_equal);
+                    continue :dispatch try decode(code, pc);
                 }
-            },
-            .check_not_character => {
-                if (readU16(code, pc, Off.check_not_character.character) != current_char) {
-                    pc = try jump(code, pc, Off.check_not_character.on_not_equal);
-                } else {
-                    pc += sz;
+                const src = subject[@intCast(from)..][0..@intCast(len)];
+                const dst = subject[@intCast(current - len)..][0..@intCast(len)];
+                const equal = switch (opcodeAt(code, pc)) {
+                    .check_not_back_ref_backward => charsEqual(Char, src, dst),
+                    .check_not_back_ref_no_case_backward => charsEqualNoCase(Char, src, dst, false),
+                    .check_not_back_ref_no_case_unicode_backward => charsEqualNoCase(Char, src, dst, true),
+                    else => unreachable,
+                };
+                if (!equal) {
+                    pc = try jump(code, pc, Off.check_not_back_ref_backward.on_not_equal);
+                    continue :dispatch try decode(code, pc);
                 }
-            },
-            .and_check4_chars => {
-                const mask = readU32(code, pc, Off.and_check4_chars.mask);
-                if (readU32(code, pc, Off.and_check4_chars.characters) == (current_char & mask)) {
-                    pc = try jump(code, pc, Off.and_check4_chars.on_equal);
-                } else {
-                    pc += sz;
+                current -= len;
+            }
+            pc += sizeAt(code, pc);
+            continue :dispatch try decode(code, pc);
+        },
+        .check_at_start => {
+            if (current + readI16(code, pc, Off.check_at_start.cp_offset) == 0) {
+                pc = try jump(code, pc, Off.check_at_start.on_at_start);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_not_at_start => {
+            if (current + readI16(code, pc, Off.check_not_at_start.cp_offset) == 0) {
+                pc += sizeAt(code, pc);
+            } else {
+                pc = try jump(code, pc, Off.check_not_at_start.on_not_at_start);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .set_current_position_from_end => {
+            const by = readI16(code, pc, Off.set_current_position_from_end.by);
+            pc += sizeAt(code, pc);
+            if (length - current > by) {
+                current = length - by;
+                current_char = subject[@intCast(current - 1)];
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_position => {
+            const pos = current + readI16(code, pc, Off.check_position.cp_offset);
+            if (pos >= length or pos < 0) {
+                pc = try jump(code, pc, Off.check_position.on_failure);
+            } else {
+                pc += sizeAt(code, pc);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .check_special_class_ranges => {
+            const set = readU8(code, pc, Off.check_special_class_ranges.character_set);
+            if (specialClassMatches(current_char, set, one_byte)) {
+                pc += sizeAt(code, pc);
+            } else {
+                pc = try jump(code, pc, Off.check_special_class_ranges.on_no_match);
+            }
+            continue :dispatch try decode(code, pc);
+        },
+        .skip_until_char => {
+            const cp_offset = readI16(code, pc, Off.skip_until_char.cp_offset);
+            const advance_by = readI16(code, pc, Off.skip_until_char.advance_by);
+            const character = readU16(code, pc, Off.skip_until_char.character);
+            const bounds = readI32(code, pc, Off.skip_until_char.bounds_check_offset);
+            while (indexInBounds(current + bounds, length)) {
+                current_char = subject[@intCast(current + cp_offset)];
+                if (character == current_char) {
+                    pc = try jump(code, pc, Off.skip_until_char.on_match);
+                    continue :dispatch try decode(code, pc);
                 }
-            },
-            .check_character_after_and => {
-                const mask = readU32(code, pc, Off.check_character_after_and.mask);
-                if (readU16(code, pc, Off.check_character_after_and.character) == (current_char & mask)) {
-                    pc = try jump(code, pc, Off.check_character_after_and.on_equal);
-                } else {
-                    pc += sz;
+                current += advance_by;
+            }
+            pc = try jump(code, pc, Off.skip_until_char.on_no_match);
+            continue :dispatch try decode(code, pc);
+        },
+        .skip_until_char_and => {
+            const cp_offset = readI16(code, pc, Off.skip_until_char_and.cp_offset);
+            const advance_by = readI16(code, pc, Off.skip_until_char_and.advance_by);
+            const character = readU16(code, pc, Off.skip_until_char_and.character);
+            const mask = readU32(code, pc, Off.skip_until_char_and.mask);
+            const bounds = readI32(code, pc, Off.skip_until_char_and.bounds_check_offset);
+            while (indexInBounds(current + bounds, length)) {
+                current_char = subject[@intCast(current + cp_offset)];
+                if (character == (current_char & mask)) {
+                    pc = try jump(code, pc, Off.skip_until_char_and.on_match);
+                    continue :dispatch try decode(code, pc);
                 }
-            },
-            .and_check_not4_chars => {
-                const mask = readU32(code, pc, Off.and_check_not4_chars.mask);
-                if (readU32(code, pc, Off.and_check_not4_chars.characters) != (current_char & mask)) {
-                    pc = try jump(code, pc, Off.and_check_not4_chars.on_not_equal);
-                } else {
-                    pc += sz;
-                }
-            },
-            .check_not_character_after_and => {
-                const mask = readU32(code, pc, Off.check_not_character_after_and.mask);
-                if (readU16(code, pc, Off.check_not_character_after_and.character) != (current_char & mask)) {
-                    pc = try jump(code, pc, Off.check_not_character_after_and.on_not_equal);
-                } else {
-                    pc += sz;
-                }
-            },
-            .check_not_character_after_minus_and => {
-                const minus = readU16(code, pc, Off.check_not_character_after_minus_and.minus);
-                const mask = readU16(code, pc, Off.check_not_character_after_minus_and.mask);
-                const character = readU16(code, pc, Off.check_not_character_after_minus_and.character);
-                if (character != ((current_char -% minus) & mask)) {
-                    pc = try jump(code, pc, Off.check_not_character_after_minus_and.on_not_equal);
-                } else {
-                    pc += sz;
-                }
-            },
-            .check_character_in_range => {
-                const from = readU16(code, pc, Off.check_character_in_range.from);
-                const to = readU16(code, pc, Off.check_character_in_range.to);
-                if (from <= current_char and current_char <= to) {
-                    pc = try jump(code, pc, Off.check_character_in_range.on_in_range);
-                } else {
-                    pc += sz;
-                }
-            },
-            .check_character_not_in_range => {
-                const from = readU16(code, pc, Off.check_character_not_in_range.from);
-                const to = readU16(code, pc, Off.check_character_not_in_range.to);
-                if (from > current_char or current_char > to) {
-                    pc = try jump(code, pc, Off.check_character_not_in_range.on_not_in_range);
-                } else {
-                    pc += sz;
-                }
-            },
-            .check_bit_in_table => {
-                const table = readTable(code, pc, Off.check_bit_in_table.table);
+                current += advance_by;
+            }
+            pc = try jump(code, pc, Off.skip_until_char_and.on_no_match);
+            continue :dispatch try decode(code, pc);
+        },
+        .skip_until_bit_in_table => {
+            const cp_offset = readI16(code, pc, Off.skip_until_bit_in_table.cp_offset);
+            const advance_by = readI16(code, pc, Off.skip_until_bit_in_table.advance_by);
+            const table = readTable(code, pc, Off.skip_until_bit_in_table.table);
+            const bounds = readI32(code, pc, Off.skip_until_bit_in_table.bounds_check_offset);
+            while (indexInBounds(current + bounds, length)) {
+                current_char = subject[@intCast(current + cp_offset)];
                 if (checkBitInTable(current_char, table)) {
-                    pc = try jump(code, pc, Off.check_bit_in_table.on_bit_set);
-                } else {
-                    pc += sz;
+                    pc = try jump(code, pc, Off.skip_until_bit_in_table.on_match);
+                    continue :dispatch try decode(code, pc);
                 }
-            },
-            .check_character_lt => {
-                if (current_char < readU16(code, pc, Off.check_character_lt.limit)) {
-                    pc = try jump(code, pc, Off.check_character_lt.on_less);
-                } else {
-                    pc += sz;
+                current += advance_by;
+            }
+            pc = try jump(code, pc, Off.skip_until_bit_in_table.on_no_match);
+            continue :dispatch try decode(code, pc);
+        },
+        .skip_until_gt_or_not_bit_in_table => {
+            const cp_offset = readI16(code, pc, Off.skip_until_gt_or_not_bit_in_table.cp_offset);
+            const advance_by = readI16(code, pc, Off.skip_until_gt_or_not_bit_in_table.advance_by);
+            const character = readU16(code, pc, Off.skip_until_gt_or_not_bit_in_table.character);
+            const table = readTable(code, pc, Off.skip_until_gt_or_not_bit_in_table.table);
+            const bounds = readI32(code, pc, Off.skip_until_gt_or_not_bit_in_table.bounds_check_offset);
+            while (indexInBounds(current + bounds, length)) {
+                current_char = subject[@intCast(current + cp_offset)];
+                if (current_char > character or !checkBitInTable(current_char, table)) {
+                    pc = try jump(code, pc, Off.skip_until_gt_or_not_bit_in_table.on_match);
+                    continue :dispatch try decode(code, pc);
                 }
-            },
-            .check_character_gt => {
-                if (current_char > readU16(code, pc, Off.check_character_gt.limit)) {
-                    pc = try jump(code, pc, Off.check_character_gt.on_greater);
-                } else {
-                    pc += sz;
+                current += advance_by;
+            }
+            pc = try jump(code, pc, Off.skip_until_gt_or_not_bit_in_table.on_no_match);
+            continue :dispatch try decode(code, pc);
+        },
+        .skip_until_char_or_char => {
+            const cp_offset = readI16(code, pc, Off.skip_until_char_or_char.cp_offset);
+            const advance_by = readI16(code, pc, Off.skip_until_char_or_char.advance_by);
+            const char1 = readU16(code, pc, Off.skip_until_char_or_char.char1);
+            const char2 = readU16(code, pc, Off.skip_until_char_or_char.char2);
+            const bounds = readI32(code, pc, Off.skip_until_char_or_char.bounds_check_offset);
+            while (indexInBounds(current + bounds, length)) {
+                current_char = subject[@intCast(current + cp_offset)];
+                if (char1 == current_char or char2 == current_char) {
+                    pc = try jump(code, pc, Off.skip_until_char_or_char.on_match);
+                    continue :dispatch try decode(code, pc);
                 }
-            },
-            .if_register_lt => {
-                const index = readU16(code, pc, Off.if_register_lt.register_index);
-                const comparand = readI32(code, pc, Off.if_register_lt.comparand);
-                if ((try getReg.get(registers, index)) < comparand) {
-                    pc = try jump(code, pc, Off.if_register_lt.on_less_than);
-                } else {
-                    pc += sz;
-                }
-            },
-            .if_register_ge => {
-                const index = readU16(code, pc, Off.if_register_ge.register_index);
-                const comparand = readI32(code, pc, Off.if_register_ge.comparand);
-                if ((try getReg.get(registers, index)) >= comparand) {
-                    pc = try jump(code, pc, Off.if_register_ge.on_greater_or_equal);
-                } else {
-                    pc += sz;
-                }
-            },
-            .if_register_eq_pos => {
-                const index = readU16(code, pc, Off.if_register_eq_pos.register_index);
-                if ((try getReg.get(registers, index)) == current) {
-                    pc = try jump(code, pc, Off.if_register_eq_pos.on_eq);
-                } else {
-                    pc += sz;
-                }
-            },
-            .check_not_back_ref,
-            .check_not_back_ref_no_case,
-            .check_not_back_ref_no_case_unicode,
-            => {
-                const start_reg = readU16(code, pc, Off.check_not_back_ref.start_reg);
-                const from = try getReg.get(registers, start_reg);
-                const end = try getReg.get(registers, start_reg + 1);
-                const len = end - from;
-                if (from >= 0 and len > 0) {
-                    if (current + len > length or from + len > length) {
-                        pc = try jump(code, pc, Off.check_not_back_ref.on_not_equal);
-                        continue :dispatch;
+                current += advance_by;
+            }
+            pc = try jump(code, pc, Off.skip_until_char_or_char.on_no_match);
+            continue :dispatch try decode(code, pc);
+        },
+        .skip_until_one_of_masked => {
+            if (Char != u8) return error.BytecodeCorrupt;
+            const cp_offset = readI16(code, pc, Off.skip_until_one_of_masked.cp_offset);
+            const advance_by = readI16(code, pc, Off.skip_until_one_of_masked.advance_by);
+            const both_chars = readU32(code, pc, Off.skip_until_one_of_masked.both_chars);
+            const both_mask = readU32(code, pc, Off.skip_until_one_of_masked.both_mask);
+            const max_offset = readI32(code, pc, Off.skip_until_one_of_masked.max_offset);
+            const chars1 = readU32(code, pc, Off.skip_until_one_of_masked.chars1);
+            const mask1 = readU32(code, pc, Off.skip_until_one_of_masked.mask1);
+            const chars2 = readU32(code, pc, Off.skip_until_one_of_masked.chars2);
+            const mask2 = readU32(code, pc, Off.skip_until_one_of_masked.mask2);
+            while (indexInBounds(current + max_offset, length)) {
+                current_char = load4(subject, current + cp_offset);
+                if (both_chars == (current_char & both_mask)) {
+                    if (chars1 == (current_char & mask1)) {
+                        pc = try jump(code, pc, Off.skip_until_one_of_masked.on_match1);
+                        continue :dispatch try decode(code, pc);
                     }
-                    const src = subject[@intCast(from)..][0..@intCast(len)];
-                    const dst = subject[@intCast(current)..][0..@intCast(len)];
-                    const equal = switch (op) {
-                        .check_not_back_ref => charsEqual(Char, src, dst),
-                        .check_not_back_ref_no_case => charsEqualNoCase(Char, src, dst, false),
-                        .check_not_back_ref_no_case_unicode => charsEqualNoCase(Char, src, dst, true),
-                        else => unreachable,
-                    };
-                    if (!equal) {
-                        pc = try jump(code, pc, Off.check_not_back_ref.on_not_equal);
-                        continue :dispatch;
+                    if (chars2 == (current_char & mask2)) {
+                        pc = try jump(code, pc, Off.skip_until_one_of_masked.on_match2);
+                        continue :dispatch try decode(code, pc);
                     }
-                    current += len;
                 }
-                pc += sz;
-            },
-            .check_not_back_ref_backward,
-            .check_not_back_ref_no_case_backward,
-            .check_not_back_ref_no_case_unicode_backward,
-            => {
-                const start_reg = readU16(code, pc, Off.check_not_back_ref_backward.start_reg);
-                const from = try getReg.get(registers, start_reg);
-                const end = try getReg.get(registers, start_reg + 1);
-                const len = end - from;
-                if (from >= 0 and len > 0) {
-                    if (current - len < 0 or from + len > length) {
-                        pc = try jump(code, pc, Off.check_not_back_ref_backward.on_not_equal);
-                        continue :dispatch;
+                current += advance_by;
+            }
+            pc = try jump(code, pc, Off.skip_until_one_of_masked.on_failure);
+            continue :dispatch try decode(code, pc);
+        },
+        .skip_until_one_of_masked3 => {
+            if (Char != u8) return error.BytecodeCorrupt;
+            const bc0_cp_offset = readI16(code, pc, Off.skip_until_one_of_masked3.bc0_cp_offset);
+            const bc0_advance_by = readI16(code, pc, Off.skip_until_one_of_masked3.bc0_advance_by);
+            const bc0_table = readTable(code, pc, Off.skip_until_one_of_masked3.bc0_table);
+            const bc1_bounds = readI32(code, pc, Off.skip_until_one_of_masked3.bc1_bounds_check_offset);
+            const bc1_cp_offset = readI16(code, pc, Off.skip_until_one_of_masked3.bc1_cp_offset);
+            const bc2_characters = readU32(code, pc, Off.skip_until_one_of_masked3.bc2_characters);
+            const bc2_mask = readU32(code, pc, Off.skip_until_one_of_masked3.bc2_mask);
+            const bc3_by = readI16(code, pc, Off.skip_until_one_of_masked3.bc3_by);
+            const bc4_bounds = readI32(code, pc, Off.skip_until_one_of_masked3.bc4_bounds_check_offset);
+            const bc4_cp_offset = readI16(code, pc, Off.skip_until_one_of_masked3.bc4_cp_offset);
+            const bc5_characters = readU32(code, pc, Off.skip_until_one_of_masked3.bc5_characters);
+            const bc5_mask = readU32(code, pc, Off.skip_until_one_of_masked3.bc5_mask);
+            const bc6_characters = readU32(code, pc, Off.skip_until_one_of_masked3.bc6_characters);
+            const bc6_mask = readU32(code, pc, Off.skip_until_one_of_masked3.bc6_mask);
+            const bc7_characters = readU32(code, pc, Off.skip_until_one_of_masked3.bc7_characters);
+            const bc7_mask = readU32(code, pc, Off.skip_until_one_of_masked3.bc7_mask);
+            while (true) {
+                while (indexInBounds(current + bc0_cp_offset, length)) {
+                    current_char = subject[@intCast(current + bc0_cp_offset)];
+                    if (checkBitInTable(current_char, bc0_table)) break;
+                    current += bc0_advance_by;
+                }
+                if (!indexInBounds(current + bc1_bounds, length)) {
+                    pc = try jump(code, pc, Off.skip_until_one_of_masked3.bc1_on_failure);
+                    continue :dispatch try decode(code, pc);
+                }
+                current_char = load4(subject, current + bc1_cp_offset);
+                if (bc2_characters == (current_char & bc2_mask)) {
+                    if (!indexInBounds(current + bc4_bounds, length)) {
+                        current += bc3_by;
+                        continue;
                     }
-                    const src = subject[@intCast(from)..][0..@intCast(len)];
-                    const dst = subject[@intCast(current - len)..][0..@intCast(len)];
-                    const equal = switch (op) {
-                        .check_not_back_ref_backward => charsEqual(Char, src, dst),
-                        .check_not_back_ref_no_case_backward => charsEqualNoCase(Char, src, dst, false),
-                        .check_not_back_ref_no_case_unicode_backward => charsEqualNoCase(Char, src, dst, true),
-                        else => unreachable,
-                    };
-                    if (!equal) {
-                        pc = try jump(code, pc, Off.check_not_back_ref_backward.on_not_equal);
-                        continue :dispatch;
+                    current_char = load4(subject, current + bc4_cp_offset);
+                    if (bc5_characters == (current_char & bc5_mask)) {
+                        pc = try jump(code, pc, Off.skip_until_one_of_masked3.bc5_on_equal);
+                        continue :dispatch try decode(code, pc);
                     }
-                    current -= len;
-                }
-                pc += sz;
-            },
-            .check_at_start => {
-                if (current + readI16(code, pc, Off.check_at_start.cp_offset) == 0) {
-                    pc = try jump(code, pc, Off.check_at_start.on_at_start);
-                } else {
-                    pc += sz;
-                }
-            },
-            .check_not_at_start => {
-                if (current + readI16(code, pc, Off.check_not_at_start.cp_offset) == 0) {
-                    pc += sz;
-                } else {
-                    pc = try jump(code, pc, Off.check_not_at_start.on_not_at_start);
-                }
-            },
-            .set_current_position_from_end => {
-                const by = readI16(code, pc, Off.set_current_position_from_end.by);
-                pc += sz;
-                if (length - current > by) {
-                    current = length - by;
-                    current_char = subject[@intCast(current - 1)];
-                }
-            },
-            .check_position => {
-                const pos = current + readI16(code, pc, Off.check_position.cp_offset);
-                if (pos >= length or pos < 0) {
-                    pc = try jump(code, pc, Off.check_position.on_failure);
-                } else {
-                    pc += sz;
-                }
-            },
-            .check_special_class_ranges => {
-                const set = readU8(code, pc, Off.check_special_class_ranges.character_set);
-                if (specialClassMatches(current_char, set, one_byte)) {
-                    pc += sz;
-                } else {
-                    pc = try jump(code, pc, Off.check_special_class_ranges.on_no_match);
-                }
-            },
-            .skip_until_char => {
-                const cp_offset = readI16(code, pc, Off.skip_until_char.cp_offset);
-                const advance_by = readI16(code, pc, Off.skip_until_char.advance_by);
-                const character = readU16(code, pc, Off.skip_until_char.character);
-                const bounds = readI32(code, pc, Off.skip_until_char.bounds_check_offset);
-                while (indexInBounds(current + bounds, length)) {
-                    current_char = subject[@intCast(current + cp_offset)];
-                    if (character == current_char) {
-                        pc = try jump(code, pc, Off.skip_until_char.on_match);
-                        continue :dispatch;
+                    if (bc6_characters == (current_char & bc6_mask)) {
+                        pc = try jump(code, pc, Off.skip_until_one_of_masked3.bc6_on_equal);
+                        continue :dispatch try decode(code, pc);
                     }
-                    current += advance_by;
+                    if (bc7_characters == (current_char & bc7_mask)) {
+                        pc = try jump(code, pc, Off.skip_until_one_of_masked3.fallthrough_jump_target);
+                        continue :dispatch try decode(code, pc);
+                    }
                 }
-                pc = try jump(code, pc, Off.skip_until_char.on_no_match);
-            },
-            .skip_until_char_and => {
-                const cp_offset = readI16(code, pc, Off.skip_until_char_and.cp_offset);
-                const advance_by = readI16(code, pc, Off.skip_until_char_and.advance_by);
-                const character = readU16(code, pc, Off.skip_until_char_and.character);
-                const mask = readU32(code, pc, Off.skip_until_char_and.mask);
-                const bounds = readI32(code, pc, Off.skip_until_char_and.bounds_check_offset);
-                while (indexInBounds(current + bounds, length)) {
-                    current_char = subject[@intCast(current + cp_offset)];
-                    if (character == (current_char & mask)) {
-                        pc = try jump(code, pc, Off.skip_until_char_and.on_match);
-                        continue :dispatch;
-                    }
-                    current += advance_by;
-                }
-                pc = try jump(code, pc, Off.skip_until_char_and.on_no_match);
-            },
-            .skip_until_bit_in_table => {
-                const cp_offset = readI16(code, pc, Off.skip_until_bit_in_table.cp_offset);
-                const advance_by = readI16(code, pc, Off.skip_until_bit_in_table.advance_by);
-                const table = readTable(code, pc, Off.skip_until_bit_in_table.table);
-                const bounds = readI32(code, pc, Off.skip_until_bit_in_table.bounds_check_offset);
-                while (indexInBounds(current + bounds, length)) {
-                    current_char = subject[@intCast(current + cp_offset)];
-                    if (checkBitInTable(current_char, table)) {
-                        pc = try jump(code, pc, Off.skip_until_bit_in_table.on_match);
-                        continue :dispatch;
-                    }
-                    current += advance_by;
-                }
-                pc = try jump(code, pc, Off.skip_until_bit_in_table.on_no_match);
-            },
-            .skip_until_gt_or_not_bit_in_table => {
-                const cp_offset = readI16(code, pc, Off.skip_until_gt_or_not_bit_in_table.cp_offset);
-                const advance_by = readI16(code, pc, Off.skip_until_gt_or_not_bit_in_table.advance_by);
-                const character = readU16(code, pc, Off.skip_until_gt_or_not_bit_in_table.character);
-                const table = readTable(code, pc, Off.skip_until_gt_or_not_bit_in_table.table);
-                const bounds = readI32(code, pc, Off.skip_until_gt_or_not_bit_in_table.bounds_check_offset);
-                while (indexInBounds(current + bounds, length)) {
-                    current_char = subject[@intCast(current + cp_offset)];
-                    if (current_char > character or !checkBitInTable(current_char, table)) {
-                        pc = try jump(code, pc, Off.skip_until_gt_or_not_bit_in_table.on_match);
-                        continue :dispatch;
-                    }
-                    current += advance_by;
-                }
-                pc = try jump(code, pc, Off.skip_until_gt_or_not_bit_in_table.on_no_match);
-            },
-            .skip_until_char_or_char => {
-                const cp_offset = readI16(code, pc, Off.skip_until_char_or_char.cp_offset);
-                const advance_by = readI16(code, pc, Off.skip_until_char_or_char.advance_by);
-                const char1 = readU16(code, pc, Off.skip_until_char_or_char.char1);
-                const char2 = readU16(code, pc, Off.skip_until_char_or_char.char2);
-                const bounds = readI32(code, pc, Off.skip_until_char_or_char.bounds_check_offset);
-                while (indexInBounds(current + bounds, length)) {
-                    current_char = subject[@intCast(current + cp_offset)];
-                    if (char1 == current_char or char2 == current_char) {
-                        pc = try jump(code, pc, Off.skip_until_char_or_char.on_match);
-                        continue :dispatch;
-                    }
-                    current += advance_by;
-                }
-                pc = try jump(code, pc, Off.skip_until_char_or_char.on_no_match);
-            },
-            .skip_until_one_of_masked => {
-                if (Char != u8) return error.BytecodeCorrupt;
-                const cp_offset = readI16(code, pc, Off.skip_until_one_of_masked.cp_offset);
-                const advance_by = readI16(code, pc, Off.skip_until_one_of_masked.advance_by);
-                const both_chars = readU32(code, pc, Off.skip_until_one_of_masked.both_chars);
-                const both_mask = readU32(code, pc, Off.skip_until_one_of_masked.both_mask);
-                const max_offset = readI32(code, pc, Off.skip_until_one_of_masked.max_offset);
-                const chars1 = readU32(code, pc, Off.skip_until_one_of_masked.chars1);
-                const mask1 = readU32(code, pc, Off.skip_until_one_of_masked.mask1);
-                const chars2 = readU32(code, pc, Off.skip_until_one_of_masked.chars2);
-                const mask2 = readU32(code, pc, Off.skip_until_one_of_masked.mask2);
-                while (indexInBounds(current + max_offset, length)) {
-                    current_char = load4(subject, current + cp_offset);
-                    if (both_chars == (current_char & both_mask)) {
-                        if (chars1 == (current_char & mask1)) {
-                            pc = try jump(code, pc, Off.skip_until_one_of_masked.on_match1);
-                            continue :dispatch;
-                        }
-                        if (chars2 == (current_char & mask2)) {
-                            pc = try jump(code, pc, Off.skip_until_one_of_masked.on_match2);
-                            continue :dispatch;
-                        }
-                    }
-                    current += advance_by;
-                }
-                pc = try jump(code, pc, Off.skip_until_one_of_masked.on_failure);
-            },
-            .skip_until_one_of_masked3 => {
-                if (Char != u8) return error.BytecodeCorrupt;
-                const bc0_cp_offset = readI16(code, pc, Off.skip_until_one_of_masked3.bc0_cp_offset);
-                const bc0_advance_by = readI16(code, pc, Off.skip_until_one_of_masked3.bc0_advance_by);
-                const bc0_table = readTable(code, pc, Off.skip_until_one_of_masked3.bc0_table);
-                const bc1_bounds = readI32(code, pc, Off.skip_until_one_of_masked3.bc1_bounds_check_offset);
-                const bc1_cp_offset = readI16(code, pc, Off.skip_until_one_of_masked3.bc1_cp_offset);
-                const bc2_characters = readU32(code, pc, Off.skip_until_one_of_masked3.bc2_characters);
-                const bc2_mask = readU32(code, pc, Off.skip_until_one_of_masked3.bc2_mask);
-                const bc3_by = readI16(code, pc, Off.skip_until_one_of_masked3.bc3_by);
-                const bc4_bounds = readI32(code, pc, Off.skip_until_one_of_masked3.bc4_bounds_check_offset);
-                const bc4_cp_offset = readI16(code, pc, Off.skip_until_one_of_masked3.bc4_cp_offset);
-                const bc5_characters = readU32(code, pc, Off.skip_until_one_of_masked3.bc5_characters);
-                const bc5_mask = readU32(code, pc, Off.skip_until_one_of_masked3.bc5_mask);
-                const bc6_characters = readU32(code, pc, Off.skip_until_one_of_masked3.bc6_characters);
-                const bc6_mask = readU32(code, pc, Off.skip_until_one_of_masked3.bc6_mask);
-                const bc7_characters = readU32(code, pc, Off.skip_until_one_of_masked3.bc7_characters);
-                const bc7_mask = readU32(code, pc, Off.skip_until_one_of_masked3.bc7_mask);
-                while (true) {
-                    while (indexInBounds(current + bc0_cp_offset, length)) {
-                        current_char = subject[@intCast(current + bc0_cp_offset)];
-                        if (checkBitInTable(current_char, bc0_table)) break;
-                        current += bc0_advance_by;
-                    }
-                    if (!indexInBounds(current + bc1_bounds, length)) {
-                        pc = try jump(code, pc, Off.skip_until_one_of_masked3.bc1_on_failure);
-                        continue :dispatch;
-                    }
-                    current_char = load4(subject, current + bc1_cp_offset);
-                    if (bc2_characters == (current_char & bc2_mask)) {
-                        if (!indexInBounds(current + bc4_bounds, length)) {
-                            current += bc3_by;
-                            continue;
-                        }
-                        current_char = load4(subject, current + bc4_cp_offset);
-                        if (bc5_characters == (current_char & bc5_mask)) {
-                            pc = try jump(code, pc, Off.skip_until_one_of_masked3.bc5_on_equal);
-                            continue :dispatch;
-                        }
-                        if (bc6_characters == (current_char & bc6_mask)) {
-                            pc = try jump(code, pc, Off.skip_until_one_of_masked3.bc6_on_equal);
-                            continue :dispatch;
-                        }
-                        if (bc7_characters == (current_char & bc7_mask)) {
-                            pc = try jump(code, pc, Off.skip_until_one_of_masked3.fallthrough_jump_target);
-                            continue :dispatch;
-                        }
-                    }
-                    current += bc3_by;
-                }
-            },
-        }
+                current += bc3_by;
+            }
+        },
     }
 }
