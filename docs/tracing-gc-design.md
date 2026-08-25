@@ -1964,8 +1964,8 @@ lost remembered-set entry, or a promotion that aged an object the trace never
 reached. It costs a whole extra heap trace plus a mark save/restore per minor,
 which is why it is a mode and not an assertion.
 
-Two rules about probes on these paths, both learned by losing a reproduction to
-them:
+Three rules about probes on these paths, all learned by losing a reproduction
+to them:
 
 - Instrumenting the *JavaScript* does not work. Any probe that allocates moves
   the collection out of the window being observed, and the failure disappears.
@@ -1973,10 +1973,47 @@ them:
 - A `getenv` on a hot path is itself a probe. One inside `generationalBarrier`
   perturbed timing enough to stop a deterministic failure from reproducing.
   Parse once, into a module-level `pub var`, as `gc.stress_collect` does.
+- On a store path, *any* probe can mask the bug, including a completely silent
+  one. Chasing the specialization defect below, a record into a static array
+  with no output masked it, and so did `ZJS_GC_VERIFY_MINOR`. The mechanism is
+  not timing: changing the stack frame of the function doing the store changes
+  the residue the conservative scanner reads, and therefore which dead objects
+  it falsely pins. `ZJS_MINOR_AUDIT` was the only instrument that stayed out of
+  the way, because it runs inside the collector rather than on the store path.
+  So the two modes are complementary, not ranked.
 
 `setarch -R` disables ASLR, which makes heap addresses stable across runs of
 the same deterministic input — that is what makes "print the pointer, then
 watch it" possible across two runs.
+
+### 14.1.1 Why a barrier can be missing for years and never show
+
+Almost every store that publishes a traced reference does so into an owner that
+is *younger* than, or the same age as, the child — a function object is created
+from bytecode that already exists, a property is set on an object built moments
+earlier. When the owner is young the barrier is a no-op by design, so a missing
+one is invisible.
+
+The defects that surfaced in 2026-08 were all on the few paths that invert that
+order. The clearest is call-site specialization: `small_inline.specializeCallSite`
+fires only after a site has been monomorphic for eight executions, so the caller
+function object has by construction already survived a minor and is old, and the
+specialized `FunctionBytecode` clone it publishes is brand new. That is the one
+path where an old owner routinely comes to point at a fresh child, and it is why
+the missing barrier in `Object.setFunctionBytecodeValue` was invisible until a
+long-running benchmark hit it.
+
+The same reasoning explains the symptom's shape. Destroying a live
+FunctionBytecode re-walks its code and drops one atom reference per
+atom-operand opcode, so it over-releases atoms shared with the rest of the
+program; a builtin's auto-init slot is keyed by atom, and the decode behind it
+then resolves against a recycled id. `InvalidBuiltinRegistry` was three
+removes from the actual fault.
+
+The lesson generalises: when looking for a missing barrier, look first at the
+paths where an old object acquires a new child — specialization, caching,
+lazily-materialised builtins, memoisation — not at the paths that allocate and
+link in one breath.
 
 ### 14.2 What test262 does not cover
 
