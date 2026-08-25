@@ -744,7 +744,7 @@ test "Irregexp turns extreme nesting into StackOverflow" {
     try std.testing.expectError(error.StackOverflow, compilePatternAndFlags(std.testing.allocator, opens, ""));
 }
 
-test "Irregexp exec reuses isolate state across repeated matches" {
+test "Irregexp exec is repeatable across matches" {
     const allocator = std.testing.allocator;
     var compiled = try compilePatternAndFlags(allocator, "a+", "");
     defer compiled.deinit(allocator);

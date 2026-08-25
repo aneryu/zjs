@@ -8,17 +8,16 @@
 const core = @import("../core/root.zig");
 const regexp_lib = @import("../libs/regexp.zig");
 const irregexp = @import("../libs/irregexp.zig");
-const regexp_bytecode = irregexp;
 const std = @import("std");
 
-pub const max_captures = regexp_bytecode.max_captures;
-pub const max_exec_slots = regexp_bytecode.max_exec_slots;
-pub const small_exec_slots = regexp_bytecode.small_exec_slots;
+pub const max_captures = irregexp.max_captures;
+pub const max_exec_slots = irregexp.max_exec_slots;
+pub const small_exec_slots = irregexp.small_exec_slots;
 pub const flag_bits = regexp_lib.flags;
-pub const Capture = regexp_bytecode.Capture;
-pub const Match = regexp_bytecode.Match;
-pub const ExecStatus = regexp_bytecode.ExecStatus;
-pub const ExecResult = regexp_bytecode.ExecResult;
+pub const Capture = irregexp.Capture;
+pub const Match = irregexp.Match;
+pub const ExecStatus = irregexp.ExecStatus;
+pub const ExecResult = irregexp.ExecResult;
 pub const ExecError = error{ OutOfMemory, BytecodeCorrupt, Timeout };
 
 pub const Compiled = irregexp.Compiled;
@@ -54,17 +53,17 @@ pub fn execCaptureSlotsOnResolvedStringFromIndex(
 ) ExecError!ExecResult {
     const options = execOptions(rt);
     return switch (string_data) {
-        .latin1 => |bytes| try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, capture),
-        .utf16 => |units| try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, capture),
+        .latin1 => |bytes| try irregexp.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, capture),
+        .utf16 => |units| try irregexp.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, capture),
     };
 }
 
 pub fn captureSlotValue(value: usize) ?usize {
-    return regexp_bytecode.captureSlotValue(value);
+    return irregexp.captureSlotValue(value);
 }
 
 pub fn groupName(bytecode: []const u8, one_based_capture_index: usize) ?[]const u8 {
-    return regexp_bytecode.groupName(bytecode, one_based_capture_index);
+    return irregexp.groupName(bytecode, one_based_capture_index);
 }
 
 pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!?bool {
@@ -73,12 +72,12 @@ pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_val
 
     const options = execOptions(rt);
     return switch (string_object.resolveData()) {
-        .latin1 => |bytes| try regexp_bytecode.testMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options),
-        .utf16 => |units| try regexp_bytecode.testMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options),
+        .latin1 => |bytes| try irregexp.testMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options),
+        .utf16 => |units| try irregexp.testMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options),
     };
 }
 
-fn execOptions(rt: *core.JSRuntime) regexp_bytecode.ExecOptions {
+fn execOptions(rt: *core.JSRuntime) irregexp.ExecOptions {
     if (!rt.hasInterruptHandler()) return .{};
     return .{
         .@"opaque" = rt,
@@ -92,22 +91,22 @@ fn checkRuntimeTimeout(context: ?*anyopaque) bool {
 }
 
 pub fn flagBitsFromBytecode(bytecode: []const u8) u16 {
-    return regexp_bytecode.getFlags(bytecode);
+    return irregexp.getFlags(bytecode);
 }
 
 pub fn appendCanonicalFlagsFromBits(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), bits: u16) !void {
     const order = [_]struct { byte: u8, bit: u16 }{
-        .{ .byte = 'd', .bit = regexp_bytecode.flags.indices },
-        .{ .byte = 'g', .bit = regexp_bytecode.flags.global },
-        .{ .byte = 'i', .bit = regexp_bytecode.flags.ignore_case },
-        .{ .byte = 'm', .bit = regexp_bytecode.flags.multiline },
-        .{ .byte = 's', .bit = regexp_bytecode.flags.dot_all },
-        .{ .byte = 'u', .bit = regexp_bytecode.flags.unicode },
-        .{ .byte = 'v', .bit = regexp_bytecode.flags.unicode_sets },
-        .{ .byte = 'y', .bit = regexp_bytecode.flags.sticky },
+        .{ .byte = 'd', .bit = irregexp.flags.indices },
+        .{ .byte = 'g', .bit = irregexp.flags.global },
+        .{ .byte = 'i', .bit = irregexp.flags.ignore_case },
+        .{ .byte = 'm', .bit = irregexp.flags.multiline },
+        .{ .byte = 's', .bit = irregexp.flags.dot_all },
+        .{ .byte = 'u', .bit = irregexp.flags.unicode },
+        .{ .byte = 'v', .bit = irregexp.flags.unicode_sets },
+        .{ .byte = 'y', .bit = irregexp.flags.sticky },
     };
     for (order) |entry| {
-        if (entry.byte == 'u' and (bits & regexp_bytecode.flags.unicode_sets) != 0) continue;
+        if (entry.byte == 'u' and (bits & irregexp.flags.unicode_sets) != 0) continue;
         if ((bits & entry.bit) != 0) try buffer.append(allocator, entry.byte);
     }
 }
@@ -144,7 +143,7 @@ test "JavaScript RegExp adapter preserves multiple named capture groups" {
     }
 }
 
-test "JavaScript RegExp adapter reuses the interpreter isolate across matches" {
+test "JavaScript RegExp adapter is repeatable across matches" {
     var compiled = try compile(std.testing.allocator, "a+", "");
     defer compiled.deinit(std.testing.allocator);
 

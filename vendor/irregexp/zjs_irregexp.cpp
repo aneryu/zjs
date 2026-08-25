@@ -489,6 +489,7 @@ int zjs_irregexp_blob_group_name(const uint8_t* blob, size_t blob_len,
   return 0;
 }
 
+// Differential / bring-up exec. JS matching uses src/libs/irregexp_interp.zig.
 int zjs_irregexp_exec(const uint8_t* blob, size_t blob_len, const void* subject,
                       size_t subject_len, int subject_width, size_t start_index,
                       int32_t* registers, size_t register_count,

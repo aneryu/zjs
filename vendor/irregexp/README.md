@@ -1,8 +1,8 @@
 # Irregexp (V8) for zjs
 
-Standalone interpreter + bytecode compiler extracted from V8 so zjs can
-compile and execute ECMAScript regular expressions without linking V8 or
-SpiderMonkey.
+Standalone V8 Irregexp bytecode compiler, extracted so zjs can compile
+ECMAScript regular expressions without linking V8 or SpiderMonkey. Exec
+of the resulting IRRX blob lives in Zig (`src/libs/irregexp_interp.zig`).
 
 ## Provenance
 

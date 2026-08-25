@@ -219,8 +219,7 @@ inline fn skip(comptime op: Opcode) usize {
     return comptime bc.opcode_size[@intFromEnum(op)];
 }
 
-/// V8 ADVANCE/DECODE: next PC and opcode, so the continue operand is a
-/// plain `Opcode` rather than a helper call.
+/// Next instruction: PC plus opcode. The labeled switch continues on `op`.
 const Next = struct {
     pc: [*]const u8,
     op: Opcode,

@@ -50,6 +50,7 @@ int zjs_irregexp_blob_group_name(
     const uint8_t** name_out,
     size_t* name_len_out);
 
+/* Differential / bring-up exec. JS matching uses the Zig interpreter. */
 int zjs_irregexp_exec(
     const uint8_t* blob,
     size_t blob_len,
