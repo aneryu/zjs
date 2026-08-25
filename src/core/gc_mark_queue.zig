@@ -14,7 +14,13 @@
 const std = @import("std");
 const gc = @import("gc.zig");
 
-pub const capacity = 4096;
+/// 65536 entries (512 KB, lazily allocated). The ring became the incremental
+/// cycle's persistent frontier in Phase 2, and a BFS frontier over a tens-of-
+/// MB heap routinely exceeds the old 4096. Overflow is still sound -- it
+/// downgrades the remark to a rescan of every marked object -- but every
+/// overflow turns one bounded remark into an O(live) pass, so the ring is
+/// sized to make that rare rather than routine.
+pub const capacity = 65536;
 
 pub const Stats = struct {
     pushed: usize = 0,

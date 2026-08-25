@@ -219,22 +219,79 @@ of §8.6's concurrent major and shares its barrier obligations):
 4. **Sweep:** initially still STW (measure its share after Phase 1; it is the
    smaller term today). Incremental sweep is Phase 3, gated on the block heap.
 
-Decisions to settle in the design review:
+Decisions settled by the design review against §8.6 (2026-08-26):
 
-- **Allocation color during marking:** allocate-black (mark at publication
-  while `marking_active`) is the simple sound choice; it trades floating
-  garbage for remark size. JSC tracks newly-allocated separately via version
-  bits; we do not have versions yet.
-- **Termination:** queue empty at remark with no re-dirty; bound remark by
-  re-running increments if the barrier queue exceeds a threshold (JSC reloops
-  its fixpoint, CollectorPhase.h Reloop).
-- **Ephemerons:** the current fixed point iterates every weak holder per round
-  (gc_trace_stw.zig:793-817). Acceptable while remark is rare; if remark
-  blows its budget on WeakMap-heavy code, move to a discovered-ephemeron queue
-  (B5).
-- **What stays honest in the instrument:** pause ring records begin, each
-  increment, and remark as separate samples; the panel gains a
-  `floating garbage` row (`recordFloatingGarbage` exists).
+- **Allocation color:** allocate-black. Not a choice after all -- §8.6's
+  concurrent-mark clause prescribes it verbatim ("new objects are
+  black-published"), as it prescribes target shading ("all later strong
+  writes use target shading"), which retroactively makes P0.1's Dijkstra
+  deviation the constitutional reading and the plan's original owner-append
+  draft the violation.
+- **Cycle state:** `major_marking_active` alone carries "a cycle is open";
+  `gc.phase` stays `.none` between increments so every existing phase guard
+  keeps its meaning. The grey queue IS the persistent frontier (capacity
+  raised 4096 -> 65536; overflow still downgrades to the marked-rescan).
+- **Explicit collections abort, never join.** `runObjectCycleRemoval`,
+  `forceGC` and urgent polls abort an open cycle (reset queue, drop
+  marking_active) and run the untouched STW `collectCycles`. Finishing the
+  cycle instead would honor its floating garbage -- objects marked during
+  increments that died before remark -- and "collect everything" callers,
+  which is every determinism-sensitive test, require full precision. Aborting
+  wastes only the increments already run.
+- **Minors:** closed while a cycle is open (§8.6 Prepare: "close admission of
+  a new minor request"); a poll that would have offered one runs an increment
+  instead ("minor requests become major assist/completion requests").
+- **Begin also retires the young/remembered state** (§8.6 initial mark step
+  3): remembered owners are not major roots.
+- **Termination:** the poll that finds the queue empty runs the final remark:
+  re-seed all roots (stack slots are not barriered, so the rescan is what
+  catches white objects referenced only from native frames), drain, then the
+  barrier-queue drain with its overflow path, ephemerons, weak, sweep.
+- **Safety valve:** if the account grows past 1.5x the threshold while a
+  cycle is open, the next poll finishes it regardless of budget -- one big
+  pause, counted and reported, instead of an unbounded heap.
+- **Ephemerons:** fixed point at remark only, current holder-iteration form;
+  the discovered-ephemeron queue (B5) waits for remark-budget evidence.
+- **Instrument:** begin, each increment, and remark are separate samples in
+  the major ring; the panel reports increments per cycle and the cycle's
+  cumulative STW (§1.3's third pause row, previously uninstrumented).
+
+Honest expectation, from the Phase-1 pause anatomy: marking is ~40% of a
+splay major. Incrementalizing it bounds that slice at the budget, but begin
+still walks the heap once (`clearMarks`) and remark still sweeps and destroys
+synchronously, so splay's worst slice lands near ~60 ms, not 2 ms. Small
+heaps (raytrace-class) land in low single-digit ms immediately. The 2 ms row
+on large heaps falls only with Phase 3 (versioned marks kill the begin walk;
+the block heap makes sweep lazy). Phase 2 is judged on the marking slice and
+on the machinery being sound, not on the full row.
+
+**Outcome (2026-08-26).** Landed. splay, fixed work: major-ring p50
+112 ms -> 1.00 ms, p95 1.007 ms (the increments, sitting exactly on their
+budget); p99 64 ms, max 67.7 ms -- the remark+sweep slice, within the ~60 ms
+this section predicted. 29 cycles, ~35 increments each, zero forced finishes.
+Two dispatch defects were found by the first real run, not by the design:
+threshold crossings reach polls as `.allocation_threshold` REQUESTS recorded
+at the allocation boundary, so "pure threshold == no request" routed
+everything to STW (cycles: 0); the corrected condition treats a
+`.soon`-urgency threshold request as self-paced. And the boundary's poll gate
+needed nothing at all: while a cycle is open the account is over the not-yet-
+reset threshold, so the boundary re-records the request each time and the
+existing gate drives the increments unaided.
+
+The throughput tax, measured: splay 2.376 -> 2.785 (cycle STW total 154 ms vs
+the old monolithic 112 ms -- floating garbage from allocate-black inflates
+the sweep and the survivor set), geomean 1.24 -> 1.29. That is the price of
+p50 going from 112 ms to 1 ms; reclaiming it is Phase 3's lazy sweep, which
+removes the largest remaining slice and most of the incremental overhead in
+the same stroke.
+
+Semantics deliberately preserved: every REQUESTED collection (host manual,
+pressure, urgent) still completes at its poll, STW; only self-paced threshold
+crossings run incrementally, and the reset of the growth threshold moves to
+the poll where the cycle completes. Four tests updated to drive open cycles
+to completion (`helpers.finishGcCycles`); four new protocol tests cover cycle
+completion, the mid-cycle store with retraction (the floating-garbage
+guarantee, strong form), explicit-collection supersession, and urgent abort.
 
 ### Acceptance
 

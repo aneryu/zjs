@@ -450,6 +450,116 @@ fn clearYoungState(rt: *JSRuntime) void {
     rt.gc.generation.retireYoungSet();
 }
 
+/// Open an incremental major cycle (§8.6 initial mark, mutator stopped for
+/// this call only).
+///
+/// Clears marks, seeds every precise and conservative root GREY into the
+/// persistent queue, retires the young/remembered state ("remembered owners
+/// are not major roots"), and publishes `major_marking_active`. Returns with
+/// the mutator free to run; the frontier drains at subsequent polls.
+pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!void {
+    std.debug.assert(!rt.gc.concurrent.markingActive());
+    rt.gc.concurrent_mark_queue.ensureCapacity(gc.Registry.markQueueAllocator());
+    rt.gc.concurrent_mark_queue.reset();
+
+    var collector = try Collector.init(rt, extra_roots, scan);
+    defer collector.deinit();
+    collector.shade_to_queue = true;
+
+    collector.clearMarks();
+    try collector.seedRoots();
+    if (collector.conservative_on) try collector.seedConservativeRoots();
+
+    // §8.6 initial mark step 3. The young suffix walk is O(young).
+    var young = rt.gc.youngIterator();
+    while (young.next()) |header| header.meta().flags.young = false;
+    rt.gc.young_head = null;
+    rt.gc.generation.retireYoungSet();
+
+    rt.gc.concurrent.major_marking_active.store(true, .monotonic);
+}
+
+/// Drain up to `budget_ns` of the grey frontier. Returns true when the
+/// frontier is empty and the cycle is ready for its final remark.
+///
+/// The clock is sampled every 64 objects rather than per pop; a traceHeader
+/// is tens of nanoseconds and `nowNanos` is not free.
+pub fn incrementalMarkStep(rt: *JSRuntime, budget_ns: u64) CollectError!bool {
+    std.debug.assert(rt.gc.concurrent.markingActive());
+    var collector = try Collector.init(rt, null, .declared_only);
+    defer collector.deinit();
+    collector.shade_to_queue = true;
+
+    const queue = &rt.gc.concurrent_mark_queue;
+    const started = profile.nowNanos();
+    var since_clock: usize = 0;
+    while (queue.pop()) |header| {
+        try collector.traceHeader(header);
+        if (collector.err) |err| return err;
+        since_clock += 1;
+        if (since_clock == 64) {
+            since_clock = 0;
+            if (profile.nowNanos() -| started >= budget_ns) break;
+        }
+    }
+    rt.gc.concurrent.stats.increments += 1;
+    return queue.len() == 0;
+}
+
+/// Final remark and sweep (§8.6, mutator stopped). Re-seeds every root --
+/// stack slots are not barriered, so the conservative rescan is what catches
+/// white objects referenced only from native frames -- drains what that and
+/// the barrier produced, then runs the ordinary weak/sweep tail.
+pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
+    std.debug.assert(rt.gc.concurrent.markingActive());
+    rt.gc.stats.collections += 1;
+
+    var collector = try Collector.init(rt, extra_roots, scan);
+    defer collector.deinit();
+
+    try collector.seedRoots();
+    if (collector.conservative_on) try collector.seedConservativeRoots();
+    try collector.drain();
+    _ = try collector.drainBarrierQueue();
+    try collector.ephemeronFixedPoint();
+
+    // Marking is over before anything is freed (§8.6 step 12 before 13).
+    rt.gc.concurrent.major_marking_active.store(false, .monotonic);
+
+    collector.processWeak();
+    collector.beginSweepModelSweep();
+    if (!rt.gc.arenaSetWhole()) {
+        collector.report.skipped_sweep_incomplete_arenas = true;
+        last_report = collector.report;
+        return 0;
+    }
+    const live_before_sweep = collector.liveHeapBytes();
+    const swept = collector.sweepUnmarked();
+    collector.report.reclaimed_bytes = live_before_sweep -| collector.liveHeapBytes();
+    if (comptime gc.sweep_model_enabled) {
+        rt.gc.sweep_model.last_sweep_debt = collector.report.reclaimed_bytes;
+    }
+    collector.endSweepModelSweep();
+
+    clearYoungState(rt);
+    rt.gc.generation.decayLowYieldStreak();
+    rt.gc.concurrent.stats.cycles_completed += 1;
+    last_report = collector.report;
+    last_report.swept = swept;
+    if (gc.arena_audit) {
+        const stale = rt.gc.address_registry.auditArenas();
+        const missing = auditLiveObjectsResolve(rt);
+        if (stale != 0 or missing != 0) {
+            std.debug.print(
+                "gc: ARENA AUDIT after incremental cycle: {d} free blocks read live, {d} live objects unresolvable\n",
+                .{ stale, missing },
+            );
+            @panic("arena invariant violated");
+        }
+    }
+    return swept;
+}
+
 /// Drain the concurrent barrier queue the way the final remark does, for
 /// tests that construct the mutator interleaving `collectConcurrentMajor`
 /// cannot express (it drains to completion in one call, so nothing mutates
@@ -496,6 +606,11 @@ const Collector = struct {
     report: Report = .{},
     exact_mark_count: usize = 0,
     conservative_on: bool,
+    /// Incremental-cycle mode: `shade` pushes grey objects onto the
+    /// persistent barrier queue instead of the per-collection work list, so
+    /// the frontier survives between increments. The work list is untouched
+    /// in this mode, which also means the collector's arena never allocates.
+    shade_to_queue: bool = false,
 
     fn init(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) std.mem.Allocator.Error!Collector {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -675,6 +790,12 @@ const Collector = struct {
         if (addr < 4096 or !std.mem.isAligned(addr, @alignOf(gc.Header))) return;
         if (header.meta().flags.mark) return;
         header.meta().flags.mark = true;
+        if (self.shade_to_queue) {
+            // A failed push is the queue's overflow contract: the object is
+            // marked, the flag is set, and the remark's rescan will find it.
+            _ = self.rt.gc.concurrent_mark_queue.push(header);
+            return;
+        }
         self.work.append(self.allocator(), header) catch |err| {
             self.err = err;
         };

@@ -8260,8 +8260,15 @@ test "object allocation keeps a threshold request while prospective bytes remain
 
     const collections_before = rt.gc.stats.collections;
     rt.collectBeforeObjectAllocation(object_bytes);
+    // Under the tracer the boundary's answer is an incremental cycle: begun
+    // here, completed at the poll that empties the frontier. The boundary
+    // keeps re-recording the threshold request while the account stays over,
+    // which is what drives those later polls.
+    helpers.finishGcCycles(rt);
     try std.testing.expectEqual(collections_before + 1, rt.gc.stats.collections);
-    try std.testing.expect(!rt.gcPendingForTest());
+    if (comptime !core.gc.trace_stw_enabled) {
+        try std.testing.expect(!rt.gcPendingForTest());
+    }
 }
 
 test "stale threshold request cannot mask explicit or pressure major requests" {
@@ -8323,8 +8330,11 @@ test "an unrequested threshold crossing is still serviced at the object boundary
 
     const collections_before = rt.gc.stats.collections;
     rt.collectBeforeObjectAllocation(object_bytes);
+    helpers.finishGcCycles(rt);
     try std.testing.expectEqual(collections_before + 1, rt.gc.stats.collections);
-    try std.testing.expect(!rt.gcPendingForTest());
+    if (comptime !core.gc.trace_stw_enabled) {
+        try std.testing.expect(!rt.gcPendingForTest());
+    }
 }
 
 test "an unrequested threshold crossing is still serviced at a scheduler poll" {
@@ -8341,9 +8351,21 @@ test "an unrequested threshold crossing is still serviced at a scheduler poll" {
     try std.testing.expect(rt.memory.allocated_bytes > rt.gcThreshold());
 
     // `shouldRunMajorAt` takes `over_threshold` recomputed by `pollGC`, so even
-    // the weakest scheduler points collect without a recorded request.
+    // the weakest scheduler points answer without a recorded request. Under
+    // the tracer the answer is now an incremental cycle: the first poll opens
+    // it, subsequent polls run bounded increments, and the poll whose
+    // increment empties the frontier performs the remark and sweep. The
+    // completion counter moves at that last poll, not the first.
     const collections_before = rt.gc.stats.collections;
     _ = try rt.pollGC(null, .safepoint);
+    if (comptime core.gc.trace_stw_enabled) {
+        try std.testing.expect(rt.gc.concurrent.markingActive());
+        var polls: usize = 0;
+        while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+            try std.testing.expect(polls < 10_000);
+            _ = try rt.pollGC(null, .safepoint);
+        }
+    }
     try std.testing.expectEqual(collections_before + 1, rt.gc.stats.collections);
 }
 
@@ -10801,6 +10823,9 @@ test "object allocation threshold triggers runtime cycle removal" {
     survivor_roots.activate(rt);
     defer survivor_roots.deactivate(rt);
 
+    // The create's boundary opened an incremental cycle; the count below is a
+    // post-collection assertion, so reach the poll where it completes.
+    helpers.finishGcCycles(rt);
     try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
 }
@@ -11032,15 +11057,26 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
         // trace prices a collection by what survives, and §1.3 caps
         // cycle peak/live at 1.8, which the growth factor equals at steady
         // state); rc keeps qjs's 1.5x verbatim.
-        const grown = if (comptime core.gc.trace_stw_enabled)
-            boundary_bytes + (boundary_bytes >> 1) + (boundary_bytes >> 2)
-        else
-            boundary_bytes + (boundary_bytes >> 1);
-        const expected = @max(
-            grown,
-            boundary_bytes + core.gc.nursery_headroom_bytes,
-        );
-        try std.testing.expectEqual(expected, rt.gcThreshold());
+        //
+        // The tracer also moves the reset's TIMING: qjs resets at the
+        // pre-object boundary; an incremental cycle resets at the poll whose
+        // increment empties the frontier, from the post-sweep account of that
+        // moment. So under the tracer, drive the cycle to completion and
+        // compute the expectation from the account it actually reset from.
+        if (comptime core.gc.trace_stw_enabled) {
+            helpers.finishGcCycles(rt);
+            const settled = rt.memory.allocated_bytes;
+            const grown = settled + (settled >> 1) + (settled >> 2);
+            const expected = @max(grown, settled + core.gc.nursery_headroom_bytes);
+            try std.testing.expectEqual(expected, rt.gcThreshold());
+        } else {
+            const grown = boundary_bytes + (boundary_bytes >> 1);
+            const expected = @max(
+                grown,
+                boundary_bytes + core.gc.nursery_headroom_bytes,
+            );
+            try std.testing.expectEqual(expected, rt.gcThreshold());
+        }
     }
 }
 
@@ -14181,6 +14217,14 @@ test "a crossed whole-heap threshold is answered by a major, never by a minor" {
     // the defect that let earley-boyer run 13,642 minors and zero majors.
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
+    // The threshold's answer is an incremental major cycle; drive it to its
+    // remark so the completion counter can move. What must NOT move, at any
+    // of these polls, is the minor counter.
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
 
     try std.testing.expectEqual(minors_before, rt.gc.generation.stats.minor_collections);
     try std.testing.expect(rt.gc.stats.collections > collections_before);
@@ -14364,4 +14408,151 @@ test "barrier queue overflow downgrades to a rescan, not to lost children" {
     b.header.meta().flags.mark = false;
     c.header.meta().flags.mark = false;
     owner.header.meta().flags.mark = false;
+}
+
+test "an incremental cycle frees threshold garbage across bounded polls" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    // Precise scans: the dead batch below lingers in native registers, and a
+    // conservative pass would pin it and fail the count.
+    rt.forcePreciseRootScanForTest();
+
+    // A survivor -- pinned, because under precise scanning a Zig local is not
+    // a root -- and a batch of garbage the cycle must find dead.
+    const keeper = try core.Object.create(rt, core.class.ids.object, null);
+    defer keeper.value().free(rt);
+    try rt.gc.pinHeader(&keeper.header);
+    defer rt.gc.unpinHeader(&keeper.header);
+    var index: usize = 0;
+    while (index < 256) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        dead.value().free(rt);
+    }
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    const freed_before = rt.gc.stats.freed_objects;
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    try std.testing.expect(rt.gc.stats.freed_objects - freed_before >= 256);
+    try std.testing.expect(rt.gc.containsHeader(&keeper.header));
+    try std.testing.expect(rt.gc.concurrent.stats.cycles_completed >= 1);
+}
+
+test "a store during an incremental cycle keeps the stored subgraph alive to the remark" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const b = try core.Object.create(rt, core.class.ids.object, null);
+    const c = try core.Object.create(rt, core.class.ids.object, null);
+    const key = try rt.internAtom("edge");
+    defer rt.atoms.free(key);
+    try b.defineOwnProperty(rt, key, core.Descriptor.data(c.value(), true, true, true));
+    c.value().free(rt);
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+
+    // Keep the cycle open across the mutation window.
+    rt.setGCThreshold(std.math.maxInt(usize));
+
+    // Mid-cycle mutation, then retraction: B flows through a store and the
+    // store is undone, so by remark time B's ONLY claim to life is the grey
+    // shade the barrier gave it at the store. Surviving the cycle is the
+    // floating-garbage guarantee -- the strong form of barrier evidence,
+    // since a holder that still referenced B would keep it trivially.
+    try holder.defineOwnProperty(rt, key, core.Descriptor.data(b.value(), true, true, true));
+    b.value().free(rt);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try holder.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    try std.testing.expect(rt.gc.containsHeader(&b.header));
+    try std.testing.expect(rt.gc.containsHeader(&c.header));
+
+    // The float lasts one cycle: a fresh full collection frees both.
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.gc.containsHeader(&b.header));
+    try std.testing.expect(!rt.gc.containsHeader(&c.header));
+}
+
+test "an explicit collection supersedes an open incremental cycle with full precision" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    // Lift the threshold so allocation-boundary polls stop firing; otherwise
+    // a heap this small finishes its cycle inside the loop below, which is
+    // correct behaviour but not the interleaving this test needs to hold open.
+    rt.setGCThreshold(std.math.maxInt(usize));
+
+    // Garbage allocated DURING the cycle is black-published (§8.6): the
+    // cycle, finished, would keep it as floating garbage. "Collect
+    // everything" must not.
+    var index: usize = 0;
+    while (index < 64) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        try std.testing.expect(dead.header.metaConst().flags.mark);
+        dead.value().free(rt);
+    }
+
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    const freed_before = rt.gc.stats.freed_objects;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.stats.freed_objects - freed_before >= 64);
+    try std.testing.expect(rt.gc.concurrent.stats.cycles_aborted >= 1);
+}
+
+test "an urgent poll aborts the open cycle and collects fully" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    rt.setGCThreshold(std.math.maxInt(usize));
+
+    var index: usize = 0;
+    while (index < 64) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        dead.value().free(rt);
+    }
+
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    const freed_before = rt.gc.stats.freed_objects;
+    _ = try rt.forceGC(null);
+    try std.testing.expect(!rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.stats.freed_objects - freed_before >= 64);
 }

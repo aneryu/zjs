@@ -245,6 +245,11 @@ pub const minor_young_threshold: usize = 16 * 1024;
 /// and only the workload knows that. `gc_generation.noteMinorYield` measures it
 /// (see `low_yield_limit`); this constant only decides how much room the young
 /// set gets before the question is asked.
+/// Time budget for one incremental marking increment at a poll. §1.3's major
+/// pause target is 2 ms p99; 1 ms per increment leaves room for the begin and
+/// remark slices, which carry fixed whole-heap work until Phase 3.
+pub const incremental_mark_budget_ns: u64 = 1_000_000;
+
 pub const nursery_headroom_bytes: usize = if (generation_enabled) minor_young_threshold * 96 else 0;
 
 const GenerationState = if (generation_enabled)
@@ -2019,6 +2024,22 @@ pub const Registry = struct {
     /// A failed push is not lost work: the object stays marked and the
     /// queue's overflow flag makes it findable by the remark's rescan of
     /// marked objects.
+    /// Discard an open incremental cycle so a full STW collection can run.
+    ///
+    /// Explicit collections abort rather than join: an object marked during
+    /// the increments that has since died is floating garbage the remark
+    /// would honor, and "collect everything" callers -- which is every
+    /// determinism-sensitive test -- require full precision. The STW
+    /// collector's own `clearMarks` re-derives everything the increments
+    /// knew, so nothing is lost but the work already done.
+    pub fn abortIncrementalCycle(self: *Registry) void {
+        if (comptime !concurrent_enabled) return;
+        if (!self.concurrent.markingActive()) return;
+        self.concurrent.major_marking_active.store(false, .monotonic);
+        self.concurrent_mark_queue.reset();
+        self.concurrent.stats.cycles_aborted += 1;
+    }
+
     pub inline fn shadeForConcurrentMark(self: *Registry, target: *GCObjectHeader) void {
         if (comptime !concurrent_enabled) return;
         self.concurrent.stats.barrier_calls += 1;
@@ -2057,6 +2078,12 @@ pub const Registry = struct {
         // to learn that this workload's young objects do not die. Stop asking
         // until a major changes the answer.
         if (self.generation.minorSuspended()) return false;
+        // §8.6 Prepare: "close admission of a new minor request". While a
+        // major cycle is open every young object is black-published anyway,
+        // so a minor would trace roots to reclaim nothing.
+        if (comptime concurrent_enabled) {
+            if (self.concurrent.markingActive()) return false;
+        }
         return self.generation.stats.young_count >= minor_young_threshold;
     }
 
@@ -2202,6 +2229,15 @@ pub const Registry = struct {
     /// allocation.
     inline fn markPublishedYoung(self: *Registry, header: *GCObjectHeader) void {
         if (comptime !generation_enabled) return;
+        // §8.6 concurrent mark: "new objects are black-published". While a
+        // cycle is open, an object allocated now is alive now, and the tracer
+        // must not have to re-discover that; unmarked it would be condemned by
+        // the remark's sweep if nothing happened to trace a path to it. The
+        // cost when no cycle is open is one predictable branch on a plain
+        // load.
+        if (comptime concurrent_enabled) {
+            if (self.concurrent.markingActive()) header.meta().flags.mark = true;
+        }
         header.meta().flags.young = true;
         self.generation.stats.young_count += 1;
         // This object was just appended at the tail, so if no suffix was open
@@ -2354,6 +2390,36 @@ pub const Registry = struct {
         self.stats.cycle_gc_time_ns +|= result.duration_ns;
         self.stats.freed_objects +|= result.freed_objects;
         self.recordPauseSample(result.duration_ns);
+    }
+
+    /// One STW slice of an incremental major cycle: begin, an increment, or
+    /// the final remark. Each is its own sample in the major ring -- the ring
+    /// answers "how long does this collector stop the world at once", and an
+    /// incremental cycle stops it many times briefly. The per-cycle total is
+    /// accumulated separately for §1.3's cumulative-STW row.
+    pub fn recordMajorSlicePause(self: *Registry, ns: u64) void {
+        self.recordPauseSample(ns);
+        if (comptime concurrent_enabled) self.concurrent.cycle_stw_ns += ns;
+    }
+
+    /// Cycle-completion accounting for an incremental major. Mirrors
+    /// `recordSuccess` minus the ring push: the slices already recorded
+    /// themselves, and pushing the cycle total as one more sample would count
+    /// the same nanoseconds twice.
+    pub fn recordIncrementalCycleSuccess(self: *Registry, result: CollectionResult) void {
+        self.stats.last_failure = .none;
+        self.stats.last_collection_time_ns = result.duration_ns;
+        self.stats.cycle_gc_count +|= 1;
+        self.stats.cycle_gc_time_ns +|= result.duration_ns;
+        self.stats.freed_objects +|= result.freed_objects;
+        if (comptime concurrent_enabled) {
+            const total = self.concurrent.cycle_stw_ns;
+            self.concurrent.stats.last_cycle_stw_ns = total;
+            if (total > self.concurrent.stats.max_cycle_stw_ns) {
+                self.concurrent.stats.max_cycle_stw_ns = total;
+            }
+            self.concurrent.cycle_stw_ns = 0;
+        }
     }
 
     /// Credit a MINOR collection without putting its pause in the major ring.

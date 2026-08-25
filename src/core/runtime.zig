@@ -2774,6 +2774,14 @@ pub const JSRuntime = struct {
         scan: GCRootScan,
     ) gc.CollectionError!gc.CollectionResult {
         self.assertOwnerThread();
+        // An explicit "collect everything" supersedes an open incremental
+        // cycle rather than joining it: the cycle's floating garbage --
+        // objects marked during increments that have since died -- would
+        // survive a finish, and this call's promise is full precision. The
+        // abort discards only work; the fresh trace below re-derives the rest.
+        if (comptime gc.trace_stw_enabled) {
+            if (!self.gc_running) self.gc.abortIncrementalCycle();
+        }
         // `gc_running` covers the major driver. The refcount/cycle phases also
         // invoke allocation and callback boundaries, and a previously queued
         // request must remain pending rather than nest a second collection.
@@ -2847,6 +2855,21 @@ pub const JSRuntime = struct {
         mode: GCPollMode,
     ) gc.CollectionError!gc.CollectionResult {
         self.assertOwnerThread();
+        // An incremental major cycle in progress claims every ordinary poll as
+        // a marking increment (§8.6: "allocation debt causes bounded mutator
+        // mark assist on slow paths/polls"). Urgent polls abort the cycle
+        // instead and fall through to the full STW collector: urgency means
+        // maximum reclaim now, and a finished-early cycle would honor its
+        // floating garbage.
+        if (comptime gc.trace_stw_enabled) {
+            if (self.gc.concurrent.markingActive() and !self.gc_running and self.gc.phase == .none) {
+                if (mode == .urgent) {
+                    self.gc.abortIncrementalCycle();
+                } else {
+                    return self.incrementalMarkPoll(roots, mode);
+                }
+            }
+        }
         // Is the whole-heap threshold already crossed? Asked BEFORE the minor
         // is offered, because a minor cannot answer this question: it does not
         // reach the old generation, which is where a heap over its threshold
@@ -2935,8 +2958,116 @@ pub const JSRuntime = struct {
             gc.RequestReason.allocation_threshold
         else
             gc.RequestReason.manual;
+        // A pure threshold crossing opens an incremental cycle and returns;
+        // the collection's result arrives at the poll whose increment empties
+        // the frontier. Everything with a REQUEST behind it -- host manual,
+        // memory pressure, collection-failed retries, any urgency -- keeps the
+        // STW collector and its complete-at-this-poll semantics: a request is
+        // a promise to someone, and "begun" is not "kept". The threshold has
+        // no requester; it is the collector pacing itself, which is exactly
+        // the case incrementality exists for.
+        if (comptime gc.trace_stw_enabled) {
+            // "Pure threshold" includes the request form: an over-threshold
+            // allocation boundary records `.allocation_threshold`/`.soon`
+            // before any poll can see the crossing, and that request is still
+            // the collector pacing itself, not a promise to a host. Manual,
+            // pressure, failure-retry, and anything urgent keep STW.
+            const self_paced = major_request == null or
+                ((major_request.?.reason orelse .manual) == .allocation_threshold and
+                    major_request.?.urgency != .urgent);
+            if (mode != .urgent and self_paced) {
+                self.gc_running = true;
+                const began = profile.nowNanos();
+                @import("gc_trace_stw.zig").beginIncrementalCycle(self, null, mode.rootScan()) catch |err| {
+                    self.gc_running = false;
+                    self.gc.abortIncrementalCycle();
+                    const mapped: gc.CollectionError = switch (err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        error.PayloadMarkFailed => error.PayloadMarkFailed,
+                    };
+                    self.gc.recordFailure(mapped);
+                    self.gc.requestGC(.collection_failed, .soon);
+                    return mapped;
+                };
+                self.gc_running = false;
+                const ended = profile.nowNanos();
+                self.gc.recordMajorSlicePause(if (ended > began) ended - began else 0);
+                return .{};
+            }
+        }
         self.gc.beginMajorCycle(reason);
         return try self.tryRunObjectCycleRemovalWithValueRoots(null, mode.rootScan());
+    }
+
+    /// One bounded marking increment, and the final remark when the frontier
+    /// runs dry. The safety valve: once the account outgrows the threshold by
+    /// half again, the cycle finishes in this poll regardless of budget --
+    /// one large pause, counted, instead of an unbounded heap.
+    fn incrementalMarkPoll(
+        self: *JSRuntime,
+        roots: ?*const ValueRootFrame,
+        mode: GCPollMode,
+    ) gc.CollectionError!gc.CollectionResult {
+        const stw = @import("gc_trace_stw.zig");
+        self.gc_running = true;
+        defer self.gc_running = false;
+
+        const forced = self.memory.allocated_bytes >
+            std.math.add(usize, self.malloc_gc_threshold, self.malloc_gc_threshold >> 1) catch std.math.maxInt(usize);
+        const began = profile.nowNanos();
+        var frontier_empty = stw.incrementalMarkStep(self, gc.incremental_mark_budget_ns) catch |err| {
+            self.gc.abortIncrementalCycle();
+            const mapped: gc.CollectionError = switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.PayloadMarkFailed => error.PayloadMarkFailed,
+            };
+            self.gc.recordFailure(mapped);
+            self.gc.requestGC(.collection_failed, .soon);
+            return mapped;
+        };
+        if (forced and !frontier_empty) {
+            self.gc.concurrent.stats.forced_finishes += 1;
+            while (!frontier_empty) {
+                frontier_empty = stw.incrementalMarkStep(self, std.math.maxInt(u64)) catch |err| {
+                    self.gc.abortIncrementalCycle();
+                    const mapped: gc.CollectionError = switch (err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        error.PayloadMarkFailed => error.PayloadMarkFailed,
+                    };
+                    self.gc.recordFailure(mapped);
+                    self.gc.requestGC(.collection_failed, .soon);
+                    return mapped;
+                };
+            }
+        }
+        if (!frontier_empty) {
+            const ended = profile.nowNanos();
+            self.gc.recordMajorSlicePause(if (ended > began) ended - began else 0);
+            return .{};
+        }
+
+        // Frontier empty: final remark, weak processing and sweep, one pause.
+        self.memory.samplePeakAtCollection();
+        const freed = stw.finishIncrementalCycle(self, roots, mode.rootScan()) catch |err| {
+            self.gc.abortIncrementalCycle();
+            const mapped: gc.CollectionError = switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.PayloadMarkFailed => error.PayloadMarkFailed,
+            };
+            self.gc.recordFailure(mapped);
+            self.gc.requestGC(.collection_failed, .soon);
+            return mapped;
+        };
+        const ended = profile.nowNanos();
+        const slice = if (ended > began) ended - began else 0;
+        self.gc.recordMajorSlicePause(slice);
+        const result: gc.CollectionResult = .{
+            .freed_objects = freed,
+            .duration_ns = slice,
+        };
+        self.gc.recordIncrementalCycleSuccess(result);
+        self.resetGCThreshold();
+        return result;
     }
 
     /// Host-facing checked form of `pollGC`. Internal engine paths use the
@@ -3277,7 +3408,12 @@ pub const JSRuntime = struct {
         // Bounded is the whole point -- an unbounded assist turns one
         // allocation into an arbitrary pause, which is what a concurrent
         // collector exists to prevent.
-        if (self.gc_running or self.gc.phase != .none or !self.gc.hasPendingMajorRequest()) return;
+        if (self.gc_running or self.gc.phase != .none) return;
+        // While an incremental cycle is open the account is over the (not yet
+        // reset) threshold, so each boundary re-records `.allocation_threshold`
+        // above and this gate stays open -- the boundary drives the cycle's
+        // increments without any cycle-specific plumbing here.
+        if (!self.gc.hasPendingMajorRequest()) return;
         _ = self.pollGC(null, .normal) catch {};
     }
 

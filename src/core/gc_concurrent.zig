@@ -43,6 +43,17 @@ pub const Stats = struct {
     /// Objects handed to the owner thread because the marker could not take
     /// them (mutator-only types, exhausted snapshots).
     bailouts: usize = 0,
+    /// Incremental cycles completed, and the marking increments they took.
+    cycles_completed: usize = 0,
+    cycles_aborted: usize = 0,
+    increments: usize = 0,
+    /// STW slices of the LAST completed cycle: begin + increments + remark,
+    /// summed. §1.3's "cumulative major STW per cycle" row.
+    last_cycle_stw_ns: u64 = 0,
+    max_cycle_stw_ns: u64 = 0,
+    /// The cycle finished early because allocation outran marking past the
+    /// safety valve, forcing a full-drain finish in one pause.
+    forced_finishes: usize = 0,
     /// Request-to-acknowledge latency at safepoints (§1.3's row).
     safepoint_wait_ns_total: u64 = 0,
     safepoint_wait_ns_max: u64 = 0,
@@ -57,6 +68,9 @@ pub const State = struct {
     /// still finish any open critical scope before parking.
     safepoint_requested: std.atomic.Value(bool) = .init(false),
     critical_depth: usize = 0,
+    /// Running STW accumulator for the open cycle; drained into
+    /// `stats.last_cycle_stw_ns` at completion.
+    cycle_stw_ns: u64 = 0,
     stats: Stats = .{},
 
     pub fn markingActive(self: *const State) bool {

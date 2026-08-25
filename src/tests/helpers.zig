@@ -962,3 +962,16 @@ pub fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, 
     };
     try rt.registerBorrowedReferenceHolder(collection);
 }
+
+/// Drive an open incremental major cycle to completion. Threshold-triggered
+/// collections under the tracer begin a cycle and finish it at a later poll;
+/// tests that assert on freed counts after a crossing call this to reach the
+/// poll where the result lands.
+pub fn finishGcCycles(rt: anytype) void {
+    if (comptime !zjs.core.gc.trace_stw_enabled) return;
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+        std.debug.assert(polls < 100_000);
+        _ = rt.pollGC(null, .safepoint) catch return;
+    }
+}
