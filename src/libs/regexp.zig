@@ -628,6 +628,12 @@ const ExecState = struct {
     undo_len: usize,
     undo_end: usize,
     cbuf_end: usize,
+    greedy_pending: bool,
+    greedy_pc: [*]const u8,
+    greedy_cptr: usize,
+    greedy_min: usize,
+    greedy_undo: usize,
+    greedy_bt_len: usize,
 
     fn init(
         s: *REExecContext,
@@ -659,6 +665,12 @@ const ExecState = struct {
             .undo_len = 0,
             .undo_end = s.undo_stack.len,
             .cbuf_end = s.cbuf_end,
+            .greedy_pending = false,
+            .greedy_pc = bc_ptr,
+            .greedy_cptr = 0,
+            .greedy_min = 0,
+            .greedy_undo = 0,
+            .greedy_bt_len = 0,
         };
     }
 
@@ -870,16 +882,65 @@ const ExecState = struct {
         pc: [*]const u8,
         cptr: usize,
         min_cptr: usize,
+        undo_top: usize,
     ) !void {
         try self.checkFrameSpace(safety, 1);
         self.bt_frames[self.bt_len] = .{
             .pc_off = try self.pcOffset(safety, pc),
             .cptr = try compactIndex(safety, cptr),
-            .undo_top = try compactIndex(safety, self.undo_len),
+            .undo_top = try compactIndex(safety, undo_top),
             .min_cptr = try compactIndex(safety, min_cptr),
             .typ = @intFromEnum(REExecStateEnum.greedy_shrink),
         };
         self.bt_len += 1;
+    }
+
+    inline fn armGreedyShrink(
+        self: *ExecState,
+        comptime safety: ExecSafety,
+        pc: [*]const u8,
+        cptr: usize,
+        min_cptr: usize,
+    ) !void {
+        if (self.greedy_pending) {
+            try self.pushGreedyShrink(safety, self.greedy_pc, self.greedy_cptr, self.greedy_min, self.greedy_undo);
+        }
+        self.greedy_pending = true;
+        self.greedy_pc = pc;
+        self.greedy_cptr = cptr;
+        self.greedy_min = min_cptr;
+        self.greedy_undo = self.undo_len;
+        self.greedy_bt_len = self.bt_len;
+    }
+
+    inline fn greedyStepBack(
+        self: *const ExecState,
+        comptime safety: ExecSafety,
+        comptime cbuf_type: CbufType,
+        cptr: usize,
+        min_cptr: usize,
+    ) ?usize {
+        if (comptime cbuf_type == .latin1) return cptr - 1;
+        var prev = cptr;
+        _ = self.getPrevCharAtBounded(safety, cbuf_type, &prev, min_cptr) orelse return null;
+        return prev;
+    }
+
+    inline fn applyGreedyPending(self: *ExecState, comptime safety: ExecSafety, comptime cbuf_type: CbufType) !bool {
+        if (!self.greedy_pending or self.bt_len != self.greedy_bt_len) return false;
+        try self.restoreUndoTo(safety, self.greedy_undo);
+        self.pc = self.greedy_pc;
+        self.cptr = self.greedy_cptr;
+        if (self.cptr > self.greedy_min) {
+            if (self.greedyStepBack(safety, cbuf_type, self.cptr, self.greedy_min)) |prev| {
+                self.greedy_cptr = prev;
+            } else {
+                self.greedy_pending = false;
+            }
+        } else {
+            self.greedy_pending = false;
+        }
+        return true;
     }
 
     inline fn saveCapture(self: *ExecState, comptime safety: ExecSafety, idx: usize, value: usize) !void {
@@ -1201,9 +1262,8 @@ const ExecState = struct {
         }
 
         if (self.cptr > min_pos) {
-            var prev = self.cptr;
-            _ = self.getPrevCharAtBounded(safety, cbuf_type, &prev, min_pos) orelse return error.BytecodeCorrupt;
-            try self.pushGreedyShrink(safety, continuation_pc, prev, min_pos);
+            const prev = self.greedyStepBack(safety, cbuf_type, self.cptr, min_pos) orelse return error.BytecodeCorrupt;
+            try self.armGreedyShrink(safety, continuation_pc, prev, min_pos);
         }
         return true;
     }
@@ -1266,6 +1326,7 @@ fn lreExecBacktrack(
                 .invalid => return error.BytecodeCorrupt,
                 .match => return true,
                 .lookahead_match => {
+                    st.greedy_pending = false;
                     while (true) {
                         if (st.bt_len == 0) return error.BytecodeCorrupt;
                         const frame = try st.popFrameKeepUndo(safety);
@@ -1276,6 +1337,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .negative_lookahead_match => {
+                    st.greedy_pending = false;
                     while (true) {
                         if (st.bt_len == 0) return error.BytecodeCorrupt;
                         const frame = try st.popFrameRestore(safety);
@@ -1366,15 +1428,6 @@ fn lreExecBacktrack(
                     const bitmap = st.pc;
                     st.pc += class8_bitmap_len;
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    if (comptime cbuf_type == .latin1) {
-                        const b = st.cbuf[st.cptr];
-                        const in_class = b < class8_char_count and class8BitmapContains(bitmap, b);
-                        if (opcode == .class8) {
-                            if (!in_class) break :dispatch_once;
-                        } else if (in_class) break :dispatch_once;
-                        st.cptr += 1;
-                        continue :main;
-                    }
                     const c = st.getCharUnchecked(cbuf_type);
                     const matched = class8CodePointMatches(bitmap, c);
                     if (opcode == .class8) {
@@ -1661,15 +1714,19 @@ fn lreExecBacktrack(
             continue :main;
         }
 
+        if (try st.applyGreedyPending(safety, cbuf_type)) {
+            try st.s.pollTimeout();
+            continue :main;
+        }
+
         while (true) {
             if (st.bt_len == 0) return false;
             const frame = try st.popFrameRestore(safety);
             const typ = try ExecState.frameType(safety, frame);
             if (typ == .lookahead) continue;
             if (typ == .greedy_shrink and st.cptr > frame.min_cptr) {
-                var prev = st.cptr;
-                if (st.getPrevCharAtBounded(safety, cbuf_type, &prev, frame.min_cptr)) |_| {
-                    try st.pushGreedyShrink(safety, st.pc, prev, frame.min_cptr);
+                if (st.greedyStepBack(safety, cbuf_type, st.cptr, frame.min_cptr)) |prev| {
+                    try st.pushGreedyShrink(safety, st.pc, prev, frame.min_cptr, st.undo_len);
                 }
             }
             break;
