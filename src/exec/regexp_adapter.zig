@@ -198,3 +198,57 @@ test "JavaScript RegExp adapter greedy class8 loop backtracks" {
         try std.testing.expectEqual(@as(usize, 3), hit.match.end);
     }
 }
+
+test "JavaScript RegExp adapter fuses latin1 char runs" {
+    {
+        var compiled = try compile(std.testing.allocator, "://", "");
+        defer compiled.deinit(std.testing.allocator);
+        try std.testing.expect(latin1SeqInBytecode(compiled.bytecode, "://"));
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "http://x" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 7), hit.match.end);
+
+        const units = [_]u16{ 'h', 't', 't', 'p', ':', '/', '/', 'x' };
+        const wide = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .utf16 = &units }, 0);
+        try std.testing.expect(wide.result == .match);
+        try std.testing.expectEqual(@as(usize, 4), wide.match.start);
+        try std.testing.expectEqual(@as(usize, 7), wide.match.end);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "ab+c", "");
+        defer compiled.deinit(std.testing.allocator);
+        try std.testing.expect(!latin1SeqInBytecode(compiled.bytecode, "ab"));
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "abbbc" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 5), hit.match.end);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "hello", "");
+        defer compiled.deinit(std.testing.allocator);
+        try std.testing.expect(latin1SeqInBytecode(compiled.bytecode, "hello"));
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "say hello!" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 9), hit.match.end);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "abc", "i");
+        defer compiled.deinit(std.testing.allocator);
+        try std.testing.expect(!latin1SeqInBytecode(compiled.bytecode, "abc"));
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxAbCy" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 2), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 5), hit.match.end);
+    }
+}
+
+fn latin1SeqInBytecode(bytecode: []const u8, literal: []const u8) bool {
+    if (literal.len < 2 or literal.len > 255) return false;
+    var i: usize = 0;
+    while (i + 2 + literal.len <= bytecode.len) : (i += 1) {
+        if (bytecode[i + 1] == literal.len and std.mem.eql(u8, bytecode[i + 2 ..][0..literal.len], literal)) return true;
+    }
+    return false;
+}

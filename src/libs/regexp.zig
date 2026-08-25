@@ -153,6 +153,7 @@ const REOPCodeEnum = enum(u8) {
     scan_until_char8,
     loop_class8_g,
     loop_not_class8_g,
+    chars8,
 };
 
 //=== Bytecode layout & shared tables ======================================
@@ -1202,6 +1203,23 @@ const ExecState = struct {
         return false;
     }
 
+    inline fn matchChars8(self: *ExecState, comptime cbuf_type: CbufType, lit: [*]const u8, n: u8) bool {
+        const len: usize = n;
+        if (self.cptr >= self.cbuf_end or self.cbuf_end - self.cptr < len) return false;
+        if (comptime cbuf_type == .latin1) {
+            if (!std.mem.eql(u8, self.cbuf[self.cptr..][0..len], lit[0..len])) return false;
+            self.cptr += len;
+            return true;
+        }
+        const units = self.cbufUtf16();
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            if (units[self.cptr + i] != lit[i]) return false;
+        }
+        self.cptr += len;
+        return true;
+    }
+
     inline fn class8Consumes(bitmap: [*]const u8, inverted: bool, code_point: u21) bool {
         const in_class = class8CodePointMatches(bitmap, code_point);
         return if (inverted) !in_class else in_class;
@@ -1363,6 +1381,14 @@ fn lreExecBacktrack(
                         c = lreCanonicalize(c, st.s.is_unicode);
                     }
                     if (expected != @as(u32, c)) break :dispatch_once;
+                    continue :main;
+                },
+                .chars8 => {
+                    const n = if (comptime safety == .trusted) st.takeU8(.trusted) else try st.takeU8(.checked);
+                    if (n == 0) return error.BytecodeCorrupt;
+                    try st.ensurePc(safety, st.pc, n);
+                    if (!st.matchChars8(cbuf_type, st.pc, n)) break :dispatch_once;
+                    st.pc += n;
                     continue :main;
                 },
                 .split_goto_first, .split_next_first => {
@@ -1804,7 +1830,7 @@ fn checkedAllocCount(header: REBytecodeHeader) !usize {
 }
 
 inline fn decodeOp(byte: u8) ?REOPCodeEnum {
-    if (byte > @intFromEnum(REOPCodeEnum.loop_not_class8_g)) return null;
+    if (byte > @intFromEnum(REOPCodeEnum.chars8)) return null;
     return @enumFromInt(byte);
 }
 
@@ -2272,6 +2298,7 @@ const REParseState = struct {
     @"opaque": ?*anyopaque = null,
     check_stack_overflow: ?StackOverflowCheck = null,
     group_names: std.ArrayList(u8) = .empty,
+    last_latin1_seq_start: ?usize = null,
 
     fn lreCheckStackOverflow(self: *const REParseState, alloca_size: usize) bool {
         const check = self.check_stack_overflow orelse return false;
@@ -2423,12 +2450,21 @@ const REParseState = struct {
         if (code[prelude + 6] != opByte(.goto_)) return;
         if (@as(i32, @bitCast(std.mem.readInt(u32, code[prelude + 7 ..][0..4], .little))) != -11) return;
         if (code[pattern_start] != opByte(.save_start) or code[pattern_start + 1] != 0) return;
-        if (code[first_atom] != opByte(.char)) return;
+        const needle: u8 = needle: {
+            if (code[first_atom] == opByte(.char)) {
+                const needle_u16 = std.mem.readInt(u16, code[first_atom + 1 ..][0..2], .little);
+                if (needle_u16 > 0xff) return;
+                break :needle @intCast(needle_u16);
+            }
+            if (code[first_atom] == opByte(.chars8)) {
+                if (code[first_atom + 1] == 0) return;
+                break :needle code[first_atom + 2];
+            }
+            return;
+        };
 
-        const needle_u16 = std.mem.readInt(u16, code[first_atom + 1 ..][0..2], .little);
-        if (needle_u16 > 0xff) return;
         code[prelude + 5] = opByte(.scan_until_char8);
-        code[prelude + 6] = @intCast(needle_u16);
+        code[prelude + 6] = needle;
         std.mem.writeInt(u32, code[prelude + 7 ..][0..4], @bitCast(@as(i32, -11)), .little);
     }
 
@@ -2469,6 +2505,7 @@ const REParseState = struct {
             const term_start = self.byte_code.items.len;
             const atom = try self.reParseTerm(is_backward_dir);
             try self.parseQuantifier(atom);
+            if (!is_backward_dir) self.tryFoldTrailingLatin1Char();
             if (is_backward_dir) try self.moveTermToStart(start, term_start, self.byte_code.items.len);
         }
     }
@@ -3908,6 +3945,47 @@ const REParseState = struct {
             self.byte_code.items[index + count .. index + count + old_len - index],
             self.byte_code.items[index..old_len],
         );
+        if (self.last_latin1_seq_start) |seq_start| {
+            if (seq_start >= index) self.last_latin1_seq_start = seq_start + count;
+        }
+    }
+
+    fn tryFoldTrailingLatin1Char(self: *REParseState) void {
+        const code = self.byte_code.items;
+        if (code.len < 3 or code[code.len - 3] != opByte(.char)) {
+            self.last_latin1_seq_start = null;
+            return;
+        }
+        const last_cp = std.mem.readInt(u16, code[code.len - 2 ..][0..2], .little);
+        if (last_cp > 0xff) {
+            self.last_latin1_seq_start = null;
+            return;
+        }
+        const char_start = code.len - 3;
+        const seq_start = self.last_latin1_seq_start orelse {
+            self.last_latin1_seq_start = char_start;
+            return;
+        };
+        if (seq_start < char_start and code[seq_start] == opByte(.chars8)) {
+            const n = code[seq_start + 1];
+            if (n < 255 and seq_start + 2 + @as(usize, n) == char_start) {
+                self.byte_code.items[seq_start + 1] = n + 1;
+                self.byte_code.items[char_start] = @intCast(last_cp);
+                self.byte_code.shrinkRetainingCapacity(code.len - 2);
+                return;
+            }
+        } else if (seq_start + 3 == char_start and code[seq_start] == opByte(.char)) {
+            const prev_cp = std.mem.readInt(u16, code[seq_start + 1 ..][0..2], .little);
+            if (prev_cp <= 0xff) {
+                self.byte_code.items[seq_start] = opByte(.chars8);
+                self.byte_code.items[seq_start + 1] = 2;
+                self.byte_code.items[seq_start + 2] = @intCast(prev_cp);
+                self.byte_code.items[seq_start + 3] = @intCast(last_cp);
+                self.byte_code.shrinkRetainingCapacity(code.len - 2);
+                return;
+            }
+        }
+        self.last_latin1_seq_start = char_start;
     }
 
     fn moveTermToStart(self: *REParseState, start: usize, term_start: usize, term_end: usize) !void {
@@ -4082,6 +4160,11 @@ fn reNeedCheckAdvAndCaptureInit(code: []const u8) CompileError!AtomAnalysis {
             .char, .char_i, .char32, .char32_i, .dot, .any, .space, .not_space, .class8, .not_class8 => {
                 need_check_advance = false;
             },
+            .chars8 => {
+                if (pos + 2 > code.len) return error.InvalidPattern;
+                len += @as(usize, code[pos + 1]);
+                need_check_advance = false;
+            },
             .loop_class8_g, .loop_not_class8_g => {
                 if (pos + 2 > code.len) return error.InvalidPattern;
                 if (code[pos + 1] != 0) need_check_advance = false;
@@ -4145,6 +4228,10 @@ fn reComputeRegisterCount(code: []u8) CompileError!u8 {
                 if (pos + 2 > code.len) return error.InvalidPattern;
                 len += @as(usize, code[pos + 1]);
             },
+            .chars8 => {
+                if (pos + 2 > code.len) return error.InvalidPattern;
+                len += @as(usize, code[pos + 1]);
+            },
             else => {},
         }
         if (pos + len > code.len) return error.InvalidPattern;
@@ -4161,6 +4248,7 @@ fn opFixedSize(op: REOPCodeEnum) ?usize {
         .dot, .any, .space, .not_space, .line_start, .line_start_m, .line_end, .line_end_m, .match, .lookahead_match, .negative_lookahead_match, .word_boundary, .word_boundary_i, .not_word_boundary, .not_word_boundary_i, .prev => 1,
         .class8, .not_class8 => 1 + class8_bitmap_len,
         .scan_until_char8 => 6,
+        .chars8 => 2,
         .loop_class8_g, .loop_not_class8_g => 2 + class8_bitmap_len,
         .goto_, .split_goto_first, .split_next_first, .lookahead, .negative_lookahead => 5,
         .loop, .set_i32 => 6,
