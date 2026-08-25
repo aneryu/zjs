@@ -10364,7 +10364,20 @@ pub const Object = extern struct {
         var current_capacity = old_capacity;
         var grew_properties = false;
         if (old_len + 1 > old_capacity) {
-            const next_capacity = shape.propertyCapacityForNeeded(old_len + 1);
+            // `Shape.prop_size` is the object's capacity record, so the buffer
+            // has to come out equal to it, not merely large enough for the
+            // count. An adopted shape can already claim more than
+            // `propertyCapacityForNeeded` would allocate -- the empty-root
+            // cache matches on `prop_count == 0` alone, so it can hand back a
+            // shape another owner grew in place -- and
+            // `reservePropertyAppend` only ever grows `prop_size`, never
+            // shrinks it to what this caller allocated. Starting them equal is
+            // what keeps them equal: both sides double from the same base on
+            // every later append.
+            const next_capacity = @max(
+                shape.propertyCapacityForNeeded(old_len + 1),
+                @as(usize, self.shape_ref.prop_size),
+            );
             const next = try rt.allocRuntime(property.Entry, next_capacity);
             errdefer rt.memory.free(property.Entry, next);
             // The dominant grow is a fresh object's FIRST property (old_len ==
