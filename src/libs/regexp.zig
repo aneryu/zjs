@@ -3307,6 +3307,7 @@ const REParseState = struct {
         }
         if (greedy and max == int32_max and (min == 0 or min == 1) and !analysis.need_check_advance) {
             if (try self.tryFoldGreedyClass8Loop(quant_atom_start, @intCast(min))) return;
+            if (try self.tryFoldGreedyChar8Loop(quant_atom_start, @intCast(min))) return;
         }
         try self.wrapGenericQuantifier(quant_atom_start, min, max, greedy, analysis.need_check_advance);
     }
@@ -3319,6 +3320,20 @@ const REParseState = struct {
         try self.insertBytes(atom_start + 1, 1);
         self.byte_code.items[atom_start] = opByte(if (op == .class8) .loop_class8_g else .loop_not_class8_g);
         self.byte_code.items[atom_start + 1] = min;
+        return true;
+    }
+
+    fn tryFoldGreedyChar8Loop(self: *REParseState, atom_start: usize, min: u8) !bool {
+        if (self.byte_code.items.len - atom_start != 3) return false;
+        if (decodeOp(self.byte_code.items[atom_start]) != .char) return false;
+        const cp = std.mem.readInt(u16, self.byte_code.items[atom_start + 1 ..][0..2], .little);
+        if (cp >= class8_char_count) return false;
+        try self.insertBytes(atom_start + 3, 1 + class8_bitmap_len - 2);
+        self.byte_code.items[atom_start] = opByte(.loop_class8_g);
+        self.byte_code.items[atom_start + 1] = min;
+        var bitmap: [class8_bitmap_len]u8 = @splat(0);
+        setClass8BitmapBit(&bitmap, @intCast(cp));
+        @memcpy(self.byte_code.items[atom_start + 2 ..][0..class8_bitmap_len], &bitmap);
         return true;
     }
 

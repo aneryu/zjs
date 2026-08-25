@@ -238,4 +238,14 @@ test "JavaScript RegExp adapter matches latin1 literals and quantified chars" {
         try std.testing.expectEqual(@as(usize, 2), hit.match.start);
         try std.testing.expectEqual(@as(usize, 5), hit.match.end);
     }
+    {
+        var compiled = try compile(std.testing.allocator, "a+b", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "aaab" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.end);
+        const miss = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "aaa" }, 0);
+        try std.testing.expect(miss.result == .no_match);
+    }
 }
