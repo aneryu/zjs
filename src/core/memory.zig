@@ -109,12 +109,50 @@ pub const SmallObjectSlab = struct {
     pub const arena_size: usize = 4 * 1024;
     pub const max_size: usize = 512;
     const slab_alignment: std.mem.Alignment = .@"8";
+    /// Arenas are aligned to their own size, so `ptr & ~(arena_size - 1)` is
+    /// the arena that owns any interior pointer.
+    ///
+    /// This is what lets the collector resolve a conservative stack candidate
+    /// with arithmetic instead of a hash lookup. An arena holds one size class
+    /// with its header at the base, so once the base is known the owning block
+    /// is `(ptr - base - header) / block_size`, and the block's first byte is
+    /// the GC metadata prefix that says whether it is a live GC object at all.
+    /// Without this alignment none of that is reachable from an interior
+    /// pointer and every published object has to be inserted into a side table
+    /// instead -- which is what the address registry was, at 76% of raytrace's
+    /// runtime. The arena is a whole page either way, so alignment costs the
+    /// backing allocator nothing it was not already paying.
+    pub const arena_alignment: std.mem.Alignment = .fromByteUnits(arena_size);
     const free_nil: u16 = std.math.maxInt(u16);
     const block_sizes = [_]usize{
         16,  24,  32,  40,  48,  56,  64,  72,
         80,  88,  96,  104, 112, 120, 128, 144,
         160, 176, 192, 208, 224, 240, 256, 288,
         320, 352, 384, 416, 448, 480, 512,
+    };
+
+    /// Every arena alive right now, for an observer installed after the fact.
+    ///
+    /// The runtime allocates before its GC registry exists, so by the time the
+    /// observer can be installed some arenas are already serving objects.
+    /// Without this they would never enter the arena set and every object in
+    /// them would be invisible to the conservative scanner -- a use-after-free
+    /// rather than a leak, and one that only shows up when a stack candidate
+    /// happens to name an early object.
+    pub fn forEachArena(self: *SmallObjectSlab, context: *anyopaque, visit: *const fn (*anyopaque, usize) void) void {
+        for (&self.arenas) |head| {
+            var node = head;
+            while (node) |arena| {
+                node = arena.next;
+                visit(context, @intFromPtr(arena));
+            }
+        }
+    }
+
+    pub const ArenaObserver = struct {
+        ctx: *anyopaque,
+        on_create: *const fn (ctx: *anyopaque, base: usize) void,
+        on_release: *const fn (ctx: *anyopaque, base: usize) void,
     };
 
     const BlockHeader = extern struct {
@@ -132,7 +170,18 @@ pub const SmallObjectSlab = struct {
         block_size_idx: u8,
     };
 
+    /// Set on every live arena, checked before an address masked out of a
+    /// conservative candidate is believed.
+    ///
+    /// The observer set below is the real authority -- a stray word can point
+    /// at an unmapped page, and reading a magic out of it would fault rather
+    /// than return false. This is the second check, against a word that points
+    /// into some other mapped allocation that happens to share a page base
+    /// with nothing at all.
+    pub const arena_magic: u32 = 0x5a4a5341;
+
     const Arena = struct {
+        magic: u32 = arena_magic,
         next: ?*Arena = null,
         prev: ?*Arena = null,
         free_next: ?*Arena = null,
@@ -154,6 +203,11 @@ pub const SmallObjectSlab = struct {
 
     arenas: [block_sizes.len]?*Arena = @splat(null),
     free_arenas: [block_sizes.len]?*Arena = @splat(null),
+    /// Told when an arena is created or released, so the collector can keep a
+    /// set of valid arena bases. Arena lifetime, not object lifetime: at 4 KiB
+    /// per arena against ~64-byte objects this is roughly two orders of
+    /// magnitude less traffic than registering each published object.
+    arena_observer: ?ArenaObserver = null,
 
     pub inline fn canUse(byte_count: usize, alignment: std.mem.Alignment) bool {
         return classIndex(byte_count, alignment) != null;
@@ -229,6 +283,13 @@ pub const SmallObjectSlab = struct {
         const arena = arenaFromBlock(header, block_idx, block_size);
 
         std.debug.assert(index < block_sizes.len);
+        // Same reason as the arena-init stamp: a freed block must not read as
+        // a live GC object. `recordHeapFreeWithBytes` clears `heap_accounted`
+        // on the way here, but it returns early when the recorded size is
+        // zero, and relying on every GC free path to have done it makes the
+        // collector's answer depend on a chain of invariants rather than on
+        // the state of the block. One byte store closes it here instead.
+        header.block_size_idx = @intCast(index);
         std.debug.assert(block_idx < arena.block_count);
         std.debug.assert(arena.block_size_idx == index);
         std.debug.assert(arena.used_blocks != 0);
@@ -253,7 +314,9 @@ pub const SmallObjectSlab = struct {
     noinline fn releaseEmptyArena(self: *SmallObjectSlab, backing: *const std.mem.Allocator, index: usize, arena: *Arena) void {
         self.removeArena(index, arena);
         self.removeFreeArena(index, arena);
-        backing.rawFree(arenaAllocation(arena), slab_alignment, @returnAddress());
+        if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(arena));
+        arena.magic = 0;
+        backing.rawFree(arenaAllocation(arena), arena_alignment, @returnAddress());
     }
 
     pub fn deinit(self: *SmallObjectSlab, backing: std.mem.Allocator) void {
@@ -261,7 +324,9 @@ pub const SmallObjectSlab = struct {
             var arena = head.*;
             while (arena) |node| {
                 arena = node.next;
-                backing.rawFree(arenaAllocation(node), slab_alignment, @returnAddress());
+                if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(node));
+                node.magic = 0;
+                backing.rawFree(arenaAllocation(node), arena_alignment, @returnAddress());
             }
         }
         self.* = .{};
@@ -275,7 +340,8 @@ pub const SmallObjectSlab = struct {
         const block_count = (arena_size - arena_header_size) / block_size;
         std.debug.assert(block_count > 0 and block_count <= free_nil);
         const alloc_size = arena_header_size + block_count * block_size;
-        const storage_ptr = backing.rawAlloc(alloc_size, slab_alignment, @returnAddress()) orelse return error.OutOfMemory;
+        const storage_ptr = backing.rawAlloc(alloc_size, arena_alignment, @returnAddress()) orelse return error.OutOfMemory;
+        std.debug.assert(@intFromPtr(storage_ptr) % arena_size == 0);
         const arena: *Arena = @ptrCast(@alignCast(storage_ptr));
         arena.* = .{
             .block_size_idx = @intCast(index),
@@ -286,9 +352,19 @@ pub const SmallObjectSlab = struct {
         while (block_idx < arena.block_count) : (block_idx += 1) {
             const header = blockHeaderAt(arena, block_idx, block_size);
             header.index_or_next = if (block_idx + 1 == arena.block_count) free_nil else block_idx + 1;
+            // Stamp the class now, which also clears the GC accounting bits
+            // that share this byte with it. Arenas come from recycled backing
+            // memory, so a block that has never been allocated would otherwise
+            // carry whatever its previous life left here -- and the collector
+            // reads exactly this byte to decide whether an address masked out
+            // of a conservative candidate is a live GC object. A stale
+            // `heap_accounted` bit in a never-allocated block makes the tracer
+            // walk garbage as if it were an object.
+            header.block_size_idx = @intCast(index);
         }
         self.addArenaList(index, arena);
         self.addFreeArena(index, arena);
+        if (self.arena_observer) |observer| observer.on_create(observer.ctx, @intFromPtr(arena));
         return arena;
     }
 
@@ -345,6 +421,38 @@ pub const SmallObjectSlab = struct {
 
     inline fn arenaBlocks(arena: *Arena) [*]u8 {
         return @as([*]u8, @ptrCast(arena)) + arena_header_size;
+    }
+
+    /// Resolve an interior pointer to the user address of the block holding it,
+    /// given the arena base it was masked out of.
+    ///
+    /// This is the whole reason arenas are self-aligned. `base` must have come
+    /// from `addr & ~(arena_size - 1)` AND been confirmed as a live arena by
+    /// the caller's own set -- the magic check here is a second filter against
+    /// a mapped-but-unrelated page, not a substitute for the first, because a
+    /// stray candidate can name an unmapped address where reading the magic
+    /// would fault.
+    ///
+    /// Returns the USER pointer (past the 8-byte block header), which for a GC
+    /// tenant is its `gc.Header`; the header itself is the metadata prefix, so
+    /// a candidate pointing at the prefix and one pointing at the object both
+    /// land on the same block and resolve identically.
+    pub fn userPtrWithinArena(base: usize, addr: usize) ?[*]u8 {
+        const arena: *Arena = @ptrFromInt(base);
+        if (arena.magic != arena_magic) return null;
+        const blocks = @intFromPtr(arenaBlocks(arena));
+        if (addr < blocks) return null;
+        const block_size = block_sizes[arena.block_size_idx];
+        const index = (addr - blocks) / block_size;
+        if (index >= arena.block_count) return null;
+        return @as([*]u8, @ptrFromInt(blocks + index * block_size)) + block_header_size;
+    }
+
+    /// Payload bytes a block of this arena hands out, for range checks against
+    /// a resolved object.
+    pub fn arenaPayloadBytes(base: usize) usize {
+        const arena: *Arena = @ptrFromInt(base);
+        return block_sizes[arena.block_size_idx] - block_header_size;
     }
 
     inline fn blockHeaderAt(arena: *Arena, block_idx: u16, block_size: usize) *BlockHeader {

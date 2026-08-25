@@ -1345,6 +1345,10 @@ pub const JSRuntime = struct {
         rt.memory.setLimit(options.memory_limit);
         rt.gc = gc.Registry.init(&rt.memory, options.gc_policy);
         rt.gc.initLists();
+        // Only now: the observer stores a pointer into `rt.gc`, so it has to be
+        // installed after the registry reaches its stable field address, for
+        // the same reason `activateRuntimeAccounting` waits above.
+        rt.gc.observeSlabArenas(&rt.memory.small_slab);
         rt.atoms = atom.AtomTable.init(&rt.memory);
         rt.atoms.runtime = rt;
         try rt.classes.initInPlace(&rt.memory, &rt.atoms);

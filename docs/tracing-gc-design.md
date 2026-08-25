@@ -895,6 +895,44 @@ prefix, body, and one-past-end, and are never dereferenced as guessed
 headers. x86_64 SysV, x86_64 Windows, AArch64 Windows, and AArch64 macOS
 are explicit unimplemented branches.
 
+#### Candidate validation by arena geometry
+
+Slab arenas are 4 KiB and aligned to their own size, so `addr & ~(arena_size-1)`
+names the arena that owns any interior pointer. An arena serves one size class
+with its header at the base, so the owning block is
+`(addr - blocks_base) / block_size`, and a block's first eight bytes are the GC
+metadata prefix. `alloc_info.heap_accounted` -- set immediately before the old
+registry insert, cleared by the free path -- is the same "live GC object"
+answer the registry was storing. Publication therefore records nothing.
+
+What the collector still keeps is a set of arena bases, because masking alone
+cannot be trusted: a conservative candidate can name an unmapped address, and
+reading a magic out of it would fault rather than return false. That set changes
+on arena lifetime, not object lifetime -- 4 KiB per entry against ~64-byte
+objects, so about two orders of magnitude less traffic, and not a churn pattern
+that degenerates. It is JSC's `MarkedBlock` set without JSC's blocks.
+
+Two consequences are worth stating because they were both mistakes first.
+
+The answer now depends on the state of memory rather than on an explicit
+registration, so every block must read as what it is. A block that has never
+been allocated has to say so: arenas come from recycled backing memory, and
+`addArena` originally left the class byte untouched, so a never-allocated block
+could carry a stale `heap_accounted` bit from that memory's previous life and
+the tracer would walk garbage as an object. Both `addArena` and the slab free
+path now stamp the class byte, which clears the GC bits in the same store.
+
+And resolution is deliberately wider than the interval the occupant table
+recorded: it accepts any address in the owning block, including the slack
+between the object's end and its size-class boundary, and it probes `addr - 1`
+so that one-past-end still names the object it is one past. Both directions
+retain rather than free, which is the only direction a conservative scanner may
+err in.
+
+Objects past the slab's 512-byte class ceiling, or over-aligned, have a
+standalone prefix and no arena; they keep the occupant table, which is why it
+still exists.
+
 #### The address registry is the compatibility-heap stand-in, and it is the cost
 
 Two `AutoHashMapUnmanaged`s -- `by_header` and a page-radix `pages` -- are

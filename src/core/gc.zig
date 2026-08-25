@@ -2060,29 +2060,78 @@ pub const Registry = struct {
         return std.heap.smp_allocator;
     }
 
+    /// Subscribe the address registry to slab arena lifetime.
+    ///
+    /// Arenas are `arena_size`-aligned, so a conservative candidate resolves to
+    /// its owning block by masking; all the registry needs is to know which
+    /// masked bases are real arenas. Installing this is what lets
+    /// `registerLiveAddress` stop inserting per published object.
+    pub fn observeSlabArenas(self: *Registry, slab: *memory.SmallObjectSlab) void {
+        if (comptime !address_registry_enabled) return;
+        // Arenas that already exist: the runtime allocates before its registry
+        // does, so the observer is always installed into a non-empty slab.
+        slab.forEachArena(self, struct {
+            fn call(ctx: *anyopaque, base: usize) void {
+                const registry: *Registry = @ptrCast(@alignCast(ctx));
+                registry.address_registry.noteArenaCreated(addressRegistryAllocator(), base);
+            }
+        }.call);
+        slab.arena_observer = .{
+            .ctx = self,
+            .on_create = struct {
+                fn call(ctx: *anyopaque, base: usize) void {
+                    const registry: *Registry = @ptrCast(@alignCast(ctx));
+                    registry.address_registry.noteArenaCreated(addressRegistryAllocator(), base);
+                }
+            }.call,
+            .on_release = struct {
+                fn call(ctx: *anyopaque, base: usize) void {
+                    const registry: *Registry = @ptrCast(@alignCast(ctx));
+                    registry.address_registry.noteArenaReleased(base);
+                }
+            }.call,
+        };
+    }
+
     inline fn registerLiveAddress(self: *Registry, header: *GCObjectHeader, bytes: usize, tracked: bool) void {
         if (comptime !address_registry_enabled) return;
         if (!tracked) return;
+        // Slab-backed objects need no entry: their arena is registered, the
+        // mask finds it, and the `heap_accounted` bit set just above this call
+        // is the same "live GC object" answer the table was storing. Only
+        // standalone-prefix allocations -- past the slab's 512-byte class
+        // ceiling, or over-aligned -- are unreachable that way.
+        if (!header.meta().alloc_info.standalone) {
+            self.markPublishedYoung(header);
+            return;
+        }
         self.address_registry.insert(addressRegistryAllocator(), header, bytes) catch {
             self.address_registry.stats.failed_inserts += 1;
         };
-        // Generation shares this lifetime: an object is young from the moment
-        // it is published until a collection lets it survive.
-        // A freshly published object is young. One bit in a byte the
-        // allocator already writes, rather than a hash-map insert per
-        // allocation.
-        if (comptime generation_enabled) {
-            header.meta().flags.young = true;
-            self.generation.stats.young_count += 1;
-            // This object was just appended at the tail, so if no suffix was
-            // open it starts here.
-            if (self.young_head == null) self.young_head = header;
-        }
+        self.markPublishedYoung(header);
+    }
+
+    /// Generation shares publication's lifetime: an object is young from the
+    /// moment it is published until a collection lets it survive. One bit in a
+    /// byte the allocator already writes, rather than a hash-map insert per
+    /// allocation.
+    inline fn markPublishedYoung(self: *Registry, header: *GCObjectHeader) void {
+        if (comptime !generation_enabled) return;
+        header.meta().flags.young = true;
+        self.generation.stats.young_count += 1;
+        // This object was just appended at the tail, so if no suffix was open
+        // it starts here.
+        if (self.young_head == null) self.young_head = header;
     }
 
     inline fn unregisterLiveAddress(self: *Registry, header: *GCObjectHeader) void {
         if (comptime !address_registry_enabled) return;
-        self.address_registry.remove(addressRegistryAllocator(), header);
+        // Mirror of `registerLiveAddress`: nothing was inserted for a
+        // slab-backed object, and `heap_accounted` is cleared by the free path
+        // that brought us here, so the mask stops resolving it on its own.
+        if (header.meta().alloc_info.standalone) {
+            self.address_registry.remove(addressRegistryAllocator(), header);
+        }
         if (comptime generation_enabled) {
             self.generation.forget(header);
             // The young set is a SUFFIX of `gc_obj_list` anchored at

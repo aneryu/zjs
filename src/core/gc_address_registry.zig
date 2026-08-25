@@ -11,6 +11,9 @@
 const std = @import("std");
 
 const gc = @import("gc.zig");
+const memory = @import("memory.zig");
+
+const Slab = memory.SmallObjectSlab;
 
 pub const enabled = gc.address_registry_enabled;
 
@@ -42,6 +45,8 @@ pub const Hit = union(Kind) {
 };
 
 pub const Stats = struct {
+    /// Slab arenas currently resolvable by mask.
+    arenas_live: usize = 0,
     /// Tombstone compactions. Expect roughly `unregister_calls / (capacity/4)`;
     /// a count of zero on a churning workload means the budget never fired.
     rehashes: usize = 0,
@@ -73,6 +78,23 @@ pub const Table = struct {
     /// would have happened anyway.
     bounds_lo: usize = std.math.maxInt(usize),
     bounds_hi: usize = 0,
+    /// Live slab arena bases (`Slab.arena_size`-aligned, so one 4 KiB page).
+    ///
+    /// This is the structure that replaces per-object registration. An arena
+    /// holds one size class with its header at the base, so an interior
+    /// pointer masked down to its arena resolves to an owning block by
+    /// arithmetic, and that block's first eight bytes are the GC metadata
+    /// prefix whose `heap_accounted` bit says whether it is a live GC object.
+    /// Nothing has to be recorded when an object is published.
+    ///
+    /// The set is still needed because masking alone cannot be trusted: a
+    /// conservative candidate can name an unmapped address, and reading a
+    /// magic out of it would fault rather than return false. But it changes on
+    /// arena lifetime, not object lifetime -- at 4 KiB per arena against
+    /// ~64-byte objects, roughly two orders of magnitude less traffic, and it
+    /// is not a churn pattern that degenerates.
+    arenas: std.AutoHashMapUnmanaged(usize, void) = .empty,
+
     /// Removals since `by_header` and `pages` were last compacted.
     ///
     /// Zig's open-addressed map marks a removed slot as a TOMBSTONE and adds
@@ -96,7 +118,89 @@ pub const Table = struct {
     /// appeared. Fixing the collection policy is what exposed this.
     removes_since_rehash: usize = 0,
 
+    /// A slab arena has been created. Its blocks become resolvable by mask.
+    pub fn noteArenaCreated(self: *Table, allocator: std.mem.Allocator, base: usize) void {
+        self.arenas.put(allocator, base, {}) catch {
+            // An arena missing from the set is invisible to the conservative
+            // scanner, which is a use-after-free rather than a leak, so it is
+            // counted where `--gc-stats` shows it rather than swallowed.
+            self.stats.failed_inserts += 1;
+            return;
+        };
+        if (base < self.bounds_lo) self.bounds_lo = base;
+        if (base + Slab.arena_size > self.bounds_hi) self.bounds_hi = base + Slab.arena_size;
+        self.stats.arenas_live += 1;
+    }
+
+    /// A slab arena is being returned to the backing allocator.
+    pub fn noteArenaReleased(self: *Table, base: usize) void {
+        if (self.arenas.remove(base)) self.stats.arenas_live -= 1;
+    }
+
+    /// Resolve a candidate through the arena geometry.
+    ///
+    /// Probes `addr` and `addr - 1`: a pointer one past the end of the object
+    /// in the preceding block lands on this block's first byte, and that is a
+    /// real reference to the preceding object. Reporting both is the same
+    /// choice `resolveAny`'s greatest-`lo` rule and JSC's ConservativeRoots
+    /// make, in the direction that retains rather than frees.
+    ///
+    /// Accepts an address anywhere in the owning block, including the slack
+    /// between the object's end and the size class boundary. That is wider
+    /// than the interval the occupant table recorded, and wider in the
+    /// conservative direction.
+    fn forEachGcObjectInArena(
+        self: *Table,
+        addr: usize,
+        context: *anyopaque,
+        visit: *const fn (*anyopaque, *gc.Header) void,
+    ) usize {
+        if (self.arenas.count() == 0) return 0;
+        var hits: usize = 0;
+        var reported: usize = 0;
+        var probe = addr;
+        while (true) {
+            const base = probe & ~(Slab.arena_size - 1);
+            if (self.arenas.contains(base)) resolve: {
+                const user = Slab.userPtrWithinArena(base, probe) orelse break :resolve;
+                const header: *gc.Header = @ptrCast(@alignCast(user));
+                if (!header.metaConst().alloc_info.heap_accounted) break :resolve;
+                if (reported == @intFromPtr(user)) break :resolve;
+                reported = @intFromPtr(user);
+                hits += 1;
+                visit(context, header);
+            }
+            if (probe != addr or addr == 0) break;
+            probe = addr - 1;
+        }
+        return hits;
+    }
+
+    /// Same geometry as `forEachGcObjectInArena`, single winner, for the
+    /// `resolveAny` shape. Only the block containing `addr` itself.
+    fn resolveInArena(self: *Table, addr: usize) ?*gc.Header {
+        if (self.arenas.count() == 0) return null;
+        // `addr` first, then `addr - 1`. Containment beats one-past-end, which
+        // is the same tie-break `resolveAny`'s greatest-`lo` rule makes: a
+        // pointer that is inside object B and also one past object A is a
+        // reference to B. Only when nothing owns `addr` itself does the
+        // preceding block get to claim it.
+        if (self.resolveExactlyInArena(addr)) |header| return header;
+        if (addr == 0) return null;
+        return self.resolveExactlyInArena(addr - 1);
+    }
+
+    fn resolveExactlyInArena(self: *Table, addr: usize) ?*gc.Header {
+        const base = addr & ~(Slab.arena_size - 1);
+        if (!self.arenas.contains(base)) return null;
+        const user = Slab.userPtrWithinArena(base, addr) orelse return null;
+        const header: *gc.Header = @ptrCast(@alignCast(user));
+        if (!header.metaConst().alloc_info.heap_accounted) return null;
+        return header;
+    }
+
     pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
+        self.arenas.deinit(allocator);
         var iterator = self.pages.iterator();
         while (iterator.next()) |entry| {
             entry.value_ptr.occupants.deinit(allocator);
@@ -236,8 +340,14 @@ pub const Table = struct {
     ) usize {
         self.stats.lookup_calls += 1;
         if (addr < self.bounds_lo or addr >= self.bounds_hi) return 0;
-        const bucket = self.pages.getPtr(addr >> page_shift) orelse return 0;
-        var hits: usize = 0;
+        var hits: usize = self.forEachGcObjectInArena(addr, context, visit);
+        // The occupant table now holds only what the arena geometry cannot
+        // reach: standalone-prefix allocations (over the slab's 512-byte class
+        // ceiling or over-aligned) and, in shadow builds, strings and ropes.
+        const bucket = self.pages.getPtr(addr >> page_shift) orelse {
+            if (hits != 0) self.stats.lookup_hits += 1;
+            return hits;
+        };
         for (bucket.occupants.items) |occupant| {
             if (addr < occupant.lo or addr >= occupant.hi) continue;
             if (occupant.kind != .gc_object) continue;
@@ -251,6 +361,10 @@ pub const Table = struct {
     pub fn resolveAny(self: *Table, addr: usize) ?Hit {
         self.stats.lookup_calls += 1;
         if (addr < self.bounds_lo or addr >= self.bounds_hi) return null;
+        if (self.resolveInArena(addr)) |header| {
+            self.stats.lookup_hits += 1;
+            return .{ .gc_object = header };
+        }
         const bucket = self.pages.getPtr(addr >> page_shift) orelse return null;
         // One-past-end of object A can equal the metadata prefix of object B.
         // Census snapshot lookup picked the last range with `lo <= addr`
@@ -271,8 +385,18 @@ pub const Table = struct {
         return null;
     }
 
+    /// Is this a live, published GC object as far as candidate validation is
+    /// concerned? Answers for arena-resolvable objects too, not just the ones
+    /// the occupant table still holds.
     pub fn containsHeader(self: *const Table, header: *const gc.Header) bool {
-        return self.by_header.contains(@intFromPtr(header));
+        const addr = @intFromPtr(header);
+        const base = addr & ~(Slab.arena_size - 1);
+        if (self.arenas.contains(base)) {
+            if (Slab.userPtrWithinArena(base, addr)) |user| {
+                if (@intFromPtr(user) == addr and header.metaConst().alloc_info.heap_accounted) return true;
+            }
+        }
+        return self.by_header.contains(addr);
     }
 
     fn rollbackPages(

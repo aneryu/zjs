@@ -7724,11 +7724,18 @@ test "address registry tracks published objects and interior pointers" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    try std.testing.expectEqual(rt.gc.liveCount(), rt.gc.address_registry.stats.live);
+    // `stats.live` counts occupant-table entries, and a slab-backed object no
+    // longer makes one: it is resolved from its arena's geometry instead. The
+    // invariant worth asserting is not the table's size but that every live
+    // object still resolves, which this test does object by object below.
     try std.testing.expectEqual(@as(usize, 0), rt.gc.address_registry.stats.failed_inserts);
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     defer obj.value().free(rt);
+    // A bare context installs its builtins lazily, so this is the allocation
+    // that first needs a slab arena; asserting before it would assert about
+    // the fixture rather than about the registry.
+    try std.testing.expect(rt.gc.address_registry.stats.arenas_live > 0);
     const header = &obj.header;
     const bytes = obj.allocationSize(rt);
     const occupant = core.gc_address_registry.Table.occupantFor(header, bytes);
@@ -7740,14 +7747,19 @@ test "address registry tracks published objects and interior pointers" {
     if (bytes > 1) {
         try std.testing.expectEqual(header, rt.gc.address_registry.resolve(@intFromPtr(header) + bytes / 2));
     }
-    try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(occupant.hi));
+    // NOT asserted: that `occupant.hi` resolves to nothing. Arena resolution
+    // accepts any address inside the owning block, including the slack between
+    // the object's end and its size-class boundary, so an address just past
+    // the object can still name it. That is wider than the interval the
+    // occupant table recorded and wider in the retaining direction, which is
+    // the only direction a conservative scanner may err in.
     try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(0x10));
 
     var iterator = rt.gc.objectIterator();
     while (iterator.next()) |live| {
         try std.testing.expectEqual(live, rt.gc.address_registry.resolve(@intFromPtr(live)));
+        try std.testing.expect(rt.gc.address_registry.containsHeader(live));
     }
-    try std.testing.expectEqual(rt.gc.liveCount(), rt.gc.address_registry.stats.live);
 }
 
 test "address registry page radix covers a multi-page allocation" {
@@ -7793,7 +7805,9 @@ test "address registry lookup cost stays with page occupants not live N" {
     }
     const register_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds() - register_start;
 
-    try std.testing.expectEqual(rt.gc.liveCount(), rt.gc.address_registry.stats.live);
+    // See the note in the test above: publication no longer writes a table
+    // entry for a slab-backed object, so the census to check is that all 2048
+    // resolve, which the lookup loop below asserts exactly.
     try std.testing.expectEqual(@as(usize, 0), rt.gc.address_registry.stats.failed_inserts);
 
     const lookups: usize = 50_000;
@@ -7823,10 +7837,11 @@ test "address registry lookup cost stays with page occupants not live N" {
     std.debug.print(
         \\
         \\address registry (2048 objects, 50000 lookups):
-        \\  live={d} pages={d} register_ns={d} hit_ns={d} miss_ns={d}
+        \\  arenas={d} live={d} pages={d} register_ns={d} hit_ns={d} miss_ns={d}
         \\  per-register ~{d}ns  per-hit ~{d}ns  per-miss ~{d}ns
         \\
     , .{
+        rt.gc.address_registry.stats.arenas_live,
         rt.gc.address_registry.stats.live,
         rt.gc.address_registry.stats.pages,
         register_u,
