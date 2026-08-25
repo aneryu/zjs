@@ -557,7 +557,7 @@ pub const Object = extern struct {
         // detached. Publish first (the shell's raw owner keeps it alive), then
         // install the open-cell -> generator edges so registry publication
         // retains its fresh-header rc==1 contract.
-        self.attachGeneratorOpenVarRefOwners();
+        self.attachGeneratorOpenVarRefOwners(rt);
     }
 
     /// Error-path counterpart for a shell that has not been registered yet.
@@ -3095,6 +3095,10 @@ pub const Object = extern struct {
             .hint = hint,
             .method_kind = method_kind,
         };
+        // The resource list lives in this object's payload, so the stack owns
+        // both values.
+        rt.gc.generationalBarrier(&self.header, resource_value.cycleMarkHeader());
+        rt.gc.generationalBarrier(&self.header, method.cycleMarkHeader());
     }
 
     pub fn disposableStackHasAsyncHint(self: *const Object) bool {
@@ -3183,6 +3187,10 @@ pub const Object = extern struct {
         const value_slot = self.varRefValueSlot();
         const old_value = value_slot.*;
         value_slot.* = next_value;
+        // The slot lives in this object's own var_ref payload, so the object is
+        // the owner. (Not to be confused with `VarRef.setVarRefValue`, which
+        // stores into a cell and takes the barrier there.)
+        rt.gc.generationalBarrier(&self.header, next_value.cycleMarkHeader());
         if (old_value) |stored| stored.free(rt);
     }
 
@@ -4380,12 +4388,12 @@ pub const Object = extern struct {
 
     /// Attach every open cell in this generator's parked frame to the object
     /// that owns its backing storage. Idempotent across repeated suspensions.
-    pub fn attachGeneratorOpenVarRefOwners(self: *Object) void {
+    pub fn attachGeneratorOpenVarRefOwners(self: *Object, rt: *JSRuntime) void {
         const execution = self.generatorPayloadPtr().execution orelse return;
         const owner = self.value();
         for (execution.suspended.storage.frame.open_var_refs) |maybe_cell| {
             const cell = maybe_cell orelse continue;
-            cell.attachOpenOwner(owner);
+            cell.attachOpenOwner(rt, owner);
         }
     }
 
@@ -6208,7 +6216,7 @@ pub const Object = extern struct {
         rt.memory.destroy(VarRefPayload, payload);
     }
 
-    fn promisePayload(self: *Object) ?*PromisePayload {
+    pub fn promisePayload(self: *Object) ?*PromisePayload {
         if (self.flags.class_payload_kind != .promise) return null;
         return @ptrCast(@alignCast(self.u.payload.?));
     }
@@ -7557,6 +7565,11 @@ pub const Object = extern struct {
             } else {
                 self.prop_values[index].slot = .{ .data = materialized };
             }
+            // Materialising a lazily installed builtin turns an inert
+            // placeholder into a real edge from an object that has typically
+            // been old since realm setup (`Math.floor` is exactly this) to a
+            // function created right now.
+            rt.gc.generationalBarrier(&self.header, materialized.cycleMarkHeader());
             rt.shapes.updatePropertyFlags(self.shape_ref, index, old_flags.withKind(.data).bits());
             destroyPropertySlot(rt, atom_id, old_flags, old_slot);
             return materialized.dup();
@@ -7577,6 +7590,7 @@ pub const Object = extern struct {
         } else {
             self.prop_values[index].slot = .{ .var_ref = cell };
         }
+        rt.gc.generationalBarrier(&self.header, &cell.header);
         rt.shapes.updatePropertyFlags(self.shape_ref, index, old_flags.withKind(.var_ref).bits());
         destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         return cell.varRefValue().dup();
@@ -7591,6 +7605,7 @@ pub const Object = extern struct {
         } else {
             self.prop_values[index].slot = .{ .var_ref = cell.dupCell() };
         }
+        rt.gc.generationalBarrier(&self.header, &cell.header);
         rt.shapes.updatePropertyFlags(self.shape_ref, index, old_flags.withKind(.var_ref).bits());
         destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         return cell.varRefValue().dup();
@@ -9392,6 +9407,10 @@ pub const Object = extern struct {
         } else {
             entry.slot = .{ .data = next_value };
         }
+        // Replacing a property value on a long-lived object is an
+        // old-to-young edge; the non-refcounted fast arms above store
+        // primitives and need none.
+        rt.gc.generationalBarrier(&self.header, next_value.cycleMarkHeader());
         destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
         return true;
@@ -9408,6 +9427,7 @@ pub const Object = extern struct {
         if (atom_id == atom.ids.Private_brand) return false;
         const old = stored.*;
         stored.* = new_value;
+        rt.gc.generationalBarrier(&self.header, new_value.cycleMarkHeader());
         old.free(rt);
         return true;
     }
@@ -10158,6 +10178,27 @@ pub const Object = extern struct {
         }
     }
 
+    /// Remember this object as the owner of whatever a property slot holds.
+    ///
+    /// Every kind but `auto_init` carries a traced reference, and a slot write
+    /// on a long-lived object is an old-to-young edge the minor cannot
+    /// rediscover -- its sticky marks stop the trace at the owner. Callers that
+    /// build a slot and publish it must go through here; the shape transition
+    /// takes its own separate barrier for the Shape.
+    inline fn barrierPropertySlot(self: *Object, rt: *JSRuntime, flags: property.Flags, slot: property.Slot) void {
+        if (comptime !gc.generation_enabled) return;
+        if (flags.deleted) return;
+        switch (flags.kind) {
+            .data => rt.gc.generationalBarrier(&self.header, slot.data.cycleMarkHeader()),
+            .accessor => {
+                if (slot.accessor.getter) |g| rt.gc.generationalBarrier(&self.header, g);
+                if (slot.accessor.setter) |st| rt.gc.generationalBarrier(&self.header, st);
+            },
+            .var_ref => rt.gc.generationalBarrier(&self.header, &slot.var_ref.header),
+            .auto_init => {},
+        }
+    }
+
     inline fn addProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
         const slot = slotFromDescriptor(&rt.atoms, atom_id, desc);
         try self.appendPreparedPropertyEntry(rt, atom_id, flagsFromDescriptor(desc), slot);
@@ -10410,6 +10451,13 @@ pub const Object = extern struct {
             self.prop_values[old_len] = .{ .slot = slot };
         }
         slot_owned = false;
+        // A new property on a long-lived object is an old-to-young edge like
+        // any other store. The shape transition below takes its own barrier for
+        // the Shape; this one is for whatever the slot holds. The two
+        // pointer-shaped kinds (accessor functions, a bound cell) matter as
+        // much as a plain value: a lazily installed native accessor on a
+        // built-in prototype is exactly this shape.
+        self.barrierPropertySlot(rt, entry_flags, slot);
 
         var inserted = true;
         errdefer if (inserted) {
@@ -10510,7 +10558,14 @@ pub const Object = extern struct {
     fn ensurePropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {
         const old_capacity = self.propertyStorageCapacity();
         if (needed <= old_capacity) return;
-        const next_capacity = shape.propertyCapacityForNeeded(needed);
+        // Same invariant as the append path: the buffer must come out equal to
+        // whatever `prop_size` the shape already claims, because that number is
+        // the object's capacity record and `reserveProperties` below will not
+        // shrink it back down to what was allocated here.
+        const next_capacity = @max(
+            shape.propertyCapacityForNeeded(needed),
+            @as(usize, self.shape_ref.prop_size),
+        );
         const next = try rt.allocRuntime(property.Entry, next_capacity);
         errdefer rt.memory.free(property.Entry, next);
         const used = self.shape_ref.prop_count;
@@ -10595,6 +10650,7 @@ pub const Object = extern struct {
             self.prop_values[index] = .{ .slot = next_slot };
         }
         next_owned = false;
+        self.barrierPropertySlot(rt, next_flags, next_slot);
         rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
         destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);

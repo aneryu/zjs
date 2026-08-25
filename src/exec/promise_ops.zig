@@ -504,6 +504,10 @@ pub fn appendPromiseReaction(rt: *core.JSRuntime, promise: *core.Object, reactio
     std.debug.assert(len < capacity_slot.*);
     slot.*.ptr[len] = reaction.dup();
     slot.* = slot.*.ptr[0 .. len + 1];
+    // The reaction list lives in the promise's payload, so the promise is the
+    // owner. A pending promise is usually the older of the two -- it is what
+    // the subscriber is attaching to.
+    rt.gc.generationalBarrier(&promise.header, reaction.cycleMarkHeader());
 }
 
 pub fn promiseReactionRecord(
@@ -812,11 +816,17 @@ pub fn promiseSettleValue(
     const old_result = result_slot.*;
     result_slot.* = next_result;
     next_result_owned = false;
+    // Settling writes straight into the payload rather than through
+    // `Object.setPromiseResult`, so it takes the barrier itself: a promise
+    // that has been pending for a while is old, and the value it settles with
+    // was just produced.
+    ctx.runtime.gc.generationalBarrier(&promise.header, next_result.cycleMarkHeader());
     promise.promiseIsRejectedSlot().* = rejected;
     if (old_result) |stored| stored.free(ctx.runtime);
     if (next_reaction_arg) |reaction_arg| {
         const old_reaction_arg = reaction_arg_slot.*;
         reaction_arg_slot.* = reaction_arg;
+        ctx.runtime.gc.generationalBarrier(&promise.header, reaction_arg.cycleMarkHeader());
         next_reaction_arg = null;
         if (old_reaction_arg) |stored| stored.free(ctx.runtime);
     }

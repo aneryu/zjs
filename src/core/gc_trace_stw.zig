@@ -21,6 +21,7 @@ const object_gc = @import("object_gc.zig");
 const object_mod = @import("object.zig");
 const object_payloads = @import("object_payloads.zig");
 const runtime_mod = @import("runtime.zig");
+const property = @import("property.zig");
 const shape = @import("shape.zig");
 const var_ref_mod = @import("var_ref.zig");
 const function_bytecode_mod = @import("../bytecode.zig").function_bytecode;
@@ -795,17 +796,65 @@ const Collector = struct {
     fn auditCondemnedYoung(self: *Collector, doomed_items: []const *gc.Header) void {
         const Audit = struct {
             doomed: []const *gc.Header,
+            rt: *JSRuntime,
             owner_kind: gc.GcKind = .object,
             owner_class: u32 = 0,
+            owner_ptr: *gc.Header = undefined,
             owner_young: bool = false,
+            owner_remembered: bool = false,
             fn hit(a: *@This(), h: ?*gc.Header) void {
                 const child = h orelse return;
                 for (a.doomed) |d| {
                     if (d != child) continue;
                     const c: *Object = @alignCast(@fieldParentPtr("header", child));
-                    std.debug.print("MINOR-AUDIT owner={s}/class{d} young={} -> child class={d}/{s}\n", .{
-                        @tagName(a.owner_kind), a.owner_class, a.owner_young,
+                    if (a.owner_kind == .object) {
+                        const o: *Object = @alignCast(@fieldParentPtr("header", a.owner_ptr));
+                        var where: []const u8 = "unknown";
+                        var hit_atom: u32 = 0;
+                        if (o.promisePayload()) |pp| {
+                            if (pp.result) |v| if (v.cycleMarkHeader() == child) {
+                                where = "promise.result";
+                            };
+                            if (pp.reaction_callback) |v| if (v.cycleMarkHeader() == child) {
+                                where = "promise.reaction_callback";
+                            };
+                            if (pp.reaction_arg) |v| if (v.cycleMarkHeader() == child) {
+                                where = "promise.reaction_arg";
+                            };
+                            for (pp.reactions) |v| {
+                                if (v.cycleMarkHeader() == child) where = "promise.reactions";
+                            }
+                        }
+                        if (o.isFastArray()) {
+                            for (o.fastArrayValues()) |v| {
+                                if (v.cycleMarkHeader() == child) where = "dense";
+                            }
+                        }
+                        for (o.propertyEntries(), 0..) |*e, pi| {
+                            const pf = property.Flags.fromBits(o.shape_ref.props()[pi].flags);
+                            if (pf.deleted) continue;
+                            switch (pf.kind) {
+                                .data => if (e.slot.data.cycleMarkHeader() == child) {
+                                    where = "prop_data";
+                                    hit_atom = o.shape_ref.props()[pi].atom_id;
+                                },
+                                .accessor => {
+                                    if (e.slot.accessor.getter) |g| if (g == child) {
+                                        where = "prop_getter";
+                                    };
+                                    if (e.slot.accessor.setter) |st| if (st == child) {
+                                        where = "prop_setter";
+                                    };
+                                },
+                                else => {},
+                            }
+                        }
+                        std.debug.print("MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d}\n", .{ o.class_id, @tagName(o.flags.class_payload_kind), where, a.rt.atoms.name(@intCast(hit_atom)) orelse "?", o.shape_ref.prop_count });
+                    }
+                    std.debug.print("MINOR-AUDIT owner={s}/ptr{x} owner_young={} owner_remembered={} -> child class={d}/{s} child_young={} child_marked={}\n", .{
+                        @tagName(a.owner_kind), @intFromPtr(a.owner_ptr), a.owner_young, a.owner_remembered,
                         c.class_id,             @tagName(c.flags.class_payload_kind),
+                        child.metaConst().flags.young, child.metaConst().flags.mark,
                     });
                     return;
                 }
@@ -831,7 +880,7 @@ const Collector = struct {
             pub fn visitWeakCollectionEntry(_: *@This(), _: *object_payloads.WeakCollectionEntry) void {}
             pub fn visitFinalizationCell(_: *@This(), _: *object_payloads.FinalizationRegistryCell) void {}
         };
-        var audit = Audit{ .doomed = doomed_items };
+        var audit = Audit{ .doomed = doomed_items, .rt = self.rt };
         var it = self.rt.gc.objectIterator();
         while (it.next()) |h| {
             var condemned = false;
@@ -843,7 +892,15 @@ const Collector = struct {
             }
             if (condemned) continue;
             audit.owner_kind = h.metaConst().flags.kind;
+            audit.owner_ptr = h;
             audit.owner_young = h.metaConst().flags.young;
+            audit.owner_remembered = blk: {
+                var rit = self.rt.gc.generation.rememberedIterator();
+                while (rit.next()) |addr| {
+                    if (addr.* == @intFromPtr(h)) break :blk true;
+                }
+                break :blk false;
+            };
             switch (h.metaConst().flags.kind) {
                 .object => {
                     const owner: *Object = @alignCast(@fieldParentPtr("header", h));
@@ -857,7 +914,7 @@ const Collector = struct {
                 },
                 .var_ref => {
                     const cell: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", h));
-                    audit.owner_class = 0;
+                    audit.owner_class = if (cell.is_open) 1 else 2;
                     audit.visitValue(&cell.value);
                 },
                 .function_bytecode => {

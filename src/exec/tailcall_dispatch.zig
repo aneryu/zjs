@@ -2894,6 +2894,10 @@ pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
             std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
             const cell = vm.var_refs_base[idx];
             value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
+            // The cell is the owner of this slot, and it long outlives the
+            // frame doing the store; `VarRef.setVarRefValue` takes the same
+            // barrier, but these handlers write `cell.pvalue` directly.
+            vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
             return cont(pc + advance, sp - 1, var_buf, vm);
         }
     }.h;
@@ -2929,6 +2933,8 @@ pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
     // operand slot — so no stack shrink is required before free (same GC-window
     // reasoning as opPutVarRef; contrast op_drop_fast, which frees the slot).
     value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
+    // See the barrier in the opPutVarRef family: the cell owns this slot.
+    vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
     return cont(pc + 3, sp - 1, var_buf, vm);
 }
 
@@ -2960,6 +2966,10 @@ pub fn opSetVarRef(comptime idx_src: VarRefIdx) Handler {
             std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
             const cell = vm.var_refs_base[idx];
             value_slot.replaceBorrowed(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
+            // The cell is the owner of this slot, and it long outlives the
+            // frame doing the store; `VarRef.setVarRefValue` takes the same
+            // barrier, but these handlers write `cell.pvalue` directly.
+            vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
             return cont(pc + advance, sp, var_buf, vm);
         }
     }.h;

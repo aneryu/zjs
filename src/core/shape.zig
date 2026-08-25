@@ -557,6 +557,12 @@ pub const Registry = struct {
         if (shape.proto == proto) return null;
         const old_proto = shape.proto;
         shape.proto = proto;
+        // The Shape owns the prototype edge, so the Shape is the barrier's
+        // owner. Every other write to `proto` is on a freshly created or
+        // relocated Shape, where the owner is young and the barrier is a
+        // no-op; this one retargets a Shape that may have been old for a long
+        // time, and the minor's sticky marks stop the trace at it.
+        if (proto) |p| self.gc_registry.generationalBarrier(&shape.header, &p.header);
         const old_hash = shape.hash;
         shape.hash = initialHash(proto);
         for (shape.props()[0..shape.prop_count]) |prop| {

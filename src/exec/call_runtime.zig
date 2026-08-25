@@ -3491,6 +3491,9 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
                 const next = value.dup();
                 const old_value = stored.*;
                 stored.* = next;
+                // Initialising a binding in a long-lived environment object is
+                // an old-to-young edge like any other property store.
+                rt.gc.generationalBarrier(&env.header, next.cycleMarkHeader());
                 old_value.free(rt);
                 return true;
             },

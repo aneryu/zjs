@@ -169,7 +169,7 @@ pub const VarRef = struct {
     /// object is retained here exactly once. This mirrors QuickJS get_var_ref's
     /// async_func retain and makes the open-cell edge `cell -> frame owner`,
     /// never the borrowed `cell -> *pvalue`.
-    pub fn attachOpenOwner(self: *VarRef, owner: JSValue) void {
+    pub fn attachOpenOwner(self: *VarRef, rt: anytype, owner: JSValue) void {
         std.debug.assert(self.is_open);
         std.debug.assert(owner.isObject());
         if (!self.value.isUndefined()) {
@@ -177,6 +177,9 @@ pub const VarRef = struct {
             return;
         }
         self.value = owner.dup();
+        // An open cell adopting its parked-frame owner is the same kind of
+        // store as `close`: a traced object gaining an edge.
+        rt.gc.generationalBarrier(&self.header, owner.cycleMarkHeader());
     }
 
     pub fn close(self: *VarRef, rt: anytype) void {
@@ -184,6 +187,11 @@ pub const VarRef = struct {
         const closed_value = self.pvalue.*.dup();
         const open_owner = self.value;
         self.value = closed_value;
+        // Closing copies the binding out of the dying frame and into the cell,
+        // which is a store into a traced object exactly like `setVarRefValue`
+        // -- and the cell is typically the older of the two, since it outlives
+        // the frame whose value it is capturing.
+        rt.gc.generationalBarrier(&self.header, closed_value.cycleMarkHeader());
         self.pvalue = &self.value;
         self.is_open = false;
         open_owner.free(rt);
