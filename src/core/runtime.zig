@@ -2840,17 +2840,25 @@ pub const JSRuntime = struct {
                 defer self.gc_running = false;
                 const started = profile.nowNanos();
                 if (@import("gc_trace_stw.zig").collectMinor(self, roots, mode.rootScan()) catch null) |freed| {
+                    self.gc.stats.collections += 1;
+                    const ended = profile.nowNanos();
+                    const elapsed = if (ended > started) ended - started else 0;
+                    // Tracked separately from the major distribution: a minor
+                    // is judged on being short, and averaging it with
+                    // whole-heap pauses hides exactly that.
+                    //
+                    // Counted whether or not it reclaimed anything. A minor
+                    // that frees nothing is the EXPENSIVE case, not a
+                    // non-event: it walked its roots and every remembered
+                    // owner and came back empty. Pricing those at zero made
+                    // the panel report `minor pause mean 0 ns, max 0 ns` for a
+                    // run that performed 320 of them, which is precisely the
+                    // shape anyone optimising the minor needs to see.
+                    self.gc.generation.stats.pause_ns_total += elapsed;
+                    if (elapsed > self.gc.generation.stats.pause_ns_max) {
+                        self.gc.generation.stats.pause_ns_max = elapsed;
+                    }
                     if (freed > 0) {
-                        self.gc.stats.collections += 1;
-                        const ended = profile.nowNanos();
-                        const elapsed = if (ended > started) ended - started else 0;
-                        // Tracked separately from the major distribution: a
-                        // minor is judged on being short, and averaging it
-                        // with whole-heap pauses hides exactly that.
-                        self.gc.generation.stats.pause_ns_total += elapsed;
-                        if (elapsed > self.gc.generation.stats.pause_ns_max) {
-                            self.gc.generation.stats.pause_ns_max = elapsed;
-                        }
                         const result: gc.CollectionResult = .{
                             .freed_objects = freed,
                             .duration_ns = elapsed,

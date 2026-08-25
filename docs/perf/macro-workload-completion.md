@@ -36,7 +36,27 @@ Per-benchmark rather than combined-only, because a failure that names itself is
 worth far more than one that says "the suite died"; and combined last, because
 some defects only appear once the heap is large enough.
 
-## Octane 2.0, refcounting vs tracing (2026-08-25, at `d1c5a60e`)
+## Status
+
+Closed. Both defects were a fast path publishing into a slot in place and
+bypassing the funnel where the barriers live:
+
+- `op_put_field`'s hit arm — `obj.prop = child` on an object that already has
+  the property, i.e. an established one, so old-to-young routinely. This was
+  the segfaults (splay, box2d, pdfjs) and the two `TypeError`s (raytrace,
+  typescript).
+- `Object.setFunctionBytecodeValue` — a closure gaining its FunctionBytecode.
+  This was every `InvalidBuiltinRegistry`.
+
+`macro-check` is 9/9 in both collectors. All twenty-two collector-attributable
+Octane failures are closed; `richards.ngs`, `richards.tiny-js` and
+`richards.ucode` still fail, identically under refcounting, on missing language
+surface.
+
+The table below is kept as the record of what the gate caught, not as current
+state.
+
+## Octane 2.0, refcounting vs tracing (2026-08-25, at `d1c5a60e`, BEFORE the fixes)
 
 Vendored at `/home/aneryu/javascript-zoo/bench`. ReleaseFast, unpinned, one run
 each — this is a completion record, not a measurement, so run-to-run score
