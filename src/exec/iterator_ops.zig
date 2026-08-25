@@ -1157,6 +1157,12 @@ pub fn arrayIteratorPrototypeFromContext(
     if (slot < ctx.class_prototypes.len) {
         const value = object.value();
         ctx.class_prototypes[slot] = value.dup();
+        // Raw slot store, not `setClassPrototype`: barrier it here. This runs
+        // the first time anything iterates an Array, which is arbitrarily long
+        // after the realm went old, and once the host create-ref is consumed
+        // the realm is a heap object rather than a root -- so the minor's
+        // sticky mark stops at it and the fresh prototype is condemned.
+        ctx.runtime.gc.generationalBarrier(&ctx.header, &object.header);
         value.free(ctx.runtime);
     }
     return object;
@@ -3195,6 +3201,13 @@ fn iteratorHelperSetInnerFromIterator(
     const old_inner_next = inner_next_slot.*;
     iterator_slot.* = next_inner_iterator;
     inner_next_slot.* = next_inner_next;
+    // Raw slot stores rather than `setOptionalValueSlot`, so they do not get
+    // that funnel's barrier. This is the one iterator-payload write that is not
+    // a one-time initialisation: `flatMap` re-points a long-lived helper at each
+    // inner iterator the outer sequence yields, which is an old-to-young edge
+    // every time the mapper returns a fresh iterable.
+    ctx.runtime.gc.generationalBarrier(&helper.header, next_inner_iterator.cycleMarkHeader());
+    ctx.runtime.gc.generationalBarrier(&helper.header, next_inner_next.cycleMarkHeader());
     if (old_inner_iterator) |stored| stored.free(ctx.runtime);
     if (old_inner_next) |stored| stored.free(ctx.runtime);
 }

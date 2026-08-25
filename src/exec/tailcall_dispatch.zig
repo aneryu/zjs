@@ -3825,16 +3825,19 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         const old_value = loadValueAsIntPair(slot);
         const value = loadValueAsIntPair(&(sp - 1)[0]);
         storeValueAsIntPair(slot, value); // consumes the stack's ref on value
-        // `obj.prop = child` on the hot arm. This writes the property slot in
-        // place and never reaches the `setOrDefineOwnDataProperty*` funnels
-        // where the other property barriers live, so it takes its own -- the
-        // same relationship `op_put_array_el` has to the dense-array setters.
-        // Receivers here are by definition ones that already have the property,
-        // i.e. established objects, so this is the old-to-young direction
-        // routinely: every large object-graph benchmark failed without it.
+        // This arm writes the property slot itself rather than going through
+        // any of the `setOrDefineOwnDataProperty*` funnels, so it needs its own
+        // barrier: `node.left = child` on a long-lived object is an old-to-young
+        // edge, and the minor's sticky marks stop the trace at the owner.
+        // (`op_put_array_el`'s dense arm above carries the same barrier for the
+        // same reason.) Receivers reaching this arm already have the property,
+        // so they are established objects and this is the old-to-young
+        // direction routinely -- every large object-graph benchmark failed
+        // without it. Comptime-gated so the refcounting build emits nothing,
+        // not even the receiver re-extraction.
         if (comptime core.gc.generation_enabled) {
-            if (object_ops.objectFromValue(receiver)) |owner| {
-                rt.gc.generationalBarrier(&owner.header, value.cycleMarkHeader());
+            if (object_ops.objectFromValueTrustedExpression(receiver)) |owner| {
+                rt.gc.generationalBarrier(&owner.header, (sp - 1)[0].cycleMarkHeader());
             }
         }
         if (old_value.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {

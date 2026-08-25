@@ -1658,6 +1658,11 @@ pub const Object = extern struct {
 
     pub fn setGlobalUninitializedVars(self: *Object, rt: *JSRuntime, v: ?*Object) !void {
         (try self.ensureGlobalPayload(rt)).uninitialized_vars = v;
+        // The side table is created on demand, the first time a global name is
+        // captured before it is declared -- arbitrarily long after the global
+        // object itself went old. It is a payload field, so no property funnel
+        // covers it.
+        if (v) |env| rt.gc.generationalBarrier(&self.header, &env.header);
     }
 
     pub fn ensureGlobalPayload(self: *Object, rt: *JSRuntime) !*GlobalPayload {
@@ -3007,6 +3012,12 @@ pub const Object = extern struct {
             .held_value = rooted_held_value.dup(),
             .unregister_token_identity = unregister_token_identity,
         };
+        // `held_value` is the cell's one strong edge (the target and the
+        // unregister token are weak identities, not traced). A registry is
+        // registered against for as long as it lives, so every `register()`
+        // after the first minor is an old-to-young store, and the sticky mark on
+        // the registry stops the trace before `visitFinalizationCell` runs.
+        rt.gc.generationalBarrier(&self.header, rooted_held_value.cycleMarkHeader());
         try rt.registerBorrowedReferenceHolder(self);
     }
 
@@ -5506,6 +5517,13 @@ pub const Object = extern struct {
         payload.error_stack = null;
         payload.error_stack_sites = next_value;
         payload.error_stack_site_count = capturedStackSiteCount(sites_value);
+        // The sites array is built after the Error instance exists, so a minor
+        // in between promotes the instance and leaves this an old-to-young
+        // payload store with no funnel to catch it. `setErrorStack` next to it
+        // needs nothing: its value is a string, and strings are not registered
+        // with the collector under this build (`gc.string_registry_enabled` is
+        // shadow-only), so they are never condemned.
+        rt.gc.generationalBarrier(&self.header, next_value.cycleMarkHeader());
         if (old_stack) |stored| stored.free(rt);
         if (old_sites) |stored| stored.free(rt);
     }
@@ -8555,6 +8573,12 @@ pub const Object = extern struct {
         } else {
             self.prop_values[index].slot = .{ .data = next_value };
         }
+        // Publishes the slot itself instead of going through
+        // `setEntryKindAndSlot`, so it has to take that funnel's barrier. The
+        // direction here is always the dangerous one: an auto-init slot lives
+        // on a builtin object that has existed since realm setup, and whatever
+        // replaces it was just built.
+        rt.gc.generationalBarrier(&self.header, next_value.cycleMarkHeader());
         rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.withKind(.data).bits());
         destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
@@ -9206,6 +9230,12 @@ pub const Object = extern struct {
         } else {
             element_slot.* = next_value;
         }
+        // These helpers write the dense slot themselves, reaching storage
+        // through `ensureArrayElementCapacity` rather than the remembering
+        // `appendUninitializedFastArraySlot`, so they inherit no barrier.
+        // `[].map(f)` filling a result array that has already gone old is
+        // exactly the old-to-young edge the minor's sticky marks stop at.
+        rt.gc.generationalBarrier(&self.header, next_value.cycleMarkHeader());
         self.markIndexedProperties(rt);
         if (!appended) old.free(rt);
         return true;
@@ -9282,6 +9312,12 @@ pub const Object = extern struct {
         } else {
             element_slot.* = next_value;
         }
+        // These helpers write the dense slot themselves, reaching storage
+        // through `ensureArrayElementCapacity` rather than the remembering
+        // `appendUninitializedFastArraySlot`, so they inherit no barrier.
+        // `[].map(f)` filling a result array that has already gone old is
+        // exactly the old-to-young edge the minor's sticky marks stop at.
+        rt.gc.generationalBarrier(&self.header, next_value.cycleMarkHeader());
         self.markIndexedProperties(rt);
         if (!appended) old.free(rt);
     }
@@ -10805,6 +10841,10 @@ pub const Object = extern struct {
         } else {
             self.prop_values[index].slot = .{ .var_ref = cell.dupCell() };
         }
+        // Same bare publication as the auto-init replacement above, and the
+        // same direction: the owner is a long-lived environment or global
+        // object and the cell is usually brand new.
+        rt.gc.generationalBarrier(&self.header, &cell.header);
         rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
         destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);

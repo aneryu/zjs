@@ -767,6 +767,11 @@ pub const Registry = struct {
         self.gc_registry.unlinkObjectWithBytes(&old.header, @sizeOf(Shape) + old_fam_bytes);
         self.gc_registry.addInitializedShape(&new_shape.header, @sizeOf(Shape) + new_fam_bytes);
         object.shape_ref = new_shape;
+        // Compaction retargets a long-lived object at a Shape allocated a few
+        // lines above, so this is an old-to-young edge even though the object
+        // itself did not change: the minor's sticky mark stops the trace at the
+        // object and the new Shape is condemned under it.
+        self.gc_registry.generationalBarrier(&object.header, &new_shape.header);
         object.prop_values = new_values.ptr;
         self.memory.destroyWithFam(Shape, old, old_fam_bytes);
         self.memory.free(Entry, old_values);

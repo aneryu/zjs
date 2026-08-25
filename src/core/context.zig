@@ -680,6 +680,12 @@ pub const JSContext = struct {
         const slot = try self.ensureClassPrototypeSlot(class_id);
         const old = slot.*;
         slot.* = prototype.value().dup();
+        // A realm fills these lazily: `%ArrayIteratorPrototype%` is built the
+        // first time a `for...of` needs it, which can be arbitrarily long after
+        // the realm itself went old. Once the host create-ref is consumed the
+        // realm is a heap object, not a root, so the minor's sticky mark stops
+        // the trace at it and the fresh prototype is condemned.
+        self.runtime.gc.generationalBarrier(&self.header, &prototype.header);
         old.free(self.runtime);
     }
 
@@ -708,6 +714,7 @@ pub const JSContext = struct {
         const slot = &self.native_error_prototypes[@intFromEnum(kind)];
         const old = slot.*;
         slot.* = prototype.value().dup();
+        self.runtime.gc.generationalBarrier(&self.header, &prototype.header);
         old.free(self.runtime);
     }
 

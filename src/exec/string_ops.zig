@@ -2502,6 +2502,9 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
     if (slot < ctx.class_prototypes.len) {
         const value = object.value();
         ctx.class_prototypes[slot] = value.dup();
+        // Raw slot store, not `setClassPrototype`: see the same barrier on the
+        // Array-iterator prototype in iterator_ops.
+        ctx.runtime.gc.generationalBarrier(&ctx.header, &object.header);
         value.free(ctx.runtime);
     }
     return object;

@@ -701,6 +701,11 @@ fn iteratorPrototype(
     if (slot < realm.class_prototypes.len) {
         const value = prototype.value();
         realm.class_prototypes[slot] = value.dup();
+        // Raw slot store, not `setClassPrototype`: see the same barrier on the
+        // Array-iterator prototype in iterator_ops. Lazily built long after the
+        // realm went old, and the realm is not a root once its create-ref is
+        // consumed.
+        rt.gc.generationalBarrier(&realm.header, &prototype.header);
         value.free(rt);
         return .{ .object = prototype, .owned = false };
     }

@@ -2739,6 +2739,14 @@ fn fastDenseArraySplice(
     // original (already duplicated into `removed`) or the undefined filler
     // above, so no destructor can run here.
     if (insert_items.len > 0) {
+        // The dense-append choke point (`appendUninitializedFastArraySlot`)
+        // remembers the owner for every ordinary push; this path reaches the
+        // storage through `fastArrayValuesMut` instead and so misses it. The
+        // tail moves above need nothing -- they relocate references the array
+        // already owned -- but these inserts are new edges into an array that
+        // may be arbitrarily old, which is what makes `a.splice(i, 1, {..})`
+        // free its own fresh elements under a minor.
+        rt.gc.rememberOwnerForBulkWrite(&object.header);
         const values = object.fastArrayValuesMut();
         for (insert_items, 0..) |item, offset| {
             const slot = &values[actual_start + offset];
@@ -3456,6 +3464,12 @@ fn fastDenseArrayUnshift(
     // Overwrite the now-stale [0, insert_count) head with fresh duplicates of
     // the arguments. The previous bits there are aliases of values that now
     // live in their moved-up slots, so they must NOT be freed here.
+    //
+    // Same omission as the splice insert loop: this grows through
+    // `fastArrayEnsureCapacity` rather than the remembering
+    // `appendUninitializedFastArraySlot`, so the new head references are edges
+    // from a possibly-old array that the minor is never told about.
+    rt.gc.rememberOwnerForBulkWrite(&object.header);
     for (args, 0..) |item, index| {
         values[index] = item.dup();
     }

@@ -2294,6 +2294,11 @@ pub fn importMetaObject(
     try defineValueProperty(ctx.runtime, object, "main", core.JSValue.boolean(record.import_meta_main));
     const value = object.value();
     record.import_meta = value.dup();
+    // The record is created when the module is loaded; `import.meta` is built
+    // the first time the module body evaluates the expression, which can be
+    // arbitrarily later. `ModuleRecord.setEvalException` already barriers its
+    // sibling field for exactly this reason; this store had no funnel at all.
+    ctx.runtime.gc.generationalBarrier(&record.header, value.cycleMarkHeader());
     return value;
 }
 
