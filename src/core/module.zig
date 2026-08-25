@@ -606,6 +606,7 @@ pub const ModuleRecord = struct {
     pub fn setEvalException(self: *ModuleRecord, rt: anytype, value: value_mod.JSValue) void {
         if (self.eval_exception) |old| old.free(rt);
         self.eval_exception = value;
+        rt.gc.generationalBarrier(&self.header, value.cycleMarkHeader());
     }
 
     pub fn request(self: *ModuleRecord, request_index: u32) ?*RequestEntry {
@@ -649,10 +650,13 @@ pub const ModuleRecord = struct {
 
     /// Complete a FunctionBytecode -> function-object move after the old owner
     /// was taken. A live slot may never be silently replaced or freed here.
-    pub fn adoptFuncObjectValueNoFail(self: *ModuleRecord, next: value_mod.JSValue) void {
+    pub fn adoptFuncObjectValueNoFail(self: *ModuleRecord, rt: anytype, next: value_mod.JSValue) void {
         std.debug.assert(self.func_obj.isUndefined());
         std.debug.assert(!next.isUndefined());
         self.func_obj = next;
+        // A ModuleRecord is a traced heap object; installing its function is an
+        // owner-to-child store like any other.
+        rt.gc.generationalBarrier(&self.header, next.cycleMarkHeader());
     }
 
     pub fn takeFuncObjectValueNoFail(self: *ModuleRecord) value_mod.JSValue {
@@ -666,10 +670,11 @@ pub const ModuleRecord = struct {
     }
 
     /// Publish a completely-constructed namespace. The record takes ownership.
-    pub fn publishModuleNamespaceNoFail(self: *ModuleRecord, owned: value_mod.JSValue) void {
+    pub fn publishModuleNamespaceNoFail(self: *ModuleRecord, rt: anytype, owned: value_mod.JSValue) void {
         std.debug.assert(self.module_ns.isUndefined());
         std.debug.assert(owned.isObject());
         self.module_ns = owned;
+        rt.gc.generationalBarrier(&self.header, owned.cycleMarkHeader());
     }
 
     pub fn namespaceAutoInitOwner(self: *const ModuleRecord) *const module_auto_init.AutoInitModuleOwner {
@@ -873,6 +878,10 @@ pub const Registry = struct {
         const record = try self.memory.create(ModuleRecord);
         record.prepare(self.memory, self.atoms, name);
         record.replaceDefinitionNoFail(pending);
+        // Bulk install of a whole pending definition -- exports, the function
+        // object, import attributes. Remember the record once instead of
+        // enumerating the fields.
+        self.gc_registry.rememberOwnerForBulkWrite(&record.header);
         self.gc_registry.addInitializedWithSizeNoFail(&record.header, @sizeOf(ModuleRecord));
         self.link(record);
         return .{ .fresh = record };

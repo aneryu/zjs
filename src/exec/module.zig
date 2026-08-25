@@ -386,7 +386,7 @@ fn ensureModuleFunction(
     errdefer if (shell_owned) object.value().free(ctx.runtime);
 
     const owned_bytecode = record.takeFuncObjectValueNoFail();
-    record.adoptFuncObjectValueNoFail(object.value());
+    record.adoptFuncObjectValueNoFail(ctx.runtime, object.value());
     shell_owned = false;
     object.setFunctionBytecodeValue(ctx.runtime, owned_bytecode) catch unreachable;
     try ensureModuleCaptureCells(ctx, object, function);
@@ -822,7 +822,7 @@ fn moduleNamespaceValueForRecord(
     var object_owned = true;
     errdefer if (object_owned) object.value().free(ctx.runtime);
     try initializeCanonicalModuleNamespace(ctx, record, object);
-    record.publishModuleNamespaceNoFail(object.value());
+    record.publishModuleNamespaceNoFail(ctx.runtime, object.value());
     object_owned = false;
     return record.moduleNamespaceValue().dup();
 }

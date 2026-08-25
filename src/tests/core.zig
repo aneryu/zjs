@@ -11476,7 +11476,7 @@ test "module namespace strong edge participates in realm object cycle collection
     var realm_owner = core.RealmRef.retain(ctx);
     defer realm_owner.deinit();
     try realm_record.installOwnedRealmRef(rt, &realm_owner);
-    record.publishModuleNamespaceNoFail(realm_record.value());
+    record.publishModuleNamespaceNoFail(rt, realm_record.value());
     object_transferred = true;
 
     ctx.destroy();
@@ -11618,7 +11618,7 @@ test "module publication retains indexed metadata and all strong value edges" {
     record.setRequestModuleNoFail(request_index, dependency);
 
     const namespace_owner = try core.Object.create(rt, core.class.ids.module_ns, null);
-    record.publishModuleNamespaceNoFail(namespace_owner.value());
+    record.publishModuleNamespaceNoFail(rt, namespace_owner.value());
     const retained_cell = try core.VarRef.createClosed(rt, core.JSValue.int32(41));
     record.publishRetainedExportCellNoFail(0, retained_cell.valueRef());
     const import_meta_owner = try core.Object.create(rt, core.class.ids.object, null);

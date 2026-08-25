@@ -849,7 +849,7 @@ const Collector = struct {
                                 else => {},
                             }
                         }
-                        std.debug.print("MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d}\n", .{ o.class_id, @tagName(o.flags.class_payload_kind), where, a.rt.atoms.name(@intCast(hit_atom)) orelse "?", o.shape_ref.prop_count });
+                        std.debug.print("MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d} owner_marked={}\n", .{ o.class_id, @tagName(o.flags.class_payload_kind), where, a.rt.atoms.name(@intCast(hit_atom)) orelse "?", o.shape_ref.prop_count, o.header.metaConst().flags.mark });
                     }
                     std.debug.print("MINOR-AUDIT owner={s}/ptr{x} owner_young={} owner_remembered={} -> child class={d}/{s} child_young={} child_marked={}\n", .{
                         @tagName(a.owner_kind), @intFromPtr(a.owner_ptr), a.owner_young, a.owner_remembered,

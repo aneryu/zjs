@@ -8079,6 +8079,18 @@ pub const Object = extern struct {
     }
 
     pub fn defineOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+        // Generational barrier at the define funnel. Every define path below --
+        // ordinary, exotic, array, create-on-miss -- publishes the descriptor's
+        // references into this object, and they are spread across a dozen raw
+        // slot stores. Recording the owner once here is what makes the set
+        // complete rather than a list that has to be kept in step; the
+        // individual stores keep their own barriers where they are the only
+        // writer.
+        if (comptime gc.generation_enabled) {
+            rt.gc.generationalBarrier(&self.header, desc.value.cycleMarkHeader());
+            rt.gc.generationalBarrier(&self.header, desc.getter.cycleMarkHeader());
+            rt.gc.generationalBarrier(&self.header, desc.setter.cycleMarkHeader());
+        }
         // qjs JS_DefineProperty resolves a real own shape entry first; only a
         // miss reaches JS_CreateProperty's exotic/array create machinery.
         // Ordinary classes therefore pay one slow-property classification,
@@ -8143,6 +8155,19 @@ pub const Object = extern struct {
     /// reintroduce the O(n) scan we are trying to avoid).
     pub fn defineOwnPropertyAssumingNew(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
         std.debug.assert(!self.hasExoticMethods());
+        // Generational barrier at the define funnel. Every define path below --
+        // ordinary, exotic, array, create-on-miss -- publishes the descriptor's
+        // references into this object, and they are spread across a dozen raw
+        // slot stores. Recording the owner once here is what makes the set
+        // complete rather than a list that has to be kept in step; the
+        // individual stores keep their own barriers where they are the only
+        // writer.
+        if (comptime gc.generation_enabled) {
+            rt.gc.generationalBarrier(&self.header, desc.value.cycleMarkHeader());
+            rt.gc.generationalBarrier(&self.header, desc.getter.cycleMarkHeader());
+            rt.gc.generationalBarrier(&self.header, desc.setter.cycleMarkHeader());
+        }
+
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
@@ -9493,6 +9518,7 @@ pub const Object = extern struct {
             } else {
                 entry.slot = .{ .data = next_value };
             }
+            rt.gc.generationalBarrier(&self.header, next_value.cycleMarkHeader());
             destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
@@ -10800,6 +10826,7 @@ pub const Object = extern struct {
         } else {
             self.prop_values[index].slot = next_slot;
         }
+        self.barrierPropertySlot(rt, next_flags, next_slot);
         rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
         destroyPropertySlot(rt, atom_id, old_flags, old_slot);
     }
