@@ -851,6 +851,11 @@ const RecentAtomString = struct {
     string: *string.String,
 };
 
+const RecentLatin1Slice = struct {
+    hash: u32,
+    string: *string.String,
+};
+
 const root_provider_inline_capacity = 1;
 
 /// A Runtime and every Realm/heap structure owned by it are mutated only by
@@ -872,6 +877,13 @@ const RuntimeCompactState = packed struct(u8) {
 
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
+    /// Occupied slots in `recent_latin1_slices`. Small enough to scan on
+    /// each internable `stringSliceValue`, large enough to hold the URL
+    /// pattern's distinct captures plus a few other hot slices.
+    pub const recent_latin1_slice_cache_len: usize = 32;
+    /// Longest latin1 slice interned. Covers bench-v8 URL captures such as
+    /// `"www.google.com"` (14) without retaining whole-string group-0 copies.
+    pub const recent_latin1_slice_max: usize = 32;
 
     /// K4 hot-state cluster: the per-call/per-return execution scalars that
     /// call admission (`canEnterInlineCallDepthBytes`), commit
@@ -1072,6 +1084,15 @@ pub const JSRuntime = struct {
     /// bytecode constants without retaining every atom string in the program;
     /// regexp literals in particular alternate between source and flags atoms.
     recent_atom_strings: [4]?RecentAtomString = @splat(null),
+    /// Content-addressed intern for short latin1 slices. Repeated
+    /// `RegExp.prototype.exec` on the same subject (bench-v8 URL, `/a+/`
+    /// group-0, class matches) otherwise allocates a fresh exact-size copy
+    /// per capture through `stringSliceValue`. Spec string equality is by
+    /// code-unit sequence, so sharing interned bodies is unobservable.
+    /// The cache holds one extra ref per occupied slot and releases it in
+    /// `JSRuntime.destroy`.
+    recent_latin1_slices: [recent_latin1_slice_cache_len]?RecentLatin1Slice = @splat(null),
+    recent_latin1_slice_next: u8 = 0,
     /// Lazy cache for uppercase percent-escaped byte strings (`%00`..`%FF`).
     /// This is a general URI hot-path cache, not a fixture shortcut:
     /// ECMAScript URI helpers and decimal-to-percent harnesses both
@@ -1238,6 +1259,8 @@ pub const JSRuntime = struct {
         rt.empty_string = null;
         rt.recent_two_unit_string = null;
         rt.recent_atom_strings = @splat(null);
+        rt.recent_latin1_slices = @splat(null);
+        rt.recent_latin1_slice_next = 0;
         rt.percent_hex_strings = @splat(null);
         rt.small_int_strings = @splat(null);
         rt.performance_time_origin_ms = 0;
@@ -1303,6 +1326,12 @@ pub const JSRuntime = struct {
             if (cached) |stored| JSValue.string(stored.string.header()).free(self);
         }
         self.compact_state.recent_atom_string_next = 0;
+        for (&self.recent_latin1_slices) |*slot| {
+            const cached = slot.*;
+            slot.* = null;
+            if (cached) |stored| JSValue.string(stored.string.header()).free(self);
+        }
+        self.recent_latin1_slice_next = 0;
         const empty_string = self.empty_string;
         self.empty_string = null;
         if (empty_string) |cached| JSValue.string(cached.header()).free(self);
@@ -2923,6 +2952,32 @@ pub const JSRuntime = struct {
             .second = second,
             .string = created,
         };
+        if (old) |stored| JSValue.string(stored.string.header()).free(self);
+        return created;
+    }
+
+    /// Return a borrowed interned latin1 string for a short slice, creating it
+    /// on miss. Returns null when `bytes` is outside the intern window
+    /// (shorter than 2 units, or longer than `recent_latin1_slice_max`).
+    /// Length-1 ASCII should use `singleByteString` instead. Callers that
+    /// return the value must `dup` it, matching `recentTwoUnitString`.
+    pub fn recentLatin1Slice(self: *JSRuntime, bytes: []const u8) !?*string.String {
+        if (bytes.len < 2 or bytes.len > recent_latin1_slice_max) return null;
+        const hash = string.hashLatin1(bytes, 0);
+        for (self.recent_latin1_slices) |slot| {
+            if (slot) |cached| {
+                if (cached.hash == hash and cached.string.eqlBytes(bytes)) return cached.string;
+            }
+        }
+
+        const created = try string.String.createLatin1(self, bytes);
+        const slot_index: usize = self.recent_latin1_slice_next;
+        const old = self.recent_latin1_slices[slot_index];
+        self.recent_latin1_slices[slot_index] = .{
+            .hash = hash,
+            .string = created,
+        };
+        self.recent_latin1_slice_next = @intCast((slot_index + 1) % recent_latin1_slice_cache_len);
         if (old) |stored| JSValue.string(stored.string.header()).free(self);
         return created;
     }

@@ -11661,6 +11661,27 @@ test "flagless RegExp flags accessor reuses the runtime empty string" {
     try std.testing.expectEqual(allocations, rt.memory.allocation_count);
 }
 
+test "stringSliceValue reuses interned latin1 captures" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const parent = try core.string.String.createLatin1(rt, "xxaaa");
+    defer parent.value().free(rt);
+
+    const first = try engine.exec.string_ops.stringSliceValue(rt, parent.value(), 2, 3);
+    defer first.free(rt);
+    try std.testing.expect(first.asStringBody().?.eqlBytes("aaa"));
+    const allocations = rt.memory.allocation_count;
+    const second = try engine.exec.string_ops.stringSliceValue(rt, parent.value(), 2, 3);
+    defer second.free(rt);
+    try std.testing.expectEqual(first.asStringBody().?, second.asStringBody().?);
+    try std.testing.expectEqual(allocations, rt.memory.allocation_count);
+
+    const whole = try engine.exec.string_ops.stringSliceValue(rt, parent.value(), 0, 5);
+    defer whole.free(rt);
+    try std.testing.expectEqual(parent, whole.asStringBody().?);
+}
+
 test "RegExp exec result template preserves metadata groups and indices" {
     try helpers.expectPrints(
         \\var plain = /a/.exec("ba");
@@ -11700,6 +11721,17 @@ test "RegExp exec reuses interpreter state across repeated matches" {
         \\}
         \\print(n, /a+/.exec("") === null, /(?:)/.exec("")[0] === "");
     , "256 true true\n");
+}
+
+test "RegExp exec reuses capture strings across repeated URL matches" {
+    try helpers.expectPrints(
+        \\var re = /(((\w+):\/\/)([^\/:]*)(:(\d+))?)?([^#?]*)(\?([^#]*))?(#(.*))?/;
+        \\var s = "http://www.google.com/search?q=zjs#frag";
+        \\var a = re.exec(s);
+        \\var b = re.exec(s);
+        \\print([a[0], a[3], a[4], a[7], a[9], a[11], a[5] === undefined].join("|"));
+        \\print(a[4] === b[4] && a[7] === b[7] && a[11] === b[11]);
+    , "http://www.google.com/search?q=zjs#frag|http|www.google.com|/search|q=zjs|frag|true\ntrue\n");
 }
 
 test "RegExp compiler stack overflow is a catchable SyntaxError" {

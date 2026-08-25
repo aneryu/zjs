@@ -3145,6 +3145,12 @@ pub fn stringSliceValue(rt: *core.JSRuntime, value: core.JSValue, start: usize, 
             return cached.value().dup();
         }
     }
+    if (string_value.borrowLatin1()) |latin1| {
+        const bytes = latin1[slice_start..][0..slice_len];
+        if (try rt.recentLatin1Slice(bytes)) |cached| {
+            return cached.value().dup();
+        }
+    }
     return (try core.string.String.createSlice(rt, string_value, slice_start, slice_len)).value();
 }
 
