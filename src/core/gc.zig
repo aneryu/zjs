@@ -122,6 +122,16 @@ pub var stress_no_minor: bool = false;
 /// a two-second script.
 pub var minor_audit: bool = false;
 
+/// `ZJS_GC_ARENA_AUDIT=1`: after every collection, check that a slab block
+/// reads as a live GC object exactly when it holds one.
+///
+/// That biconditional is what conservative candidate validation resolves
+/// against, and it is maintained by scattered stores in two modules rather
+/// than by any one owner -- both stamps that fix it could be deleted with a
+/// green suite. A checker is the answer to an invariant with no owner: it does
+/// not care which store was forgotten.
+pub var arena_audit: bool = false;
+
 /// `ZJS_GC_VERIFY_MINOR=1`: check every minor's condemned set against what a
 /// full trace would keep. See `gc_trace_stw.computeFullReachable`.
 pub var verify_minor: bool = false;
@@ -134,6 +144,10 @@ fn readStressFromEnv() void {
     if (std.c.getenv("ZJS_MINOR_AUDIT")) |raw| {
         const text = std.mem.span(raw);
         minor_audit = text.len != 0 and !std.mem.eql(u8, text, "0");
+    }
+    if (std.c.getenv("ZJS_GC_ARENA_AUDIT")) |raw| {
+        const text = std.mem.span(raw);
+        arena_audit = text.len != 0 and !std.mem.eql(u8, text, "0");
     }
     if (std.c.getenv("ZJS_GC_VERIFY_MINOR")) |raw| {
         const text = std.mem.span(raw);
@@ -1002,6 +1016,9 @@ pub const Registry = struct {
     host_quiescent: bool = false,
 
     /// Page-radix map of published GC objects. Void in production `rc`.
+    /// The slab whose arena lifetimes this registry observes, for recovery.
+    arena_slab: if (address_registry_enabled) ?*memory.SmallObjectSlab else void =
+        if (address_registry_enabled) null else {},
     address_registry: if (address_registry_enabled) AddressRegistryTable else void =
         if (address_registry_enabled) .{} else {},
 
@@ -2068,8 +2085,14 @@ pub const Registry = struct {
     /// `registerLiveAddress` stop inserting per published object.
     pub fn observeSlabArenas(self: *Registry, slab: *memory.SmallObjectSlab) void {
         if (comptime !address_registry_enabled) return;
-        // Arenas that already exist: the runtime allocates before its registry
-        // does, so the observer is always installed into a non-empty slab.
+        // Kept so a failed arena registration can be recovered by re-walking
+        // the slab, instead of leaving that arena invisible for its whole life.
+        self.arena_slab = slab;
+        // Arenas that already exist. In the current `initWithAccount` order
+        // there are none -- `enableSmallObjectSlab` runs afterwards, so this
+        // walk visits nothing -- but the observer's correctness must not depend
+        // on that ordering, because an arena created before it is installed is
+        // invisible to the conservative scanner forever.
         slab.forEachArena(self, struct {
             fn call(ctx: *anyopaque, base: usize) void {
                 const registry: *Registry = @ptrCast(@alignCast(ctx));
@@ -2289,6 +2312,21 @@ pub const Registry = struct {
         self.stats.pause_samples[self.stats.pause_sample_cursor] = duration_ns;
         self.stats.pause_sample_cursor = (self.stats.pause_sample_cursor + 1) % pause_sample_capacity;
         self.stats.pause_sample_count +|= 1;
+    }
+
+    /// Is every live arena resolvable, so that sweeping is sound?
+    ///
+    /// An arena that failed to register hides every object it holds from the
+    /// conservative stack scan, so a sweep performed in that state can free a
+    /// live object. Recovery is a re-walk of the slab's arena lists, which
+    /// costs one pass over at most a few thousand pointers and only happens
+    /// after an allocation failure. If it still cannot record them, the caller
+    /// must mark without sweeping: a bounded leak instead of a use-after-free.
+    pub fn arenaSetWhole(self: *Registry) bool {
+        if (comptime !address_registry_enabled) return true;
+        if (!self.address_registry.arenas_incomplete) return true;
+        const slab = self.arena_slab orelse return false;
+        return self.address_registry.resyncArenas(addressRegistryAllocator(), slab);
     }
 
     pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {

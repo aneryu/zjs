@@ -41,6 +41,11 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     // It asserts completion, not a score, so it is a correctness gate and
     // belongs here rather than under `perf-*`.
     const run_macro_check = b.addSystemCommand(&.{ "python3", "tools/perf/bench_v8/check_completes.py" });
+    // The macro workloads are where the arena invariant broke, and where a
+    // deleted block stamp is still caught today; unit tests never recycle an
+    // arena with dirty content. A no-op in the refcounting build, which never
+    // reads the variable.
+    run_macro_check.setEnvironmentVariable("ZJS_GC_ARENA_AUDIT", "1");
     run_macro_check.addArtifactArg(zjs_exe);
     const macro_check_step = b.step("macro-check", "Assert every vendored bench-v8 benchmark still completes on the built zjs");
     macro_check_step.dependOn(&run_macro_check.step);

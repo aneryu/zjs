@@ -63,6 +63,9 @@ pub const Report = struct {
     reclaimed_bytes: usize = 0,
     /// Of this collection's wall time, how much went on census walks.
     census_ns: u64 = 0,
+    /// The round marked but did not sweep: an arena was unregistered, so a
+    /// conservative candidate into it could not have been resolved.
+    skipped_sweep_incomplete_arenas: bool = false,
     soft_headroom: usize = 0,
     hard_headroom: usize = 0,
     windows_active: usize = 0,
@@ -240,6 +243,17 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
     } else last_report.remaining = 0;
     last_report.drained_sweep_debt = drained_sweep_debt;
     last_report.census_ns = last_census_ns;
+    if (gc.arena_audit) {
+        const stale = rt.gc.address_registry.auditArenas();
+        const missing = auditLiveObjectsResolve(rt);
+        if (stale != 0 or missing != 0) {
+            std.debug.print(
+                "gc: ARENA AUDIT after major: {d} free blocks read live, {d} live objects unresolvable\n",
+                .{ stale, missing },
+            );
+            @panic("arena invariant violated");
+        }
+    }
     if (comptime gc.block_heap_enabled) {
         last_report.mark_epoch = rt.gc.block_heap.mark_epoch;
         last_report.committed_bytes = rt.gc.block_heap.stats.committed_bytes;
@@ -305,6 +319,10 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     if (young_before > rt.gc.generation.stats.young_at_start_max) {
         rt.gc.generation.stats.young_at_start_max = young_before;
     }
+    // Same requirement as the major: a sweep is only sound when every arena is
+    // registered, because an unregistered one hides its objects from the
+    // conservative scan that decides what is live.
+    if (!rt.gc.arenaSetWhole()) return 0;
     const reclaimed = collector.sweepUnmarkedYoung();
 
     // Promotion is the sticky rule made concrete: everything still young
@@ -404,6 +422,33 @@ fn clearYoungState(rt: *JSRuntime) void {
     rt.gc.generation.retireYoungSet();
 }
 
+/// The other direction of the arena invariant: every live object must be
+/// findable from a conservative candidate.
+///
+/// `auditArenas` catches garbage that reads as live. This catches live objects
+/// that read as garbage, which is the direction that frees something still in
+/// use -- and it is checked here rather than at each suspected site because the
+/// ways to lose an object (an unregistered arena, a bounds window that excludes
+/// it, a block index rejected as out of range) have nothing in common except
+/// the answer they produce.
+pub fn auditLiveObjectsResolve(rt: *JSRuntime) usize {
+    var missing: usize = 0;
+    var reported: usize = 0;
+    var it = rt.gc.objectIterator();
+    while (it.next()) |header| {
+        if (rt.gc.address_registry.containsHeader(header)) continue;
+        missing += 1;
+        if (reported < 8) {
+            reported += 1;
+            std.debug.print(
+                "gc: ARENA AUDIT live object at 0x{x} (kind {any}) does not resolve\n",
+                .{ @intFromPtr(header), header.metaConst().flags.kind },
+            );
+        }
+    }
+    return missing;
+}
+
 const Collector = struct {
     rt: *JSRuntime,
     extra_roots: ?*const runtime_mod.ValueRootFrame,
@@ -482,6 +527,16 @@ const Collector = struct {
         self.processWeak();
         self.endSweepModelMark();
         self.beginSweepModelSweep();
+        // Sweeping requires that every live object be reachable from a
+        // conservative candidate, which requires every arena to be registered.
+        // If one is not, mark and stop: the marks are still correct, nothing is
+        // reclaimed this round, and the objects stay alive until the arena set
+        // can be repaired. Leaking a round is recoverable; freeing a live
+        // object is not.
+        if (!self.rt.gc.arenaSetWhole()) {
+            self.report.skipped_sweep_incomplete_arenas = true;
+            return 0;
+        }
         const live_before_sweep = self.liveHeapBytes();
         const swept = self.sweepUnmarked();
         self.report.reclaimed_bytes = live_before_sweep -| self.liveHeapBytes();

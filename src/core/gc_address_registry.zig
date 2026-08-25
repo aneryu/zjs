@@ -47,6 +47,12 @@ pub const Hit = union(Kind) {
 pub const Stats = struct {
     /// Slab arenas currently resolvable by mask.
     arenas_live: usize = 0,
+    /// Arena bases that could not be recorded. Kept apart from
+    /// `failed_inserts` because the blast radius is different by two orders of
+    /// magnitude: one is a single object, the other is a whole 4 KiB arena.
+    arena_insert_failures: usize = 0,
+    /// Recovery attempts after such a failure.
+    arena_resyncs: usize = 0,
     /// Tombstone compactions. Expect roughly `unregister_calls / (capacity/4)`;
     /// a count of zero on a churning workload means the budget never fired.
     rehashes: usize = 0,
@@ -95,6 +101,13 @@ pub const Table = struct {
     /// is not a churn pattern that degenerates.
     arenas: std.AutoHashMapUnmanaged(usize, void) = .empty,
 
+    /// An arena base failed to enter `arenas` and has not been recovered.
+    ///
+    /// Sticky. While set, some live objects may be unresolvable from a
+    /// conservative candidate, so sweeping is unsound; the collector marks
+    /// only. See `noteArenaCreated`.
+    arenas_incomplete: bool = false,
+
     /// Removals since `by_header` and `pages` were last compacted.
     ///
     /// Zig's open-addressed map marks a removed slot as a TOMBSTONE and adds
@@ -119,17 +132,61 @@ pub const Table = struct {
     removes_since_rehash: usize = 0,
 
     /// A slab arena has been created. Its blocks become resolvable by mask.
+    ///
+    /// Failure here is not a lost statistic. An arena absent from the set is
+    /// invisible to the conservative scanner for its whole life, and it holds up
+    /// to 253 blocks, so one dropped insert can hide hundreds of live objects
+    /// from a stack scan -- a use-after-free, not a leak, and one that would
+    /// surface far from here. `arenas_incomplete` is therefore sticky and the
+    /// collector must clear it (by re-walking the slab) before it is allowed to
+    /// sweep again.
     pub fn noteArenaCreated(self: *Table, allocator: std.mem.Allocator, base: usize) void {
         self.arenas.put(allocator, base, {}) catch {
-            // An arena missing from the set is invisible to the conservative
-            // scanner, which is a use-after-free rather than a leak, so it is
-            // counted where `--gc-stats` shows it rather than swallowed.
-            self.stats.failed_inserts += 1;
+            self.stats.arena_insert_failures += 1;
+            self.arenas_incomplete = true;
             return;
         };
+        // `+ 1` so that a one-past-end pointer to an object in the arena's last
+        // block is inside the window. The occupant table this replaces carried
+        // the same `+ 1` (`occupantFor`: `hi = header_addr + bytes + 1`) for the
+        // same reason. Without it, when a size class divides the block region
+        // exactly, an object filling the final block of the highest arena has a
+        // one-past-end address equal to `bounds_hi`, and the range check rejects
+        // it before the `addr - 1` probe can resolve it.
         if (base < self.bounds_lo) self.bounds_lo = base;
-        if (base + Slab.arena_size > self.bounds_hi) self.bounds_hi = base + Slab.arena_size;
+        if (base + Slab.arena_size + 1 > self.bounds_hi) self.bounds_hi = base + Slab.arena_size + 1;
         self.stats.arenas_live += 1;
+    }
+
+    /// Re-register every arena the slab currently owns.
+    ///
+    /// Called by the collector when `arenas_incomplete` is set. Returns true if
+    /// the set is whole again. Idempotent: `put` on a base already present is a
+    /// no-op, so this can run as often as the collector likes.
+    pub fn resyncArenas(self: *Table, allocator: std.mem.Allocator, slab: *Slab) bool {
+        const Sync = struct {
+            table: *Table,
+            allocator: std.mem.Allocator,
+            ok: bool = true,
+            fn visit(ctx: *anyopaque, base: usize) void {
+                const sync: *@This() = @ptrCast(@alignCast(ctx));
+                if (sync.table.arenas.contains(base)) return;
+                sync.table.arenas.put(sync.allocator, base, {}) catch {
+                    sync.ok = false;
+                    return;
+                };
+                if (base < sync.table.bounds_lo) sync.table.bounds_lo = base;
+                if (base + Slab.arena_size + 1 > sync.table.bounds_hi) {
+                    sync.table.bounds_hi = base + Slab.arena_size + 1;
+                }
+                sync.table.stats.arenas_live += 1;
+            }
+        };
+        var sync: Sync = .{ .table = self, .allocator = allocator };
+        slab.forEachArena(&sync, Sync.visit);
+        if (sync.ok) self.arenas_incomplete = false;
+        self.stats.arena_resyncs += 1;
+        return sync.ok;
     }
 
     /// A slab arena is being returned to the backing allocator.
@@ -197,6 +254,45 @@ pub const Table = struct {
         const header: *gc.Header = @ptrCast(@alignCast(user));
         if (!header.metaConst().alloc_info.heap_accounted) return null;
         return header;
+    }
+
+    /// Audit the invariant candidate validation rests on, over every arena.
+    ///
+    /// Two directions, and they fail differently. A block that is FREE but
+    /// reads `heap_accounted` makes the tracer treat unowned memory as an
+    /// object: that is the hard SEGV this collector already produced once, from
+    /// arena memory recycled with a stale byte. A block that holds a live
+    /// object but does NOT resolve makes the conservative scan miss a real
+    /// reference: that one frees a live object and surfaces far from its cause,
+    /// which is why it needs a checker rather than a test per suspected site.
+    ///
+    /// Returns the number of violations, and reports the first few. Costs a
+    /// walk of every block of every arena, so it is opt-in: `ZJS_GC_ARENA_AUDIT=1`.
+    pub fn auditArenas(self: *Table) usize {
+        const Audit = struct {
+            violations: usize = 0,
+            reported: usize = 0,
+            free_but_accounted: usize = 0,
+            fn visit(ctx: *anyopaque, user: [*]u8, is_free: bool) void {
+                const audit: *@This() = @ptrCast(@alignCast(ctx));
+                if (!is_free) return;
+                const header: *const gc.Header = @ptrCast(@alignCast(user));
+                if (!header.metaConst().alloc_info.heap_accounted) return;
+                audit.violations += 1;
+                audit.free_but_accounted += 1;
+                if (audit.reported < 8) {
+                    audit.reported += 1;
+                    std.debug.print(
+                        "gc: ARENA AUDIT free block at 0x{x} reads heap_accounted (kind {any}, rc {d})\n",
+                        .{ @intFromPtr(user), header.metaConst().flags.kind, header.metaConst().rc },
+                    );
+                }
+            }
+        };
+        var audit: Audit = .{};
+        var it = self.arenas.keyIterator();
+        while (it.next()) |base| Slab.forEachArenaBlock(base.*, &audit, Audit.visit);
+        return audit.violations;
     }
 
     pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {

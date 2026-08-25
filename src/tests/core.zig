@@ -14177,3 +14177,95 @@ test "independent runtimes collect without touching each other" {
         try std.testing.expect(rt.gc.liveCount() > 0);
     }
 }
+
+test "a crossed whole-heap threshold is answered by a major, never by a minor" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // `minor_young_threshold` is 16k objects, which no unit test builds, so the
+    // automatic-minor arm is unreachable from here without this. That is itself
+    // the reason this test did not exist: the branch whose ordering is the
+    // whole point of the fix cannot be entered at test heap sizes.
+    const stress_before = core.gc.stress_collect;
+    core.gc.stress_collect = true;
+    defer core.gc.stress_collect = stress_before;
+
+    var index: usize = 0;
+    while (index < 64) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        dead.value().free(rt);
+    }
+
+    const minors_before = rt.gc.generation.stats.minor_collections;
+    const collections_before = rt.gc.stats.collections;
+
+    // Put the heap over its whole-heap threshold. A minor cannot answer this:
+    // it does not look at the old generation, which is where a heap past its
+    // threshold has its garbage. Answering it with a minor and returning was
+    // the defect that let earley-boyer run 13,642 minors and zero majors.
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+
+    try std.testing.expectEqual(minors_before, rt.gc.generation.stats.minor_collections);
+    try std.testing.expect(rt.gc.stats.collections > collections_before);
+}
+
+test "a minor does not move the major's threshold" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const stress_before = core.gc.stress_collect;
+    core.gc.stress_collect = true;
+    defer core.gc.stress_collect = stress_before;
+
+    var index: usize = 0;
+    while (index < 64) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        dead.value().free(rt);
+    }
+
+    // Comfortably under the threshold, so the minor is the arm that runs.
+    rt.setGCThreshold(rt.memory.allocated_bytes * 4);
+    const threshold_before = rt.gcThreshold();
+    const minors_before = rt.gc.generation.stats.minor_collections;
+
+    _ = try rt.pollGC(null, .safepoint);
+
+    try std.testing.expect(rt.gc.generation.stats.minor_collections > minors_before);
+    // A minor that reset this would raise the major's bar to 1.5x a footprint
+    // that is mostly old garbage it never examined, and every minor would push
+    // the major further away.
+    try std.testing.expectEqual(threshold_before, rt.gcThreshold());
+}
+
+test "arena resolution stops at the arena header and at the last block" {
+    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    const header = &obj.header;
+
+    const arena_size = core.memory.SmallObjectSlab.arena_size;
+    const base = @intFromPtr(header) & ~(arena_size - 1);
+    try std.testing.expect(rt.gc.address_registry.arenas.contains(base));
+
+    // The object itself resolves; the arena's own header is not an object and
+    // must not. Resolution is deliberately wide -- it accepts size-class slack
+    // and probes one-past-end -- and nothing else bounds how wide it may get.
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(@intFromPtr(header)));
+    try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(base));
+    try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(base + 8));
+}

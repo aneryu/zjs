@@ -448,11 +448,37 @@ pub const SmallObjectSlab = struct {
         return @as([*]u8, @ptrFromInt(blocks + index * block_size)) + block_header_size;
     }
 
-    /// Payload bytes a block of this arena hands out, for range checks against
-    /// a resolved object.
-    pub fn arenaPayloadBytes(base: usize) usize {
+    /// Every block of an arena, with the slab's own opinion of whether it is
+    /// free, so the collector can audit the invariant its candidate validation
+    /// rests on: a block reads as a live GC object exactly when it holds one.
+    ///
+    /// Both halves of that are checkable only from here. "Free" means on this
+    /// arena's free chain, which covers blocks never handed out (a fresh arena
+    /// threads all of them onto it) and blocks returned by `freeAtIndex`. Those
+    /// are precisely the two states whose stale `alloc_info` byte made the
+    /// tracer walk garbage as an object.
+    pub fn forEachArenaBlock(
+        base: usize,
+        context: *anyopaque,
+        visit: *const fn (ctx: *anyopaque, user: [*]u8, is_free: bool) void,
+    ) void {
         const arena: *Arena = @ptrFromInt(base);
-        return block_sizes[arena.block_size_idx] - block_header_size;
+        if (arena.magic != arena_magic) return;
+        const block_size = block_sizes[arena.block_size_idx];
+        // 253 blocks is the most any size class fits in a 4 KiB arena.
+        var free_bits: [4]u64 = @splat(0);
+        var cursor = arena.first_free_block;
+        var guard: usize = 0;
+        while (cursor != free_nil and guard <= arena.block_count) : (guard += 1) {
+            if (cursor >= arena.block_count) break;
+            free_bits[cursor / 64] |= @as(u64, 1) << @intCast(cursor % 64);
+            cursor = blockHeaderAt(arena, cursor, block_size).index_or_next;
+        }
+        var index: u16 = 0;
+        while (index < arena.block_count) : (index += 1) {
+            const is_free = (free_bits[index / 64] & (@as(u64, 1) << @intCast(index % 64))) != 0;
+            visit(context, userData(blockHeaderAt(arena, index, block_size)), is_free);
+        }
     }
 
     inline fn blockHeaderAt(arena: *Arena, block_idx: u16, block_size: usize) *BlockHeader {
