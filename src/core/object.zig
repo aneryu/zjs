@@ -7226,6 +7226,11 @@ pub const Object = extern struct {
         if (prototype) |proto| gc.retain(&proto.header);
         errdefer if (prototype) |proto| proto.value().free(rt);
         try rt.shapes.prepareUpdate(&self.shape_ref);
+        // Every write to `shape_ref` is an owner adopting a Shape: the clone or
+        // relocation this call may perform produces a fresh, young one, and a
+        // long-lived owner reaching it is an old-to-young edge the minor's
+        // sticky marks would otherwise stop short of.
+        rt.gc.generationalBarrier(&self.header, &self.shape_ref.header);
         const old_prototype = rt.shapes.replacePrototypeAssumePrepared(self.shape_ref, prototype);
         if (old_prototype) |old| old.value().free(rt);
         self.flags.is_std_array_prototype = false;
@@ -8227,6 +8232,11 @@ pub const Object = extern struct {
         try self.ensureUniqueShapeForMutation(rt);
         try self.ensurePropertyCapacity(rt, needed);
         try rt.shapes.reservePropertyHash(&self.shape_ref, needed);
+        // Every write to `shape_ref` is an owner adopting a Shape: the clone or
+        // relocation this call may perform produces a fresh, young one, and a
+        // long-lived owner reaching it is an old-to-young edge the minor's
+        // sticky marks would otherwise stop short of.
+        rt.gc.generationalBarrier(&self.header, &self.shape_ref.header);
     }
 
     /// Install a placeholder property whose backing value is computed
@@ -9769,6 +9779,11 @@ pub const Object = extern struct {
         const old_flags = self.propFlagsAt(index);
         if (!old_flags.configurable) return false;
         rt.shapes.prepareUpdate(&self.shape_ref) catch return false;
+        // Every write to `shape_ref` is an owner adopting a Shape: the clone or
+        // relocation this call may perform produces a fresh, young one, and a
+        // long-lived owner reaching it is an old-to-young edge the minor's
+        // sticky marks would otherwise stop short of.
+        rt.gc.generationalBarrier(&self.header, &self.shape_ref.header);
         const entry = &self.prop_values[index];
         const old_slot = entry.slot;
         // `deleted` is a flag bit, not a kind/arm: keep a harmless data cell.
@@ -10420,6 +10435,15 @@ pub const Object = extern struct {
         // append) and the sparse array-index path pay an outlined call.
         if (is_array_index or !rt.shapes.tryCachedTransition(&self.shape_ref, atom_id, entry_flags.bits(), current_capacity)) {
             try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity, is_array_index);
+        } else {
+            // A cache HIT swaps `shape_ref` here and never reaches
+            // `adoptShapeForNewProperty`, which is where the miss path takes
+            // its barrier. A long-lived object adopting a Shape that is still
+            // young is an old-to-young edge either way: the minor's sticky
+            // marks stop the trace at the owner, so without this the Shape is
+            // condemned while the owner still points at it, and the owner's
+            // eventual teardown releases a refcount through freed memory.
+            rt.gc.generationalBarrier(&self.header, &self.shape_ref.header);
         }
         if (grew_properties and old_capacity != 0) rt.memory.free(property.Entry, old_properties);
         inserted = false;
@@ -10434,6 +10458,9 @@ pub const Object = extern struct {
         const next_shape = try rt.shapes.cloneForMutation(self.shape_ref);
         const old_shape = self.shape_ref;
         self.shape_ref = next_shape;
+        // The clone is freshly allocated and therefore young; the owner that
+        // adopts it here may be long dead to the minor's sticky marks.
+        rt.gc.generationalBarrier(&self.header, &next_shape.header);
         rt.shapes.release(old_shape);
     }
 
@@ -10482,6 +10509,11 @@ pub const Object = extern struct {
         }
         const old_properties: []property.Entry = if (old_capacity != 0) self.prop_values[0..old_capacity] else &.{};
         try rt.shapes.reserveProperties(&self.shape_ref, next_capacity);
+        // Every write to `shape_ref` is an owner adopting a Shape: the clone or
+        // relocation this call may perform produces a fresh, young one, and a
+        // long-lived owner reaching it is an old-to-young edge the minor's
+        // sticky marks would otherwise stop short of.
+        rt.gc.generationalBarrier(&self.header, &self.shape_ref.header);
         self.prop_values = next.ptr;
         if (old_capacity != 0) rt.memory.free(property.Entry, old_properties);
     }
