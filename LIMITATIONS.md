@@ -64,9 +64,9 @@ module loading are not supported.
 JS `RegExp` compile still uses the standalone V8 Irregexp bytecode compiler
 (no native JIT, no ICU). Exec runs a Zig interpreter over that bytecode; the
 C++ interpreter remains linked as a compile-time island and a parity check.
-The JS object layer (lastIndex, species, match arrays) is unchanged. Known
-engine-side gaps versus the previous QuickJS-style matcher and versus a full
-V8/ICU build:
+Match arrays still eager-copy capture strings (QuickJS `js_sub_string`).
+Known engine-side gaps versus the previous QuickJS-style matcher and versus a
+full V8/ICU build:
 
 - Unicode property escapes (`\p{}` / `\P{}`) are not expanded; they fail at
   compile time until property tables are wired through the shim.

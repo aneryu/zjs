@@ -1,12 +1,8 @@
 //! Zig interpreter for V8 Irregexp bytecode.
 //!
-//! The C++ island still compiles patterns into IRRX blobs. Exec no longer
-//! crosses into Isolate / Handle / C ABI machinery on the match hot path.
-//! Dispatch is a labeled `switch` (`continue :dispatch next_opcode`), Zig's
-//! structured analog of V8's computed-goto interpreter. The program counter
-//! is a pointer into the blob so jump targets are `base + u32` rather than a
-//! slice index; fallthrough uses a comptime opcode size so the continue
-//! operand stays a plain `Opcode`.
+//! Compile still lives in the C++ island. Exec is a labeled `switch` over
+//! IRRX bytecode (`continue :dispatch nxt.op`), with a pointer PC and
+//! comptime instruction sizes. ReleaseFast trusts compiler-emitted code.
 const std = @import("std");
 const builtin = @import("builtin");
 const unicode = @import("unicode.zig");
@@ -212,8 +208,6 @@ fn load4(subject: []const u8, index: i32) u32 {
     return std.mem.littleToNative(u32, ptr.*);
 }
 
-/// Next-opcode operand for labeled-switch `continue`. ReleaseFast returns a
-/// plain `Opcode` so LLVM can emit a per-arm jump instead of an error union.
 inline fn nextOpcode(pc: [*]const u8) Opcode {
     if (!trusted_code) {
         if (pc[0] >= bc.opcode_count) unreachable;
@@ -225,8 +219,8 @@ inline fn skip(comptime op: Opcode) usize {
     return comptime bc.opcode_size[@intFromEnum(op)];
 }
 
-/// V8 `ADVANCE` + `DECODE`: load the next handler address before the rest of
-/// the current arm so the jump-table miss can overlap with operand work.
+/// V8 ADVANCE/DECODE: next PC and opcode, so the continue operand is a
+/// plain `Opcode` rather than a helper call.
 const Next = struct {
     pc: [*]const u8,
     op: Opcode,
@@ -242,6 +236,10 @@ inline fn decodeFallthrough(pc: [*]const u8, comptime op: Opcode) Next {
 
 inline fn decodeJump(code: []const u8, pc: [*]const u8, off: usize) Next {
     return decodeAt(jumpTo(code, pc, off));
+}
+
+inline fn decodeRestore(code: []const u8, offset: i32) Next {
+    return decodeAt(restorePc(code, offset));
 }
 
 inline fn jumpTo(code: []const u8, pc: [*]const u8, off: usize) [*]const u8 {
@@ -400,7 +398,7 @@ fn execGeneric(
             if (interrupt.check) |check| {
                 if (check(interrupt.ctx)) return error.Timeout;
             }
-            const nxt = decodeAt(restorePc(code, backtrack.pop() orelse return error.BytecodeCorrupt));
+            const nxt = decodeRestore(code, backtrack.pop() orelse return error.BytecodeCorrupt);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
@@ -434,25 +432,25 @@ fn execGeneric(
         .check_fixed_length_loop => {
             const tos = backtrack.peek() orelse return error.BytecodeCorrupt;
             if (current == tos) {
-                pc = jumpTo(code, pc, Off.check_fixed_length_loop.on_tos_equals_current_position);
+                const nxt = decodeJump(code, pc, Off.check_fixed_length_loop.on_tos_equals_current_position);
                 _ = backtrack.pop();
-            } else {
-                pc += skip(.check_fixed_length_loop);
+                pc = nxt.pc;
+                continue :dispatch nxt.op;
             }
-            const nxt = decodeAt(pc);
+            const nxt = decodeFallthrough(pc, .check_fixed_length_loop);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .load_current_character => {
             const bounds = readI32(pc, Off.load_current_character.bounds_check_offset);
             if (!indexInBounds(current + bounds, length)) {
-                pc = jumpTo(code, pc, Off.load_current_character.on_failure);
-            } else {
-                const cp_offset = readI16(pc, Off.load_current_character.cp_offset);
-                current_char = subject[@intCast(current + cp_offset)];
-                pc += skip(.load_current_character);
+                const nxt = decodeJump(code, pc, Off.load_current_character.on_failure);
+                pc = nxt.pc;
+                continue :dispatch nxt.op;
             }
-            const nxt = decodeAt(pc);
+            const cp_offset = readI16(pc, Off.load_current_character.cp_offset);
+            current_char = subject[@intCast(current + cp_offset)];
+            const nxt = decodeFallthrough(pc, .load_current_character);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
@@ -466,13 +464,13 @@ fn execGeneric(
         .load2_current_chars => {
             const bounds = readI32(pc, Off.load2_current_chars.bounds_check_offset);
             if (!indexInBounds(current + bounds, length)) {
-                pc = jumpTo(code, pc, Off.load2_current_chars.on_failure);
-            } else {
-                const cp_offset = readI16(pc, Off.load2_current_chars.cp_offset);
-                current_char = load2(Char, subject, current + cp_offset);
-                pc += skip(.load2_current_chars);
+                const nxt = decodeJump(code, pc, Off.load2_current_chars.on_failure);
+                pc = nxt.pc;
+                continue :dispatch nxt.op;
             }
-            const nxt = decodeAt(pc);
+            const cp_offset = readI16(pc, Off.load2_current_chars.cp_offset);
+            current_char = load2(Char, subject, current + cp_offset);
+            const nxt = decodeFallthrough(pc, .load2_current_chars);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
@@ -487,13 +485,13 @@ fn execGeneric(
             if (Char != u8) return error.BytecodeCorrupt;
             const bounds = readI32(pc, Off.load4_current_chars.bounds_check_offset);
             if (!indexInBounds(current + bounds, length)) {
-                pc = jumpTo(code, pc, Off.load4_current_chars.on_failure);
-            } else {
-                const cp_offset = readI16(pc, Off.load4_current_chars.cp_offset);
-                current_char = load4(subject, current + cp_offset);
-                pc += skip(.load4_current_chars);
+                const nxt = decodeJump(code, pc, Off.load4_current_chars.on_failure);
+                pc = nxt.pc;
+                continue :dispatch nxt.op;
             }
-            const nxt = decodeAt(pc);
+            const cp_offset = readI16(pc, Off.load4_current_chars.cp_offset);
+            current_char = load4(subject, current + cp_offset);
+            const nxt = decodeFallthrough(pc, .load4_current_chars);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
@@ -506,86 +504,70 @@ fn execGeneric(
             continue :dispatch nxt.op;
         },
         .check4_chars => {
-            if (readU32(pc, Off.check4_chars.characters) == current_char) {
-                pc = jumpTo(code, pc, Off.check4_chars.on_equal);
-            } else {
-                pc += skip(.check4_chars);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (readU32(pc, Off.check4_chars.characters) == current_char)
+                decodeJump(code, pc, Off.check4_chars.on_equal)
+            else
+                decodeFallthrough(pc, .check4_chars);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_character => {
-            if (readU16(pc, Off.check_character.character) == current_char) {
-                pc = jumpTo(code, pc, Off.check_character.on_equal);
-            } else {
-                pc += skip(.check_character);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (readU16(pc, Off.check_character.character) == current_char)
+                decodeJump(code, pc, Off.check_character.on_equal)
+            else
+                decodeFallthrough(pc, .check_character);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_not4_chars => {
-            if (readU32(pc, Off.check_not4_chars.characters) != current_char) {
-                pc = jumpTo(code, pc, Off.check_not4_chars.on_not_equal);
-            } else {
-                pc += skip(.check_not4_chars);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (readU32(pc, Off.check_not4_chars.characters) != current_char)
+                decodeJump(code, pc, Off.check_not4_chars.on_not_equal)
+            else
+                decodeFallthrough(pc, .check_not4_chars);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_not_character => {
-            if (readU16(pc, Off.check_not_character.character) != current_char) {
-                pc = jumpTo(code, pc, Off.check_not_character.on_not_equal);
-            } else {
-                pc += skip(.check_not_character);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (readU16(pc, Off.check_not_character.character) != current_char)
+                decodeJump(code, pc, Off.check_not_character.on_not_equal)
+            else
+                decodeFallthrough(pc, .check_not_character);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .and_check4_chars => {
             const mask = readU32(pc, Off.and_check4_chars.mask);
-            if (readU32(pc, Off.and_check4_chars.characters) == (current_char & mask)) {
-                pc = jumpTo(code, pc, Off.and_check4_chars.on_equal);
-            } else {
-                pc += skip(.and_check4_chars);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (readU32(pc, Off.and_check4_chars.characters) == (current_char & mask))
+                decodeJump(code, pc, Off.and_check4_chars.on_equal)
+            else
+                decodeFallthrough(pc, .and_check4_chars);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_character_after_and => {
             const mask = readU32(pc, Off.check_character_after_and.mask);
-            if (readU16(pc, Off.check_character_after_and.character) == (current_char & mask)) {
-                pc = jumpTo(code, pc, Off.check_character_after_and.on_equal);
-            } else {
-                pc += skip(.check_character_after_and);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (readU16(pc, Off.check_character_after_and.character) == (current_char & mask))
+                decodeJump(code, pc, Off.check_character_after_and.on_equal)
+            else
+                decodeFallthrough(pc, .check_character_after_and);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .and_check_not4_chars => {
             const mask = readU32(pc, Off.and_check_not4_chars.mask);
-            if (readU32(pc, Off.and_check_not4_chars.characters) != (current_char & mask)) {
-                pc = jumpTo(code, pc, Off.and_check_not4_chars.on_not_equal);
-            } else {
-                pc += skip(.and_check_not4_chars);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (readU32(pc, Off.and_check_not4_chars.characters) != (current_char & mask))
+                decodeJump(code, pc, Off.and_check_not4_chars.on_not_equal)
+            else
+                decodeFallthrough(pc, .and_check_not4_chars);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_not_character_after_and => {
             const mask = readU32(pc, Off.check_not_character_after_and.mask);
-            if (readU16(pc, Off.check_not_character_after_and.character) != (current_char & mask)) {
-                pc = jumpTo(code, pc, Off.check_not_character_after_and.on_not_equal);
-            } else {
-                pc += skip(.check_not_character_after_and);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (readU16(pc, Off.check_not_character_after_and.character) != (current_char & mask))
+                decodeJump(code, pc, Off.check_not_character_after_and.on_not_equal)
+            else
+                decodeFallthrough(pc, .check_not_character_after_and);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
@@ -593,102 +575,84 @@ fn execGeneric(
             const minus = readU16(pc, Off.check_not_character_after_minus_and.minus);
             const mask = readU16(pc, Off.check_not_character_after_minus_and.mask);
             const character = readU16(pc, Off.check_not_character_after_minus_and.character);
-            if (character != ((current_char -% minus) & mask)) {
-                pc = jumpTo(code, pc, Off.check_not_character_after_minus_and.on_not_equal);
-            } else {
-                pc += skip(.check_not_character_after_minus_and);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (character != ((current_char -% minus) & mask))
+                decodeJump(code, pc, Off.check_not_character_after_minus_and.on_not_equal)
+            else
+                decodeFallthrough(pc, .check_not_character_after_minus_and);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_character_in_range => {
             const from = readU16(pc, Off.check_character_in_range.from);
             const to = readU16(pc, Off.check_character_in_range.to);
-            if (from <= current_char and current_char <= to) {
-                pc = jumpTo(code, pc, Off.check_character_in_range.on_in_range);
-            } else {
-                pc += skip(.check_character_in_range);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (from <= current_char and current_char <= to)
+                decodeJump(code, pc, Off.check_character_in_range.on_in_range)
+            else
+                decodeFallthrough(pc, .check_character_in_range);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_character_not_in_range => {
             const from = readU16(pc, Off.check_character_not_in_range.from);
             const to = readU16(pc, Off.check_character_not_in_range.to);
-            if (from > current_char or current_char > to) {
-                pc = jumpTo(code, pc, Off.check_character_not_in_range.on_not_in_range);
-            } else {
-                pc += skip(.check_character_not_in_range);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (from > current_char or current_char > to)
+                decodeJump(code, pc, Off.check_character_not_in_range.on_not_in_range)
+            else
+                decodeFallthrough(pc, .check_character_not_in_range);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_bit_in_table => {
             const table = readTable(pc, Off.check_bit_in_table.table);
-            if (checkBitInTable(current_char, table)) {
-                pc = jumpTo(code, pc, Off.check_bit_in_table.on_bit_set);
-            } else {
-                pc += skip(.check_bit_in_table);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (checkBitInTable(current_char, table))
+                decodeJump(code, pc, Off.check_bit_in_table.on_bit_set)
+            else
+                decodeFallthrough(pc, .check_bit_in_table);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_character_lt => {
-            if (current_char < readU16(pc, Off.check_character_lt.limit)) {
-                pc = jumpTo(code, pc, Off.check_character_lt.on_less);
-            } else {
-                pc += skip(.check_character_lt);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (current_char < readU16(pc, Off.check_character_lt.limit))
+                decodeJump(code, pc, Off.check_character_lt.on_less)
+            else
+                decodeFallthrough(pc, .check_character_lt);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_character_gt => {
-            if (current_char > readU16(pc, Off.check_character_gt.limit)) {
-                pc = jumpTo(code, pc, Off.check_character_gt.on_greater);
-            } else {
-                pc += skip(.check_character_gt);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (current_char > readU16(pc, Off.check_character_gt.limit))
+                decodeJump(code, pc, Off.check_character_gt.on_greater)
+            else
+                decodeFallthrough(pc, .check_character_gt);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .if_register_lt => {
             const index = readU16(pc, Off.if_register_lt.register_index);
             const comparand = readI32(pc, Off.if_register_lt.comparand);
-            if ((regGet(registers, index)) < comparand) {
-                pc = jumpTo(code, pc, Off.if_register_lt.on_less_than);
-            } else {
-                pc += skip(.if_register_lt);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if ((regGet(registers, index)) < comparand)
+                decodeJump(code, pc, Off.if_register_lt.on_less_than)
+            else
+                decodeFallthrough(pc, .if_register_lt);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .if_register_ge => {
             const index = readU16(pc, Off.if_register_ge.register_index);
             const comparand = readI32(pc, Off.if_register_ge.comparand);
-            if ((regGet(registers, index)) >= comparand) {
-                pc = jumpTo(code, pc, Off.if_register_ge.on_greater_or_equal);
-            } else {
-                pc += skip(.if_register_ge);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if ((regGet(registers, index)) >= comparand)
+                decodeJump(code, pc, Off.if_register_ge.on_greater_or_equal)
+            else
+                decodeFallthrough(pc, .if_register_ge);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .if_register_eq_pos => {
             const index = readU16(pc, Off.if_register_eq_pos.register_index);
-            if ((regGet(registers, index)) == current) {
-                pc = jumpTo(code, pc, Off.if_register_eq_pos.on_eq);
-            } else {
-                pc += skip(.if_register_eq_pos);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if ((regGet(registers, index)) == current)
+                decodeJump(code, pc, Off.if_register_eq_pos.on_eq)
+            else
+                decodeFallthrough(pc, .if_register_eq_pos);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
@@ -759,55 +723,46 @@ fn execGeneric(
             continue :dispatch nxt.op;
         },
         .check_at_start => {
-            if (current + readI16(pc, Off.check_at_start.cp_offset) == 0) {
-                pc = jumpTo(code, pc, Off.check_at_start.on_at_start);
-            } else {
-                pc += skip(.check_at_start);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (current + readI16(pc, Off.check_at_start.cp_offset) == 0)
+                decodeJump(code, pc, Off.check_at_start.on_at_start)
+            else
+                decodeFallthrough(pc, .check_at_start);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_not_at_start => {
-            if (current + readI16(pc, Off.check_not_at_start.cp_offset) == 0) {
-                pc += skip(.check_not_at_start);
-            } else {
-                pc = jumpTo(code, pc, Off.check_not_at_start.on_not_at_start);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (current + readI16(pc, Off.check_not_at_start.cp_offset) == 0)
+                decodeFallthrough(pc, .check_not_at_start)
+            else
+                decodeJump(code, pc, Off.check_not_at_start.on_not_at_start);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .set_current_position_from_end => {
             const by = readI16(pc, Off.set_current_position_from_end.by);
-            pc += skip(.set_current_position_from_end);
+            const nxt = decodeFallthrough(pc, .set_current_position_from_end);
             if (length - current > by) {
                 current = length - by;
                 current_char = subject[@intCast(current - 1)];
             }
-            const nxt = decodeAt(pc);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_position => {
             const pos = current + readI16(pc, Off.check_position.cp_offset);
-            if (pos >= length or pos < 0) {
-                pc = jumpTo(code, pc, Off.check_position.on_failure);
-            } else {
-                pc += skip(.check_position);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (pos >= length or pos < 0)
+                decodeJump(code, pc, Off.check_position.on_failure)
+            else
+                decodeFallthrough(pc, .check_position);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },
         .check_special_class_ranges => {
             const set = readU8(pc, Off.check_special_class_ranges.character_set);
-            if (specialClassMatches(current_char, set, one_byte)) {
-                pc += skip(.check_special_class_ranges);
-            } else {
-                pc = jumpTo(code, pc, Off.check_special_class_ranges.on_no_match);
-            }
-            const nxt = decodeAt(pc);
+            const nxt = if (specialClassMatches(current_char, set, one_byte))
+                decodeFallthrough(pc, .check_special_class_ranges)
+            else
+                decodeJump(code, pc, Off.check_special_class_ranges.on_no_match);
             pc = nxt.pc;
             continue :dispatch nxt.op;
         },

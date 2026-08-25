@@ -2865,8 +2865,7 @@ pub fn createRegExpMatchArrayFromValue(
     return createRegExpMatchArrayFromValueSlow(rt, global, input_value, found, input_len, has_indices);
 }
 
-/// bench-v8 and most `.exec()` calls have only capture 0. Skip the named-groups
-/// object, the N-element capture loop, and the `noinline` general path.
+/// Group-0 match arrays skip the named-groups object and the capture loop.
 fn createRegExpMatchArrayGroup0(
     rt: *core.JSRuntime,
     global: *core.Object,
@@ -2889,7 +2888,7 @@ fn createRegExpMatchArrayGroup0(
     return out.value();
 }
 
-pub noinline fn createRegExpMatchArrayFromValueSlow(
+noinline fn createRegExpMatchArrayFromValueSlow(
     rt: *core.JSRuntime,
     global: *core.Object,
     input_value: core.JSValue,

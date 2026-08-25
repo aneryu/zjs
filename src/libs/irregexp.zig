@@ -488,15 +488,11 @@ fn execStatus(status: c_int) !ExecResult {
     };
 }
 
-fn copyRegisters(dst: []usize, src: []const i32, capture_slots: usize) void {
+fn copyRegisters(dst: []usize, src: []const i32) void {
     const n = @min(dst.len, src.len);
     var i: usize = 0;
     while (i < n) : (i += 1) {
-        if (i < capture_slots) {
-            dst[i] = if (src[i] < 0) no_slot_value else @intCast(src[i]);
-        } else {
-            dst[i] = if (src[i] < 0) no_slot_value else @intCast(src[i]);
-        }
+        dst[i] = if (src[i] < 0) no_slot_value else @intCast(src[i]);
     }
     if (n < dst.len) @memset(dst[n..], no_slot_value);
 }
@@ -586,7 +582,7 @@ pub fn execCaptureSlotsSliceTrustedWithOptions(
         .failure => .no_match,
     };
     if (result == .match) {
-        copyRegisters(capture, regs, registers_per_match);
+        copyRegisters(capture, regs);
     }
     return result;
 }
@@ -863,7 +859,7 @@ test "Zig Irregexp interpreter matches C++ exec on representative patterns" {
             null,
         );
         const cpp = try execStatus(cpp_status);
-        if (cpp == .match) copyRegisters(cpp_slots, cpp_regs, registers_per_match);
+        if (cpp == .match) copyRegisters(cpp_slots, cpp_regs);
         try std.testing.expectEqual(cpp, zig);
         if (zig == .match) {
             try std.testing.expectEqualSlices(usize, cpp_slots, zig_slots);
