@@ -856,6 +856,14 @@ const RecentLatin1Slice = struct {
     string: *string.String,
 };
 
+/// Occupied slots in `JSRuntime.recent_latin1_slices`. Small enough to scan on
+/// each internable `stringSliceValue`, large enough to hold the URL pattern's
+/// distinct captures plus a few other hot slices.
+const recent_latin1_slice_cache_len: usize = 32;
+/// Longest latin1 slice interned. Covers bench-v8 URL captures such as
+/// `"www.google.com"` (14) without retaining whole-string group-0 copies.
+const recent_latin1_slice_max: usize = 32;
+
 const root_provider_inline_capacity = 1;
 
 /// A Runtime and every Realm/heap structure owned by it are mutated only by
@@ -877,13 +885,6 @@ const RuntimeCompactState = packed struct(u8) {
 
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
-    /// Occupied slots in `recent_latin1_slices`. Small enough to scan on
-    /// each internable `stringSliceValue`, large enough to hold the URL
-    /// pattern's distinct captures plus a few other hot slices.
-    pub const recent_latin1_slice_cache_len: usize = 32;
-    /// Longest latin1 slice interned. Covers bench-v8 URL captures such as
-    /// `"www.google.com"` (14) without retaining whole-string group-0 copies.
-    pub const recent_latin1_slice_max: usize = 32;
 
     /// K4 hot-state cluster: the per-call/per-return execution scalars that
     /// call admission (`canEnterInlineCallDepthBytes`), commit

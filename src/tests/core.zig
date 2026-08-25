@@ -1846,7 +1846,7 @@ test "short latin1 slices intern across repeated copies" {
     try std.testing.expectEqual(allocations, rt.memory.allocation_count);
 
     var i: u32 = 0;
-    while (i < core.JSRuntime.recent_latin1_slice_cache_len) : (i += 1) {
+    while (i < rt.recent_latin1_slices.len) : (i += 1) {
         var buf: [8]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "s{d:0>4}", .{i}) catch unreachable;
         _ = (try rt.recentLatin1Slice(text)).?;

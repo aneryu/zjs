@@ -61,7 +61,9 @@ module loading are not supported.
 
 ## Regular Expressions
 
-Match arrays still eager-copy capture strings (QuickJS `js_sub_string`).
+Match-array captures are still eager copies (QuickJS `js_sub_string`), not
+zero-copy views. Short latin1 slices (length 2..32) may be interned and
+reused; longer slices and UTF-16 still allocate a fresh copy.
 
 ## Proper Tail Calls
 
