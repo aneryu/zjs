@@ -115,11 +115,19 @@ pub var stress_disable: bool = false;
 /// trace never sees at all", which a full collection would miss too.
 pub var stress_no_minor: bool = false;
 
+/// `ZJS_GC_VERIFY_MINOR=1`: check every minor's condemned set against what a
+/// full trace would keep. See `gc_trace_stw.computeFullReachable`.
+pub var verify_minor: bool = false;
+
 
 /// Read once at `Registry.init`. "0" or empty disables; "1" enables at the
 /// default cadence; any other integer enables at that cadence.
 fn readStressFromEnv() void {
     if (comptime !trace_stw_enabled) return;
+    if (std.c.getenv("ZJS_GC_VERIFY_MINOR")) |raw| {
+        const text = std.mem.span(raw);
+        verify_minor = text.len != 0 and !std.mem.eql(u8, text, "0");
+    }
     if (std.c.getenv("ZJS_GC_NO_MINOR")) |raw| {
         const text = std.mem.span(raw);
         stress_no_minor = text.len != 0 and !std.mem.eql(u8, text, "0");

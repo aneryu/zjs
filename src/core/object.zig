@@ -5063,6 +5063,11 @@ pub const Object = extern struct {
         const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
         const old_fb = self.u.bytecode_function.function_bytecode;
         self.u.bytecode_function.function_bytecode = fb;
+        // A FunctionBytecode is a traced heap object, and a closure gaining one
+        // is an ordinary owner-to-child store. Closures are created lazily and
+        // repeatedly against long-lived function objects, so this is the
+        // old-to-young direction far more often than not.
+        rt.gc.generationalBarrier(&self.header, &fb.header);
         if (old_fb) |old| gc.release(rt, &old.header);
     }
 

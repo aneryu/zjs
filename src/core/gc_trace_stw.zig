@@ -103,6 +103,65 @@ pub const Report = struct {
 
 pub var last_report: Report = .{};
 
+/// `ZJS_GC_VERIFY_MINOR=1`: what a FULL trace would keep, recomputed before
+/// each minor so the minor's condemned set can be checked against it.
+///
+/// This is the systematic form of `ZJS_MINOR_AUDIT`. The audit asks "does some
+/// live object still name this?", which finds a missing barrier only when the
+/// owner is itself reachable AND the edge is one `traceChildEdges` enumerates
+/// -- it is blind to exactly the cases where the tracer does not know about the
+/// reference at all. This asks the question the collector is really answering,
+/// "is this garbage?", against the collector's own roots with the generational
+/// shortcuts turned off. Anything it reports is a young-generation soundness
+/// violation whatever the cause: a missing write barrier, a remembered-set
+/// entry lost, a promotion that aged something the trace never reached.
+///
+/// Cost is a whole extra whole-heap trace plus a mark save/restore per minor,
+/// which is why it is a diagnostic mode and not an assertion.
+var verify_reachable: std.AutoHashMapUnmanaged(usize, void) = .empty;
+var verify_armed: bool = false;
+
+/// Mark exactly what the roots reach, with no sticky-old shortcut and no
+/// remembered set, and hand back the set. Leaves every mark bit as it found it:
+/// the minor that runs next depends on the sticky marks this has to disturb.
+fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !void {
+    verify_reachable.clearRetainingCapacity();
+
+    var saved: std.ArrayList(*gc.Header) = .empty;
+    defer saved.deinit(rt.memory.persistent_allocator);
+    {
+        var it = rt.gc.objectIterator();
+        while (it.next()) |header| {
+            if (header.metaConst().flags.mark) try saved.append(rt.memory.persistent_allocator, header);
+        }
+    }
+
+    var probe = try Collector.init(rt, null, scan);
+    defer probe.deinit();
+    probe.clearMarks();
+    try probe.seedRoots();
+    try probe.drain();
+    if (probe.conservative_on) {
+        try probe.seedConservativeRoots();
+        try probe.drain();
+    }
+    // `processWeak` is deliberately NOT run: it clears weak references, and a
+    // diagnostic pass must not have side effects the real collection then sees.
+    try probe.ephemeronFixedPoint();
+
+    {
+        var it = rt.gc.objectIterator();
+        while (it.next()) |header| {
+            if (header.metaConst().flags.mark) {
+                try verify_reachable.put(rt.memory.persistent_allocator, @intFromPtr(header), {});
+            }
+        }
+    }
+
+    probe.clearMarks();
+    for (saved.items) |header| header.meta().flags.mark = true;
+}
+
 pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
     var drained_sweep_debt: usize = 0;
     if (comptime gc.sweep_model_enabled) {
@@ -157,6 +216,13 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
 
     var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
+
+    if (gc.verify_minor) {
+        computeFullReachable(rt, scan) catch |err| {
+            std.debug.print("VERIFY-MINOR setup failed: {s}\n", .{@errorName(err)});
+        };
+        verify_armed = true;
+    }
 
     collector.clearYoungMarks();
     try collector.seedRoots();
@@ -726,6 +792,24 @@ const Collector = struct {
             // trace did not reach is a missing root or a missing barrier, and
             // must fail loudly rather than be masked by a count.
             doomed.append(self.allocator(), header) catch return 0;
+        }
+        if (verify_armed) {
+            verify_armed = false;
+            var violations: usize = 0;
+            for (doomed.items) |header| {
+                if (!verify_reachable.contains(@intFromPtr(header))) continue;
+                violations += 1;
+                const kind = header.metaConst().flags.kind;
+                if (kind == .object) {
+                    const o: *Object = @alignCast(@fieldParentPtr("header", header));
+                    std.debug.print("VERIFY-MINOR condemned-but-reachable kind=object class={d} payload={s}\n", .{ o.class_id, @tagName(o.flags.class_payload_kind) });
+                } else {
+                    std.debug.print("VERIFY-MINOR condemned-but-reachable kind={s}\n", .{@tagName(kind)});
+                }
+            }
+            if (violations != 0) {
+                std.debug.print("VERIFY-MINOR {d} of {d} condemned objects are reachable by a full trace\n", .{ violations, doomed.items.len });
+            }
         }
         if (std.c.getenv("ZJS_MINOR_AUDIT") != null) self.auditCondemnedYoung(doomed.items);
         for (doomed.items) |header| {

@@ -3825,6 +3825,18 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         const old_value = loadValueAsIntPair(slot);
         const value = loadValueAsIntPair(&(sp - 1)[0]);
         storeValueAsIntPair(slot, value); // consumes the stack's ref on value
+        // `obj.prop = child` on the hot arm. This writes the property slot in
+        // place and never reaches the `setOrDefineOwnDataProperty*` funnels
+        // where the other property barriers live, so it takes its own -- the
+        // same relationship `op_put_array_el` has to the dense-array setters.
+        // Receivers here are by definition ones that already have the property,
+        // i.e. established objects, so this is the old-to-young direction
+        // routinely: every large object-graph benchmark failed without it.
+        if (comptime core.gc.generation_enabled) {
+            if (object_ops.objectFromValue(receiver)) |owner| {
+                rt.gc.generationalBarrier(&owner.header, value.cycleMarkHeader());
+            }
+        }
         if (old_value.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {
             // Park the dying old value (rc == 1) in the now-dead value slot;
             // the tail completes both releases off the still-intact operands.

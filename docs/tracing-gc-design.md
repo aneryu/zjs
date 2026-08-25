@@ -1936,6 +1936,61 @@ high-volume stress. A race detector that supports the chosen Zig/LLVM atomic
 paths is preferred, but deterministic happens-before assertions remain
 required because stress alone does not prove absence of a missed interleaving.
 
+### 14.1 Diagnostic modes
+
+Four environment variables, all read once at `Registry.init` and all no-ops
+outside `-Dzjs_gc=trace_stw`. They exist because a young-generation soundness
+bug is only observable when a collection lands inside the exact window a
+reference is untraced, and at the production safepoint cadence of 10 000 ticks
+that window is hit by accident: the same binary passes or fails depending on
+allocation history.
+
+| Variable | Effect |
+|---|---|
+| `ZJS_GC_STRESS=<ticks>` | Collect at every safepoint that has anything young, and shorten the safepoint cadence to `<ticks>`. `off` disables collection entirely. |
+| `ZJS_GC_NO_MINOR=1` | Majors only. |
+| `ZJS_MINOR_AUDIT=1` | After the minor picks its condemned set, report any live object still holding an edge into it, naming the owner, the slot, and whether the owner was remembered. |
+| `ZJS_GC_VERIFY_MINOR=1` | Before each minor, recompute what a full trace would keep; afterwards report every condemned object that trace reached. |
+
+Choosing between the last two matters. `ZJS_MINOR_AUDIT` answers "does some
+live object still name this?", which finds a missing barrier only when the
+owner is itself reachable *and* the edge is one `traceChildEdges` enumerates —
+it is blind to exactly the cases where the tracer does not know about the
+reference at all, and that blindness cost a day. `ZJS_GC_VERIFY_MINOR` asks the
+question the collector is really answering, "is this garbage?", against the
+collector's own roots with the generational shortcuts turned off. Anything it
+reports is a soundness violation whatever the cause: a missing write barrier, a
+lost remembered-set entry, or a promotion that aged an object the trace never
+reached. It costs a whole extra heap trace plus a mark save/restore per minor,
+which is why it is a mode and not an assertion.
+
+Two rules about probes on these paths, both learned by losing a reproduction to
+them:
+
+- Instrumenting the *JavaScript* does not work. Any probe that allocates moves
+  the collection out of the window being observed, and the failure disappears.
+  Instrument the engine.
+- A `getenv` on a hot path is itself a probe. One inside `generationalBarrier`
+  perturbed timing enough to stop a deterministic failure from reproducing.
+  Parse once, into a module-level `pub var`, as `gc.stress_collect` does.
+
+`setarch -R` disables ASLR, which makes heap addresses stable across runs of
+the same deterministic input — that is what makes "print the pointer, then
+watch it" possible across two runs.
+
+### 14.2 What test262 does not cover
+
+test262 cases are small and short-lived. Almost none allocate enough to trigger
+a minor collection, and fewer still keep an object alive across one, so 49 778
+of them barely exercise the generational write barrier. The macro-workload gate
+(`zig build macro-check`, docs/perf/macro-workload-completion.md) exists because
+of a concrete instance: with the tracing collector at test262 0/49778 and both
+unit suites green, twelve of twenty-six vendored Octane benchmarks still failed
+outright, every one of them a live object reclaimed by a minor.
+
+A passing test262 therefore says nothing about generational correctness, and
+the two gates are not substitutes for one another.
+
 ## 15. Open decisions
 
 1. Which fields qualify as immutable published GC pointers, and how is that
