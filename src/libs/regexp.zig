@@ -1356,32 +1356,13 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .char, .char_i => {
-                    const peel_op: u8 = @intFromEnum(opcode);
-                    while (true) {
-                        const expected: u32 = if (comptime safety == .trusted) st.takeU16(.trusted) else try st.takeU16(.checked);
-                        if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                        if (comptime cbuf_type == .latin1) {
-                            if (opcode == .char) {
-                                if (expected > 0xff or st.cbuf[st.cptr] != expected) break :dispatch_once;
-                                st.cptr += 1;
-                            } else {
-                                const c = lreCanonicalize(st.getCharUnchecked(cbuf_type), st.s.is_unicode);
-                                if (expected != @as(u32, c)) break :dispatch_once;
-                            }
-                        } else {
-                            var c = st.getCharUnchecked(cbuf_type);
-                            if (opcode == .char_i) {
-                                c = lreCanonicalize(c, st.s.is_unicode);
-                            }
-                            if (expected != @as(u32, c)) break :dispatch_once;
-                        }
-                        try st.ensurePc(safety, st.pc, 1);
-                        if (comptime safety == .trusted) {
-                            if (@intFromPtr(st.pc) >= @intFromPtr(st.bc_end)) break;
-                        }
-                        if (st.pc[0] != peel_op) break;
-                        st.pc += 1;
+                    const expected: u32 = if (comptime safety == .trusted) st.takeU16(.trusted) else try st.takeU16(.checked);
+                    if (st.cptr >= st.cbuf_end) break :dispatch_once;
+                    var c = st.getCharUnchecked(cbuf_type);
+                    if (opcode == .char_i) {
+                        c = lreCanonicalize(c, st.s.is_unicode);
                     }
+                    if (expected != @as(u32, c)) break :dispatch_once;
                     continue :main;
                 },
                 .split_goto_first, .split_next_first => {
