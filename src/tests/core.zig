@@ -14269,3 +14269,41 @@ test "arena resolution stops at the arena header and at the last block" {
     try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(base));
     try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(base + 8));
 }
+
+test "a minor that keeps reclaiming nothing stops being offered" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const State = @TypeOf(rt.gc.generation);
+    try std.testing.expect(!rt.gc.generation.minorSuspended());
+
+    // Yield below the floor, repeated. The policy exists because a workload is
+    // allowed to disagree with the weak generational hypothesis -- splay links
+    // every fresh node straight into its live tree -- and a minor that learns
+    // this by paying a full root and conservative stack scan each time is the
+    // cost being removed. Measured 2026-08-25: splay is 1.26x faster once the
+    // minor stops being offered.
+    var round: usize = 0;
+    while (round < State.low_yield_limit) : (round += 1) {
+        rt.gc.generation.noteMinorYield(1000, 1);
+    }
+    try std.testing.expect(rt.gc.generation.minorSuspended());
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.stats.minor_suspensions);
+
+    // A major buys one probe, not a fresh run of unproductive minors, and the
+    // interval doubles each time the probe confirms the answer.
+    var majors: usize = 0;
+    while (majors < 64) : (majors += 1) rt.gc.generation.decayLowYieldStreak();
+    try std.testing.expect(!rt.gc.generation.minorSuspended());
+
+    // A productive minor puts it straight back into service.
+    while (round < State.low_yield_limit * 2) : (round += 1) {
+        rt.gc.generation.noteMinorYield(1000, 1);
+    }
+    try std.testing.expect(rt.gc.generation.minorSuspended());
+    rt.gc.generation.noteMinorYield(1000, 900);
+    try std.testing.expect(!rt.gc.generation.minorSuspended());
+}

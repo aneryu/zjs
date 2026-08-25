@@ -234,6 +234,9 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
     defer collector.deinit();
     const swept = try collector.run();
     clearYoungState(rt);
+    // A major resets the experiment: it changes what is old, and with it the
+    // survival rate the next minor would measure.
+    rt.gc.generation.decayLowYieldStreak();
     last_report = collector.report;
     last_report.swept = swept;
     if (detailed_reports) {
@@ -324,6 +327,7 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     // conservative scan that decides what is live.
     if (!rt.gc.arenaSetWhole()) return 0;
     const reclaimed = collector.sweepUnmarkedYoung();
+    rt.gc.generation.noteMinorYield(young_before, reclaimed);
 
     // Promotion is the sticky rule made concrete: everything still young
     // after the sweep survived this collection, so it is old now. Clearing

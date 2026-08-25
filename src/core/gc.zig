@@ -2013,6 +2013,10 @@ pub const Registry = struct {
         if (self.phase != .none) return false;
         if (stress_disable or stress_no_minor) return false;
         if (stress_collect) return self.generation.stats.young_count != 0;
+        // A minor that keeps coming back empty is a root and stack scan spent
+        // to learn that this workload's young objects do not die. Stop asking
+        // until a major changes the answer.
+        if (self.generation.minorSuspended()) return false;
         return self.generation.stats.young_count >= minor_young_threshold;
     }
 

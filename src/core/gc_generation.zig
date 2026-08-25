@@ -21,6 +21,10 @@ pub const Stats = struct {
     young_count: usize = 0,
     remembered_owners: usize = 0,
     remembered_drops: usize = 0,
+    /// Times the minor was suspended for reclaiming too little to be worth its
+    /// fixed cost. A workload that keeps its young objects alive is not a
+    /// defect, but paying a full root and stack scan to discover that is.
+    minor_suspensions: usize = 0,
     minor_collections: usize = 0,
     promoted: usize = 0,
     /// Owners re-traced by a minor that turned out to hold no young child.
@@ -49,6 +53,9 @@ pub const Stats = struct {
 
 pub const State = struct {
     remembered: std.AutoHashMapUnmanaged(usize, void) = .{},
+    low_yield_streak: usize = 0,
+    probe_backoff: usize = 1,
+    probe_countdown: usize = 0,
     stats: Stats = .{},
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
@@ -107,6 +114,70 @@ pub const State = struct {
         self.remembered.clearRetainingCapacity();
         self.stats.young_count = 0;
         self.stats.remembered_owners = 0;
+    }
+
+    /// Minors this workload has run whose yield did not justify their cost.
+    ///
+    /// A minor's price is almost all fixed: every precise root, a spilled and
+    /// conservatively scanned native stack, and a walk of every remembered
+    /// owner, none of which shrinks with the young set. It is worth paying only
+    /// when most of the young set is dead. The weak generational hypothesis
+    /// says it usually is -- but a workload is free to disagree, and splay does
+    /// emphatically: it links each freshly allocated node straight into the
+    /// live tree, 95%+ of the young set survives, and measured on 2026-08-25
+    /// disabling minors entirely made it 21% FASTER while reclaiming more.
+    /// earley-boyer loses 3% the same way.
+    ///
+    /// So the policy stops asserting the hypothesis and measures it instead.
+    /// After `low_yield_limit` consecutive minors reclaim less than a tenth of
+    /// the young set, minors stop being offered; the next major clears the
+    /// count, because a major changes the old generation and with it the
+    /// survival rate the next minor would see.
+    pub const low_yield_limit: usize = 3;
+    const low_yield_reclaim_percent: usize = 10;
+
+    /// How many majors to let pass before probing a suspended minor again.
+    /// Doubles on each probe that confirms the workload still keeps its young
+    /// objects, so a program that simply does not benefit stops being charged
+    /// for the discovery. Capped so a phase change is still noticed.
+    const probe_backoff_max: usize = 64;
+
+    pub fn noteMinorYield(self: *State, young_before: usize, reclaimed: usize) void {
+        if (young_before == 0) return;
+        if (reclaimed * 100 >= young_before * low_yield_reclaim_percent) {
+            self.low_yield_streak = 0;
+            self.probe_backoff = 1;
+            self.probe_countdown = 0;
+            return;
+        }
+        self.low_yield_streak += 1;
+        if (self.low_yield_streak >= low_yield_limit) {
+            if (self.low_yield_streak == low_yield_limit) self.stats.minor_suspensions += 1;
+            self.probe_backoff = @min(self.probe_backoff * 2, probe_backoff_max);
+            self.probe_countdown = self.probe_backoff;
+        }
+    }
+
+    /// A major has run: let the minor try once more.
+    ///
+    /// Decay by one rather than reset to zero. Zeroing made every major buy a
+    /// fresh run of `low_yield_limit` unproductive minors, and on a workload
+    /// whose majors are frequent that is most of them -- splay recovered only a
+    /// third of what suspending the minor outright was worth. Decaying leaves a
+    /// suspended collector one probe per major: enough to notice that the
+    /// workload's young mortality has changed, cheap enough that noticing costs
+    /// one scan instead of three.
+    pub fn decayLowYieldStreak(self: *State) void {
+        if (self.low_yield_streak == 0) return;
+        if (self.probe_countdown > 0) {
+            self.probe_countdown -= 1;
+            return;
+        }
+        self.low_yield_streak -= 1;
+    }
+
+    pub fn minorSuspended(self: *const State) bool {
+        return self.low_yield_streak >= low_yield_limit;
     }
 
     pub fn promoteSurvivors(self: *State, survivors: usize) void {
