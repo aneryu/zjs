@@ -6552,6 +6552,27 @@ test "proxy revocation target is internal" {
     try std.testing.expectEqualStrings("false\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\ndone\n", stream.buffered());
 }
 
+test "nested greedy class8 captures last inner run" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var t32 = /^(([a-z]+)*[a-z]\.)+[a-z]{2,}$/.exec("www.netscape.com");
+        \\print(t32[0] + "|" + t32[1] + "|" + t32[2]);
+        \\var t33 = /^(([a-z]+)*([a-z])\.)+[a-z]{2,}$/.exec("www.netscape.com");
+        \\print(t33[0] + "|" + t33[1] + "|" + t33[2] + "|" + t33[3]);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "www.netscape.com|netscape.|netscap\nwww.netscape.com|netscape.|netscap|e\n",
+        stream.buffered(),
+    );
+}
+
 test "regexp accessor realm TypeError constructor is internal" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

@@ -199,6 +199,40 @@ test "JavaScript RegExp adapter greedy class8 loop backtracks" {
     }
 }
 
+test "JavaScript RegExp adapter nested greedy class8 captures last inner run" {
+    // test262 S15.10.2.8_A3_T32 / T33: the first in-place class8 shrink must
+    // park the rest of the chain and clear pending, or a later `*` consumes
+    // given-back letters and group 2 collapses to a single character.
+    {
+        var compiled = try compile(std.testing.allocator, "^(([a-z]+)*[a-z]\\.)+[a-z]{2,}$", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "www.netscape.com" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 16), hit.match.end);
+        try std.testing.expectEqual(@as(usize, 2), hit.match.capture_count);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.captures[0].start.?);
+        try std.testing.expectEqual(@as(usize, 13), hit.match.captures[0].end.?);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.captures[1].start.?);
+        try std.testing.expectEqual(@as(usize, 11), hit.match.captures[1].end.?);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "^(([a-z]+)*([a-z])\\.)+[a-z]{2,}$", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "www.netscape.com" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 16), hit.match.end);
+        try std.testing.expectEqual(@as(usize, 3), hit.match.capture_count);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.captures[0].start.?);
+        try std.testing.expectEqual(@as(usize, 13), hit.match.captures[0].end.?);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.captures[1].start.?);
+        try std.testing.expectEqual(@as(usize, 11), hit.match.captures[1].end.?);
+        try std.testing.expectEqual(@as(usize, 11), hit.match.captures[2].start.?);
+        try std.testing.expectEqual(@as(usize, 12), hit.match.captures[2].end.?);
+    }
+}
+
 test "JavaScript RegExp adapter matches latin1 literals and quantified chars" {
     {
         var compiled = try compile(std.testing.allocator, "://", "");

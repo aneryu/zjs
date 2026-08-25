@@ -931,15 +931,15 @@ const ExecState = struct {
         try self.restoreUndoTo(safety, self.greedy_undo);
         self.pc = self.greedy_pc;
         self.cptr = self.greedy_cptr;
+        // One in-place shrink, then park the rest as a stack chain and clear
+        // pending. Leaving pending armed lets a later `*` consume given-back
+        // chars as extra iterations (test262 S15.10.2.8_A3_T32/T33).
         if (self.cptr > self.greedy_min) {
             if (self.greedyStepBack(safety, cbuf_type, self.cptr, self.greedy_min)) |prev| {
-                self.greedy_cptr = prev;
-            } else {
-                self.greedy_pending = false;
+                try self.pushGreedyShrink(safety, self.greedy_pc, prev, self.greedy_min, self.greedy_undo);
             }
-        } else {
-            self.greedy_pending = false;
         }
+        self.greedy_pending = false;
         return true;
     }
 
