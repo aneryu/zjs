@@ -1,5 +1,15 @@
 # Tracing GC: pause-first execution plan
 
+**Status (2026-08-26): Phases 0-2 executed and landed on `gc/tracing`; every
+outcome, including the two missed lines, is recorded in its phase's Outcome
+paragraph. Phase 3 items remain trigger-gated tranches. Standing against
+§1.3 after Phase 2: minor pauses mean 1.0 ms / max 2.7 ms; major-ring p50
+1.00 ms and p95 1.007 ms with the p99 at 64 ms on the remark+sweep slice --
+the one slice only Phase 3's lazy sweep and versioned marks can shrink. Of
+Phase 3's triggers, incremental sweep's has already fired (the sweep share of
+the tail slice exceeds the remark share); it is the next tranche when this
+line of work resumes.**
+
 Companion to `tracing-gc-design.md`. That document says what the collector
 should be; this one sequences the work from where the implementation stands on
 2026-08-26, after the arena-geometry campaign and two adversarial reviews of it.
