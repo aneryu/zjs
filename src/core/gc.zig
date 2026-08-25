@@ -115,6 +115,7 @@ pub var stress_disable: bool = false;
 /// trace never sees at all", which a full collection would miss too.
 pub var stress_no_minor: bool = false;
 
+
 /// Read once at `Registry.init`. "0" or empty disables; "1" enables at the
 /// default cadence; any other integer enables at that cadence.
 fn readStressFromEnv() void {
