@@ -119,6 +119,7 @@ pub const gc_trace_stw = if (gc.trace_stw_enabled) @import("gc_trace_stw.zig") e
     pub const enabled = false;
     pub const Report = struct {
         ephemeron_values_shaded: usize = 0,
+        census_ns: u64 = 0,
     };
     pub var last_report: Report = .{};
     /// Present so callers need no `comptime` guard; the `rc` build has no

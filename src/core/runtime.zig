@@ -2818,7 +2818,19 @@ pub const JSRuntime = struct {
             .freed_objects = freed,
             .duration_ns = blk: {
                 const end_ns = profile.nowNanos();
-                break :blk if (end_ns > start_ns) end_ns - start_ns else 0;
+                const elapsed = if (end_ns > start_ns) end_ns - start_ns else 0;
+                // Charge the census to whoever asked for it, not to the pause.
+                // The walks run inside this region and are enabled by the same
+                // `--gc-stats` that prints the distribution, so leaving them in
+                // makes the only pause instrument inflate its own subject by
+                // ~40%. Subtracting is exact enough: the walks are timed
+                // individually, and the clock calls that measure them are
+                // themselves inside the measured span.
+                const census = if (comptime gc.trace_stw_enabled)
+                    @import("gc_trace_stw.zig").last_census_ns
+                else
+                    0;
+                break :blk elapsed -| census;
             },
         };
         self.gc.recordSuccess(result);
@@ -2878,7 +2890,11 @@ pub const JSRuntime = struct {
                             .freed_objects = freed,
                             .duration_ns = elapsed,
                         };
-                        self.gc.recordSuccess(result);
+                        // NOT `recordSuccess`: that would push a minor's
+                        // duration into the major pause ring and count it as a
+                        // whole-heap cycle. The minor's own pause accounting is
+                        // the `generation.stats` update just above.
+                        self.gc.recordMinorSuccess(result);
                         // Deliberately NOT `resetGCThreshold()`. That sets the
                         // major threshold to 1.5x the CURRENT footprint and
                         // clears the allocation debt, and a minor has no claim

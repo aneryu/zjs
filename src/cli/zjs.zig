@@ -921,6 +921,13 @@ fn dumpGcSweepStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Regi
             "gc: debt mark {d} sweep {d} soft {d} hard {d}\n",
             .{ model.debt.mark_debt, model.debt.sweep_debt, model.debt.soft_headroom, model.debt.hard_headroom },
         );
+        // `debt.sweep_debt` above is zeroed by `endSweep` before this runs, so
+        // it prints 0 for a completed collection and always did. The bytes the
+        // last sweep actually returned are the space account's delta across it.
+        try writer.print(
+            "gc: last sweep reclaimed {d} bytes, census {d} ns (excluded from the pause above)\n",
+            .{ model.last_sweep_debt, engine.core.gc_trace_stw.last_report.census_ns },
+        );
     }
 }
 
@@ -952,12 +959,17 @@ fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats) !void {
 /// Pause percentiles, or an explicit "no rounds" line. Never print zeros for
 /// an empty distribution: a run that never collected must not read like a run
 /// that collected instantly.
+///
+/// MAJOR collections only. Minors keep their own line below, because the two
+/// populations are more than an order of magnitude apart and mixing them made
+/// this p50 report a minor while claiming to report the whole-heap pause the
+/// design target is written against.
 fn dumpGcPauses(writer: *std.Io.Writer, distribution: ?zjs.GCPauseDistribution) !void {
     const d = distribution orelse {
-        try writer.print("gc: pauses none (no collection completed)\n", .{});
+        try writer.print("gc: pauses none (no major collection completed)\n", .{});
         return;
     };
-    try writer.print("gc: pause p50 {d} ns, p95 {d} ns, p99 {d} ns, max {d} ns over {d} rounds\n", .{
+    try writer.print("gc: major pause p50 {d} ns, p95 {d} ns, p99 {d} ns, max {d} ns over {d} rounds\n", .{
         d.p50_ns,
         d.p95_ns,
         d.p99_ns,

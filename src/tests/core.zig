@@ -7704,6 +7704,13 @@ test "trace_stw survivor classes on a known graph" {
     dropGcPtr(&right);
 
     const live_header = &live.header;
+    // `marked_conservative_extra` is one of the census fields the collector
+    // only computes when asked, and the default is off because that is what a
+    // shipped binary runs. Asking here rather than leaving it to the build
+    // means this assertion tests a number instead of testing zero.
+    const census_before = core.gc_trace_stw.detailed_reports;
+    core.gc_trace_stw.detailed_reports = true;
+    defer core.gc_trace_stw.detailed_reports = census_before;
     const swept = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(closed_property_cycle_reclaimed_count, swept);
     try std.testing.expect(rt.gc.containsHeader(live_header));

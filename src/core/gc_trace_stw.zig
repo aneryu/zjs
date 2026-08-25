@@ -20,6 +20,7 @@ const module_mod = @import("module.zig");
 const object_gc = @import("object_gc.zig");
 const object_mod = @import("object.zig");
 const object_payloads = @import("object_payloads.zig");
+const profile = @import("profile.zig");
 const runtime_mod = @import("runtime.zig");
 const property = @import("property.zig");
 const shape = @import("shape.zig");
@@ -58,6 +59,10 @@ pub const Report = struct {
     conservative: conservative.Metrics = .{},
     mark_debt: usize = 0,
     sweep_debt: usize = 0,
+    /// Bytes the sweep actually returned, from the space account's delta.
+    reclaimed_bytes: usize = 0,
+    /// Of this collection's wall time, how much went on census walks.
+    census_ns: u64 = 0,
     soft_headroom: usize = 0,
     hard_headroom: usize = 0,
     windows_active: usize = 0,
@@ -162,23 +167,55 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !void {
     for (saved.items) |header| header.meta().flags.mark = true;
 }
 
-/// Fill in the report fields that each cost a whole-heap walk.
+/// Compute the census fields that each cost a whole-heap walk.
 ///
-/// A major needs exactly two passes over the heap: `clearMarks` before the
-/// trace and `sweepUnmarked` after it, plus `clearYoungState` to retire the
-/// young set. It was doing NINE. The other six existed only to produce numbers:
-/// `allocated_before`, `marked_exact`, `marked_conservative_extra`, the sweep
-/// model's unmarked-byte accounting (which the `--gc-stats` panel reads and no
-/// policy acts on), and two `liveCount()` calls feeding `report.remaining` and
-/// the `promoted` counter. Every one of them walked the entire heap, so the
-/// instrumentation cost several times the collection it was describing.
+/// A major over the compatibility heap needs `clearMarks` before the trace and
+/// `sweepUnmarked` after it, plus `clearYoungState` to retire the young set.
+/// `collectCycles` was doing eight passes; five of the extra ones exist only to
+/// produce numbers -- `allocated_before`, `marked_exact`,
+/// `marked_conservative_extra`, and two `liveCount()` calls feeding
+/// `report.remaining` and the `promoted` counter.
 ///
-/// Default off outside tests; `--gc-stats` turns it on. A run that asks for the
-/// numbers is willing to pay for them, and the cost is now visible to whoever
-/// asked instead of being charged to everyone who did not.
-pub var detailed_reports: bool = builtin.is_test;
+/// "Only to produce numbers" is not the same as "no effect", and the first
+/// version of this comment claimed it was. `countMarked` runs immediately
+/// before `seedConservativeRoots`, so the `*gc.Header` it leaves in a
+/// callee-saved register is shaded by the conservative stack scan and pins an
+/// object that would otherwise be swept: turning the census off makes a major
+/// reclaim slightly MORE, not less. That is the retaining direction going away
+/// rather than a lost object, so it is safe -- but it makes the census a
+/// behavioural switch, and it has to be treated as one.
+///
+/// Which is why the default is `false`, the shipped value, rather than
+/// `builtin.is_test`. Keying it off the test build made `zig build test`
+/// exercise only the configuration nobody runs, and the configuration everybody
+/// runs did not pass: `engine_production`'s allocation-failure test depended on
+/// the emergency collection reclaiming exactly nothing. Tests that want the
+/// census ask for it around the body that needs it.
+pub var detailed_reports: bool = false;
+
+/// Nanoseconds the last collection spent on census walks rather than on
+/// collecting, so the pause it reports is the pause it would have had.
+///
+/// Without this the only instrument for the pause distribution inflates it:
+/// the census runs inside the region `tryRunObjectCycleRemovalWithValueRoots`
+/// times, and it is enabled by the same `--gc-stats` that prints the result.
+/// Measured at +38-41% on raytrace's p50. An instrument that changes its
+/// subject by that much cannot be used to judge a change to the subject, and
+/// this repository has already been burned twice by rulers that moved.
+pub var last_census_ns: u64 = 0;
+
+inline fn censusStart() u64 {
+    return if (detailed_reports) profile.nowNanos() else 0;
+}
+
+inline fn censusEnd(started: u64) void {
+    if (!detailed_reports) return;
+    const now = profile.nowNanos();
+    if (now > started) last_census_ns +|= now - started;
+}
 
 pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
+    last_census_ns = 0;
     var drained_sweep_debt: usize = 0;
     if (comptime gc.sweep_model_enabled) {
         if (rt.gc.sweep_model.debt.sweep_debt != 0) {
@@ -196,8 +233,13 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
     clearYoungState(rt);
     last_report = collector.report;
     last_report.swept = swept;
-    last_report.remaining = if (detailed_reports) rt.gc.liveCount() else 0;
+    if (detailed_reports) {
+        const t = censusStart();
+        last_report.remaining = rt.gc.liveCount();
+        censusEnd(t);
+    } else last_report.remaining = 0;
     last_report.drained_sweep_debt = drained_sweep_debt;
+    last_report.census_ns = last_census_ns;
     if (comptime gc.block_heap_enabled) {
         last_report.mark_epoch = rt.gc.block_heap.mark_epoch;
         last_report.committed_bytes = rt.gc.block_heap.stats.committed_bytes;
@@ -329,7 +371,11 @@ pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     const swept = collector.sweepUnmarked();
     last_report = collector.report;
     last_report.swept = swept;
-    last_report.remaining = if (detailed_reports) rt.gc.liveCount() else 0;
+    if (detailed_reports) {
+        const t = censusStart();
+        last_report.remaining = rt.gc.liveCount();
+        censusEnd(t);
+    } else last_report.remaining = 0;
     if (comptime gc.generation_enabled) {
         // Everything that survived a major is old, and the remembered set it
         // was built from is stale (§8.2). Clearing the bits and the suffix
@@ -340,7 +386,9 @@ pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
         // The argument feeds the `promoted` counter and nothing else, and
         // `liveCount` is a whole-heap walk. After a major every survivor is
         // old, so with the counter unread there is nothing to count.
+        const t = censusStart();
         rt.gc.generation.promoteSurvivors(if (detailed_reports) rt.gc.liveCount() else 0);
+        censusEnd(t);
     }
     return swept;
 }
@@ -402,8 +450,10 @@ const Collector = struct {
     fn run(self: *Collector) CollectError!usize {
         self.clearMarks();
         if (detailed_reports) {
+            const t = censusStart();
             var live = self.rt.gc.objectIterator();
             while (live.next()) |_| self.report.allocated_before += 1;
+            censusEnd(t);
         }
 
         self.beginSweepModelMark();
@@ -411,16 +461,20 @@ const Collector = struct {
         try self.seedRoots();
         try self.drain();
         if (detailed_reports) {
+            const t = censusStart();
             self.exact_mark_count = self.countMarked();
             self.report.marked_exact = self.exact_mark_count;
+            censusEnd(t);
         }
 
         if (self.conservative_on) {
             try self.seedConservativeRoots();
             try self.drain();
             if (detailed_reports) {
+                const t = censusStart();
                 const after = self.countMarked();
                 self.report.marked_conservative_extra = after - self.exact_mark_count;
+                censusEnd(t);
             }
         }
 
@@ -428,7 +482,12 @@ const Collector = struct {
         self.processWeak();
         self.endSweepModelMark();
         self.beginSweepModelSweep();
+        const live_before_sweep = self.liveHeapBytes();
         const swept = self.sweepUnmarked();
+        self.report.reclaimed_bytes = live_before_sweep -| self.liveHeapBytes();
+        if (comptime gc.sweep_model_enabled) {
+            self.rt.gc.sweep_model.last_sweep_debt = self.report.reclaimed_bytes;
+        }
         self.endSweepModelSweep();
         return swept;
     }
@@ -444,19 +503,20 @@ const Collector = struct {
 
     fn endSweepModelMark(self: *Collector) void {
         if (comptime !gc.sweep_model_enabled) return;
-        var unmarked_bytes: usize = 0;
-        // Whole-heap walk with a size lookup per object, for a byte count the
-        // panel prints and nothing acts on. `endMark(0)` leaves the model with
-        // no sweep debt, which is the state `collectCycles` asserts.
-        if (detailed_reports) {
-            var iterator = self.rt.gc.objectIterator();
-            while (iterator.next()) |header| {
-                if (header.metaConst().flags.mark) continue;
-                if (header.metaConst().flags.is_pinned) continue;
-                unmarked_bytes +|= gc.Registry.heapByteSizeFromHeader(self.rt, header);
-            }
-        }
-        self.rt.gc.sweep_model.endMark(unmarked_bytes);
+        // Zero, deliberately: the whole-heap walk that used to produce a figure
+        // here is gone.
+        //
+        // It visited every object and asked `heapByteSizeFromHeader` for each,
+        // to compute the bytes the sweep was about to reclaim, and nothing
+        // could read the answer -- `endSweep` zeroes `debt.sweep_debt` before
+        // `refreshHeadroom` consumes it (gc_sweep_model.zig:94,99), and the
+        // panel prints that same zeroed field. The number is worth having, so
+        // it now comes from the space account instead: live bytes before the
+        // sweep minus live bytes after. That is exact and free, because every
+        // free already debits it.
+        //
+        // The window transitions `endMark` drives do not depend on the value.
+        self.rt.gc.sweep_model.endMark(0);
     }
 
     fn beginSweepModelSweep(self: *Collector) void {

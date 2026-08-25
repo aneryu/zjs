@@ -735,6 +735,16 @@ test "production embedding public API allocation failures keep host ownership in
     const persistent_before = rt.persistentRootCountForTest();
     const local_before = rt.localRootCountForTest();
 
+    // Collect first, THEN pin the limit to what is left.
+    //
+    // The limit is exactly the current footprint, so this test only observes a
+    // failing allocation if the emergency collection that runs at the limit
+    // (`collectBeforeLimitRejection`) has nothing to reclaim. Without this the
+    // test asserts "there happens to be no garbage right now", which is a
+    // property of whatever ran before it rather than of the API under test --
+    // and it duly broke when a collector change freed 480 bytes more here.
+    _ = rt.runObjectCycleRemoval();
+
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     defer rt.setMemoryLimit(null);
 

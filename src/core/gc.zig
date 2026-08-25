@@ -2268,7 +2268,25 @@ pub const Registry = struct {
         self.stats.cycle_gc_count +|= 1;
         self.stats.cycle_gc_time_ns +|= result.duration_ns;
         self.stats.freed_objects +|= result.freed_objects;
-        self.stats.pause_samples[self.stats.pause_sample_cursor] = result.duration_ns;
+        self.recordPauseSample(result.duration_ns);
+    }
+
+    /// Credit a MINOR collection without putting its pause in the major ring.
+    ///
+    /// The two populations differ by more than an order of magnitude -- a minor
+    /// is judged on being short, a major on bounding the whole heap -- so
+    /// mixing them makes the percentile panel report the wrong thing entirely.
+    /// A run doing 90% minors printed a p50 of 758us against a true major
+    /// median of 16.45ms, and the target it is checked against
+    /// (`docs/tracing-gc-design.md` §1.3) is a major target. The minor's own
+    /// distribution lives in `generation.stats`.
+    pub fn recordMinorSuccess(self: *Registry, result: CollectionResult) void {
+        self.stats.last_failure = .none;
+        self.stats.freed_objects +|= result.freed_objects;
+    }
+
+    fn recordPauseSample(self: *Registry, duration_ns: u64) void {
+        self.stats.pause_samples[self.stats.pause_sample_cursor] = duration_ns;
         self.stats.pause_sample_cursor = (self.stats.pause_sample_cursor + 1) % pause_sample_capacity;
         self.stats.pause_sample_count +|= 1;
     }
