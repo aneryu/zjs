@@ -1837,6 +1837,8 @@ test "short latin1 slices intern across repeated copies" {
     try std.testing.expect((try rt.recentLatin1Slice("x" ** 33)) == null);
 
     const first = (try rt.recentLatin1Slice("www.google.com")).?;
+    first.retain();
+    defer first.value().free(rt);
     try std.testing.expect(first.eqlBytes("www.google.com"));
     const allocations = rt.memory.allocation_count;
     const second = (try rt.recentLatin1Slice("www.google.com")).?;
@@ -1849,10 +1851,9 @@ test "short latin1 slices intern across repeated copies" {
         const text = std.fmt.bufPrint(&buf, "s{d:0>4}", .{i}) catch unreachable;
         _ = (try rt.recentLatin1Slice(text)).?;
     }
-    const allocations_after_fill = rt.memory.allocation_count;
     const revived = (try rt.recentLatin1Slice("www.google.com")).?;
+    try std.testing.expect(revived != first);
     try std.testing.expect(revived.eqlBytes("www.google.com"));
-    try std.testing.expectEqual(allocations_after_fill + 1, rt.memory.allocation_count);
 }
 
 test "flat strings store characters inline in a single fixed-size allocation" {
