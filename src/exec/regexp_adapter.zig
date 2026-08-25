@@ -159,3 +159,42 @@ test "JavaScript RegExp adapter is repeatable across matches" {
     const empty = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "" }, 0);
     try std.testing.expect(empty.result == .no_match);
 }
+
+test "JavaScript RegExp adapter greedy class8 loop backtracks" {
+    {
+        var compiled = try compile(std.testing.allocator, "[a-z]+a", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "bbba" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.end);
+
+        const miss = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "bbb" }, 0);
+        try std.testing.expect(miss.result == .no_match);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "[aeiou]*", "");
+        defer compiled.deinit(std.testing.allocator);
+        const empty = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xyz" }, 0);
+        try std.testing.expect(empty.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), empty.match.start);
+        try std.testing.expectEqual(@as(usize, 0), empty.match.end);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "[^#?]*x", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "abcx" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.end);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "[^a]+\u{1F600}", "u");
+        defer compiled.deinit(std.testing.allocator);
+        const input = [_]u16{ 'x', 0xd83d, 0xde00 };
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .utf16 = &input }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 3), hit.match.end);
+    }
+}

@@ -189,6 +189,9 @@ const REExecStateEnum = enum(u3) {
     split,
     lookahead,
     negative_lookahead,
+    // One frame covers a greedy class8/not_class8 run: restore to `cptr`,
+    // then re-push a shorter candidate while `cptr` is still above `min_cptr`.
+    greedy_shrink,
 };
 
 const no_slot_value = std.math.maxInt(usize);
@@ -198,6 +201,7 @@ const REBTFrame = extern struct {
     pc_off: u32,
     cptr: u32,
     undo_top: u32,
+    min_cptr: u32,
     typ: u8,
 };
 
@@ -842,7 +846,7 @@ const ExecState = struct {
 
     inline fn frameType(comptime safety: ExecSafety, frame: REBTFrame) !REExecStateEnum {
         if (comptime safety == .checked) {
-            if (frame.typ > @intFromEnum(REExecStateEnum.negative_lookahead)) return error.BytecodeCorrupt;
+            if (frame.typ > @intFromEnum(REExecStateEnum.greedy_shrink)) return error.BytecodeCorrupt;
         }
         return @enumFromInt(frame.typ);
     }
@@ -854,7 +858,26 @@ const ExecState = struct {
             .pc_off = try self.pcOffset(safety, pc),
             .cptr = try compactIndex(safety, self.cptr),
             .undo_top = undo_top,
+            .min_cptr = 0,
             .typ = @intFromEnum(typ),
+        };
+        self.bt_len += 1;
+    }
+
+    inline fn pushGreedyShrink(
+        self: *ExecState,
+        comptime safety: ExecSafety,
+        pc: [*]const u8,
+        cptr: usize,
+        min_cptr: usize,
+    ) !void {
+        try self.checkFrameSpace(safety, 1);
+        self.bt_frames[self.bt_len] = .{
+            .pc_off = try self.pcOffset(safety, pc),
+            .cptr = try compactIndex(safety, cptr),
+            .undo_top = try compactIndex(safety, self.undo_len),
+            .min_cptr = try compactIndex(safety, min_cptr),
+            .typ = @intFromEnum(REExecStateEnum.greedy_shrink),
         };
         self.bt_len += 1;
     }
@@ -1118,6 +1141,16 @@ const ExecState = struct {
         return false;
     }
 
+    inline fn class8Consumes(bitmap: [*]const u8, inverted: bool, code_point: u21) bool {
+        const in_class = class8CodePointMatches(bitmap, code_point);
+        return if (inverted) !in_class else in_class;
+    }
+
+    inline fn class8ConsumesByte(bitmap: [*]const u8, inverted: bool, byte: u8) bool {
+        const in_class = byte < class8_char_count and class8BitmapContains(bitmap, byte);
+        return if (inverted) !in_class else in_class;
+    }
+
     inline fn scanGreedyClass8(
         self: *ExecState,
         comptime safety: ExecSafety,
@@ -1127,33 +1160,52 @@ const ExecState = struct {
         min: u8,
         continuation_pc: [*]const u8,
     ) !bool {
-        var count: usize = 0;
-        var last_candidate: ?usize = if (min == 0) self.cptr else null;
-        while (self.cptr < self.cbuf_end) {
+        var remaining_min: u8 = min;
+        while (remaining_min > 0) {
+            if (self.cptr >= self.cbuf_end) return false;
             const before = self.cptr;
             const c = self.getCharUnchecked(cbuf_type);
-            const matched = class8CodePointMatches(bitmap, c);
-            if (if (inverted) matched else !matched) {
+            if (!class8Consumes(bitmap, inverted, c)) {
                 self.cptr = before;
-                break;
+                return false;
             }
-            count += 1;
-            if (count >= min) {
-                const after = self.cptr;
-                if (last_candidate) |candidate| {
-                    self.cptr = candidate;
-                    try self.pushExecState(safety, continuation_pc, .split);
-                    self.cptr = after;
+            remaining_min -= 1;
+        }
+        const min_pos = self.cptr;
+
+        if (comptime cbuf_type == .latin1) {
+            var cptr = self.cptr;
+            const end = self.cbuf_end;
+            const input = self.cbuf;
+            while (cptr < end) {
+                if (!class8ConsumesByte(bitmap, inverted, input[cptr])) break;
+                cptr += 1;
+                if (cptr & 0xff == 0) try self.s.pollTimeout();
+            }
+            self.cptr = cptr;
+        } else {
+            var scanned: usize = 0;
+            while (self.cptr < self.cbuf_end) {
+                const before = self.cptr;
+                const c = self.getCharUnchecked(cbuf_type);
+                if (!class8Consumes(bitmap, inverted, c)) {
+                    self.cptr = before;
+                    break;
                 }
-                last_candidate = after;
+                scanned += 1;
+                if (scanned == 256) {
+                    scanned = 0;
+                    try self.s.pollTimeout();
+                }
             }
-            try self.s.pollTimeout();
         }
-        if (last_candidate) |candidate| {
-            self.cptr = candidate;
-            return true;
+
+        if (self.cptr > min_pos) {
+            var prev = self.cptr;
+            _ = self.getPrevCharAtBounded(safety, cbuf_type, &prev, min_pos) orelse return error.BytecodeCorrupt;
+            try self.pushGreedyShrink(safety, continuation_pc, prev, min_pos);
         }
-        return false;
+        return true;
     }
 
     inline fn matchRawForward(self: *ExecState, comptime safety: ExecSafety, comptime cbuf_type: CbufType, start: usize, end: usize) bool {
@@ -1314,6 +1366,15 @@ fn lreExecBacktrack(
                     const bitmap = st.pc;
                     st.pc += class8_bitmap_len;
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
+                    if (comptime cbuf_type == .latin1) {
+                        const b = st.cbuf[st.cptr];
+                        const in_class = b < class8_char_count and class8BitmapContains(bitmap, b);
+                        if (opcode == .class8) {
+                            if (!in_class) break :dispatch_once;
+                        } else if (in_class) break :dispatch_once;
+                        st.cptr += 1;
+                        continue :main;
+                    }
                     const c = st.getCharUnchecked(cbuf_type);
                     const matched = class8CodePointMatches(bitmap, c);
                     if (opcode == .class8) {
@@ -1603,7 +1664,15 @@ fn lreExecBacktrack(
         while (true) {
             if (st.bt_len == 0) return false;
             const frame = try st.popFrameRestore(safety);
-            if (try ExecState.frameType(safety, frame) != .lookahead) break;
+            const typ = try ExecState.frameType(safety, frame);
+            if (typ == .lookahead) continue;
+            if (typ == .greedy_shrink and st.cptr > frame.min_cptr) {
+                var prev = st.cptr;
+                if (st.getPrevCharAtBounded(safety, cbuf_type, &prev, frame.min_cptr)) |_| {
+                    try st.pushGreedyShrink(safety, st.pc, prev, frame.min_cptr);
+                }
+            }
+            break;
         }
         try st.s.pollTimeout();
         continue :main;
