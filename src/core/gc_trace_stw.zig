@@ -162,6 +162,22 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !void {
     for (saved.items) |header| header.meta().flags.mark = true;
 }
 
+/// Fill in the report fields that each cost a whole-heap walk.
+///
+/// A major needs exactly two passes over the heap: `clearMarks` before the
+/// trace and `sweepUnmarked` after it, plus `clearYoungState` to retire the
+/// young set. It was doing NINE. The other six existed only to produce numbers:
+/// `allocated_before`, `marked_exact`, `marked_conservative_extra`, the sweep
+/// model's unmarked-byte accounting (which the `--gc-stats` panel reads and no
+/// policy acts on), and two `liveCount()` calls feeding `report.remaining` and
+/// the `promoted` counter. Every one of them walked the entire heap, so the
+/// instrumentation cost several times the collection it was describing.
+///
+/// Default off outside tests; `--gc-stats` turns it on. A run that asks for the
+/// numbers is willing to pay for them, and the cost is now visible to whoever
+/// asked instead of being charged to everyone who did not.
+pub var detailed_reports: bool = builtin.is_test;
+
 pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
     var drained_sweep_debt: usize = 0;
     if (comptime gc.sweep_model_enabled) {
@@ -180,7 +196,7 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
     clearYoungState(rt);
     last_report = collector.report;
     last_report.swept = swept;
-    last_report.remaining = rt.gc.liveCount();
+    last_report.remaining = if (detailed_reports) rt.gc.liveCount() else 0;
     last_report.drained_sweep_debt = drained_sweep_debt;
     if (comptime gc.block_heap_enabled) {
         last_report.mark_epoch = rt.gc.block_heap.mark_epoch;
@@ -313,7 +329,7 @@ pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     const swept = collector.sweepUnmarked();
     last_report = collector.report;
     last_report.swept = swept;
-    last_report.remaining = rt.gc.liveCount();
+    last_report.remaining = if (detailed_reports) rt.gc.liveCount() else 0;
     if (comptime gc.generation_enabled) {
         // Everything that survived a major is old, and the remembered set it
         // was built from is stale (§8.2). Clearing the bits and the suffix
@@ -321,7 +337,10 @@ pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
         // survivor that kept its young bit would be swept by the next minor
         // on the strength of a trace that never looked at its incoming edges.
         clearYoungState(rt);
-        rt.gc.generation.promoteSurvivors(rt.gc.liveCount());
+        // The argument feeds the `promoted` counter and nothing else, and
+        // `liveCount` is a whole-heap walk. After a major every survivor is
+        // old, so with the counter unread there is nothing to count.
+        rt.gc.generation.promoteSurvivors(if (detailed_reports) rt.gc.liveCount() else 0);
     }
     return swept;
 }
@@ -382,21 +401,27 @@ const Collector = struct {
 
     fn run(self: *Collector) CollectError!usize {
         self.clearMarks();
-        var live = self.rt.gc.objectIterator();
-        while (live.next()) |_| self.report.allocated_before += 1;
+        if (detailed_reports) {
+            var live = self.rt.gc.objectIterator();
+            while (live.next()) |_| self.report.allocated_before += 1;
+        }
 
         self.beginSweepModelMark();
 
         try self.seedRoots();
         try self.drain();
-        self.exact_mark_count = self.countMarked();
-        self.report.marked_exact = self.exact_mark_count;
+        if (detailed_reports) {
+            self.exact_mark_count = self.countMarked();
+            self.report.marked_exact = self.exact_mark_count;
+        }
 
         if (self.conservative_on) {
             try self.seedConservativeRoots();
             try self.drain();
-            const after = self.countMarked();
-            self.report.marked_conservative_extra = after - self.exact_mark_count;
+            if (detailed_reports) {
+                const after = self.countMarked();
+                self.report.marked_conservative_extra = after - self.exact_mark_count;
+            }
         }
 
         try self.ephemeronFixedPoint();
@@ -420,11 +445,16 @@ const Collector = struct {
     fn endSweepModelMark(self: *Collector) void {
         if (comptime !gc.sweep_model_enabled) return;
         var unmarked_bytes: usize = 0;
-        var iterator = self.rt.gc.objectIterator();
-        while (iterator.next()) |header| {
-            if (header.metaConst().flags.mark) continue;
-            if (header.metaConst().flags.is_pinned) continue;
-            unmarked_bytes +|= gc.Registry.heapByteSizeFromHeader(self.rt, header);
+        // Whole-heap walk with a size lookup per object, for a byte count the
+        // panel prints and nothing acts on. `endMark(0)` leaves the model with
+        // no sweep debt, which is the state `collectCycles` asserts.
+        if (detailed_reports) {
+            var iterator = self.rt.gc.objectIterator();
+            while (iterator.next()) |header| {
+                if (header.metaConst().flags.mark) continue;
+                if (header.metaConst().flags.is_pinned) continue;
+                unmarked_bytes +|= gc.Registry.heapByteSizeFromHeader(self.rt, header);
+            }
         }
         self.rt.gc.sweep_model.endMark(unmarked_bytes);
     }

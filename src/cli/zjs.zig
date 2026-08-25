@@ -106,6 +106,9 @@ pub fn parseArgs(args: []const []const u8) CliError!Command {
         }
         if (std.mem.eql(u8, rest[0], "--gc-stats")) {
             options.gc_stats = true;
+            // The panel's census costs six whole-heap walks per major, so the
+            // collector only performs them when someone is going to read them.
+            engine.core.gc_trace_stw.detailed_reports = true;
             rest = rest[1..];
             continue;
         }

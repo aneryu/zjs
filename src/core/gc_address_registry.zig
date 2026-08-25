@@ -42,6 +42,9 @@ pub const Hit = union(Kind) {
 };
 
 pub const Stats = struct {
+    /// Tombstone compactions. Expect roughly `unregister_calls / (capacity/4)`;
+    /// a count of zero on a churning workload means the budget never fired.
+    rehashes: usize = 0,
     live: usize = 0,
     string_live: usize = 0,
     pages: usize = 0,
@@ -61,17 +64,6 @@ const PageBucket = struct {
 };
 
 pub const Table = struct {
-    // Note on a refuted fix. Zig's open-addressed map marks a removed slot as a
-    // TOMBSTONE and restores `available`, so a map under balanced churn -- which
-    // this one is, one insert and one remove per GC object -- never grows and so
-    // never rehashes away its tombstones, and the probe loop walks them. Forcing
-    // a periodic `rehash` was measured on 2026-08-25 and is a LOSS at every
-    // budget tried: -8% on raytrace at capacity/4, still negative at capacity.
-    // A rehash reinserts every live entry, and amortised over the removals that
-    // paid for it that costs more than the probe steps it saves. Do not retry
-    // it; the cure for the probe cost is to stop using a hash map here at all
-    // (block-granular metadata, as JSC does), which removes the insert and the
-    // remove as well.
     pages: std.AutoHashMapUnmanaged(usize, PageBucket) = .empty,
     by_header: std.AutoHashMapUnmanaged(usize, Occupant) = .empty,
     stats: Stats = .{},
@@ -81,6 +73,28 @@ pub const Table = struct {
     /// would have happened anyway.
     bounds_lo: usize = std.math.maxInt(usize),
     bounds_hi: usize = 0,
+    /// Removals since `by_header` and `pages` were last compacted.
+    ///
+    /// Zig's open-addressed map marks a removed slot as a TOMBSTONE and adds
+    /// the slot back to `available` (hash_map.zig:957,1231), so a map under
+    /// balanced churn never grows and therefore never rehashes. Its probe loop
+    /// stops at a FREE slot (`while (!metadata[0].isFree())`, :984,:1155) and a
+    /// tombstone is not free. This table sees one insert and one remove per GC
+    /// object, so once every slot has been occupied at least once there is no
+    /// free slot left anywhere and EVERY probe degenerates to a full-capacity
+    /// scan -- for a live set of ~4.5k entries that is ~8k slots walked per
+    /// allocation, measured at ~4.9us and 76% of raytrace's whole runtime.
+    ///
+    /// `rehash` is the only way to clear tombstones; there is no incremental
+    /// reclaim. Compacting on a removal budget makes its O(capacity) cost
+    /// amortise to a constant per removal.
+    ///
+    /// Historical note, because the first attempt at this was measured and
+    /// rejected: that A/B ran against a build whose major collection never
+    /// triggered, so almost nothing was ever freed, the maps barely churned,
+    /// and the compaction was pure overhead against a disease that had not yet
+    /// appeared. Fixing the collection policy is what exposed this.
+    removes_since_rehash: usize = 0,
 
     pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
         var iterator = self.pages.iterator();
@@ -177,6 +191,23 @@ pub const Table = struct {
         }
         self.stats.live -= 1;
         if (range.kind != .gc_object) self.stats.string_live -= 1;
+        self.compactIfTombstoned();
+    }
+
+    /// Clear accumulated tombstones once they have cost enough to pay for it.
+    ///
+    /// The budget is a quarter of capacity, so one O(capacity) rehash is bought
+    /// by capacity/4 removals: a constant per removal, against probes that
+    /// would otherwise be O(capacity) each. Both maps are compacted together
+    /// because `removePtr` deletes from both.
+    fn compactIfTombstoned(self: *Table) void {
+        self.removes_since_rehash += 1;
+        const budget = self.by_header.capacity() / 4;
+        if (budget == 0 or self.removes_since_rehash < budget) return;
+        self.removes_since_rehash = 0;
+        self.by_header.rehash(std.hash_map.AutoContext(usize){});
+        self.pages.rehash(std.hash_map.AutoContext(usize){});
+        self.stats.rehashes += 1;
     }
 
     pub fn resolve(self: *Table, addr: usize) ?*gc.Header {

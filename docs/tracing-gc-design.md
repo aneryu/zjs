@@ -895,6 +895,36 @@ prefix, body, and one-past-end, and are never dereferenced as guessed
 headers. x86_64 SysV, x86_64 Windows, AArch64 Windows, and AArch64 macOS
 are explicit unimplemented branches.
 
+#### The address registry is the compatibility-heap stand-in, and it is the cost
+
+Two `AutoHashMapUnmanaged`s -- `by_header` and a page-radix `pages` -- are
+written on EVERY object publication and read on every conservative candidate.
+That is the price of resolving arbitrary words against a heap whose objects sit
+wherever the general allocator put them. §4.2's block space removes the need
+for it: a 64KB-aligned block makes `block = ptr & ~(block_bytes-1)` O(1),
+`Block.cellIndex` turns the offset into a cell index, and a bloom filter over
+block bases rejects non-heap words without touching memory -- which is what JSC
+does (`MarkedBlock`, `TinyBloomFilter`). `src/core/gc_block_heap.zig` already
+implements the blocks, the cell index, and the mark epochs; `serves_gc_nodes`
+is still false, so nothing allocates from it yet.
+
+Until then the maps carry the whole heap, and their failure mode is worth
+recording because it is invisible in the source. Zig's open-addressed map marks
+a removed slot as a tombstone and returns it to `available`
+(hash_map.zig:957,1231), so a map under balanced churn -- one insert and one
+remove per object, exactly this one -- never grows and therefore never rehashes
+the tombstones away. Its probe loop stops at a FREE slot (:984,:1155), and a
+tombstone is not free. Once every slot has been occupied once, no free slot
+remains and every probe scans the full capacity. Measured on 2026-08-25 at
+~4.9us per publication, 76% of raytrace's entire runtime. A tombstone-budgeted
+`rehash` restores it: raytrace 5.1x, deltablue 6.7x.
+
+The reason this went unseen for so long is the §8.5 note above: while the major
+never triggered, almost nothing was ever freed, so the maps never churned and
+the degradation never appeared. It arrived with the fix. An earlier A/B of the
+same `rehash` against the leaking build measured it as a small loss, which it
+correctly was -- against a disease that had not yet started.
+
 ### 7.3 Native pointer contract
 
 - A temporary raw pointer used only within the currently active synchronous
@@ -1043,6 +1073,36 @@ Before setting a survivor mark, minor calls `ensureMarkEpoch` even though minor
 does not increment the heap epoch. Blocks with sweep debt are closed to
 allocation. A block reopened after sweep enlists again on its first new young
 allocation.
+
+#### When a minor runs, and when it must stand aside
+
+A minor answers allocation churn. It cannot answer heap growth, because it does
+not look at the old generation, and a heap that has outgrown its threshold has
+put its garbage there. So the whole-heap threshold is tested FIRST, and a minor
+is offered only while the heap is under it. A minor must also never call
+`resetGCThreshold`: that raises the major's bar to 1.5x the current footprint
+and clears the allocation debt, and the footprint it would be measuring is
+mostly old garbage the minor never examined.
+
+Getting this backwards is not a small mis-tuning; it silently converts the
+collector into a leak. The original `pollGC` offered the minor first and
+returned as soon as it freed anything, so the major test below it was
+unreachable whenever a minor succeeded -- which is almost always. Each minor
+then raised the bar by half, so the more garbage accumulated the further the
+major receded. Measured on 2026-08-25: earley-boyer performed 13,642 minors and
+zero majors, promoted 6.8M objects, and finished holding 435MB where refcounting
+held 3MB. Every one of those minors paid 1.12ms to scan roots into a heap that
+large, and the whole-heap trace that would have reclaimed it never ran.
+
+What makes this hard to notice is that the leak reads as speed. A collector that
+never performs a whole-heap trace never pays for one, so the leaking build was
+1.5x to 4x FASTER on the object-graph benchmarks than the same build with the
+policy corrected. Any benchmark comparison against a build whose major does not
+trigger is measuring the absence of collection, and the direction of the error
+is flattering. `--gc-stats` reports `minor collections` next to the total
+`collection entries` precisely so the two can be told apart: if the difference
+is near zero, no major is running and no throughput number from that build means
+anything.
 
 ### 8.6 Major collection
 

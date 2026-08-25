@@ -2829,13 +2829,24 @@ pub const JSRuntime = struct {
         mode: GCPollMode,
     ) gc.CollectionError!gc.CollectionResult {
         self.assertOwnerThread();
+        // Is the whole-heap threshold already crossed? Asked BEFORE the minor
+        // is offered, because a minor cannot answer this question: it does not
+        // reach the old generation, which is where a heap over its threshold
+        // has put its garbage. Offering the minor first let it free a handful
+        // of young objects, report success, and return -- and the major check
+        // below was never reached. Nothing then ever collected the old
+        // generation: earley-boyer performed 13,642 minors and zero majors,
+        // promoted 6.8M objects, and finished holding 435MB where refcounting
+        // held 3MB, with every one of those minors paying 1.12ms to trace a
+        // heap that large. See `docs/tracing-gc-design.md` §8.5.
+        const over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
         // §8.5: an automatic poll prefers a minor. A minor only reaches the
         // young set, so allocation churn is reclaimed without a whole-heap
         // trace -- but only here. An explicit `runObjectCycleRemoval` means
         // "collect everything", and answering it with a minor would silently
         // change what that call promises.
         if (comptime gc.generation_enabled) {
-            if (mode.acceptsMinor() and !self.gc_running and self.gc.shouldTryMinor()) {
+            if (!over_threshold and mode.acceptsMinor() and !self.gc_running and self.gc.shouldTryMinor()) {
                 self.gc_running = true;
                 defer self.gc_running = false;
                 const started = profile.nowNanos();
@@ -2864,7 +2875,15 @@ pub const JSRuntime = struct {
                             .duration_ns = elapsed,
                         };
                         self.gc.recordSuccess(result);
-                        self.resetGCThreshold();
+                        // Deliberately NOT `resetGCThreshold()`. That sets the
+                        // major threshold to 1.5x the CURRENT footprint and
+                        // clears the allocation debt, and a minor has no claim
+                        // to either: it did not look at the old generation, so
+                        // the footprint it is measuring is mostly old garbage
+                        // it cannot see. Resetting here raised the bar by half
+                        // on every minor, so the more garbage accumulated the
+                        // further the major receded -- the threshold outran the
+                        // heap it was meant to bound. Both belong to the major.
                         return result;
                     }
                 }
@@ -2882,7 +2901,6 @@ pub const JSRuntime = struct {
             .allocation_slow_path, .idle, .urgent => self.requestGCForProcessMemoryPressure(),
             .callback_boundary, .safepoint => {},
         }
-        const over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
         const run_major = self.gc.shouldRunMajorAt(scheduler_point, over_threshold);
         if (!run_major) return .{};
 
