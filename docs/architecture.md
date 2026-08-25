@@ -180,9 +180,7 @@ Host functions register through `ExternalHostCall` on the public API
 
 ## Libraries, CLI, tests
 
-- `src/libs/`: Irregexp (V8 C++ compiler + Zig bytecode interpreter)
-  compile/exec, QuickJS-style regexp helpers, unicode, bigint, number
-  formatting. Vendor sources and the C ABI live under `vendor/irregexp/`.
+- `src/libs/`: regexp, unicode, bigint, number formatting
 - `src/cli/`: `zjs` and `run-test262`; `run_test262_options.zig` owns the
   latter's arguments, `run_test262_config.zig` owns configuration files and
   feature overrides, `run_test262_names.zig` owns allocated name sets and

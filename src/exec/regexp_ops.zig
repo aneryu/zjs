@@ -2,7 +2,7 @@
 //!
 //! Receiver and argument values are borrowed; returned JSValues are owned, and
 //! temporary source/flag strings plus compiled buffers are released locally.
-//! The matching engine is `libs/irregexp.zig`; VM/string observable
+//! The matching engine is `libs/regexp.zig`; VM/string observable
 //! integration stays behind `regexp_fastpath.zig` and `string_ops.zig` rather
 //! than being folded into these builtin bodies. QuickJS mappings include the
 //! constructor at quickjs.c:47728, flags access at quickjs.c:47943, and
@@ -11,7 +11,6 @@
 const core = @import("../core/root.zig");
 const regexp_adapter = @import("regexp_adapter.zig");
 const regexp_lib = @import("../libs/regexp.zig");
-const irregexp = @import("../libs/irregexp.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -535,7 +534,7 @@ fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool {
     return rt.checkNativeStackOverflow(alloca_size);
 }
 
-fn regexpCompileOptions(rt: *core.JSRuntime) irregexp.CompileOptions {
+fn regexpCompileOptions(rt: *core.JSRuntime) regexp_lib.CompileOptions {
     return .{
         .@"opaque" = rt,
         .check_stack_overflow = lreCheckStackOverflow,
@@ -558,7 +557,7 @@ fn throwRegExpStackOverflow(rt: *core.JSRuntime, global: ?*core.Object) !void {
     return error.SyntaxError;
 }
 
-fn compileSourceAndFlags(rt: *core.JSRuntime, global: ?*core.Object, source: core.JSValue, flags: core.JSValue) !irregexp.Compiled {
+fn compileSourceAndFlags(rt: *core.JSRuntime, global: ?*core.Object, source: core.JSValue, flags: core.JSValue) !regexp_lib.Compiled {
     // QuickJS's js_compile_regexp passes both strings through
     // JS_ToCStringLen2. ASCII strings keep a live reference and expose their
     // inline bytes directly; only strings that need UTF-8 transcoding allocate
@@ -583,7 +582,7 @@ fn compileSourceAndFlags(rt: *core.JSRuntime, global: ?*core.Object, source: cor
     var source_bytes = try core.JSValue.String.Utf8.fromValueCesu8(rt.memory.allocator, source, cesu8);
     defer source_bytes.deinit();
 
-    return irregexp.compilePatternWithFlagBitsAndOptions(rt.memory.allocator, source_bytes.slice(), flag_bits, regexpCompileOptions(rt)) catch |err| switch (err) {
+    return regexp_lib.compilePatternWithFlagBitsAndOptions(rt.memory.allocator, source_bytes.slice(), flag_bits, regexpCompileOptions(rt)) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return error.SyntaxError,
         error.StackOverflow => {
             try throwRegExpStackOverflow(rt, global);
@@ -631,7 +630,7 @@ test "constructCompiled roots string source while creating regexp object" {
 
     const source = try core.string.String.createAscii(rt, "a");
     const source_value = source.value();
-    var compiled = try irregexp.compilePatternAndFlags(rt.memory.allocator, "a", "g");
+    var compiled = try regexp_lib.compilePatternAndFlags(rt.memory.allocator, "a", "g");
     defer compiled.deinit(rt.memory.allocator);
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -650,9 +649,7 @@ test "constructCompiled roots string source while creating regexp object" {
     source_value.free(rt);
 }
 
-/// Pattern/flags early-error validation still uses `libs/regexp.zig`
-/// `parseFlagBits`. Compilation is Irregexp (V8 interpreter bytecode).
-pub const compilePatternAndFlags = irregexp.compilePatternAndFlags;
+pub const compilePatternAndFlags = regexp_lib.compilePatternAndFlags;
 
 fn invalidUnicodeEscape(pattern: []const u8, index: *usize, in_class: bool) bool {
     if (index.* + 1 >= pattern.len or pattern[index.*] != '\\') return true;
@@ -983,7 +980,7 @@ fn regexpObjectFromValue(value: core.JSValue) ?*core.Object {
 }
 
 /// QuickJS source map: selected RegExp.prototype methods currently covered by
-/// smoke and parser lowering. Matching is owned by libs/irregexp.zig.
+/// smoke and parser lowering. Matching is owned by libs/regexp.zig.
 pub fn methodCall(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, arg: ?core.JSValue) !core.JSValue {
     _ = arg;
     const object = try expectRegExpObject(object_value);

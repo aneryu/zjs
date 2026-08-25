@@ -1777,7 +1777,7 @@ test "F4: regexp literal stores pattern then parse-time bytecode in the constant
     const compiled_string = compiled_value.asStringBodyRaw() orelse return error.TestExpectedEqual;
     try std.testing.expect(!compiled_string.isWide());
 
-    var expected = try engine.libs.irregexp.compilePatternAndFlags(std.testing.allocator, "a+", "gi");
+    var expected = try engine.libs.regexp.compilePatternAndFlags(std.testing.allocator, "a+", "gi");
     defer expected.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, expected.bytecode, compiled_string.borrowLatin1().?);
 }

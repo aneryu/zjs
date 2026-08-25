@@ -61,21 +61,7 @@ module loading are not supported.
 
 ## Regular Expressions
 
-JS `RegExp` compile still uses the standalone V8 Irregexp bytecode compiler
-(no native JIT, no ICU). Exec runs a Zig interpreter over that bytecode; the
-C++ interpreter remains linked as a compile-time island and a parity check.
 Match arrays still eager-copy capture strings (QuickJS `js_sub_string`).
-Known engine-side gaps versus the previous QuickJS-style matcher and versus a
-full V8/ICU build:
-
-- Unicode property escapes (`\p{}` / `\P{}`) are not expanded; they fail at
-  compile time until property tables are wired through the shim.
-- `/ui` and `/vi` character-class case-fold close-over is incomplete without
-  ICU. `/i` uses the Zig unicode case-fold hooks and can still fold some
-  non-Latin-1 pairs (for example U+212A Kelvin) without the `u` flag.
-- Named-group and capture metadata are stored in the zjs `IRRX` blob, not
-  V8 heap objects. ASCII and BMP names work; some astral group-name
-  replacements (`$<𝒜>`) still miss the capture.
 
 ## Proper Tail Calls
 

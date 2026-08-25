@@ -8,8 +8,8 @@ pub const max_captures = 255;
 const register_count_max = 255;
 pub const max_exec_slots = max_captures * 2 + register_count_max;
 pub const small_exec_slots = 64;
-const static_bt_frame_count = 16;
-const static_undo_count = 32;
+const static_bt_frame_count: usize = 64;
+const static_undo_count: usize = 64;
 const interrupt_counter_init = 10000;
 
 pub const flags = struct {
@@ -71,7 +71,9 @@ pub const ExecOptions = struct {
     check_timeout: ?CheckTimeout = null,
 };
 
-const REBytecodeHeader = struct {
+const REBytecodeHeader = Header;
+
+pub const Header = struct {
     flags: u16,
     capture_count: usize,
     register_count: usize,
@@ -176,6 +178,12 @@ const ExecSafety = enum {
     checked,
     trusted,
 };
+
+const ExecReadError = error{BytecodeCorrupt};
+
+fn ReadRet(comptime safety: ExecSafety, comptime T: type) type {
+    return if (safety == .trusted) T else ExecReadError!T;
+}
 
 const REExecStateEnum = enum(u3) {
     split,
@@ -399,6 +407,10 @@ pub const Compiled = struct {
         self.bytecode = &.{};
     }
 
+    pub fn header(self: Compiled) ?Header {
+        return parseHeader(self.bytecode) catch null;
+    }
+
     pub fn captureCount(self: Compiled) usize {
         return captureCountFromBytecode(self.bytecode);
     }
@@ -575,7 +587,10 @@ fn execCaptureSlotsParsed(
     @memset(capture[0..alloc_count], no_slot_value);
     const bytecode_end = header_len + header.bytecode_len;
     const matched = switch (cbuf_type) {
-        .latin1 => try lreExecBacktrack(safety, .latin1, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr),
+        .latin1 => if (comptime safety == .trusted)
+            try @call(.always_inline, lreExecBacktrack, .{ safety, .latin1, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr })
+        else
+            try lreExecBacktrack(safety, .latin1, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr),
         .utf16_units => try lreExecBacktrack(safety, .utf16_units, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr),
         .utf16_unicode => try lreExecBacktrack(safety, .utf16_unicode, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr),
     };
@@ -748,6 +763,46 @@ const ExecState = struct {
 
     inline fn getI32(self: *ExecState, comptime safety: ExecSafety) !i32 {
         return @bitCast(try self.getU32(safety));
+    }
+
+    inline fn takeU8(self: *ExecState, comptime safety: ExecSafety) ReadRet(safety, u8) {
+        if (comptime safety == .trusted) {
+            const value = self.pc[0];
+            self.pc += 1;
+            return value;
+        }
+        return self.getU8(.checked);
+    }
+
+    inline fn takeU16(self: *ExecState, comptime safety: ExecSafety) ReadRet(safety, u16) {
+        if (comptime safety == .trusted) {
+            const value = std.mem.readInt(u16, self.pc[0..2], .little);
+            self.pc += 2;
+            return value;
+        }
+        return self.getU16(.checked);
+    }
+
+    inline fn takeU32(self: *ExecState, comptime safety: ExecSafety) ReadRet(safety, u32) {
+        if (comptime safety == .trusted) {
+            const value = std.mem.readInt(u32, self.pc[0..4], .little);
+            self.pc += 4;
+            return value;
+        }
+        return self.getU32(.checked);
+    }
+
+    inline fn takeI32(self: *ExecState, comptime safety: ExecSafety) ReadRet(safety, i32) {
+        if (comptime safety == .trusted) return @bitCast(self.takeU32(.trusted));
+        return self.getI32(.checked);
+    }
+
+    inline fn takePc(self: *ExecState, comptime safety: ExecSafety, offset: i32) ReadRet(safety, [*]const u8) {
+        if (comptime safety == .trusted) {
+            const delta: usize = @bitCast(@as(isize, offset));
+            return @ptrFromInt(@intFromPtr(self.pc) +% delta);
+        }
+        return self.pcWithOffset(.checked, offset);
     }
 
     inline fn compactIndex(comptime safety: ExecSafety, value: usize) !u32 {
@@ -1150,7 +1205,7 @@ fn lreExecBacktrack(
 
     main: while (true) {
         dispatch_once: {
-            const opcode_byte = try st.getU8(safety);
+            const opcode_byte: u8 = if (comptime safety == .trusted) st.takeU8(.trusted) else try st.takeU8(.checked);
             const opcode = if (comptime safety == .trusted)
                 @as(REOPCodeEnum, @enumFromInt(opcode_byte))
             else
@@ -1177,7 +1232,7 @@ fn lreExecBacktrack(
                     break :dispatch_once;
                 },
                 .char32, .char32_i => {
-                    const expected = try st.getU32(safety);
+                    const expected = if (comptime safety == .trusted) st.takeU32(.trusted) else try st.takeU32(.checked);
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
                     var c = st.getCharUnchecked(cbuf_type);
                     if (opcode == .char32_i) {
@@ -1187,7 +1242,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .char, .char_i => {
-                    const expected: u32 = try st.getU16(safety);
+                    const expected: u32 = if (comptime safety == .trusted) st.takeU16(.trusted) else try st.takeU16(.checked);
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
                     var c = st.getCharUnchecked(cbuf_type);
                     if (opcode == .char_i) {
@@ -1197,23 +1252,23 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .split_goto_first, .split_next_first => {
-                    const offset = try st.getI32(safety);
+                    const offset = if (comptime safety == .trusted) st.takeI32(.trusted) else try st.takeI32(.checked);
                     const pc1 = if (opcode == .split_next_first)
-                        try st.pcWithOffset(safety, offset)
+                        if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset)
                     else
                         st.pc;
-                    if (opcode == .split_goto_first) st.pc = try st.pcWithOffset(safety, offset);
+                    if (opcode == .split_goto_first) st.pc = if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset);
                     try st.pushExecState(safety, pc1, .split);
                     continue :main;
                 },
                 .lookahead, .negative_lookahead => {
-                    const offset = try st.getI32(safety);
-                    try st.pushExecState(safety, try st.pcWithOffset(safety, offset), if (opcode == .lookahead) .lookahead else .negative_lookahead);
+                    const offset = if (comptime safety == .trusted) st.takeI32(.trusted) else try st.takeI32(.checked);
+                    try st.pushExecState(safety, if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset), if (opcode == .lookahead) .lookahead else .negative_lookahead);
                     continue :main;
                 },
                 .goto_ => {
-                    const offset = try st.getI32(safety);
-                    st.pc = try st.pcWithOffset(safety, offset);
+                    const offset = if (comptime safety == .trusted) st.takeI32(.trusted) else try st.takeI32(.checked);
+                    st.pc = if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset);
                     try st.s.pollTimeout();
                     continue :main;
                 },
@@ -1269,14 +1324,14 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .scan_until_char8 => {
-                    const needle = try st.getU8(safety);
-                    const offset = try st.getI32(safety);
+                    const needle = if (comptime safety == .trusted) st.takeU8(.trusted) else try st.takeU8(.checked);
+                    const offset = if (comptime safety == .trusted) st.takeI32(.trusted) else try st.takeI32(.checked);
                     if (!st.scanUntilChar8(cbuf_type, needle)) break :dispatch_once;
-                    st.pc = try st.pcWithOffset(safety, offset);
+                    st.pc = if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset);
                     continue :main;
                 },
                 .loop_class8_g, .loop_not_class8_g => {
-                    const min = try st.getU8(safety);
+                    const min = if (comptime safety == .trusted) st.takeU8(.trusted) else try st.takeU8(.checked);
                     if (min > 1) return error.BytecodeCorrupt;
                     try st.ensurePc(safety, st.pc, class8_bitmap_len);
                     const bitmap = st.pc;
@@ -1285,7 +1340,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .save_start, .save_end => {
-                    const val = try st.getU8(safety);
+                    const val = if (comptime safety == .trusted) st.takeU8(.trusted) else try st.takeU8(.checked);
                     if (comptime safety == .checked) {
                         if (val >= st.s.capture_count) return error.BytecodeCorrupt;
                     }
@@ -1335,7 +1390,7 @@ fn lreExecBacktrack(
                     const next_value = value - 1;
                     try st.saveCaptureCheck(safety, st.registerSlot(reg), next_value);
                     if (next_value != 0) {
-                        st.pc = try st.pcWithOffset(safety, offset);
+                        st.pc = if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset);
                         try st.s.pollTimeout();
                     }
                     continue :main;
@@ -1359,7 +1414,7 @@ fn lreExecBacktrack(
                     const next_value = value - 1;
                     try st.saveCaptureCheck(safety, st.registerSlot(reg), next_value);
                     if (next_value > limit) {
-                        st.pc = try st.pcWithOffset(safety, offset);
+                        st.pc = if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset);
                         try st.s.pollTimeout();
                     } else {
                         if (needs_advance_check and st.capture[st.registerSlot(@as(usize, reg) + 1)] == st.cptr and next_value != limit) {
@@ -1367,10 +1422,10 @@ fn lreExecBacktrack(
                         }
                         if (next_value != 0) {
                             const pc1 = if (opcode == .loop_split_next_first or opcode == .loop_check_adv_split_next_first)
-                                try st.pcWithOffset(safety, offset)
+                                if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset)
                             else
                                 st.pc;
-                            if (opcode == .loop_split_goto_first or opcode == .loop_check_adv_split_goto_first) st.pc = try st.pcWithOffset(safety, offset);
+                            if (opcode == .loop_split_goto_first or opcode == .loop_check_adv_split_goto_first) st.pc = if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset);
                             try st.pushExecState(safety, pc1, .split);
                         }
                     }
@@ -1413,7 +1468,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .back_reference, .back_reference_i, .backward_back_reference, .backward_back_reference_i => {
-                    const n = try st.getU8(safety);
+                    const n = if (comptime safety == .trusted) st.takeU8(.trusted) else try st.takeU8(.checked);
                     const pc1 = st.pc;
                     try st.ensurePc(safety, st.pc, n);
                     st.pc += @as(usize, n);
@@ -1472,7 +1527,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .range, .range_i => {
-                    const n = try st.getU16(safety);
+                    const n = if (comptime safety == .trusted) st.takeU16(.trusted) else try st.takeU16(.checked);
                     if (n == 0) return error.BytecodeCorrupt;
                     try st.ensurePc(safety, st.pc, @as(usize, n) * 4);
                     range_match: {
@@ -1505,7 +1560,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .range32, .range32_i => {
-                    const n = try st.getU16(safety);
+                    const n = if (comptime safety == .trusted) st.takeU16(.trusted) else try st.takeU16(.checked);
                     if (n == 0) return error.BytecodeCorrupt;
                     try st.ensurePc(safety, st.pc, @as(usize, n) * 8);
                     range32_match: {

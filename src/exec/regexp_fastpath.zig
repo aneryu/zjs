@@ -859,7 +859,7 @@ pub fn regExpExecCompiledResult(
     string_value: core.JSValue,
     string_data: core.string.String.ResolvedData,
     compiled: regexp_adapter.Compiled,
-    header: regexp_adapter.BlobHeader,
+    header: regexp_adapter.Header,
     use_last_index: bool,
     is_global: bool,
     is_sticky: bool,
