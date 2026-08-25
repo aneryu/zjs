@@ -524,7 +524,7 @@ fn runInterp(
         .latin1 => |bytes| blk: {
             if (header.latin1_len != 0) {
                 const code = bytecode[header.latin1_off..][0..header.latin1_len];
-                break :blk try interp.execLatin1(allocator, code, bytes, start_index, regs, interrupt);
+                break :blk try @call(.always_inline, interp.execLatin1, .{ allocator, code, bytes, start_index, regs, interrupt });
             }
             if (header.uc16_len == 0) return error.BytecodeCorrupt;
             widened = try allocator.alloc(u16, bytes.len);
