@@ -3283,7 +3283,15 @@ pub const JSRuntime = struct {
     fn resetGCThreshold(self: *JSRuntime) void {
         // qjs js_trigger_gc after JS_RunGC (quickjs.c:1795-1796):
         //   malloc_gc_threshold = malloc_size + (malloc_size >> 1)
-        self.malloc_gc_threshold = std.math.add(usize, self.memory.allocated_bytes, self.memory.allocated_bytes >> 1) catch std.math.maxInt(usize);
+        const grown = std.math.add(usize, self.memory.allocated_bytes, self.memory.allocated_bytes >> 1) catch std.math.maxInt(usize);
+        // ...plus room for one nursery. Half of a small live set is less than
+        // a nursery, and since the threshold is tested before a minor is
+        // offered, such a threshold would be crossed first every time and
+        // every collection would be a major. raytrace lives in 288KB, so the
+        // qjs rule alone gives it 144KB of headroom to fill a nursery that
+        // wants an order of magnitude more.
+        const floored = std.math.add(usize, self.memory.allocated_bytes, gc.nursery_headroom_bytes) catch std.math.maxInt(usize);
+        self.malloc_gc_threshold = @max(grown, floored);
         self.gc.resetAllocationDebt();
     }
 

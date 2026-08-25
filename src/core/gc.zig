@@ -177,10 +177,46 @@ const ConcurrentState = if (concurrent_enabled)
 else
     void;
 
-/// Young objects required before a minor is worth its root scan. A starting
-/// value, not a tuned one: the histogram work that would justify a number
-/// lives with allocation headroom in a later tranche.
-pub const minor_young_threshold: usize = 512;
+/// Young objects required before a minor is worth its root scan.
+///
+/// A minor's cost splits into a per-object part (clear, trace and sweep the
+/// young suffix) and a per-invocation part that does not shrink with the young
+/// set at all: scan every precise root, spill and scan the native stack
+/// conservatively, and force-trace every remembered owner. At 512 objects the
+/// second part dominates -- raytrace was paying 104us per minor to reclaim
+/// about a thousand objects -- and 40% of the young set was surviving, because
+/// a nursery that small is collected again before its occupants have had time
+/// to die. Everything that survives is promoted, and only a major can reclaim
+/// a promoted object, so an undersized nursery manufactures old garbage.
+///
+/// For scale: V8's semi-space is 1-8MB and JSC's eden runs to tens of MB. At
+/// zjs's p50 object size this is ~1.5MB, which is the low end of that range
+/// rather than a match for it; the pause budget is what argues against going
+/// further, and that trade is measurable once the block space lands.
+pub const minor_young_threshold: usize = 16 * 1024;
+
+/// Bytes the major threshold must leave free above the live set, so that a
+/// nursery can actually fill.
+///
+/// The whole-heap threshold is tested before a minor is offered (§8.5), which
+/// means a threshold tighter than one nursery is a threshold the nursery can
+/// never reach: every collection becomes a major and the generational filter
+/// is dead code. qjs needs no such floor because it has no young generation.
+/// Sized from the p95 of the allocation histogram rather than the p50, since
+/// the point is to guarantee the room, not to predict it.
+///
+/// The room is not always enough, and that turns out to be the right outcome
+/// rather than a shortfall to tune away. `allocated_bytes` counts strings,
+/// shapes and bytecode too, so on a small live set the threshold is still
+/// crossed before the nursery fills and every collection becomes a major:
+/// raytrace and deltablue run with zero minors. Both are FASTER that way --
+/// a whole-heap trace of 600KB costs less than the per-invocation root and
+/// conservative-stack scan a minor pays to avoid it. Where the live set is
+/// large the arithmetic reverses and minors carry the load, which is what
+/// splay (49MB live) does at 623 minors to 40 majors. So the threshold
+/// chooses between generational and whole-heap collection by heap size, and
+/// the crossover is where the two costs meet.
+pub const nursery_headroom_bytes: usize = if (generation_enabled) minor_young_threshold * 96 else 0;
 
 const GenerationState = if (generation_enabled)
     @import("gc_generation.zig").State

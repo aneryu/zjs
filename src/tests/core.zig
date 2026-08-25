@@ -10998,7 +10998,16 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
         const object_request = survivor.allocationSize(rt);
         const object_charge = core.memory.MemoryAccount.accountedSizeForRequest(object_request, .@"8");
         const boundary_bytes = rt.memory.allocated_bytes - object_charge;
-        const expected = boundary_bytes + (boundary_bytes >> 1);
+        // ...and, under the tracing collector, never tighter than one nursery
+        // above the live set. A threshold below that is one the young
+        // generation can never reach, since it is tested before a minor is
+        // offered, so every collection would be a major (`gc.zig`
+        // `nursery_headroom_bytes`). `rc` has no young generation and the
+        // headroom is zero there, which leaves the qjs rule exactly.
+        const expected = @max(
+            boundary_bytes + (boundary_bytes >> 1),
+            boundary_bytes + core.gc.nursery_headroom_bytes,
+        );
         try std.testing.expectEqual(expected, rt.gcThreshold());
     }
 }
