@@ -3,11 +3,17 @@
 //! The C++ island still compiles patterns into IRRX blobs. Exec no longer
 //! crosses into Isolate / Handle / C ABI machinery on the match hot path.
 const std = @import("std");
+const builtin = @import("builtin");
 const unicode = @import("unicode.zig");
 const bc = @import("irregexp_bytecode.zig");
 
 const Opcode = bc.Opcode;
 const Off = bc.Off;
+
+/// Compiler-emitted bytecode is trusted in ReleaseFast/ReleaseSmall the same
+/// way V8's interpreter uses `DCHECK` rather than a per-instruction sandbox.
+/// Debug and ReleaseSafe still reject out-of-range PCs, opcodes, and registers.
+const trusted_code = builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall;
 
 pub const Result = enum { success, failure };
 
@@ -17,6 +23,7 @@ pub const Interrupt = struct {
 };
 
 const max_backtrack_slots: usize = (64 * 1024 * 1024) / @sizeOf(i32);
+const inline_backtrack_slots: usize = 64;
 
 const word_character_map: [256]u8 = blk: {
     var map = [_]u8{0} ** 256;
@@ -30,29 +37,88 @@ const word_character_map: [256]u8 = blk: {
     break :blk map;
 };
 
+inline fn loadUnaligned(comptime T: type, code: []const u8, pc: usize, off: usize) T {
+    const ptr: *align(1) const T = @ptrCast(code.ptr + pc + off);
+    return ptr.*;
+}
+
 fn readI16(code: []const u8, pc: usize, off: usize) i16 {
-    return std.mem.bytesToValue(i16, code[pc + off ..][0..2]);
+    return loadUnaligned(i16, code, pc, off);
 }
 
 fn readI32(code: []const u8, pc: usize, off: usize) i32 {
-    return std.mem.bytesToValue(i32, code[pc + off ..][0..4]);
+    return loadUnaligned(i32, code, pc, off);
 }
 
 fn readU16(code: []const u8, pc: usize, off: usize) u16 {
-    return std.mem.bytesToValue(u16, code[pc + off ..][0..2]);
+    return loadUnaligned(u16, code, pc, off);
 }
 
 fn readU32(code: []const u8, pc: usize, off: usize) u32 {
-    return std.mem.bytesToValue(u32, code[pc + off ..][0..4]);
+    return loadUnaligned(u32, code, pc, off);
 }
 
 fn readU8(code: []const u8, pc: usize, off: usize) u8 {
-    return code[pc + off];
+    return (code.ptr + pc + off)[0];
 }
 
 fn readTable(code: []const u8, pc: usize, off: usize) *const [16]u8 {
-    return code[pc + off ..][0..16];
+    return @ptrCast(code.ptr + pc + off);
 }
+
+/// V8 `BacktrackStack`: 64 inline slots, then heap. Avoids a heap allocation
+/// on every exec for the common case (`std.ArrayList.ensureTotalCapacity(64)`).
+const BacktrackStack = struct {
+    inline_buf: [inline_backtrack_slots]i32 = undefined,
+    heap: []i32 = &.{},
+    len: usize = 0,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *BacktrackStack) void {
+        if (self.heap.len != 0) self.allocator.free(self.heap);
+    }
+
+    inline fn storage(self: *BacktrackStack) []i32 {
+        return if (self.heap.len != 0) self.heap else self.inline_buf[0..];
+    }
+
+    fn grow(self: *BacktrackStack) error{OutOfMemory}!void {
+        const old = self.storage();
+        const new_cap = @max(old.len * 2, inline_backtrack_slots * 2);
+        const new_heap = try self.allocator.alloc(i32, new_cap);
+        @memcpy(new_heap[0..self.len], old[0..self.len]);
+        if (self.heap.len != 0) self.allocator.free(self.heap);
+        self.heap = new_heap;
+    }
+
+    fn push(self: *BacktrackStack, value: i32) error{ BytecodeCorrupt, OutOfMemory }!void {
+        if (self.len >= max_backtrack_slots) return error.BytecodeCorrupt;
+        var slots = self.storage();
+        if (self.len == slots.len) {
+            @branchHint(.unlikely);
+            try self.grow();
+            slots = self.storage();
+        }
+        slots[self.len] = value;
+        self.len += 1;
+    }
+
+    fn pop(self: *BacktrackStack) ?i32 {
+        if (self.len == 0) return null;
+        self.len -= 1;
+        return self.storage()[self.len];
+    }
+
+    fn peek(self: *const BacktrackStack) ?i32 {
+        if (self.len == 0) return null;
+        const slots: []const i32 = if (self.heap.len != 0) self.heap else &self.inline_buf;
+        return slots[self.len - 1];
+    }
+
+    fn truncate(self: *BacktrackStack, new_len: usize) void {
+        self.len = new_len;
+    }
+};
 
 fn indexInBounds(index: i32, length: i32) bool {
     return @as(u32, @bitCast(index)) < @as(u32, @bitCast(length));
@@ -131,17 +197,14 @@ fn charsEqualNoCase(comptime Char: type, a: []const Char, b: []const Char, is_un
 }
 
 fn load2(comptime Char: type, subject: []const Char, index: i32) u32 {
-    const i: usize = @intCast(index);
+    const ptr: [*]const Char = subject.ptr + @as(usize, @intCast(index));
     const shift = @bitSizeOf(Char);
-    return @as(u32, subject[i]) | (@as(u32, subject[i + 1]) << shift);
+    return @as(u32, ptr[0]) | (@as(u32, ptr[1]) << shift);
 }
 
 fn load4(subject: []const u8, index: i32) u32 {
-    const i: usize = @intCast(index);
-    return @as(u32, subject[i]) |
-        (@as(u32, subject[i + 1]) << 8) |
-        (@as(u32, subject[i + 2]) << 16) |
-        (@as(u32, subject[i + 3]) << 24);
+    const ptr: *align(1) const u32 = @ptrCast(subject.ptr + @as(usize, @intCast(index)));
+    return std.mem.littleToNative(u32, ptr.*);
 }
 
 pub fn execLatin1(
@@ -184,57 +247,55 @@ fn execGeneric(
         subject[start_index - 1];
 
     var pc: usize = 0;
-    var backtrack: std.ArrayList(i32) = .empty;
-    defer backtrack.deinit(allocator);
-    try backtrack.ensureTotalCapacity(allocator, 64);
+    var backtrack = BacktrackStack{ .allocator = allocator };
+    defer backtrack.deinit();
 
     const jump = struct {
         fn go(bytes: []const u8, at: usize, off: usize) error{BytecodeCorrupt}!usize {
             const target = readU32(bytes, at, off);
-            if (target >= bytes.len) return error.BytecodeCorrupt;
+            if (!trusted_code and target >= bytes.len) return error.BytecodeCorrupt;
             return target;
         }
     }.go;
 
     const getReg = struct {
         fn get(regs: []i32, index: u16) error{BytecodeCorrupt}!i32 {
-            if (index >= regs.len) return error.BytecodeCorrupt;
-            return regs[index];
+            if (!trusted_code and index >= regs.len) return error.BytecodeCorrupt;
+            return regs.ptr[index];
         }
         fn ptr(regs: []i32, index: u16) error{BytecodeCorrupt}!*i32 {
-            if (index >= regs.len) return error.BytecodeCorrupt;
-            return &regs[index];
+            if (!trusted_code and index >= regs.len) return error.BytecodeCorrupt;
+            return &regs.ptr[index];
         }
     };
 
-    const pushBt = struct {
-        fn push(allocator_: std.mem.Allocator, stack: *std.ArrayList(i32), value: i32) error{ BytecodeCorrupt, OutOfMemory }!void {
-            if (stack.items.len >= max_backtrack_slots) return error.BytecodeCorrupt;
-            try stack.append(allocator_, value);
-        }
-    }.push;
-
     dispatch: while (true) {
-        if (pc >= code.len) return error.BytecodeCorrupt;
-        const raw = code[pc];
-        if (raw >= bc.opcode_count) return error.BytecodeCorrupt;
+        if (!trusted_code) {
+            if (pc >= code.len) return error.BytecodeCorrupt;
+        }
+        const raw = code.ptr[pc];
+        if (!trusted_code) {
+            if (raw >= bc.opcode_count) return error.BytecodeCorrupt;
+        }
         const op: Opcode = @enumFromInt(raw);
         const sz: usize = bc.opcode_size[@intFromEnum(op)];
-        if (pc + sz > code.len) return error.BytecodeCorrupt;
+        if (!trusted_code) {
+            if (pc + sz > code.len) return error.BytecodeCorrupt;
+        }
 
         switch (op) {
             .break_ => return error.BytecodeCorrupt,
             .push_current_position => {
-                try pushBt(allocator, &backtrack, current);
+                try backtrack.push(current);
                 pc += sz;
             },
             .push_backtrack => {
-                try pushBt(allocator, &backtrack, @bitCast(readU32(code, pc, Off.push_backtrack.label)));
+                try backtrack.push(@bitCast(readU32(code, pc, Off.push_backtrack.label)));
                 pc += sz;
             },
             .push_register => {
                 const index = readU16(code, pc, Off.push_register.register_index);
-                try pushBt(allocator, &backtrack, try getReg.get(registers, index));
+                try backtrack.push(try getReg.get(registers, index));
                 pc += sz;
             },
             .set_register => {
@@ -247,10 +308,10 @@ fn execGeneric(
                 const from_reg = readU16(code, pc, Off.clear_registers.from_register);
                 const to_reg = readU16(code, pc, Off.clear_registers.to_register);
                 if (from_reg > to_reg) return error.BytecodeCorrupt;
-                var i = from_reg;
-                while (i <= to_reg) : (i += 1) {
-                    (try getReg.ptr(registers, i)).* = -1;
-                }
+                if (!trusted_code and @as(usize, to_reg) >= registers.len) return error.BytecodeCorrupt;
+                const from: usize = from_reg;
+                const to_exclusive: usize = @as(usize, to_reg) + 1;
+                @memset(registers.ptr[from..to_exclusive], -1);
                 pc += sz;
             },
             .advance_register => {
@@ -272,14 +333,14 @@ fn execGeneric(
             },
             .write_stack_pointer_to_register => {
                 const index = readU16(code, pc, Off.write_stack_pointer_to_register.register_index);
-                (try getReg.ptr(registers, index)).* = @intCast(backtrack.items.len);
+                (try getReg.ptr(registers, index)).* = @intCast(backtrack.len);
                 pc += sz;
             },
             .read_stack_pointer_from_register => {
                 const index = readU16(code, pc, Off.read_stack_pointer_from_register.register_index);
                 const new_sp = try getReg.get(registers, index);
-                if (new_sp < 0 or @as(usize, @intCast(new_sp)) > backtrack.items.len) return error.BytecodeCorrupt;
-                backtrack.shrinkRetainingCapacity(@intCast(new_sp));
+                if (new_sp < 0 or @as(usize, @intCast(new_sp)) > backtrack.len) return error.BytecodeCorrupt;
+                backtrack.truncate(@intCast(new_sp));
                 pc += sz;
             },
             .pop_current_position => {
@@ -312,7 +373,7 @@ fn execGeneric(
                 current += by;
             },
             .check_fixed_length_loop => {
-                const tos = backtrack.getLastOrNull() orelse return error.BytecodeCorrupt;
+                const tos = backtrack.peek() orelse return error.BytecodeCorrupt;
                 if (current == tos) {
                     pc = try jump(code, pc, Off.check_fixed_length_loop.on_tos_equals_current_position);
                     _ = backtrack.pop();

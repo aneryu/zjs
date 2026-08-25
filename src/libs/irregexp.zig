@@ -496,35 +496,22 @@ fn copyRegisters(dst: []usize, src: []const i32, capture_slots: usize) void {
     if (n < dst.len) @memset(dst[n..], no_slot_value);
 }
 
-pub fn execCaptureSlotsSliceTrustedWithOptions(
-    allocator: std.mem.Allocator,
-    bytecode: []const u8,
-    input: Input,
-    start_index: usize,
-    options: ExecOptions,
-    capture: []usize,
-) !ExecResult {
-    const header = parseHeader(bytecode) orelse return error.BytecodeCorrupt;
-    const registers_per_match = header.capture_count * 2;
-    if (capture.len < registers_per_match) return error.BytecodeCorrupt;
-    const input_len = switch (input) {
+fn inputLen(input: Input) usize {
+    return switch (input) {
         .latin1 => |bytes| bytes.len,
         .utf16 => |units| units.len,
     };
-    if (start_index > input_len) return .out_of_range;
+}
 
-    const need = @max(registers_per_match, header.register_count);
-    var inline_regs: [small_exec_slots]i32 = undefined;
-    var heap_regs: []i32 = &.{};
-    defer if (heap_regs.len != 0) allocator.free(heap_regs);
-    const regs = if (need <= inline_regs.len)
-        inline_regs[0..need]
-    else blk: {
-        heap_regs = try allocator.alloc(i32, need);
-        break :blk heap_regs;
-    };
-    @memset(regs, -1);
-
+fn runInterp(
+    allocator: std.mem.Allocator,
+    bytecode: []const u8,
+    header: BlobHeader,
+    input: Input,
+    start_index: usize,
+    options: ExecOptions,
+    regs: []i32,
+) !interp.Result {
     var widened: []u16 = &.{};
     defer if (widened.len != 0) allocator.free(widened);
 
@@ -533,7 +520,7 @@ pub fn execCaptureSlotsSliceTrustedWithOptions(
         .ctx = options.@"opaque",
     };
 
-    const zig_result = switch (input) {
+    return switch (input) {
         .latin1 => |bytes| blk: {
             if (header.latin1_len != 0) {
                 const code = bytecode[header.latin1_off..][0..header.latin1_len];
@@ -551,6 +538,44 @@ pub fn execCaptureSlotsSliceTrustedWithOptions(
             break :blk try interp.execUtf16(allocator, code, units, start_index, regs, interrupt);
         },
     };
+}
+
+fn acquireRegisters(
+    allocator: std.mem.Allocator,
+    need: usize,
+    inline_regs: *[small_exec_slots]i32,
+    heap_regs: *[]i32,
+) ![]i32 {
+    const regs = if (need <= inline_regs.len)
+        inline_regs[0..need]
+    else blk: {
+        heap_regs.* = try allocator.alloc(i32, need);
+        break :blk heap_regs.*;
+    };
+    @memset(regs, -1);
+    return regs;
+}
+
+pub fn execCaptureSlotsSliceTrustedWithOptions(
+    allocator: std.mem.Allocator,
+    bytecode: []const u8,
+    input: Input,
+    start_index: usize,
+    options: ExecOptions,
+    capture: []usize,
+) !ExecResult {
+    const header = parseHeader(bytecode) orelse return error.BytecodeCorrupt;
+    const registers_per_match = header.capture_count * 2;
+    if (capture.len < registers_per_match) return error.BytecodeCorrupt;
+    if (start_index > inputLen(input)) return .out_of_range;
+
+    const need = @max(registers_per_match, header.register_count);
+    var inline_regs: [small_exec_slots]i32 = undefined;
+    var heap_regs: []i32 = &.{};
+    defer if (heap_regs.len != 0) allocator.free(heap_regs);
+    const regs = try acquireRegisters(allocator, need, &inline_regs, &heap_regs);
+
+    const zig_result = try runInterp(allocator, bytecode, header, input, start_index, options, regs);
     const result: ExecResult = switch (zig_result) {
         .success => .match,
         .failure => .no_match,
@@ -617,21 +642,16 @@ pub fn testMatchTrustedWithOptions(
     options: ExecOptions,
 ) !?bool {
     const header = parseHeader(bytecode) orelse return error.BytecodeCorrupt;
-    const alloc_count = @max(header.capture_count * 2, header.register_count);
-    var inline_slots: [small_exec_slots]usize = undefined;
-    var heap_slots: []usize = &.{};
-    defer if (heap_slots.len != 0) allocator.free(heap_slots);
-    const slots = if (alloc_count <= inline_slots.len)
-        inline_slots[0..alloc_count]
-    else blk: {
-        heap_slots = try allocator.alloc(usize, alloc_count);
-        break :blk heap_slots;
-    };
-    const result = try execCaptureSlotsSliceTrustedWithOptions(allocator, bytecode, input, start_index, options, slots);
-    return switch (result) {
-        .match => true,
-        .no_match, .out_of_range => false,
-        .not_available => null,
+    if (start_index > inputLen(input)) return false;
+    const need = @max(header.capture_count * 2, header.register_count);
+    var inline_regs: [small_exec_slots]i32 = undefined;
+    var heap_regs: []i32 = &.{};
+    defer if (heap_regs.len != 0) allocator.free(heap_regs);
+    const regs = try acquireRegisters(allocator, need, &inline_regs, &heap_regs);
+    const zig_result = try runInterp(allocator, bytecode, header, input, start_index, options, regs);
+    return switch (zig_result) {
+        .success => true,
+        .failure => false,
     };
 }
 
