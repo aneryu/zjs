@@ -933,35 +933,36 @@ Objects past the slab's 512-byte class ceiling, or over-aligned, have a
 standalone prefix and no arena; they keep the occupant table, which is why it
 still exists.
 
-#### The address registry is the compatibility-heap stand-in, and it is the cost
+#### What the occupant table still carries, and what it cost while it carried everything
 
-Two `AutoHashMapUnmanaged`s -- `by_header` and a page-radix `pages` -- are
-written on EVERY object publication and read on every conservative candidate.
-That is the price of resolving arbitrary words against a heap whose objects sit
-wherever the general allocator put them. §4.2's block space removes the need
-for it: a 64KB-aligned block makes `block = ptr & ~(block_bytes-1)` O(1),
-`Block.cellIndex` turns the offset into a cell index, and a bloom filter over
-block bases rejects non-heap words without touching memory -- which is what JSC
-does (`MarkedBlock`, `TinyBloomFilter`). `src/core/gc_block_heap.zig` already
-implements the blocks, the cell index, and the mark epochs; `serves_gc_nodes`
-is still false, so nothing allocates from it yet.
+The table now holds only standalone-prefix allocations -- past the slab's
+512-byte class ceiling, or over-aligned -- because everything else resolves
+through the arena geometry above. This section records what it was, since the
+failure mode is invisible in the source and will recur in any Zig map used the
+same way.
 
-Until then the maps carry the whole heap, and their failure mode is worth
-recording because it is invisible in the source. Zig's open-addressed map marks
-a removed slot as a tombstone and returns it to `available`
-(hash_map.zig:957,1231), so a map under balanced churn -- one insert and one
-remove per object, exactly this one -- never grows and therefore never rehashes
-the tombstones away. Its probe loop stops at a FREE slot (:984,:1155), and a
-tombstone is not free. Once every slot has been occupied once, no free slot
-remains and every probe scans the full capacity. Measured on 2026-08-25 at
-~4.9us per publication, 76% of raytrace's entire runtime. A tombstone-budgeted
-`rehash` restores it: raytrace 5.1x, deltablue 6.7x.
+Two `AutoHashMapUnmanaged`s, `by_header` and a page-radix `pages`, were written
+on every object publication and read on every conservative candidate. Zig's
+open-addressed map marks a removed slot as a tombstone and returns it to
+`available` (hash_map.zig:957,1231), so a map under balanced churn -- one insert
+and one remove per object, exactly this one -- never grows and therefore never
+rehashes the tombstones away. Its probe loop stops at a FREE slot (:984,:1155),
+and a tombstone is not free. Once every slot has been occupied once, no free
+slot remains and every probe scans the full capacity: ~4.9us per publication,
+76% of raytrace's entire runtime. A tombstone-budgeted `rehash` restored it
+(raytrace 5.1x, deltablue 6.7x) and remains in place for the standalone
+population, which is small enough that it now rarely fires.
 
-The reason this went unseen for so long is the §8.5 note above: while the major
-never triggered, almost nothing was ever freed, so the maps never churned and
-the degradation never appeared. It arrived with the fix. An earlier A/B of the
-same `rehash` against the leaking build measured it as a small loss, which it
-correctly was -- against a disease that had not yet started.
+Two things about how that was found are worth keeping. It went unseen because
+while the major never triggered almost nothing was freed, so the maps never
+churned; the degradation arrived with the fix for §8.5. And an earlier A/B of
+the same `rehash` against the leaking build measured it as a small loss, which
+it correctly was -- against a disease that had not yet started.
+
+§4.2's block space is still the end state: it would remove the standalone
+population's table too, and `src/core/gc_block_heap.zig` already implements the
+blocks, the cell index and the mark epochs, with `serves_gc_nodes` false so
+nothing allocates from it yet.
 
 ### 7.3 Native pointer contract
 
@@ -1141,6 +1142,25 @@ is flattering. `--gc-stats` reports `minor collections` next to the total
 `collection entries` precisely so the two can be told apart: if the difference
 is near zero, no major is running and no throughput number from that build means
 anything.
+
+#### Whether a minor is worth running is a property of the workload
+
+A minor's cost is almost entirely fixed -- every precise root, a spilled and
+conservatively scanned native stack, and a walk of every remembered owner --
+and none of it shrinks with the young set. It pays only when most of the young
+set is dead, which is the weak generational hypothesis, and a workload is
+entitled to disagree. splay links each freshly allocated node straight into its
+live tree: 95%+ of the young set survives, each survivor is promoted into a
+generation only a major can reclaim, and a minor there costs 29ms against a
+112ms major while reclaiming almost nothing. Disabling minors outright makes it
+21% faster.
+
+So the collector measures rather than asserts. `noteMinorYield` suspends the
+minor after `low_yield_limit` consecutive rounds reclaim under a tenth of the
+young set; a major buys one probe, and the interval between probes doubles to a
+cap each time a probe confirms the answer. This is not a splay special case --
+nothing names a benchmark -- it is the collector declining to keep paying for
+an experiment whose result it already has.
 
 ### 8.6 Major collection
 

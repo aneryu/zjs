@@ -225,11 +225,16 @@ pub const minor_young_threshold: usize = 16 * 1024;
 /// crossed before the nursery fills and every collection becomes a major:
 /// raytrace and deltablue run with zero minors. Both are FASTER that way --
 /// a whole-heap trace of 600KB costs less than the per-invocation root and
-/// conservative-stack scan a minor pays to avoid it. Where the live set is
-/// large the arithmetic reverses and minors carry the load, which is what
-/// splay (49MB live) does at 623 minors to 40 majors. So the threshold
-/// chooses between generational and whole-heap collection by heap size, and
-/// the crossover is where the two costs meet.
+/// conservative-stack scan a minor pays to avoid it.
+///
+/// An earlier version of this comment claimed the arithmetic reverses on a
+/// large live set, and cited splay at 623 minors to 40 majors as the case where
+/// minors carry the load. That was wrong in both directions: the ratio is not
+/// reproducible, and disabling minors on splay makes it 21% faster. Heap size
+/// does not decide whether a minor is worth running -- young mortality does,
+/// and only the workload knows that. `gc_generation.noteMinorYield` measures it
+/// (see `low_yield_limit`); this constant only decides how much room the young
+/// set gets before the question is asked.
 pub const nursery_headroom_bytes: usize = if (generation_enabled) minor_young_threshold * 96 else 0;
 
 const GenerationState = if (generation_enabled)
