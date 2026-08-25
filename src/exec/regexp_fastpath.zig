@@ -832,7 +832,8 @@ pub fn regExpExecResult(
     const cached_bytecode = regexp_object.regexpCompiledBytecode();
     if (cached_bytecode.len != 0) {
         const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(cached_bytecode) };
-        const bits = compiled.flagBits();
+        const header = compiled.header() orelse return null;
+        const bits = header.flags;
         const is_global = (bits & regexp_adapter.flag_bits.global) != 0;
         const is_sticky = (bits & regexp_adapter.flag_bits.sticky) != 0;
         const has_indices = (bits & regexp_adapter.flag_bits.indices) != 0;
@@ -843,7 +844,7 @@ pub fn regExpExecResult(
             }
             return core.JSValue.nullValue();
         }
-        return try regExpExecCompiledResult(ctx, output, global, regexp_value, regexp_object, string_value, string_data, compiled, use_last_index, is_global, is_sticky, has_indices, start_index, caller_function, caller_frame);
+        return try regExpExecCompiledResult(ctx, output, global, regexp_value, regexp_object, string_value, string_data, compiled, header, use_last_index, is_global, is_sticky, has_indices, start_index, caller_function, caller_frame);
     }
 
     return null;
@@ -858,6 +859,7 @@ pub fn regExpExecCompiledResult(
     string_value: core.JSValue,
     string_data: core.string.String.ResolvedData,
     compiled: regexp_adapter.Compiled,
+    header: regexp_adapter.BlobHeader,
     use_last_index: bool,
     is_global: bool,
     is_sticky: bool,
@@ -867,7 +869,7 @@ pub fn regExpExecCompiledResult(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const rt = ctx.runtime;
-    const alloc_count = compiled.allocCount();
+    const alloc_count = header.capture_count * 2 + header.register_count;
     var inline_capture_slots: [regexp_adapter.small_exec_slots]usize = undefined;
     var heap_capture_slots: []usize = &.{};
     defer if (heap_capture_slots.len != 0) rt.memory.allocator.free(heap_capture_slots);
@@ -895,14 +897,14 @@ pub fn regExpExecCompiledResult(
                 try setRegExpLastIndexStrict(ctx, output, global, regexp_value, regexp_object, next_value, caller_function, caller_frame);
             }
 
-            const total_capture_count = compiled.captureCount();
+            const total_capture_count = header.capture_count;
             const found = RegExpMatch{
                 .index = match_start,
                 .len = match_end - match_start,
                 .capture_slots = capture_slots[2 .. total_capture_count * 2],
                 .capture_bytecode = compiled.bytecode,
                 .capture_count = total_capture_count - 1,
-                .has_named_captures = (compiled.flagBits() & regexp_adapter.flag_bits.named_groups) != 0,
+                .has_named_captures = (header.flags & regexp_adapter.flag_bits.named_groups) != 0,
             };
             return try createRegExpMatchArrayFromValue(rt, global, string_value, &found, string_data.len(), has_indices);
         },

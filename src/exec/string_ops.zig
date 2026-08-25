@@ -2851,7 +2851,45 @@ fn regExpResultPropertyTemplate(rt: *core.JSRuntime, global: *core.Object) !*cor
     return initRegExpResultPropertyTemplate(rt, global);
 }
 
-pub noinline fn createRegExpMatchArrayFromValue(
+pub fn createRegExpMatchArrayFromValue(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    input_value: core.JSValue,
+    found: *const RegExpMatch,
+    input_len: usize,
+    has_indices: bool,
+) !core.JSValue {
+    if (!has_indices and !found.has_named_captures and found.capture_count == 0) {
+        return createRegExpMatchArrayGroup0(rt, global, input_value, found, input_len);
+    }
+    return createRegExpMatchArrayFromValueSlow(rt, global, input_value, found, input_len, has_indices);
+}
+
+/// bench-v8 and most `.exec()` calls have only capture 0. Skip the named-groups
+/// object, the N-element capture loop, and the `noinline` general path.
+fn createRegExpMatchArrayGroup0(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    input_value: core.JSValue,
+    found: *const RegExpMatch,
+    input_len: usize,
+) !core.JSValue {
+    const template = try regExpResultPropertyTemplate(rt, global);
+    const out = try core.Object.createRegExpMatchArrayFromShape(rt, template, @intCast(found.index), input_value, core.JSValue.undefinedValue());
+    errdefer core.Object.destroyFromHeader(rt, &out.header);
+
+    const matched = try stringSliceValue(rt, input_value, found.index, found.len);
+    errdefer matched.free(rt);
+    const elements = try rt.memory.alloc(core.JSValue, 1);
+    elements[0] = matched;
+    out.adoptDenseArrayElementsAssumingEmpty(elements);
+    out.flags.may_have_indexed_properties = true;
+
+    try updateRegExpLegacyStaticsForMatch(rt, global, input_value, found, input_len);
+    return out.value();
+}
+
+pub noinline fn createRegExpMatchArrayFromValueSlow(
     rt: *core.JSRuntime,
     global: *core.Object,
     input_value: core.JSValue,

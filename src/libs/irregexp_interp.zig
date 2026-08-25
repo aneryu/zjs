@@ -225,6 +225,25 @@ inline fn skip(comptime op: Opcode) usize {
     return comptime bc.opcode_size[@intFromEnum(op)];
 }
 
+/// V8 `ADVANCE` + `DECODE`: load the next handler address before the rest of
+/// the current arm so the jump-table miss can overlap with operand work.
+const Next = struct {
+    pc: [*]const u8,
+    op: Opcode,
+};
+
+inline fn decodeAt(pc: [*]const u8) Next {
+    return .{ .pc = pc, .op = nextOpcode(pc) };
+}
+
+inline fn decodeFallthrough(pc: [*]const u8, comptime op: Opcode) Next {
+    return decodeAt(pc + skip(op));
+}
+
+inline fn decodeJump(code: []const u8, pc: [*]const u8, off: usize) Next {
+    return decodeAt(jumpTo(code, pc, off));
+}
+
 inline fn jumpTo(code: []const u8, pc: [*]const u8, off: usize) [*]const u8 {
     const target: usize = loadAt(u32, pc, off);
     if (!trusted_code and target >= code.len) unreachable;
@@ -295,26 +314,30 @@ fn execGeneric(
         .break_ => return error.BytecodeCorrupt,
         .push_current_position => {
             try backtrack.push(current);
-            pc += skip(.push_current_position);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .push_current_position);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .push_backtrack => {
             try backtrack.push(@bitCast(readU32(pc, Off.push_backtrack.label)));
-            pc += skip(.push_backtrack);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .push_backtrack);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .push_register => {
             const index = readU16(pc, Off.push_register.register_index);
             try backtrack.push(regGet(registers, index));
-            pc += skip(.push_register);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .push_register);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .set_register => {
             const index = readU16(pc, Off.set_register.register_index);
             const value = readI32(pc, Off.set_register.value);
             (regPtr(registers, index)).* = value;
-            pc += skip(.set_register);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .set_register);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .clear_registers => {
             const from_reg = readU16(pc, Off.clear_registers.from_register);
@@ -324,77 +347,89 @@ fn execGeneric(
             const from: usize = from_reg;
             const to_exclusive: usize = @as(usize, to_reg) + 1;
             @memset(registers.ptr[from..to_exclusive], -1);
-            pc += skip(.clear_registers);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .clear_registers);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .advance_register => {
             const index = readU16(pc, Off.advance_register.register_index);
             const by = readI16(pc, Off.advance_register.by);
             (regPtr(registers, index)).* += by;
-            pc += skip(.advance_register);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .advance_register);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .write_current_position_to_register => {
             const index = readU16(pc, Off.write_current_position_to_register.register_index);
             const cp_offset = readI16(pc, Off.write_current_position_to_register.cp_offset);
             (regPtr(registers, index)).* = current + cp_offset;
-            pc += skip(.write_current_position_to_register);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .write_current_position_to_register);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .read_current_position_from_register => {
             const index = readU16(pc, Off.read_current_position_from_register.register_index);
             current = regGet(registers, index);
-            pc += skip(.read_current_position_from_register);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .read_current_position_from_register);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .write_stack_pointer_to_register => {
             const index = readU16(pc, Off.write_stack_pointer_to_register.register_index);
             (regPtr(registers, index)).* = @intCast(backtrack.len);
-            pc += skip(.write_stack_pointer_to_register);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .write_stack_pointer_to_register);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .read_stack_pointer_from_register => {
             const index = readU16(pc, Off.read_stack_pointer_from_register.register_index);
             const new_sp = regGet(registers, index);
             if (new_sp < 0 or @as(usize, @intCast(new_sp)) > backtrack.len) return error.BytecodeCorrupt;
             backtrack.truncate(@intCast(new_sp));
-            pc += skip(.read_stack_pointer_from_register);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .read_stack_pointer_from_register);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .pop_current_position => {
             current = backtrack.pop() orelse return error.BytecodeCorrupt;
-            pc += skip(.pop_current_position);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .pop_current_position);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .backtrack => {
             if (interrupt.check) |check| {
                 if (check(interrupt.ctx)) return error.Timeout;
             }
-            pc = restorePc(code, backtrack.pop() orelse return error.BytecodeCorrupt);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(restorePc(code, backtrack.pop() orelse return error.BytecodeCorrupt));
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .pop_register => {
             const index = readU16(pc, Off.pop_register.register_index);
             (regPtr(registers, index)).* = backtrack.pop() orelse return error.BytecodeCorrupt;
-            pc += skip(.pop_register);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .pop_register);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .fail => return .failure,
         .succeed => return .success,
         .advance_current_position => {
             current += readI16(pc, Off.advance_current_position.by);
-            pc += skip(.advance_current_position);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .advance_current_position);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .go_to => {
-            pc = jumpTo(code, pc, Off.go_to.label);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeJump(code, pc, Off.go_to.label);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .advance_cp_and_goto => {
             const by = readI16(pc, Off.advance_cp_and_goto.by);
-            pc = jumpTo(code, pc, Off.advance_cp_and_goto.on_goto);
+            const nxt = decodeJump(code, pc, Off.advance_cp_and_goto.on_goto);
             current += by;
-            continue :dispatch nextOpcode(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_fixed_length_loop => {
             const tos = backtrack.peek() orelse return error.BytecodeCorrupt;
@@ -404,7 +439,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_fixed_length_loop);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .load_current_character => {
             const bounds = readI32(pc, Off.load_current_character.bounds_check_offset);
@@ -415,13 +452,16 @@ fn execGeneric(
                 current_char = subject[@intCast(current + cp_offset)];
                 pc += skip(.load_current_character);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .load_current_character_unchecked => {
             const cp_offset = readI16(pc, Off.load_current_character_unchecked.cp_offset);
             current_char = subject[@intCast(current + cp_offset)];
-            pc += skip(.load_current_character_unchecked);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .load_current_character_unchecked);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .load2_current_chars => {
             const bounds = readI32(pc, Off.load2_current_chars.bounds_check_offset);
@@ -432,13 +472,16 @@ fn execGeneric(
                 current_char = load2(Char, subject, current + cp_offset);
                 pc += skip(.load2_current_chars);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .load2_current_chars_unchecked => {
             const cp_offset = readI16(pc, Off.load2_current_chars_unchecked.cp_offset);
             current_char = load2(Char, subject, current + cp_offset);
-            pc += skip(.load2_current_chars_unchecked);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .load2_current_chars_unchecked);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .load4_current_chars => {
             if (Char != u8) return error.BytecodeCorrupt;
@@ -450,14 +493,17 @@ fn execGeneric(
                 current_char = load4(subject, current + cp_offset);
                 pc += skip(.load4_current_chars);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .load4_current_chars_unchecked => {
             if (Char != u8) return error.BytecodeCorrupt;
             const cp_offset = readI16(pc, Off.load4_current_chars_unchecked.cp_offset);
             current_char = load4(subject, current + cp_offset);
-            pc += skip(.load4_current_chars_unchecked);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .load4_current_chars_unchecked);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check4_chars => {
             if (readU32(pc, Off.check4_chars.characters) == current_char) {
@@ -465,7 +511,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check4_chars);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_character => {
             if (readU16(pc, Off.check_character.character) == current_char) {
@@ -473,7 +521,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_character);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_not4_chars => {
             if (readU32(pc, Off.check_not4_chars.characters) != current_char) {
@@ -481,7 +531,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_not4_chars);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_not_character => {
             if (readU16(pc, Off.check_not_character.character) != current_char) {
@@ -489,7 +541,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_not_character);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .and_check4_chars => {
             const mask = readU32(pc, Off.and_check4_chars.mask);
@@ -498,7 +552,9 @@ fn execGeneric(
             } else {
                 pc += skip(.and_check4_chars);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_character_after_and => {
             const mask = readU32(pc, Off.check_character_after_and.mask);
@@ -507,7 +563,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_character_after_and);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .and_check_not4_chars => {
             const mask = readU32(pc, Off.and_check_not4_chars.mask);
@@ -516,7 +574,9 @@ fn execGeneric(
             } else {
                 pc += skip(.and_check_not4_chars);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_not_character_after_and => {
             const mask = readU32(pc, Off.check_not_character_after_and.mask);
@@ -525,7 +585,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_not_character_after_and);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_not_character_after_minus_and => {
             const minus = readU16(pc, Off.check_not_character_after_minus_and.minus);
@@ -536,7 +598,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_not_character_after_minus_and);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_character_in_range => {
             const from = readU16(pc, Off.check_character_in_range.from);
@@ -546,7 +610,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_character_in_range);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_character_not_in_range => {
             const from = readU16(pc, Off.check_character_not_in_range.from);
@@ -556,7 +622,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_character_not_in_range);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_bit_in_table => {
             const table = readTable(pc, Off.check_bit_in_table.table);
@@ -565,7 +633,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_bit_in_table);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_character_lt => {
             if (current_char < readU16(pc, Off.check_character_lt.limit)) {
@@ -573,7 +643,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_character_lt);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_character_gt => {
             if (current_char > readU16(pc, Off.check_character_gt.limit)) {
@@ -581,7 +653,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_character_gt);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .if_register_lt => {
             const index = readU16(pc, Off.if_register_lt.register_index);
@@ -591,7 +665,9 @@ fn execGeneric(
             } else {
                 pc += skip(.if_register_lt);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .if_register_ge => {
             const index = readU16(pc, Off.if_register_ge.register_index);
@@ -601,7 +677,9 @@ fn execGeneric(
             } else {
                 pc += skip(.if_register_ge);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .if_register_eq_pos => {
             const index = readU16(pc, Off.if_register_eq_pos.register_index);
@@ -610,7 +688,9 @@ fn execGeneric(
             } else {
                 pc += skip(.if_register_eq_pos);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_not_back_ref,
         .check_not_back_ref_no_case,
@@ -622,8 +702,9 @@ fn execGeneric(
             const len = end - from;
             if (from >= 0 and len > 0) {
                 if (current + len > length or from + len > length) {
-                    pc = jumpTo(code, pc, Off.check_not_back_ref.on_not_equal);
-                    continue :dispatch nextOpcode(pc);
+                    const nxt = decodeJump(code, pc, Off.check_not_back_ref.on_not_equal);
+                    pc = nxt.pc;
+                    continue :dispatch nxt.op;
                 }
                 const src = subject[@intCast(from)..][0..@intCast(len)];
                 const dst = subject[@intCast(current)..][0..@intCast(len)];
@@ -634,13 +715,15 @@ fn execGeneric(
                     else => unreachable,
                 };
                 if (!equal) {
-                    pc = jumpTo(code, pc, Off.check_not_back_ref.on_not_equal);
-                    continue :dispatch nextOpcode(pc);
+                    const nxt = decodeJump(code, pc, Off.check_not_back_ref.on_not_equal);
+                    pc = nxt.pc;
+                    continue :dispatch nxt.op;
                 }
                 current += len;
             }
-            pc += skip(.check_not_back_ref);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .check_not_back_ref);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_not_back_ref_backward,
         .check_not_back_ref_no_case_backward,
@@ -652,8 +735,9 @@ fn execGeneric(
             const len = end - from;
             if (from >= 0 and len > 0) {
                 if (current - len < 0 or from + len > length) {
-                    pc = jumpTo(code, pc, Off.check_not_back_ref_backward.on_not_equal);
-                    continue :dispatch nextOpcode(pc);
+                    const nxt = decodeJump(code, pc, Off.check_not_back_ref_backward.on_not_equal);
+                    pc = nxt.pc;
+                    continue :dispatch nxt.op;
                 }
                 const src = subject[@intCast(from)..][0..@intCast(len)];
                 const dst = subject[@intCast(current - len)..][0..@intCast(len)];
@@ -664,13 +748,15 @@ fn execGeneric(
                     else => unreachable,
                 };
                 if (!equal) {
-                    pc = jumpTo(code, pc, Off.check_not_back_ref_backward.on_not_equal);
-                    continue :dispatch nextOpcode(pc);
+                    const nxt = decodeJump(code, pc, Off.check_not_back_ref_backward.on_not_equal);
+                    pc = nxt.pc;
+                    continue :dispatch nxt.op;
                 }
                 current -= len;
             }
-            pc += skip(.check_not_back_ref_backward);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeFallthrough(pc, .check_not_back_ref_backward);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_at_start => {
             if (current + readI16(pc, Off.check_at_start.cp_offset) == 0) {
@@ -678,7 +764,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_at_start);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_not_at_start => {
             if (current + readI16(pc, Off.check_not_at_start.cp_offset) == 0) {
@@ -686,7 +774,9 @@ fn execGeneric(
             } else {
                 pc = jumpTo(code, pc, Off.check_not_at_start.on_not_at_start);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .set_current_position_from_end => {
             const by = readI16(pc, Off.set_current_position_from_end.by);
@@ -695,7 +785,9 @@ fn execGeneric(
                 current = length - by;
                 current_char = subject[@intCast(current - 1)];
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_position => {
             const pos = current + readI16(pc, Off.check_position.cp_offset);
@@ -704,7 +796,9 @@ fn execGeneric(
             } else {
                 pc += skip(.check_position);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .check_special_class_ranges => {
             const set = readU8(pc, Off.check_special_class_ranges.character_set);
@@ -713,7 +807,9 @@ fn execGeneric(
             } else {
                 pc = jumpTo(code, pc, Off.check_special_class_ranges.on_no_match);
             }
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeAt(pc);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .skip_until_char => {
             const cp_offset = readI16(pc, Off.skip_until_char.cp_offset);
@@ -723,13 +819,15 @@ fn execGeneric(
             while (indexInBounds(current + bounds, length)) {
                 current_char = subject[@intCast(current + cp_offset)];
                 if (character == current_char) {
-                    pc = jumpTo(code, pc, Off.skip_until_char.on_match);
-                    continue :dispatch nextOpcode(pc);
+                    const nxt = decodeJump(code, pc, Off.skip_until_char.on_match);
+                    pc = nxt.pc;
+                    continue :dispatch nxt.op;
                 }
                 current += advance_by;
             }
-            pc = jumpTo(code, pc, Off.skip_until_char.on_no_match);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeJump(code, pc, Off.skip_until_char.on_no_match);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .skip_until_char_and => {
             const cp_offset = readI16(pc, Off.skip_until_char_and.cp_offset);
@@ -740,13 +838,15 @@ fn execGeneric(
             while (indexInBounds(current + bounds, length)) {
                 current_char = subject[@intCast(current + cp_offset)];
                 if (character == (current_char & mask)) {
-                    pc = jumpTo(code, pc, Off.skip_until_char_and.on_match);
-                    continue :dispatch nextOpcode(pc);
+                    const nxt = decodeJump(code, pc, Off.skip_until_char_and.on_match);
+                    pc = nxt.pc;
+                    continue :dispatch nxt.op;
                 }
                 current += advance_by;
             }
-            pc = jumpTo(code, pc, Off.skip_until_char_and.on_no_match);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeJump(code, pc, Off.skip_until_char_and.on_no_match);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .skip_until_bit_in_table => {
             const cp_offset = readI16(pc, Off.skip_until_bit_in_table.cp_offset);
@@ -756,13 +856,15 @@ fn execGeneric(
             while (indexInBounds(current + bounds, length)) {
                 current_char = subject[@intCast(current + cp_offset)];
                 if (checkBitInTable(current_char, table)) {
-                    pc = jumpTo(code, pc, Off.skip_until_bit_in_table.on_match);
-                    continue :dispatch nextOpcode(pc);
+                    const nxt = decodeJump(code, pc, Off.skip_until_bit_in_table.on_match);
+                    pc = nxt.pc;
+                    continue :dispatch nxt.op;
                 }
                 current += advance_by;
             }
-            pc = jumpTo(code, pc, Off.skip_until_bit_in_table.on_no_match);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeJump(code, pc, Off.skip_until_bit_in_table.on_no_match);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .skip_until_gt_or_not_bit_in_table => {
             const cp_offset = readI16(pc, Off.skip_until_gt_or_not_bit_in_table.cp_offset);
@@ -773,13 +875,15 @@ fn execGeneric(
             while (indexInBounds(current + bounds, length)) {
                 current_char = subject[@intCast(current + cp_offset)];
                 if (current_char > character or !checkBitInTable(current_char, table)) {
-                    pc = jumpTo(code, pc, Off.skip_until_gt_or_not_bit_in_table.on_match);
-                    continue :dispatch nextOpcode(pc);
+                    const nxt = decodeJump(code, pc, Off.skip_until_gt_or_not_bit_in_table.on_match);
+                    pc = nxt.pc;
+                    continue :dispatch nxt.op;
                 }
                 current += advance_by;
             }
-            pc = jumpTo(code, pc, Off.skip_until_gt_or_not_bit_in_table.on_no_match);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeJump(code, pc, Off.skip_until_gt_or_not_bit_in_table.on_no_match);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .skip_until_char_or_char => {
             const cp_offset = readI16(pc, Off.skip_until_char_or_char.cp_offset);
@@ -790,13 +894,15 @@ fn execGeneric(
             while (indexInBounds(current + bounds, length)) {
                 current_char = subject[@intCast(current + cp_offset)];
                 if (char1 == current_char or char2 == current_char) {
-                    pc = jumpTo(code, pc, Off.skip_until_char_or_char.on_match);
-                    continue :dispatch nextOpcode(pc);
+                    const nxt = decodeJump(code, pc, Off.skip_until_char_or_char.on_match);
+                    pc = nxt.pc;
+                    continue :dispatch nxt.op;
                 }
                 current += advance_by;
             }
-            pc = jumpTo(code, pc, Off.skip_until_char_or_char.on_no_match);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeJump(code, pc, Off.skip_until_char_or_char.on_no_match);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .skip_until_one_of_masked => {
             if (Char != u8) return error.BytecodeCorrupt;
@@ -813,18 +919,21 @@ fn execGeneric(
                 current_char = load4(subject, current + cp_offset);
                 if (both_chars == (current_char & both_mask)) {
                     if (chars1 == (current_char & mask1)) {
-                        pc = jumpTo(code, pc, Off.skip_until_one_of_masked.on_match1);
-                        continue :dispatch nextOpcode(pc);
+                        const nxt = decodeJump(code, pc, Off.skip_until_one_of_masked.on_match1);
+                        pc = nxt.pc;
+                        continue :dispatch nxt.op;
                     }
                     if (chars2 == (current_char & mask2)) {
-                        pc = jumpTo(code, pc, Off.skip_until_one_of_masked.on_match2);
-                        continue :dispatch nextOpcode(pc);
+                        const nxt = decodeJump(code, pc, Off.skip_until_one_of_masked.on_match2);
+                        pc = nxt.pc;
+                        continue :dispatch nxt.op;
                     }
                 }
                 current += advance_by;
             }
-            pc = jumpTo(code, pc, Off.skip_until_one_of_masked.on_failure);
-            continue :dispatch nextOpcode(pc);
+            const nxt = decodeJump(code, pc, Off.skip_until_one_of_masked.on_failure);
+            pc = nxt.pc;
+            continue :dispatch nxt.op;
         },
         .skip_until_one_of_masked3 => {
             if (Char != u8) return error.BytecodeCorrupt;
@@ -851,8 +960,9 @@ fn execGeneric(
                     current += bc0_advance_by;
                 }
                 if (!indexInBounds(current + bc1_bounds, length)) {
-                    pc = jumpTo(code, pc, Off.skip_until_one_of_masked3.bc1_on_failure);
-                    continue :dispatch nextOpcode(pc);
+                    const nxt = decodeJump(code, pc, Off.skip_until_one_of_masked3.bc1_on_failure);
+                    pc = nxt.pc;
+                    continue :dispatch nxt.op;
                 }
                 current_char = load4(subject, current + bc1_cp_offset);
                 if (bc2_characters == (current_char & bc2_mask)) {
@@ -862,16 +972,19 @@ fn execGeneric(
                     }
                     current_char = load4(subject, current + bc4_cp_offset);
                     if (bc5_characters == (current_char & bc5_mask)) {
-                        pc = jumpTo(code, pc, Off.skip_until_one_of_masked3.bc5_on_equal);
-                        continue :dispatch nextOpcode(pc);
+                        const nxt = decodeJump(code, pc, Off.skip_until_one_of_masked3.bc5_on_equal);
+                        pc = nxt.pc;
+                        continue :dispatch nxt.op;
                     }
                     if (bc6_characters == (current_char & bc6_mask)) {
-                        pc = jumpTo(code, pc, Off.skip_until_one_of_masked3.bc6_on_equal);
-                        continue :dispatch nextOpcode(pc);
+                        const nxt = decodeJump(code, pc, Off.skip_until_one_of_masked3.bc6_on_equal);
+                        pc = nxt.pc;
+                        continue :dispatch nxt.op;
                     }
                     if (bc7_characters == (current_char & bc7_mask)) {
-                        pc = jumpTo(code, pc, Off.skip_until_one_of_masked3.fallthrough_jump_target);
-                        continue :dispatch nextOpcode(pc);
+                        const nxt = decodeJump(code, pc, Off.skip_until_one_of_masked3.fallthrough_jump_target);
+                        pc = nxt.pc;
+                        continue :dispatch nxt.op;
                     }
                 }
                 current += bc3_by;

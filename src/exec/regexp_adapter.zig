@@ -22,6 +22,7 @@ pub const ExecResult = regexp_bytecode.ExecResult;
 pub const ExecError = error{ OutOfMemory, BytecodeCorrupt, Timeout };
 
 pub const Compiled = irregexp.Compiled;
+pub const BlobHeader = irregexp.BlobHeader;
 
 pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags: []const u8) !Compiled {
     return irregexp.compilePatternAndFlags(allocator, pattern, flags);

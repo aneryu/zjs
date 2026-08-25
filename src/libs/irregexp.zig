@@ -110,9 +110,13 @@ pub const Compiled = struct {
     pub fn flagBits(self: Compiled) u16 {
         return getFlags(self.bytecode);
     }
+
+    pub fn header(self: Compiled) ?BlobHeader {
+        return parseHeader(self.bytecode);
+    }
 };
 
-const BlobHeader = struct {
+pub const BlobHeader = struct {
     flags: u16,
     capture_count: usize,
     register_count: usize,
@@ -169,7 +173,8 @@ pub fn registerCount(bytecode: []const u8) usize {
 }
 
 fn allocCountFromBytecode(bytecode: []const u8) usize {
-    return captureCountFromBytecode(bytecode) * 2 + registerCountFromBytecode(bytecode);
+    const header = parseHeader(bytecode) orelse return 0;
+    return header.capture_count * 2 + header.register_count;
 }
 
 pub fn allocCount(bytecode: []const u8) usize {
