@@ -14017,45 +14017,6 @@ test "the marker worker and a mutator can shade concurrently without losing mark
     for (held) |obj| try std.testing.expect(obj.header.metaConst().flags.mark);
 }
 
-test "mark assist is bounded and only runs while marking" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-
-    var held: [200]*core.Object = undefined;
-    for (&held) |*slot| {
-        slot.* = try core.Object.createPlainObject(rt, null);
-        slot.*.header.meta().flags.mark = false;
-    }
-    defer for (held) |obj| obj.value().free(rt);
-
-    var queue = core.gc.mark_queue.Queue{};
-    queue.ensureCapacity(std.testing.allocator);
-    defer queue.deinit(std.testing.allocator);
-    for (held) |obj| _ = queue.push(&obj.header);
-
-    // Not marking: an assist must do nothing at all, or every allocation in
-    // an idle runtime would pay for a collector that is not running.
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.markAssist(&queue, 64));
-
-    rt.gc.concurrent.major_marking_active.store(true, .release);
-    defer rt.gc.concurrent.major_marking_active.store(false, .release);
-
-    // Marking: the assist takes its budget and no more. The bound is what
-    // keeps one allocation from becoming an arbitrary pause.
-    try std.testing.expectEqual(@as(usize, 10), rt.gc.markAssist(&queue, 10));
-    try std.testing.expectEqual(@as(usize, 10), rt.gc.concurrent.stats.assist_marked);
-    try std.testing.expectEqual(@as(usize, held.len - 10), queue.len());
-
-    // Draining past the end returns what was actually available, not the
-    // budget: an assist reports work done, never work intended.
-    const rest = rt.gc.markAssist(&queue, 1000);
-    try std.testing.expectEqual(@as(usize, held.len - 10), rest);
-    try std.testing.expectEqual(@as(usize, 0), queue.len());
-    for (held) |obj| try std.testing.expect(obj.header.metaConst().flags.mark);
-}
 
 test "snapshot capture never returns a descriptor assembled across two publishes" {
     if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
@@ -14306,4 +14267,91 @@ test "a minor that keeps reclaiming nothing stops being offered" {
     try std.testing.expect(rt.gc.generation.minorSuspended());
     rt.gc.generation.noteMinorYield(1000, 900);
     try std.testing.expect(!rt.gc.generation.minorSuspended());
+}
+
+test "marking barrier shades grey, not black: the stored object's children survive the remark" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // B -> C, and the store target A. C's only strong path will run through
+    // the edge the mutator creates during marking.
+    const a = try core.Object.create(rt, core.class.ids.object, null);
+    defer a.value().free(rt);
+    const b = try core.Object.create(rt, core.class.ids.object, null);
+    defer b.value().free(rt);
+    const c = try core.Object.create(rt, core.class.ids.object, null);
+    const key = try rt.internAtom("edge");
+    defer rt.atoms.free(key);
+    try b.defineOwnProperty(rt, key, core.Descriptor.data(c.value(), true, true, true));
+    c.value().free(rt);
+
+    // The interleaving `collectConcurrentMajor` cannot express, constructed by
+    // hand: initial mark has traced A and blackened it; B and C were reachable
+    // through a path the mutator is about to erase, so the tracer never saw
+    // them. Then the mutator stores B into A. The write barrier is the only
+    // thing standing between C and the sweep.
+    a.header.meta().flags.mark = true;
+    b.header.meta().flags.mark = false;
+    c.header.meta().flags.mark = false;
+    rt.gc.concurrent_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    defer rt.gc.concurrent.major_marking_active.store(false, .release);
+
+    rt.gc.generationalBarrier(&a.header, &b.header);
+
+    // B must be GREY: marked (so the sweep keeps it) AND queued (so its
+    // children get traced). The original barrier only marked, and a marked
+    // object is never re-entered by `shade()`, so C stayed white through the
+    // remark and was swept alive.
+    try std.testing.expect(b.header.metaConst().flags.mark);
+    const drained = try core.gc_trace_stw.remarkBarrierQueueForTest(rt);
+    try std.testing.expect(drained >= 1);
+    try std.testing.expect(c.header.metaConst().flags.mark);
+
+    // Cleanup: marks are collection-transient state in this simulated cycle.
+    a.header.meta().flags.mark = false;
+    b.header.meta().flags.mark = false;
+    c.header.meta().flags.mark = false;
+}
+
+test "barrier queue overflow downgrades to a rescan, not to lost children" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const b = try core.Object.create(rt, core.class.ids.object, null);
+    defer b.value().free(rt);
+    const c = try core.Object.create(rt, core.class.ids.object, null);
+    const key = try rt.internAtom("edge");
+    defer rt.atoms.free(key);
+    try b.defineOwnProperty(rt, key, core.Descriptor.data(c.value(), true, true, true));
+    c.value().free(rt);
+
+    // No ring at all: every push reports overflow, which is the same state a
+    // full ring reaches. The shaded object keeps its mark, loses its queue
+    // slot, and must still be found by the remark's marked-object rescan.
+    b.header.meta().flags.mark = false;
+    c.header.meta().flags.mark = false;
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    defer rt.gc.concurrent.major_marking_active.store(false, .release);
+
+    const owner = try core.Object.create(rt, core.class.ids.object, null);
+    defer owner.value().free(rt);
+    owner.header.meta().flags.mark = true;
+    rt.gc.generationalBarrier(&owner.header, &b.header);
+
+    try std.testing.expect(b.header.metaConst().flags.mark);
+    try std.testing.expect(rt.gc.concurrent_mark_queue.hasOverflowed());
+    _ = try core.gc_trace_stw.remarkBarrierQueueForTest(rt);
+    try std.testing.expect(c.header.metaConst().flags.mark);
+    try std.testing.expect(!rt.gc.concurrent_mark_queue.hasOverflowed());
+
+    b.header.meta().flags.mark = false;
+    c.header.meta().flags.mark = false;
+    owner.header.meta().flags.mark = false;
 }

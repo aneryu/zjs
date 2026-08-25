@@ -180,6 +180,16 @@ pub const concurrent = @import("gc_concurrent.zig");
 /// Bounded mark queue whose overflow downgrades to rescan rather than
 /// dropping work (§8.4).
 pub const mark_queue = @import("gc_mark_queue.zig");
+
+/// The census switch lives with the collector; the barrier only reads it.
+/// Mutual import with `gc_trace_stw.zig` is fine -- Zig resolves lazily -- and
+/// the `rc` build sees a false constant instead of the module.
+const gc_trace_stw_reports = if (trace_stw_enabled)
+    @import("gc_trace_stw.zig")
+else
+    struct {
+        pub var detailed_reports: bool = false;
+    };
 /// Marker worker thread (§8.6). Reads published objects and sets mark bits;
 /// never frees, allocates, or calls embedder code.
 pub const marker = @import("gc_marker.zig");
@@ -1051,6 +1061,13 @@ pub const Registry = struct {
     // that fail halfway through construction.
     concurrent: if (concurrent_enabled) ConcurrentState else void =
         if (concurrent_enabled) .{} else {},
+    /// Objects the marking barrier shaded GREY: marked, children still to be
+    /// traced. The remark drains it; overflow downgrades to a rescan of every
+    /// marked object (`gc_trace_stw.drainBarrierQueue`). Lives on the Registry
+    /// rather than in `concurrent.State` so the barrier reaches it without an
+    /// import cycle through `gc_mark_queue`.
+    concurrent_mark_queue: if (concurrent_enabled) mark_queue.Queue else void =
+        if (concurrent_enabled) .{} else {},
     generation: if (generation_enabled) GenerationState else void =
         if (generation_enabled) .{} else {},
     block_heap: if (block_heap_enabled) BlockHeap else void =
@@ -1219,8 +1236,8 @@ pub const Registry = struct {
         if (comptime address_registry_enabled) {
             self.address_registry.deinit(addressRegistryAllocator());
             if (comptime generation_enabled) self.generation.deinit(addressRegistryAllocator());
-
         }
+        if (comptime concurrent_enabled) self.concurrent_mark_queue.deinit(addressRegistryAllocator());
         if (comptime sweep_model_enabled) {
             self.sweep_model.deinit(addressRegistryAllocator());
         }
@@ -1970,36 +1987,49 @@ pub const Registry = struct {
     ///
     /// Called only from inside a `CriticalScope`, so final remark cannot stop
     /// the mutator between the heap store and this shading.
+    /// Marking-phase write barrier: shade the stored value GREY.
+    ///
+    /// Grey means marked AND queued for tracing. The first version of this
+    /// function only set the mark bit, which is black-without-having-been-
+    /// traced: a pre-existing child whose only path ran through the shaded
+    /// object was never discovered and was swept alive. The remark could not
+    /// save it -- `shade()` skips already-marked objects, so a marked object
+    /// is never re-entered. The hole exists for single-threaded incremental
+    /// marking exactly as for a concurrent thread: an object traced in one
+    /// increment and mutated in the mutator window is otherwise never
+    /// re-examined.
+    ///
+    /// This is the Dijkstra direction (shade the target), not JSC's
+    /// Steele-style owner-append (`Heap::addToRememberedSet` re-queues the
+    /// owner). JSC can afford owner-append because `CellState` gives it a
+    /// grey state that deduplicates the append: the second barrier on a
+    /// remembered owner takes the fast path. Our header has a single mark bit
+    /// and no free flag, so owner-append would re-push the same hot owner on
+    /// every store and flood the ring -- forcing the coarse overflow rescan
+    /// every cycle. Shading the target dedups for free: the mark bit itself
+    /// is the "already queued" test. The price is more floating garbage (a
+    /// stored-then-overwritten value survives the cycle), which is the
+    /// documented cost of an insertion barrier (§8.4).
+    ///
+    /// A failed push is not lost work: the object stays marked and the
+    /// queue's overflow flag makes it findable by the remark's rescan of
+    /// marked objects.
     pub inline fn shadeForConcurrentMark(self: *Registry, target: *GCObjectHeader) void {
         if (comptime !concurrent_enabled) return;
         self.concurrent.stats.barrier_calls += 1;
         if (target.meta().flags.mark) return;
         target.meta().flags.mark = true;
         self.concurrent.stats.shaded += 1;
+        _ = self.concurrent_mark_queue.push(target);
     }
 
-    /// Bounded mark assist (§8.6): the mutator drains a slice of the marker's
-    /// queue when allocation is outrunning marking.
-    ///
-    /// Bounded on purpose. An unbounded assist turns an allocation into an
-    /// arbitrary pause, which is the failure mode a concurrent collector
-    /// exists to avoid; a bounded one trades a little mutator time for
-    /// keeping the cycle on schedule, and the cost is reported rather than
-    /// hidden.
-    pub fn markAssist(self: *Registry, queue: *mark_queue.Queue, budget: usize) usize {
-        if (comptime !concurrent_enabled) return 0;
-        if (!self.concurrent.markingActive()) return 0;
-        var done: usize = 0;
-        while (done < budget) : (done += 1) {
-            const header = queue.pop() orelse break;
-            if (!header.meta().flags.mark) {
-                header.meta().flags.mark = true;
-                self.concurrent.stats.assist_marked += 1;
-            }
-        }
-        if (done != 0) self.concurrent.stats.assist_batches += 1;
-        return done;
-    }
+    // `markAssist` used to live here: pop a slice of the queue and set mark
+    // bits. Under grey-queue semantics that is unsound, not merely useless --
+    // an entry's presence in the queue is the ONLY record that its children
+    // are still untraced, so popping without tracing loses work, and this
+    // module cannot trace (the visitors live with the collector). The bounded
+    // increment returns in Phase 2 inside `gc_trace_stw`, where it can trace,
+    // and repopulates the `assist_*` stats the panel still reports.
 
     /// Count objects left marked but unreachable once a cycle ends. This is
     /// the floating-garbage row, and it is measured by comparing the mark set
@@ -2060,16 +2090,34 @@ pub const Registry = struct {
                 return;
             }
         }
-        self.generation.stats.barrier_calls += 1;
-        if (self.generation.isYoung(owner)) {
-            self.generation.stats.barrier_young_owner += 1;
+        // The counter block is diagnostic, not policy, and it was two
+        // unconditional RMWs on a path that runs tens of millions of times
+        // per benchmark. JSC's barrier fast path carries zero counters
+        // (`m_barriersExecuted` lives in the slow path only). Same rule here:
+        // pay for numbers when someone asked for them.
+        if (gc_trace_stw_reports.detailed_reports) {
+            self.generation.stats.barrier_calls += 1;
+            if (self.generation.isYoung(owner)) {
+                self.generation.stats.barrier_young_owner += 1;
+                return;
+            }
+            if (!self.generation.isYoung(target)) {
+                self.generation.stats.barrier_old_target += 1;
+                return;
+            }
+            self.generation.rememberOwner(addressRegistryAllocator(), owner);
             return;
         }
-        if (!self.generation.isYoung(target)) {
-            self.generation.stats.barrier_old_target += 1;
-            return;
-        }
+        if (self.generation.isYoung(owner)) return;
+        if (!self.generation.isYoung(target)) return;
         self.generation.rememberOwner(addressRegistryAllocator(), owner);
+    }
+
+    /// The barrier queue's ring shares the registry's allocator for the same
+    /// reason the registry uses it: collection-infrastructure allocation must
+    /// not recurse into the JS heap account.
+    pub inline fn markQueueAllocator() std.mem.Allocator {
+        return addressRegistryAllocator();
     }
 
     inline fn addressRegistryAllocator() std.mem.Allocator {

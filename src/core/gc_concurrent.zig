@@ -60,7 +60,16 @@ pub const State = struct {
     stats: Stats = .{},
 
     pub fn markingActive(self: *const State) bool {
-        return self.major_marking_active.load(.acquire);
+        // `.monotonic`, deliberately, and this is the write barrier's hot
+        // path: `.acquire` compiles to an `ldar` on aarch64, and the barrier
+        // runs tens of millions of times per benchmark (55.8M on
+        // earley-boyer). Today there is exactly one thread -- marking is
+        // driven to completion on the owner -- so there is no ordering to
+        // acquire. When a real marker thread lands, this becomes JSC's
+        // threshold protocol: a plain byte the collector rewrites at phase
+        // boundaries with the world stopped, fences only in the slow path
+        // (HeapInlines.h:106, Heap.cpp:2871).
+        return self.major_marking_active.load(.monotonic);
     }
 
     /// Enter the region in which a store and its shading are indivisible with

@@ -361,7 +361,10 @@ pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
 
-    // Initial mark, mutator stopped.
+    // Initial mark, mutator stopped. The barrier queue gets its ring before
+    // marking is published: a queue with no buffer reports every push as
+    // overflow, which is sound but downgrades every cycle to the rescan.
+    rt.gc.concurrent_mark_queue.ensureCapacity(gc.Registry.markQueueAllocator());
     collector.clearMarks();
     var live = rt.gc.objectIterator();
     while (live.next()) |_| collector.report.allocated_before += 1;
@@ -369,20 +372,27 @@ pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     if (collector.conservative_on) try collector.seedConservativeRoots();
 
     // Publish that marking is live before resuming: from here every strong
-    // write shades its target instead of taking the generational path.
+    // write shades its target GREY -- marked and queued -- instead of taking
+    // the generational path.
     rt.gc.concurrent.major_marking_active.store(true, .release);
 
     // Concurrent phase. The mutator is logically running here; the barrier is
-    // what keeps its writes visible to this drain.
+    // what keeps its writes visible to this drain, and what it queued is part
+    // of this drain's work.
     try collector.drain();
+    _ = try collector.drainBarrierQueue();
     collector.report.marked_exact = collector.countMarked();
 
     // Final remark, mutator stopped again. Roots are rescanned because they
     // moved while the mutator ran, and the drain repeats because rescanning
-    // and the barrier both produce work.
+    // and the barrier both produce work. The barrier queue is drained to
+    // empty HERE, under the stopped mutator: entries are grey -- their
+    // children have never been traced -- and leaving one behind is exactly
+    // the black-without-tracing hole this queue exists to close.
     try collector.seedRoots();
     if (collector.conservative_on) try collector.seedConservativeRoots();
     try collector.drain();
+    _ = try collector.drainBarrierQueue();
     try collector.ephemeronFixedPoint();
 
     // Marking is over before anything is freed: a mutator that resumes mid
@@ -424,6 +434,16 @@ fn clearYoungState(rt: *JSRuntime) void {
     while (it.next()) |header| header.meta().flags.young = false;
     rt.gc.young_head = null;
     rt.gc.generation.retireYoungSet();
+}
+
+/// Drain the concurrent barrier queue the way the final remark does, for
+/// tests that construct the mutator interleaving `collectConcurrentMajor`
+/// cannot express (it drains to completion in one call, so nothing mutates
+/// between its phases). Returns the number of grey entries traced.
+pub fn remarkBarrierQueueForTest(rt: *JSRuntime) CollectError!usize {
+    var collector = try Collector.init(rt, null, .declared_only);
+    defer collector.deinit();
+    return collector.drainBarrierQueue();
 }
 
 /// The other direction of the arena invariant: every live object must be
@@ -746,6 +766,40 @@ const Collector = struct {
             @ptrCast(self),
         );
         if (self.err) |err| return err;
+    }
+
+    /// Trace everything the marking barrier shaded grey, then handle
+    /// overflow by the coarse route.
+    ///
+    /// A queue entry is marked with untraced children; tracing it and
+    /// draining makes it genuinely black. Overflow does not lose work -- the
+    /// object stays marked and the flag stays set -- but it does lose the
+    /// ADDRESS, so the downgrade is one pass over every marked object,
+    /// tracing each. That is strictly more scanning and strictly no less
+    /// discovery (`gc_mark_queue.zig`'s contract). One pass suffices: any
+    /// object the pass shades goes onto the ordinary work list and is traced
+    /// transitively by the drain before the pass moves on.
+    fn drainBarrierQueue(self: *Collector) CollectError!usize {
+        if (comptime !gc.concurrent_enabled) return 0;
+        const queue = &self.rt.gc.concurrent_mark_queue;
+        var drained: usize = 0;
+        while (queue.pop()) |header| {
+            drained += 1;
+            try self.traceHeader(header);
+            if (self.err) |err| return err;
+            try self.drain();
+        }
+        if (queue.hasOverflowed()) {
+            var it = self.rt.gc.objectIterator();
+            while (it.next()) |header| {
+                if (!header.metaConst().flags.mark) continue;
+                try self.traceHeader(header);
+                if (self.err) |err| return err;
+                try self.drain();
+            }
+            queue.clearOverflow();
+        }
+        return drained;
     }
 
     fn drain(self: *Collector) CollectError!void {

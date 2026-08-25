@@ -49,12 +49,23 @@ This hole exists for **single-threaded incremental marking too**, not just for
 a concurrent thread: an object traced in increment N and mutated in the
 mutator window is not re-examined in increment N+1.
 
-Fix in the JSC shape, which also matches our own generational barrier's
-owner-orientation: the barrier appends the **owner** to a mark queue
-(`gc_mark_queue.zig`, currently an orphan) and the drain re-traces owners.
-JSC: `Heap::addToRememberedSet` sets the cell `PossiblyGrey` and appends it to
-`m_mutatorMarkStack` (Heap.cpp:1266-1268); the re-visit walks children through
-the normal path that enqueues.
+Fix: shade the **target grey** -- mark it AND push it onto the barrier queue
+(`gc_mark_queue.zig`); the remark drains the queue, tracing each entry, with
+queue overflow downgrading to one pass over every marked object.
+
+Decision record: the first draft of this plan prescribed JSC's shape instead
+(`Heap::addToRememberedSet` appends the **owner** to `m_mutatorMarkStack`,
+Heap.cpp:1266-1268). JSC can afford owner-append because `CellState` gives it
+a grey state that deduplicates it -- the second barrier on a remembered owner
+takes the fast path. Our header has one mark bit and no free flag, so
+owner-append would re-push the same hot owner on every store, flood the
+4096-entry ring, and force the coarse overflow rescan every cycle. Shading
+the target dedups for free (the mark bit IS the already-queued test), at the
+documented cost of more floating garbage. `markAssist` was deleted rather
+than kept: under grey-queue semantics an entry's presence in the queue is the
+only record that its children are untraced, so popping without tracing --
+which is all a Registry-level assist can do -- loses work. The bounded
+increment returns in Phase 2 inside `gc_trace_stw`, where tracing lives.
 
 Evidence required: a unit test that constructs the counterexample — owner
 traced black, store of an untraced object whose other paths are then erased,
