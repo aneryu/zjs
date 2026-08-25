@@ -811,7 +811,7 @@ const Collector = struct {
                 std.debug.print("VERIFY-MINOR {d} of {d} condemned objects are reachable by a full trace\n", .{ violations, doomed.items.len });
             }
         }
-        if (std.c.getenv("ZJS_MINOR_AUDIT") != null) self.auditCondemnedYoung(doomed.items);
+        if (gc.minor_audit) self.auditCondemnedYoung(doomed.items);
         for (doomed.items) |header| {
             self.rt.gc.detachCycleCandidate(header);
             gc.listAddTail(&self.rt.gc.tmp_obj_list, header);

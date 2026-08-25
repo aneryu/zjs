@@ -848,10 +848,11 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *const engine.core.gc
         st.young_count,
         st.remembered_owners,
     });
-    try writer.print("gc: minor collections {d}, promoted {d}, remembered without young {d}\n", .{
+    try writer.print("gc: minor collections {d}, promoted {d}, remembered without young {d}, remembered drops {d}\n", .{
         st.minor_collections,
         st.promoted,
         st.remembered_without_young,
+        st.remembered_drops,
     });
     try writer.print("gc: barrier calls {d}, skipped young-owner {d}, skipped old-target {d}\n", .{
         st.barrier_calls,

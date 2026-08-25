@@ -20,6 +20,7 @@ const gc = @import("gc.zig");
 pub const Stats = struct {
     young_count: usize = 0,
     remembered_owners: usize = 0,
+    remembered_drops: usize = 0,
     minor_collections: usize = 0,
     promoted: usize = 0,
     /// Owners re-traced by a minor that turned out to hold no young child.
@@ -71,7 +72,15 @@ pub const State = struct {
     /// minor can re-trace it; see §8.3 on why `tryMark(owner)` would be wrong
     /// (a sticky old mark would make the walk skip its children).
     pub fn rememberOwner(self: *State, allocator: std.mem.Allocator, owner: *gc.Header) void {
-        self.remembered.put(allocator, @intFromPtr(owner), {}) catch return;
+        self.remembered.put(allocator, @intFromPtr(owner), {}) catch {
+            // A dropped entry is a silent old-to-young edge: the minor will not
+            // re-trace this owner and will condemn the child it just gained.
+            // The registry keeps the same counter for the same reason; without
+            // one, an allocation failure here is indistinguishable from a
+            // missing barrier when the crash finally arrives.
+            self.stats.remembered_drops += 1;
+            return;
+        };
         self.stats.remembered_owners = self.remembered.count();
     }
 

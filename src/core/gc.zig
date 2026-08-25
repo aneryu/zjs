@@ -115,6 +115,13 @@ pub var stress_disable: bool = false;
 /// trace never sees at all", which a full collection would miss too.
 pub var stress_no_minor: bool = false;
 
+/// `ZJS_MINOR_AUDIT=1`: after the minor picks its condemned set, report any
+/// live object still holding an edge into it. Parsed once here rather than
+/// read at the check, because the minor path is exactly where a `getenv` per
+/// collection is the probe that hides the bug -- regexp performs 794 minors in
+/// a two-second script.
+pub var minor_audit: bool = false;
+
 /// `ZJS_GC_VERIFY_MINOR=1`: check every minor's condemned set against what a
 /// full trace would keep. See `gc_trace_stw.computeFullReachable`.
 pub var verify_minor: bool = false;
@@ -124,6 +131,10 @@ pub var verify_minor: bool = false;
 /// default cadence; any other integer enables at that cadence.
 fn readStressFromEnv() void {
     if (comptime !trace_stw_enabled) return;
+    if (std.c.getenv("ZJS_MINOR_AUDIT")) |raw| {
+        const text = std.mem.span(raw);
+        minor_audit = text.len != 0 and !std.mem.eql(u8, text, "0");
+    }
     if (std.c.getenv("ZJS_GC_VERIFY_MINOR")) |raw| {
         const text = std.mem.span(raw);
         verify_minor = text.len != 0 and !std.mem.eql(u8, text, "0");

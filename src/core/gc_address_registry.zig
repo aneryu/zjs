@@ -61,6 +61,17 @@ const PageBucket = struct {
 };
 
 pub const Table = struct {
+    // Note on a refuted fix. Zig's open-addressed map marks a removed slot as a
+    // TOMBSTONE and restores `available`, so a map under balanced churn -- which
+    // this one is, one insert and one remove per GC object -- never grows and so
+    // never rehashes away its tombstones, and the probe loop walks them. Forcing
+    // a periodic `rehash` was measured on 2026-08-25 and is a LOSS at every
+    // budget tried: -8% on raytrace at capacity/4, still negative at capacity.
+    // A rehash reinserts every live entry, and amortised over the removals that
+    // paid for it that costs more than the probe steps it saves. Do not retry
+    // it; the cure for the probe cost is to stop using a hash map here at all
+    // (block-granular metadata, as JSC does), which removes the insert and the
+    // remove as well.
     pages: std.AutoHashMapUnmanaged(usize, PageBucket) = .empty,
     by_header: std.AutoHashMapUnmanaged(usize, Occupant) = .empty,
     stats: Stats = .{},
