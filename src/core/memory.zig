@@ -31,6 +31,19 @@ const diagnostic_accounting_enabled = builtin.is_test or builtin.mode == .Debug;
 /// `MemoryAccount.allocator` container call sites at the backing-allocator
 /// vtable instead, and schedule fail-injection toward not-yet-failed sites.
 pub const oom_coverage_enabled: bool = build_options.zjs_oom_coverage;
+
+/// Does a collector in this build need to find an arena from an interior
+/// pointer?
+///
+/// Only the tracing and shadow collectors scan conservatively, and only they
+/// resolve a stack word against the heap. Refcounting never asks, so it should
+/// not pay: self-aligned arenas, the `magic` word in the arena header, the
+/// lifetime observer, and the class-byte stamps all exist for that one query.
+/// Mirrors `gc.address_registry_enabled`, which cannot be imported here --
+/// `gc.zig` depends on this module, not the other way round.
+pub const arena_addressable: bool = std.mem.eql(u8, build_options.zjs_gc, "trace_stw") or
+    std.mem.eql(u8, build_options.zjs_gc, "shadow") or
+    builtin.is_test;
 pub const force_gc_on_allocation_enabled: bool = build_options.zjs_force_gc;
 
 /// Whether an ordinary allocation consults the GC threshold at all.
@@ -122,7 +135,8 @@ pub const SmallObjectSlab = struct {
     /// instead -- which is what the address registry was, at 76% of raytrace's
     /// runtime. The arena is a whole page either way, so alignment costs the
     /// backing allocator nothing it was not already paying.
-    pub const arena_alignment: std.mem.Alignment = .fromByteUnits(arena_size);
+    pub const arena_alignment: std.mem.Alignment =
+        if (arena_addressable) .fromByteUnits(arena_size) else slab_alignment;
     const free_nil: u16 = std.math.maxInt(u16);
     const block_sizes = [_]usize{
         16,  24,  32,  40,  48,  56,  64,  72,
@@ -181,7 +195,7 @@ pub const SmallObjectSlab = struct {
     pub const arena_magic: u32 = 0x5a4a5341;
 
     const Arena = struct {
-        magic: u32 = arena_magic,
+        magic: if (arena_addressable) u32 else void = if (arena_addressable) arena_magic else {},
         next: ?*Arena = null,
         prev: ?*Arena = null,
         free_next: ?*Arena = null,
@@ -207,7 +221,8 @@ pub const SmallObjectSlab = struct {
     /// set of valid arena bases. Arena lifetime, not object lifetime: at 4 KiB
     /// per arena against ~64-byte objects this is roughly two orders of
     /// magnitude less traffic than registering each published object.
-    arena_observer: ?ArenaObserver = null,
+    arena_observer: if (arena_addressable) ?ArenaObserver else void =
+        if (arena_addressable) null else {},
 
     pub inline fn canUse(byte_count: usize, alignment: std.mem.Alignment) bool {
         return classIndex(byte_count, alignment) != null;
@@ -314,8 +329,10 @@ pub const SmallObjectSlab = struct {
     noinline fn releaseEmptyArena(self: *SmallObjectSlab, backing: *const std.mem.Allocator, index: usize, arena: *Arena) void {
         self.removeArena(index, arena);
         self.removeFreeArena(index, arena);
-        if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(arena));
-        arena.magic = 0;
+        if (comptime arena_addressable) {
+            if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(arena));
+            arena.magic = 0;
+        }
         backing.rawFree(arenaAllocation(arena), arena_alignment, @returnAddress());
     }
 
@@ -324,8 +341,10 @@ pub const SmallObjectSlab = struct {
             var arena = head.*;
             while (arena) |node| {
                 arena = node.next;
-                if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(node));
-                node.magic = 0;
+                if (comptime arena_addressable) {
+                    if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(node));
+                    node.magic = 0;
+                }
                 backing.rawFree(arenaAllocation(node), arena_alignment, @returnAddress());
             }
         }
@@ -341,7 +360,7 @@ pub const SmallObjectSlab = struct {
         std.debug.assert(block_count > 0 and block_count <= free_nil);
         const alloc_size = arena_header_size + block_count * block_size;
         const storage_ptr = backing.rawAlloc(alloc_size, arena_alignment, @returnAddress()) orelse return error.OutOfMemory;
-        std.debug.assert(@intFromPtr(storage_ptr) % arena_size == 0);
+        if (comptime arena_addressable) std.debug.assert(@intFromPtr(storage_ptr) % arena_size == 0);
         const arena: *Arena = @ptrCast(@alignCast(storage_ptr));
         arena.* = .{
             .block_size_idx = @intCast(index),
@@ -360,11 +379,13 @@ pub const SmallObjectSlab = struct {
             // of a conservative candidate is a live GC object. A stale
             // `heap_accounted` bit in a never-allocated block makes the tracer
             // walk garbage as if it were an object.
-            header.block_size_idx = @intCast(index);
+            if (comptime arena_addressable) header.block_size_idx = @intCast(index);
         }
         self.addArenaList(index, arena);
         self.addFreeArena(index, arena);
-        if (self.arena_observer) |observer| observer.on_create(observer.ctx, @intFromPtr(arena));
+        if (comptime arena_addressable) {
+            if (self.arena_observer) |observer| observer.on_create(observer.ctx, @intFromPtr(arena));
+        }
         return arena;
     }
 
@@ -438,6 +459,7 @@ pub const SmallObjectSlab = struct {
     /// a candidate pointing at the prefix and one pointing at the object both
     /// land on the same block and resolve identically.
     pub fn userPtrWithinArena(base: usize, addr: usize) ?[*]u8 {
+        if (comptime !arena_addressable) return null;
         const arena: *Arena = @ptrFromInt(base);
         if (arena.magic != arena_magic) return null;
         const blocks = @intFromPtr(arenaBlocks(arena));
@@ -462,6 +484,7 @@ pub const SmallObjectSlab = struct {
         context: *anyopaque,
         visit: *const fn (ctx: *anyopaque, user: [*]u8, is_free: bool) void,
     ) void {
+        if (comptime !arena_addressable) return;
         const arena: *Arena = @ptrFromInt(base);
         if (arena.magic != arena_magic) return;
         const block_size = block_sizes[arena.block_size_idx];
