@@ -1512,7 +1512,12 @@ pub const Registry = struct {
         }
         return .{
             .total_allocated_bytes = derived_heap_live,
-            .peak_allocated_bytes = derived_heap_live,
+            // The account's real high-water, not live again. This field
+            // printed `live` for its whole history, which is why the §1.3
+            // peak/live rows had no instrument: peak == live == allocated on
+            // every panel ever captured. Whole-account rather than heap-only,
+            // which errs on the reporting-more side.
+            .peak_allocated_bytes = rt.memory.peak_allocated_bytes,
             .heap_live_bytes = derived_heap_live,
             .old_live_bytes = old_live,
             .large_object_bytes = large_live,

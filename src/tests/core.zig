@@ -6194,7 +6194,9 @@ test "gc live heap stats drop when object is released" {
 
     const released = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 0), released.total_allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 0), released.peak_allocated_bytes);
+    // A high-water mark does not descend on release; the old assertion of
+    // zero pinned the field's former lie of echoing `live`.
+    try std.testing.expect(released.peak_allocated_bytes >= expected_gc_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.old_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.old_alloc_count);
     try std.testing.expectEqual(@as(usize, 0), released.heap_live_bytes);
@@ -11026,8 +11028,16 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
         // offered, so every collection would be a major (`gc.zig`
         // `nursery_headroom_bytes`). `rc` has no young generation and the
         // headroom is zero there, which leaves the qjs rule exactly.
+        // The tracer grows by 1.75x (see `resetGCThreshold`: a whole-heap
+        // trace prices a collection by what survives, and §1.3 caps
+        // cycle peak/live at 1.8, which the growth factor equals at steady
+        // state); rc keeps qjs's 1.5x verbatim.
+        const grown = if (comptime core.gc.trace_stw_enabled)
+            boundary_bytes + (boundary_bytes >> 1) + (boundary_bytes >> 2)
+        else
+            boundary_bytes + (boundary_bytes >> 1);
         const expected = @max(
-            boundary_bytes + (boundary_bytes >> 1),
+            grown,
             boundary_bytes + core.gc.nursery_headroom_bytes,
         );
         try std.testing.expectEqual(expected, rt.gcThreshold());

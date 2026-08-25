@@ -171,6 +171,30 @@ Proceed to Phase 2 when splay ≤ ~2.0 and no other benchmark regresses past
 1.1x its Phase-0 value. Everything here is also strictly useful to Phase 2:
 fewer and cheaper majors mean fewer and smaller pauses to incrementalize.
 
+**Outcome (2026-08-26).** P1.1 landed as designed: probe minors fell from
+~29 ms to 0.85 ms mean / 2.07 ms max on splay -- the 1 ms minor target is in
+reach -- and majors lost their third whole-heap walk (one wrinkle the design
+missed: objects allocated DURING the sweep publish young behind the walk's
+cursor; they form a contiguous tail run and are retired by a backward walk,
+which the suffix invariant caught). P1.3 landed with the corrected two-
+population filter. P1.2 landed at **1.75, not 2.0**: fixing the peak
+instrument (the panel's `peak` field had echoed `live` for its whole history,
+and per-allocation peak tracking is Debug-only, so the §1.3 rows had no
+production instrument at all -- peak is now sampled at collection entry, one
+@max per collection) showed that steady-state cycle peak/live equals the
+growth factor by construction, so the §1.3 cap of 1.8 rules 2.0 out.
+
+Result: splay 3.162 → 2.376 (majors ~41 → ~26), geomean 1.31 → 1.24, all
+other benchmarks within noise of their Phase-0 values. **The splay ≤ ~2.0
+line is missed**: it is reachable at a growth factor of 2.0 (measured 2.133)
+but the constitution caps the factor first. The gate line was this plan's
+estimate, not a design row; the design row wins. Raising it again is a
+renegotiation of §1.3's 1.8 with the design's owner, not a tuning decision.
+Residual splay RSS (479 MB vs heap peak 262 MB) is allocator retention --
+survivors scattered across arenas keep pages committed -- which is the
+quiescent committed/live row's territory and a block-heap (Phase 3) item.
+Phase 2 proceeds: its goal does not depend on this line.
+
 ## 4. Phase 2 — incremental marking (the pause goal itself)
 
 The only work that moves §1.3's pause rows. Design sketch below; **the full

@@ -213,6 +213,9 @@ pub fn spillRegistersAndScan(
         return;
     }
     comptime std.debug.assert(gc.address_registry_enabled);
+    // The filter must be current before any word is dismissed by it; arenas
+    // and standalone allocations may have appeared since the last scan.
+    rt.gc.address_registry.rebuildScanFilter();
     var image: SpillImage = undefined;
     const sp = dumpAarch64(&image);
     std.mem.doNotOptimizeAway(&image);

@@ -1369,6 +1369,19 @@ pub const MemoryAccount = struct {
         if (self.trigger_gc_fn) |trigger| trigger(self.trigger_gc_ctx, byte_count);
     }
 
+    /// Sample the high-water mark at a collection boundary.
+    ///
+    /// Per-allocation peak tracking is Debug/test-only (`updatePeak` under
+    /// `diagnostic_accounting_enabled`) because a RMW per allocation is the
+    /// kind of tax this allocator exists to avoid. But §1.3's peak/live rows
+    /// need a production number, and the within-cycle high-water is, to within
+    /// mutator-side frees, the account at the moment a collection triggers --
+    /// which is exactly when this is called. One @max per collection instead
+    /// of one per allocation.
+    pub fn samplePeakAtCollection(self: *MemoryAccount) void {
+        self.updatePeak();
+    }
+
     fn updatePeak(self: *MemoryAccount) void {
         self.peak_allocated_bytes = @max(self.peak_allocated_bytes, self.allocated_bytes);
         self.peak_allocation_count = @max(self.peak_allocation_count, self.allocation_count);

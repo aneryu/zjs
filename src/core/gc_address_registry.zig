@@ -108,6 +108,20 @@ pub const Table = struct {
     /// only. See `noteArenaCreated`.
     arenas_incomplete: bool = false,
 
+    /// One-word bloom filter over every 4 KiB base a candidate could resolve
+    /// through: arena bases OR'd with occupant-table page bases. `ruleOut` is
+    /// two ALU ops, and it rejects almost every stack word before any hash
+    /// probe runs -- JSC's TinyBloomFilter over its MarkedBlock set
+    /// (ConservativeRoots.cpp:168-173), which it also rebuilds per collection
+    /// because a bloom filter cannot forget.
+    ///
+    /// Soundness constraint, learned by review before it shipped: the filter
+    /// MUST cover both populations. A filter built from arenas alone would
+    /// early-out on words pointing into standalone-prefix allocations and the
+    /// scan would miss live objects -- a use-after-free, not an optimization.
+    /// Arena size and page size are both 4096, so one mask serves both.
+    scan_filter: usize = 0,
+
     /// Removals since `by_header` and `pages` were last compacted.
     ///
     /// Zig's open-addressed map marks a removed slot as a TOMBSTONE and adds
@@ -295,6 +309,23 @@ pub const Table = struct {
         return audit.violations;
     }
 
+    /// Rebuild the scan filter from the live sets. Called at the start of
+    /// each conservative scan; a few hundred keys, so the rebuild is cheaper
+    /// than a handful of the probes it saves.
+    pub fn rebuildScanFilter(self: *Table) void {
+        var bits: usize = 0;
+        var arena_it = self.arenas.keyIterator();
+        while (arena_it.next()) |base| bits |= base.*;
+        var page_it = self.pages.keyIterator();
+        while (page_it.next()) |page| bits |= page.* << page_shift;
+        self.scan_filter = bits;
+    }
+
+    /// Two ALU ops: can this 4 KiB base possibly be registered?
+    inline fn filterRulesOut(self: *const Table, base: usize) bool {
+        return (base & self.scan_filter) != base;
+    }
+
     pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
         self.arenas.deinit(allocator);
         var iterator = self.pages.iterator();
@@ -436,6 +467,12 @@ pub const Table = struct {
     ) usize {
         self.stats.lookup_calls += 1;
         if (addr < self.bounds_lo or addr >= self.bounds_hi) return 0;
+        // The `addr - 1` probe can land in the PREVIOUS page when `addr` is
+        // page-aligned, so both bases must clear the filter before the word
+        // can be dismissed.
+        const base = addr & ~(Slab.arena_size - 1);
+        const prev_base = (addr -% 1) & ~(Slab.arena_size - 1);
+        if (self.filterRulesOut(base) and self.filterRulesOut(prev_base)) return 0;
         var hits: usize = self.forEachGcObjectInArena(addr, context, visit);
         // The occupant table now holds only what the arena geometry cannot
         // reach: standalone-prefix allocations (over the slab's 512-byte class

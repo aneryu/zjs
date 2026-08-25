@@ -425,13 +425,27 @@ pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     return swept;
 }
 
-/// Retire the young set after a whole-heap collection. Walks the full list
-/// rather than the suffix because a major has already swept, which can free
-/// the object the suffix cursor names.
+/// Retire the young set after a whole-heap collection.
+///
+/// The bulk of the young bits are retired by the sweep itself -- survivors on
+/// both arms of its walk get `young = false` -- so the whole-heap pass this
+/// used to be is gone. What the sweep cannot see is an object allocated
+/// DURING it: finalizer enqueue and deferred-free bookkeeping allocate, and
+/// publication marks young and appends at the list tail, behind the walk's
+/// cursor. Those are therefore a contiguous tail run, and retiring them is a
+/// backward walk that stops at the first non-young object --
+/// O(sweep-time allocations), not O(heap). The suffix invariant
+/// (`verifyHeapAccounting`) is what caught this: with `young_head` null, any
+/// surviving young bit is a corruption report.
 fn clearYoungState(rt: *JSRuntime) void {
     if (comptime !gc.generation_enabled) return;
-    var it = rt.gc.objectIterator();
-    while (it.next()) |header| header.meta().flags.young = false;
+    var cursor = rt.gc.gc_obj_list.prev;
+    while (cursor) |h| {
+        if (h == &rt.gc.gc_obj_list) break;
+        if (!h.metaConst().flags.young) break;
+        h.meta().flags.young = false;
+        cursor = h.prev;
+    }
     rt.gc.young_head = null;
     rt.gc.generation.retireYoungSet();
 }
@@ -1048,10 +1062,27 @@ const Collector = struct {
         var iterator = self.rt.gc.objectIterator();
         while (iterator.next()) |header| {
             if (header.metaConst().flags.mark) {
-                header.meta().flags.mark = false;
+                // The mark STAYS. §8.2's sticky rule is `allocated && marked`
+                // is old, and the survivor's mark is what tells the next
+                // minor's `shade()` to stop at it -- clearing here made the
+                // first minor after every major find the whole heap unmarked
+                // and re-trace the entire live set from the roots (~29 ms per
+                // probe minor on splay, against a 1 ms target). The next
+                // major's `clearMarks` is the clearer; this used to clear a
+                // second time. Retiring the young bit rides the same walk,
+                // which is what deleted `clearYoungState`'s third whole-heap
+                // pass.
+                header.meta().flags.young = false;
                 continue;
             }
-            if (header.metaConst().flags.is_pinned) continue;
+            if (header.metaConst().flags.is_pinned) {
+                // An unmarked-but-pinned survivor must retire its young bit
+                // too: it leaves the suffix when `young_head` resets below,
+                // and a stale young bit would make the barrier remember its
+                // owner on every store, forever.
+                header.meta().flags.young = false;
+                continue;
+            }
             self.rt.gc.detachCycleCandidate(header);
             gc.listAddTail(&self.rt.gc.tmp_obj_list, header);
         }

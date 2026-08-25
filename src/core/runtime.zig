@@ -2787,6 +2787,8 @@ pub const JSRuntime = struct {
         self.gc_running = true;
         defer self.gc_running = false;
 
+        // The cycle's high-water is the account right now, at trigger time.
+        self.memory.samplePeakAtCollection();
         const start_ns = profile.nowNanos();
 
         self.gc.beginMajorCycle(self.gc.activeMajorReason() orelse .manual);
@@ -2865,6 +2867,7 @@ pub const JSRuntime = struct {
             if (!over_threshold and mode.acceptsMinor() and !self.gc_running and self.gc.shouldTryMinor()) {
                 self.gc_running = true;
                 defer self.gc_running = false;
+                self.memory.samplePeakAtCollection();
                 const started = profile.nowNanos();
                 if (@import("gc_trace_stw.zig").collectMinor(self, roots, mode.rootScan()) catch null) |freed| {
                     self.gc.stats.collections += 1;
@@ -3301,9 +3304,27 @@ pub const JSRuntime = struct {
     }
 
     fn resetGCThreshold(self: *JSRuntime) void {
-        // qjs js_trigger_gc after JS_RunGC (quickjs.c:1795-1796):
-        //   malloc_gc_threshold = malloc_size + (malloc_size >> 1)
-        const grown = std.math.add(usize, self.memory.allocated_bytes, self.memory.allocated_bytes >> 1) catch std.math.maxInt(usize);
+        // Refcounting keeps qjs's rule verbatim (js_trigger_gc after JS_RunGC,
+        // quickjs.c:1795-1796): threshold = malloc_size + (malloc_size >> 1).
+        //
+        // The tracer gets 2x, and the divergence is deliberate: qjs's 1.5x
+        // governs a CYCLE collector running over a heap where refcounting has
+        // already freed every acyclic object, so each round handles residue.
+        // A tracer must trace the whole live set to free anything at all --
+        // the cost of a collection is proportional to what survives, not to
+        // what dies -- so the same constant buys far less allocation per
+        // whole-heap trace. Copying it across that semantic change was
+        // faithfulness to the wrong collector: splay completed in 16 rounds
+        // under rc and paid ~41 whole-heap majors under the tracer at 1.5x.
+        // JSC's precedent for a full-tracing heap is a growth factor of 2 on
+        // small heaps (smallHeapGrowthFactor, OptionsList.h:219; "small" is
+        // heap < 25% of RAM). The memory price stays inside §1.3's
+        // cycle peak/live < 1.8 budget and is re-measured in the plan's P1
+        // gate.
+        const grown = if (comptime gc.trace_stw_enabled)
+            std.math.add(usize, self.memory.allocated_bytes, (self.memory.allocated_bytes >> 1) + (self.memory.allocated_bytes >> 2)) catch std.math.maxInt(usize)
+        else
+            std.math.add(usize, self.memory.allocated_bytes, self.memory.allocated_bytes >> 1) catch std.math.maxInt(usize);
         // ...plus room for one nursery. Half of a small live set is less than
         // a nursery, and since the threshold is tested before a minor is
         // offered, such a threshold would be crossed first every time and
