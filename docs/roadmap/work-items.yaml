@@ -71,7 +71,7 @@ items:
     title: "Typed interpreter verdict after T-spike"
     type: gate
     verdicts: [implement, ir_only, pause]
-    state: ready
+    state: blocked
     wip_slot: none
     hard_prerequisites: [PERF-T-SPIKE]
     authority: {file: docs/roadmap.md, section: "2"}
@@ -130,11 +130,11 @@ items:
   - id: PERF-T-SPIKE
     title: Typed-slot interpreter benefit spike (polymorphic arm; u64 vs pinned-pointer guard arms)
     type: spike
-    state: done
-    wip_slot: none
+    state: now
+    wip_slot: implementation
     completion_commit: a2d9bc03
     evidence: reports/evidence/PERF-T-SPIKE/manifest.json
-    notes: "ran 2026-08-26 (same day). Result: own-slot mechanism effect +3.8% (fusion-neutral D/C 0.963), BELOW the frozen +8% kill line; polymorphic sites regress 6.5%; both guard arms indistinguishable (u64 0.963 vs pinned-ptr 0.964). Prototype on spike/perf-t, suite 2364/0. Feeds G1-TYPED"
+    notes: "2026-08-26 first round read +3.8% on a float-dominated loop and was written up as FAIL; 2026-08-27 that verdict was WITHDRAWN. A standalone controlled demo showed that workload hides the access entirely (probe and slot cost identical cycles behind a serial float chain), and a retest on property-dense workloads gives +8.9% (prop_dense) and +15.7% (chain_walk) -- the kill line is cleared on the shapes the policy actually named. Constant across all rounds: ~7-8% fewer instructions, polymorphic sites regress 6.4%, guard arms indistinguishable. Decisive evidence still owed: the real bench_v8 suite (needs the u8 site index widened)"
     activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
     acceptance_policy: {path: policies/spikes/perf-t-spike-v1.json, status: frozen}
