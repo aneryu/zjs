@@ -391,7 +391,7 @@ items:
     state: now
     wip_slot: decision
     hard_prerequisites: []
-    notes: "remaining verdicts: AsyncToken epoch width/scope; external memory accounting mandatory?; event channel primitive vs pattern; class-id/NativeType identity rules; handle scope in v1?"
+    notes: "SIX verdicts per doc §33 (registry previously listed five): AsyncToken epoch width/scope; external memory accounting mandatory?; event channel primitive vs pattern; side-by-side manifest fields (process_singleton reservation); class-id/NativeType identity rules; handle scope in v1?. Plus M0D gate: confirm the §0.1 classification table itself. Doc debts found 2026-08-26 (fix with the verdict write, FNABI v0.7): §34 item 33 still says side-by-side hot reload (contradicts §22.7 v0.6); §18.1 lacks the 至多存活到调用结束 clause §0.1 credits it with; class-id ledger ruling (u16 scarcity/ClassIdSlot/triple identity) never internalized into normative text"
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M0D"}
   - id: FN-M0I
     title: ABI schema + C/Zig golden layouts + generator source of truth (non-contentious skeleton)
