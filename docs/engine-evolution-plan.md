@@ -43,12 +43,12 @@ baseline JIT 与 optimizing JIT 建立统一底座;同时不与进行中的 trac
 
 - **静态轴姊妹方案**:
   [type-directed-optimization-plan.md](type-directed-optimization-plan.md)
-  (v0.8,DRAFT)——TS 类型驱动的 typed bytecode 与 AOT 路线,与本
+  (v1.2,DRAFT)——TS 类型驱动的 typed bytecode 与 AOT 路线,与本
   方案的动态轴互补;FNABI 里程碑已拆分(roadmap v1.7):M1A 不依赖
   本计划,M1B←F1,M1C←F2(不再整体挂 S1 全就绪)。
 - **原生插件 ABI**:
   [fun-native-plugin-design.md](fun-native-plugin-design.md)
-  (FNABI v0.3,2026-08-25 采纳)——§9.1 的 NativeCallDescriptor 与
+  (FNABI v0.6)——§9.1 的 NativeCallDescriptor 与
   FNABI 的 `NativeCallPlan` 统一为单一 schema;runtime-plugin-abi.md
   已 deprecated。
 

@@ -1,6 +1,6 @@
 # Fun Native Plugin 技术设计
 
-版本：0.5（治理归一化,与 roadmap v1.7 对齐）  
+版本：0.6（v1.8 语义闭合:§22.7 side-by-side 移 post-v1、finalizer 三态裁决方案 B、引用版本更新;0.5:治理归一化）  
 日期：2026-08-26  
 状态：评审修订版；**FN-M0F 冻结 FNABI v1,前置=FN-M0D 关闭全部
 freeze_blocker**(见 §33)。**0.5:治理归一化**——M0 拆
@@ -13,7 +13,7 @@ process-model-design.md §20.2/§20.2a,本文 §0.1 逐条分类):class id
 原语(tsfn 对应物)、外部内存计价必填、§18.1 handle-scope 留门措辞、
 §22.7 side-by-side 启用前提清单、epoch 作用域条款。  
 适用范围：fun runtime、zjs VM、Fun Native ABI、Zig Native SDK、native package 构建与分发体系  
-规范性引用：[vm-value-representation-contract.md](vm-value-representation-contract.md)（v1，normative）、[type-directed-optimization-plan.md](type-directed-optimization-plan.md)（v0.8）、[engine-evolution-plan.md](engine-evolution-plan.md)、[runtime-plugin-abi.md](runtime-plugin-abi.md)（deprecated，见 §28.1）
+规范性引用：[vm-value-representation-contract.md](vm-value-representation-contract.md)（v1，normative）、[type-directed-optimization-plan.md](type-directed-optimization-plan.md)（v1.2）、[engine-evolution-plan.md](engine-evolution-plan.md)、[runtime-plugin-abi.md](runtime-plugin-abi.md)（deprecated，见 §28.1）
 
 ---
 
@@ -63,7 +63,7 @@ process-model-design.md §20.2/§20.2a,本文 §0.1 逐条分类):class id
 | external memory accounting（外部内存计价）是否必填 | **freeze_blocker** | descriptor 字段语义——必填与否改变既有字段的合同含义，非纯追加 |
 | 循环事件通道原语（tsfn 对应物） | **freeze_blocker**（待 M0D 裁决：原语 vs 组合） | 若裁为 ABI 原语则进入 v1 公开表面，必须随 v1 冻结；若裁为既有原语（thread-safe completion queue + AsyncToken）之上的组合模式，则降档为 append_only_extension |
 | handle scope 是否进入 v1 | **append_only_extension** | §18.1 措辞已留门（raw `JSValue` 默认只在当前 managed call 内有效，至多存活到调用结束），后续以追加 Host capability 方式引入不破坏 v1 |
-| 无在飞资源快速销毁路径 + finalizer 三态 | **runtime_internal** | 行为合同，不改公开结构；插件可见时序合同（finalizer 在 runtime thread、nothrow/nonblocking、exactly-once release）已由 §34 冻结项 24/28/29 覆盖，三态是其内部状态机，不新增插件可见时序承诺 |
+| 无在飞资源快速销毁路径 + finalizer 三态 | **runtime_internal**(已裁 2026-08-26,方案 B) | **FN-M0D 裁决:插件 destructor 合同 reason-independent——始终执行同一幂等、nothrow 清理语义,不提供 FunFinalizeReason 参数,插件不得按退出原因分支**;三态(普通 GC/normal 退出/kill)只控制 runtime 的调度、等待与堆外收尾。需要区分退出策略的资源走 begin_shutdown/CancellationToken/AsyncOperation,不由 finalizer 承担策略(N-API 先例:reason 依赖的析构是事故源)。插件可见时序合同已由 §34 冻结项 24/28/29 覆盖。process-model v0.6 已同步撤回「插件 finalizer 合同扩三态」要求 |
 | §22.7 side-by-side 启用前提清单 / manifest 字段（process_singleton 等） | **post_v1**（manifest 预留字段位=append_only_extension） | v1 hot-reload 路径为 Worker Restart，side-by-side 不可达；manifest 本身支持追加字段，预留位不阻塞冻结 |
 | epoch 作用域（per-Runtime） | **runtime_internal** | 语义条款，不改 ABI 结构（位宽另列 freeze_blocker） |
 
@@ -2069,23 +2069,25 @@ load once
 
 `PluginInstance` 仍应在 runtime close 后销毁；“不 dlclose”只保留 image code，不等于泄漏 runtime state。
 
-### 22.7 Hot Reload
+### 22.7 Hot Reload(v0.6 裁决:v1 = Worker Restart 单线;side-by-side 移入 post-v1)
 
-开发模式使用 side-by-side image：
+**v1 现行规范**:plugin artifact 变化 → **Worker Restart** → 以最新
+artifact 重建 Runtime(热更设计 §26.3 同款)。FN-M0F **不冻结**
+side-by-side 语义。
+
+**Post-v1 / Incubator:Side-by-side NativeImage**(启用前置见 §0.1
+post_v1 行——process_singleton、静态构造双重初始化、依赖库单例、
+世代回收诸问题裁决后方可激活):
 
 ```text
 artifact digest A -> NativeImage A -> PluginInstance A
 artifact digest B -> NativeImage B -> PluginInstance B
 ```
 
-规则：
-
-- 新 import 绑定 B。
-- 已存在 JS Function、NativeType、NativeObject 和 AsyncToken 继续绑定 A。
-- A/B type identity 不兼容。
-- 不迁移 native object pointer、module state 或 Promise。
-- A 的 instance 在其 owner 全部 drain 后销毁。
-- v1 不自动 `dlclose` A。
+incubator 规则草案(未冻结):新 import 绑定 B;已存在 JS Function/
+NativeType/NativeObject/AsyncToken 继续绑定 A;A/B type identity
+不兼容;不迁移 native object pointer、module state 或 Promise;
+A 的 instance 在其 owner 全部 drain 后销毁;不自动 `dlclose` A。
 
 ---
 

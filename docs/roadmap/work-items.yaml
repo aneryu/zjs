@@ -1,96 +1,133 @@
 # Machine-readable work-item registry — the source of truth for roadmap.md's
-# ID table, canonical DAG, and registry views. tools/docs/roadmap_lint.py
-# validates this file and its consistency with roadmap.md on CI.
+# generated sections (ID list, canonical DAG, status view). Validated by
+# tools/docs/roadmap_lint.py; the generated sections are rendered/checked by
+# tools/docs/render_roadmap.py.
 #
-# Field semantics:
+# schema v2:
 #   type:  governance | gate | spike | spec | implementation | measurement
 #   state: now | ready | gated | blocked | later | incubator | done
-#     ready   = all hard_prerequisites done (empty list counts as satisfied)
-#     gated   = waits on a gate verdict listed in activation
-#     blocked = at least one hard_prerequisite not done
-#   activation:          non-DAG unlock conditions (gate verdicts, BASE-G0)
-#   hard_prerequisites:  DAG edges (must be item ids; acyclic)
-#   authority:           the normative document/section for this item
+#   wip_slot: decision | implementation | measurement | none
+#   gates declare `verdicts`; activation is structured:
+#     activation: {any|all: [{item, verdict|verdict_not|state, condition?}]}
+#   hard_prerequisites are the only DAG edges (acyclic).
+
+schema_version: 2
+roadmap_version: "1.8"
+roadmap_status: candidate
 
 items:
   # ---- governance ----
   - id: BASE-DOC-NORM
     title: Domain-doc normalization (single current text, no stale verdicts)
     type: governance
-    state: now
+    state: done
+    wip_slot: none
+    completion_commit: pending-this-commit
     hard_prerequisites: []
-    deliverables: [evolution v0.6, typed v1.1, fnabi v0.5, hot-reload v1.5, process v0.5, README refs]
-    acceptance: roadmap-lint forbidden-phrase scan passes; no contrary verdicts between roadmap and domain-doc bodies
+    acceptance: roadmap-lint forbidden-phrase scan green; no contrary verdicts between roadmap and domain-doc bodies
     authority: {file: docs/roadmap.md, section: "0"}
 
   - id: BASE-ROADMAP-LINT
-    title: Registry + roadmap consistency linter in CI
+    title: Registry + roadmap consistency linter and renderer in CI
     type: governance
-    state: now
+    state: done
+    wip_slot: none
+    completion_commit: af238c7c
     hard_prerequisites: []
-    deliverables: [docs/roadmap/work-items.yaml, tools/docs/roadmap_lint.py, CI job]
-    acceptance: lint green on CI for main pushes and PRs
+    acceptance: lint + render --check green on CI
     authority: {file: docs/roadmap.md, section: "4"}
 
   - id: BASE-G0
     title: Measurement freeze (reference fingerprints, policies, evidence layout)
     type: governance
-    state: ready
+    state: now
+    wip_slot: decision
     hard_prerequisites: []
     deliverables:
       - QuickJS commit/compiler/flags/binary sha256 + reproducible recipe
       - zjs merge-base + candidate sha256, dirty=false
       - suite revision + per-case source hash + skip policy
       - public immutable tracing ref (tag/commit, not a local branch name)
-      - measurement_policy hash + gc_merge_policy.json + spike policy files
+      - measurement_policy hash + gc_merge_policy.json + four spike policy files
       - reports/evidence/ layout with per-item manifest schema
-    acceptance: every official number in roadmap links to an evidence id; independent reproduction possible
+    acceptance: every official number links to an evidence id; independent reproduction possible
     authority: {file: docs/roadmap.md, section: "0/2"}
 
   # ---- gates ----
   - id: G1-GC
-    title: "GC verdict: continue P3 | time-box | pause"
+    title: "GC verdict after GC-GAP"
     type: gate
+    verdicts: [continue, time_box, pause]
     state: blocked
+    wip_slot: none
     hard_prerequisites: [GC-GAP]
     authority: {file: docs/roadmap.md, section: "2"}
   - id: G1-TYPED
-    title: "Typed interpreter verdict: implement T1 | IR-only | pause"
+    title: "Typed interpreter verdict after T-spike"
     type: gate
+    verdicts: [implement, ir_only, pause]
     state: blocked
+    wip_slot: none
     hard_prerequisites: [PERF-T-SPIKE]
     authority: {file: docs/roadmap.md, section: "2"}
   - id: G1-FEEDBACK
-    title: "Feedback profile verdict: disabled | collect-only | monomorphic | PIC2"
+    title: "Feedback profile verdict after DYN-spike"
     type: gate
+    verdicts: [disabled, collect_only, monomorphic, pic2]
     state: blocked
+    wip_slot: none
     hard_prerequisites: [PERF-DYN-SPIKE]
     authority: {file: docs/roadmap.md, section: "2"}
   - id: G1-JIT
-    title: "Baseline JIT verdict: eligible | redesign | later"
+    title: "Baseline JIT verdict after JIT-spike"
     type: gate
+    verdicts: [eligible, redesign, later]
     state: blocked
+    wip_slot: none
     hard_prerequisites: [PERF-JIT-SPIKE]
     authority: {file: docs/roadmap.md, section: "2"}
   - id: G1-AOT
-    title: "Native AOT verdict: eligible | later"
+    title: "Native AOT verdict after N-spike"
     type: gate
+    verdicts: [eligible, later]
     state: blocked
+    wip_slot: none
     hard_prerequisites: [PERF-N-SPIKE]
     authority: {file: docs/roadmap.md, section: "2"}
   - id: BACKEND-ORDER
-    title: "Backend ordering: JIT first | AOT first | parallel forbidden | both later"
+    title: "Backend ordering verdict"
     type: gate
+    verdicts: [jit_first, aot_first, parallel_forbidden, both_later]
     state: blocked
+    wip_slot: none
     hard_prerequisites: [G1-JIT, G1-AOT]
     authority: {file: docs/roadmap.md, section: "2"}
+  - id: G2-GC-MERGE
+    title: "GC merge statistical gate (three-state, per gc_merge_policy.json)"
+    type: gate
+    verdicts: [pass, fail, inconclusive]
+    state: blocked
+    wip_slot: none
+    hard_prerequisites: [GC-P3]
+    notes: inconclusive at n=32 forbids merge; branch retained; reopen only on substantive change
+    authority: {file: docs/roadmap.md, section: "2"}
+  - id: G1-LIGHT-PROCESS-WORKLOAD
+    title: "Lightweight-process value gate: does the many-idle-resident workload exist?"
+    type: gate
+    verdicts: [exists, absent]
+    state: ready
+    wip_slot: none
+    hard_prerequisites: []
+    notes: workload table (app type x process count x lifetime x spawn rate); D7 enters active DAG only on `exists`
+    authority: {file: docs/process-model-design.md, section: "15"}
 
   # ---- performance evidence (spikes) ----
   - id: PERF-T-SPIKE
-    title: Typed-slot interpreter benefit spike (polymorphic arm mandatory)
+    title: Typed-slot interpreter benefit spike (polymorphic arm; u64 vs pinned-pointer guard arms)
     type: spike
     state: ready
-    activation: [BASE-G0.done]
+    wip_slot: implementation
+    activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
     acceptance_policy: {path: policies/spikes/perf-t-spike-v1.json, status: pending}
     authority: {file: docs/type-directed-optimization-plan.md, section: "S2 / T-gate 0"}
@@ -98,25 +135,27 @@ items:
     title: Dynamic-feedback minimal evidence (disposable side table; mono + PIC2 arms)
     type: spike
     state: ready
-    activation: [BASE-G0.done]
+    wip_slot: implementation
+    activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
     acceptance_policy: {path: policies/spikes/perf-dyn-spike-v1.json, status: pending}
-    notes: outputs a concrete feedback profile, not a bare PASS; must reconcile the 08-17 IC refutation
+    notes: outputs a concrete feedback profile; must reconcile the 08-17 IC refutation
     authority: {file: docs/roadmap.md, section: "2"}
   - id: PERF-JIT-SPIKE
     title: Baseline-JIT minimum closed-loop spike (8-12 opcodes, break-even analysis)
     type: spike
     state: blocked
-    activation: [BASE-G0.done]
+    wip_slot: implementation
+    activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: [PERF-VMABI]
     acceptance_policy: {path: policies/spikes/perf-jit-spike-v1.json, status: pending}
-    notes: reports compile latency, code bytes/bytecode byte, entry/exit, bailout, break-even hotness, RW->RX/icache, code retirement
     authority: {file: docs/engine-evolution-plan.md, section: "Phase 2 spike gate"}
   - id: PERF-N-SPIKE
     title: Native Zig AOT shape spike (boundary cost, GC/exception closure)
     type: spike
     state: ready
-    activation: [BASE-G0.done]
+    wip_slot: implementation
+    activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
     acceptance_policy: {path: policies/spikes/perf-n-spike-v1.json, status: pending}
     authority: {file: docs/type-directed-optimization-plan.md, section: "5.1 / 8"}
@@ -126,57 +165,73 @@ items:
     title: VM execution ABI (VmExecState, HelperDescriptor, exception/interrupt, GC slot abstraction)
     type: implementation
     state: ready
+    wip_slot: implementation
     hard_prerequisites: []
     authority: {file: docs/engine-evolution-plan.md, section: "5"}
   - id: PERF-OPCODE-SPACE
     title: Opcode namespace plan (wide/prefix planes, versioning, shared generator, decode A/B)
     type: spec
     state: ready
+    wip_slot: decision
     hard_prerequisites: []
     notes: consumers = FN-M1A, PERF-T1, CALL_NATIVE_*/typed families, SER-ARTIFACT opcode versioning
     authority: {file: docs/type-directed-optimization-plan.md, section: "F4 / opcode space"}
   - id: PERF-SHAPE-ID
-    title: Shape identity dual-domain contract (mutable u64 identity; pinned-pointer guard for immutable typed shapes)
+    title: Shape identity dual-domain contract (mutable u64 per-Runtime counter; pinned-pointer for immutable typed shapes)
     type: implementation
     state: gated
-    activation: [G1-TYPED.implement-or-FN-M1B-demand]
+    wip_slot: implementation
+    activation:
+      any:
+        - {item: G1-TYPED, verdict: implement}
+        - {item: FN-M1A, state: done, condition: nativeclass_slice_selected}
     hard_prerequisites: []
     authority: {file: docs/type-directed-optimization-plan.md, section: "4.1"}
   - id: PERF-SIDECAR
     title: SidecarCore container protocol + per-site side-table carrier
     type: spec
     state: ready
+    wip_slot: decision
     hard_prerequisites: []
-    notes: freezes container protocol only; payload sections evolve independently; four-party review
+    notes: container protocol only; payload sections evolve independently; four-party review
     authority: {file: docs/roadmap.md, section: "2"}
   - id: PERF-TYPED-IR
     title: Type certificates, typed metadata, layout references (F3/F5)
     type: implementation
     state: gated
-    activation: [G1-TYPED.implement, G1-AOT.eligible]
-    activation_mode: any
+    wip_slot: implementation
+    activation:
+      any:
+        - {item: G1-TYPED, verdict: implement}
+        - {item: G1-AOT, verdict: eligible}
     hard_prerequisites: []
     authority: {file: docs/type-directed-optimization-plan.md, section: "F3/F5"}
   - id: PERF-T1
     title: Typed interpreter slots (T1)
     type: implementation
     state: gated
-    activation: [G1-TYPED.implement]
+    wip_slot: implementation
+    activation: {all: [{item: G1-TYPED, verdict: implement}]}
     hard_prerequisites: [PERF-TYPED-IR, PERF-SHAPE-ID, PERF-OPCODE-SPACE]
     authority: {file: docs/type-directed-optimization-plan.md, section: "T1"}
   - id: PERF-P05
     title: Interpreter feedback slots (Phase 0.5, per G1-FEEDBACK profile)
     type: implementation
     state: gated
-    activation: [G1-FEEDBACK.not-disabled]
+    wip_slot: implementation
+    activation: {all: [{item: G1-FEEDBACK, verdict_not: disabled}]}
     hard_prerequisites: [PERF-SHAPE-ID, PERF-SIDECAR]
-    notes: prerequisites also include the 08-17 IC-refutation reconciliation and the GC-line joint review (acceptance checklist)
+    notes: acceptance checklist also requires the 08-17 IC-refutation reconciliation and the GC-line joint review
     authority: {file: docs/engine-evolution-plan.md, section: "6"}
   - id: PERF-JIT
     title: Baseline JIT backend (direct machine code)
     type: implementation
     state: gated
-    activation: [G1-JIT.eligible, BACKEND-ORDER]
+    wip_slot: implementation
+    activation:
+      all:
+        - {item: G1-JIT, verdict: eligible}
+        - {item: BACKEND-ORDER, verdict_not: both_later}
     hard_prerequisites: [PERF-VMABI]
     notes: PERF-P05 and PERF-TYPED-IR are optional enhancements, not hard prerequisites
     authority: {file: docs/engine-evolution-plan.md, section: "8"}
@@ -184,31 +239,60 @@ items:
     title: Native AOT backend (Zig source emission)
     type: implementation
     state: gated
-    activation: [G1-AOT.eligible, BACKEND-ORDER]
+    wip_slot: implementation
+    activation:
+      all:
+        - {item: G1-AOT, verdict: eligible}
+        - {item: BACKEND-ORDER, verdict_not: both_later}
     hard_prerequisites: [PERF-TYPED-IR, PERF-VMABI]
     authority: {file: docs/type-directed-optimization-plan.md, section: "5.1 / 10"}
+  - id: PERF-ASM-1A
+    title: AArch64 asm interpreter prototype (evolution Phase 1A)
+    type: implementation
+    state: incubator
+    wip_slot: none
+    hard_prerequisites: []
+    notes: "activation: iOS execution window opens + GC representation stable"
+    authority: {file: docs/engine-evolution-plan.md, section: "7"}
+  - id: PERF-ASM-1B
+    title: Asm interpreter productionization (evolution Phase 1B)
+    type: implementation
+    state: incubator
+    wip_slot: none
+    hard_prerequisites: [PERF-ASM-1A, GC-MERGE]
+    authority: {file: docs/engine-evolution-plan.md, section: "7"}
 
   # ---- GC ----
   - id: GC-GAP
     title: Full-suite RC vs tracing A/B (plus 4-row per-benchmark account)
     type: measurement
     state: ready
-    activation: [BASE-G0.done]
+    wip_slot: measurement
+    activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
     authority: {file: docs/tracing-gc-design.md, section: "pause plan"}
   - id: GC-P3
     title: Lazy sweep + versioned marks + throughput-tax recovery
     type: implementation
     state: gated
-    activation: [G1-GC.continue]
+    wip_slot: implementation
+    activation: {all: [{item: G1-GC, verdict: continue}]}
     hard_prerequisites: []
     authority: {file: docs/tracing-gc-design.md, section: "pause plan 5"}
+  - id: VM-CONTRACT-GC
+    title: Representation-contract revision for the tracing switch (versioned, reviewed)
+    type: spec
+    state: gated
+    wip_slot: decision
+    activation: {all: [{item: G2-GC-MERGE, verdict: pass}]}
+    hard_prerequisites: []
+    authority: {file: docs/vm-value-representation-contract.md, section: "all"}
   - id: GC-MERGE
-    title: GC merge gate run + representation-contract revision + production merge
+    title: Tracing GC production merge into main
     type: implementation
     state: blocked
-    hard_prerequisites: [GC-P3]
-    acceptance: three-state gate per gc_merge_policy.json (PASS required; INCONCLUSIVE at n=32 forbids merge)
+    wip_slot: implementation
+    hard_prerequisites: [VM-CONTRACT-GC]
     authority: {file: docs/roadmap.md, section: "2"}
 
   # ---- serialization ----
@@ -216,13 +300,23 @@ items:
     title: Serialization encoding kernel spec + three profile boundaries
     type: spec
     state: ready
+    wip_slot: decision
     hard_prerequisites: []
     notes: three-party review; typed open-question-5 evaluated before freeze; SC requirements present
     authority: {file: docs/process-model-design.md, section: "13"}
+  - id: SER-TRANSFER
+    title: ExternalMemoryToken cross-runtime transfer adapter
+    type: implementation
+    state: ready
+    wip_slot: implementation
+    hard_prerequisites: []
+    notes: rc baseline rides SharedBufferStore atomic rc; tracing side is the ledger-registered adapter debt
+    authority: {file: docs/process-model-design.md, section: "4.2 / 15.3a"}
   - id: SER-ARTIFACT
     title: Bytecode artifact profile (hot-reload W1)
     type: implementation
     state: blocked
+    wip_slot: implementation
     hard_prerequisites: [SER-CORE]
     acceptance: round-trip property tests + fuzz + hot-reload test rows; feeds Build Cache
     authority: {file: docs/fun-dev-hot-reload-design.md, section: "27.10"}
@@ -230,13 +324,15 @@ items:
     title: State snapshot profile
     type: implementation
     state: blocked
+    wip_slot: implementation
     hard_prerequisites: [SER-CORE]
     authority: {file: docs/fun-dev-hot-reload-design.md, section: "27.9 / 15"}
   - id: SER-MESSAGE
     title: Process message profile (SC values + three zero-copy channels)
     type: implementation
     state: blocked
-    hard_prerequisites: [SER-CORE]
+    wip_slot: implementation
+    hard_prerequisites: [SER-CORE, SER-TRANSFER]
     authority: {file: docs/process-model-design.md, section: "4 / 13"}
 
   # ---- hot reload / debug ----
@@ -244,101 +340,119 @@ items:
     title: HostCore + Disposable Session + Sequential Reload
     type: implementation
     state: now
+    wip_slot: implementation
+    estimate_class: L
     hard_prerequisites: []
-    notes: "fun-side main effort; zjs small increment = Root Handle table API + epoch-safe deref/release"
+    notes: "fun-side main effort; zjs increment = Root Handle table + epoch-safe deref/release. Internal slices: P1a Root Handle API, P1b disposable-session CLI loop, P1c HostCore/BindingRouter, P1d watcher + error overlay"
     authority: {file: docs/fun-dev-hot-reload-design.md, section: "12 / 37"}
   - id: HR-P2A
     title: Scope + async safety (CancellationToken, stale callbacks, drain, native-only completion)
     type: implementation
     state: blocked
-    hard_prerequisites: [HR-P1]
-    notes: does NOT depend on serialization; shares RT-LIFECYCLE primitives
+    wip_slot: implementation
+    hard_prerequisites: [HR-P1, RT-LIFECYCLE]
+    notes: no serialization dependency; consumes RT-LIFECYCLE primitives; owns SessionScope/EventBarrier/callback ownership
     authority: {file: docs/fun-dev-hot-reload-design.md, section: "10 / 28"}
   - id: HR-P2B
     title: Snapshot/restore state migration
     type: implementation
     state: blocked
+    wip_slot: implementation
     hard_prerequisites: [HR-P2A, SER-SNAPSHOT]
     authority: {file: docs/fun-dev-hot-reload-design.md, section: "14 / 15"}
   - id: HR-P3
     title: ESM HMR + registry multi-versioning
     type: implementation
     state: blocked
+    wip_slot: implementation
     hard_prerequisites: [HR-P2A, PERF-SIDECAR]
     authority: {file: docs/fun-dev-hot-reload-design.md, section: "16-21"}
   - id: DBG-W2
     title: Minimal CDP backend
     type: implementation
     state: ready
+    wip_slot: implementation
     hard_prerequisites: []
     authority: {file: docs/fun-dev-hot-reload-design.md, section: "37 W2"}
 
   # ---- FNABI ----
   - id: FN-M0D
-    title: ABI decision closure (debt classification + six freeze verdicts)
+    title: ABI decision closure (freeze-blocker verdicts; finalizer plan B recorded 2026-08-26)
     type: governance
     state: ready
+    wip_slot: decision
     hard_prerequisites: []
-    notes: "verdicts: AsyncToken epoch width/scope; external memory accounting mandatory?; event channel primitive vs pattern; side-by-side manifest field; class-id/NativeType identity; handle scope in v1?"
+    notes: "remaining verdicts: AsyncToken epoch width/scope; external memory accounting mandatory?; event channel primitive vs pattern; class-id/NativeType identity rules; handle scope in v1?"
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M0D"}
   - id: FN-M0I
     title: ABI schema + C/Zig golden layouts + generator source of truth (non-contentious skeleton)
     type: implementation
     state: now
+    wip_slot: implementation
+    estimate_class: M
     hard_prerequisites: []
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M0I"}
   - id: FN-M0F
-    title: FNABI v1 freeze
+    title: FNABI v1 freeze (side-by-side semantics excluded, per v0.6)
     type: governance
     state: blocked
+    wip_slot: decision
     hard_prerequisites: [FN-M0D, FN-M0I]
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M0F"}
   - id: FN-M1A
     title: Static NativeEntry end-to-end (add / managedCreateObject)
     type: implementation
     state: blocked
+    wip_slot: implementation
     hard_prerequisites: [FN-M0F, PERF-OPCODE-SPACE]
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M1A"}
   - id: FN-M1B
     title: NativeClass method (World.step)
     type: implementation
     state: blocked
+    wip_slot: implementation
     hard_prerequisites: [FN-M1A, PERF-SHAPE-ID]
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M1B"}
   - id: FN-M1C
     title: Dynamic call quickening
     type: implementation
     state: blocked
+    wip_slot: implementation
     hard_prerequisites: [FN-M1A, PERF-SIDECAR]
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M1C"}
   - id: FN-M2
     title: zjs Native Execution Core
     type: implementation
     state: later
+    wip_slot: implementation
     hard_prerequisites: [FN-M1A, FN-M1B, FN-M1C]
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M2"}
   - id: FN-M3
     title: Dynamic loader + official SDK
     type: implementation
     state: later
+    wip_slot: implementation
     hard_prerequisites: [FN-M2]
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M3"}
   - id: FN-M4
-    title: Buffer, Async, full lifecycle (event-channel verdict lands here at latest)
+    title: Buffer, Async, full lifecycle (event-channel verdict lands here at latest; PluginInstance cancel/drain adapter over RT-LIFECYCLE)
     type: implementation
     state: later
-    hard_prerequisites: [FN-M3]
+    wip_slot: implementation
+    hard_prerequisites: [FN-M3, RT-LIFECYCLE]
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M4"}
   - id: FN-M5
     title: Build, CAS, prebuilt, mobile platforms
     type: implementation
     state: later
+    wip_slot: implementation
     hard_prerequisites: [FN-M4]
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M5"}
   - id: FN-M6
     title: JIT-tier native call optimization
     type: implementation
     state: later
+    wip_slot: implementation
     hard_prerequisites: [FN-M5, PERF-JIT]
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M6"}
 
@@ -347,58 +461,65 @@ items:
     title: Shared runtime lifecycle primitives (pauseJobs/resumeJobs, reasoned interrupt + priority, cancellation hooks)
     type: implementation
     state: ready
+    wip_slot: implementation
     hard_prerequisites: []
-    notes: consumed by PROC-D5B, HR-P2A, FNABI shutdown - one implementation, three consumers
+    notes: runtime-level primitives only; consumers = PROC-D5B (scheduler), HR-P2A (session scope), FN-M4 (plugin cancel/drain)
     authority: {file: docs/process-model-design.md, section: "5 / 16.2"}
+  - id: GC-MULTIRT-GATE
+    title: Multi-runtime GC acceptance batch 2 (TSan as gate, concurrent create/destroy, N-runtime concurrent collect)
+    type: implementation
+    state: ready
+    wip_slot: implementation
+    hard_prerequisites: []
+    authority: {file: docs/tracing-gc-design.md, section: "13/14"}
+  - id: VM-WEAK-REGISTRY
+    title: Unified weak-ref/finalizer registry (representation-contract section 6 open item; pid intern depends on it)
+    type: implementation
+    state: ready
+    wip_slot: implementation
+    hard_prerequisites: []
+    authority: {file: docs/vm-value-representation-contract.md, section: "6"}
   - id: PROC-D3
     title: Cross-runtime delivery + mailbox + pid intern
     type: implementation
     state: blocked
-    hard_prerequisites: [SER-MESSAGE]
-    notes: "acceptance checklist: multi-runtime gate batch 2 (TSan, concurrent collect); contract weak-ref registry project"
+    wip_slot: implementation
+    hard_prerequisites: [SER-MESSAGE, GC-MULTIRT-GATE, VM-WEAK-REGISTRY]
     authority: {file: docs/process-model-design.md, section: "6 / 8"}
   - id: PROC-D4
     title: spawn/exit/link/monitor/call
     type: implementation
     state: blocked
+    wip_slot: implementation
     hard_prerequisites: [PROC-D3, SER-ARTIFACT]
     authority: {file: docs/process-model-design.md, section: "7 / 9 / 10"}
   - id: PROC-D5A
     title: Per-thread IO
     type: implementation
     state: ready
+    wip_slot: implementation
     hard_prerequisites: []
     authority: {file: docs/process-model-design.md, section: "5"}
   - id: PROC-D5B
     title: Scheduler pool + budget kill
     type: implementation
     state: blocked
+    wip_slot: implementation
     hard_prerequisites: [RT-LIFECYCLE]
     authority: {file: docs/process-model-design.md, section: "5"}
   - id: PROC-D6
     title: Supervisor library + register/whereis
     type: implementation
     state: blocked
+    wip_slot: implementation
     hard_prerequisites: [PROC-D4]
     authority: {file: docs/process-model-design.md, section: "10.1"}
-  - id: PERF-ASM-1A
-    title: AArch64 asm interpreter prototype (evolution Phase 1A)
-    type: implementation
-    state: incubator
-    hard_prerequisites: []
-    notes: "activation: iOS execution window opens + GC representation stable"
-    authority: {file: docs/engine-evolution-plan.md, section: "7"}
-  - id: PERF-ASM-1B
-    title: Asm interpreter productionization (evolution Phase 1B)
-    type: implementation
-    state: incubator
-    hard_prerequisites: [PERF-ASM-1A, GC-MERGE]
-    authority: {file: docs/engine-evolution-plan.md, section: "7"}
-
   - id: PROC-D7
     title: Lightweight processes (shared immortal segment)
     type: implementation
     state: blocked
+    wip_slot: implementation
+    activation: {all: [{item: G1-LIGHT-PROCESS-WORKLOAD, verdict: exists}]}
     hard_prerequisites: [GC-MERGE]
-    notes: "acceptance checklist: contract revision; comptime split verdict (checkpoint fires); real workload table"
+    notes: "acceptance checklist: comptime split verdict (checkpoint fires)"
     authority: {file: docs/process-model-design.md, section: "15"}

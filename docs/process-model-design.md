@@ -1,6 +1,6 @@
 # zjs 进程模型设计(Erlang 风格多线程)
 
-版本:0.5(正文归一化——D5 拆分+RT-LIFECYCLE 提取、旧术语清理〔两期
+版本:0.6(撤回插件 finalizer 三态合同扩展,随 FNABI FN-M0D 方案 B;0.5:正文归一化——D5 拆分+RT-LIFECYCLE 提取、旧术语清理〔两期
 交付/D1D2 别名/LIFO 残留〕;无新设计。
 0.4:roadmap v1.5 治理对齐——序列化改 SER-CORE+profile 术语,消除
 PROC-D2 别名,旧别名映射:D1a=SER-CORE spec、D1b=SER-ARTIFACT、
@@ -322,8 +322,11 @@ drain / GPU fence 的矛盾以**解耦**消解:JS 堆的归还与 native 资源�
   时,kill 无法生效 → 升级 **Worker Restart**;静态亲和下连坐半径 = 同
   Worker 全部进程,全部以 killed 语义通知各自 monitor。为此 **supervisor
   须可跨 Worker 部署**(否则监督者与被监督者同归于尽)。
-- finalizer 判别扩为三态:普通 GC / normal 退出 / kill,插件 finalizer
-  合同(「能区分普通 GC 和 teardown」)相应扩展(FNABI 欠账)。
+- finalizer 三态(普通 GC / normal 退出 / kill)**只控制 runtime 的
+  调度、等待与堆外收尾**;插件 destructor 合同保持 reason-independent
+  幂等(FNABI v0.6 FN-M0D 裁决方案 B,v0.6 撤回此前「插件 finalizer
+  合同相应扩展」的要求)——需要区分退出策略的资源走 begin_shutdown/
+  CancellationToken/AsyncOperation。
 - **「复用热更销毁路径」收窄**:真正通用的只有热更 §28 的步 7–9(scope/
   callback roots/module registry roots)、步 11(五阶段堆销毁)、步 13
   与 §10 AsyncOperation 不变量;步 2(SessionLease)、步 10(inspector)、

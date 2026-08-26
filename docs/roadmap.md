@@ -1,18 +1,19 @@
 # zjs / fun 统一路线图
 
-版本:1.7  
+版本:1.8  
 日期:2026-08-26  
-状态:执行总纲候选。v1.7 = 治理收敛版(BASE-DOC-NORM 正文归一化 +
-BASE-ROADMAP-LINT 机器化;权威矩阵、DAG 闭合、Gate 闭合、Registry
-机器化),无新增设计。转 **approved execution baseline** 的硬条件
-见 §0.3。
+状态:执行总纲候选。v1.8 = 语义闭合 + 可执行 Registry(schema v2
+结构化 activation、生成区段由 YAML 驱动、共享生命周期依赖闭合、
+finalizer/side-by-side/counter-scope 三项裁决落地),无新增设计。
+转 **approved execution baseline** 的硬条件见 §0.3。
 
 **机器可读 source of truth**:
-[`docs/roadmap/work-items.yaml`](roadmap/work-items.yaml)——本文的
-ID 表、DAG 与状态是它的视图;一致性由
-[`tools/docs/roadmap_lint.py`](../tools/docs/roadmap_lint.py) 在 CI
-校验(ID 唯一/前置存在/无环/状态一致/gate 有卡/spike 有 policy/
-authority 存在/双向 ID 引用/退役短语扫描)。
+[`docs/roadmap/work-items.yaml`](roadmap/work-items.yaml)(schema v2)
+——本文 §1/§5 的 ID 表、DAG 与状态是**生成区段**,由
+[`tools/docs/render_roadmap.py`](../tools/docs/render_roadmap.py)
+渲染;[`tools/docs/roadmap_lint.py`](../tools/docs/roadmap_lint.py)
+在 CI 校验 schema/结构化 activation(verdict 须为 gate 声明的枚举)/
+无环/状态一致/WIP 限额/双向 ID 引用/退役短语/生成区段无 diff。
 
 ## 0. Authority / Scope / Baseline
 
@@ -58,80 +59,90 @@ BASE-G0 完成前,一切吞吐/pause 数字是本地决策输入,非可复现项
 ### 0.3 转 approved execution baseline 的硬条件
 
 ```
-[ ] BASE-DOC-NORM 完成(正文无相反裁决;退役短语 lint 绿)
-[ ] BASE-ROADMAP-LINT 进入 CI
+[x] BASE-DOC-NORM 完成(v1.8;退役短语 lint 绿)
+[x] BASE-ROADMAP-LINT 进入 CI(af238c7c;v1.8 起含生成区段校验)
 [ ] BASE-G0 完成(tracing 公开 ref、yardstick 冻结、
     gc_merge_policy.json、四份 spike policy 落地)
-[ ] Canonical DAG 只含硬依赖;所有节点在 Registry;隐藏前置有 ID
-    或入 acceptance checklist
-[ ] G1-FEEDBACK 与 G1-JIT 分离;PERF-JIT-SPIKE 定义完成(已在 v1.7)
-[ ] FN-M0D freeze blockers 完成分类(FNABI v0.5)
-[ ] HR-P2A/P2B 拆分(hot-reload v1.5)
+[x] Canonical DAG 由 Registry 生成,只含硬依赖;隐藏前置全部有 ID
+[x] G1-FEEDBACK 与 G1-JIT 分离;PERF-JIT-SPIKE 定义完成(v1.7)
+[x] FN-M0D freeze blockers 完成分类(FNABI v0.5;finalizer 已裁 v0.6)
+[x] HR-P2A/P2B 拆分(hot-reload v1.5)
 [ ] STATUS.md 登记当前 roadmap 版本与 approval 状态
+[ ] main branch ruleset(required checks;force-push 已禁)
 ```
 
-## 1. Canonical DAG(仅硬依赖;交付偏好与测量排队不在此图)
+## 1. Canonical DAG(由 Registry 生成;仅硬依赖与 activation,
+交付偏好与测量排队不在此图)
 
+<!-- BEGIN GENERATED: DAG -->
 ```
-治理
-  BASE-DOC-NORM ──→ BASE-ROADMAP-LINT
-  BASE-G0 ──→ 所有正式 evidence
+# hard dependencies (A + B -> C); gate conditions listed as activation
+GC-GAP -> G1-GC
+PERF-T-SPIKE -> G1-TYPED
+PERF-DYN-SPIKE -> G1-FEEDBACK
+PERF-JIT-SPIKE -> G1-JIT
+PERF-N-SPIKE -> G1-AOT
+G1-JIT + G1-AOT -> BACKEND-ORDER
+GC-P3 -> G2-GC-MERGE
+PERF-VMABI -> PERF-JIT-SPIKE
+PERF-TYPED-IR + PERF-SHAPE-ID + PERF-OPCODE-SPACE -> PERF-T1
+PERF-SHAPE-ID + PERF-SIDECAR -> PERF-P05
+PERF-VMABI -> PERF-JIT
+PERF-TYPED-IR + PERF-VMABI -> PERF-AOT
+PERF-ASM-1A + GC-MERGE -> PERF-ASM-1B
+VM-CONTRACT-GC -> GC-MERGE
+SER-CORE -> SER-ARTIFACT
+SER-CORE -> SER-SNAPSHOT
+SER-CORE + SER-TRANSFER -> SER-MESSAGE
+HR-P1 + RT-LIFECYCLE -> HR-P2A
+HR-P2A + SER-SNAPSHOT -> HR-P2B
+HR-P2A + PERF-SIDECAR -> HR-P3
+FN-M0D + FN-M0I -> FN-M0F
+FN-M0F + PERF-OPCODE-SPACE -> FN-M1A
+FN-M1A + PERF-SHAPE-ID -> FN-M1B
+FN-M1A + PERF-SIDECAR -> FN-M1C
+FN-M1A + FN-M1B + FN-M1C -> FN-M2
+FN-M2 -> FN-M3
+FN-M3 + RT-LIFECYCLE -> FN-M4
+FN-M4 -> FN-M5
+FN-M5 + PERF-JIT -> FN-M6
+SER-MESSAGE + GC-MULTIRT-GATE + VM-WEAK-REGISTRY -> PROC-D3
+PROC-D3 + SER-ARTIFACT -> PROC-D4
+RT-LIFECYCLE -> PROC-D5B
+PROC-D4 -> PROC-D6
+GC-MERGE -> PROC-D7
 
-性能证据(四 spike 技术独立)
-  BASE-G0 ──→ PERF-T-SPIKE ──→ G1-TYPED
-  BASE-G0 ──→ PERF-DYN-SPIKE ──→ G1-FEEDBACK
-  BASE-G0 + PERF-VMABI ──→ PERF-JIT-SPIKE ──→ G1-JIT
-  BASE-G0 ──→ PERF-N-SPIKE ──→ G1-AOT
-  G1-JIT + G1-AOT ──→ BACKEND-ORDER
-
-Typed
-  G1-TYPED=implement 或 G1-AOT=eligible ──→ PERF-TYPED-IR
-  G1-TYPED=implement + PERF-TYPED-IR + PERF-SHAPE-ID
-    + PERF-OPCODE-SPACE ──→ PERF-T1
-
-动态反馈
-  G1-FEEDBACK≠disabled + PERF-SHAPE-ID + PERF-SIDECAR ──→ PERF-P05
-  (acceptance checklist:08-17 IC 否证对账、GC 线同桌评审)
-
-JIT / AOT(两 backend;typed 与反馈对 JIT 只是可选增强)
-  G1-JIT=eligible + PERF-VMABI ──→ PERF-JIT
-  PERF-P05 ──optional──→ PERF-JIT
-  PERF-TYPED-IR ──optional──→ PERF-JIT
-  G1-AOT=eligible + PERF-TYPED-IR + PERF-VMABI ──→ PERF-AOT
-
-FNABI
-  FN-M0D ──→ FN-M0F ←── FN-M0I
-  FN-M0F + PERF-OPCODE-SPACE ──→ FN-M1A
-  FN-M1A + PERF-SHAPE-ID ──→ FN-M1B     (M1B/M1C 并行分支,
-  FN-M1A + PERF-SIDECAR  ──→ FN-M1C      先后按产品价值排)
-  FN-M1A + FN-M1B + FN-M1C ──→ FN-M2 ──→ FN-M3 ──→ FN-M4 ──→ FN-M5
-  FN-M5 + PERF-JIT ──→ FN-M6
-
-Hot Reload / 调试
-  HR-P1 ──→ HR-P2A
-  HR-P2A + SER-SNAPSHOT ──→ HR-P2B
-  HR-P2A + PERF-SIDECAR ──→ HR-P3
-  DBG-W2:无硬前置
-
-序列化
-  SER-CORE ──→ SER-ARTIFACT / SER-SNAPSHOT / SER-MESSAGE
-
-进程 / 运行时生命周期
-  SER-MESSAGE ──→ PROC-D3
-  PROC-D3 + SER-ARTIFACT ──→ PROC-D4 ──→ PROC-D6
-  PROC-D5A:无硬前置
-  RT-LIFECYCLE ──→ PROC-D5B
-  (RT-LIFECYCLE 同为 HR-P2A 与 FNABI shutdown 的共享原语)
-  GC-MERGE ──→ PROC-D7(checklist:契约修订、分档裁决、负载表)
-
-GC
-  BASE-G0 ──→ GC-GAP ──→ G1-GC
-  G1-GC=continue ──→ GC-P3 ──→ GC-MERGE
+# activation conditions (non-DAG unlocks)
+PERF-T-SPIKE: BASE-G0.done
+PERF-DYN-SPIKE: BASE-G0.done
+PERF-JIT-SPIKE: BASE-G0.done
+PERF-N-SPIKE: BASE-G0.done
+PERF-SHAPE-ID: G1-TYPED=implement | FN-M1A.done[nativeclass_slice_selected]
+PERF-TYPED-IR: G1-TYPED=implement | G1-AOT=eligible
+PERF-T1: G1-TYPED=implement
+PERF-P05: G1-FEEDBACK≠disabled
+PERF-JIT: G1-JIT=eligible & BACKEND-ORDER≠both_later
+PERF-AOT: G1-AOT=eligible & BACKEND-ORDER≠both_later
+GC-GAP: BASE-G0.done
+GC-P3: G1-GC=continue
+VM-CONTRACT-GC: G2-GC-MERGE=pass
+PROC-D7: G1-LIGHT-PROCESS-WORKLOAD=exists
 ```
+<!-- END GENERATED: DAG -->
 
-incubator(不在 active DAG):PERF-ASM-1A/PERF-ASM-1B(evolution
-Phase 1A/1B;激活=iOS 执行窗口打开+GC 表示定型);P2 eval 缓存
-(typed plan v1.1,fun 真实负载达线后回归)。
+以下为叙述性注释(非权威,权威=上方生成区段与 yaml):
+
+- 四 spike 技术独立;串行只是测量队列(§4)。JIT/AOT 是两 backend,
+  typed 与反馈对 PERF-JIT 只是可选增强(不入硬依赖)。
+- FN-M1B/FN-M1C 是并行分支,先后按产品价值排。
+- RT-LIFECYCLE 是共享生命周期原语,消费者=PROC-D5B、HR-P2A、FN-M4
+  (v1.8 起三条边全部入 DAG,防三线各自实现)。
+- GC 链三拆(v1.8):G2-GC-MERGE(统计 gate)→ VM-CONTRACT-GC
+  (契约修订,独立 review)→ GC-MERGE(合入动作);PROC-D7 依赖的
+  是合入动作。
+- incubator(不在 active DAG):PERF-ASM-1A/PERF-ASM-1B(激活=
+  iOS 执行窗口+GC 表示定型);P2 eval 缓存(typed v1.2,fun 真实
+  负载达线后回归)。
 
 ## 2. Gates
 
@@ -189,10 +200,23 @@ parallel marking = pause/扩展性选项,非吞吐补救。吞吐三角三选一
 风险退休项与表示定型点,非产品交付解锁器。
 
 **PERF-SHAPE-ID 合同形态(已裁)**:双域——动态可变 shape 用 u64
-identity/version(mutation/relocation/ABA);typed/NativeClass 的
-immutable canonical shape 允许 pinned-pointer guard(生命周期钉住、
-无 transition、不跨 Runtime、teardown 前统一失效)。T-spike 双臂
-对比,不预设全场景走 u64。
+identity/version(mutation/relocation/ABA;**计数器作用域=
+per-Runtime**,v1.8:artifact 只存引用表索引,identity 比较仅同
+Runtime 内有效);typed/NativeClass 的 immutable canonical shape
+允许 pinned-pointer guard(生命周期钉住、无 transition、不跨
+Runtime、teardown 前统一失效)。T-spike 双臂对比,不预设全场景走 u64。
+
+**v1.8 新增裁决**:①**FNABI finalizer 三态=方案 B**——插件
+destructor reason-independent 幂等,无 FunFinalizeReason;三态只
+控制 runtime 的调度/等待/堆外收尾,退出策略归 begin_shutdown/
+CancellationToken/AsyncOperation(FNABI v0.6 已裁,process v0.6
+同步撤回合同扩展要求);②**side-by-side NativeImage 移入 post-v1
+incubator**——v1 = plugin artifact 变化→Worker Restart 单线,
+FN-M0F 不冻结 side-by-side 语义(FNABI §22.7 v0.6);③GC 链三拆:
+G2-GC-MERGE(统计 gate)→VM-CONTRACT-GC(契约修订独立 review)→
+GC-MERGE(合入动作);④三个隐藏前置升正式工作项:SER-TRANSFER、
+GC-MULTIRT-GATE、VM-WEAK-REGISTRY;PROC-D7 的价值门升为
+G1-LIGHT-PROCESS-WORKLOAD。
 
 ## 3. Now / Next / Later
 
@@ -223,7 +247,10 @@ JIT/AOT 双 eligible 时按产品价值排序:
 PERF-OPCODE-SPACE、DBG-W2、PROC-D5A、RT-LIFECYCLE。
 
 **Later**:SER 三 profile 下游、FN-M1A→M1B/M1C、HR-P2A/P2B/P3、
-PROC-D3→D4→D6、GC-MERGE→PROC-D7、FN-M2..M6。
+PROC-D3→D4→D6、G2-GC-MERGE→VM-CONTRACT-GC→GC-MERGE→PROC-D7、
+FN-M2..M6。SER-TRANSFER/GC-MULTIRT-GATE/VM-WEAK-REGISTRY 随 WIP
+空位安插(均 ready);G1-LIGHT-PROCESS-WORKLOAD 的负载表调查可
+提前做。
 
 ## 4. WIP limits and execution protocol
 
@@ -244,26 +271,29 @@ contract + BASE-G0 policies;官方读数前必查孤儿+亲和。
 ## 5. 工作项登记册
 
 登记册的完整数据在 [`work-items.yaml`](roadmap/work-items.yaml)
-(每项:type/state/activation/hard_prerequisites/deliverables/
-acceptance/authority)。全部 ID:
+(schema v2:type/state/wip_slot/activation/hard_prerequisites/
+deliverables/acceptance/authority;gate 声明 verdicts)。
 
+<!-- BEGIN GENERATED: ID-LIST -->
 ```
-治理     BASE-DOC-NORM BASE-ROADMAP-LINT BASE-G0
-gates    G1-GC G1-TYPED G1-FEEDBACK G1-JIT G1-AOT BACKEND-ORDER
-性能     PERF-T-SPIKE PERF-DYN-SPIKE PERF-JIT-SPIKE PERF-N-SPIKE
-         PERF-VMABI PERF-OPCODE-SPACE PERF-SHAPE-ID PERF-SIDECAR
-         PERF-TYPED-IR PERF-T1 PERF-P05 PERF-JIT PERF-AOT
-GC       GC-GAP GC-P3 GC-MERGE
-序列化   SER-CORE SER-ARTIFACT SER-SNAPSHOT SER-MESSAGE
-fun 面   HR-P1 HR-P2A HR-P2B HR-P3 DBG-W2
-         FN-M0D FN-M0I FN-M0F FN-M1A FN-M1B FN-M1C
-         FN-M2 FN-M3 FN-M4 FN-M5 FN-M6
-运行时   RT-LIFECYCLE PROC-D3 PROC-D4 PROC-D5A PROC-D5B
-         PROC-D6 PROC-D7
+治理       BASE-DOC-NORM BASE-ROADMAP-LINT BASE-G0
+gates    G1-GC G1-TYPED G1-FEEDBACK G1-JIT G1-AOT BACKEND-ORDER G2-GC-MERGE G1-LIGHT-PROCESS-WORKLOAD
+性能       PERF-T-SPIKE PERF-DYN-SPIKE PERF-JIT-SPIKE PERF-N-SPIKE PERF-VMABI PERF-OPCODE-SPACE PERF-SHAPE-ID PERF-SIDECAR PERF-TYPED-IR PERF-T1 PERF-P05 PERF-JIT PERF-AOT PERF-ASM-1A PERF-ASM-1B
+GC       GC-GAP GC-P3 VM-CONTRACT-GC GC-MERGE GC-MULTIRT-GATE
+序列化      SER-CORE SER-TRANSFER SER-ARTIFACT SER-SNAPSHOT SER-MESSAGE
+fun 面    HR-P1 HR-P2A HR-P2B HR-P3 DBG-W2 FN-M0D FN-M0I FN-M0F FN-M1A FN-M1B FN-M1C FN-M2 FN-M3 FN-M4 FN-M5 FN-M6
+运行时/进程   RT-LIFECYCLE VM-WEAK-REGISTRY PROC-D3 PROC-D4 PROC-D5A PROC-D5B PROC-D6 PROC-D7
 ```
+<!-- END GENERATED: ID-LIST -->
 
-状态速览(与 yaml 同步;lint 校验一致性):**now** = HR-P1、
-FN-M0I、BASE-DOC-NORM、BASE-ROADMAP-LINT;**ready** = BASE-G0、
-FN-M0D、四 spike 中三个(PERF-JIT-SPIKE 等 PERF-VMABI)、
-PERF-VMABI、PERF-OPCODE-SPACE、PERF-SIDECAR、SER-CORE、DBG-W2、
-PROC-D5A、RT-LIFECYCLE、GC-GAP;其余 gated/blocked/later 见 yaml。
+<!-- BEGIN GENERATED: STATUS -->
+```
+now        BASE-G0 HR-P1 FN-M0I
+ready      G1-LIGHT-PROCESS-WORKLOAD PERF-T-SPIKE PERF-DYN-SPIKE PERF-N-SPIKE PERF-VMABI PERF-OPCODE-SPACE PERF-SIDECAR GC-GAP SER-CORE SER-TRANSFER DBG-W2 FN-M0D RT-LIFECYCLE GC-MULTIRT-GATE VM-WEAK-REGISTRY PROC-D5A
+gated      PERF-SHAPE-ID PERF-TYPED-IR PERF-T1 PERF-P05 PERF-JIT PERF-AOT GC-P3 VM-CONTRACT-GC
+blocked    G1-GC G1-TYPED G1-FEEDBACK G1-JIT G1-AOT BACKEND-ORDER G2-GC-MERGE PERF-JIT-SPIKE GC-MERGE SER-ARTIFACT SER-SNAPSHOT SER-MESSAGE HR-P2A HR-P2B HR-P3 FN-M0F FN-M1A FN-M1B FN-M1C PROC-D3 PROC-D4 PROC-D5B PROC-D6 PROC-D7
+later      FN-M2 FN-M3 FN-M4 FN-M5 FN-M6
+incubator  PERF-ASM-1A PERF-ASM-1B
+done       BASE-DOC-NORM BASE-ROADMAP-LINT
+```
+<!-- END GENERATED: STATUS -->

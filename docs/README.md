@@ -25,15 +25,15 @@ when needed.
   [Fun Native Plugin design](fun-native-plugin-design.md)).
 - [Fun Dev Hot Reload design](fun-dev-hot-reload-design.md): the fun/zjs
   hot-reload and dev-update system — HostCore/Session split, Sequential
-  Session Reload, ESM HMR, and the zjs capability list (v1.3,
-  adversarially reviewed 2026-08-26; Shadow Swap deferred to its
-  appendix A).
+  Session Reload, ESM HMR, and the zjs capability list (v1.5,
+  2026-08-26; stage 2 split into P2A async-safety / P2B state
+  migration; Shadow Swap deferred to its appendix A).
 - [Process Model design](process-model-design.md): Erlang-style multithreading
   — Runtime-per-process → lightweight processes, turn-boundary scheduling,
   selective receive, link/monitor/supervision (v0.5 design exploration,
   2026-08-26; §20 records the six-plan reconciliation verdicts and the
   per-document debt ledger).
-- [Roadmap](roadmap.md): the unified execution-baseline candidate (v1.7) —
+- [Roadmap](roadmap.md): the unified execution-baseline candidate (v1.8) —
   authority matrix, canonical hard-dependency DAG, gates, WIP limits; the
   machine-readable registry is [roadmap/work-items.yaml](roadmap/work-items.yaml),
   validated on CI by `tools/docs/roadmap_lint.py`. Roadmap verdicts must be

@@ -1,6 +1,6 @@
 # zjs 类型导向优化方案（TypeScript type lint 静态轴）
 
-Version: 1.1（正文归一化 + roadmap v1.7 对齐:TYPED-IR 双触发、
+Version: 1.2（G1-FEEDBACK 链残留清零 + shape 计数器作用域 per-Runtime;1.1:正文归一化 + roadmap v1.7 对齐:TYPED-IR 双触发、
 shape 双域身份合同、PERF-T1/PERF-OPCODE-SPACE 正式工作项）
 Date: 2026-08-26
 Status: DRAFT — 待 owner 评审
@@ -38,7 +38,7 @@ note 1 的触发条件再被 v1.7 双触发更新）:四处旧裁决按 roadmap 
    编码);FN-M1B←F1;FN-M1C←F2(FNABI v0.4 §33)。「S1 滑期连带
    阻塞第三个计划」的风险随之收窄到 M1B/M1C。
 5. **Phase 0.5 时序**——不再先于 spike:动态反馈的立项证据由
-   **PERF-DYN-SPIKE**(roadmap v1.5)购买,0.5 挂 G1-JIT 之后,且
+   **PERF-DYN-SPIKE**(roadmap v1.5)购买,0.5 由 G1-FEEDBACK 独立裁决(与 G1-JIT 无关,1.2 修正),且
    前置 SidecarCore 容器协议与 08-17 IC 否证对账。
 
 Review note（0.8 → 0.9）：**P2 eval CompilationCache 的 Octane 收益
@@ -346,11 +346,15 @@ canonical bytecode 不改）+ monomorphic shape cache（shape 指针 +
    （ABA）。**1.1 定案（roadmap v1.7，PERF-SHAPE-ID）：双域身份
    合同**——
    - **动态可变 shape**：增设 u64 `identity` 字段（identity ==
-     version 单字段），创建时与每次原地变异时都从全局单调计数器
-     取新值；缓存只存 identity，不存指针。guard = 1 load + 1 cmp
-     （与 JSC structureID 比较同级），id 永不复用 ⇒ 天然防 ABA，
-     relocate 免疫（identity 随对象搬走）——解决 mutation/
-     relocation/ABA 三案；
+     version 单字段），创建时与每次原地变异时取新值——**计数器
+     作用域 = per-Runtime**（1.2 定案,process ledger 裁决同款):
+     shape 与站点缓存皆 Runtime-local,进程级全局原子计数器会引入
+     跨 Runtime 争用与单线程路径税;identity 比较仅在同 Runtime 内
+     有效;**artifact 只存引用表索引,永不落盘 identity 值或指针**;
+     未来需要跨 Runtime 稳定身份时用 (runtime generation, local
+     identity) 二元组。缓存只存 identity,不存指针。guard = 1 load
+     + 1 cmp（与 JSC structureID 比较同级），id 永不复用 ⇒ 天然防
+     ABA，relocate 免疫——解决 mutation/relocation/ABA 三案；
    - **typed/NativeClass 的 immutable canonical shape**：允许
      **pinned pointer guard**（指针比较），前提四条全满足——
      生命周期钉住、不 transition、不跨 Runtime、teardown 前统一
@@ -371,7 +375,7 @@ canonical bytecode 不改）+ monomorphic shape cache（shape 指针 +
 
 静态轴在此基建上的增量只有：预建 shape 注册表 + certificate 摄入 +
 特化 opcode 家族。**时序（1.0 修订入正文）：Phase 0.5 不再是静态
-轴的第一步——它移出 S1、挂 G1-JIT 之后，立项证据由 PERF-DYN-SPIKE
+轴的第一步——它移出 S1,立项证据由 PERF-DYN-SPIKE
 购买、经 G1-FEEDBACK 独立裁决（evolution v0.6）；两轴共享基建，
 不共享排期。**
 
@@ -518,7 +522,7 @@ Gate 1 含「JIT/AOT 两者均后置、投入转产品能力」的合法出口�
 | # | 前置项 | 为什么阻塞 | 状态与出处 |
 | --- | --- | --- | --- |
 | F1 | **shape identity（= PERF-SHAPE-ID，双域身份合同，§4.1）** | 一切 per-site 缓存（Phase 0.5 反馈槽、T1 guard）的健全性依据；现状 rc==1 原地变异 + relocate ABA 使指针比对不可靠 | 未开工；交付物 = §4.1 双域身份合同（1.1 定案：动态域 u64 identity + typed/NativeClass 域 pinned pointer guard），需与 tracing GC 侧共同评审 |
-| F2 | **per-site metadata 侧表** | **仅动态轴（Phase 0.5 反馈槽）的载体**。0.3 修正：typed 站点的 guard 数据是编译期常量、编进操作数，运行时**不消费侧表**（这正是 §1.5 免于"miss 税"否证的机制根据）——T1 对 F2 无硬依赖，静态轴与 Phase 0.5 交付解耦；仅站点毒化计数、atom 恢复表等冷路径设施可复用其挂载点 | = Phase 0.5 交付物（v0.4 §6.1；时序 1.0 修订：挂 G1-JIT 之后，由 PERF-DYN-SPIKE→G1-FEEDBACK 裁决） |
+| F2 | **per-site metadata 侧表** | **仅动态轴（Phase 0.5 反馈槽）的载体**。0.3 修正：typed 站点的 guard 数据是编译期常量、编进操作数，运行时**不消费侧表**（这正是 §1.5 免于"miss 税"否证的机制根据）——T1 对 F2 无硬依赖，静态轴与 Phase 0.5 交付解耦；仅站点毒化计数、atom 恢复表等冷路径设施可复用其挂载点 | = Phase 0.5 交付物（v0.4 §6.1；时序 1.0/1.2 修订:由 PERF-DYN-SPIKE→G1-FEEDBACK 独立裁决,与 G1-JIT 无关） |
 | F3 | **TS 语法解析（strip，可擦除子集）** | 引擎读不到注解则静态轴不存在 | 未开工，独立可交付（T-gate 0）；与 F5 同属 **PERF-TYPED-IR**，启动条件 = 双触发（§5.1） |
 | F4 | **opcode 空间接入**（opcode namespace 方案已升为独立工作项 **PERF-OPCODE-SPACE**，roadmap v1.7） | short 区 178-253 已被 temp 区+融合 op 占用（`bytecode.zig:348-424`）；T1-T4 预计需 20-40 个新 id，现平面放不下 | 未开工；PERF-OPCODE-SPACE 范围 = wide/prefix/二级平面、编码版本策略、四消费方共享生成源（compiler/disassembler/serializer/JIT）、I-cache 与 decode 成本 A/B；本计划 F4 与 FN-M1A、SER-ARTIFACT 均依赖它 |
 | F5 | **编译期 shape 注册机制**（typed class 声明 → shape 描述随字节码携带 → 首次执行物化） | T1 的"预建 shape"需要编译器能描述布局；现状 shape 全部运行时构建 | 未开工。**翻案说明**：zoo-r0 曾否决 `object_from_shape`（eligible literals ≪ G1 bar）——那是对 untyped 动态字面量的可证明率裁决；typed class 是显式声明，可证明率 100%，前提不同，旧裁决不适用；与 F3 同属 **PERF-TYPED-IR**（双触发，§5.1） |
@@ -530,7 +534,7 @@ Gate 1 含「JIT/AOT 两者均后置、投入转产品能力」的合法出口�
 | --- | --- | --- |
 | P1 | **门禁扩容**：refactor gate 从 v7 的 8 基准扩到含 pdfjs/typescript/box2d/gbemu | v7 门禁盲区已让这一族无守卫滑坡数周；类型轴施工期（大量编译器/解释器改动）必须有全谱守卫。**已交付（2026-08-25）**：A/B 门禁随 Octane 2.0 扩到 16 项（`docs/refactor-policy.md:40-45`） |
 | P2 | **eval CompilationCache**（V8 四元组 key，incubator） | Octane 收益 0.9 证伪（cacheBust 使命中恒 0）；**T5 的对冲**逻辑保留为 incubator 立项理由——TS 解析与类型传播会让编译变贵;是否立项以 fun 真实负载定 |
-| P3 | **原型链命中缓存**（Phase 0.5 范围内优先项；时序随 Phase 0.5 挂 G1-JIT 之后、由 PERF-DYN-SPIKE→G1-FEEDBACK 裁决，1.0 修订） | 归因显示 Richards/DeltaBlue 的方法读（proto-hit）是最大单项负载；且 T1 的 proto-slot 形态（带 guard）与它是同一机制——若立项则动态版先落地，typed 版只是预填 |
+| P3 | **原型链命中缓存**（Phase 0.5 范围内优先项；时序随 Phase 0.5 由 PERF-DYN-SPIKE→G1-FEEDBACK 独立裁决,1.0/1.2 修订） | 归因显示 Richards/DeltaBlue 的方法读（proto-hit）是最大单项负载；且 T1 的 proto-slot 形态（带 guard）与它是同一机制——若立项则动态版先落地，typed 版只是预填 |
 | P4 | **tracing GC 合入窗口协调** | `gc/tracing` 状态降级（2026-08-25）：此前"四门全绿"是在 major 从不触发的收集器上量的（`f10855c6`、`756a1d07`），合入窗口前须重新过门；F1 动 shape 布局、F2 引入新 GC 可达结构（缓存持 shape 引用），两个大改动不应同时在飞——建议 GC 重新过门合入或明确冻结窗口后再动 F1/F2 |
 | P5 | **zlib indirect-eval 修复** | 正确性欠账（Octane 第 17 项跳过中）；与类型轴无依赖，但 eval 语义修复与 P2 同域，可顺路 |
 
@@ -547,7 +551,7 @@ S0  F6 测量尺裁决 + P1 门禁扩容（~1 天，一切 A/B 的前提）
     —— **两项均已交付（2026-08-25，见 §6.1 F6/P1 状态列）**
 S1  = Phase 0（PERF-VMABI）：VmExecState ABI、helper 频率仪器。
     **Phase 0.5 移出 S1**——F2 side table、property/call 反馈槽与
-    P3 原型链命中缓存及其验收锚随之外移,挂 G1-JIT 之后,由
+    P3 原型链命中缓存及其验收锚随之外移,由
     PERF-DYN-SPIKE→G1-FEEDBACK 独立裁决（evolution v0.6）
     ├─ F1 shape identity（PERF-SHAPE-ID）不随 0.5 外移:它是
     │   PERF-T1 的硬前置,排期与 P4（gc/tracing 合入窗口）协调
@@ -648,7 +652,7 @@ untyped——静态轴投资在 JIT 时代复利，不重复计价。
 | S0 测量尺裁决+门禁扩容 | 1-2 | 保全所有后续 A/B | 无穷（风险口径） |
 | **P2 eval 缓存** | 3-5 | Octane 预期 0.9 证伪归零,转 incubator | ROI 首位撤销,移交 T/N-spike |
 | **T-spike** | 2-3 | 把 T1 的 35-55 人日投资决策从纸面变实测 | **信息购买，第二优先** |
-| Phase 0.5 全量 | 15-20 | Octane +0.5~1.5% + Phase 2 必需输入 | 单看解释器级偏低；时序挂 G1-JIT 之后，立项证据由 PERF-DYN-SPIKE 购买（1.0 修订） |
+| Phase 0.5 全量 | 15-20 | Octane +0.5~1.5% + Phase 2 必需输入 | 单看解释器级偏低；时序由 G1-FEEDBACK 独立裁决,立项证据由 PERF-DYN-SPIKE 购买(1.0/1.2 修订) |
 | F1+F3+F4+F5+T1（= PERF-SHAPE-ID + PERF-TYPED-IR + PERF-OPCODE-SPACE + PERF-T1，G1-TYPED 裁决实施后） | 35-55（F3 TS 语法 10-20 为大头） | typed 负载 +15~20%（基准档） | 取决于 fun 热代码的 typed 占比——占比高则为产品主杠杆 |
 | T2/T3/T4 | 各 2-8 | typed +1~3%/项 | 低，仅作基建摊销后的搭车项 |
 | P5 zlib 修复 | 2-4 | 正确性+第 17 项分数 | 正确性义务 |
