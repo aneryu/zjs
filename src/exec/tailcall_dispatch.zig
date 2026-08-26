@@ -3906,18 +3906,6 @@ fn op_tspike_get_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf:
     return cont(pc + 6, sp, var_buf, vm);
 }
 
-fn op_tspike_put_release_old_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
-    const rt = vm.ctx.runtime;
-    (sp - 1)[0].freeDuringActiveBytecode(rt);
-    (sp - 2)[0].freeObjectAssumeObjectDuringActiveBytecode(rt);
-    return cont(pc + 6, sp - 2, var_buf, vm);
-}
-
-fn op_tspike_put_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
-    (sp - 2)[0].freeObjectAssumeObjectDuringActiveBytecode(vm.ctx.runtime);
-    return cont(pc + 6, sp - 2, var_buf, vm);
-}
-
 pub fn op_tspike_get_slot(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section_tail) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const obj = object_ops.objectFromValue(receiver) orelse
@@ -3943,30 +3931,6 @@ pub fn op_tspike_get_slot(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
         return @call(.always_tail, op_tspike_get_release_receiver_tail, .{ pc, sp, var_buf, vm });
     }
     return cont(pc + 6, sp, var_buf, vm);
-}
-
-pub fn op_tspike_put_slot(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section_tail) callconv(.c) Outcome {
-    const receiver = (sp - 2)[0];
-    const obj = object_ops.objectFromValue(receiver) orelse
-        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    const e = &tspike.registry[pc[5]];
-    // Writes never take the prototype leg: a proto hit would be a shadowing
-    // add, which is the generic path's business.
-    if (tspike.shapeKey(obj.shape_ref) != e.guard_key or e.proto_key != 0)
-        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    const rt = vm.ctx.runtime;
-    const slot = &obj.prop_values[e.slot_index].slot.data;
-    const old_value = loadValueAsIntPair(slot);
-    const value = loadValueAsIntPair(&(sp - 1)[0]);
-    storeValueAsIntPair(slot, value); // consumes the stack's ref on value
-    if (old_value.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {
-        storeValueAsIntPair(&(sp - 1)[0], old_value);
-        return @call(.always_tail, op_tspike_put_release_old_tail, .{ pc, sp, var_buf, vm });
-    }
-    if (receiver.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
-        return @call(.always_tail, op_tspike_put_release_receiver_tail, .{ pc, sp, var_buf, vm });
-    }
-    return cont(pc + 6, sp - 2, var_buf, vm);
 }
 
 fn op_get_array_el_atom_key(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {

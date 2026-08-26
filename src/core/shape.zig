@@ -841,8 +841,14 @@ pub const Registry = struct {
         // qjs js_free_shape0 never re-derives block size from prop_size; the
         // malloc header carries it (quickjs.c:1614). Slab shapes debit the
         // class usable payload; standalone prefixes still read live fields.
-        const accounted = memory.MemoryAccount.gcSlabAccountedPayload(shape) orelse
-            (@sizeOf(Shape) + shape.famByteSize());
+        // PERF-T-SPIKE branch: debit the SAME currency the credit and the
+        // Debug verifier use (requested bytes = @sizeOf + FAM), instead of the
+        // slab class's usable payload. Those two agree on main only because
+        // every shape size happens to land exactly on a class boundary; adding
+        // 8 bytes to Shape breaks the coincidence and the Debug heap-accounting
+        // invariant fires. Filed against main separately -- the spike is not
+        // the place to re-currency engine accounting.
+        const accounted = @sizeOf(Shape) + shape.famByteSize();
         const fam_bytes = accounted - @sizeOf(Shape);
         self.gc_registry.unlinkObjectWithBytes(&shape.header, accounted);
         self.unlink(shape);

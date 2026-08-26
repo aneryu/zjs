@@ -437,7 +437,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     }.b);
 
     // --- fields / private / array_el / super ---
-    inline for ([_]u8{ op.get_field, op.get_field2, op.put_field, op.tspike_get_slot, op.tspike_put_slot }) |o| t[o] = h_field;
+    inline for ([_]u8{ op.get_field, op.get_field2, op.put_field, op.tspike_get_slot }) |o| t[o] = h_field;
     t[op.get_private_field] = h(struct {
         fn b(vm: *Vm) HostError!void {
             _ = try vm_property_private.getPrivateFieldVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
@@ -994,7 +994,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // PERF-T-SPIKE (branch-quarantined): guarded direct-slot access; every
     // miss re-tails to cold h_field, whose field() arms cover these ops.
     t[op.tspike_get_slot] = dispatch.op_tspike_get_slot;
-    t[op.tspike_put_slot] = dispatch.op_tspike_put_slot;
     t[op.get_array_el] = dispatch.op_get_array_el; // dense fast path; miss → cold h_get_array_element
     t[op.push_0_or] = dispatch.op_push_0_or;
     t[op.sar_get_array_el] = dispatch.op_sar_get_array_el;

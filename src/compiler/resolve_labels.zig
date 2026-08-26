@@ -2672,20 +2672,6 @@ const Resolver = struct {
                     }
                 },
 
-                // PERF-T-SPIKE: put sites get their own registry entries.
-                op.put_field => {
-                    if (tspikeOn() and tspike_next_site < 256) {
-                        try self.attachSource();
-                        try self.appendByte(op.tspike_put_slot);
-                        try self.appendU32(try readU32At(self.code, position, 1));
-                        try self.appendByte(@intCast(tspike_next_site));
-                        tspike_next_site += 1;
-                        try self.consumeInstructionAtom(position, instruction, true);
-                    } else {
-                        try self.copyDefault(layout, position, instruction);
-                    }
-                },
-
                 // qjs:35276-35296.
                 op.push_atom_value => {
                     if (try self.matchSeq(position_next, &.{

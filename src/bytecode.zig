@@ -415,14 +415,16 @@ pub const opcode = struct {
         pub const parser_label_tag: u32 = 0x8000_0000;
 
         /// PERF-T-SPIKE (branch-quarantined prototype): guarded direct-slot
-        /// property access. Operands: atom u32 (capture/fallback only) +
+        /// property READ. Operands: atom u32 (capture/fallback only) +
         /// registry index u8. Emitted only by the ZJS_TSPIKE=1 rewrite in
-        /// resolve_labels.zig; never by the normal pipeline.
+        /// resolve_labels.zig; never by the normal pipeline. Only ONE id is
+        /// claimed: 255 must stay unclaimed (the invalid-opcode test uses it),
+        /// so writes keep the generic path -- a conservative bias, since the
+        /// typed workloads are read-dominated.
         pub const tspike_get_slot: u8 = 254;
-        pub const tspike_put_slot: u8 = 255;
 
         /// Number of real (DEF) opcodes; ids 0..op_count-1 are claimed.
-        pub const op_count: u16 = 256;
+        pub const op_count: u16 = 255;
         /// First id of the temp/short overlap range (OP_nop + 1).
         pub const op_temp_start: u8 = 178;
         /// One past the last temp id (exclusive).
@@ -499,7 +501,7 @@ pub const opcode = struct {
         }
     };
 
-    pub const op_info_len: usize = 275;
+    pub const op_info_len: usize = 274;
 
     /// Merged metadata table in quickjs-opcode.h file order (see header
     /// comment for the index layout).
@@ -778,7 +780,6 @@ pub const opcode = struct {
         .{ .name = "push_this_put_loc0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [271] id 252
         .{ .name = "put_loc0_get_loc0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [272] id 253
         .{ .name = "tspike_get_slot", .size = 6, .n_pop = 1, .n_push = 1, .fmt = .atom_u8 }, // [273] id 254 (spike)
-        .{ .name = "tspike_put_slot", .size = 6, .n_pop = 2, .n_push = 0, .fmt = .atom_u8 }, // [274] id 255 (spike)
     };
 
     /// Name-free production view of `opcode_info`, matching QuickJS's

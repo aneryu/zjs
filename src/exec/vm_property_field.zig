@@ -190,21 +190,15 @@ pub noinline fn field(
     // site is captured HERE, on its first cold visit, so the resident
     // handlers stay leaf (see tspike.zig fairness rule 1): this visit still
     // answers generically, and the next execution takes the guarded path.
-    if (opc == op.tspike_get_slot or opc == op.tspike_put_slot) {
+    if (opc == op.tspike_get_slot) {
         frame.pc += 1;
         const site_index = function.byteCode()[site_pc + 5];
         const entry = &tspike.registry[site_index];
         if (entry.state == tspike.state_empty) {
-            const is_put = opc == op.tspike_put_slot;
-            const depth: usize = if (is_put) 2 else 1;
-            if (stack.len() >= depth) {
-                const receiver = stack.values[stack.len() - depth];
+            if (stack.len() >= 1) {
+                const receiver = stack.values[stack.len() - 1];
                 if (core.value_semantics.objectFromValue(receiver)) |obj| {
-                    if (is_put) {
-                        _ = tspike.capture(obj, atom_id, entry, true);
-                    } else {
-                        _ = tspike.capture(obj, atom_id, entry, false);
-                    }
+                    _ = tspike.capture(obj, atom_id, entry, false);
                 } else {
                     entry.state = tspike.state_poisoned;
                 }
@@ -292,7 +286,7 @@ pub noinline fn field(
             errdefer value.free(ctx.runtime);
             try stack.pushOwned(value);
         },
-        op.put_field, op.tspike_put_slot => {
+        op.put_field => {
             const value = try stack.pop();
             var value_consumed = false;
             defer if (!value_consumed) value.free(ctx.runtime);
