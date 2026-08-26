@@ -2508,9 +2508,16 @@ pub const JSRuntime = struct {
             // two husk-forming sites apply (`Object.destroyFromHeader` and
             // `drainCycleDeferredFrees`). `finalizing` cannot serve here: the
             // sweep sets it on every object it parks, not only on husks.
-            if (object.weakref_count == 0 and
-                object.header.meta().rc == 0 and !object.header.meta().flags.mark)
-            {
+            const husk_dead = if (comptime gc.trace_stw_enabled)
+                // Under the tracer, rc 0 can only be the deliberate husk stamp
+                // -- object counts are frozen at 1 -- and the mark bit's
+                // meaning now depends on `mark_parity`, which flips per cycle
+                // while a husk's bit stays frozen at death. The rc build keeps
+                // the raw-bit protocol (queued-for-teardown reads as marked).
+                object.header.meta().rc == 0
+            else
+                object.header.meta().rc == 0 and !object.header.meta().flags.mark;
+            if (object.weakref_count == 0 and husk_dead) {
                 Object.destroyDeadWeakHusk(self, object);
             }
             return;

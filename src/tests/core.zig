@@ -13873,12 +13873,12 @@ test "the barrier shades exact targets while marking and remembers owners otherw
     try std.testing.expectEqual(shaded_before, rt.gc.concurrent.stats.shaded);
 
     // Marking active: the same write shades its exact target instead.
-    child.header.meta().flags.mark = false;
+    rt.gc.setHeaderUnmarked(&child.header);
     rt.gc.concurrent.major_marking_active.store(true, .release);
     defer rt.gc.concurrent.major_marking_active.store(false, .release);
     rt.gc.generationalBarrier(&owner.header, &child.header);
     try std.testing.expect(rt.gc.concurrent.stats.shaded > shaded_before);
-    try std.testing.expect(child.header.metaConst().flags.mark);
+    try std.testing.expect(rt.gc.headerMarked(&child.header));
 }
 
 test "a concurrent major collects garbage and keeps what the barrier shaded" {
@@ -13912,22 +13912,22 @@ test "the barrier shades a target the marker had already passed" {
     // colour the barrier gives it, not its lifetime.
     const target = try core.Object.createPlainObject(rt, null);
     defer target.value().free(rt);
-    target.header.meta().flags.mark = false;
+    rt.gc.setHeaderUnmarked(&target.header);
 
     // The interleaving the barrier exists for: the mutator stores a reference
     // after the marker already walked the owner, so nothing will re-trace it.
     // Only the shading keeps the target in this cycle's live set.
     rt.gc.concurrent.major_marking_active.store(true, .release);
     const shaded_before = rt.gc.concurrent.stats.shaded;
-    rt.gc.shadeForConcurrentMark(&target.header);
+    rt.gc.shadeForConcurrentMark(&target.header, &target.header);
     rt.gc.concurrent.major_marking_active.store(false, .release);
 
-    try std.testing.expect(target.header.metaConst().flags.mark);
+    try std.testing.expect(rt.gc.headerMarked(&target.header));
     try std.testing.expectEqual(shaded_before + 1, rt.gc.concurrent.stats.shaded);
 
     // Shading twice is idempotent: an already-marked target costs a check,
     // not a second queue entry.
-    rt.gc.shadeForConcurrentMark(&target.header);
+    rt.gc.shadeForConcurrentMark(&target.header, &target.header);
     try std.testing.expectEqual(shaded_before + 1, rt.gc.concurrent.stats.shaded);
 }
 
@@ -13999,7 +13999,7 @@ test "the marker worker marks queued objects on its own thread" {
     var held: [64]*core.Object = undefined;
     for (&held) |*slot| {
         slot.* = try core.Object.createPlainObject(rt, null);
-        slot.*.header.meta().flags.mark = false;
+        rt.gc.setHeaderUnmarked(&slot.*.header);
     }
     defer for (held) |obj| obj.value().free(rt);
 
@@ -14019,7 +14019,7 @@ test "the marker worker marks queued objects on its own thread" {
     worker.join();
     rt.gc.concurrent.major_marking_active.store(false, .release);
 
-    for (held) |obj| try std.testing.expect(obj.header.metaConst().flags.mark);
+    for (held) |obj| try std.testing.expect(rt.gc.headerMarked(&obj.header));
     try std.testing.expectEqual(@as(usize, held.len), worker.stats.marked);
     try std.testing.expect(!worker.running.load(.acquire));
 }
@@ -14034,7 +14034,7 @@ test "the marker worker and a mutator can shade concurrently without losing mark
     var held: [256]*core.Object = undefined;
     for (&held) |*slot| {
         slot.* = try core.Object.createPlainObject(rt, null);
-        slot.*.header.meta().flags.mark = false;
+        rt.gc.setHeaderUnmarked(&slot.*.header);
     }
     defer for (held) |obj| obj.value().free(rt);
 
@@ -14050,7 +14050,7 @@ test "the marker worker and a mutator can shade concurrently without losing mark
     // neither may lose an object.
     for (held, 0..) |obj, i| {
         if (i % 2 == 0) {
-            rt.gc.shadeForConcurrentMark(&obj.header);
+            rt.gc.shadeForConcurrentMark(&obj.header, &obj.header);
         } else {
             _ = queue.push(&obj.header);
         }
@@ -14060,7 +14060,7 @@ test "the marker worker and a mutator can shade concurrently without losing mark
     worker.join();
     rt.gc.concurrent.major_marking_active.store(false, .release);
 
-    for (held) |obj| try std.testing.expect(obj.header.metaConst().flags.mark);
+    for (held) |obj| try std.testing.expect(rt.gc.headerMarked(&obj.header));
 }
 
 
@@ -14347,9 +14347,9 @@ test "marking barrier shades grey, not black: the stored object's children survi
     // through a path the mutator is about to erase, so the tracer never saw
     // them. Then the mutator stores B into A. The write barrier is the only
     // thing standing between C and the sweep.
-    a.header.meta().flags.mark = true;
-    b.header.meta().flags.mark = false;
-    c.header.meta().flags.mark = false;
+    rt.gc.setHeaderMarked(&a.header);
+    rt.gc.setHeaderUnmarked(&b.header);
+    rt.gc.setHeaderUnmarked(&c.header);
     rt.gc.concurrent_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
     rt.gc.concurrent.major_marking_active.store(true, .release);
     defer rt.gc.concurrent.major_marking_active.store(false, .release);
@@ -14360,15 +14360,15 @@ test "marking barrier shades grey, not black: the stored object's children survi
     // children get traced). The original barrier only marked, and a marked
     // object is never re-entered by `shade()`, so C stayed white through the
     // remark and was swept alive.
-    try std.testing.expect(b.header.metaConst().flags.mark);
+    try std.testing.expect(rt.gc.headerMarked(&b.header));
     const drained = try core.gc_trace_stw.remarkBarrierQueueForTest(rt);
     try std.testing.expect(drained >= 1);
-    try std.testing.expect(c.header.metaConst().flags.mark);
+    try std.testing.expect(rt.gc.headerMarked(&c.header));
 
     // Cleanup: marks are collection-transient state in this simulated cycle.
-    a.header.meta().flags.mark = false;
-    b.header.meta().flags.mark = false;
-    c.header.meta().flags.mark = false;
+    rt.gc.setHeaderUnmarked(&a.header);
+    rt.gc.setHeaderUnmarked(&b.header);
+    rt.gc.setHeaderUnmarked(&c.header);
 }
 
 test "barrier queue overflow downgrades to a rescan, not to lost children" {
@@ -14389,25 +14389,25 @@ test "barrier queue overflow downgrades to a rescan, not to lost children" {
     // No ring at all: every push reports overflow, which is the same state a
     // full ring reaches. The shaded object keeps its mark, loses its queue
     // slot, and must still be found by the remark's marked-object rescan.
-    b.header.meta().flags.mark = false;
-    c.header.meta().flags.mark = false;
+    rt.gc.setHeaderUnmarked(&b.header);
+    rt.gc.setHeaderUnmarked(&c.header);
     rt.gc.concurrent.major_marking_active.store(true, .release);
     defer rt.gc.concurrent.major_marking_active.store(false, .release);
 
     const owner = try core.Object.create(rt, core.class.ids.object, null);
     defer owner.value().free(rt);
-    owner.header.meta().flags.mark = true;
+    rt.gc.setHeaderMarked(&owner.header);
     rt.gc.generationalBarrier(&owner.header, &b.header);
 
-    try std.testing.expect(b.header.metaConst().flags.mark);
+    try std.testing.expect(rt.gc.headerMarked(&b.header));
     try std.testing.expect(rt.gc.concurrent_mark_queue.hasOverflowed());
     _ = try core.gc_trace_stw.remarkBarrierQueueForTest(rt);
-    try std.testing.expect(c.header.metaConst().flags.mark);
+    try std.testing.expect(rt.gc.headerMarked(&c.header));
     try std.testing.expect(!rt.gc.concurrent_mark_queue.hasOverflowed());
 
-    b.header.meta().flags.mark = false;
-    c.header.meta().flags.mark = false;
-    owner.header.meta().flags.mark = false;
+    rt.gc.setHeaderUnmarked(&b.header);
+    rt.gc.setHeaderUnmarked(&c.header);
+    rt.gc.setHeaderUnmarked(&owner.header);
 }
 
 test "an incremental cycle frees threshold garbage across bounded polls" {
@@ -14519,7 +14519,7 @@ test "an explicit collection supersedes an open incremental cycle with full prec
     var index: usize = 0;
     while (index < 64) : (index += 1) {
         const dead = try core.Object.create(rt, core.class.ids.object, null);
-        try std.testing.expect(dead.header.metaConst().flags.mark);
+        try std.testing.expect(rt.gc.headerMarked(&dead.header));
         dead.value().free(rt);
     }
 

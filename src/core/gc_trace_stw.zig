@@ -140,7 +140,7 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !void {
     {
         var it = rt.gc.objectIterator();
         while (it.next()) |header| {
-            if (header.metaConst().flags.mark) try saved.append(rt.memory.persistent_allocator, header);
+            if (rt.gc.headerMarked(header)) try saved.append(rt.memory.persistent_allocator, header);
         }
     }
 
@@ -160,14 +160,14 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !void {
     {
         var it = rt.gc.objectIterator();
         while (it.next()) |header| {
-            if (header.metaConst().flags.mark) {
+            if (rt.gc.headerMarked(header)) {
                 try verify_reachable.put(rt.memory.persistent_allocator, @intFromPtr(header), {});
             }
         }
     }
 
     probe.clearMarks();
-    for (saved.items) |header| header.meta().flags.mark = true;
+    for (saved.items) |header| rt.gc.setHeaderMarked(header);
 }
 
 /// Compute the census fields that each cost a whole-heap walk.
@@ -494,20 +494,11 @@ pub fn incrementalMarkStep(rt: *JSRuntime, budget_ns: u64) CollectError!bool {
     const started = profile.nowNanos();
     var since_clock: usize = 0;
     while (queue.pop()) |header| {
-        // The mutator ran between increments, and rc-counted kinds -- shapes,
-        // whose replacement churn is constant -- can be freed while sitting
-        // in this queue. Nothing purges the queue on free (a scan per free
-        // would be the wrong trade), so the pop validates instead: resolve
-        // the address as the conservative scanner would. A freed slab block
-        // reads unaccounted; a freed standalone loses its occupant entry; a
-        // released arena is absent from the set, which matters because its
-        // pages may be unmapped and even reading the byte would fault. A slot
-        // reused by a NEW object resolves and is traced, which is sound --
-        // tracing any live object is always sound, and costs at most some
-        // floating marks. The STW collector never needed this: its work list
-        // does not outlive a pause, and this queue's whole purpose is to.
-        if (!rt.gc.address_registry.containsHeader(header)) continue;
-        if (header.meta().flags.cycle_visited) continue;
+        // No validation needed: rc-managed kinds never enter the queue (see
+        // `shade`), and everything that can is freeable only by the collector
+        // itself, which does not run inside its own mutator windows. The pop
+        // used to revalidate through the address registry -- 4.3% of splay's
+        // runtime, paid per object against a hazard only shapes had.
         try collector.traceHeader(header);
         if (collector.err) |err| return err;
         since_clock += 1;
@@ -570,7 +561,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     var doomed_bytes: usize = 0;
     var iterator = rt.gc.objectIterator();
     while (iterator.next()) |header| {
-        if (header.metaConst().flags.mark) {
+        if (rt.gc.headerMarked(header)) {
             header.meta().flags.young = false;
             continue;
         }
@@ -920,10 +911,13 @@ const Collector = struct {
         self.report.trans_swept_to_active = model.trans_swept_to_active;
     }
 
+    /// Whole-heap unmark. The O(1) parity flip that tried to replace this is
+    /// unsound under sticky generations (see `Registry.mark_parity`); the
+    /// walk falls to the block heap's per-block versions, not to a global bit.
     fn clearMarks(self: *Collector) void {
         var iterator = self.rt.gc.objectIterator();
         while (iterator.next()) |header| {
-            header.meta().flags.mark = false;
+            self.rt.gc.setHeaderUnmarked(header);
         }
     }
 
@@ -938,7 +932,7 @@ const Collector = struct {
     fn clearYoungMarks(self: *Collector) void {
         var iterator = self.rt.gc.youngIterator();
         while (iterator.next()) |header| {
-            header.meta().flags.mark = false;
+            self.rt.gc.setHeaderUnmarked(header);
         }
     }
 
@@ -946,7 +940,7 @@ const Collector = struct {
         var n: usize = 0;
         var iterator = self.rt.gc.objectIterator();
         while (iterator.next()) |header| {
-            if (header.metaConst().flags.mark) n += 1;
+            if (self.rt.gc.headerMarked(header)) n += 1;
         }
         return n;
     }
@@ -955,7 +949,7 @@ const Collector = struct {
         if (self.err != null) return;
         const addr = @intFromPtr(header);
         if (addr < 4096 or !std.mem.isAligned(addr, @alignOf(gc.Header))) return;
-        if (header.meta().flags.mark) return;
+        if (self.rt.gc.headerMarked(header)) return;
         // A condemned corpse awaiting its destruction slice. No precise root
         // can name it -- the remark proved it unreachable and processWeak
         // cleared its identities -- so the only way here is conservative
@@ -963,8 +957,32 @@ const Collector = struct {
         // `heap_accounted`. Shading it would trace freed payloads.
         // `detachCycleCandidate` already stamps the bit; this is the read.
         if (header.meta().flags.cycle_visited) return;
-        header.meta().flags.mark = true;
+        self.rt.gc.setHeaderMarked(header);
         if (self.shade_to_queue) {
+            // rc-managed kinds (shapes and realms still refcount under the
+            // tracer) never enter the queue: the mutator can free them during
+            // a window and the entry would dangle -- the pop used to pay a
+            // hash-validation per object to survive that, 4.3% of splay's
+            // whole runtime. Instead they are traced HERE, synchronously: a
+            // shape's trace is one proto edge, a realm is shaded once per
+            // cycle at the seeds. Every kind that CAN sit in the queue can
+            // only be freed by the collector itself, which does not run
+            // inside its own windows, so the queue needs no validation at
+            // all.
+            const kind = header.meta().flags.kind;
+            if (kind == .shape or kind == .realm_context) {
+                // Mark BEFORE tracing: the mark is both this object's
+                // survival (an unmarked shape here was condemned alive -- the
+                // first build of this branch forgot the store and test262
+                // found what macro-check missed) and the recursion's
+                // deduplication, since a re-shade of the same shape now takes
+                // the marked early-return above.
+                self.rt.gc.setHeaderMarked(header);
+                self.traceHeader(header) catch |err| {
+                    self.err = err;
+                };
+                return;
+            }
             // A failed push is the queue's overflow contract: the object is
             // marked, the flag is set, and the remark's rescan will find it.
             _ = self.rt.gc.concurrent_mark_queue.push(header);
@@ -1094,9 +1112,6 @@ const Collector = struct {
         var drained: usize = 0;
         while (queue.pop()) |header| {
             drained += 1;
-            // Same dangling-entry hazard as `incrementalMarkStep`: entries
-            // queued in earlier mutator windows may have been rc-freed since.
-            if (!self.rt.gc.address_registry.containsHeader(header)) continue;
             try self.traceHeader(header);
             if (self.err) |err| return err;
             try self.drain();
@@ -1104,7 +1119,7 @@ const Collector = struct {
         if (queue.hasOverflowed()) {
             var it = self.rt.gc.objectIterator();
             while (it.next()) |header| {
-                if (!header.metaConst().flags.mark) continue;
+                if (!self.rt.gc.headerMarked(header)) continue;
                 try self.traceHeader(header);
                 if (self.err) |err| return err;
                 try self.drain();
@@ -1162,12 +1177,12 @@ const Collector = struct {
             var holder = self.rt.weak_reference_holder_head;
             while (holder) |object| {
                 const next = object.weakReferenceHolderNext();
-                if (object.header.metaConst().flags.mark) {
+                if (self.rt.gc.headerMarked(&object.header)) {
                     if (object.collectionPayloadForCycleGc()) |payload| {
                         for (payload.weak_entries) |*entry| {
                             if (!keyIsMarked(self.rt, entry.key_identity)) continue;
                             const child = entry.value.cycleMarkHeader() orelse continue;
-                            if (child.metaConst().flags.mark) continue;
+                            if (self.rt.gc.headerMarked(child)) continue;
                             self.shade(child);
                             self.report.ephemeron_values_shaded += 1;
                         }
@@ -1197,7 +1212,7 @@ const Collector = struct {
         var current = self.rt.weak_reference_holder_head;
         while (current) |holder| {
             const next = holder.weakReferenceHolderNext();
-            if (holder.header.metaConst().flags.mark) {
+            if (self.rt.gc.headerMarked(&holder.header)) {
                 self.sweepHolder(holder, &finalization_enqueue_blocked);
             }
             current = next;
@@ -1289,7 +1304,7 @@ const Collector = struct {
         defer doomed.deinit(self.allocator());
         var young_it = self.rt.gc.youngIterator();
         while (young_it.next()) |header| {
-            if (header.metaConst().flags.mark) continue;
+            if (self.rt.gc.headerMarked(header)) continue;
             if (header.metaConst().flags.is_pinned) continue;
             // Every condemned kind is freed, not just `.object` -- see
             // `destroyCondemned`. A young var_ref or shape the trace did not
@@ -1359,7 +1374,7 @@ const Collector = struct {
 
         var iterator = self.rt.gc.objectIterator();
         while (iterator.next()) |header| {
-            if (header.metaConst().flags.mark) {
+            if (self.rt.gc.headerMarked(header)) {
                 // The mark STAYS. §8.2's sticky rule is `allocated && marked`
                 // is old, and the survivor's mark is what tells the next
                 // minor's `shade()` to stop at it -- clearing here made the
@@ -1465,12 +1480,12 @@ const Collector = struct {
                                 else => {},
                             }
                         }
-                        std.debug.print("MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d} owner_marked={}\n", .{ o.class_id, @tagName(o.flags.class_payload_kind), where, a.rt.atoms.name(@intCast(hit_atom)) orelse "?", o.shape_ref.prop_count, o.header.metaConst().flags.mark });
+                        std.debug.print("MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d} owner_marked={}\n", .{ o.class_id, @tagName(o.flags.class_payload_kind), where, a.rt.atoms.name(@intCast(hit_atom)) orelse "?", o.shape_ref.prop_count, a.rt.gc.headerMarked(&o.header) });
                     }
                     std.debug.print("MINOR-AUDIT owner={s}/ptr{x} owner_young={} owner_remembered={} -> child class={d}/{s} child_young={} child_marked={}\n", .{
                         @tagName(a.owner_kind), @intFromPtr(a.owner_ptr), a.owner_young, a.owner_remembered,
                         c.class_id,             @tagName(c.flags.class_payload_kind),
-                        child.metaConst().flags.young, child.metaConst().flags.mark,
+                        child.metaConst().flags.young, a.rt.gc.headerMarked(child),
                     });
                     return;
                 }
@@ -1655,5 +1670,5 @@ fn keyIsMarked(rt: *const JSRuntime, identity: usize) bool {
         return rt.atoms.kind(@intCast(atom_id)) == .symbol;
     }
     const object = rt.liveObjectFromWeakIdentity(identity) orelse return false;
-    return object.header.metaConst().flags.mark;
+    return rt.gc.headerMarked(&object.header);
 }

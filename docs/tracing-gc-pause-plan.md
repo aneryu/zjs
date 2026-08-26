@@ -361,6 +361,51 @@ this pause" had to be found**:
   condemn time NET OF the morgue's bytes, with the completion poll refining
   it from the truly shrunk account.
 
+## 4c. The splay verdict, taken whole (2026-08-26)
+
+Asked to look at splay as a whole rather than knife by knife, the anatomy:
+
+**The workload is the tracer's worst case by construction, not by our
+implementation.** The tree holds ~8000 nodes; every iteration inserts a
+~50-object payload and removes an OLD node's payload -- each object lives
+~8000 iterations before dying. So the garbage is 100% old, 100% acyclic, and
+dies at a constant rate. Refcounting is the information-theoretic optimum for
+that shape (removal drops the count to zero, freeing is O(1) with zero
+traversal); a tracer pays a whole-heap mark to discover each death. The 95%+
+young survival that suspends our minors is a property of the workload, and
+generational filtering is correctly useless here.
+
+Profile at this state (share of total runtime): mutator ~33%, marking ~19%,
+begin/condemn walks and poll dispatch ~21%, destruction ~10%, queue-pop
+validation 4.3% (since removed). Incremental knives taken: pop validation
+deleted by keeping rc-managed kinds out of the queue entirely (shapes expand
+synchronously at shade -- one proto edge; the barrier re-queues the OWNER for
+rc-managed targets), worth 3-5%.
+
+**One knife was drawn and retracted with a lesson worth the retraction: the
+O(1) mark-parity flip is unsound under sticky generations.** A flip equals a
+clear only when the heap is uniformly marked, and the sticky rule ends every
+cycle mixed -- survivors marked, newborns unmarked. Flipping reads every
+newborn as marked (they leak; their children get condemned alive), and
+allocate-black-always as a fix kills the minor outright. JSC escapes with
+per-BLOCK versions plus a newlyAllocated bitmap; that is the block heap's
+job, not a global bit's. The parity accessors stay in as the migration seam.
+
+**The structural ceiling:** incremental knives top out around splay ~2.3
+(from 2.87). Reaching the gate (bench-v8 composite >= 0.995, splay >= ~0.8)
+requires removing ~70% of remaining GC time, and only two paths do that:
+
+1. **Block heap serving GC nodes** (§4.5's own tranche): lazy sweep folds
+   condemn+destroy into allocation (the allocator's freelist scan IS the
+   sweep), per-block version bits kill the begin walk, block bitmaps replace
+   list traversal, and arena fragmentation (RSS 479 MB vs heap peak 263 MB)
+   falls out. This is the correct end-state and the plan's standing
+   recommendation.
+2. **Constitutional relief on §1.3's cycle peak/live < 1.8**: the growth
+   factor is the largest single lever (1.75 -> 3.0 halves collection count;
+   splay ~2.9 -> ~1.9 by arithmetic) and is capped by that row, since steady-
+   state peak/live equals the factor. Owner's call, not a tuning decision.
+
 ## 5. Phase 3 — deferred, with their triggers
 
 | Item | Trigger |

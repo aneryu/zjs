@@ -1066,6 +1066,24 @@ pub const Registry = struct {
     // that fail halfway through construction.
     concurrent: if (concurrent_enabled) ConcurrentState else void =
         if (concurrent_enabled) .{} else {},
+    /// Which value of `flags.mark` MEANS marked. Fixed at `true` -- the raw
+    /// bit's historical meaning -- and never flipped.
+    ///
+    /// A global parity flip was implemented as the O(1) replacement for the
+    /// begin-of-major `clearMarks` walk, and it is UNSOUND under sticky
+    /// generations, which is worth keeping in writing because the idea will
+    /// look attractive again: a flip is only equivalent to clearing when the
+    /// whole heap is uniformly marked, and the sticky rule ends every cycle
+    /// with a MIXED heap -- survivors marked, everything born since unmarked.
+    /// Flipping reads all those newborns as marked: they leak, their children
+    /// reachable only through them get condemned alive, and allocate-black-
+    /// always as a fix kills the minor outright (nothing young is ever
+    /// unmarked). JSC escapes the dilemma with per-BLOCK versions plus a
+    /// separate newlyAllocated bitmap (MarkedBlock.h:313), which is the block
+    /// heap's job here, not a single global bit's. The accessors stay so the
+    /// block-heap migration has one seam to cut.
+    mark_parity: bool = true,
+
     /// Condemned by an incremental cycle's finish, awaiting sliced
     /// destruction at later polls.
     ///
@@ -2006,6 +2024,18 @@ pub const Registry = struct {
         listDel(header);
     }
 
+    pub inline fn headerMarked(self: *const Registry, h: *const GCObjectHeader) bool {
+        return h.metaConst().flags.mark == self.mark_parity;
+    }
+
+    pub inline fn setHeaderMarked(self: *const Registry, h: *GCObjectHeader) void {
+        h.meta().flags.mark = self.mark_parity;
+    }
+
+    pub inline fn setHeaderUnmarked(self: *const Registry, h: *GCObjectHeader) void {
+        h.meta().flags.mark = !self.mark_parity;
+    }
+
     pub fn detachCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
         std.debug.assert(!header.meta().flags.cycle_visited);
         self.removeGcObject(header);
@@ -2071,11 +2101,32 @@ pub const Registry = struct {
         self.concurrent.stats.cycles_aborted += 1;
     }
 
-    pub inline fn shadeForConcurrentMark(self: *Registry, target: *GCObjectHeader) void {
+    pub inline fn shadeForConcurrentMark(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void {
         if (comptime !concurrent_enabled) return;
         self.concurrent.stats.barrier_calls += 1;
-        if (target.meta().flags.mark) return;
-        target.meta().flags.mark = true;
+        if (self.headerMarked(target)) return;
+        // rc-managed targets (shape adoption is the live case: a black object
+        // takes a fresh shape) must not enter the queue -- the mutator can
+        // free them while queued and the entry dangles. Marking without
+        // queuing is the black-without-tracing hole, so instead the OWNER is
+        // re-queued: its re-trace reaches the target through `shade`, whose
+        // queue mode expands rc-managed kinds synchronously. In the
+        // vanishing case where the owner is itself rc-managed, fall back to
+        // the queue's overflow contract: mark the target and set the flag, so
+        // the remark's marked-object rescan traces its children.
+        const kind = target.meta().flags.kind;
+        if (kind == .shape or kind == .realm_context) {
+            const owner_kind = owner.meta().flags.kind;
+            if (owner_kind == .shape or owner_kind == .realm_context) {
+                self.setHeaderMarked(target);
+                self.concurrent.stats.shaded += 1;
+                self.concurrent_mark_queue.overflowed.store(true, .release);
+                return;
+            }
+            _ = self.concurrent_mark_queue.push(owner);
+            return;
+        }
+        self.setHeaderMarked(target);
         self.concurrent.stats.shaded += 1;
         _ = self.concurrent_mark_queue.push(target);
     }
@@ -2177,7 +2228,7 @@ pub const Registry = struct {
         // this cycle, so remembering its owner as well would be redundant.
         if (comptime concurrent_enabled) {
             if (self.concurrent.markingActive()) {
-                self.shadeForConcurrentMark(target);
+                self.shadeForConcurrentMark(owner, target);
                 return;
             }
         }
@@ -2289,13 +2340,11 @@ pub const Registry = struct {
     inline fn markPublishedYoung(self: *Registry, header: *GCObjectHeader) void {
         if (comptime !generation_enabled) return;
         // §8.6 concurrent mark: "new objects are black-published". While a
-        // cycle is open, an object allocated now is alive now, and the tracer
-        // must not have to re-discover that; unmarked it would be condemned by
-        // the remark's sweep if nothing happened to trace a path to it. The
-        // cost when no cycle is open is one predictable branch on a plain
-        // load.
+        // cycle is open, an object allocated now is alive now, and unmarked it
+        // would be condemned by the remark's sweep. When no cycle is open the
+        // prefix's zeroed byte already means unmarked.
         if (comptime concurrent_enabled) {
-            if (self.concurrent.markingActive()) header.meta().flags.mark = true;
+            if (self.concurrent.markingActive()) self.setHeaderMarked(header);
         }
         header.meta().flags.young = true;
         self.generation.stats.young_count += 1;
