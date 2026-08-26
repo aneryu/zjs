@@ -42,7 +42,7 @@ items:
     type: governance
     state: done
     wip_slot: none
-    completion_commit: pending-this-commit
+    completion_commit: 982475fa
     evidence: reports/evidence/BASE-G0/manifest.json
     hard_prerequisites: []
     deliverables:
