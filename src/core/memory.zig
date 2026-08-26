@@ -1126,7 +1126,9 @@ pub const MemoryAccount = struct {
     /// `initGcPrefix`, info byte fixed to the block-cell marker.
     inline fn initGcPrefixBlockCell(comptime T: type, meta: [*]u8) void {
         comptime std.debug.assert(T.gc_kind_tag < 8);
-        std.mem.writeInt(u16, meta[0..2], 0, .little);
+        // Bytes 0..2 carry the CELL INDEX, stamped by the allocation hook so
+        // the mark accessors never pay the non-power-of-two division on the
+        // trace's hottest path. Preserved here, not zeroed.
         std.mem.writeInt(u16, meta[2..4], @as(u16, alloc_info_block_cell) | (@as(u16, T.gc_kind_tag) << 8), .little);
         @as(*align(4) i32, @ptrCast(@alignCast(meta + 4))).* = 1;
     }
@@ -1162,11 +1164,16 @@ pub const MemoryAccount = struct {
         if (comptime is_gc) {
             if (self.gc_cell_alloc_fn) |cell_alloc| {
                 if (T.gc_kind_tag == self.gc_cell_kind_tag) {
-                    const bytes: usize = gc_prefix_size + @sizeOf(T);
+                    const bytes: usize = @sizeOf(T);
                     try self.checkAllocation(bytes);
                     if (comptime trigger_gc) self.triggerGCBeforeAllocation(bytes);
-                    if (cell_alloc(self.gc_cell_ctx, bytes)) |cell| {
+                    if (cell_alloc(self.gc_cell_ctx, gc_prefix_size + bytes)) |cell| {
                         initGcPrefixBlockCell(T, cell);
+                        // Slab accounting parity: the ledger records the
+                        // object's size, never the prefix -- the heap-account
+                        // verifier derives its expectation from
+                        // `allocationSize`, and an 8-byte skew per object is
+                        // a HeapLiveBytesMismatch on the first audit.
                         self.creditAlloc(bytes, null);
                         self.noteAllocDiagnostics(true, @sizeOf(T), 1, @intFromPtr(cell) + gc_prefix_size);
                         return @ptrFromInt(@intFromPtr(cell) + gc_prefix_size);
@@ -1230,7 +1237,7 @@ pub const MemoryAccount = struct {
         if (comptime is_gc) {
             if (self.gc_cell_free_fn) |cell_free| {
                 if (gcAllocInfoByte(ptr) == alloc_info_block_cell) {
-                    const bytes: usize = gc_prefix_size + @sizeOf(T);
+                    const bytes: usize = @sizeOf(T);
                     self.debitAlloc(bytes, null);
                     self.noteFreeDiagnostics(true);
                     cell_free(self.gc_cell_ctx, @ptrFromInt(@intFromPtr(ptr) - gc_prefix_size));

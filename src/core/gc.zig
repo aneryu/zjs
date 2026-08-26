@@ -69,6 +69,8 @@ pub const block_heap_enabled: bool = trace_stw_enabled;
 /// lists the candidate scan walks.
 pub const string_registry_enabled: bool = shadow_tracer_enabled;
 
+const BlockHeapMod = @import("gc_block_heap.zig");
+
 const AddressRegistryTable = if (address_registry_enabled)
     @import("gc_address_registry.zig").Table
 else
@@ -1669,7 +1671,7 @@ pub const Registry = struct {
         }
 
         if (comptime address_registry_enabled) {
-            if (tracked) self.linkGcObjectTail(h);
+            if (tracked and !isBlockCellHeader(h)) self.linkGcObjectTail(h);
             self.registerLiveAddress(h, bytes, tracked);
             self.observeNewPublication(h, bytes);
         } else if (tracked) self.linkGcObjectTail(h);
@@ -1931,15 +1933,114 @@ pub const Registry = struct {
         self.pin_entries_capacity = new_capacity;
     }
 
+    /// Composite iterator over every PUBLISHED GC object.
+    ///
+    /// Two phases behind one `next()`: the intrusive list (slab and
+    /// standalone kinds -- block-served objects no longer link there), then
+    /// the block heap's cells, walked bitmap-word first so an empty block
+    /// costs four word tests. Producing a cell requires alloc-bit AND
+    /// `heap_accounted`, which is exactly the old list membership: husks keep
+    /// their cell but lose their accounting, and a cell between
+    /// `initGcPrefix` and registration is not yet an object.
+    ///
+    /// In young mode the block phase walks the young-block list instead of
+    /// every superblock, filtering per cell on the `young` header bit --
+    /// recycled cells put OLD objects inside young-listed blocks.
     pub const GcObjectIterator = struct {
         cursor: ?*GCObjectHeader,
         sentinel: *const GCObjectHeader,
+        heap: if (block_heap_enabled) ?*const BlockHeapMod.Heap else void =
+            if (block_heap_enabled) null else {},
+        young_only: bool = false,
+        /// Dead-scan mode: the block phase yields only allocated-and-unmarked
+        /// cells, computed word-at-a-time, so survivors are never touched --
+        /// the whole point of bitmap condemnation. List-phase consumers do
+        /// their own mark test as before.
+        unmarked_only: bool = false,
+        sb_index: usize = 0,
+        blk_index: usize = 0,
+        cell_index: u32 = 0,
+        young_block: usize = 0,
 
         pub fn next(self: *GcObjectIterator) ?*GCObjectHeader {
-            const current = self.cursor orelse return null;
-            if (current == self.sentinel) return null;
-            self.cursor = current.next;
-            return current;
+            if (self.cursor) |current| {
+                if (current != self.sentinel) {
+                    self.cursor = current.next;
+                    return current;
+                }
+                self.cursor = null;
+            }
+            if (comptime !block_heap_enabled) return null;
+            const heap = self.heap orelse return null;
+            if (self.young_only) return self.nextYoungCell(heap);
+            return self.nextCell(heap);
+        }
+
+        fn nextInBlock(self: *GcObjectIterator, block: *BlockHeapMod.Block, young_filter: bool) ?*GCObjectHeader {
+            // Word-skipping: an empty word advances 64 cells on one load. The
+            // first cut walked cell by cell with an atomic load each, which
+            // priced enumeration at the block's CAPACITY -- slower than the
+            // list it replaced.
+            const words = block.allocWords();
+            const epoch = if (comptime block_heap_enabled) self.heap.?.mark_epoch else 0;
+            while (self.cell_index < block.cell_count) {
+                const word_index = self.cell_index / 64;
+                const shift: u6 = @intCast(self.cell_index % 64);
+                const raw = if (self.unmarked_only)
+                    block.deadWord(word_index, epoch)
+                else
+                    @atomicLoad(u64, &words[word_index], .monotonic);
+                const word = raw >> shift;
+                if (word == 0) {
+                    self.cell_index = @intCast((word_index + 1) * 64);
+                    continue;
+                }
+                const index = self.cell_index + @ctz(word);
+                if (index >= block.cell_count) break;
+                self.cell_index = index + 1;
+                const header: *GCObjectHeader = @ptrFromInt(block.cellBase(index) + metadata_prefix_size);
+                if (!header.metaConst().alloc_info.heap_accounted) continue;
+                if (young_filter and !header.metaConst().flags.young) continue;
+                return header;
+            }
+            return null;
+        }
+
+        fn nextCell(self: *GcObjectIterator, heap: *const BlockHeapMod.Heap) ?*GCObjectHeader {
+            while (self.sb_index < heap.superblocks.items.len) {
+                const sb = heap.superblocks.items[self.sb_index];
+                if (sb.kind != .classed) {
+                    self.sb_index += 1;
+                    self.blk_index = 0;
+                    continue;
+                }
+                while (self.blk_index < BlockHeapMod.blocks_per_superblock) {
+                    const base = @intFromPtr(sb.bytes.ptr) + self.blk_index * BlockHeapMod.block_bytes;
+                    const block: *BlockHeapMod.Block = @ptrFromInt(base);
+                    if (block.magic != BlockHeapMod.block_magic) {
+                        self.blk_index += 1;
+                        self.cell_index = 0;
+                        continue;
+                    }
+                    if (self.nextInBlock(block, false)) |header| return header;
+                    self.blk_index += 1;
+                    self.cell_index = 0;
+                }
+                self.sb_index += 1;
+                self.blk_index = 0;
+            }
+            return null;
+        }
+
+        fn nextYoungCell(self: *GcObjectIterator, heap: *const BlockHeapMod.Heap) ?*GCObjectHeader {
+            _ = heap;
+            while (self.young_block > 1) {
+                const block: *BlockHeapMod.Block = @ptrFromInt(self.young_block);
+                if (self.nextInBlock(block, true)) |header| return header;
+                self.young_block = block.young_link;
+                self.cell_index = 0;
+            }
+            return null;
         }
     };
 
@@ -1947,6 +2048,7 @@ pub const Registry = struct {
         return .{
             .cursor = self.gc_obj_list.next,
             .sentinel = &self.gc_obj_list,
+            .heap = if (comptime block_heap_enabled) &self.block_heap else {},
         };
     }
 
@@ -1958,10 +2060,24 @@ pub const Registry = struct {
     /// starts, which is what lets a minor cost O(young) instead of O(heap) --
     /// the difference between a nursery collection and a whole-heap walk that
     /// happens to ignore most of what it visits.
+    /// Dead-scan iterator: block phase yields only unmarked allocated cells.
+    /// The list phase is unchanged -- its consumers test marks themselves.
+    pub fn deadCandidateIterator(self: *const Registry) GcObjectIterator {
+        var it = self.objectIterator();
+        it.unmarked_only = true;
+        return it;
+    }
+
     pub fn youngIterator(self: *const Registry) GcObjectIterator {
         return .{
             .cursor = self.young_head,
             .sentinel = &self.gc_obj_list,
+            .heap = if (comptime block_heap_enabled) &self.block_heap else {},
+            .young_only = true,
+            .young_block = if (comptime block_heap_enabled)
+                (if (self.block_heap.young_blocks) |head| @intFromPtr(head) else 0)
+            else
+                0,
         };
     }
 
@@ -2000,6 +2116,18 @@ pub const Registry = struct {
         return result;
     }
 
+    /// Served from the collector's block heap: enumerated by block bitmaps,
+    /// never linked on `gc_obj_list`, young-tracked at block granularity.
+    pub inline fn isBlockCellHeader(h: *const GCObjectHeader) bool {
+        if (comptime !block_heap_enabled) return false;
+        // The CLASS FIELD is the marker, not the whole byte: publication sets
+        // `heap_accounted` on top of it (0x1F becomes 0x5F), and comparing
+        // the full byte made every published block object fail this test --
+        // so they linked onto the list AND were enumerated by the block
+        // phase, and the bitmap mark split never engaged at all.
+        return h.metaConst().alloc_info.block_size_idx == 0x1F;
+    }
+
     fn appendGcObject(self: *Registry, header: *GCObjectHeader) void {
         std.debug.assert(isCycleCandidate(header));
         std.debug.assert(header.prev == null);
@@ -2024,15 +2152,53 @@ pub const Registry = struct {
         listDel(header);
     }
 
+    /// Mark accessors, split by population.
+    ///
+    /// Block cells keep their mark in the BLOCK's bitmap under the heap's
+    /// mark epoch: bumping the epoch at a major's begin makes every block's
+    /// bitmap stale -- read as unmarked -- in O(1), which is what the single
+    /// global parity bit could not soundly do (see `mark_parity` below) and
+    /// what the whole-heap `clearMarks` walk used to cost ~milliseconds per
+    /// cycle to do by hand. The epoch never moves between majors, so sticky
+    /// marks survive for the minors exactly as before. Everything not in a
+    /// block cell (slab and standalone kinds) keeps the header bit.
+    ///
+    /// Dispatch cost is one byte read (`alloc_info`, which shares the cell's
+    /// first cache line with the header) and a mask; the bitmap word is
+    /// shared by 64 neighbours, which is better locality than 64 scattered
+    /// header bytes.
     pub inline fn headerMarked(self: *const Registry, h: *const GCObjectHeader) bool {
+        if (comptime block_heap_enabled) {
+            if (h.metaConst().alloc_info.block_size_idx == 0x1F) {
+                const cell = @intFromPtr(h) - metadata_prefix_size;
+                const block = BlockHeapMod.Block.fromCellTrusted(cell);
+                return block.isMarked(h.metaConst().size_class, self.block_heap.mark_epoch);
+            }
+        }
         return h.metaConst().flags.mark == self.mark_parity;
     }
 
     pub inline fn setHeaderMarked(self: *const Registry, h: *GCObjectHeader) void {
+        if (comptime block_heap_enabled) {
+            if (h.metaConst().alloc_info.block_size_idx == 0x1F) {
+                const cell = @intFromPtr(h) - metadata_prefix_size;
+                const block = BlockHeapMod.Block.fromCellTrusted(cell);
+                block.setMark(h.metaConst().size_class, self.block_heap.mark_epoch);
+                return;
+            }
+        }
         h.meta().flags.mark = self.mark_parity;
     }
 
     pub inline fn setHeaderUnmarked(self: *const Registry, h: *GCObjectHeader) void {
+        if (comptime block_heap_enabled) {
+            if (h.metaConst().alloc_info.block_size_idx == 0x1F) {
+                const cell = @intFromPtr(h) - metadata_prefix_size;
+                const block = BlockHeapMod.Block.fromCellTrusted(cell);
+                block.clearMark(h.metaConst().size_class, self.block_heap.mark_epoch);
+                return;
+            }
+        }
         h.meta().flags.mark = !self.mark_parity;
     }
 
@@ -2317,6 +2483,14 @@ pub const Registry = struct {
             fn call(ctx: *anyopaque, bytes: usize) ?[*]u8 {
                 const registry: *Registry = @ptrCast(@alignCast(ctx));
                 const cell = registry.block_heap.alloc(bytes) catch return null;
+                // Stamp the cell index into the prefix's size_class slot (a
+                // block cell never uses it otherwise). The mark accessors run
+                // on the trace's hottest path, and deriving the index there
+                // costs an integer division per shade -- cell sizes are not
+                // powers of two. One division here, at allocation, instead.
+                const addr = @intFromPtr(cell.ptr);
+                const block = BlockHeapMod.Block.fromCellTrusted(addr);
+                std.mem.writeInt(u16, cell.ptr[0..2], @intCast(block.cellIndexTrusted(addr)), .little);
                 return cell.ptr;
             }
         }.call;
@@ -2419,6 +2593,16 @@ pub const Registry = struct {
         }
         header.meta().flags.young = true;
         self.generation.stats.young_count += 1;
+        if (comptime block_heap_enabled) {
+            if (isBlockCellHeader(header)) {
+                // Block-granular young tracking: the block joins the young
+                // list on its first young cell; the suffix anchor below is
+                // list-population business only.
+                const cell = @intFromPtr(header) - metadata_prefix_size;
+                self.block_heap.noteYoungCell(BlockHeapMod.Block.fromCellTrusted(cell));
+                return;
+            }
+        }
         // This object was just appended at the tail, so if no suffix was open
         // it starts here.
         if (self.young_head == null) self.young_head = header;

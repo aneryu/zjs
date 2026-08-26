@@ -55,7 +55,6 @@ pub const Worker = struct {
     fn run(self: *Worker, registry: *gc.Registry, queue: *gc.mark_queue.Queue) void {
         defer self.running.store(false, .release);
         while (!self.stop.load(.acquire)) {
-            _ = registry;
             const header = queue.pop() orelse {
                 self.stats.idle_spins += 1;
                 std.Thread.yield() catch {};
@@ -63,9 +62,12 @@ pub const Worker = struct {
             };
             // Marking is the whole job: the owner thread walks children during
             // remark. Splitting edge enumeration across threads would need the
-            // snapshot protocol (§6.3), which is a later tranche.
-            if (!header.meta().flags.mark) {
-                header.meta().flags.mark = true;
+            // snapshot protocol (§6.3), which is a later tranche. The mark
+            // accessors dispatch to the block bitmap for cell-served objects;
+            // writing the raw header bit here left them unmarked in the
+            // authority the collector actually reads.
+            if (!registry.headerMarked(header)) {
+                registry.setHeaderMarked(header);
                 self.stats.marked += 1;
             }
         }

@@ -100,6 +100,12 @@ pub const Block = extern struct {
     size_class: u16 = 0,
     sweep_state: sweep.SweepState = .fresh,
     flags: u8 = 0,
+    /// Intrusive young-block link (address; 0 = not linked). A block joins
+    /// the list the first time a cycle publishes a young object into it --
+    /// including an OLD block that hands out a recycled cell, which is what
+    /// makes cell reuse compatible with the young scan: the per-cell `young`
+    /// header bit filters the old neighbours.
+    young_link: usize = 0,
     cells_offset: u32 = 0,
     alloc_bits_off: u32 = 0,
     mark_bits_off: u32 = 0,
@@ -107,7 +113,7 @@ pub const Block = extern struct {
     bitmap_words: u32 = 0,
     next_free: usize = 0,
 
-    const flag_young: u8 = 1 << 0;
+    pub const flag_young: u8 = 1 << 0;
     const flag_remembered: u8 = 1 << 1;
     const flag_overflow: u8 = 1 << 2;
     const flag_bailout: u8 = 1 << 3;
@@ -162,12 +168,50 @@ pub const Block = extern struct {
         return index;
     }
 
+    /// The alloc bitmap words, for word-skipping enumeration.
+    pub fn allocWords(self: *Block) []u64 {
+        return self.bitmaps().alloc;
+    }
+
+    /// One word of dead candidates: allocated cells the current epoch never
+    /// marked. A stale epoch means no cell was marked, so every allocated
+    /// cell is a candidate.
+    pub fn deadWord(self: *Block, word_index: usize, epoch: u64) u64 {
+        const alloc = @atomicLoad(u64, &self.bitmaps().alloc[word_index], .monotonic);
+        if (self.mark_epoch != epoch) return alloc;
+        const mark = @atomicLoad(u64, &self.bitmaps().mark[word_index], .monotonic);
+        return alloc & ~mark;
+    }
+
     pub fn cellAllocated(self: *Block, index: u32) bool {
         return testBit(self.bitmaps().alloc, index);
     }
 
     pub fn cellBase(self: *const Block, index: u32) usize {
         return @intFromPtr(self) + self.cells_offset + index * self.cell_size;
+    }
+
+    /// The block containing a cell KNOWN to be a block cell (its prefix
+    /// carries the route marker). No membership check: the marker is the
+    /// proof, and the mask is pure arithmetic on a mapped page.
+    pub inline fn fromCellTrusted(cell_addr: usize) *Block {
+        return @ptrFromInt(cell_addr & ~@as(usize, block_bytes - 1));
+    }
+
+    /// Cell index for a KNOWN cell base (exact, not interior).
+    pub inline fn cellIndexTrusted(self: *const Block, cell_addr: usize) u32 {
+        return @intCast((cell_addr - (@intFromPtr(self) + self.cells_offset)) / self.cell_size);
+    }
+
+    /// Unmark under the epoch scheme: a stale bitmap already reads unmarked
+    /// for every cell, so only a current-epoch bit needs clearing.
+    pub fn clearMark(self: *Block, index: u32, epoch: u64) void {
+        if (self.mark_epoch != epoch) return;
+        clearBit(self.bitmaps().mark, index);
+    }
+
+    pub inline fn isYoungListed(self: *const Block) bool {
+        return (self.flags & flag_young) != 0;
     }
 
     pub fn ensureMarkEpoch(self: *Block, epoch: u64) void {
@@ -197,6 +241,8 @@ pub const Heap = struct {
     medium: std.AutoHashMapUnmanaged(usize, MediumExtent) = .empty,
     free_blocks: [space.class_count]?*Block = @splat(null),
     active: [space.class_count]?*Block = @splat(null),
+    /// Head of the young-block list (see `noteYoungCell`).
+    young_blocks: ?*Block = null,
     stats: Stats = .{},
     mark_epoch: u64 = 0,
 
@@ -256,6 +302,27 @@ pub const Heap = struct {
         if (self.medium.contains(addr)) return true;
         const block = Block.fromAddr(addr) orelse return false;
         return self.containsBlock(block);
+    }
+
+    /// First time this cycle that a young object lands in `block`: put the
+    /// block on the young list. One flag test on the publication path.
+    pub inline fn noteYoungCell(self: *Heap, block: *Block) void {
+        if (block.isYoungListed()) return;
+        block.flags |= Block.flag_young;
+        block.young_link = if (self.young_blocks) |head| @intFromPtr(head) else 1;
+        self.young_blocks = block;
+    }
+
+    /// Retire the young-block list: clear flags, break links.
+    pub fn clearYoungBlocks(self: *Heap) void {
+        var cursor = self.young_blocks;
+        while (cursor) |block| {
+            const link = block.young_link;
+            block.flags &= ~Block.flag_young;
+            block.young_link = 0;
+            cursor = if (link <= 1) null else @ptrFromInt(link);
+        }
+        self.young_blocks = null;
     }
 
     pub fn blockOf(self: *const Heap, ptr: [*]u8) ?*Block {
@@ -506,16 +573,21 @@ fn bitMask(index: u32) u64 {
     return @as(u64, 1) << @intCast(index % 64);
 }
 
+/// Atomic bit ops: 64 cells share a word, and a marker worker and the
+/// mutator's barrier can shade neighbours concurrently -- plain RMW lost
+/// marks the moment the worker existed (caught by its own unit test). The
+/// header-bit era was immune only because every object owned its byte.
 fn testBit(bits: []const u64, index: u32) bool {
-    return bits[bitWord(index)] & bitMask(index) != 0;
+    const word = @atomicLoad(u64, &bits[index / 64], .monotonic);
+    return (word & (@as(u64, 1) << @intCast(index % 64))) != 0;
 }
 
 fn setBit(bits: []u64, index: u32) void {
-    bits[bitWord(index)] |= bitMask(index);
+    _ = @atomicRmw(u64, &bits[index / 64], .Or, @as(u64, 1) << @intCast(index % 64), .monotonic);
 }
 
 fn clearBit(bits: []u64, index: u32) void {
-    bits[bitWord(index)] &= ~bitMask(index);
+    _ = @atomicRmw(u64, &bits[index / 64], .And, ~(@as(u64, 1) << @intCast(index % 64)), .monotonic);
 }
 
 fn testPage(bits: [pages_per_superblock / 64]u64, page: u32) bool {

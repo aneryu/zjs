@@ -21,6 +21,8 @@ const object_gc = @import("object_gc.zig");
 const object_mod = @import("object.zig");
 const object_payloads = @import("object_payloads.zig");
 const profile = @import("profile.zig");
+const memory_mod = @import("memory.zig");
+const BlockHeapMod = @import("gc_block_heap.zig");
 const runtime_mod = @import("runtime.zig");
 const property = @import("property.zig");
 const shape = @import("shape.zig");
@@ -337,6 +339,7 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     while (survivors.next()) |header| {
         header.meta().flags.young = false;
     }
+    if (comptime gc.block_heap_enabled) rt.gc.block_heap.clearYoungBlocks();
     rt.gc.young_head = null;
     rt.gc.generation.promoteSurvivors(young_before -| reclaimed);
     last_report.minor_reclaimed = reclaimed;
@@ -446,6 +449,15 @@ fn clearYoungState(rt: *JSRuntime) void {
         h.meta().flags.young = false;
         cursor = h.prev;
     }
+    // Block-population young bits: walk the young-block list, not the heap.
+    // This also retires sweep-time allocations -- a block that received one
+    // is on the list like any other.
+    if (comptime gc.block_heap_enabled) {
+        var young = rt.gc.youngIterator();
+        young.cursor = null;
+        while (young.next()) |h| h.meta().flags.young = false;
+        rt.gc.block_heap.clearYoungBlocks();
+    }
     rt.gc.young_head = null;
     rt.gc.generation.retireYoungSet();
 }
@@ -470,9 +482,11 @@ pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.Va
     try collector.seedRoots();
     if (collector.conservative_on) try collector.seedConservativeRoots();
 
-    // §8.6 initial mark step 3. The young suffix walk is O(young).
+    // §8.6 initial mark step 3. O(young) via the suffix and the young-block
+    // list.
     var young = rt.gc.youngIterator();
     while (young.next()) |header| header.meta().flags.young = false;
+    if (comptime gc.block_heap_enabled) rt.gc.block_heap.clearYoungBlocks();
     rt.gc.young_head = null;
     rt.gc.generation.retireYoungSet();
 
@@ -557,19 +571,31 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // Weak state is already clear and the trace already proved these
     // unreachable, so the mutator cannot tell the difference; what it buys is
     // the whole reason Phase 2 exists.
+    // Dead-scan condemnation: the block phase computes alloc & ~mark a word
+    // at a time and never touches a survivor -- the survivors' young bits are
+    // retired by the young-block list in `clearYoungState`, not here. The
+    // list phase still carries the per-header test for the non-block kinds.
     var condemned: usize = 0;
     var doomed_bytes: usize = 0;
-    var iterator = rt.gc.objectIterator();
+    var iterator = rt.gc.deadCandidateIterator();
     while (iterator.next()) |header| {
-        if (rt.gc.headerMarked(header)) {
-            header.meta().flags.young = false;
-            continue;
+        if (!gc.Registry.isBlockCellHeader(header)) {
+            // List phase: mark test as always, and fold the survivors' young
+            // retirement into the same touch.
+            if (rt.gc.headerMarked(header)) {
+                header.meta().flags.young = false;
+                continue;
+            }
         }
-        if (header.metaConst().flags.is_pinned) {
-            header.meta().flags.young = false;
-            continue;
-        }
-        doomed_bytes +|= gc.Registry.heapByteSizeFromHeader(rt, header);
+        if (header.metaConst().flags.is_pinned) continue;
+        // The byte total only feeds the threshold's condemn-time reset; for a
+        // block corpse the cell class is close enough, and precise
+        // `heapByteSizeFromHeader` reads the corpse's shape -- one cache miss
+        // per dead object, on the slice that is the pause tail.
+        doomed_bytes +|= if (gc.Registry.isBlockCellHeader(header))
+            BlockHeapMod.Block.fromCellTrusted(@intFromPtr(header) - gc.metadata_prefix_size).cell_size - gc.metadata_prefix_size
+        else
+            gc.Registry.heapByteSizeFromHeader(rt, header);
         rt.gc.detachCycleCandidate(header);
         gc.listAddTail(&rt.gc.doomed_list, header);
         // A condemned shape must leave the transition table NOW, not at its
@@ -911,13 +937,28 @@ const Collector = struct {
         self.report.trans_swept_to_active = model.trans_swept_to_active;
     }
 
-    /// Whole-heap unmark. The O(1) parity flip that tried to replace this is
-    /// unsound under sticky generations (see `Registry.mark_parity`); the
-    /// walk falls to the block heap's per-block versions, not to a global bit.
+    /// Whole-heap unmark.
+    ///
+    /// Block cells: one epoch bump. Every block's bitmap goes stale at once
+    /// and reads unmarked until its first `setMark` re-stamps it -- the
+    /// per-block-version scheme the unsound global parity flip pointed at
+    /// (see `Registry.mark_parity`), now real. The walk below only still
+    /// exists for the non-block populations (slab and standalone kinds), and
+    /// skips block cells outright rather than paying a block-header read to
+    /// clear a bit the bump already invalidated. Restore semantics for the
+    /// VERIFY_MINOR probe hold: re-marking a saved set under the new epoch
+    /// means exactly "marked" again.
     fn clearMarks(self: *Collector) void {
-        var iterator = self.rt.gc.objectIterator();
-        while (iterator.next()) |header| {
+        if (comptime gc.block_heap_enabled) self.rt.gc.block_heap.mark_epoch += 1;
+        // LIST ONLY. The epoch bump above is the whole-population unmark for
+        // block cells; walking the composite iterator here re-enumerated
+        // every live cell just to skip it, and that enumeration alone was the
+        // 12 ms p99 begin slice on splay.
+        var cursor = self.rt.gc.gc_obj_list.next;
+        while (cursor) |header| {
+            if (header == &self.rt.gc.gc_obj_list) break;
             self.rt.gc.setHeaderUnmarked(header);
+            cursor = header.next;
         }
     }
 
@@ -1381,7 +1422,7 @@ const Collector = struct {
     fn sweepUnmarked(self: *Collector) usize {
         gc.listInit(&self.rt.gc.tmp_obj_list);
 
-        var iterator = self.rt.gc.objectIterator();
+        var iterator = self.rt.gc.deadCandidateIterator();
         while (iterator.next()) |header| {
             if (self.rt.gc.headerMarked(header)) {
                 // The mark STAYS. §8.2's sticky rule is `allocated && marked`
