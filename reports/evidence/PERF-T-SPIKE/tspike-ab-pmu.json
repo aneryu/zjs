@@ -1,0 +1,1207 @@
+{
+ "tool": "run_tspike_ab.py",
+ "policy": "policies/spikes/perf-t-spike-v1.json",
+ "protocol": "fixed-work, function-wrapped workloads; paired ABBA arm rotation (order reversed on odd samples); pinned CPU; host lock held; instructions+cycles recorded in the same run as wall time",
+ "samples": 8,
+ "cpu": 19,
+ "binaries": {
+  "base": "/home/aneryu/zjs-frozen/tspike-2026-08-26/zjs-base-main",
+  "binctl": "/home/aneryu/zjs-frozen/tspike-2026-08-26/zjs-spike-u64",
+  "fusectl": "/home/aneryu/zjs-frozen/tspike-2026-08-26/zjs-spike-u64",
+  "u64": "/home/aneryu/zjs-frozen/tspike-2026-08-26/zjs-spike-u64",
+  "ptr": "/home/aneryu/zjs-frozen/tspike-2026-08-26/zjs-spike-ptr"
+ },
+ "arm_env": {
+  "base": {},
+  "binctl": {},
+  "fusectl": {
+   "ZJS_TSPIKE": "fuseoff"
+  },
+  "u64": {
+   "ZJS_TSPIKE": "1"
+  },
+  "ptr": {
+   "ZJS_TSPIKE": "1"
+  }
+ },
+ "summary": {
+  "own_slot": {
+   "base": {
+    "wall_s": 0.560567254666239,
+    "instructions": 11433893705.0,
+    "cycles": 2154711019.0,
+    "wall_cv": 0.00454110611173614
+   },
+   "binctl": {
+    "wall_s": 0.561479473952204,
+    "instructions": 11433888601.0,
+    "cycles": 2157043408.0,
+    "wall_cv": 0.004146857267026184
+   },
+   "fusectl": {
+    "wall_s": 0.5703149612527341,
+    "instructions": 11702280897.5,
+    "cycles": 2192273657.5,
+    "wall_cv": 0.001491519454135161
+   },
+   "u64": {
+    "wall_s": 0.5494614217896014,
+    "instructions": 10897351737.5,
+    "cycles": 2110715591.5,
+    "wall_cv": 0.004219920441736496
+   },
+   "ptr": {
+    "wall_s": 0.549539903877303,
+    "instructions": 10807864176.0,
+    "cycles": 2111803251.0,
+    "wall_cv": 0.0008514280390311701
+   },
+   "ratios": {
+    "mechanism_u64_over_fusectl": 0.9634,
+    "mechanism_ptr_over_fusectl": 0.9636,
+    "endtoend_u64_over_base": 0.9802,
+    "endtoend_ptr_over_base": 0.9803,
+    "binary_delta_binctl_over_base": 1.0016,
+    "fusion_cost_fusectl_over_binctl": 1.0157,
+    "insn_u64_over_fusectl": 0.9312,
+    "cycles_u64_over_fusectl": 0.9628
+   }
+  },
+  "proto_slot": {
+   "base": {
+    "wall_s": 1.7287884436082095,
+    "instructions": 33169883215.0,
+    "cycles": 6709241868.0,
+    "wall_cv": 0.1821869729534607
+   },
+   "binctl": {
+    "wall_s": 1.7291638646274805,
+    "instructions": 33169829902.5,
+    "cycles": 6711112205.5,
+    "wall_cv": 0.3147433380544163
+   },
+   "fusectl": {
+    "wall_s": 1.7293275881092995,
+    "instructions": 33385612121.5,
+    "cycles": 6708401066.0,
+    "wall_cv": 0.16991992543773718
+   },
+   "u64": {
+    "wall_s": 1.7000110757071525,
+    "instructions": 32737379257.5,
+    "cycles": 6596948675.5,
+    "wall_cv": 0.04892557413456855
+   },
+   "ptr": {
+    "wall_s": 1.69957630103454,
+    "instructions": 32730222058.5,
+    "cycles": 6595782807.0,
+    "wall_cv": 0.0006013758123899905
+   },
+   "ratios": {
+    "mechanism_u64_over_fusectl": 0.983,
+    "mechanism_ptr_over_fusectl": 0.9828,
+    "endtoend_u64_over_base": 0.9834,
+    "endtoend_ptr_over_base": 0.9831,
+    "binary_delta_binctl_over_base": 1.0002,
+    "fusion_cost_fusectl_over_binctl": 1.0001,
+    "insn_u64_over_fusectl": 0.9806,
+    "cycles_u64_over_fusectl": 0.9834
+   }
+  },
+  "poly_stress": {
+   "base": {
+    "wall_s": 0.6670219271909446,
+    "instructions": 12480566129.0,
+    "cycles": 2570330222.5,
+    "wall_cv": 0.00742169171821981
+   },
+   "binctl": {
+    "wall_s": 0.6681010199245065,
+    "instructions": 12480646564.0,
+    "cycles": 2577486054.0,
+    "wall_cv": 0.0031989384676684818
+   },
+   "fusectl": {
+    "wall_s": 0.6698636712972075,
+    "instructions": 12538288591.0,
+    "cycles": 2581146283.0,
+    "wall_cv": 0.008282989249988038
+   },
+   "u64": {
+    "wall_s": 0.7113772465381771,
+    "instructions": 13441001151.5,
+    "cycles": 2743531641.5,
+    "wall_cv": 0.038692651650752564
+   },
+   "ptr": {
+    "wall_s": 0.7105402564629912,
+    "instructions": 13441015832.0,
+    "cycles": 2740121008.0,
+    "wall_cv": 0.004166801650239578
+   },
+   "ratios": {
+    "mechanism_u64_over_fusectl": 1.062,
+    "mechanism_ptr_over_fusectl": 1.0607,
+    "endtoend_u64_over_base": 1.0665,
+    "endtoend_ptr_over_base": 1.0652,
+    "binary_delta_binctl_over_base": 1.0016,
+    "fusion_cost_fusectl_over_binctl": 1.0026,
+    "insn_u64_over_fusectl": 1.072,
+    "cycles_u64_over_fusectl": 1.0629
+   }
+  },
+  "untyped_control": {
+   "base": {
+    "wall_s": 0.04069797624833882,
+    "instructions": 661112523.0,
+    "cycles": 128342703.5,
+    "wall_cv": 0.01995997650378748
+   },
+   "binctl": {
+    "wall_s": 0.04377330793067813,
+    "instructions": 713567554.5,
+    "cycles": 141247815.0,
+    "wall_cv": 0.013961883847722291
+   },
+   "fusectl": {
+    "wall_s": 0.0439339280128479,
+    "instructions": 714722619.0,
+    "cycles": 141483831.0,
+    "wall_cv": 0.01803611704201742
+   },
+   "u64": {
+    "wall_s": 0.04379163356497884,
+    "instructions": 714870610.0,
+    "cycles": 141601486.5,
+    "wall_cv": 0.014145564761405187
+   },
+   "ptr": {
+    "wall_s": 0.04391776002012193,
+    "instructions": 714248815.5,
+    "cycles": 141505548.0,
+    "wall_cv": 0.012265973563103568
+   },
+   "ratios": {
+    "mechanism_u64_over_fusectl": 0.9968,
+    "mechanism_ptr_over_fusectl": 0.9996,
+    "endtoend_u64_over_base": 1.076,
+    "endtoend_ptr_over_base": 1.0791,
+    "binary_delta_binctl_over_base": 1.0756,
+    "fusion_cost_fusectl_over_binctl": 1.0037,
+    "insn_u64_over_fusectl": 1.0002,
+    "cycles_u64_over_fusectl": 1.0008
+   }
+  }
+ },
+ "raw": {
+  "own_slot": {
+   "base": [
+    {
+     "wall_s": 0.5606022919528186,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11433916545,
+     "cycles": 2153872004
+    },
+    {
+     "wall_s": 0.5601464197970927,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11434221290,
+     "cycles": 2152762130
+    },
+    {
+     "wall_s": 0.5606914376839995,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11434246059,
+     "cycles": 2155550034
+    },
+    {
+     "wall_s": 0.5605322173796594,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11433826397,
+     "cycles": 2153844174
+    },
+    {
+     "wall_s": 0.5537164900451899,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11433619515,
+     "cycles": 2157622768
+    },
+    {
+     "wall_s": 0.5605263700708747,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11433870865,
+     "cycles": 2152863420
+    },
+    {
+     "wall_s": 0.5608856389299035,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11433808425,
+     "cycles": 2157999645
+    },
+    {
+     "wall_s": 0.5619182358495891,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11433945473,
+     "cycles": 2159900913
+    }
+   ],
+   "binctl": [
+    {
+     "wall_s": 0.5614874330349267,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11433877054,
+     "cycles": 2156275488
+    },
+    {
+     "wall_s": 0.5617825323715806,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11434156949,
+     "cycles": 2158574864
+    },
+    {
+     "wall_s": 0.560447839088738,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11433876017,
+     "cycles": 2153524267
+    },
+    {
+     "wall_s": 0.5624271132983267,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11433733319,
+     "cycles": 2161982983
+    },
+    {
+     "wall_s": 0.555177538190037,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11433599931,
+     "cycles": 2155197500
+    },
+    {
+     "wall_s": 0.5620817011222243,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11433917117,
+     "cycles": 2160589550
+    },
+    {
+     "wall_s": 0.5614715148694813,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11433900148,
+     "cycles": 2157811328
+    },
+    {
+     "wall_s": 0.5607682457193732,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11434137368,
+     "cycles": 2155365571
+    }
+   ],
+   "fusectl": [
+    {
+     "wall_s": 0.5705881910398602,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11702606043,
+     "cycles": 2193328058
+    },
+    {
+     "wall_s": 0.5698332521133125,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11702587134,
+     "cycles": 2190364770
+    },
+    {
+     "wall_s": 0.5701361368410289,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11702244927,
+     "cycles": 2191715376
+    },
+    {
+     "wall_s": 0.5689397850073874,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11702072223,
+     "cycles": 2187424586
+    },
+    {
+     "wall_s": 0.5704937856644392,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11702168709,
+     "cycles": 2192831939
+    },
+    {
+     "wall_s": 0.5718513559550047,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11702266831,
+     "cycles": 2196592740
+    },
+    {
+     "wall_s": 0.5701175886206329,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11702294964,
+     "cycles": 2191134545
+    },
+    {
+     "wall_s": 0.5709672817029059,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 11702413990,
+     "cycles": 2195612254
+    }
+   ],
+   "u64": [
+    {
+     "wall_s": 0.5494913482107222,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10897402544,
+     "cycles": 2109429705
+    },
+    {
+     "wall_s": 0.5492212353274226,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10897677555,
+     "cycles": 2108927231
+    },
+    {
+     "wall_s": 0.5490363771095872,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10897403572,
+     "cycles": 2109537871
+    },
+    {
+     "wall_s": 0.5554000670090318,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10897181415,
+     "cycles": 2130280787
+    },
+    {
+     "wall_s": 0.5494314953684807,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10897165972,
+     "cycles": 2111893312
+    },
+    {
+     "wall_s": 0.5484672118909657,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10897300931,
+     "cycles": 2109249617
+    },
+    {
+     "wall_s": 0.5503172311000526,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10897251950,
+     "cycles": 2112728597
+    },
+    {
+     "wall_s": 0.5524146659299731,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10897429460,
+     "cycles": 2123098309
+    }
+   ],
+   "ptr": [
+    {
+     "wall_s": 0.5500625371932983,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10807796846,
+     "cycles": 2111901799
+    },
+    {
+     "wall_s": 0.5496037937700748,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10808224281,
+     "cycles": 2111342341
+    },
+    {
+     "wall_s": 0.5494760139845312,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10807948252,
+     "cycles": 2111704703
+    },
+    {
+     "wall_s": 0.5489342417567968,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10807770010,
+     "cycles": 2109625611
+    },
+    {
+     "wall_s": 0.550049914047122,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10807559282,
+     "cycles": 2112492197
+    },
+    {
+     "wall_s": 0.5487818978726864,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10807793275,
+     "cycles": 2110927183
+    },
+    {
+     "wall_s": 0.549633567687124,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10807973894,
+     "cycles": 2112639967
+    },
+    {
+     "wall_s": 0.5492703821510077,
+     "stdout": "tspike-own checksum 18442942.588",
+     "instructions": 10807931506,
+     "cycles": 2113167463
+    }
+   ]
+  },
+  "proto_slot": {
+   "base": [
+    {
+     "wall_s": 1.7291381913237274,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33170134399,
+     "cycles": 6709427728
+    },
+    {
+     "wall_s": 1.7272838060744107,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33169586970,
+     "cycles": 6704945526
+    },
+    {
+     "wall_s": 1.7283938573673368,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33170530273,
+     "cycles": 6709056008
+    },
+    {
+     "wall_s": 2.6752271517179906,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33172880118,
+     "cycles": 6712904964
+    },
+    {
+     "wall_s": 1.7284386958926916,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33169166606,
+     "cycles": 6707320742
+    },
+    {
+     "wall_s": 1.7294867960736156,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33170237209,
+     "cycles": 6712908519
+    },
+    {
+     "wall_s": 1.7294439496472478,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33169632031,
+     "cycles": 6710102137
+    },
+    {
+     "wall_s": 1.7048364048823714,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33169142895,
+     "cycles": 6704504604
+    }
+   ],
+   "binctl": [
+    {
+     "wall_s": 1.7298594969324768,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33170182572,
+     "cycles": 6711977832
+    },
+    {
+     "wall_s": 1.7279478483833373,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33169491853,
+     "cycles": 6706627131
+    },
+    {
+     "wall_s": 1.7289085532538593,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33169409749,
+     "cycles": 6710766521
+    },
+    {
+     "wall_s": 3.459831451997161,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33175034693,
+     "cycles": 6707630301
+    },
+    {
+     "wall_s": 1.7212114031426609,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33168767577,
+     "cycles": 6710490562
+    },
+    {
+     "wall_s": 1.7294191760011017,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33169795106,
+     "cycles": 6715330234
+    },
+    {
+     "wall_s": 1.7287128968164325,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33169864699,
+     "cycles": 6711457890
+    },
+    {
+     "wall_s": 1.7331930776126683,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33169893943,
+     "cycles": 6726783179
+    }
+   ],
+   "fusectl": [
+    {
+     "wall_s": 1.7308687893673778,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33385658417,
+     "cycles": 6718255693
+    },
+    {
+     "wall_s": 1.7268955986946821,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33385621698,
+     "cycles": 6702768670
+    },
+    {
+     "wall_s": 1.749046577140689,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33385364862,
+     "cycles": 6788662302
+    },
+    {
+     "wall_s": 2.6162157962098718,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33388255487,
+     "cycles": 6705205056
+    },
+    {
+     "wall_s": 1.7217609453946352,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33384921757,
+     "cycles": 6705244899
+    },
+    {
+     "wall_s": 1.7223798870109022,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33385511138,
+     "cycles": 6707863737
+    },
+    {
+     "wall_s": 1.7277863868512213,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33385602545,
+     "cycles": 6708938395
+    },
+    {
+     "wall_s": 1.7407151921652257,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 33386034786,
+     "cycles": 6756506912
+    }
+   ],
+   "u64": [
+    {
+     "wall_s": 1.7000440740957856,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32737489677,
+     "cycles": 6597732098
+    },
+    {
+     "wall_s": 1.697754549793899,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32737268838,
+     "cycles": 6588952723
+    },
+    {
+     "wall_s": 1.7017095112241805,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32736683995,
+     "cycles": 6604557109
+    },
+    {
+     "wall_s": 1.6975681306794286,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32736936538,
+     "cycles": 6586618910
+    },
+    {
+     "wall_s": 1.7038182788528502,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32737729105,
+     "cycles": 6608873224
+    },
+    {
+     "wall_s": 1.939454501029104,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32739710332,
+     "cycles": 7544062036
+    },
+    {
+     "wall_s": 1.6999395438469946,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32737146542,
+     "cycles": 6593247257
+    },
+    {
+     "wall_s": 1.6999780773185194,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32737584986,
+     "cycles": 6596165253
+    }
+   ],
+   "ptr": [
+    {
+     "wall_s": 1.6985154217109084,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32730176265,
+     "cycles": 6590474531
+    },
+    {
+     "wall_s": 1.6984333917498589,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32731429475,
+     "cycles": 6590895117
+    },
+    {
+     "wall_s": 1.6983074289746583,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32729596392,
+     "cycles": 6590621294
+    },
+    {
+     "wall_s": 1.6993665620684624,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32729637298,
+     "cycles": 6594741930
+    },
+    {
+     "wall_s": 1.700632629916072,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32730267881,
+     "cycles": 6597245087
+    },
+    {
+     "wall_s": 1.70029419939965,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32730150551,
+     "cycles": 6596977805
+    },
+    {
+     "wall_s": 1.700831581838429,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32730267852,
+     "cycles": 6599110112
+    },
+    {
+     "wall_s": 1.6997860400006175,
+     "stdout": "tspike-proto checksum 164400000",
+     "instructions": 32730703161,
+     "cycles": 6596823684
+    }
+   ]
+  },
+  "poly_stress": {
+   "base": [
+    {
+     "wall_s": 0.6670944471843541,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480550536,
+     "cycles": 2569468022
+    },
+    {
+     "wall_s": 0.666949407197535,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12481110579,
+     "cycles": 2568820300
+    },
+    {
+     "wall_s": 0.6678197123110294,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480426461,
+     "cycles": 2572362777
+    },
+    {
+     "wall_s": 0.6534794140607119,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480213740,
+     "cycles": 2566602057
+    },
+    {
+     "wall_s": 0.6686021527275443,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480571494,
+     "cycles": 2574338384
+    },
+    {
+     "wall_s": 0.6653145011514425,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480594317,
+     "cycles": 2571192423
+    },
+    {
+     "wall_s": 0.6679886449128389,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480773098,
+     "cycles": 2573103144
+    },
+    {
+     "wall_s": 0.6661353590898216,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480560764,
+     "cycles": 2566889082
+    }
+   ],
+   "binctl": [
+    {
+     "wall_s": 0.67017692187801,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480470760,
+     "cycles": 2582193472
+    },
+    {
+     "wall_s": 0.6672892267815769,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480965883,
+     "cycles": 2569276507
+    },
+    {
+     "wall_s": 0.6697142003104091,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480400218,
+     "cycles": 2578900453
+    },
+    {
+     "wall_s": 0.6658425149507821,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480640917,
+     "cycles": 2580152701
+    },
+    {
+     "wall_s": 0.6689128130674362,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480670138,
+     "cycles": 2576071655
+    },
+    {
+     "wall_s": 0.6649889620020986,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480470157,
+     "cycles": 2568845255
+    },
+    {
+     "wall_s": 0.6702789259143174,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480652211,
+     "cycles": 2583027343
+    },
+    {
+     "wall_s": 0.6659730509854853,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12480679612,
+     "cycles": 2566390440
+    }
+   ],
+   "fusectl": [
+    {
+     "wall_s": 0.6697348589077592,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12538349035,
+     "cycles": 2579934676
+    },
+    {
+     "wall_s": 0.6700543807819486,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12538254340,
+     "cycles": 2581096257
+    },
+    {
+     "wall_s": 0.6680674790404737,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12537903081,
+     "cycles": 2573301489
+    },
+    {
+     "wall_s": 0.6577301709912717,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12537987488,
+     "cycles": 2573929976
+    },
+    {
+     "wall_s": 0.6770199900493026,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12538364212,
+     "cycles": 2608976603
+    },
+    {
+     "wall_s": 0.6722310571931303,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12538302409,
+     "cycles": 2589760484
+    },
+    {
+     "wall_s": 0.6658736518584192,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12538274773,
+     "cycles": 2582302972
+    },
+    {
+     "wall_s": 0.6699924836866558,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 12538527797,
+     "cycles": 2581196309
+    }
+   ],
+   "u64": [
+    {
+     "wall_s": 0.7903398629277945,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13441547849,
+     "cycles": 3050723126
+    },
+    {
+     "wall_s": 0.7117581381462514,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13441196253,
+     "cycles": 2742097732
+    },
+    {
+     "wall_s": 0.7109963549301028,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13440782152,
+     "cycles": 2739532786
+    },
+    {
+     "wall_s": 0.7095187311060727,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13440893585,
+     "cycles": 2744965551
+    },
+    {
+     "wall_s": 0.7146706217899919,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13441037151,
+     "cycles": 2755530958
+    },
+    {
+     "wall_s": 0.7091449000872672,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13440965152,
+     "cycles": 2740025361
+    },
+    {
+     "wall_s": 0.7109771938994527,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13440811880,
+     "cycles": 2741026857
+    },
+    {
+     "wall_s": 0.7139786123298109,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13441123379,
+     "cycles": 2754702950
+    }
+   ],
+   "ptr": [
+    {
+     "wall_s": 0.7122534089721739,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13440969727,
+     "cycles": 2745561214
+    },
+    {
+     "wall_s": 0.7098514577373862,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13441149086,
+     "cycles": 2737040941
+    },
+    {
+     "wall_s": 0.7131472919136286,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13440819199,
+     "cycles": 2744975569
+    },
+    {
+     "wall_s": 0.7094711437821388,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13440817343,
+     "cycles": 2741266795
+    },
+    {
+     "wall_s": 0.7106129499152303,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13441074023,
+     "cycles": 2738096643
+    },
+    {
+     "wall_s": 0.7144382731057703,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13441001252,
+     "cycles": 2754335455
+    },
+    {
+     "wall_s": 0.7104675630107522,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13441308353,
+     "cycles": 2738975221
+    },
+    {
+     "wall_s": 0.704636356793344,
+     "stdout": "tspike-poly checksum 819200000",
+     "instructions": 13441030412,
+     "cycles": 2736855441
+    }
+   ]
+  },
+  "untyped_control": {
+   "base": [
+    {
+     "wall_s": 0.041366443037986755,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 661404014,
+     "cycles": 129390249
+    },
+    {
+     "wall_s": 0.040833789855241776,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 660896272,
+     "cycles": 128079588
+    },
+    {
+     "wall_s": 0.04104243637993932,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 660338255,
+     "cycles": 128818575
+    },
+    {
+     "wall_s": 0.03993171779438853,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 661452926,
+     "cycles": 128042478
+    },
+    {
+     "wall_s": 0.04077225271612406,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 661395780,
+     "cycles": 128417459
+    },
+    {
+     "wall_s": 0.03906404413282871,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 660927116,
+     "cycles": 128276504
+    },
+    {
+     "wall_s": 0.04062369978055358,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 661297930,
+     "cycles": 128408903
+    },
+    {
+     "wall_s": 0.03949291771277785,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 660617962,
+     "cycles": 127826112
+    }
+   ],
+   "binctl": [
+    {
+     "wall_s": 0.044326176866889,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713524670,
+     "cycles": 142056851
+    },
+    {
+     "wall_s": 0.04419270996004343,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713842599,
+     "cycles": 140731735
+    },
+    {
+     "wall_s": 0.04378503421321511,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713486646,
+     "cycles": 141024869
+    },
+    {
+     "wall_s": 0.043985872995108366,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713610439,
+     "cycles": 140889141
+    },
+    {
+     "wall_s": 0.043344083707779646,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713405027,
+     "cycles": 141307604
+    },
+    {
+     "wall_s": 0.0425241026096046,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713808611,
+     "cycles": 141188026
+    },
+    {
+     "wall_s": 0.043761581648141146,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 714012806,
+     "cycles": 141606964
+    },
+    {
+     "wall_s": 0.0430616638623178,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713063925,
+     "cycles": 143111769
+    }
+   ],
+   "fusectl": [
+    {
+     "wall_s": 0.04435283225029707,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713675329,
+     "cycles": 141511282
+    },
+    {
+     "wall_s": 0.044058133848011494,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713848497,
+     "cycles": 140873498
+    },
+    {
+     "wall_s": 0.04380972217768431,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 714755164,
+     "cycles": 141456380
+    },
+    {
+     "wall_s": 0.04451881814748049,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 715153172,
+     "cycles": 141444704
+    },
+    {
+     "wall_s": 0.04296280303969979,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 714690074,
+     "cycles": 140722107
+    },
+    {
+     "wall_s": 0.04249664582312107,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713669860,
+     "cycles": 141789921
+    },
+    {
+     "wall_s": 0.04426633520051837,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 715342230,
+     "cycles": 142264979
+    },
+    {
+     "wall_s": 0.0428028479218483,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 715676370,
+     "cycles": 141906338
+    }
+   ],
+   "u64": [
+    {
+     "wall_s": 0.044038656167685986,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 715337086,
+     "cycles": 141563431
+    },
+    {
+     "wall_s": 0.04471343103796244,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 715366356,
+     "cycles": 142724225
+    },
+    {
+     "wall_s": 0.04383162595331669,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713911561,
+     "cycles": 141639542
+    },
+    {
+     "wall_s": 0.042874382343143225,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 714485487,
+     "cycles": 141094138
+    },
+    {
+     "wall_s": 0.042977938894182444,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 714984972,
+     "cycles": 140774144
+    },
+    {
+     "wall_s": 0.04375164117664099,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 714437690,
+     "cycles": 146171729
+    },
+    {
+     "wall_s": 0.04351335670799017,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 714756248,
+     "cycles": 141111314
+    },
+    {
+     "wall_s": 0.04424350801855326,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 715365523,
+     "cycles": 142475631
+    }
+   ],
+   "ptr": [
+    {
+     "wall_s": 0.04521830705925822,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 714608070,
+     "cycles": 141482127
+    },
+    {
+     "wall_s": 0.043923221062868834,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713883649,
+     "cycles": 140669896
+    },
+    {
+     "wall_s": 0.04391229897737503,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 714724701,
+     "cycles": 142146735
+    },
+    {
+     "wall_s": 0.043802367988973856,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713539648,
+     "cycles": 141068704
+    },
+    {
+     "wall_s": 0.043543652165681124,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 714824801,
+     "cycles": 141103798
+    },
+    {
+     "wall_s": 0.04460591496899724,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 714505874,
+     "cycles": 141528969
+    },
+    {
+     "wall_s": 0.044203022960573435,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 712552121,
+     "cycles": 146115220
+    },
+    {
+     "wall_s": 0.043824370950460434,
+     "stdout": "tspike-untyped checksum 30721470",
+     "instructions": 713991757,
+     "cycles": 142143401
+    }
+   ]
+  }
+ }
+}

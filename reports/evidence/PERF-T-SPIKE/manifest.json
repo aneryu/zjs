@@ -1,5 +1,5 @@
 {
- "manifest_version": 1,
+ "manifest_version": 2,
  "work_item": "PERF-T-SPIKE",
  "date": "2026-08-26",
  "commits": {
@@ -58,9 +58,14 @@
    "note": "independent repeat under a concurrent compile; reproduces the gate reading"
   },
   {
+   "path": "reports/evidence/PERF-T-SPIKE/tspike-ab-pmu.json",
+   "sha256": "5a3f9fced9df76571fe3418fc16a46ce8a80ae1942205f333091e254e6a1dfc9",
+   "note": "third run, PMU counters working (the first two runs' counter parsing missed the PMU-prefixed event names on this big.LITTLE host; wall-time readings were unaffected). Wall ratios reproduce a third time (own-slot 0.963); this run also carries instructions/cycles"
+  },
+  {
    "path": "reports/evidence/PERF-T-SPIKE/run_tspike_ab.py",
-   "sha256": "4c2cb333b9261cd432c53b65be10728ac21bf436babea935203b5c4a7c5d40be",
-   "note": "harness"
+   "sha256": "ec6e1ba3f4714c6e540dd7fb7e4c27a6528f18609d0a82e6941517674a47c8ad",
+   "note": "harness (PMU parsing fixed)"
   }
  ],
  "arms": {
@@ -76,7 +81,8 @@
    "value": 0.9625,
    "as_speedup_percent": 3.9,
    "policy_minimum_effect_percent": 8.0,
-   "verdict_vs_kill_line": "BELOW the +8% kill line"
+   "verdict_vs_kill_line": "BELOW the +8% kill line",
+   "repeats": "own-slot mechanism ratio measured three times under different host conditions: 0.962, 0.963, 0.963"
   },
   "official_ratios": {
    "own_slot": {
@@ -170,6 +176,7 @@
   },
   "findings": [
    "Own-slot: removing the entire per-access probe chain (shape -> mask -> prop_size -> bucket -> Property -> atom compare) buys only 3.8% -- the baseline fast arm was already too cheap for the probe to be the cost centre. Consistent with the 2026-08-17 IC refutation (fast arm already 2-3 cyc).",
+   "Instruction/cycle split (own-slot): -6.9% instructions vs -3.7% cycles at IPC 5.16. The saving is real but was already overlapped by ILP -- the instruction-phantom pattern this project has priced before. The mechanism cannot reach +8% cycles on this workload even with a zero-cost guard.",
    "Guard arms are indistinguishable: u64 identity 0.963 vs pinned pointer 0.964 (own-slot). The extra identity load costs nothing measurable, so the SOUND u64 identity can be used everywhere -- a direct input to PERF-SHAPE-ID, which had reserved pinned-pointer guards for immutable typed shapes on cost grounds.",
    "Polymorphic sites REGRESS 6.5% (poly_stress D/C 1.065): on an alternating-shape site the guard never hits, so every access pays guard + miss + generic fallback. The monomorphic win is smaller than the polymorphic loss.",
    "Proto (method-read) sites gain only 1.7% (D/C 0.983) despite the double guard replacing a full chain walk.",
@@ -179,7 +186,29 @@
    "Writes keep the generic path (only opcode 254 was claimable), so own_slot's 3 writes per body are unspecialized: the measured win is a conservative lower bound.",
    "Site capture happens on the first cold visit; steady state is guard + load with no side table.",
    "Resident handler verified leaf (no prologue), matching baseline op_get_field, after an earlier draft that would have under-priced the mechanism."
-  ]
+  ],
+  "mechanism_counters": {
+   "source": "tspike-ab-pmu.json (fixed work => instruction counts are effectively deterministic and load-insensitive)",
+   "own_slot": {
+    "instructions_D_over_C": 0.931,
+    "cycles_D_over_C": 0.963,
+    "wall_D_over_C": 0.963,
+    "baseline_IPC": 5.16
+   },
+   "proto_slot": {
+    "instructions_D_over_C": 0.981,
+    "cycles_D_over_C": 0.983
+   },
+   "poly_stress": {
+    "instructions_D_over_C": 1.072,
+    "cycles_D_over_C": 1.063
+   },
+   "untyped_control": {
+    "instructions_D_over_C": 1.0,
+    "cycles_D_over_C": 1.001
+   },
+   "reading": "On own-slot the prototype removes 6.9% of retired instructions -- the probe chain really is gone -- but only 3.7% of cycles, because the baseline already runs at IPC 5.16 and the out-of-order engine was hiding most of that work. This is the decisive argument: at this IPC, clearing the +8% cycle bar would need roughly 15% of instructions removed, and the ENTIRE per-access probe chain is worth 6.9%. The mechanism's ceiling on this workload is about half the kill line, so no amount of prototype polish reaches it."
+  }
  },
  "correctness_gates": {
   "zig build test": "2364 passed / 0 failed on spike/perf-t, matching main exactly",
