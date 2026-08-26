@@ -385,3 +385,41 @@ signal that the procedure is right: nothing in the suite asserted that
 opcode's encoding, and the cold shell took the sub-arm unchanged.
 
 `call_constructor` is excluded from every wave (§7.5).
+
+## 8.4 Cost factor found while attempting wave 1 (and why it re-orders the waves)
+
+Wave 1 was attempted and rolled back. The mechanism worked — sub constants,
+stack arms, cold sub-arms and emit-site rewrites all compiled and ran — but
+two things made the wave expensive in a way frequency data does not predict:
+
+**(a) Opcodes reached through a size-precomputing writer.** The private-field
+family (`get_private_field`, `put_private_field`, `define_private_field`,
+`private_in`) is not emitted through `Emitter.op`; it goes through
+`rules.writeLoweredPrivateField`, whose caller pre-computes the byte length
+via `rules.loweredPrivateFieldSize`. Demoting them means changing an
+encoding and its size oracle together — exactly where a silent off-by-one
+hides. They need their own careful pass, not a batch.
+
+**(b) Opcodes pinned by byte-offset assertions.** The `compiler.s2g4` tests
+pin emitted streams down to `code_len`, `expectLabel` targets,
+`code[22..24]` slices and `last_opcode_pos`. `check_ctor`, `init_ctor` and
+`add_brand` sit at the head of constructor streams, so demoting them shifts
+every later offset by one and requires ~36 coordinated numeric updates.
+Bumping them arithmetically is precisely the blind mechanical edit that
+silently weakens a QuickJS-faithfulness test; a wave that needs it must
+recompute the pins from the actual emitted stream, deliberately, with the
+diff reviewed.
+
+**Revised wave order** — cheapest first, measured by *test coupling* rather
+than by frequency:
+
+| wave | selection rule | examples |
+|---|---|---|
+| 1' | emitted via plain `Emitter.op`, and absent from every pinned stream | `set_proto`, `check_brand` (which has zero emit sites at all — likely a Tier A retirement instead) |
+| 2' | pinned-stream opcodes, done with pins recomputed from the emitted bytes | `check_ctor`, `init_ctor`, `add_brand`, `set_home_object`, `get_super*`, `put_super_value` |
+| 3' | size-oracle opcodes | the private-field family |
+
+The pilot stands: one id freed, suite green. The lesson for the estimate in
+§7.5 is that "84 ids are cold" remains true, but the *cost per id* is not
+uniform — it is set by how tightly the opcode is pinned by tests, not by how
+rarely it runs.
