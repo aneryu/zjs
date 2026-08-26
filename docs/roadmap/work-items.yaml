@@ -130,8 +130,9 @@ items:
   - id: PERF-T-SPIKE
     title: Typed-slot interpreter benefit spike (polymorphic arm; u64 vs pinned-pointer guard arms)
     type: spike
-    state: ready
+    state: now
     wip_slot: implementation
+    notes: "started 2026-08-26 by owner order; the two basis=proposed policy thresholds (untyped-controls geomean cap 1.005; hard stop 5 person-days) were ratified with the start order. Prototype quarantined to branch spike/perf-t; the official A/B queues behind any G2 measurement"
     activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
     acceptance_policy: {path: policies/spikes/perf-t-spike-v1.json, status: frozen}
