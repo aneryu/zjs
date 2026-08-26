@@ -1,7 +1,13 @@
 # VM 值表示契约(engine plan × tracing GC 同步点)
 
-Version: 1
-Date: 2026-08-24
+Version: 2
+Date: 2026-08-26
+v2(2026-08-26,FN-M0F 冻结同 commit):①§1.1「plugin ABI fingerprint
+不变」承诺按 2026-08-25 裁决过渡为 FNABI ABI tuple;②新增
+**layout_epoch = 1**——`FUN_VALUE_ABI` 的第一分量,只在真实表示
+变化(布局/tag 语义/地址稳定性)时递增,与本文档版号解耦(编辑性
+修版不构成 ABI 事件)。v2 不改变任何布局或语义承诺。
+v1: 2026-08-24 初版。
 Status: normative — 本契约是
 [engine-evolution-plan.md](engine-evolution-plan.md)(§3.1 裁决 A 的
 "表示定型"里程碑)与 [tracing-gc-design.md](tracing-gc-design.md) 两线
@@ -29,19 +35,22 @@ Status: normative — 本契约是
   ——forcing function 仅适用于 host-quiescent 触发;engine-active
   扫描在测试态**开启** conservative(精确模式在该场景被证不
   sound)。
-- **§1.1"plugin ABI fingerprint 不变"承诺将过渡**:按 2026-08-25
-  裁决(FNABI v0.3),该承诺过渡为 FNABI ABI tuple
-  (`FUN_VALUE_ABI` = 表示契约版本 + `JSValue.abi_encoding_revision`,
-  [fun-native-plugin-design.md](fun-native-plugin-design.md)
-  §11.3)。过渡须按本契约自身规则"先改本契约并递增版本号"执行;
-  本 errata 只登记欠账,不执行修订。
+- ~~§1.1"plugin ABI fingerprint 不变"承诺将过渡~~:**已于 v2
+  (2026-08-26,FN-M0F 冻结同 commit)执行**——§1.1 现行文即
+  FNABI ABI tuple 承诺,第一分量为 layout_epoch(现值 1,与文档
+  版号解耦)。
 
 ---
 
 ## 1. 三条硬承诺(引擎线可以直接依赖)
 
 1. **`JSValue` 16 字节 extern tagged 布局不变**;`property.Slot` 布局
-   不变;plugin ABI fingerprint 不变。Slot 是**既有字段之上的突变协议,
+   不变;对插件的表示承诺以 **FNABI ABI tuple** 表达(v2 过渡,
+   2026-08-26:`FUN_VALUE_ABI` = (`layout_epoch`,
+   `JSValue.abi_encoding_revision`),layout_epoch 现值 **1**,见
+   [fun-native-plugin-design.md](fun-native-plugin-design.md) §11.3;
+   旧「plugin ABI fingerprint 不变」承诺随 runtime-plugin-abi 退役
+   过渡至此)。Slot 是**既有字段之上的突变协议,
    不是新的 16 字节表示**(gc_slot.zig 头注)。
 2. **非搬移(non-moving)**:sticky-mark-bit 分代,无 copy/compaction,
    地址稳定性是设计保证(tracing-gc-design.md :58/:848/:897)。

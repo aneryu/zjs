@@ -408,8 +408,10 @@ items:
   - id: FN-M0F
     title: FNABI v1 freeze (side-by-side semantics excluded, per v0.6)
     type: governance
-    state: ready
-    wip_slot: decision
+    state: done
+    wip_slot: none
+    completion_commit: pending-this-commit
+    evidence: "FNABI v0.8 (§0/§33: freeze record + pre-adoption amendment rule) + representation contract v2 (fingerprint -> FNABI tuple, layout_epoch=1); owner ruling 2026-08-26"
     hard_prerequisites: [FN-M0D, FN-M0I]
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M0F"}
   - id: FN-M1A
@@ -478,6 +480,14 @@ items:
     hard_prerequisites: []
     notes: runtime-level primitives only; consumers = PROC-D5B (scheduler), HR-P2A (session scope), FN-M4 (plugin cancel/drain)
     authority: {file: docs/process-model-design.md, section: "5 / 16.2"}
+  - id: GC-PARALLEL-MARK
+    title: Parallel marking (pause/scalability lever promoted by the throughput-triangle ruling)
+    type: implementation
+    state: ready
+    wip_slot: implementation
+    hard_prerequisites: []
+    notes: "LANE: dedicated GC session, branch gc/tracing. Owner triangle ruling 2026-08-26 Option B (gc_merge_policy v2): promoted to a formal plan item; memory envelope stays growth 1.75x / cycle peak-over-live 1.8. Expected to close the residual G2 throughput gap; G2 looks before it land as INCONCLUSIVE per policy."
+    authority: {file: docs/tracing-gc-design.md, section: "9 / pause plan"}
   - id: GC-MULTIRT-GATE
     title: Multi-runtime GC acceptance batch 2 (TSan as gate, concurrent create/destroy, N-runtime concurrent collect)
     type: implementation

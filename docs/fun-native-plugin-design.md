@@ -1,9 +1,12 @@
 # Fun Native Plugin 技术设计
 
-版本：0.7（**FN-M0D 六项裁决闭合**,2026-08-26 owner 批复:epoch=u64/per-Runtime、外部内存计价必填、事件通道=组合模式降档、manifest 不预留 side-by-side 字段、class-id 静态槽新章 §19.2a、handle scope 不进 v1;0.6:side-by-side 移 post-v1、finalizer 方案 B）  
+版本：0.8（**FN-M0F:FNABI v1 已冻结**,2026-08-26 owner 批复;0.7:M0D 六项裁决闭合;0.6:side-by-side 移 post-v1、finalizer 方案 B）  
 日期：2026-08-26  
-状态：评审修订版；**FN-M0F 冻结 FNABI v1,前置=FN-M0D 关闭全部
-freeze_blocker**(见 §33)。**0.5:治理归一化**——M0 拆
+状态：**FNABI v1 FROZEN(2026-08-26)**。冻结面=`src/abi/fun_native_abi.zig`
+(单一事实源)及其生成 C 头、§12.1 结构、§15.2 签名 id 表、常量表;
+演进=append-only(minor)或 major。**预采纳修订规则**:首个第三方
+plugin artifact 存在之前,M1 实现若发现冻结面实质缺陷,可经正式复审
+修订并重新冻结(记录+版本递增);此后收紧为纯追加/major。**0.5:治理归一化**——M0 拆
 FN-M0D/FN-M0I/FN-M0F、开放欠账分类表(§0.1)、FN-M1B/FN-M1C 并行化、
 删除正文残留的整体 M1 依赖表述;**无新设计内容**。全局工作项 ID:
 FN-M0D/FN-M0I/FN-M0F/FN-M1A/FN-M1B/FN-M1C/FN-M2..M6
@@ -18,6 +21,24 @@ process-model-design.md §20.2/§20.2a,本文 §0.1 逐条分类):class id
 ---
 
 ## 0. 版本变更
+
+**0.8（2026-08-26，FN-M0F:FNABI v1 冻结；owner 批复「可以冻结」）**：
+
+- v1 冻结面 = FN-M0I 交付物:`src/abi/fun_native_abi.zig` + 生成的
+  `src/abi/fun_native_abi.h`(§12.1 六结构、§15.2 25 个签名 id、
+  status/export/call/marshal 常量、opaque 类型清单),由四重机械
+  测试(golden 尺寸偏移/无隐式 padding/头文件新鲜度/@cImport C-Zig
+  往返)钉死在 CI。
+- **预采纳修订规则**(与测量政策先例同构):首个第三方 plugin
+  artifact 存在之前,实现期发现的冻结面实质缺陷可经正式复审修订并
+  重新冻结;之后只许 append-only minor 或 major。
+- 验收门同 commit 完成:表示契约 v2 落地 fingerprint→FNABI tuple
+  过渡(§28.1 第 4 条),并定义 **layout_epoch**(现值 1,与契约
+  文档版号解耦)为 `FUN_VALUE_ABI` 第一分量——编辑性修版不再
+  构成 ABI 事件;§11.3 同步。
+- 排除项重申:side-by-side 语义、Host 表内部内容(v1 opaque,随 M1
+  追加定义)、handle scope、事件通道原语均不在冻结面内(各自裁决
+  见 0.6/0.7)。
 
 **0.7（2026-08-26，FN-M0D 六项裁决闭合；owner 逐项批复「按建议来」）**：
 
@@ -789,7 +810,9 @@ Fast Call ABI 不定义 JS `Number` 到 `i32` 的具体转换语义；该语义�
 版本：
 
 ```text
-FUN_VALUE_ABI = (表示契约版本, JSValue.abi_encoding_revision)
+FUN_VALUE_ABI = (layout_epoch, JSValue.abi_encoding_revision)
+// layout_epoch:表示契约 v2 定义,现值 1;只在真实表示变化
+// (布局/tag 语义/地址稳定性)时递增,与契约文档版号解耦
 ```
 
 zjs 已有 `JSValue.abi_encoding_revision`（进 plugin ABI fingerprint）；FNABI 直接复用该机制，不另设编号。规则：
@@ -3124,15 +3147,21 @@ Zig SDK：
 - C 头 `JSValue` 拼写定案（`zjs_JSValue` tag + 可关闭别名，§12.1）。
 - 涉及 M0D 未裁决项的字段以 reserved/opaque 占位，骨架不因此阻塞。
 
-#### FN-M0F：v1 freeze
+#### FN-M0F：v1 freeze（**已冻结 2026-08-26，v0.8；owner 批复**）
 
-前置 = FN-M0D 全部 freeze_blocker 关闭；FN-M0I 交付物是被冻结的对象。
+前置 = FN-M0D 全部 freeze_blocker 关闭（0.7 完成）；FN-M0I 交付物是被冻结的对象（2026-08-26 完成）。
 
-验收门：
+验收门（均已达成）：
 
-- 表示契约修订完成评审：「plugin ABI fingerprint」承诺过渡到 FNABI ABI tuple（§28.1 第 4 条）。
-- ABI 兼容规则和 v1 freeze decision（§34 清单）通过评审。
-- 不允许在 FN-M0F 前发布第三方可依赖的 FNABI v1。
+- [x] 表示契约修订完成评审：契约 v2（2026-08-26）执行「plugin ABI
+  fingerprint」→ FNABI ABI tuple 过渡（§28.1 第 4 条），并定义
+  layout_epoch=1 为 tuple 第一分量。
+- [x] ABI 兼容规则和 v1 freeze decision（§34 清单）通过评审
+  （owner 批复 2026-08-26；§34 第 33 条已随 0.7 修正）。
+- [x] FN-M0F 前未发布任何第三方可依赖的 FNABI v1。
+
+**预采纳修订规则**：见页首状态栏（首个第三方 artifact 前可复审修订
+再冻结；之后 append-only/major）。
 
 ### M1：最小静态端到端链路(FN-M1A / FN-M1B / FN-M1C)
 

@@ -1,4 +1,6 @@
 /* fun_native_abi.h — Fun Native ABI (FNABI) v1.
+ * FROZEN v1 (FN-M0F, 2026-08-26): evolution is append-only
+ * (struct_size + minor) or a major bump.
  *
  * GENERATED from src/abi/fun_native_abi.zig — DO NOT EDIT.
  * Regenerate: zig run src/abi/gen_header.zig  (from the repo root)

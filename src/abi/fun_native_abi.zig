@@ -1,5 +1,12 @@
 //! Fun Native ABI (FNABI) v1 schema — the single source of truth (FN-M0I).
 //!
+//! FROZEN v1 (FN-M0F, 2026-08-26, owner-ratified). Evolution is
+//! append-only (struct_size + minor bump) or a major bump. Pre-adoption
+//! amendment rule: until the first third-party plugin artifact exists, a
+//! substantive defect found by the M1 implementation may amend this surface
+//! through a formal re-freeze review (recorded, version-bumped); after
+//! that, append-only/major strictly.
+//!
 //! Every public ABI struct, constant, and id table lives here. The C header
 //! `src/abi/fun_native_abi.h` is GENERATED from this file (`zig run
 //! src/abi/gen_header.zig`); `src/tests/abi_layout.zig` pins the golden
@@ -243,6 +250,8 @@ pub const c_header_text: []const u8 = blk: {
     @setEvalBranchQuota(20_000);
     var h: []const u8 =
         \\/* fun_native_abi.h — Fun Native ABI (FNABI) v1.
+        \\ * FROZEN v1 (FN-M0F, 2026-08-26): evolution is append-only
+        \\ * (struct_size + minor) or a major bump.
         \\ *
         \\ * GENERATED from src/abi/fun_native_abi.zig — DO NOT EDIT.
         \\ * Regenerate: zig run src/abi/gen_header.zig  (from the repo root)

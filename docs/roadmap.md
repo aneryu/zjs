@@ -204,9 +204,12 @@ activation canary(最小机制覆盖量,冻结在 policy 里):
 正确性:四门全绿(单测双模式 + test262 双向)
 ```
 
-parallel marking = pause/扩展性选项,非吞吐补救。吞吐三角三选一
-在 G1-GC 裁,论证存 process ledger §20.2a。Track B 定性:最大架构
-风险退休项与表示定型点,非产品交付解锁器。
+吞吐三角已裁(2026-08-26,G1-GC/Option B,记录在
+gc_merge_policy.json v2):**parallel marking 升正式计划项
+(GC-PARALLEL-MARK,GC 会话车道)**,内存包络维持 growth 1.75x /
+cycle peak-over-live 1.8(方案 A 定价证伪:1.75→2.5x 只赎回约 1/3
+gap);分层判据(方案 C)弃,与「GC 打磨好才合入」常任裁决一致。
+Track B 定性:最大架构风险退休项与表示定型点,非产品交付解锁器。
 
 **PERF-SHAPE-ID 合同形态(已裁)**:双域——动态可变 shape 用 u64
 identity/version(mutation/relocation/ABA;**计数器作用域=
@@ -231,12 +234,12 @@ G1-LIGHT-PROCESS-WORKLOAD。
 
 **Now(遵守 §4 WIP)**
 ```
-owner-decision: PERF-OPCODE-SPACE(driver 会话)。**FN-M0F 已就绪待裁**
-                (M0D 闭合 v0.7 + M0I 完成 2026-08-26:schema/生成 C 头/
-                golden 测试/NativeCallPlan 映射/SDK thunk 骨架/fun 侧
-                打包 schema,zjs 2364/0)——冻结评审排 decision 队列
+owner-decision: PERF-OPCODE-SPACE(driver 会话)。FN-M0F 已裁并冻结
+                (2026-08-26,FNABI v0.8+表示契约 v2);FN-M1A 只剩等
+                PERF-OPCODE-SPACE
 implementation: GC-P3(GC 专属会话,分支 gc/tracing,不碰 main);
-                driver 侧一槽已释放(候补:HR-P1 或 spike 队列)
+                driver 侧一槽**空置——owner 定夺中**(候选:
+                PERF-T-SPIKE / HR-P1 / RT-LIFECYCLE 等,见讨论)
 measurement:    (空;队列下一位 = PERF-T-SPIKE,占 implementation
                 槽,开工前须批 policy 中 basis=proposed 阈值)
 ```
@@ -303,7 +306,7 @@ deliverables/acceptance/authority;gate 声明 verdicts)。
 治理       BASE-DOC-NORM BASE-ROADMAP-LINT BASE-G0
 gates    G1-GC G1-TYPED G1-FEEDBACK G1-JIT G1-AOT BACKEND-ORDER G2-GC-MERGE G1-LIGHT-PROCESS-WORKLOAD
 性能       PERF-T-SPIKE PERF-DYN-SPIKE PERF-JIT-SPIKE PERF-N-SPIKE PERF-VMABI PERF-OPCODE-SPACE PERF-SHAPE-ID PERF-SIDECAR PERF-TYPED-IR PERF-T1 PERF-P05 PERF-JIT PERF-AOT PERF-ASM-1A PERF-ASM-1B
-GC       GC-GAP GC-P3 VM-CONTRACT-GC GC-MERGE GC-MULTIRT-GATE
+GC       GC-GAP GC-P3 VM-CONTRACT-GC GC-MERGE GC-PARALLEL-MARK GC-MULTIRT-GATE
 序列化      SER-CORE SER-TRANSFER SER-ARTIFACT SER-SNAPSHOT SER-MESSAGE
 fun 面    HR-P1 HR-P2A HR-P2B HR-P3 DBG-W2 FN-M0D FN-M0I FN-M0F FN-M1A FN-M1B FN-M1C FN-M2 FN-M3 FN-M4 FN-M5 FN-M6
 运行时/进程   RT-LIFECYCLE VM-WEAK-REGISTRY PROC-D3 PROC-D4 PROC-D5A PROC-D5B PROC-D6 PROC-D7
@@ -313,11 +316,11 @@ fun 面    HR-P1 HR-P2A HR-P2B HR-P3 DBG-W2 FN-M0D FN-M0I FN-M0F FN-M1A FN-M1B F
 <!-- BEGIN GENERATED: STATUS -->
 ```
 now        PERF-OPCODE-SPACE GC-P3
-ready      G1-LIGHT-PROCESS-WORKLOAD PERF-T-SPIKE PERF-DYN-SPIKE PERF-N-SPIKE PERF-VMABI PERF-SIDECAR SER-CORE SER-TRANSFER HR-P1 DBG-W2 FN-M0F RT-LIFECYCLE GC-MULTIRT-GATE VM-WEAK-REGISTRY PROC-D5A
+ready      G1-LIGHT-PROCESS-WORKLOAD PERF-T-SPIKE PERF-DYN-SPIKE PERF-N-SPIKE PERF-VMABI PERF-SIDECAR SER-CORE SER-TRANSFER HR-P1 DBG-W2 RT-LIFECYCLE GC-PARALLEL-MARK GC-MULTIRT-GATE VM-WEAK-REGISTRY PROC-D5A
 gated      PERF-SHAPE-ID PERF-TYPED-IR PERF-T1 PERF-P05 PERF-JIT PERF-AOT VM-CONTRACT-GC
 blocked    G1-TYPED G1-FEEDBACK G1-JIT G1-AOT BACKEND-ORDER G2-GC-MERGE PERF-JIT-SPIKE GC-MERGE SER-ARTIFACT SER-SNAPSHOT SER-MESSAGE HR-P2A HR-P2B HR-P3 FN-M1A FN-M1B FN-M1C PROC-D3 PROC-D4 PROC-D5B PROC-D6 PROC-D7
 later      FN-M2 FN-M3 FN-M4 FN-M5 FN-M6
 incubator  PERF-ASM-1A PERF-ASM-1B
-done       BASE-DOC-NORM BASE-ROADMAP-LINT BASE-G0 G1-GC GC-GAP FN-M0D FN-M0I
+done       BASE-DOC-NORM BASE-ROADMAP-LINT BASE-G0 G1-GC GC-GAP FN-M0D FN-M0I FN-M0F
 ```
 <!-- END GENERATED: STATUS -->
