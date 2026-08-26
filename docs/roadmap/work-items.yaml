@@ -270,7 +270,7 @@ items:
     type: measurement
     state: done
     wip_slot: none
-    completion_commit: pending-this-commit
+    completion_commit: 215e9f2f
     evidence: reports/evidence/GC-GAP/manifest.json
     activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
