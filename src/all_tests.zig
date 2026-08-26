@@ -149,6 +149,7 @@ test {
 
     // Relative imports for files that are not module roots
     std.testing.refAllDecls(@import("tests/abi_layout.zig"));
+    std.testing.refAllDecls(@import("binding/native_call_plan.zig"));
     std.testing.refAllDecls(@import("tests/gc_stress.zig"));
     std.testing.refAllDecls(@import("cli/zjs.zig"));
     std.testing.refAllDecls(@import("cli/run_test262.zig"));
