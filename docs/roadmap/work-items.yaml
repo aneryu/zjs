@@ -63,7 +63,7 @@ items:
     verdict: continue
     state: done
     wip_slot: none
-    completion_commit: pending-this-commit
+    completion_commit: e08fdac0
     hard_prerequisites: [GC-GAP]
     notes: "ruled continue 2026-08-26 (owner assigned a dedicated GC session to carry the line forward with the GC-GAP account on the table). STILL OWED at this gate per gc_merge_policy: the frozen non-inferiority margin + the throughput-triangle answer (ledger 20.2a) — must be written into gc_merge_policy.json before the first G2-GC-MERGE look."
     authority: {file: docs/roadmap.md, section: "2"}
