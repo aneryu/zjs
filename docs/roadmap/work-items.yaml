@@ -60,7 +60,7 @@ items:
     title: "GC verdict after GC-GAP"
     type: gate
     verdicts: [continue, time_box, pause]
-    state: blocked
+    state: ready
     wip_slot: none
     hard_prerequisites: [GC-GAP]
     authority: {file: docs/roadmap.md, section: "2"}
@@ -268,8 +268,10 @@ items:
   - id: GC-GAP
     title: Full-suite RC vs tracing A/B (plus 4-row per-benchmark account)
     type: measurement
-    state: now
-    wip_slot: measurement
+    state: done
+    wip_slot: none
+    completion_commit: pending-this-commit
+    evidence: reports/evidence/GC-GAP/manifest.json
     activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
     notes: "protocol + frozen reference set: policies/gc_merge_policy.json (gap_measurement) + reports/evidence/BASE-G0/manifest.json"

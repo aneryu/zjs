@@ -1,0 +1,2508 @@
+{
+ "samples": 8,
+ "cpu": "19",
+ "arms": {
+  "trace": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zjs-tracestw-candidate-62061f94",
+  "rc_tip": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zjs-rc-branchtip-62061f94",
+  "rc_mb": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zjs-rc-mergebase-14b0618d"
+ },
+ "protocol": "fixed-work (doWarmup=false, doDeterministic=true), paired per-bench rotation ABBA-alternated, pinned CPU 19 under host-heavy flock",
+ "results": {
+  "deltablue": {
+   "trace": [
+    {
+     "wall_s": 19.60993966087699,
+     "maxrss_kb": 8036,
+     "gc_panel": [
+      "gc: collection entries 968, completed rounds 968, failed 0",
+      "gc: objects freed 10050661, zero-ref drains 0",
+      "gc: collection time total 217922819 ns, last 213426 ns",
+      "gc: live 453332 bytes, peak 2080881 bytes, allocated 453332 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 111473 ns, p95 236002 ns, p99 249426 ns, max 260722 ns over 2904 rounds",
+      "gc: space histogram total 18648750, bytes 1520396732, p50 64, p95 160, p99 160, max_small 128, covered 16875380/18648750, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66285668 hard 66285668",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 447200 milli 4690 superblocks 1 large 0 epoch 0",
+      "gc: generation young 4199, remembered owners 10",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 60130263, skipped young-owner 59722893, skipped old-target 263241",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 63, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 968 (aborted 0, forced 0), increments 968, cycle stw last 413812 ns max 457108 ns",
+      "gc: last finish slice remark 30576 ns, weak 16 ns, sweep+destroy 53617 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 19.608878667932004,
+     "maxrss_kb": 8048,
+     "gc_panel": [
+      "gc: collection entries 968, completed rounds 968, failed 0",
+      "gc: objects freed 10050661, zero-ref drains 0",
+      "gc: collection time total 216755881 ns, last 209969 ns",
+      "gc: live 453332 bytes, peak 2080881 bytes, allocated 453332 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 110977 ns, p95 234034 ns, p99 249346 ns, max 254306 ns over 2904 rounds",
+      "gc: space histogram total 18648750, bytes 1520396732, p50 64, p95 160, p99 160, max_small 128, covered 16875380/18648750, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66285668 hard 66285668",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 447200 milli 4690 superblocks 1 large 0 epoch 0",
+      "gc: generation young 4199, remembered owners 10",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 60130263, skipped young-owner 59722893, skipped old-target 263241",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 63, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 968 (aborted 0, forced 0), increments 968, cycle stw last 408595 ns max 464228 ns",
+      "gc: last finish slice remark 29632 ns, weak 48 ns, sweep+destroy 53808 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 19.483561809174716,
+     "maxrss_kb": 8036,
+     "gc_panel": [
+      "gc: collection entries 968, completed rounds 968, failed 0",
+      "gc: objects freed 10050661, zero-ref drains 0",
+      "gc: collection time total 216460629 ns, last 209905 ns",
+      "gc: live 453332 bytes, peak 2080881 bytes, allocated 453332 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 110864 ns, p95 235842 ns, p99 247585 ns, max 256337 ns over 2904 rounds",
+      "gc: space histogram total 18648750, bytes 1520396732, p50 64, p95 160, p99 160, max_small 128, covered 16875380/18648750, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66285668 hard 66285668",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 447200 milli 4690 superblocks 1 large 0 epoch 0",
+      "gc: generation young 4199, remembered owners 10",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 60130263, skipped young-owner 59722893, skipped old-target 263241",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 63, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 968 (aborted 0, forced 0), increments 968, cycle stw last 403651 ns max 445267 ns",
+      "gc: last finish slice remark 31408 ns, weak 32 ns, sweep+destroy 57697 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 19.581844390835613,
+     "maxrss_kb": 8044,
+     "gc_panel": [
+      "gc: collection entries 968, completed rounds 968, failed 0",
+      "gc: objects freed 10050661, zero-ref drains 0",
+      "gc: collection time total 216139738 ns, last 213265 ns",
+      "gc: live 453332 bytes, peak 2080881 bytes, allocated 453332 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 109649 ns, p95 233793 ns, p99 243921 ns, max 254002 ns over 2904 rounds",
+      "gc: space histogram total 18648750, bytes 1520396732, p50 64, p95 160, p99 160, max_small 128, covered 16875380/18648750, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66285668 hard 66285668",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 447200 milli 4690 superblocks 1 large 0 epoch 0",
+      "gc: generation young 4199, remembered owners 10",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 60130263, skipped young-owner 59722893, skipped old-target 263241",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 63, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 968 (aborted 0, forced 0), increments 968, cycle stw last 400771 ns max 448611 ns",
+      "gc: last finish slice remark 30320 ns, weak 32 ns, sweep+destroy 53712 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 19.543120101094246,
+     "maxrss_kb": 8036,
+     "gc_panel": [
+      "gc: collection entries 968, completed rounds 968, failed 0",
+      "gc: objects freed 10050661, zero-ref drains 0",
+      "gc: collection time total 216902942 ns, last 210465 ns",
+      "gc: live 453332 bytes, peak 2080881 bytes, allocated 453332 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 110256 ns, p95 235025 ns, p99 247185 ns, max 253186 ns over 2904 rounds",
+      "gc: space histogram total 18648750, bytes 1520396732, p50 64, p95 160, p99 160, max_small 128, covered 16875380/18648750, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66285668 hard 66285668",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 447200 milli 4690 superblocks 1 large 0 epoch 0",
+      "gc: generation young 4199, remembered owners 10",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 60130263, skipped young-owner 59722893, skipped old-target 263241",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 63, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 968 (aborted 0, forced 0), increments 968, cycle stw last 395778 ns max 470083 ns",
+      "gc: last finish slice remark 29905 ns, weak 32 ns, sweep+destroy 53472 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 19.55027347104624,
+     "maxrss_kb": 7984,
+     "gc_panel": [
+      "gc: collection entries 968, completed rounds 968, failed 0",
+      "gc: objects freed 10050661, zero-ref drains 0",
+      "gc: collection time total 216951162 ns, last 208754 ns",
+      "gc: live 453332 bytes, peak 2080881 bytes, allocated 453332 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 111952 ns, p95 233890 ns, p99 246081 ns, max 260226 ns over 2904 rounds",
+      "gc: space histogram total 18648750, bytes 1520396732, p50 64, p95 160, p99 160, max_small 128, covered 16875380/18648750, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66285668 hard 66285668",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 447200 milli 4690 superblocks 1 large 0 epoch 0",
+      "gc: generation young 4199, remembered owners 10",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 60130263, skipped young-owner 59722893, skipped old-target 263241",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 63, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 968 (aborted 0, forced 0), increments 968, cycle stw last 404515 ns max 456003 ns",
+      "gc: last finish slice remark 32592 ns, weak 32 ns, sweep+destroy 56912 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 20.537363099865615,
+     "maxrss_kb": 8048,
+     "gc_panel": [
+      "gc: collection entries 968, completed rounds 968, failed 0",
+      "gc: objects freed 10050661, zero-ref drains 0",
+      "gc: collection time total 218152454 ns, last 210578 ns",
+      "gc: live 453332 bytes, peak 2080881 bytes, allocated 453332 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 112305 ns, p95 236738 ns, p99 248130 ns, max 256689 ns over 2904 rounds",
+      "gc: space histogram total 18648750, bytes 1520396732, p50 64, p95 160, p99 160, max_small 128, covered 16875380/18648750, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66285668 hard 66285668",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 447200 milli 4690 superblocks 1 large 0 epoch 0",
+      "gc: generation young 4199, remembered owners 10",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 60130263, skipped young-owner 59722893, skipped old-target 263241",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 63, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 968 (aborted 0, forced 0), increments 968, cycle stw last 417187 ns max 700005 ns",
+      "gc: last finish slice remark 34288 ns, weak 16 ns, sweep+destroy 54112 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 19.62394311418757,
+     "maxrss_kb": 7984,
+     "gc_panel": [
+      "gc: collection entries 968, completed rounds 968, failed 0",
+      "gc: objects freed 10050661, zero-ref drains 0",
+      "gc: collection time total 217448226 ns, last 210849 ns",
+      "gc: live 453332 bytes, peak 2080881 bytes, allocated 453332 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 112112 ns, p95 235186 ns, p99 249954 ns, max 261602 ns over 2904 rounds",
+      "gc: space histogram total 18648750, bytes 1520396732, p50 64, p95 160, p99 160, max_small 128, covered 16875380/18648750, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66285668 hard 66285668",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 447200 milli 4690 superblocks 1 large 0 epoch 0",
+      "gc: generation young 4199, remembered owners 10",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 60130263, skipped young-owner 59722893, skipped old-target 263241",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 63, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 968 (aborted 0, forced 0), increments 968, cycle stw last 399906 ns max 467603 ns",
+      "gc: last finish slice remark 31248 ns, weak 32 ns, sweep+destroy 53649 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    }
+   ],
+   "rc_tip": [
+    {
+     "wall_s": 19.866970569826663,
+     "maxrss_kb": 5680,
+     "gc_panel": [
+      "gc: collection entries 4768, completed rounds 4768, failed 0",
+      "gc: objects freed 5337496, zero-ref drains 2349612",
+      "gc: collection time total 257583975 ns, last 50400 ns",
+      "gc: live 159231 bytes, peak 672961 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 57024 ns, p95 73841 ns, p99 75536 ns, max 77969 ns over 4768 rounds"
+     ]
+    },
+    {
+     "wall_s": 20.009724985808134,
+     "maxrss_kb": 5744,
+     "gc_panel": [
+      "gc: collection entries 4768, completed rounds 4768, failed 0",
+      "gc: objects freed 5337496, zero-ref drains 2349612",
+      "gc: collection time total 254956060 ns, last 50192 ns",
+      "gc: live 159231 bytes, peak 672961 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 56368 ns, p95 72785 ns, p99 74961 ns, max 77041 ns over 4768 rounds"
+     ]
+    },
+    {
+     "wall_s": 20.003170712850988,
+     "maxrss_kb": 5744,
+     "gc_panel": [
+      "gc: collection entries 4768, completed rounds 4768, failed 0",
+      "gc: objects freed 5337496, zero-ref drains 2349612",
+      "gc: collection time total 254393965 ns, last 50576 ns",
+      "gc: live 159231 bytes, peak 672961 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 56256 ns, p95 73505 ns, p99 74976 ns, max 87040 ns over 4768 rounds"
+     ]
+    },
+    {
+     "wall_s": 19.858090925961733,
+     "maxrss_kb": 5680,
+     "gc_panel": [
+      "gc: collection entries 4768, completed rounds 4768, failed 0",
+      "gc: objects freed 5337496, zero-ref drains 2349612",
+      "gc: collection time total 256002359 ns, last 50977 ns",
+      "gc: live 159231 bytes, peak 672961 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 56544 ns, p95 73585 ns, p99 75408 ns, max 78353 ns over 4768 rounds"
+     ]
+    },
+    {
+     "wall_s": 19.90804211003706,
+     "maxrss_kb": 5744,
+     "gc_panel": [
+      "gc: collection entries 4768, completed rounds 4768, failed 0",
+      "gc: objects freed 5337496, zero-ref drains 2349612",
+      "gc: collection time total 257557319 ns, last 52592 ns",
+      "gc: live 159231 bytes, peak 672961 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 56417 ns, p95 72849 ns, p99 76240 ns, max 81088 ns over 4768 rounds"
+     ]
+    },
+    {
+     "wall_s": 19.991944230161607,
+     "maxrss_kb": 5744,
+     "gc_panel": [
+      "gc: collection entries 4768, completed rounds 4768, failed 0",
+      "gc: objects freed 5337496, zero-ref drains 2349612",
+      "gc: collection time total 256250149 ns, last 50977 ns",
+      "gc: live 159231 bytes, peak 672961 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 56721 ns, p95 73184 ns, p99 76000 ns, max 77713 ns over 4768 rounds"
+     ]
+    },
+    {
+     "wall_s": 19.903040043078363,
+     "maxrss_kb": 5744,
+     "gc_panel": [
+      "gc: collection entries 4768, completed rounds 4768, failed 0",
+      "gc: objects freed 5337496, zero-ref drains 2349612",
+      "gc: collection time total 258639894 ns, last 53377 ns",
+      "gc: live 159231 bytes, peak 672961 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 57264 ns, p95 74289 ns, p99 75632 ns, max 78704 ns over 4768 rounds"
+     ]
+    },
+    {
+     "wall_s": 20.00891885906458,
+     "maxrss_kb": 5744,
+     "gc_panel": [
+      "gc: collection entries 4768, completed rounds 4768, failed 0",
+      "gc: objects freed 5337496, zero-ref drains 2349612",
+      "gc: collection time total 256164414 ns, last 50128 ns",
+      "gc: live 159231 bytes, peak 672961 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 56720 ns, p95 73568 ns, p99 75328 ns, max 78497 ns over 4768 rounds"
+     ]
+    }
+   ],
+   "rc_mb": [
+    {
+     "wall_s": 19.921359875239432,
+     "maxrss_kb": 5604,
+     "gc_panel": [
+      "gc: collection entries 4613, completed rounds 4613, failed 0",
+      "gc: objects freed 5337030, zero-ref drains 2349612",
+      "gc: collection time total 262353667 ns, last 59712 ns",
+      "gc: live 159231 bytes, peak 159231 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 59425 ns, p95 63792 ns, p99 77648 ns, max 79969 ns over 4613 rounds"
+     ]
+    },
+    {
+     "wall_s": 19.964183661621064,
+     "maxrss_kb": 5668,
+     "gc_panel": [
+      "gc: collection entries 4613, completed rounds 4613, failed 0",
+      "gc: objects freed 5337030, zero-ref drains 2349612",
+      "gc: collection time total 262232729 ns, last 59552 ns",
+      "gc: live 159231 bytes, peak 159231 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 59184 ns, p95 63600 ns, p99 78017 ns, max 80401 ns over 4613 rounds"
+     ]
+    },
+    {
+     "wall_s": 19.910230868961662,
+     "maxrss_kb": 5652,
+     "gc_panel": [
+      "gc: collection entries 4613, completed rounds 4613, failed 0",
+      "gc: objects freed 5337030, zero-ref drains 2349612",
+      "gc: collection time total 261074514 ns, last 59824 ns",
+      "gc: live 159231 bytes, peak 159231 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 59057 ns, p95 63664 ns, p99 76688 ns, max 79456 ns over 4613 rounds"
+     ]
+    },
+    {
+     "wall_s": 19.825345762073994,
+     "maxrss_kb": 5604,
+     "gc_panel": [
+      "gc: collection entries 4613, completed rounds 4613, failed 0",
+      "gc: objects freed 5337030, zero-ref drains 2349612",
+      "gc: collection time total 260481612 ns, last 59360 ns",
+      "gc: live 159231 bytes, peak 159231 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 59056 ns, p95 63793 ns, p99 76944 ns, max 79824 ns over 4613 rounds"
+     ]
+    },
+    {
+     "wall_s": 19.713891637977213,
+     "maxrss_kb": 5604,
+     "gc_panel": [
+      "gc: collection entries 4613, completed rounds 4613, failed 0",
+      "gc: objects freed 5337030, zero-ref drains 2349612",
+      "gc: collection time total 260340395 ns, last 59520 ns",
+      "gc: live 159231 bytes, peak 159231 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 58864 ns, p95 64209 ns, p99 76689 ns, max 88608 ns over 4613 rounds"
+     ]
+    },
+    {
+     "wall_s": 19.91009397013113,
+     "maxrss_kb": 5652,
+     "gc_panel": [
+      "gc: collection entries 4613, completed rounds 4613, failed 0",
+      "gc: objects freed 5337030, zero-ref drains 2349612",
+      "gc: collection time total 262621000 ns, last 59617 ns",
+      "gc: live 159231 bytes, peak 159231 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 59281 ns, p95 63824 ns, p99 77521 ns, max 79041 ns over 4613 rounds"
+     ]
+    },
+    {
+     "wall_s": 19.875926184933633,
+     "maxrss_kb": 5660,
+     "gc_panel": [
+      "gc: collection entries 4613, completed rounds 4613, failed 0",
+      "gc: objects freed 5337030, zero-ref drains 2349612",
+      "gc: collection time total 261677928 ns, last 58528 ns",
+      "gc: live 159231 bytes, peak 159231 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 59056 ns, p95 63408 ns, p99 76673 ns, max 78976 ns over 4613 rounds"
+     ]
+    },
+    {
+     "wall_s": 19.987156616989523,
+     "maxrss_kb": 5652,
+     "gc_panel": [
+      "gc: collection entries 4613, completed rounds 4613, failed 0",
+      "gc: objects freed 5337030, zero-ref drains 2349612",
+      "gc: collection time total 261466047 ns, last 59680 ns",
+      "gc: live 159231 bytes, peak 159231 bytes, allocated 159231 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 59072 ns, p95 63937 ns, p99 77249 ns, max 79472 ns over 4613 rounds"
+     ]
+    }
+   ]
+  },
+  "regexp": {
+   "trace": [
+    {
+     "wall_s": 5.338131313677877,
+     "maxrss_kb": 13936,
+     "gc_panel": [
+      "gc: collection entries 236, completed rounds 236, failed 0",
+      "gc: objects freed 2735536, zero-ref drains 0",
+      "gc: collection time total 87144806 ns, last 388131 ns",
+      "gc: live 876835 bytes, peak 7222219 bytes, allocated 876835 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 119009 ns, p95 392435 ns, p99 404723 ns, max 424148 ns over 707 rounds",
+      "gc: space histogram total 2753658, bytes 176527715, p50 64, p95 64, p99 64, max_small 128, covered 2753557/2753657, large 1",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66040453 hard 66040453",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 702800 milli 2984 superblocks 1 large 0 epoch 0",
+      "gc: generation young 8350, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 2263, skipped young-owner 1976, skipped old-target 100",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 236 (aborted 0, forced 0), increments 236, cycle stw last 586581 ns max 680630 ns",
+      "gc: last finish slice remark 28993 ns, weak 16 ns, sweep+destroy 60432 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 5.345512444153428,
+     "maxrss_kb": 13936,
+     "gc_panel": [
+      "gc: collection entries 236, completed rounds 236, failed 0",
+      "gc: objects freed 2735536, zero-ref drains 0",
+      "gc: collection time total 86685652 ns, last 381203 ns",
+      "gc: live 876835 bytes, peak 7222219 bytes, allocated 876835 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 117537 ns, p95 389923 ns, p99 400659 ns, max 410740 ns over 707 rounds",
+      "gc: space histogram total 2753658, bytes 176527715, p50 64, p95 64, p99 64, max_small 128, covered 2753557/2753657, large 1",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66040453 hard 66040453",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 702800 milli 2984 superblocks 1 large 0 epoch 0",
+      "gc: generation young 8350, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 2263, skipped young-owner 1976, skipped old-target 100",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 236 (aborted 0, forced 0), increments 236, cycle stw last 582356 ns max 663030 ns",
+      "gc: last finish slice remark 29937 ns, weak 32 ns, sweep+destroy 60592 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 5.357976689003408,
+     "maxrss_kb": 13984,
+     "gc_panel": [
+      "gc: collection entries 236, completed rounds 236, failed 0",
+      "gc: objects freed 2735536, zero-ref drains 0",
+      "gc: collection time total 86957571 ns, last 380114 ns",
+      "gc: live 876835 bytes, peak 7222219 bytes, allocated 876835 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 117745 ns, p95 392035 ns, p99 412659 ns, max 458628 ns over 707 rounds",
+      "gc: space histogram total 2753658, bytes 176527715, p50 64, p95 64, p99 64, max_small 128, covered 2753557/2753657, large 1",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66040453 hard 66040453",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 702800 milli 2984 superblocks 1 large 0 epoch 0",
+      "gc: generation young 8350, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 2263, skipped young-owner 1976, skipped old-target 100",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 236 (aborted 0, forced 0), increments 236, cycle stw last 581300 ns max 716998 ns",
+      "gc: last finish slice remark 30496 ns, weak 32 ns, sweep+destroy 63009 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 5.311965775676072,
+     "maxrss_kb": 13936,
+     "gc_panel": [
+      "gc: collection entries 236, completed rounds 236, failed 0",
+      "gc: objects freed 2735536, zero-ref drains 0",
+      "gc: collection time total 86338957 ns, last 383459 ns",
+      "gc: live 876835 bytes, peak 7222219 bytes, allocated 876835 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 117616 ns, p95 388386 ns, p99 400195 ns, max 411539 ns over 707 rounds",
+      "gc: space histogram total 2753658, bytes 176527715, p50 64, p95 64, p99 64, max_small 128, covered 2753557/2753657, large 1",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66040453 hard 66040453",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 702800 milli 2984 superblocks 1 large 0 epoch 0",
+      "gc: generation young 8350, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 2263, skipped young-owner 1976, skipped old-target 100",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 236 (aborted 0, forced 0), increments 236, cycle stw last 585892 ns max 662981 ns",
+      "gc: last finish slice remark 32224 ns, weak 64 ns, sweep+destroy 60208 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 5.341370883397758,
+     "maxrss_kb": 14000,
+     "gc_panel": [
+      "gc: collection entries 236, completed rounds 236, failed 0",
+      "gc: objects freed 2735536, zero-ref drains 0",
+      "gc: collection time total 87253786 ns, last 388323 ns",
+      "gc: live 876835 bytes, peak 7222219 bytes, allocated 876835 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 117888 ns, p95 393459 ns, p99 404994 ns, max 417043 ns over 707 rounds",
+      "gc: space histogram total 2753658, bytes 176527715, p50 64, p95 64, p99 64, max_small 128, covered 2753557/2753657, large 1",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66040453 hard 66040453",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 702800 milli 2984 superblocks 1 large 0 epoch 0",
+      "gc: generation young 8350, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 2263, skipped young-owner 1976, skipped old-target 100",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 236 (aborted 0, forced 0), increments 236, cycle stw last 588868 ns max 674341 ns",
+      "gc: last finish slice remark 30577 ns, weak 32 ns, sweep+destroy 60336 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 5.318114632740617,
+     "maxrss_kb": 13936,
+     "gc_panel": [
+      "gc: collection entries 236, completed rounds 236, failed 0",
+      "gc: objects freed 2735536, zero-ref drains 0",
+      "gc: collection time total 85870638 ns, last 373571 ns",
+      "gc: live 876835 bytes, peak 7222219 bytes, allocated 876835 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 115521 ns, p95 387058 ns, p99 397459 ns, max 408962 ns over 707 rounds",
+      "gc: space histogram total 2753658, bytes 176527715, p50 64, p95 64, p99 64, max_small 128, covered 2753557/2753657, large 1",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66040453 hard 66040453",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 702800 milli 2984 superblocks 1 large 0 epoch 0",
+      "gc: generation young 8350, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 2263, skipped young-owner 1976, skipped old-target 100",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 236 (aborted 0, forced 0), increments 236, cycle stw last 568740 ns max 649460 ns",
+      "gc: last finish slice remark 29040 ns, weak 16 ns, sweep+destroy 60304 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 5.377685290295631,
+     "maxrss_kb": 14000,
+     "gc_panel": [
+      "gc: collection entries 236, completed rounds 236, failed 0",
+      "gc: objects freed 2735536, zero-ref drains 0",
+      "gc: collection time total 86297490 ns, last 378931 ns",
+      "gc: live 876835 bytes, peak 7222219 bytes, allocated 876835 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 117377 ns, p95 387458 ns, p99 397859 ns, max 413794 ns over 707 rounds",
+      "gc: space histogram total 2753658, bytes 176527715, p50 64, p95 64, p99 64, max_small 128, covered 2753557/2753657, large 1",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66040453 hard 66040453",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 702800 milli 2984 superblocks 1 large 0 epoch 0",
+      "gc: generation young 8350, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 2263, skipped young-owner 1976, skipped old-target 100",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 236 (aborted 0, forced 0), increments 236, cycle stw last 581155 ns max 673957 ns",
+      "gc: last finish slice remark 29200 ns, weak 16 ns, sweep+destroy 60176 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 5.363253501709551,
+     "maxrss_kb": 14000,
+     "gc_panel": [
+      "gc: collection entries 236, completed rounds 236, failed 0",
+      "gc: objects freed 2735536, zero-ref drains 0",
+      "gc: collection time total 88369459 ns, last 380709 ns",
+      "gc: live 876835 bytes, peak 7222219 bytes, allocated 876835 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 117217 ns, p95 396374 ns, p99 448371 ns, max 480279 ns over 707 rounds",
+      "gc: space histogram total 2753658, bytes 176527715, p50 64, p95 64, p99 64, max_small 128, covered 2753557/2753657, large 1",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66040453 hard 66040453",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 702800 milli 2984 superblocks 1 large 0 epoch 0",
+      "gc: generation young 8350, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 2263, skipped young-owner 1976, skipped old-target 100",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 236 (aborted 0, forced 0), increments 236, cycle stw last 580745 ns max 698234 ns",
+      "gc: last finish slice remark 29921 ns, weak 32 ns, sweep+destroy 60368 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    }
+   ],
+   "rc_tip": [
+    {
+     "wall_s": 5.029344660229981,
+     "maxrss_kb": 9072,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 97696 ns, last 30560 ns",
+      "gc: live 314807 bytes, peak 2760346 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 20832 ns, p95 30560 ns, p99 30560 ns, max 30560 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.0234135389328,
+     "maxrss_kb": 9120,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 100897 ns, last 30193 ns",
+      "gc: live 314807 bytes, peak 2760346 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 24256 ns, p95 30193 ns, p99 30193 ns, max 30193 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.091001447290182,
+     "maxrss_kb": 9136,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 99936 ns, last 32096 ns",
+      "gc: live 314807 bytes, peak 2760346 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 20464 ns, p95 32096 ns, p99 32096 ns, max 32096 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.008799081202596,
+     "maxrss_kb": 9136,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 97312 ns, last 30352 ns",
+      "gc: live 314807 bytes, peak 2760346 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 20672 ns, p95 30352 ns, p99 30352 ns, max 30352 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.0728250769898295,
+     "maxrss_kb": 9124,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 98656 ns, last 31216 ns",
+      "gc: live 314807 bytes, peak 2760346 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 20608 ns, p95 31216 ns, p99 31216 ns, max 31216 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.062798114027828,
+     "maxrss_kb": 9072,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 105552 ns, last 30928 ns",
+      "gc: live 314807 bytes, peak 2760346 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 27264 ns, p95 30928 ns, p99 30928 ns, max 30928 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.049734155181795,
+     "maxrss_kb": 9124,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 99024 ns, last 31280 ns",
+      "gc: live 314807 bytes, peak 2760346 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 20928 ns, p95 31280 ns, p99 31280 ns, max 31280 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.061975440941751,
+     "maxrss_kb": 9072,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 98721 ns, last 31008 ns",
+      "gc: live 314807 bytes, peak 2760346 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 20480 ns, p95 31008 ns, p99 31008 ns, max 31008 ns over 4 rounds"
+     ]
+    }
+   ],
+   "rc_mb": [
+    {
+     "wall_s": 5.184444156009704,
+     "maxrss_kb": 9060,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 97873 ns, last 30929 ns",
+      "gc: live 314807 bytes, peak 314807 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 20352 ns, p95 30929 ns, p99 30929 ns, max 30929 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.2432295279577374,
+     "maxrss_kb": 9060,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 99425 ns, last 31440 ns",
+      "gc: live 314807 bytes, peak 314807 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 21408 ns, p95 31440 ns, p99 31440 ns, max 31440 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.202829879708588,
+     "maxrss_kb": 9060,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 97169 ns, last 30657 ns",
+      "gc: live 314807 bytes, peak 314807 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 20304 ns, p95 30657 ns, p99 30657 ns, max 30657 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.092870274093002,
+     "maxrss_kb": 9060,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 97936 ns, last 30672 ns",
+      "gc: live 314807 bytes, peak 314807 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 20576 ns, p95 30672 ns, p99 30672 ns, max 30672 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.2798731052316725,
+     "maxrss_kb": 9060,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 98432 ns, last 30784 ns",
+      "gc: live 314807 bytes, peak 314807 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 20576 ns, p95 30784 ns, p99 30784 ns, max 30784 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.2588645769283175,
+     "maxrss_kb": 9060,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 103984 ns, last 31248 ns",
+      "gc: live 314807 bytes, peak 314807 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 25264 ns, p95 31248 ns, p99 31248 ns, max 31248 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.276069401297718,
+     "maxrss_kb": 9060,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 97264 ns, last 30288 ns",
+      "gc: live 314807 bytes, peak 314807 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 20368 ns, p95 30288 ns, p99 30288 ns, max 30288 ns over 4 rounds"
+     ]
+    },
+    {
+     "wall_s": 5.145748222246766,
+     "maxrss_kb": 9060,
+     "gc_panel": [
+      "gc: collection entries 4, completed rounds 4, failed 0",
+      "gc: objects freed 0, zero-ref drains 2743857",
+      "gc: collection time total 97425 ns, last 30784 ns",
+      "gc: live 314807 bytes, peak 314807 bytes, allocated 314807 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 20385 ns, p95 30784 ns, p99 30784 ns, max 30784 ns over 4 rounds"
+     ]
+    }
+   ]
+  },
+  "pdfjs": {
+   "trace": [
+    {
+     "wall_s": 3.224140158854425,
+     "maxrss_kb": 60652,
+     "gc_panel": [
+      "gc: collection entries 170, completed rounds 18, failed 0",
+      "gc: objects freed 2790536, zero-ref drains 0",
+      "gc: collection time total 11902898 ns, last 211826 ns",
+      "gc: live 6020443 bytes, peak 40686482 bytes, allocated 6020443 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 620037 ns, p95 1147178 ns, p99 1246827 ns, max 1246827 ns over 55 rounds",
+      "gc: space histogram total 4603398, bytes 395385170, p50 64, p95 128, p99 128, max_small 128, covered 4584707/4603394, large 4",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 60711181 hard 61793735",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 14680064 live 2723120 milli 5391 superblocks 7 large 0 epoch 0",
+      "gc: generation young 14354, remembered owners 23",
+      "gc: minor collections 152, promoted 92830, remembered without young 527, remembered drops 0, suspensions 0",
+      "gc: barrier calls 7263021, skipped young-owner 7163986, skipped old-target 19970",
+      "gc: minor pause mean 828294 ns, max 955656 ns",
+      "gc: minor young-at-start mean 16822, max 19174, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 18 (aborted 0, forced 0), increments 18, cycle stw last 2681334 ns max 2731639 ns",
+      "gc: last finish slice remark 54080 ns, weak 304 ns, sweep+destroy 321059 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.2010695482604206,
+     "maxrss_kb": 60904,
+     "gc_panel": [
+      "gc: collection entries 170, completed rounds 18, failed 0",
+      "gc: objects freed 2790536, zero-ref drains 0",
+      "gc: collection time total 12850097 ns, last 1201881 ns",
+      "gc: live 6020443 bytes, peak 40686482 bytes, allocated 6020443 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 635285 ns, p95 1148536 ns, p99 1228345 ns, max 1228345 ns over 54 rounds",
+      "gc: space histogram total 4603398, bytes 395385170, p50 64, p95 128, p99 128, max_small 128, covered 4584707/4603394, large 4",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 60711181 hard 61793735",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 14680064 live 2723120 milli 5391 superblocks 7 large 0 epoch 0",
+      "gc: generation young 14354, remembered owners 23",
+      "gc: minor collections 152, promoted 92830, remembered without young 529, remembered drops 0, suspensions 0",
+      "gc: barrier calls 7263021, skipped young-owner 7163986, skipped old-target 19970",
+      "gc: minor pause mean 816594 ns, max 957095 ns",
+      "gc: minor young-at-start mean 16822, max 19174, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 18 (aborted 0, forced 0), increments 18, cycle stw last 2653924 ns max 2689252 ns",
+      "gc: last finish slice remark 50433 ns, weak 224 ns, sweep+destroy 317458 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.2149640740826726,
+     "maxrss_kb": 60956,
+     "gc_panel": [
+      "gc: collection entries 170, completed rounds 18, failed 0",
+      "gc: objects freed 2790536, zero-ref drains 0",
+      "gc: collection time total 12886780 ns, last 1202025 ns",
+      "gc: live 6020443 bytes, peak 40686482 bytes, allocated 6020443 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 621204 ns, p95 1167128 ns, p99 1241977 ns, max 1241977 ns over 54 rounds",
+      "gc: space histogram total 4603398, bytes 395385170, p50 64, p95 128, p99 128, max_small 128, covered 4584707/4603394, large 4",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 60711181 hard 61793735",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 14680064 live 2723120 milli 5391 superblocks 7 large 0 epoch 0",
+      "gc: generation young 14354, remembered owners 23",
+      "gc: minor collections 152, promoted 92830, remembered without young 530, remembered drops 0, suspensions 0",
+      "gc: barrier calls 7263021, skipped young-owner 7163986, skipped old-target 19970",
+      "gc: minor pause mean 831708 ns, max 933367 ns",
+      "gc: minor young-at-start mean 16822, max 19174, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 18 (aborted 0, forced 0), increments 18, cycle stw last 2648243 ns max 2672211 ns",
+      "gc: last finish slice remark 61104 ns, weak 352 ns, sweep+destroy 320962 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.217103499919176,
+     "maxrss_kb": 60352,
+     "gc_panel": [
+      "gc: collection entries 170, completed rounds 18, failed 0",
+      "gc: objects freed 2790536, zero-ref drains 0",
+      "gc: collection time total 12987896 ns, last 1204040 ns",
+      "gc: live 6020443 bytes, peak 40686482 bytes, allocated 6020443 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 630900 ns, p95 1131800 ns, p99 1216969 ns, max 1216969 ns over 54 rounds",
+      "gc: space histogram total 4603398, bytes 395385170, p50 64, p95 128, p99 128, max_small 128, covered 4584707/4603394, large 4",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 60711181 hard 61793735",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 14680064 live 2723120 milli 5391 superblocks 7 large 0 epoch 0",
+      "gc: generation young 14354, remembered owners 23",
+      "gc: minor collections 152, promoted 92830, remembered without young 529, remembered drops 0, suspensions 0",
+      "gc: barrier calls 7263021, skipped young-owner 7163986, skipped old-target 19970",
+      "gc: minor pause mean 821567 ns, max 927255 ns",
+      "gc: minor young-at-start mean 16822, max 19174, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 18 (aborted 0, forced 0), increments 18, cycle stw last 2631106 ns max 2713826 ns",
+      "gc: last finish slice remark 48736 ns, weak 336 ns, sweep+destroy 317971 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.2102195946499705,
+     "maxrss_kb": 60652,
+     "gc_panel": [
+      "gc: collection entries 170, completed rounds 18, failed 0",
+      "gc: objects freed 2790536, zero-ref drains 0",
+      "gc: collection time total 12733749 ns, last 1201544 ns",
+      "gc: live 6020443 bytes, peak 40686482 bytes, allocated 6020443 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 621588 ns, p95 1138359 ns, p99 1234488 ns, max 1234488 ns over 54 rounds",
+      "gc: space histogram total 4603398, bytes 395385170, p50 64, p95 128, p99 128, max_small 128, covered 4584707/4603394, large 4",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 60711181 hard 61793735",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 14680064 live 2723120 milli 5391 superblocks 7 large 0 epoch 0",
+      "gc: generation young 14354, remembered owners 23",
+      "gc: minor collections 152, promoted 92830, remembered without young 528, remembered drops 0, suspensions 0",
+      "gc: barrier calls 7263021, skipped young-owner 7163986, skipped old-target 19970",
+      "gc: minor pause mean 823474 ns, max 929430 ns",
+      "gc: minor young-at-start mean 16822, max 19174, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 18 (aborted 0, forced 0), increments 18, cycle stw last 2649170 ns max 2649170 ns",
+      "gc: last finish slice remark 56401 ns, weak 384 ns, sweep+destroy 323602 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.204518843907863,
+     "maxrss_kb": 60908,
+     "gc_panel": [
+      "gc: collection entries 170, completed rounds 18, failed 0",
+      "gc: objects freed 2790536, zero-ref drains 0",
+      "gc: collection time total 12690786 ns, last 1205272 ns",
+      "gc: live 6020443 bytes, peak 40686482 bytes, allocated 6020443 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 594356 ns, p95 1145895 ns, p99 1247128 ns, max 1247128 ns over 54 rounds",
+      "gc: space histogram total 4603398, bytes 395385170, p50 64, p95 128, p99 128, max_small 128, covered 4584707/4603394, large 4",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 60711181 hard 61793735",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 14680064 live 2723120 milli 5391 superblocks 7 large 0 epoch 0",
+      "gc: generation young 14354, remembered owners 23",
+      "gc: minor collections 152, promoted 92830, remembered without young 527, remembered drops 0, suspensions 0",
+      "gc: barrier calls 7263021, skipped young-owner 7163986, skipped old-target 19970",
+      "gc: minor pause mean 829566 ns, max 981206 ns",
+      "gc: minor young-at-start mean 16822, max 19174, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 18 (aborted 0, forced 0), increments 18, cycle stw last 2693282 ns max 2722753 ns",
+      "gc: last finish slice remark 54209 ns, weak 320 ns, sweep+destroy 315618 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.2145481812767684,
+     "maxrss_kb": 60784,
+     "gc_panel": [
+      "gc: collection entries 170, completed rounds 18, failed 0",
+      "gc: objects freed 2790536, zero-ref drains 0",
+      "gc: collection time total 11772397 ns, last 204401 ns",
+      "gc: live 6020443 bytes, peak 40686482 bytes, allocated 6020443 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 608740 ns, p95 1147895 ns, p99 1253384 ns, max 1253384 ns over 55 rounds",
+      "gc: space histogram total 4603398, bytes 395385170, p50 64, p95 128, p99 128, max_small 128, covered 4584707/4603394, large 4",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 60711181 hard 61793735",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 14680064 live 2723120 milli 5391 superblocks 7 large 0 epoch 0",
+      "gc: generation young 14354, remembered owners 23",
+      "gc: minor collections 152, promoted 92830, remembered without young 528, remembered drops 0, suspensions 0",
+      "gc: barrier calls 7263021, skipped young-owner 7163986, skipped old-target 19970",
+      "gc: minor pause mean 823821 ns, max 916646 ns",
+      "gc: minor young-at-start mean 16822, max 19174, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 18 (aborted 0, forced 0), increments 18, cycle stw last 2701985 ns max 2701985 ns",
+      "gc: last finish slice remark 63649 ns, weak 272 ns, sweep+destroy 318562 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.2330794162116945,
+     "maxrss_kb": 60640,
+     "gc_panel": [
+      "gc: collection entries 170, completed rounds 18, failed 0",
+      "gc: objects freed 2790536, zero-ref drains 0",
+      "gc: collection time total 11828399 ns, last 209059 ns",
+      "gc: live 6020443 bytes, peak 40686482 bytes, allocated 6020443 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 626601 ns, p95 1136961 ns, p99 1243939 ns, max 1243939 ns over 55 rounds",
+      "gc: space histogram total 4603398, bytes 395385170, p50 64, p95 128, p99 128, max_small 128, covered 4584707/4603394, large 4",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 60711181 hard 61793735",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 14680064 live 2723120 milli 5391 superblocks 7 large 0 epoch 0",
+      "gc: generation young 14354, remembered owners 23",
+      "gc: minor collections 152, promoted 92830, remembered without young 528, remembered drops 0, suspensions 0",
+      "gc: barrier calls 7263021, skipped young-owner 7163986, skipped old-target 19970",
+      "gc: minor pause mean 907620 ns, max 1068336 ns",
+      "gc: minor young-at-start mean 16822, max 19174, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 18 (aborted 0, forced 0), increments 18, cycle stw last 2658888 ns max 2674711 ns",
+      "gc: last finish slice remark 52225 ns, weak 272 ns, sweep+destroy 318437 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    }
+   ],
+   "rc_tip": [
+    {
+     "wall_s": 3.123534047976136,
+     "maxrss_kb": 41416,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 16506010 ns, last 2649894 ns",
+      "gc: live 2561380 bytes, peak 35398810 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1218554 ns, p95 2649894 ns, p99 2649894 ns, max 2649894 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.109557589981705,
+     "maxrss_kb": 41416,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 16822065 ns, last 2872406 ns",
+      "gc: live 2561380 bytes, peak 35398810 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1257450 ns, p95 2872406 ns, p99 2872406 ns, max 2872406 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.135728983208537,
+     "maxrss_kb": 41544,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 16372870 ns, last 2420513 ns",
+      "gc: live 2561380 bytes, peak 35398810 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1217352 ns, p95 2512530 ns, p99 2512530 ns, max 2512530 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.1037941756658256,
+     "maxrss_kb": 41512,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 16623713 ns, last 2585777 ns",
+      "gc: live 2561380 bytes, peak 35398810 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1260985 ns, p95 2585777 ns, p99 2585777 ns, max 2585777 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.096822960767895,
+     "maxrss_kb": 41404,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 16269658 ns, last 2387504 ns",
+      "gc: live 2561380 bytes, peak 35398810 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1211672 ns, p95 2451968 ns, p99 2451968 ns, max 2451968 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.1063065133057535,
+     "maxrss_kb": 41412,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 15708147 ns, last 2500544 ns",
+      "gc: live 2561380 bytes, peak 35398810 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1153351 ns, p95 2500544 ns, p99 2500544 ns, max 2500544 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.1024208520539105,
+     "maxrss_kb": 41544,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 15685043 ns, last 2467424 ns",
+      "gc: live 2561380 bytes, peak 35398810 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1187128 ns, p95 2467424 ns, p99 2467424 ns, max 2467424 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.0963549851439893,
+     "maxrss_kb": 41444,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 16662443 ns, last 2464293 ns",
+      "gc: live 2561380 bytes, peak 35398810 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1344485 ns, p95 2464293 ns, p99 2464293 ns, max 2464293 ns over 12 rounds"
+     ]
+    }
+   ],
+   "rc_mb": [
+    {
+     "wall_s": 3.0923169632442296,
+     "maxrss_kb": 41376,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 16503386 ns, last 2625302 ns",
+      "gc: live 2561380 bytes, peak 2561380 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 1363419 ns, p95 2625302 ns, p99 2625302 ns, max 2625302 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.099920265842229,
+     "maxrss_kb": 41312,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 16806847 ns, last 2617380 ns",
+      "gc: live 2561380 bytes, peak 2561380 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 1260682 ns, p95 2617380 ns, p99 2617380 ns, max 2617380 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.0938946371898055,
+     "maxrss_kb": 41308,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 17187335 ns, last 2600946 ns",
+      "gc: live 2561380 bytes, peak 2561380 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 1288073 ns, p95 2600946 ns, p99 2600946 ns, max 2600946 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.089089097920805,
+     "maxrss_kb": 41376,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 16622097 ns, last 2451024 ns",
+      "gc: live 2561380 bytes, peak 2561380 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 1278713 ns, p95 2453440 ns, p99 2453440 ns, max 2453440 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.098292849957943,
+     "maxrss_kb": 41356,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 16523610 ns, last 2766578 ns",
+      "gc: live 2561380 bytes, peak 2561380 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 1193016 ns, p95 2766578 ns, p99 2766578 ns, max 2766578 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.0917506022378802,
+     "maxrss_kb": 41372,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 15620772 ns, last 2332478 ns",
+      "gc: live 2561380 bytes, peak 2561380 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 1168183 ns, p95 2332478 ns, p99 2332478 ns, max 2332478 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.097696146927774,
+     "maxrss_kb": 41376,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 15708434 ns, last 2369679 ns",
+      "gc: live 2561380 bytes, peak 2561380 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 1195943 ns, p95 2369679 ns, p99 2369679 ns, max 2369679 ns over 12 rounds"
+     ]
+    },
+    {
+     "wall_s": 3.095118131954223,
+     "maxrss_kb": 41276,
+     "gc_panel": [
+      "gc: collection entries 12, completed rounds 12, failed 0",
+      "gc: objects freed 79950, zero-ref drains 2625764",
+      "gc: collection time total 16502968 ns, last 2556806 ns",
+      "gc: live 2561380 bytes, peak 2561380 bytes, allocated 2561380 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 1228706 ns, p95 2556806 ns, p99 2556806 ns, max 2556806 ns over 12 rounds"
+     ]
+    }
+   ]
+  },
+  "raytrace": {
+   "trace": [
+    {
+     "wall_s": 13.90952355088666,
+     "maxrss_kb": 8404,
+     "gc_panel": [
+      "gc: collection entries 3735, completed rounds 3735, failed 0",
+      "gc: objects freed 44198196, zero-ref drains 0",
+      "gc: collection time total 873213103 ns, last 228290 ns",
+      "gc: live 266620 bytes, peak 2561285 bytes, allocated 266620 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 106273 ns, p95 238306 ns, p99 257970 ns, max 275715 ns over 11205 rounds",
+      "gc: space histogram total 90430983, bytes 6980234212, p50 96, p95 96, p99 160, max_small 128, covered 88554799/90430983, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66217468 hard 66217468",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 174240 milli 12036 superblocks 1 large 0 epoch 0",
+      "gc: generation young 1905, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 151985421, skipped young-owner 151976221, skipped old-target 3769",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 178, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 3735 (aborted 0, forced 0), increments 3735, cycle stw last 437156 ns max 520453 ns",
+      "gc: last finish slice remark 26480 ns, weak 32 ns, sweep+destroy 63313 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 13.817548369057477,
+     "maxrss_kb": 8400,
+     "gc_panel": [
+      "gc: collection entries 3735, completed rounds 3735, failed 0",
+      "gc: objects freed 44198196, zero-ref drains 0",
+      "gc: collection time total 867358716 ns, last 226882 ns",
+      "gc: live 266620 bytes, peak 2561285 bytes, allocated 266620 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 104033 ns, p95 237330 ns, p99 256114 ns, max 274275 ns over 11205 rounds",
+      "gc: space histogram total 90430983, bytes 6980234212, p50 96, p95 96, p99 160, max_small 128, covered 88554799/90430983, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66217468 hard 66217468",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 174240 milli 12036 superblocks 1 large 0 epoch 0",
+      "gc: generation young 1905, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 151985421, skipped young-owner 151976221, skipped old-target 3769",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 178, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 3735 (aborted 0, forced 0), increments 3735, cycle stw last 411219 ns max 585892 ns",
+      "gc: last finish slice remark 26400 ns, weak 32 ns, sweep+destroy 65792 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 13.978426817338914,
+     "maxrss_kb": 8532,
+     "gc_panel": [
+      "gc: collection entries 3735, completed rounds 3735, failed 0",
+      "gc: objects freed 44198196, zero-ref drains 0",
+      "gc: collection time total 867754722 ns, last 227634 ns",
+      "gc: live 266620 bytes, peak 2561285 bytes, allocated 266620 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 103777 ns, p95 235922 ns, p99 260210 ns, max 282962 ns over 11205 rounds",
+      "gc: space histogram total 90430983, bytes 6980234212, p50 96, p95 96, p99 160, max_small 128, covered 88554799/90430983, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66217468 hard 66217468",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 174240 milli 12036 superblocks 1 large 0 epoch 0",
+      "gc: generation young 1905, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 151985421, skipped young-owner 151976221, skipped old-target 3769",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 178, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 3735 (aborted 0, forced 0), increments 3735, cycle stw last 411907 ns max 612500 ns",
+      "gc: last finish slice remark 25921 ns, weak 16 ns, sweep+destroy 64768 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 13.90482580801472,
+     "maxrss_kb": 8404,
+     "gc_panel": [
+      "gc: collection entries 3735, completed rounds 3735, failed 0",
+      "gc: objects freed 44198196, zero-ref drains 0",
+      "gc: collection time total 865663498 ns, last 229137 ns",
+      "gc: live 266620 bytes, peak 2561285 bytes, allocated 266620 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 107201 ns, p95 235858 ns, p99 255634 ns, max 272241 ns over 11205 rounds",
+      "gc: space histogram total 90430983, bytes 6980234212, p50 96, p95 96, p99 160, max_small 128, covered 88554799/90430983, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66217468 hard 66217468",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 174240 milli 12036 superblocks 1 large 0 epoch 0",
+      "gc: generation young 1905, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 151985421, skipped young-owner 151976221, skipped old-target 3769",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 178, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 3735 (aborted 0, forced 0), increments 3735, cycle stw last 440051 ns max 622340 ns",
+      "gc: last finish slice remark 27664 ns, weak 16 ns, sweep+destroy 64289 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 13.825923440977931,
+     "maxrss_kb": 8404,
+     "gc_panel": [
+      "gc: collection entries 3735, completed rounds 3735, failed 0",
+      "gc: objects freed 44198196, zero-ref drains 0",
+      "gc: collection time total 867499409 ns, last 230241 ns",
+      "gc: live 266620 bytes, peak 2561285 bytes, allocated 266620 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 106417 ns, p95 237281 ns, p99 259121 ns, max 277730 ns over 11205 rounds",
+      "gc: space histogram total 90430983, bytes 6980234212, p50 96, p95 96, p99 160, max_small 128, covered 88554799/90430983, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66217468 hard 66217468",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 174240 milli 12036 superblocks 1 large 0 epoch 0",
+      "gc: generation young 1905, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 151985421, skipped young-owner 151976221, skipped old-target 3769",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 178, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 3735 (aborted 0, forced 0), increments 3735, cycle stw last 438067 ns max 516707 ns",
+      "gc: last finish slice remark 26880 ns, weak 32 ns, sweep+destroy 63585 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 13.93017675774172,
+     "maxrss_kb": 8400,
+     "gc_panel": [
+      "gc: collection entries 3735, completed rounds 3735, failed 0",
+      "gc: objects freed 44198196, zero-ref drains 0",
+      "gc: collection time total 865606357 ns, last 225585 ns",
+      "gc: live 266620 bytes, peak 2561285 bytes, allocated 266620 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 102465 ns, p95 234897 ns, p99 257618 ns, max 281538 ns over 11205 rounds",
+      "gc: space histogram total 90430983, bytes 6980234212, p50 96, p95 96, p99 160, max_small 128, covered 88554799/90430983, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66217468 hard 66217468",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 174240 milli 12036 superblocks 1 large 0 epoch 0",
+      "gc: generation young 1905, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 151985421, skipped young-owner 151976221, skipped old-target 3769",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 178, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 3735 (aborted 0, forced 0), increments 3735, cycle stw last 408051 ns max 487299 ns",
+      "gc: last finish slice remark 26464 ns, weak 32 ns, sweep+destroy 62753 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 13.821353116072714,
+     "maxrss_kb": 8396,
+     "gc_panel": [
+      "gc: collection entries 3735, completed rounds 3735, failed 0",
+      "gc: objects freed 44198196, zero-ref drains 0",
+      "gc: collection time total 868711130 ns, last 226930 ns",
+      "gc: live 266620 bytes, peak 2561285 bytes, allocated 266620 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 104097 ns, p95 235490 ns, p99 257633 ns, max 282833 ns over 11205 rounds",
+      "gc: space histogram total 90430983, bytes 6980234212, p50 96, p95 96, p99 160, max_small 128, covered 88554799/90430983, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66217468 hard 66217468",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 174240 milli 12036 superblocks 1 large 0 epoch 0",
+      "gc: generation young 1905, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 151985421, skipped young-owner 151976221, skipped old-target 3769",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 178, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 3735 (aborted 0, forced 0), increments 3735, cycle stw last 415475 ns max 495075 ns",
+      "gc: last finish slice remark 28064 ns, weak 32 ns, sweep+destroy 63120 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 13.875917101744562,
+     "maxrss_kb": 8532,
+     "gc_panel": [
+      "gc: collection entries 3735, completed rounds 3735, failed 0",
+      "gc: objects freed 44198196, zero-ref drains 0",
+      "gc: collection time total 865841033 ns, last 228355 ns",
+      "gc: live 266620 bytes, peak 2561285 bytes, allocated 266620 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 103026 ns, p95 236067 ns, p99 251460 ns, max 266515 ns over 11205 rounds",
+      "gc: space histogram total 90430983, bytes 6980234212, p50 96, p95 96, p99 160, max_small 128, covered 88554799/90430983, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 66217468 hard 66217468",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 2097152 live 174240 milli 12036 superblocks 1 large 0 epoch 0",
+      "gc: generation young 1905, remembered owners 3",
+      "gc: minor collections 0, promoted 0, remembered without young 0, remembered drops 0, suspensions 0",
+      "gc: barrier calls 151985421, skipped young-owner 151976221, skipped old-target 3769",
+      "gc: minor pause mean 0 ns, max 0 ns",
+      "gc: minor young-at-start mean 0, max 0, kept by refcount 0",
+      "gc: shaded 178, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 3735 (aborted 0, forced 0), increments 3735, cycle stw last 411078 ns max 471910 ns",
+      "gc: last finish slice remark 26832 ns, weak 16 ns, sweep+destroy 62641 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    }
+   ],
+   "rc_tip": [
+    {
+     "wall_s": 11.89205422392115,
+     "maxrss_kb": 5760,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 76337 ns, last 26656 ns",
+      "gc: live 108174 bytes, peak 966729 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 26656 ns, p95 28225 ns, p99 28225 ns, max 28225 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.935975304339081,
+     "maxrss_kb": 5776,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 74992 ns, last 26576 ns",
+      "gc: live 108174 bytes, peak 966729 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 26576 ns, p95 27792 ns, p99 27792 ns, max 27792 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.990220349747688,
+     "maxrss_kb": 5776,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 76401 ns, last 26768 ns",
+      "gc: live 108174 bytes, peak 966729 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 26768 ns, p95 28592 ns, p99 28592 ns, max 28592 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.951506156940013,
+     "maxrss_kb": 5772,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 77617 ns, last 27505 ns",
+      "gc: live 108174 bytes, peak 966729 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 27505 ns, p95 28560 ns, p99 28560 ns, max 28560 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.94537244969979,
+     "maxrss_kb": 5776,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 83920 ns, last 26976 ns",
+      "gc: live 108174 bytes, peak 966729 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 26976 ns, p95 35712 ns, p99 35712 ns, max 35712 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.863756207283586,
+     "maxrss_kb": 5776,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 76928 ns, last 27136 ns",
+      "gc: live 108174 bytes, peak 966729 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 27136 ns, p95 28608 ns, p99 28608 ns, max 28608 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.82583742402494,
+     "maxrss_kb": 5712,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 76064 ns, last 26528 ns",
+      "gc: live 108174 bytes, peak 966729 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 26528 ns, p95 28176 ns, p99 28176 ns, max 28176 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.915955963078886,
+     "maxrss_kb": 5760,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 83425 ns, last 26704 ns",
+      "gc: live 108174 bytes, peak 966729 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 28000 ns, p95 28721 ns, p99 28721 ns, max 28721 ns over 3 rounds"
+     ]
+    }
+   ],
+   "rc_mb": [
+    {
+     "wall_s": 11.786286157555878,
+     "maxrss_kb": 5700,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 77168 ns, last 27152 ns",
+      "gc: live 108174 bytes, peak 108174 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 27152 ns, p95 28160 ns, p99 28160 ns, max 28160 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.756719877943397,
+     "maxrss_kb": 5700,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 76065 ns, last 26785 ns",
+      "gc: live 108174 bytes, peak 108174 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 26785 ns, p95 27792 ns, p99 27792 ns, max 27792 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.751092992722988,
+     "maxrss_kb": 5684,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 76577 ns, last 27713 ns",
+      "gc: live 108174 bytes, peak 108174 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 27488 ns, p95 27713 ns, p99 27713 ns, max 27713 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.75161246675998,
+     "maxrss_kb": 5684,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 75200 ns, last 26144 ns",
+      "gc: live 108174 bytes, peak 108174 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 26144 ns, p95 27872 ns, p99 27872 ns, max 27872 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.742210731375962,
+     "maxrss_kb": 5700,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 76673 ns, last 27168 ns",
+      "gc: live 108174 bytes, peak 108174 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 27168 ns, p95 27905 ns, p99 27905 ns, max 27905 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.80547354882583,
+     "maxrss_kb": 5700,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 74178 ns, last 26257 ns",
+      "gc: live 108174 bytes, peak 108174 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 26257 ns, p95 26929 ns, p99 26929 ns, max 26929 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.710964768193662,
+     "maxrss_kb": 5684,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 73824 ns, last 26320 ns",
+      "gc: live 108174 bytes, peak 108174 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 26320 ns, p95 26784 ns, p99 26784 ns, max 26784 ns over 3 rounds"
+     ]
+    },
+    {
+     "wall_s": 11.858854845166206,
+     "maxrss_kb": 5636,
+     "gc_panel": [
+      "gc: collection entries 3, completed rounds 3, failed 0",
+      "gc: objects freed 0, zero-ref drains 32004220",
+      "gc: collection time total 74786 ns, last 26225 ns",
+      "gc: live 108174 bytes, peak 108174 bytes, allocated 108174 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 26225 ns, p95 27217 ns, p99 27217 ns, max 27217 ns over 3 rounds"
+     ]
+    }
+   ]
+  },
+  "earley-boyer": {
+   "trace": [
+    {
+     "wall_s": 28.755147374235094,
+     "maxrss_kb": 41620,
+     "gc_panel": [
+      "gc: collection entries 10608, completed rounds 7702, failed 0",
+      "gc: objects freed 171671184, zero-ref drains 0",
+      "gc: collection time total 2527591937 ns, last 495268 ns",
+      "gc: live 5525565 bytes, peak 15003587 bytes, allocated 5525565 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 550533 ns, p95 1202473 ns, p99 1543788 ns, max 1739310 ns over 23626 rounds",
+      "gc: space histogram total 255025370, bytes 17469601852, p50 64, p95 96, p99 128, max_small 128, covered 255024438/255025370, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 61280123 hard 61280123",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 27262976 live 6296800 milli 4330 superblocks 13 large 0 epoch 0",
+      "gc: generation young 1406, remembered owners 3",
+      "gc: minor collections 2906, promoted 18606670, remembered without young 2630, remembered drops 0, suspensions 0",
+      "gc: barrier calls 415564876, skipped young-owner 408109035, skipped old-target 513904",
+      "gc: minor pause mean 628790 ns, max 744630 ns",
+      "gc: minor young-at-start mean 16686, max 17276, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 7702 (aborted 0, forced 0), increments 8024, cycle stw last 2544708 ns max 4210450 ns",
+      "gc: last finish slice remark 46304 ns, weak 144 ns, sweep+destroy 163809 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 28.600826730020344,
+     "maxrss_kb": 41708,
+     "gc_panel": [
+      "gc: collection entries 10614, completed rounds 7714, failed 0",
+      "gc: objects freed 171671182, zero-ref drains 0",
+      "gc: collection time total 2528880370 ns, last 511492 ns",
+      "gc: live 5525629 bytes, peak 14985491 bytes, allocated 5525629 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 525588 ns, p95 1163737 ns, p99 1412234 ns, max 1712973 ns over 23635 rounds",
+      "gc: space histogram total 255025370, bytes 17469601852, p50 64, p95 96, p99 128, max_small 128, covered 255024438/255025370, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 61280059 hard 61280059",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 27262976 live 6296880 milli 4330 superblocks 13 large 0 epoch 0",
+      "gc: generation young 1406, remembered owners 3",
+      "gc: minor collections 2900, promoted 18591231, remembered without young 2616, remembered drops 0, suspensions 0",
+      "gc: barrier calls 415564950, skipped young-owner 408109107, skipped old-target 513942",
+      "gc: minor pause mean 630061 ns, max 764550 ns",
+      "gc: minor young-at-start mean 16683, max 17276, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 7714 (aborted 0, forced 0), increments 8009, cycle stw last 2714388 ns max 4277679 ns",
+      "gc: last finish slice remark 48592 ns, weak 176 ns, sweep+destroy 170769 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 28.850994207896292,
+     "maxrss_kb": 41548,
+     "gc_panel": [
+      "gc: collection entries 10608, completed rounds 7704, failed 0",
+      "gc: objects freed 171671185, zero-ref drains 0",
+      "gc: collection time total 2530083093 ns, last 497139 ns",
+      "gc: live 5525565 bytes, peak 15003587 bytes, allocated 5525565 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 537875 ns, p95 1176328 ns, p99 1526971 ns, max 1724732 ns over 23610 rounds",
+      "gc: space histogram total 255025370, bytes 17469601852, p50 64, p95 96, p99 128, max_small 128, covered 255024438/255025370, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 61280123 hard 61280123",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 27262976 live 6296800 milli 4330 superblocks 13 large 0 epoch 0",
+      "gc: generation young 1406, remembered owners 3",
+      "gc: minor collections 2904, promoted 18589011, remembered without young 2622, remembered drops 0, suspensions 0",
+      "gc: barrier calls 415565029, skipped young-owner 408109253, skipped old-target 513917",
+      "gc: minor pause mean 625577 ns, max 802150 ns",
+      "gc: minor young-at-start mean 16683, max 17276, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 7704 (aborted 0, forced 0), increments 8004, cycle stw last 2526401 ns max 4417774 ns",
+      "gc: last finish slice remark 46161 ns, weak 48 ns, sweep+destroy 162129 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 29.04319017007947,
+     "maxrss_kb": 41680,
+     "gc_panel": [
+      "gc: collection entries 10605, completed rounds 7700, failed 0",
+      "gc: objects freed 171673090, zero-ref drains 0",
+      "gc: collection time total 2534591334 ns, last 538020 ns",
+      "gc: live 5403773 bytes, peak 14986011 bytes, allocated 5403773 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 576388 ns, p95 1156871 ns, p99 1408681 ns, max 1660587 ns over 23815 rounds",
+      "gc: space histogram total 255025370, bytes 17469601852, p50 64, p95 96, p99 128, max_small 128, covered 255024438/255025370, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 60978491 hard 60978491",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 27262976 live 6144560 milli 4437 superblocks 13 large 0 epoch 0",
+      "gc: generation young 2222, remembered owners 3",
+      "gc: minor collections 2905, promoted 18587945, remembered without young 2630, remembered drops 0, suspensions 0",
+      "gc: barrier calls 415563952, skipped young-owner 408108075, skipped old-target 513895",
+      "gc: minor pause mean 666591 ns, max 754565 ns",
+      "gc: minor young-at-start mean 16686, max 17276, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 7700 (aborted 0, forced 0), increments 8217, cycle stw last 3222966 ns max 4451901 ns",
+      "gc: last finish slice remark 46128 ns, weak 128 ns, sweep+destroy 171329 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 28.922199276275933,
+     "maxrss_kb": 41528,
+     "gc_panel": [
+      "gc: collection entries 10610, completed rounds 7710, failed 0",
+      "gc: objects freed 171671235, zero-ref drains 0",
+      "gc: collection time total 2619115083 ns, last 493859 ns",
+      "gc: live 5522429 bytes, peak 15003691 bytes, allocated 5522429 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 543683 ns, p95 1175575 ns, p99 1518218 ns, max 1724523 ns over 23661 rounds",
+      "gc: space histogram total 255025370, bytes 17469601852, p50 64, p95 96, p99 128, max_small 128, covered 255024438/255025370, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 61284155 hard 61284155",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 27262976 live 6292880 milli 4333 superblocks 13 large 0 epoch 0",
+      "gc: generation young 1406, remembered owners 3",
+      "gc: minor collections 2900, promoted 18609481, remembered without young 2620, remembered drops 0, suspensions 0",
+      "gc: barrier calls 415564790, skipped young-owner 408109014, skipped old-target 513873",
+      "gc: minor pause mean 634850 ns, max 758965 ns",
+      "gc: minor young-at-start mean 16687, max 17276, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 7710 (aborted 0, forced 0), increments 8043, cycle stw last 2768242 ns max 4360076 ns",
+      "gc: last finish slice remark 48064 ns, weak 16 ns, sweep+destroy 171889 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 28.612706794869155,
+     "maxrss_kb": 41576,
+     "gc_panel": [
+      "gc: collection entries 10608, completed rounds 7704, failed 0",
+      "gc: objects freed 171671186, zero-ref drains 0",
+      "gc: collection time total 2522933568 ns, last 505139 ns",
+      "gc: live 5525565 bytes, peak 15003691 bytes, allocated 5525565 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 529043 ns, p95 1176247 ns, p99 1502585 ns, max 1743467 ns over 23623 rounds",
+      "gc: space histogram total 255025370, bytes 17469601852, p50 64, p95 96, p99 128, max_small 128, covered 255024438/255025370, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 61280123 hard 61280123",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 27262976 live 6296800 milli 4330 superblocks 13 large 0 epoch 0",
+      "gc: generation young 1406, remembered owners 3",
+      "gc: minor collections 2904, promoted 18588847, remembered without young 2619, remembered drops 0, suspensions 0",
+      "gc: barrier calls 415564934, skipped young-owner 408109170, skipped old-target 513895",
+      "gc: minor pause mean 623735 ns, max 950406 ns",
+      "gc: minor young-at-start mean 16683, max 17276, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 7704 (aborted 0, forced 0), increments 8017, cycle stw last 2553376 ns max 4263611 ns",
+      "gc: last finish slice remark 46977 ns, weak 160 ns, sweep+destroy 164737 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 28.800384657923132,
+     "maxrss_kb": 41580,
+     "gc_panel": [
+      "gc: collection entries 10608, completed rounds 7704, failed 0",
+      "gc: objects freed 171671185, zero-ref drains 0",
+      "gc: collection time total 2527031143 ns, last 495731 ns",
+      "gc: live 5525565 bytes, peak 15003691 bytes, allocated 5525565 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 543715 ns, p95 1185271 ns, p99 1497498 ns, max 1663242 ns over 23625 rounds",
+      "gc: space histogram total 255025370, bytes 17469601852, p50 64, p95 96, p99 128, max_small 128, covered 255024438/255025370, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 61280123 hard 61280123",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 27262976 live 6296800 milli 4330 superblocks 13 large 0 epoch 0",
+      "gc: generation young 1406, remembered owners 3",
+      "gc: minor collections 2904, promoted 18589669, remembered without young 2620, remembered drops 0, suspensions 0",
+      "gc: barrier calls 415564875, skipped young-owner 408109107, skipped old-target 513884",
+      "gc: minor pause mean 634403 ns, max 761957 ns",
+      "gc: minor young-at-start mean 16684, max 17276, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 7704 (aborted 0, forced 0), increments 8019, cycle stw last 2551776 ns max 4517420 ns",
+      "gc: last finish slice remark 43073 ns, weak 112 ns, sweep+destroy 163489 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 28.62533596297726,
+     "maxrss_kb": 41604,
+     "gc_panel": [
+      "gc: collection entries 10608, completed rounds 7707, failed 0",
+      "gc: objects freed 171671181, zero-ref drains 0",
+      "gc: collection time total 2524472824 ns, last 499126 ns",
+      "gc: live 5525565 bytes, peak 14985491 bytes, allocated 5525565 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 528632 ns, p95 1157520 ns, p99 1523349 ns, max 1663766 ns over 23613 rounds",
+      "gc: space histogram total 255025370, bytes 17469601852, p50 64, p95 96, p99 128, max_small 128, covered 255024438/255025370, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 61280123 hard 61280123",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 27262976 live 6296800 milli 4330 superblocks 13 large 0 epoch 0",
+      "gc: generation young 1406, remembered owners 3",
+      "gc: minor collections 2901, promoted 18579734, remembered without young 2617, remembered drops 0, suspensions 0",
+      "gc: barrier calls 415564997, skipped young-owner 408109192, skipped old-target 513911",
+      "gc: minor pause mean 658637 ns, max 897565 ns",
+      "gc: minor young-at-start mean 16685, max 17276, kept by refcount 0",
+      "gc: shaded 2, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 7707 (aborted 0, forced 0), increments 8001, cycle stw last 2567010 ns max 4182073 ns",
+      "gc: last finish slice remark 45536 ns, weak 112 ns, sweep+destroy 166371 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    }
+   ],
+   "rc_tip": [
+    {
+     "wall_s": 23.96423767833039,
+     "maxrss_kb": 19000,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76687650, zero-ref drains 23732013",
+      "gc: collection time total 3276629768 ns, last 3249290 ns",
+      "gc: live 1839557 bytes, peak 14203219 bytes, allocated 1839557 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 414979 ns, p95 575493 ns, p99 1006200 ns, max 3460571 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.97912906995043,
+     "maxrss_kb": 19132,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76687650, zero-ref drains 23732013",
+      "gc: collection time total 3285828581 ns, last 3190759 ns",
+      "gc: live 1839557 bytes, peak 14203219 bytes, allocated 1839557 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 415491 ns, p95 575476 ns, p99 971831 ns, max 3252504 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.928592251148075,
+     "maxrss_kb": 19004,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76687650, zero-ref drains 23732013",
+      "gc: collection time total 3276798018 ns, last 3192310 ns",
+      "gc: live 1839557 bytes, peak 14203219 bytes, allocated 1839557 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 412867 ns, p95 572996 ns, p99 981399 ns, max 3320199 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.802378213964403,
+     "maxrss_kb": 19004,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76687650, zero-ref drains 23732013",
+      "gc: collection time total 3266839838 ns, last 3187013 ns",
+      "gc: live 1839557 bytes, peak 14203219 bytes, allocated 1839557 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 413090 ns, p95 575764 ns, p99 977030 ns, max 3410118 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.976019529160112,
+     "maxrss_kb": 19004,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76687650, zero-ref drains 23732013",
+      "gc: collection time total 3294832707 ns, last 3374453 ns",
+      "gc: live 1839557 bytes, peak 14203219 bytes, allocated 1839557 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 415858 ns, p95 578676 ns, p99 968822 ns, max 3374453 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.80896773422137,
+     "maxrss_kb": 19132,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76687650, zero-ref drains 23732013",
+      "gc: collection time total 3279198179 ns, last 3228868 ns",
+      "gc: live 1839557 bytes, peak 14203219 bytes, allocated 1839557 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 414530 ns, p95 575939 ns, p99 982311 ns, max 3264741 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.933766020927578,
+     "maxrss_kb": 19132,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76687650, zero-ref drains 23732013",
+      "gc: collection time total 3291884813 ns, last 3116851 ns",
+      "gc: live 1839557 bytes, peak 14203219 bytes, allocated 1839557 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 415154 ns, p95 577652 ns, p99 980150 ns, max 3274773 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.892416114918888,
+     "maxrss_kb": 19004,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76687650, zero-ref drains 23732013",
+      "gc: collection time total 3271004845 ns, last 3265165 ns",
+      "gc: live 1839557 bytes, peak 14203219 bytes, allocated 1839557 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 414454 ns, p95 576312 ns, p99 991278 ns, max 3323886 ns over 7266 rounds"
+     ]
+    }
+   ],
+   "rc_mb": [
+    {
+     "wall_s": 23.61912699788809,
+     "maxrss_kb": 19124,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76701195, zero-ref drains 23732013",
+      "gc: collection time total 3339671952 ns, last 3460635 ns",
+      "gc: live 972677 bytes, peak 972677 bytes, allocated 972677 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 423796 ns, p95 587893 ns, p99 1403195 ns, max 3619900 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.607176697812974,
+     "maxrss_kb": 19124,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76701195, zero-ref drains 23732013",
+      "gc: collection time total 3365239121 ns, last 3521834 ns",
+      "gc: live 972677 bytes, peak 972677 bytes, allocated 972677 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 425235 ns, p95 586964 ns, p99 1374282 ns, max 3713035 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.681312154978514,
+     "maxrss_kb": 19124,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76701195, zero-ref drains 23732013",
+      "gc: collection time total 3334941130 ns, last 3488808 ns",
+      "gc: live 972677 bytes, peak 972677 bytes, allocated 972677 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 420115 ns, p95 583460 ns, p99 1313545 ns, max 3592040 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.77338510286063,
+     "maxrss_kb": 19120,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76701195, zero-ref drains 23732013",
+      "gc: collection time total 3359206935 ns, last 3581400 ns",
+      "gc: live 972677 bytes, peak 972677 bytes, allocated 972677 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 426739 ns, p95 586020 ns, p99 1369609 ns, max 3657432 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.64744081394747,
+     "maxrss_kb": 19128,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76701195, zero-ref drains 23732013",
+      "gc: collection time total 3371806384 ns, last 3656199 ns",
+      "gc: live 972677 bytes, peak 972677 bytes, allocated 972677 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 426642 ns, p95 590068 ns, p99 1369465 ns, max 3803336 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.747079777996987,
+     "maxrss_kb": 19172,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76701195, zero-ref drains 23732013",
+      "gc: collection time total 3348018689 ns, last 3509510 ns",
+      "gc: live 972677 bytes, peak 972677 bytes, allocated 972677 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 423507 ns, p95 586324 ns, p99 1395545 ns, max 3581863 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 23.65050796419382,
+     "maxrss_kb": 19116,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76701195, zero-ref drains 23732013",
+      "gc: collection time total 3354224495 ns, last 3569735 ns",
+      "gc: live 972677 bytes, peak 972677 bytes, allocated 972677 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 425459 ns, p95 586340 ns, p99 1374504 ns, max 3662631 ns over 7266 rounds"
+     ]
+    },
+    {
+     "wall_s": 24.04599049175158,
+     "maxrss_kb": 19176,
+     "gc_panel": [
+      "gc: collection entries 7266, completed rounds 7266, failed 0",
+      "gc: objects freed 76701195, zero-ref drains 23732013",
+      "gc: collection time total 3419434079 ns, last 3667827 ns",
+      "gc: live 972677 bytes, peak 972677 bytes, allocated 972677 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 431479 ns, p95 601465 ns, p99 1382852 ns, max 3667827 ns over 7266 rounds"
+     ]
+    }
+   ]
+  },
+  "splay": {
+   "trace": [
+    {
+     "wall_s": 3.789529982022941,
+     "maxrss_kb": 558436,
+     "gc_panel": [
+      "gc: collection entries 37, completed rounds 29, failed 0",
+      "gc: objects freed 11243234, zero-ref drains 0",
+      "gc: collection time total 131046627 ns, last 7100824 ns",
+      "gc: live 54738064 bytes, peak 251948098 bytes, allocated 54738064 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1001448 ns, p95 1007896 ns, p99 6749620 ns, max 7456250 ns over 1379 rounds",
+      "gc: space histogram total 18409431, bytes 1340877048, p50 64, p95 96, p99 112, max_small 128, covered 18409325/18409431, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 0 hard 0",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 232783872 live 68337520 milli 3407 superblocks 111 large 0 epoch 0",
+      "gc: generation young 85767, remembered owners 2200",
+      "gc: minor collections 8, promoted 137965, remembered without young 1540, remembered drops 0, suspensions 4",
+      "gc: barrier calls 50767353, skipped young-owner 46406359, skipped old-target 2325819",
+      "gc: minor pause mean 822610 ns, max 1593981 ns",
+      "gc: minor young-at-start mean 17753, max 19812, kept by refcount 0",
+      "gc: shaded 24, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 29 (aborted 0, forced 0), increments 936, cycle stw last 82120497 ns max 82965577 ns",
+      "gc: last finish slice remark 194113 ns, weak 144 ns, sweep+destroy 5080984 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.822823293041438,
+     "maxrss_kb": 556680,
+     "gc_panel": [
+      "gc: collection entries 37, completed rounds 29, failed 0",
+      "gc: objects freed 11243638, zero-ref drains 0",
+      "gc: collection time total 135017135 ns, last 7292869 ns",
+      "gc: live 54712208 bytes, peak 251947850 bytes, allocated 54712208 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1001399 ns, p95 1007591 ns, p99 6889073 ns, max 7516390 ns over 1383 rounds",
+      "gc: space histogram total 18409431, bytes 1340877048, p50 64, p95 96, p99 112, max_small 128, covered 18409325/18409431, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 0 hard 0",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 232783872 live 68305200 milli 3408 superblocks 111 large 0 epoch 0",
+      "gc: generation young 85338, remembered owners 2193",
+      "gc: minor collections 8, promoted 137550, remembered without young 1529, remembered drops 0, suspensions 4",
+      "gc: barrier calls 50766569, skipped young-owner 46405908, skipped old-target 2325700",
+      "gc: minor pause mean 874952 ns, max 1759885 ns",
+      "gc: minor young-at-start mean 17698, max 19812, kept by refcount 0",
+      "gc: shaded 52, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 29 (aborted 0, forced 0), increments 924, cycle stw last 83275145 ns max 84100655 ns",
+      "gc: last finish slice remark 181810 ns, weak 208 ns, sweep+destroy 5304086 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.828318933956325,
+     "maxrss_kb": 557704,
+     "gc_panel": [
+      "gc: collection entries 37, completed rounds 29, failed 0",
+      "gc: objects freed 11243638, zero-ref drains 0",
+      "gc: collection time total 135776672 ns, last 6649662 ns",
+      "gc: live 54712208 bytes, peak 251944130 bytes, allocated 54712208 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1001479 ns, p95 1007639 ns, p99 6893679 ns, max 7454515 ns over 1417 rounds",
+      "gc: space histogram total 18409431, bytes 1340877048, p50 64, p95 96, p99 112, max_small 128, covered 18409325/18409431, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 0 hard 0",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 232783872 live 68305200 milli 3408 superblocks 111 large 0 epoch 0",
+      "gc: generation young 85385, remembered owners 2194",
+      "gc: minor collections 8, promoted 137695, remembered without young 1542, remembered drops 0, suspensions 4",
+      "gc: barrier calls 50766685, skipped young-owner 46406099, skipped old-target 2325512",
+      "gc: minor pause mean 908230 ns, max 1823276 ns",
+      "gc: minor young-at-start mean 17718, max 19812, kept by refcount 0",
+      "gc: shaded 55, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 29 (aborted 0, forced 0), increments 957, cycle stw last 84918502 ns max 85304231 ns",
+      "gc: last finish slice remark 183010 ns, weak 304 ns, sweep+destroy 5204803 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.856952537316829,
+     "maxrss_kb": 556740,
+     "gc_panel": [
+      "gc: collection entries 37, completed rounds 29, failed 0",
+      "gc: objects freed 11243638, zero-ref drains 0",
+      "gc: collection time total 134750840 ns, last 7311904 ns",
+      "gc: live 54712208 bytes, peak 251946114 bytes, allocated 54712208 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1001527 ns, p95 1008358 ns, p99 6864109 ns, max 7424385 ns over 1423 rounds",
+      "gc: space histogram total 18409431, bytes 1340877048, p50 64, p95 96, p99 112, max_small 128, covered 18409325/18409431, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 0 hard 0",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 232783872 live 68305200 milli 3408 superblocks 111 large 0 epoch 0",
+      "gc: generation young 85384, remembered owners 2195",
+      "gc: minor collections 8, promoted 137630, remembered without young 1533, remembered drops 0, suspensions 4",
+      "gc: barrier calls 50766783, skipped young-owner 46406135, skipped old-target 2325614",
+      "gc: minor pause mean 867087 ns, max 1733819 ns",
+      "gc: minor young-at-start mean 17709, max 19812, kept by refcount 0",
+      "gc: shaded 24, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 29 (aborted 0, forced 0), increments 962, cycle stw last 85302096 ns max 85918949 ns",
+      "gc: last finish slice remark 193714 ns, weak 256 ns, sweep+destroy 5169282 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.8259459482505918,
+     "maxrss_kb": 557372,
+     "gc_panel": [
+      "gc: collection entries 37, completed rounds 29, failed 0",
+      "gc: objects freed 11243335, zero-ref drains 0",
+      "gc: collection time total 134855981 ns, last 7239534 ns",
+      "gc: live 54731600 bytes, peak 251946314 bytes, allocated 54731600 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1001447 ns, p95 1007111 ns, p99 6871196 ns, max 7571792 ns over 1387 rounds",
+      "gc: space histogram total 18409431, bytes 1340877048, p50 64, p95 96, p99 112, max_small 128, covered 18409325/18409431, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 0 hard 0",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 232783872 live 68329440 milli 3407 superblocks 111 large 0 epoch 0",
+      "gc: generation young 85645, remembered owners 2201",
+      "gc: minor collections 8, promoted 137868, remembered without young 1539, remembered drops 0, suspensions 4",
+      "gc: barrier calls 50767083, skipped young-owner 46406421, skipped old-target 2325518",
+      "gc: minor pause mean 883553 ns, max 1777196 ns",
+      "gc: minor young-at-start mean 17741, max 19812, kept by refcount 0",
+      "gc: shaded 14, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 29 (aborted 0, forced 0), increments 926, cycle stw last 83198020 ns max 83629000 ns",
+      "gc: last finish slice remark 179713 ns, weak 208 ns, sweep+destroy 5212193 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.829325354192406,
+     "maxrss_kb": 556580,
+     "gc_panel": [
+      "gc: collection entries 37, completed rounds 29, failed 0",
+      "gc: objects freed 11243537, zero-ref drains 0",
+      "gc: collection time total 135034157 ns, last 6546857 ns",
+      "gc: live 54718672 bytes, peak 251944434 bytes, allocated 54718672 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1001447 ns, p95 1007671 ns, p99 6855803 ns, max 7427263 ns over 1414 rounds",
+      "gc: space histogram total 18409431, bytes 1340877048, p50 64, p95 96, p99 112, max_small 128, covered 18409325/18409431, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 0 hard 0",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 232783872 live 68313280 milli 3408 superblocks 111 large 0 epoch 0",
+      "gc: generation young 85487, remembered owners 2196",
+      "gc: minor collections 8, promoted 137666, remembered without young 1532, remembered drops 0, suspensions 4",
+      "gc: barrier calls 50766970, skipped young-owner 46406356, skipped old-target 2325532",
+      "gc: minor pause mean 862063 ns, max 1716170 ns",
+      "gc: minor young-at-start mean 17714, max 19812, kept by refcount 0",
+      "gc: shaded 23, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 29 (aborted 0, forced 0), increments 956, cycle stw last 85231897 ns max 85309480 ns",
+      "gc: last finish slice remark 178002 ns, weak 304 ns, sweep+destroy 5241728 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.9120287098921835,
+     "maxrss_kb": 556568,
+     "gc_panel": [
+      "gc: collection entries 37, completed rounds 29, failed 0",
+      "gc: objects freed 11243739, zero-ref drains 0",
+      "gc: collection time total 136352337 ns, last 7485167 ns",
+      "gc: live 54705744 bytes, peak 251947258 bytes, allocated 54705744 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1001542 ns, p95 1007686 ns, p99 6806058 ns, max 7485167 ns over 1457 rounds",
+      "gc: space histogram total 18409431, bytes 1340877048, p50 64, p95 96, p99 112, max_small 128, covered 18409325/18409431, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 0 hard 0",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 232783872 live 68297120 milli 3409 superblocks 111 large 0 epoch 0",
+      "gc: generation young 85267, remembered owners 2190",
+      "gc: minor collections 8, promoted 137500, remembered without young 1527, remembered drops 0, suspensions 4",
+      "gc: barrier calls 50766469, skipped young-owner 46405944, skipped old-target 2325543",
+      "gc: minor pause mean 866055 ns, max 1749819 ns",
+      "gc: minor young-at-start mean 17692, max 19812, kept by refcount 0",
+      "gc: shaded 59, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 29 (aborted 0, forced 0), increments 997, cycle stw last 87112766 ns max 87186590 ns",
+      "gc: last finish slice remark 194769 ns, weak 48 ns, sweep+destroy 5298497 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    },
+    {
+     "wall_s": 3.8268458279781044,
+     "maxrss_kb": 558652,
+     "gc_panel": [
+      "gc: collection entries 37, completed rounds 29, failed 0",
+      "gc: objects freed 11243335, zero-ref drains 0",
+      "gc: collection time total 136489202 ns, last 7793208 ns",
+      "gc: live 54731600 bytes, peak 251948106 bytes, allocated 54731600 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 1001422 ns, p95 1007598 ns, p99 6934684 ns, max 7793208 ns over 1384 rounds",
+      "gc: space histogram total 18409431, bytes 1340877048, p50 64, p95 96, p99 112, max_small 128, covered 18409325/18409431, large 0",
+      "gc: sweep windows fresh 0 active 0 needs_sweep 0 sweeping 0 swept 0",
+      "gc: debt mark 0 sweep 0 soft 0 hard 0",
+      "gc: last sweep reclaimed 0 bytes, census 0 ns (excluded from the pause above)",
+      "gc: block heap committed 232783872 live 68329440 milli 3407 superblocks 111 large 0 epoch 0",
+      "gc: generation young 85641, remembered owners 2199",
+      "gc: minor collections 8, promoted 138029, remembered without young 1541, remembered drops 0, suspensions 4",
+      "gc: barrier calls 50767234, skipped young-owner 46406397, skipped old-target 2325691",
+      "gc: minor pause mean 879307 ns, max 1749655 ns",
+      "gc: minor young-at-start mean 17761, max 19812, kept by refcount 0",
+      "gc: shaded 17, bailouts 0, floating garbage 0",
+      "gc: incremental cycles 29 (aborted 0, forced 0), increments 924, cycle stw last 83340298 ns max 84248087 ns",
+      "gc: last finish slice remark 179746 ns, weak 112 ns, sweep+destroy 5251414 ns",
+      "gc: assist batches 0 marked 0 mean 0 ns",
+      "gc: safepoint acks 0, wait mean 0 ns, max 0 ns, deferred 0"
+     ]
+    }
+   ],
+   "rc_tip": [
+    {
+     "wall_s": 1.8783372677862644,
+     "maxrss_kb": 153740,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 97035159 ns, last 40469004 ns",
+      "gc: live 77238 bytes, peak 114815538 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 419011 ns, p95 40469004 ns, p99 40469004 ns, max 40469004 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.884462095797062,
+     "maxrss_kb": 153744,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 97230354 ns, last 40524806 ns",
+      "gc: live 77238 bytes, peak 114815538 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 409491 ns, p95 40524806 ns, p99 40524806 ns, max 40524806 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.8773853187449276,
+     "maxrss_kb": 153680,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 97149995 ns, last 40343860 ns",
+      "gc: live 77238 bytes, peak 114815538 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 419027 ns, p95 40343860 ns, p99 40343860 ns, max 40343860 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.8778329160995781,
+     "maxrss_kb": 153680,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 97976195 ns, last 40848637 ns",
+      "gc: live 77238 bytes, peak 114815538 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 413171 ns, p95 40848637 ns, p99 40848637 ns, max 40848637 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.8945723720826209,
+     "maxrss_kb": 153744,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 98006168 ns, last 41003927 ns",
+      "gc: live 77238 bytes, peak 114815538 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 420355 ns, p95 41003927 ns, p99 41003927 ns, max 41003927 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.8829569122754037,
+     "maxrss_kb": 153744,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 97254676 ns, last 40748401 ns",
+      "gc: live 77238 bytes, peak 114815538 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 420771 ns, p95 40748401 ns, p99 40748401 ns, max 40748401 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.8939226870425045,
+     "maxrss_kb": 153732,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 98203730 ns, last 41199759 ns",
+      "gc: live 77238 bytes, peak 114815538 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 408898 ns, p95 41199759 ns, p99 41199759 ns, max 41199759 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.8838095078244805,
+     "maxrss_kb": 153680,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 97000550 ns, last 40592417 ns",
+      "gc: live 77238 bytes, peak 114815538 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: major pause p50 425750 ns, p95 40592417 ns, p99 40592417 ns, max 40592417 ns over 16 rounds"
+     ]
+    }
+   ],
+   "rc_mb": [
+    {
+     "wall_s": 1.8520895950496197,
+     "maxrss_kb": 153604,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 101183912 ns, last 42414059 ns",
+      "gc: live 77238 bytes, peak 77238 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 423396 ns, p95 42414059 ns, p99 42414059 ns, max 42414059 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.8659849790856242,
+     "maxrss_kb": 153668,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 101863233 ns, last 42530788 ns",
+      "gc: live 77238 bytes, peak 77238 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 418899 ns, p95 42530788 ns, p99 42530788 ns, max 42530788 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.8462074371054769,
+     "maxrss_kb": 153668,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 101630774 ns, last 42139456 ns",
+      "gc: live 77238 bytes, peak 77238 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 418723 ns, p95 42139456 ns, p99 42139456 ns, max 42139456 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.872155618853867,
+     "maxrss_kb": 153668,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 101806189 ns, last 42639769 ns",
+      "gc: live 77238 bytes, peak 77238 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 430882 ns, p95 42639769 ns, p99 42639769 ns, max 42639769 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.8661538199521601,
+     "maxrss_kb": 153668,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 102280765 ns, last 42505680 ns",
+      "gc: live 77238 bytes, peak 77238 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 426738 ns, p95 42505680 ns, p99 42505680 ns, max 42505680 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.8712020250968635,
+     "maxrss_kb": 153664,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 102443553 ns, last 43032414 ns",
+      "gc: live 77238 bytes, peak 77238 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 430770 ns, p95 43032414 ns, p99 43032414 ns, max 43032414 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.8689770912751555,
+     "maxrss_kb": 153604,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 101578214 ns, last 42589736 ns",
+      "gc: live 77238 bytes, peak 77238 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 424643 ns, p95 42589736 ns, p99 42589736 ns, max 42589736 ns over 16 rounds"
+     ]
+    },
+    {
+     "wall_s": 1.8718676608987153,
+     "maxrss_kb": 153660,
+     "gc_panel": [
+      "gc: collection entries 16, completed rounds 16, failed 0",
+      "gc: objects freed 0, zero-ref drains 689195",
+      "gc: collection time total 101946939 ns, last 42667854 ns",
+      "gc: live 77238 bytes, peak 77238 bytes, allocated 77238 bytes",
+      "gc: weak refs 0, finalizer queue 0",
+      "gc: pause p50 413846 ns, p95 42667854 ns, p99 42667854 ns, max 42667854 ns over 16 rounds"
+     ]
+    }
+   ]
+  }
+ }
+}

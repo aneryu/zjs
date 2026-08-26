@@ -1,0 +1,415 @@
+{
+ "manifest_version": 1,
+ "work_item": "GC-GAP",
+ "date": "2026-08-26",
+ "commits": {
+  "zjs_merge_base": {
+   "commit": "14b0618dff40400b6d43b402270a9d9cd0c6111e",
+   "dirty": false
+  },
+  "zjs_gc_candidate": {
+   "commit": "62061f94e235c2ade9082df0f2c49ad8b7ac972d",
+   "dirty": false,
+   "ref": "frozen/gc-tracing-2026-08-26"
+  },
+  "javascript_zoo_benches": {
+   "commit": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+   "dirty": false,
+   "note": "six fixed-work benches source"
+  }
+ },
+ "binary_sha256": {
+  "reference_set": {
+   "sha256": "see reports/evidence/BASE-G0/manifest.json",
+   "path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/",
+   "recipe": "BASE-G0 frozen set, used unmodified"
+  }
+ },
+ "toolchain": {
+  "zig": "0.16.0"
+ },
+ "policy_sha256": {
+  "policies/gc_merge_policy.json": "7772ec44f6a46311fb0c3ea97ba91c3b287941618d37f84493707d7b9bf33fd5",
+  "tools/compare/measurement_policy.json": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68"
+ },
+ "host": {
+  "os": "Linux 6.17.0-1014-nvidia aarch64",
+  "cpu_pin": "19 (armv8_pmuv3_1 cluster)",
+  "hygiene": "load 0.08 at start, no orphan measurement processes, host-heavy flock held for the whole chain"
+ },
+ "command": [
+  "flock -x /tmp/zjs-host-heavy.lock: taskset -c 19 run_benchv8_compare.py --zjs <trace-candidate> --baseline <rc-mergebase> --samples 8",
+  "same: --zjs <rc-branchtip> --baseline <rc-mergebase> --samples 8 (diagnostic arm)",
+  "same lock: gcgap_account.py (six benches x three arms x 8 samples, fixed-work doWarmup=false/doDeterministic=true, per-bench arm rotation alternated per sample, /usr/bin/time -v + --gc-stats)"
+ ],
+ "raw_artifacts": [
+  {
+   "path": "reports/evidence/GC-GAP/gcgap-suite-trace-vs-mbrc.json",
+   "sha256": "572a8bcb4e9481bfd10b14fa70db1756c8e745c3c36b65a2ed9bbd61827abb2c"
+  },
+  {
+   "path": "reports/evidence/GC-GAP/gcgap-suite-rctip-vs-mbrc.json",
+   "sha256": "7127865028821be80619057afafede3dede32c6e4784d9e7bc9e8e477e129978"
+  },
+  {
+   "path": "reports/evidence/GC-GAP/gcgap-account.json",
+   "sha256": "f4fad8d31e6ecb7d33497f9bb5ee88dbbc8eee9182aab0f18eee5aed1dcfe08b"
+  },
+  {
+   "path": "reports/evidence/GC-GAP/gcgap_account.py",
+   "sha256": "19840f73923dc75c30a85690bbadc90f674e6b3b9d181bdb9aa896c70913e796",
+   "note": "harness"
+  }
+ ],
+ "result": {
+  "summary": {
+   "fixed_work_geomean_trace_over_rcmb": 1.2062,
+   "fixed_work_geomean_trace_over_rctip": 1.2049,
+   "suite_headline_score_ratio_trace_over_rcmb": 0.8321,
+   "suite_headline_score_ratio_rctip_over_rcmb": 0.9876
+  },
+  "per_benchmark_account": {
+   "deltablue": {
+    "wall_ratio_trace_over_rcmb": 0.984,
+    "wall_ratio_trace_over_rctip": 0.982,
+    "wall_ratio_rctip_over_rcmb": 1.002,
+    "peak_rss_ratio_trace_over_rcmb": 1.42,
+    "trace": {
+     "pause_p50_ns": 111225.0,
+     "pause_p95_ns": 235105.5,
+     "pause_p99_ns": 247857.5,
+     "pause_max_ns": 256513.0,
+     "pause_events": 2904.0,
+     "completed_rounds": 968.0,
+     "gc_time_total_ns": 216927052.0,
+     "minor_count": 0.0,
+     "block_heap_committed": 2097152.0,
+     "block_heap_live": 447200.0,
+     "wall_s_median": 19.5954,
+     "maxrss_kb_median": 8036.0
+    },
+    "rc_mb": {
+     "pause_p50_ns": 59064.5,
+     "pause_p95_ns": 63792.5,
+     "pause_p99_ns": 77096.5,
+     "pause_max_ns": 79648.0,
+     "pause_events": 4613.0,
+     "completed_rounds": 4613.0,
+     "gc_time_total_ns": 261571987.5,
+     "minor_count": null,
+     "block_heap_committed": null,
+     "block_heap_live": null,
+     "wall_s_median": 19.9102,
+     "maxrss_kb_median": 5652.0
+    },
+    "rc_tip": {
+     "pause_p50_ns": null,
+     "pause_p95_ns": 73536.5,
+     "pause_p99_ns": 75472.0,
+     "pause_max_ns": 78425.0,
+     "pause_events": 4768.0,
+     "completed_rounds": 4768.0,
+     "gc_time_total_ns": 256207281.5,
+     "minor_count": null,
+     "block_heap_committed": null,
+     "block_heap_live": null,
+     "wall_s_median": 19.95,
+     "maxrss_kb_median": 5744.0
+    }
+   },
+   "regexp": {
+    "wall_ratio_trace_over_rcmb": 1.023,
+    "wall_ratio_trace_over_rctip": 1.057,
+    "wall_ratio_rctip_over_rcmb": 0.968,
+    "peak_rss_ratio_trace_over_rcmb": 1.54,
+    "trace": {
+     "pause_p50_ns": 117576.5,
+     "pause_p95_ns": 390979.0,
+     "pause_p99_ns": 402691.0,
+     "pause_max_ns": 415418.5,
+     "pause_events": 707.0,
+     "completed_rounds": 236.0,
+     "gc_time_total_ns": 86821611.5,
+     "minor_count": 0.0,
+     "block_heap_committed": 2097152.0,
+     "block_heap_live": 702800.0,
+     "wall_s_median": 5.3434,
+     "maxrss_kb_median": 13960.0
+    },
+    "rc_mb": {
+     "pause_p50_ns": 20480.5,
+     "pause_p95_ns": 30784.0,
+     "pause_p99_ns": 30784.0,
+     "pause_max_ns": 30784.0,
+     "pause_events": 4.0,
+     "completed_rounds": 4.0,
+     "gc_time_total_ns": 97904.5,
+     "minor_count": null,
+     "block_heap_committed": null,
+     "block_heap_live": null,
+     "wall_s_median": 5.223,
+     "maxrss_kb_median": 9060.0
+    },
+    "rc_tip": {
+     "pause_p50_ns": null,
+     "pause_p95_ns": 30968.0,
+     "pause_p99_ns": 30968.0,
+     "pause_max_ns": 30968.0,
+     "pause_events": 4.0,
+     "completed_rounds": 4.0,
+     "gc_time_total_ns": 98872.5,
+     "minor_count": null,
+     "block_heap_committed": null,
+     "block_heap_live": null,
+     "wall_s_median": 5.0559,
+     "maxrss_kb_median": 9122.0
+    }
+   },
+   "pdfjs": {
+    "wall_ratio_trace_over_rcmb": 1.039,
+    "wall_ratio_trace_over_rctip": 1.035,
+    "wall_ratio_rctip_over_rcmb": 1.003,
+    "peak_rss_ratio_trace_over_rcmb": 1.47,
+    "trace": {
+     "pause_p50_ns": 621396.0,
+     "pause_p95_ns": 1146536.5,
+     "pause_p99_ns": 1242958.0,
+     "pause_max_ns": 1242958.0,
+     "pause_events": 54.0,
+     "completed_rounds": 18.0,
+     "gc_time_total_ns": 12712267.5,
+     "minor_count": 152.0,
+     "block_heap_committed": 14680064.0,
+     "block_heap_live": 2723120.0,
+     "wall_s_median": 3.2148,
+     "maxrss_kb_median": 60718.0
+    },
+    "rc_mb": {
+     "pause_p50_ns": 1244694.0,
+     "pause_p95_ns": 2578876.0,
+     "pause_p99_ns": 2578876.0,
+     "pause_max_ns": 2578876.0,
+     "pause_events": 12.0,
+     "completed_rounds": 12.0,
+     "gc_time_total_ns": 16513498.0,
+     "minor_count": null,
+     "block_heap_committed": null,
+     "block_heap_live": null,
+     "wall_s_median": 3.0945,
+     "maxrss_kb_median": 41364.0
+    },
+    "rc_tip": {
+     "pause_p50_ns": null,
+     "pause_p95_ns": 2506537.0,
+     "pause_p99_ns": 2506537.0,
+     "pause_max_ns": 2506537.0,
+     "pause_events": 12.0,
+     "completed_rounds": 12.0,
+     "gc_time_total_ns": 16439440.0,
+     "minor_count": null,
+     "block_heap_committed": null,
+     "block_heap_live": null,
+     "wall_s_median": 3.1051,
+     "maxrss_kb_median": 41430.0
+    }
+   },
+   "raytrace": {
+    "wall_ratio_trace_over_rcmb": 1.182,
+    "wall_ratio_trace_over_rctip": 1.165,
+    "wall_ratio_rctip_over_rcmb": 1.015,
+    "peak_rss_ratio_trace_over_rcmb": 1.48,
+    "trace": {
+     "pause_p50_ns": 104065.0,
+     "pause_p95_ns": 235994.5,
+     "pause_p99_ns": 257625.5,
+     "pause_max_ns": 276722.5,
+     "pause_events": 11205.0,
+     "completed_rounds": 3735.0,
+     "gc_time_total_ns": 867429062.5,
+     "minor_count": 0.0,
+     "block_heap_committed": 2097152.0,
+     "block_heap_live": 174240.0,
+     "wall_s_median": 13.8904,
+     "maxrss_kb_median": 8404.0
+    },
+    "rc_mb": {
+     "pause_p50_ns": 26552.5,
+     "pause_p95_ns": 27752.5,
+     "pause_p99_ns": 27752.5,
+     "pause_max_ns": 27752.5,
+     "pause_events": 3.0,
+     "completed_rounds": 3.0,
+     "gc_time_total_ns": 75632.5,
+     "minor_count": null,
+     "block_heap_committed": null,
+     "block_heap_live": null,
+     "wall_s_median": 11.7542,
+     "maxrss_kb_median": 5692.0
+    },
+    "rc_tip": {
+     "pause_p50_ns": null,
+     "pause_p95_ns": 28576.0,
+     "pause_p99_ns": 28576.0,
+     "pause_max_ns": 28576.0,
+     "pause_events": 3.0,
+     "completed_rounds": 3.0,
+     "gc_time_total_ns": 76664.5,
+     "minor_count": null,
+     "block_heap_committed": null,
+     "block_heap_live": null,
+     "wall_s_median": 11.926,
+     "maxrss_kb_median": 5774.0
+    }
+   },
+   "earley-boyer": {
+    "wall_ratio_trace_over_rcmb": 1.216,
+    "wall_ratio_trace_over_rctip": 1.203,
+    "wall_ratio_rctip_over_rcmb": 1.011,
+    "peak_rss_ratio_trace_over_rcmb": 2.17,
+    "trace": {
+     "pause_p50_ns": 540779.0,
+     "pause_p95_ns": 1175911.0,
+     "pause_p99_ns": 1510401.5,
+     "pause_max_ns": 1718748.0,
+     "pause_events": 23625.5,
+     "completed_rounds": 7704.0,
+     "gc_time_total_ns": 2528236153.5,
+     "minor_count": 2904.0,
+     "block_heap_committed": 27262976.0,
+     "block_heap_live": 6296800.0,
+     "wall_s_median": 28.7778,
+     "maxrss_kb_median": 41592.0
+    },
+    "rc_mb": {
+     "pause_p50_ns": 425347.0,
+     "pause_p95_ns": 586652.0,
+     "pause_p99_ns": 1374393.0,
+     "pause_max_ns": 3660031.5,
+     "pause_events": 7266.0,
+     "completed_rounds": 7266.0,
+     "gc_time_total_ns": 3356715715.0,
+     "minor_count": null,
+     "block_heap_committed": null,
+     "block_heap_live": null,
+     "wall_s_median": 23.6659,
+     "maxrss_kb_median": 19124.0
+    },
+    "rc_tip": {
+     "pause_p50_ns": null,
+     "pause_p95_ns": 575851.5,
+     "pause_p99_ns": 980774.5,
+     "pause_max_ns": 3322042.5,
+     "pause_events": 7266.0,
+     "completed_rounds": 7266.0,
+     "gc_time_total_ns": 3277998098.5,
+     "minor_count": null,
+     "block_heap_committed": null,
+     "block_heap_live": null,
+     "wall_s_median": 23.9312,
+     "maxrss_kb_median": 19004.0
+    }
+   },
+   "splay": {
+    "wall_ratio_trace_over_rcmb": 2.049,
+    "wall_ratio_trace_over_rctip": 2.032,
+    "wall_ratio_rctip_over_rcmb": 1.008,
+    "peak_rss_ratio_trace_over_rcmb": 3.63,
+    "trace": {
+     "pause_p50_ns": 1001447.5,
+     "pause_p95_ns": 1007655.0,
+     "pause_p99_ns": 6867652.5,
+     "pause_max_ns": 7470708.5,
+     "pause_events": 1400.5,
+     "completed_rounds": 29.0,
+     "gc_time_total_ns": 135025646.0,
+     "minor_count": 8.0,
+     "block_heap_committed": 232783872.0,
+     "block_heap_live": 68309240.0,
+     "wall_s_median": 3.8276,
+     "maxrss_kb_median": 557056.0
+    },
+    "rc_mb": {
+     "pause_p50_ns": 424019.5,
+     "pause_p95_ns": 42560262.0,
+     "pause_p99_ns": 42560262.0,
+     "pause_max_ns": 42560262.0,
+     "pause_events": 16.0,
+     "completed_rounds": 16.0,
+     "gc_time_total_ns": 101834711.0,
+     "minor_count": null,
+     "block_heap_committed": null,
+     "block_heap_live": null,
+     "wall_s_median": 1.8676,
+     "maxrss_kb_median": 153666.0
+    },
+    "rc_tip": {
+     "pause_p50_ns": null,
+     "pause_p95_ns": 40670409.0,
+     "pause_p99_ns": 40670409.0,
+     "pause_max_ns": 40670409.0,
+     "pause_events": 16.0,
+     "completed_rounds": 16.0,
+     "gc_time_total_ns": 97242515.0,
+     "minor_count": null,
+     "block_heap_committed": null,
+     "block_heap_live": null,
+     "wall_s_median": 1.8834,
+     "maxrss_kb_median": 153736.0
+    }
+   }
+  },
+  "notes": [
+   "pause rows: run-level panel medians; tracer panel separates major ring (census-excluded) and minor mean/max; rc panel is a single pause ring",
+   "splay pause: trace major p99 6.87ms/max 7.47ms vs rc p99/max 42.4ms \u2014 the tracer wins the pause row on its own worst throughput workload",
+   "splay memory: trace maxrss 544MB vs rc 150MB (3.63x) \u2014 allocator/sweep retention, the account's largest memory signal",
+   "SplayLatency suite score 0.185 (trace) and 0.805 (branch rc arm) \u2014 the branch regresses splay latency even under rc; attribution owed",
+   "at-exit committed/live and peak/live are teardown-adjacent readings, not the \u00a71.3 envelope quantities; envelope verdicts need in-cycle sampling"
+  ]
+ },
+ "canary_base_candidate_medians": {
+  "deltablue": {
+   "pause_events": 2904.0,
+   "completed_rounds": 968.0,
+   "gc_time_total_ns": 216927052.0,
+   "minor_count": 0.0,
+   "block_heap_committed": 2097152.0
+  },
+  "regexp": {
+   "pause_events": 707.0,
+   "completed_rounds": 236.0,
+   "gc_time_total_ns": 86821611.5,
+   "minor_count": 0.0,
+   "block_heap_committed": 2097152.0
+  },
+  "pdfjs": {
+   "pause_events": 54.0,
+   "completed_rounds": 18.0,
+   "gc_time_total_ns": 12712267.5,
+   "minor_count": 152.0,
+   "block_heap_committed": 14680064.0
+  },
+  "raytrace": {
+   "pause_events": 11205.0,
+   "completed_rounds": 3735.0,
+   "gc_time_total_ns": 867429062.5,
+   "minor_count": 0.0,
+   "block_heap_committed": 2097152.0
+  },
+  "earley-boyer": {
+   "pause_events": 23625.5,
+   "completed_rounds": 7704.0,
+   "gc_time_total_ns": 2528236153.5,
+   "minor_count": 2904.0,
+   "block_heap_committed": 27262976.0
+  },
+  "splay": {
+   "pause_events": 1400.5,
+   "completed_rounds": 29.0,
+   "gc_time_total_ns": 135025646.0,
+   "minor_count": 8.0,
+   "block_heap_committed": 232783872.0
+  }
+ },
+ "verdict": null,
+ "owner_decision": null
+}
