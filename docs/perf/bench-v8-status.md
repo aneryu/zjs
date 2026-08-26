@@ -36,10 +36,12 @@ Consequences:
    GCC-13 build (Jul 24, 5139288 B; md5 not recorded — the binary
    pre-dates this fingerprint rule), GCC-16 build md5
    `5e965b35f757e6c24c8f534bb4c6ee10` (Aug 24, 5279720 B).
-4. Which build is the official yardstick going forward is an owner
-   call: GCC-13 is the reproducible "system default compiler" build;
-   GCC-16 is the stronger opponent. Pending that ruling, published
-   comparisons must name the reference build explicitly.
+4. **Yardstick ruled (owner ratification 2026-08-26, BASE-G0):** the
+   GCC-16 build (`/home/aneryu/quickjs/qjs`, md5 `5e965b35...`, sha256
+   `5741f6bc...`) is the official reference going forward — the stronger
+   opponent, and the binary the current v9 snapshot already used. Full
+   fingerprint + recipe: `reports/evidence/BASE-G0/manifest.json`.
+   Published comparisons against any other build must say so explicitly.
 
 ## 2026-08-25: suite expanded to Octane 2.0 (version 9)
 

@@ -2,11 +2,12 @@
 
 版本:1.9  
 日期:2026-08-26  
-状态:执行总纲候选。v1.9 = BASE-G0 测量冻结完成(官方 qjs 尺裁定、
-三枚 zjs 冻结二进制、套件逐 case 指纹、tracing 公开 tag、
-gc_merge_policy + 四份 spike policy 预注册、evidence 登记册落地),
-无新增设计。v1.8 = 语义闭合 + 可执行 Registry。
-转 **approved execution baseline** 的硬条件见 §0.3(仅剩 ruleset 项)。
+状态:**approved execution baseline**(§0.3 硬条件 2026-08-26 全数
+达成;owner 同日批复 qjs 尺裁定与 required-checks ruleset)。
+v1.9 = BASE-G0 测量冻结完成(官方 qjs 尺裁定、三枚 zjs 冻结二进制、
+套件逐 case 指纹、tracing 公开 tag、gc_merge_policy + 四份 spike
+policy 预注册、evidence 登记册落地),无新增设计。v1.8 = 语义闭合 +
+可执行 Registry。
 
 **机器可读 source of truth**:
 [`docs/roadmap/work-items.yaml`](roadmap/work-items.yaml)(schema v2)
@@ -71,10 +72,12 @@ BASE-G0 完成前,一切吞吐/pause 数字是本地决策输入,非可复现项
 [x] FN-M0D freeze blockers 完成分类(FNABI v0.5;finalizer 已裁 v0.6)
 [x] HR-P2A/P2B 拆分(hot-reload v1.5)
 [x] STATUS.md 登记当前 roadmap 版本与 approval 状态(v1.9)
-[ ] main branch ruleset(required checks;force-push/删除已禁
-    `main-no-force-push`)——required checks 会阻断 owner 直推 main
-    的现行工作流(commit 须先在他处跑绿),启用与否=工作流形态的
-    owner 裁决,不由执行侧代作
+[x] main branch ruleset(owner 批复 2026-08-26):
+    `main-no-force-push`(禁 force-push/删除,无 bypass)+
+    `main-required-checks`(required checks = roadmap-lint /
+    linux-arm64 / linux-x86_64;repository-admin bypass=always,
+    保全 owner 直推 main 的现行工作流;macOS/Windows smoke 维持
+    advisory)
 ```
 
 ## 1. Canonical DAG(由 Registry 生成;仅硬依赖与 activation,

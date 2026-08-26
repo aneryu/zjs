@@ -7,14 +7,18 @@ this page and the documents it names win.
 ## Roadmap governance
 
 Current roadmap: `docs/roadmap.md` **v1.9** (registry
-`docs/roadmap/work-items.yaml`), approval status: **candidate** — the
-sole open §0.3 hard condition is the main-branch required-checks ruleset
-(an owner workflow decision). BASE-G0 (measurement freeze) completed
-2026-08-26: the official QuickJS yardstick is the GCC-16 build recorded in
+`docs/roadmap/work-items.yaml`), approval status: **approved execution
+baseline** (all §0.3 hard conditions met 2026-08-26; owner ratified the
+yardstick ruling and the main required-checks ruleset the same day).
+BASE-G0 (measurement freeze) completed 2026-08-26: the official QuickJS
+yardstick is the GCC-16 build recorded in
 `reports/evidence/BASE-G0/manifest.json`, the tracing-GC candidate is
 pinned by the public tag `frozen/gc-tracing-2026-08-26`, and all official
 measurements are governed by `policies/` (preregistered) with evidence
-registered under `reports/evidence/`.
+registered under `reports/evidence/`. Main branch protection:
+`main-no-force-push` (no force-push/deletion, no bypass) +
+`main-required-checks` (roadmap-lint, linux-arm64, linux-x86_64;
+repository-admin bypass keeps the owner's direct-push workflow).
 
 ## test262
 
@@ -37,8 +41,9 @@ current five-engine snapshot there reads zjs/qjs composite 0.9611 against a
 GCC 16.0.1 reference build. Per the 2026-08-25 reference-drift adjudication,
 every published record must carry the reference binary's fingerprint
 (hash + compiler); ratios are not comparable across suite versions or
-reference binaries, and which build is the official yardstick is an open
-owner decision.
+reference binaries. The official yardstick was ruled 2026-08-26 (BASE-G0,
+owner-ratified): the GCC-16 reference build pinned in
+`reports/evidence/BASE-G0/manifest.json`.
 
 The 15-benchmark zoo suite stays as a standalone-file attribution
 instrument (usage: `tools/perf/zoo/README.md`). Its last baseline (geomean

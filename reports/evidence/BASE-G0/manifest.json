@@ -120,5 +120,5 @@
 
   "result": "Measurement baseline frozen: official qjs yardstick ruled (GCC-16 build), zjs merge-base + GC candidate binaries pinned, suite revision + per-case hashes recorded, tracing candidate published as immutable tag, gc_merge_policy + four spike policies preregistered, evidence layout established.",
   "verdict": null,
-  "owner_decision": "delegated execution 2026-08-26 (owner: '继续' after roadmap review); explicit ratification points: (1) qjs GCC-16 binary as official yardstick, (2) thresholds marked basis=proposed in the spike policies, (3) gc_merge margin deferred to G1-GC per policy"
+  "owner_decision": "delegated execution 2026-08-26 (owner: '继续' after roadmap review). Ratifications 2026-08-26 (owner: '1.没问题；3.同意'): (1) qjs GCC-16 binary as official yardstick — RATIFIED; (3) main required-checks ruleset — APPROVED, implemented as ruleset 21546820 (roadmap-lint/linux-arm64/linux-x86_64, repository-admin bypass=always preserving the direct-push workflow). Still pending per-spike: (2) thresholds marked basis=proposed in the spike policies must be owner-approved before that spike starts; gc_merge margin deferred to G1-GC per policy."
 }
