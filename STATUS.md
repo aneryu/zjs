@@ -4,6 +4,18 @@ This page is the single authoritative status source for `zjs`.
 README carries condensed copies of the headline tables; when they disagree,
 this page and the documents it names win.
 
+## Roadmap governance
+
+Current roadmap: `docs/roadmap.md` **v1.9** (registry
+`docs/roadmap/work-items.yaml`), approval status: **candidate** — the
+sole open §0.3 hard condition is the main-branch required-checks ruleset
+(an owner workflow decision). BASE-G0 (measurement freeze) completed
+2026-08-26: the official QuickJS yardstick is the GCC-16 build recorded in
+`reports/evidence/BASE-G0/manifest.json`, the tracing-GC candidate is
+pinned by the public tag `frozen/gc-tracing-2026-08-26`, and all official
+measurements are governed by `policies/` (preregistered) with evidence
+registered under `reports/evidence/`.
+
 ## test262
 
 Checked report date: 2026-08-22 (full-suite run recorded under Known defects

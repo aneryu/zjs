@@ -1,0 +1,55 @@
+{
+  "policy_id": "perf-n-spike",
+  "policy_version": 1,
+  "status": "frozen",
+  "date_frozen": "2026-08-26",
+  "work_item": "PERF-N-SPIKE",
+  "gate": "G1-AOT",
+  "spec_basis": [
+    "docs/type-directed-optimization-plan.md §5.1 (N-spike: hand-written codegen-target Zig, richards-typed module, 3-5 person-days, deliverables a+b), §5.2 (boundary crossing tiers; crossing costs measured at spike time)"
+  ],
+
+  "scope": {
+    "native_arm": "hand-write the Zig that the AOT emitter SHOULD emit for one richards-typed microbench module; statically link against the zjs runtime; execute vs the interpreter on identical fixed work",
+    "boundary_set": "native->interp single crossing, interp->native single crossing, round-trip ping-pong; each at the four tiers: generic wrapper / descriptor / direct call / batched API",
+    "explicitly_out": "no emitter, no compiler pipeline, no F3/F5 — the arm is hand-written by construction"
+  },
+
+  "primary_metric": "paired fixed-work time ratio, richards-typed module: native arm vs interpreter (insn+cycles recorded together)",
+
+  "thresholds": {
+    "pass": ">= 2.0x (paper anchor for typed OO code is 2-4x at baseline-JIT-grade code quality; the spike must reach the anchor's floor)",
+    "redesign": "1.3x - 2.0x: real but below anchor -> recalibrate the v1 AOT scope/claims before G1-AOT rules",
+    "fail": "< 1.3x: the native thesis does not survive contact with the real runtime boundary",
+    "basis": "2-4x anchor: doc; the 2.0x/1.3x cutpoints: proposed"
+  },
+
+  "required_artifacts": [
+    "(a) measured native-arm multiple on zjs — first real anchor against the 2-4x paper number",
+    "(b) engineering form + pitfall list for GC/exception/boundary integration — REQUIRED REGARDLESS OF VERDICT (doc: deliverable b)",
+    "boundary cost table: cycles per crossing per tier, plus round-trip"
+  ],
+
+  "correctness_gates": [
+    "module output checksums identical to the interpreter run",
+    "conservative-scan root visibility: collection forced while native frames hold heap references, under -Dzjs_gc=trace_stw",
+    "exception crossing: JS exception thrown under a native frame propagates via status return with correct backtrace kind marks"
+  ],
+
+  "maximum_regression": {
+    "rule": "none applicable to shipped code (spike links its own binary); interpreter binary untouched"
+  },
+
+  "size_cost_limit": {
+    "timebox_person_days": 5,
+    "basis": "doc (3-5 人日)"
+  },
+
+  "sample_protocol": "measurement contract (sha256 020f2f18...); >=8 paired ABBA samples, pinned big core, CV <= 5%",
+
+  "verdicts": {
+    "pass": ">= 2.0x + correctness green -> G1-AOT=eligible; BACKEND-ORDER prices it against G1-JIT; v1 scope defined from the measured data",
+    "redesign": "1.3-2.0x -> rescope (e.g. numeric-core-only claims, boundary-density limits) and re-rule",
+    "fail": "< 1.3x -> G1-AOT=later; typed value stays as backend-input and typed-FFI lines"
+  }
+}

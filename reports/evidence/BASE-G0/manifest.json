@@ -1,0 +1,124 @@
+{
+  "manifest_version": 1,
+  "work_item": "BASE-G0",
+  "date": "2026-08-26",
+
+  "commits": {
+    "zjs_main": {
+      "commit": "8893c56b92eb3d6beb1937f421f7160f87e20dfd",
+      "dirty": false,
+      "ref": "main",
+      "note": "repo state at freeze time (roadmap v1.8 -> v1.9 in the freeze commit)"
+    },
+    "zjs_merge_base": {
+      "commit": "14b0618dff40400b6d43b402270a9d9cd0c6111e",
+      "dirty": false,
+      "note": "merge-base(main, gc/tracing); GC-GAP baseline source"
+    },
+    "zjs_gc_candidate": {
+      "commit": "62061f94e235c2ade9082df0f2c49ad8b7ac972d",
+      "dirty": false,
+      "ref": "frozen/gc-tracing-2026-08-26",
+      "note": "gc/tracing tip (Block heap Step 2), pinned by the public immutable tag frozen/gc-tracing-2026-08-26. RE-FREEZE RULE: if gc/tracing advances before GC-GAP runs, bump manifest_version with new fingerprints first. The working copy at /home/aneryu/worktrees/gc-tracing carried uncommitted WIP at freeze time and is NOT part of the candidate."
+    },
+    "quickjs": {
+      "commit": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+      "dirty": false,
+      "note": "checkout /home/aneryu/quickjs, VERSION 2026-06-04"
+    },
+    "octane_suite_upstream": {
+      "commit": "570ad1ccfe86e3eecba0636c8f932ac08edec517",
+      "dirty": false,
+      "note": "chromium/octane vendored unmodified into tools/perf/bench_v8/suite/ (BenchmarkSuite.version = 9); per-case hashes below are the in-repo ground truth"
+    }
+  },
+
+  "binary_sha256": {
+    "qjs_official_yardstick": {
+      "path": "/home/aneryu/quickjs/qjs",
+      "sha256": "5741f6bc79ca7164ed3109dd0ed0c6e3189ad1c0c4038c266b3731b8b11ec17d",
+      "producer": "GNU C23 16.0.1 20260315 (experimental) [trunk r16-8100-g3aca3bae8ee] (Ubuntu 16-20260315-1ubuntu1~24~ppa1)",
+      "recipe": "upstream Makefile defaults with CC=GCC 16.0.1: -O2 -fwrapv -g -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection -fasynchronous-unwind-tables (flags recovered from DWARF DW_AT_producer; matches Makefile CFLAGS_OPT). md5 5e965b35f757e6c24c8f534bb4c6ee10 matches the GCC-16 build recorded in docs/perf/bench-v8-status.md. YARDSTICK RULING (this freeze): this binary is the official reference; ratios quoted against any other qjs build must say so."
+    },
+    "zjs_rc_mergebase": {
+      "path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zjs-rc-mergebase-14b0618d",
+      "sha256": "5662f660355394a0e0a0163f629b6e109c5e9461160fc41b5bdb0c90005e5726",
+      "recipe": "git worktree at 14b0618d (clean); zig build zjs (ReleaseFast defaults, gc=rc)"
+    },
+    "zjs_tracestw_candidate": {
+      "path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zjs-tracestw-candidate-62061f94",
+      "sha256": "eae503818748e45aa60aa2683423e3c17821ee139294d0da6ca7154bddecd5ea",
+      "recipe": "git worktree at 62061f94 (clean); zig build zjs -Dzjs_gc=trace_stw"
+    },
+    "zjs_rc_branchtip_diagnostic": {
+      "path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zjs-rc-branchtip-62061f94",
+      "sha256": "e7f14b80fa1d1dd0e3251618a1e9033d3b1b01edf053d3cfef0b33d93af0f646",
+      "recipe": "git worktree at 62061f94 (clean); zig build zjs -Dzjs_gc=rc — diagnostic arm only (separates branch deltas from the collector switch)"
+    }
+  },
+
+  "suite": {
+    "name": "bench_v8 / Octane 2.0 (V8 suite version 9)",
+    "path": "tools/perf/bench_v8/suite/",
+    "skip_policy": "zlib only, enforced fail-closed by run_benchv8_compare.py SKIPPED_SUITES (owner decision 2026-08-25; tools/perf/bench_v8/README.md)",
+    "per_case_sha256": {
+      "base.js": "216612c2e7096a02b3e52b57e9cf9351bbaf180d60938d5c60b85fd756232733",
+      "box2d.js": "83b10c280f004e7b156a9e04d09ce4109892ea92788f7c6c963f7fadf29c7bd4",
+      "code-load.js": "32fd38d49bb8794b40e947c70c0c51276bfc2588833a8451a25b1b2bfccad96c",
+      "crypto.js": "b01b6b3fe534327fdef05131162927bc5508f100a3208e185d0c5a4efb200a39",
+      "deltablue.js": "6c4784e82f3e8f5c18306d289653d08b17b38838f1bac16b38611d7318fa5a36",
+      "earley-boyer.js": "8dd28a505f7e705642f86816232b012fd3c770ec8afc9f719ce89ce772dab347",
+      "gbemu-part1.js": "67ae8c639b7acc5ebbcf0995c8b68821251a629f72c604e74cae8526c8e85965",
+      "gbemu-part2.js": "acd923e085cf70fce8a15b1420d1fa489bd8315e4a8c066775aeaa7104e609d3",
+      "mandreel.js": "fc4a9516e8899bb33df63a69db30797959a138d33233e9fb1ccc57cb91dcd164",
+      "navier-stokes.js": "27926de809451c60b0c49a4185c08f97081310d0db166a30c1d202fb656556a2",
+      "pdfjs.js": "ced89e66a178a4b63a69ea33fc6f47d405bf9bd379817be25f060a4b2dcce351",
+      "raytrace.js": "64b8ff90969966dd69659100e28754976dfc3e9a4f8ee55b9232f974c66ed08c",
+      "regexp.js": "a292d6047900c5296ea9e2628453832cc3bfe397e49fddade8aff7b5876c8263",
+      "richards.js": "1246a64a24b931158bf01c24640343259fa74b0226e73bad630bd1f686aa0fa7",
+      "run.js": "11ef403ccc064bccf8230542510fdf2fce0bf09379e05badf5e01663b3d2a576",
+      "splay.js": "f9a6a60d8f205908f5542ad1180abc1902dcdab3dcb4278017c5ce179ee123f7",
+      "typescript-compiler.js": "9e99fe0ddfe48a2462eca622ade1e1ddd13bf49f8e461a6c53463bbbc1d5363a",
+      "typescript-input.js": "e23d2fe7b3df9dc069c720ab3fb112006c235d0eb416556ecde7c3a2766a0396",
+      "typescript.js": "fbc5ec16d9c60b1bdcca7e7b9f66fba2fe46c0e04da64088203052e47922ff21",
+      "zlib-data.js": "b8d093321289574f36116e933e2b3b211bb98df9fe3e761ffb1be550d0e82aed",
+      "zlib.js": "d8c4bca32e84b38f573d3ee50a38b194afc9fb4e2f79754d952524bff01a898c"
+    }
+  },
+
+  "toolchain": {
+    "zig": "0.16.0",
+    "qjs_cc": "GCC 16.0.1 20260315 (Ubuntu 16-20260315-1ubuntu1~24~ppa1)"
+  },
+
+  "policy_sha256": {
+    "tools/compare/measurement_policy.json": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68",
+    "policies/gc_merge_policy.json": "7772ec44f6a46311fb0c3ea97ba91c3b287941618d37f84493707d7b9bf33fd5",
+    "policies/spikes/perf-t-spike-v1.json": "ba1619ec28cc920766216f5c1d2f012c4c888973477e2ee2cab532a05a81fcc9",
+    "policies/spikes/perf-dyn-spike-v1.json": "239d5c1a95aa7b9a05d7e516e0264bb2a677b508f40be75d54aa26b64b85d782",
+    "policies/spikes/perf-jit-spike-v1.json": "e1228adda33b2feacfeed3466e6852741aea543f85ffd325eabfb49c497ef6ed",
+    "policies/spikes/perf-n-spike-v1.json": "7c2a03b7f61f82d0785f9000597f0cac08c13f95aea6b0262e60cd86156ae203"
+  },
+
+  "host": {
+    "os": "Linux 6.17.0-1014-nvidia aarch64",
+    "cpu": "big.LITTLE, Cortex-X925 + Cortex-A725; big cores 5-9,15-19 (pmu armv8_pmuv3_1); official reads pinned per docs/perf/README.md"
+  },
+
+  "command": [
+    "zig build zjs (worktree @14b0618d)",
+    "zig build zjs -Dzjs_gc=trace_stw (worktree @62061f94)",
+    "zig build zjs -Dzjs_gc=rc (worktree @62061f94)",
+    "sha256sum over binaries, suite files, and policy files",
+    "git tag -a frozen/gc-tracing-2026-08-26 62061f94"
+  ],
+
+  "raw_artifacts": [
+    {"path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/SHA256SUMS", "note": "frozen binary digest list"},
+    {"path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zig-version.txt", "note": "0.16.0"}
+  ],
+
+  "result": "Measurement baseline frozen: official qjs yardstick ruled (GCC-16 build), zjs merge-base + GC candidate binaries pinned, suite revision + per-case hashes recorded, tracing candidate published as immutable tag, gc_merge_policy + four spike policies preregistered, evidence layout established.",
+  "verdict": null,
+  "owner_decision": "delegated execution 2026-08-26 (owner: '继续' after roadmap review); explicit ratification points: (1) qjs GCC-16 binary as official yardstick, (2) thresholds marked basis=proposed in the spike policies, (3) gc_merge margin deferred to G1-GC per policy"
+}

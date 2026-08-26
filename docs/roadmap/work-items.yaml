@@ -12,7 +12,7 @@
 #   hard_prerequisites are the only DAG edges (acyclic).
 
 schema_version: 2
-roadmap_version: "1.8"
+roadmap_version: "1.9"
 roadmap_status: candidate
 
 items:
@@ -22,7 +22,7 @@ items:
     type: governance
     state: done
     wip_slot: none
-    completion_commit: pending-this-commit
+    completion_commit: 8893c56b
     hard_prerequisites: []
     acceptance: roadmap-lint forbidden-phrase scan green; no contrary verdicts between roadmap and domain-doc bodies
     authority: {file: docs/roadmap.md, section: "0"}
@@ -40,8 +40,10 @@ items:
   - id: BASE-G0
     title: Measurement freeze (reference fingerprints, policies, evidence layout)
     type: governance
-    state: now
-    wip_slot: decision
+    state: done
+    wip_slot: none
+    completion_commit: pending-this-commit
+    evidence: reports/evidence/BASE-G0/manifest.json
     hard_prerequisites: []
     deliverables:
       - QuickJS commit/compiler/flags/binary sha256 + reproducible recipe
@@ -129,7 +131,7 @@ items:
     wip_slot: implementation
     activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
-    acceptance_policy: {path: policies/spikes/perf-t-spike-v1.json, status: pending}
+    acceptance_policy: {path: policies/spikes/perf-t-spike-v1.json, status: frozen}
     authority: {file: docs/type-directed-optimization-plan.md, section: "S2 / T-gate 0"}
   - id: PERF-DYN-SPIKE
     title: Dynamic-feedback minimal evidence (disposable side table; mono + PIC2 arms)
@@ -138,7 +140,7 @@ items:
     wip_slot: implementation
     activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
-    acceptance_policy: {path: policies/spikes/perf-dyn-spike-v1.json, status: pending}
+    acceptance_policy: {path: policies/spikes/perf-dyn-spike-v1.json, status: frozen}
     notes: outputs a concrete feedback profile; must reconcile the 08-17 IC refutation
     authority: {file: docs/roadmap.md, section: "2"}
   - id: PERF-JIT-SPIKE
@@ -148,7 +150,7 @@ items:
     wip_slot: implementation
     activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: [PERF-VMABI]
-    acceptance_policy: {path: policies/spikes/perf-jit-spike-v1.json, status: pending}
+    acceptance_policy: {path: policies/spikes/perf-jit-spike-v1.json, status: frozen}
     authority: {file: docs/engine-evolution-plan.md, section: "Phase 2 spike gate"}
   - id: PERF-N-SPIKE
     title: Native Zig AOT shape spike (boundary cost, GC/exception closure)
@@ -157,7 +159,7 @@ items:
     wip_slot: implementation
     activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
-    acceptance_policy: {path: policies/spikes/perf-n-spike-v1.json, status: pending}
+    acceptance_policy: {path: policies/spikes/perf-n-spike-v1.json, status: frozen}
     authority: {file: docs/type-directed-optimization-plan.md, section: "5.1 / 8"}
 
   # ---- performance infrastructure ----
@@ -266,10 +268,11 @@ items:
   - id: GC-GAP
     title: Full-suite RC vs tracing A/B (plus 4-row per-benchmark account)
     type: measurement
-    state: ready
+    state: now
     wip_slot: measurement
     activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
+    notes: "protocol + frozen reference set: policies/gc_merge_policy.json (gap_measurement) + reports/evidence/BASE-G0/manifest.json"
     authority: {file: docs/tracing-gc-design.md, section: "pause plan"}
   - id: GC-P3
     title: Lazy sweep + versioned marks + throughput-tax recovery
@@ -379,7 +382,7 @@ items:
   - id: FN-M0D
     title: ABI decision closure (freeze-blocker verdicts; finalizer plan B recorded 2026-08-26)
     type: governance
-    state: ready
+    state: now
     wip_slot: decision
     hard_prerequisites: []
     notes: "remaining verdicts: AsyncToken epoch width/scope; external memory accounting mandatory?; event channel primitive vs pattern; class-id/NativeType identity rules; handle scope in v1?"

@@ -1,0 +1,58 @@
+{
+  "policy_id": "perf-t-spike",
+  "policy_version": 1,
+  "status": "frozen",
+  "date_frozen": "2026-08-26",
+  "work_item": "PERF-T-SPIKE",
+  "gate": "G1-TYPED",
+  "spec_basis": [
+    "docs/type-directed-optimization-plan.md §三 (effect table + kill rows), §四 (PERF-SHAPE-ID dual-domain), §6.2 (T-spike mandatory verification gate)",
+    "docs/process-model-design.md §20.2a typed 追加 ①② (unsound guard elision forbidden; polymorphic arm mandatory)"
+  ],
+
+  "scope": "2-3 day vertical prototype: hand-prebuilt shape registry + specialized typed slot access; no compiler pipeline, no F3/F5 ingestion",
+
+  "arms": {
+    "guard_mechanism": ["u64_identity_per_runtime", "pinned_pointer_immutable_shape"],
+    "site_form": ["own_slot", "proto_slot"],
+    "stress": "polymorphic arm: alternating two-subclass call sites with sliding-window (not consecutive-fail) invalidation — mandatory per ledger §20.2a ②"
+  },
+
+  "target_workloads": {
+    "primary": "hand-built typed property-dense fixed-work microbench (pdfjs/typescript/box2d access shapes)",
+    "secondary": "method-read-dense fixed-work microbench (richards/deltablue proto-chain shapes)",
+    "controls": "untyped equivalents of the same loops (specialization must not tax the untyped path)"
+  },
+
+  "primary_metric": "paired fixed-work time ratio, own-slot form, property-dense typed microbench (candidate/baseline; insn and cycles recorded together)",
+
+  "minimum_effect": {
+    "own_slot": "+8% on the property-dense typed microbench, in at least one guard arm",
+    "basis": "doc (typed plan §三 kill row: < +8% ⇒ 静态属性赌注死)"
+  },
+
+  "maximum_regression": {
+    "untyped_controls": "geomean <= 1.005 (within noise band)",
+    "basis": "proposed"
+  },
+
+  "correctness_gates": [
+    "zig build test, zig build smoke",
+    "test262 subset covering property semantics touched by the prototype",
+    "NO guard-free own-slot access anywhere in the prototype: untyped-alias delete makes guard elision a memory-safety defect (ledger §20.2a ①); auto-seal vs guard is a T-gate-0 ruling, not a spike shortcut"
+  ],
+
+  "size_cost_limit": {
+    "timebox_person_days": 3,
+    "hard_stop_person_days": 5,
+    "basis": "doc (2-3 天垂直原型); hard stop proposed"
+  },
+
+  "sample_protocol": "measurement contract (tools/compare/measurement_policy.json sha256 020f2f18...); >=8 paired ABBA samples, pinned big core, CV <= 5% or lengthen workload; insn+cycles same run",
+
+  "verdicts": {
+    "pass": "own-slot >= +8% in >=1 guard arm AND polymorphic arm does not collapse the win AND untyped controls within noise -> evidence supports G1-TYPED=implement; report which guard domain won where (feeds PERF-SHAPE-ID dual-domain contract)",
+    "redesign": "the +8% is reachable only by violating a v1 constraint (e.g. only unsound guard elision clears it, or proto-slot/polymorphic pathology contradicts the S3 workload) -> respec before G1-TYPED rules",
+    "fail": "own-slot < +8% in every sound arm -> static-property bet dead; interpreter-level static axis shrinks to typed FFI + backend-input value; PERF-TYPED-IR still ruled by its dual trigger (typed plan §5.1)"
+  }
+}

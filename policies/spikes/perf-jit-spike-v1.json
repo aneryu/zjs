@@ -1,0 +1,69 @@
+{
+  "policy_id": "perf-jit-spike",
+  "policy_version": 1,
+  "status": "frozen",
+  "date_frozen": "2026-08-26",
+  "work_item": "PERF-JIT-SPIKE",
+  "gate": "G1-JIT",
+  "hard_prerequisite": "PERF-VMABI (VmExecState / HelperDescriptor / exception-interrupt / GC slot abstraction)",
+  "spec_basis": [
+    "docs/roadmap.md §2 (G1-JIT minimum scope + required report + break-even decision quantity)",
+    "docs/engine-evolution-plan.md §八 (linear baseline compiler; JitMeta/JitCodeBlock; W^X obligations)"
+  ],
+
+  "scope": {
+    "opcodes": "8-12 high-frequency opcodes",
+    "required_coverage": ["numeric loop", "call-heavy", "property load", "helper bailout", "exception return", "GC safepoint"],
+    "basis": "doc (roadmap §2)"
+  },
+
+  "required_report": [
+    "steady-state speedup on covered fixed-work loops",
+    "compile latency per function",
+    "code bytes per bytecode byte",
+    "entry/exit cost (interp->jit, jit->interp)",
+    "bailout cost (guard fail -> slow helper -> compiled continuation)",
+    "break-even hotness",
+    "code retirement path (eviction / function destruction invalidation)",
+    "RW->RX transition + icache flush cost and mechanism",
+    "basis: doc (roadmap §2 list, verbatim)"
+  ],
+
+  "primary_metric": {
+    "decision_quantity": "break_even_count = compile_cost / (interpreter_cost_per_iter - jit_cost_per_iter)",
+    "pass_condition": "break_even_count falls inside the hotness range of real workloads",
+    "operationalization": ">= 30% of dynamically executed bytecode on the bench_v8 v9 suite (opcode-profiling build measurement) belongs to functions whose observed hotness >= 2x break_even_count",
+    "basis": "decision quantity and pass wording: doc; the 30%/2x operationalization: proposed"
+  },
+
+  "secondary_metrics": {
+    "steady_state_speedup_min": "+25% on the covered numeric-loop fixed-work microbench (context: all interpreter skeletons sit on the ~20.7 cyc/iter indirect-jump dispatch floor; a JIT that cannot beat the floor it removes has no thesis)",
+    "code_size_cap": "report code bytes/bytecode byte; v0 macro-expansion cap 12x — above it, the RC inc/dec expansion strategy must be redesigned before eligibility",
+    "basis": "proposed"
+  },
+
+  "maximum_regression": {
+    "jit_off_default_path": "geomean <= 1.005 with the JIT compiled in but disabled (the interpreter must not pay for the spike's existence)",
+    "basis": "proposed"
+  },
+
+  "correctness_gates": [
+    "zig build test, zig build smoke with JIT on for covered opcodes",
+    "test262 subset for covered opcode semantics, JIT on",
+    "exception propagation via explicit status return (no system unwind) demonstrated across a JIT frame",
+    "GC safepoint: collection triggered inside JIT code sees all live slots (shadow/audit instrumentation)"
+  ],
+
+  "size_cost_limit": {
+    "timebox_person_days": 10,
+    "basis": "proposed (minimum closed loop)"
+  },
+
+  "sample_protocol": "measurement contract (sha256 020f2f18...); >=8 paired ABBA samples, pinned big core, CV <= 5%; insn+cycles same run",
+
+  "verdicts": {
+    "pass": "primary pass_condition + secondary metrics + correctness green -> G1-JIT=eligible; BACKEND-ORDER then prices it against G1-AOT",
+    "redesign": "a positive per-iter delta exists but break-even lands outside real hotness (compile cost dominated), or W^X/retirement obligations unresolved on a target platform -> respec compile-cost or platform strategy before re-ruling",
+    "fail": "jit_cost_per_iter >= interpreter_cost_per_iter on covered loops (no break-even exists), or the code-size/regression caps cannot be met -> G1-JIT=later"
+  }
+}

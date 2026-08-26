@@ -1,11 +1,12 @@
 # zjs / fun 统一路线图
 
-版本:1.8  
+版本:1.9  
 日期:2026-08-26  
-状态:执行总纲候选。v1.8 = 语义闭合 + 可执行 Registry(schema v2
-结构化 activation、生成区段由 YAML 驱动、共享生命周期依赖闭合、
-finalizer/side-by-side/counter-scope 三项裁决落地),无新增设计。
-转 **approved execution baseline** 的硬条件见 §0.3。
+状态:执行总纲候选。v1.9 = BASE-G0 测量冻结完成(官方 qjs 尺裁定、
+三枚 zjs 冻结二进制、套件逐 case 指纹、tracing 公开 tag、
+gc_merge_policy + 四份 spike policy 预注册、evidence 登记册落地),
+无新增设计。v1.8 = 语义闭合 + 可执行 Registry。
+转 **approved execution baseline** 的硬条件见 §0.3(仅剩 ruleset 项)。
 
 **机器可读 source of truth**:
 [`docs/roadmap/work-items.yaml`](roadmap/work-items.yaml)(schema v2)
@@ -61,14 +62,19 @@ BASE-G0 完成前,一切吞吐/pause 数字是本地决策输入,非可复现项
 ```
 [x] BASE-DOC-NORM 完成(v1.8;退役短语 lint 绿)
 [x] BASE-ROADMAP-LINT 进入 CI(af238c7c;v1.8 起含生成区段校验)
-[ ] BASE-G0 完成(tracing 公开 ref、yardstick 冻结、
-    gc_merge_policy.json、四份 spike policy 落地)
+[x] BASE-G0 完成(v1.9;tracing 公开 tag `frozen/gc-tracing-2026-08-26`、
+    yardstick 裁定=GCC-16 qjs、gc_merge_policy.json + 四份 spike
+    policy 预注册、evidence 登记册;详见
+    reports/evidence/BASE-G0/manifest.json)
 [x] Canonical DAG 由 Registry 生成,只含硬依赖;隐藏前置全部有 ID
 [x] G1-FEEDBACK 与 G1-JIT 分离;PERF-JIT-SPIKE 定义完成(v1.7)
 [x] FN-M0D freeze blockers 完成分类(FNABI v0.5;finalizer 已裁 v0.6)
 [x] HR-P2A/P2B 拆分(hot-reload v1.5)
-[ ] STATUS.md 登记当前 roadmap 版本与 approval 状态
-[ ] main branch ruleset(required checks;force-push 已禁)
+[x] STATUS.md 登记当前 roadmap 版本与 approval 状态(v1.9)
+[ ] main branch ruleset(required checks;force-push/删除已禁
+    `main-no-force-push`)——required checks 会阻断 owner 直推 main
+    的现行工作流(commit 须先在他处跑绿),启用与否=工作流形态的
+    owner 裁决,不由执行侧代作
 ```
 
 ## 1. Canonical DAG(由 Registry 生成;仅硬依赖与 activation,
@@ -222,16 +228,18 @@ G1-LIGHT-PROCESS-WORKLOAD。
 
 **Now(遵守 §4 WIP)**
 ```
-owner-decision: BASE-G0(完成后进 FN-M0D)
+owner-decision: FN-M0D(BASE-G0 已于 v1.9 完成)
 implementation: HR-P1 · FN-M0I(仅非争议骨架,不执行 freeze)
-(BASE-DOC-NORM/BASE-ROADMAP-LINT 随本版落地)
+measurement:    GC-GAP(冻结引用集与协议见 gc_merge_policy.json +
+                reports/evidence/BASE-G0/manifest.json;出数后裁 G1-GC)
 ```
 
 **证据购买(implementation slot 释放后;测量队列串行)**
 ```
 GC-GAP → PERF-T-SPIKE → PERF-DYN-SPIKE → PERF-JIT-SPIKE
        → PERF-N-SPIKE
-各 gate 出数即裁,互不等待
+各 gate 出数即裁,互不等待;四份 spike policy 已预注册
+(policies/spikes/,basis=proposed 的阈值开工前须 owner 批)
 ```
 
 **Gate 后分叉(不预设完整路径必做)**
@@ -288,12 +296,12 @@ fun 面    HR-P1 HR-P2A HR-P2B HR-P3 DBG-W2 FN-M0D FN-M0I FN-M0F FN-M1A FN-M1B F
 
 <!-- BEGIN GENERATED: STATUS -->
 ```
-now        BASE-G0 HR-P1 FN-M0I
-ready      G1-LIGHT-PROCESS-WORKLOAD PERF-T-SPIKE PERF-DYN-SPIKE PERF-N-SPIKE PERF-VMABI PERF-OPCODE-SPACE PERF-SIDECAR GC-GAP SER-CORE SER-TRANSFER DBG-W2 FN-M0D RT-LIFECYCLE GC-MULTIRT-GATE VM-WEAK-REGISTRY PROC-D5A
+now        GC-GAP HR-P1 FN-M0D FN-M0I
+ready      G1-LIGHT-PROCESS-WORKLOAD PERF-T-SPIKE PERF-DYN-SPIKE PERF-N-SPIKE PERF-VMABI PERF-OPCODE-SPACE PERF-SIDECAR SER-CORE SER-TRANSFER DBG-W2 RT-LIFECYCLE GC-MULTIRT-GATE VM-WEAK-REGISTRY PROC-D5A
 gated      PERF-SHAPE-ID PERF-TYPED-IR PERF-T1 PERF-P05 PERF-JIT PERF-AOT GC-P3 VM-CONTRACT-GC
 blocked    G1-GC G1-TYPED G1-FEEDBACK G1-JIT G1-AOT BACKEND-ORDER G2-GC-MERGE PERF-JIT-SPIKE GC-MERGE SER-ARTIFACT SER-SNAPSHOT SER-MESSAGE HR-P2A HR-P2B HR-P3 FN-M0F FN-M1A FN-M1B FN-M1C PROC-D3 PROC-D4 PROC-D5B PROC-D6 PROC-D7
 later      FN-M2 FN-M3 FN-M4 FN-M5 FN-M6
 incubator  PERF-ASM-1A PERF-ASM-1B
-done       BASE-DOC-NORM BASE-ROADMAP-LINT
+done       BASE-DOC-NORM BASE-ROADMAP-LINT BASE-G0
 ```
 <!-- END GENERATED: STATUS -->

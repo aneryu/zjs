@@ -1,0 +1,104 @@
+{
+  "policy_id": "zjs-gc-merge-gate",
+  "policy_version": 1,
+  "date_frozen": "2026-08-26",
+  "work_items": {
+    "measurement": "GC-GAP",
+    "gate": "G2-GC-MERGE",
+    "spec_basis": [
+      "docs/roadmap.md §2 (GC 合入 gate — this file is its executable form)",
+      "gc/tracing:docs/tracing-gc-pause-plan.md (§1.3 gates, six-benchmark account)",
+      "docs/process-model-design.md §20.2a (throughput triangle)"
+    ]
+  },
+
+  "frozen_reference_set": {
+    "note": "Binary fingerprints and suite per-case hashes live in reports/evidence/BASE-G0/manifest.json. If gc/tracing advances past the frozen candidate commit before GC-GAP runs, the reference set MUST be re-frozen (manifest version bump) before any official sample; measuring a stale candidate is not permitted.",
+    "baseline": "zjs merge-base 14b0618d, gc=rc (default)",
+    "candidate": "zjs gc/tracing 62061f94, -Dzjs_gc=trace_stw",
+    "diagnostic_arm": "zjs gc/tracing 62061f94, -Dzjs_gc=rc — separates the branch's non-collector deltas from the collector switch; diagnostic only, never a gate input"
+  },
+
+  "gap_measurement": {
+    "consumer": "GC-GAP (official RC vs tracing account; input to G1-GC)",
+    "workloads": {
+      "gc_heavy_six": ["deltablue", "regexp", "pdfjs", "raytrace", "earley-boyer", "splay"],
+      "full_suite": "bench_v8 Octane 2.0 v9, zlib skip contract per tools/perf/bench_v8/README.md",
+      "basis": "doc (pause-plan six-benchmark A/B obligation)"
+    },
+    "per_benchmark_account_rows": [
+      "fixed-work time ratio (paired, candidate/baseline)",
+      "peak RSS",
+      "quiescent committed / live bytes",
+      "pause distribution (run-level p50/p95/p99/max, cumulative STW) + collection counts (minor/major)"
+    ],
+    "memory_envelope": {
+      "cycle_peak_over_live_max": 1.8,
+      "basis": "doc (pause-plan §1.3; growth-factor A/B obligation)"
+    }
+  },
+
+  "primary_safety": {
+    "statistic": "paired log-ratio, run-level, per-benchmark and suite geomean",
+    "rule": "one-sided 95% non-inferiority lower confidence bound >= frozen margin",
+    "margin": null,
+    "margin_rule": "The margin is an owner decision taken at G1-GC (throughput triangle, process ledger §20.2a: renegotiate memory envelope / promote parallel marking / tiered criteria). It MUST be written into this file (policy_version bump) before the first n=8 look of G2-GC-MERGE; changing it after any look invalidates the sequence.",
+    "basis": "doc (roadmap §2; ledger §20.2a defers the number to post-GC-GAP owner ruling)"
+  },
+
+  "primary_benefit": {
+    "rule": "exactly one preregistered benefit metric per merge candidate, named in the candidate's evidence manifest before the first look (e.g. major pause p99, or cumulative STW p99); all other metrics are descriptive or multiplicity-corrected",
+    "basis": "doc (roadmap §2)"
+  },
+
+  "pause_statistics": {
+    "rule": "aggregate within each run first (p50/p95/p99/max/cumulative STW); compare run-level statistics only; individual GC events are never independent samples (pseudo-replication)",
+    "basis": "doc (roadmap §2)"
+  },
+
+  "looks": {
+    "sequence": [8, 16, 32],
+    "inconclusive_rule": "still crossing the margin at n=32 = INCONCLUSIVE: no merge, branch retained; reopen only after a substantive mechanism or measurement-environment change",
+    "sequential_control": {
+      "method": "pocock-approx equal spend, one-sided",
+      "alpha_total": 0.05,
+      "per_look_alpha": [0.017, 0.017, 0.016],
+      "note": "a preregistered confidence-sequence procedure may replace this if implemented and frozen before the first look",
+      "basis": "proposed (roadmap §2 requires a frozen alpha-spending/confidence-sequence scheme but does not fix one)"
+    }
+  },
+
+  "activation_canary": {
+    "rule": "Per-workload minimum mechanism coverage. Thresholds are derived, not hand-picked: for each GC-heavy workload, minimum_major_cycles_per_sample, minimum marked/allocated bytes, minimum swept bytes, and minimum gc_active_time_share are frozen at 0.5x the values recorded by the candidate arm in the GC-GAP evidence manifest, automatically, when that manifest lands. A gate sample failing any canary row is invalid (not a pass, not a fail).",
+    "categorical_requirements": [
+      "each GC-heavy workload independently triggers at least one major collection per sample",
+      "collector mode and policy digest identical across all samples",
+      "growth factor identical across measurement/test/release configurations",
+      "measurement, test, and release configurations run the same collector code (no builtin.is_test divergence)",
+      "pause timer excludes census/reporting time"
+    ],
+    "basis": "doc (roadmap §2 canary list); derivation constant 0.5x is proposed"
+  },
+
+  "correctness_gates": {
+    "required_all_green": [
+      "zig build test (rc mode)",
+      "zig build test -Dzjs_gc=trace_stw",
+      "test262 full suite, rc mode",
+      "test262 full suite, trace_stw mode"
+    ],
+    "basis": "doc (roadmap §2 四门全绿)"
+  },
+
+  "verdicts": {
+    "pass": "safety bound holds and preregistered benefit metric improves; proceeds to VM-CONTRACT-GC",
+    "fail": "safety bound violated at any look under the spending scheme",
+    "inconclusive": "n=32 exhausted while crossing the margin; no merge, branch retained"
+  },
+
+  "measurement_contract": {
+    "path": "tools/compare/measurement_policy.json",
+    "sha256": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68",
+    "additional": "docs/perf/README.md sampling discipline; official reads: orphan-process and affinity check first; pinned big-core cluster; ABBA interleaving"
+  }
+}

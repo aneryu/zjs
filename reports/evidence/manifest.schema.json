@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "zjs-evidence-manifest",
+  "title": "zjs evidence manifest (roadmap §0.2 item 6)",
+  "type": "object",
+  "required": [
+    "manifest_version", "work_item", "date", "commits", "binary_sha256",
+    "toolchain", "policy_sha256", "host", "command", "raw_artifacts",
+    "result", "verdict", "owner_decision"
+  ],
+  "properties": {
+    "manifest_version": {"type": "integer", "minimum": 1},
+    "work_item": {"type": "string", "description": "registry id, e.g. GC-GAP"},
+    "date": {"type": "string", "description": "YYYY-MM-DD"},
+    "commits": {
+      "type": "object",
+      "description": "every source tree involved: zjs merge-base/candidate, quickjs, suite vendor commit; dirty must be false",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["commit", "dirty"],
+        "properties": {
+          "commit": {"type": "string"},
+          "dirty": {"type": "boolean", "const": false},
+          "ref": {"type": "string"},
+          "note": {"type": "string"}
+        }
+      }
+    },
+    "binary_sha256": {
+      "type": "object",
+      "description": "name -> {path, sha256, recipe}",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["sha256"],
+        "properties": {
+          "path": {"type": "string"},
+          "sha256": {"type": "string"},
+          "recipe": {"type": "string"},
+          "producer": {"type": "string"}
+        }
+      }
+    },
+    "toolchain": {"type": "object"},
+    "policy_sha256": {
+      "type": "object",
+      "description": "policy file path -> sha256 at run time",
+      "additionalProperties": {"type": "string"}
+    },
+    "host": {"type": "object"},
+    "command": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "exact invocations, in order"
+    },
+    "raw_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": {"type": "string"},
+          "sha256": {"type": "string"},
+          "note": {"type": "string"}
+        }
+      }
+    },
+    "result": {"description": "structured or prose summary of the measured outcome"},
+    "verdict": {
+      "type": ["string", "null"],
+      "description": "gate verdict this evidence forced, or null if informational"
+    },
+    "owner_decision": {
+      "type": ["string", "null"],
+      "description": "owner ruling text/date, or 'delegated' with provenance"
+    }
+  }
+}

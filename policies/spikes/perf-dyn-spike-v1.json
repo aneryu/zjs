@@ -1,0 +1,72 @@
+{
+  "policy_id": "perf-dyn-spike",
+  "policy_version": 1,
+  "status": "frozen",
+  "date_frozen": "2026-08-26",
+  "work_item": "PERF-DYN-SPIKE",
+  "gate": "G1-FEEDBACK",
+  "spec_basis": [
+    "docs/roadmap.md §2 (G1-FEEDBACK outputs a mechanism profile, not PASS/FAIL)",
+    "docs/engine-evolution-plan.md §六 (Phase 0.5 feedback slots)",
+    "docs/process-model-design.md §20.2a evolution 追加 (mandatory reconciliation with the 08-17 IC refutation)",
+    "docs/type-directed-optimization-plan.md §四 (anchor set expansion to +Richards/DeltaBlue)"
+  ],
+
+  "preconditions": [
+    "WRITTEN reconciliation, before any measurement: why per-site feedback slots + sidecar do not repeat the 08-17 IC refutation (fast arm already 2-3 cyc; bolt-on cache cannot pay its miss tax) given the 08-25 attribution (op_get_field re-pays hash probing every access, 47 insn, 23% cycles bucket-load stall). If the reconciliation cannot distinguish the new mechanism from the refuted one, the spike does not start.",
+    "shape identity guard uses the PERF-SHAPE-ID dual-domain contract shape (u64 identity, per-Runtime counter) — no raw-pointer guards on mutable shapes"
+  ],
+
+  "arms": {
+    "modes": ["collect_only", "monomorphic", "pic2"],
+    "carrier": "disposable per-site side table (thrown away after the spike; NOT the production sidecar container)",
+    "poison_policy": "sliding_window (consecutive-fail thresholds never trigger on alternating bimorphic sites — ledger §20.2a)"
+  },
+
+  "target_workloads": {
+    "anchors": ["pdfjs", "typescript", "box2d", "richards", "deltablue"],
+    "controls": "remaining bench_v8 v9 suite (zlib skip contract)",
+    "basis": "doc (typed plan §四: pdfjs/typescript/box2d + Richards/DeltaBlue)"
+  },
+
+  "primary_metric": "paired per-benchmark fixed-work time ratio on the anchor set; anchor geomean as summary",
+
+  "minimum_effect": {
+    "rule": "an arm earns a non-disabled profile only if it shows >= +2% on >= 2 anchor benchmarks each with a per-benchmark confidence interval excluding 1.0, OR anchor geomean >= +1.5%",
+    "basis": "proposed (instrument resolution: suite-level ruler resolves ~0.7%; single-benchmark high-sample is the sanctioned high-resolution mode)"
+  },
+
+  "maximum_regression": {
+    "controls": "control-set geomean <= 1.005",
+    "site_metadata": "report bytes/site for every arm; side-table RSS <= 1% of workload heap peak",
+    "basis": "proposed"
+  },
+
+  "correctness_gates": [
+    "zig build test, zig build smoke",
+    "test262 subset covering property access/invalidations touched by the slots",
+    "invalidation soundness demo: mutation/relocation/ABA cases from the shape-identity contract must all invalidate"
+  ],
+
+  "size_cost_limit": {
+    "timebox_person_days": 5,
+    "basis": "proposed"
+  },
+
+  "sample_protocol": "measurement contract (sha256 020f2f18...); >=8 paired ABBA samples per benchmark, pinned big core, CV <= 5%; frequency adjudication before per-event cost claims (contract clause 9)",
+
+  "output_profile_schema": {
+    "selected_feedback_profile": {
+      "mode": "disabled | collect_only | monomorphic | pic2",
+      "poison_policy": "sliding_window",
+      "polymorphic_arms": "0 | 2",
+      "site_metadata_budget": "<bytes/site, from the winning arm's measured footprint>"
+    }
+  },
+
+  "verdicts": {
+    "pass": "monomorphic (or collect_only) clears minimum_effect within regression limits -> G1-FEEDBACK selects that profile; PERF-P05 activates",
+    "redesign": "ONLY pic2 clears minimum_effect -> per roadmap §2, evolution Phase 0.5 spec must be revised before implementation; G1-FEEDBACK waits for the revision",
+    "fail": "no arm clears minimum_effect -> profile = disabled; the 08-17 refutation stands for interpreter-level feedback; feedback remains a Phase 2 JIT-input question only"
+  }
+}
