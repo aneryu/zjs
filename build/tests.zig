@@ -53,6 +53,9 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     scoped_test_options.addOption([]const u8, "runtime_empty_plugin_fixture_path", b.getInstallPath(.lib, runtime_empty_plugin_fixture.out_filename));
     unified_tests.root_module.addImport("zjs", unified_tests.root_module);
     unified_tests.root_module.addOptions("build_options", test_options);
+    // FNABI C/Zig round-trip (src/tests/abi_layout.zig) @cImports the
+    // generated src/abi/fun_native_abi.h.
+    unified_tests.root_module.addIncludePath(b.path("src"));
     const run_unified_tests = b.addRunArtifact(unified_tests);
     run_unified_tests.step.dependOn(&install_runtime_plugin_fixture.step);
     run_unified_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
