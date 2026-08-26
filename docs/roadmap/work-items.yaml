@@ -401,7 +401,7 @@ items:
     state: done
     wip_slot: none
     estimate_class: M
-    completion_commit: pending-this-commit
+    completion_commit: c1523d2b
     evidence: "zjs 745ee8c0/ddeb04cd/dec7cf98 (src/abi + src/binding/native_call_plan.zig + golden tests, unified 2364/0) + fun 018195a8 (src/native packaging schemas)"
     hard_prerequisites: []
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M0I"}
