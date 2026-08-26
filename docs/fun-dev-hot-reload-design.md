@@ -1,13 +1,14 @@
 # fun / zjs Hot Reload 与开发时更新系统设计
 
-版本：1.4（roadmap v1.5 治理对齐:冻结项 21 修订为 SER-CORE+profile 模型）  
+版本：1.5（阶段 2 拆 P2A/P2B、阶段 1 zjs 侧工作量修正;无新设计。
+1.4:roadmap v1.5 治理对齐——冻结项 21 修订为 SER-CORE+profile 模型）  
 日期：2026-08-26  
 状态：对抗性复审修订版（实现对账 + owner 裁决 + 三路对抗评审 + 序列化
 条款同步——冻结项 21、§27.10、§37 W1 的「同一交付物」表述统一改指
-SER-ARTIFACT profile,详见冻结项 21 v1.4 注;其余 v1.4 欠账仍开放,
+SER-ARTIFACT profile,详见冻结项 21 v1.4 注;其余欠账仍开放,
 见 process-model-design.md §20.2/§20.2a:state 默认值、
 save-to-restored-state 指标、fire-and-forget 警示、A.11 接管等）  
-替代版本：1.3  
+替代版本：1.4  
 涉及组件：fun、zjs、zabel、Native Plugin、CDP Inspector  
 目标读者：fun/zjs 核心开发者、图形运行时开发者、Native Plugin 开发者
 
@@ -107,6 +108,8 @@ v1.2 将设计与 zjs `main`（`bce28d11`）的实现现状逐项对账，并由
 v1.2 的补充判断是：
 
 > **这个基础的引擎侧原语（多 Runtime、断言加固销毁、interrupt、loader 钩子）已经存在；v1 的主要工程量在 fun 侧的 HostCore 拆分与 BindingRouter，以及 zjs 侧的 module registry 多版本化。**
+>
+> （v1.5 修正：阶段 1 的 zjs 侧亦非零新增——主要新增 = Root Handle 表 API 与 epoch-safe deref/release，§27.8 明示该表现不存在。）
 
 ---
 
@@ -918,7 +921,7 @@ JS 可以彻底重建
 Window/GPU/Surface 不重建
 ```
 
-引擎侧对账：这条路径所需的全部 zjs 原语（多 Runtime、断言加固销毁、interrupt、loader 钩子、teardown finalizer 枚举）在 main 上已具备。
+引擎侧对账：这条路径所需的 zjs 原语大体已具备（多 Runtime、断言加固销毁、interrupt、loader 钩子、teardown finalizer 枚举在 main 上均存在）；zjs 侧小增量 = Root Handle 表 API 与 epoch-safe deref/release（§27.8，现不存在），不是零新增。
 
 ---
 
@@ -1073,7 +1076,7 @@ snapshot 或 restore 失败时：
 - GPUBuffer wrapper。
 - WebSocket wrapper。
 
-实现依赖：跨两个独立 Heap 传递上述类型需要 zjs 提供结构化序列化原语（§27.9）；该原语现状不存在，属于阶段 2 的引擎侧交付物。
+实现依赖：跨两个独立 Heap 传递上述类型需要 zjs 提供结构化序列化原语（§27.9 = SER-SNAPSHOT profile）；该原语现状不存在，属于阶段 2B 的引擎侧交付物（§37；前置 = 阶段 2A + SER-SNAPSHOT，阶段 2A 本身不依赖任何序列化）。
 
 ## 15.5 预算
 
@@ -1785,7 +1788,7 @@ beginDestroy()
 destroySession()
 ```
 
-现状：`createSession`/`destroySession` 即 `JSRuntime.create`/`destroy`，已具备且断言加固（销毁末尾零残留断言）；`requestInterrupt` 已具备（interrupt handler + dispatch 全 backedge/call seam 检查点，可中断纯循环与纯递归）。`pauseJobs`/`resumeJobs`/`beginDestroy` 的显式 API 形态需补齐。
+现状：`createSession`/`destroySession` 即 `JSRuntime.create`/`destroy`，已具备且断言加固（销毁末尾零残留断言）；`requestInterrupt` 已具备（interrupt handler + dispatch 全 backedge/call seam 检查点，可中断纯循环与纯递归）。`pauseJobs`/`resumeJobs`/`beginDestroy` 的显式 API 形态需补齐——这些待补项（含带 reason 的 `requestInterrupt` 与优先级仲裁、生命周期取消钩子）归入跨线共享工作项 **RT-LIFECYCLE**（roadmap v1.7；process-model-design.md v0.5 §16.3 同款，热更与 FNABI shutdown 共用），不在本文档单独交付。
 
 ## 27.2 Module API
 
@@ -1891,7 +1894,7 @@ structuredDeserialize(bytes) JSValue
 
 覆盖 §15.4 允许类型，带时间与大小预算，超预算返回错误。
 
-现状：不存在，需新建；可与未来 Worker `postMessage` 需求共用同一实现。
+现状：不存在，需新建（= SER-SNAPSHOT profile，属阶段 2B，§37）；与未来 Worker `postMessage`/进程消息需求（SER-MESSAGE）共享 SER-CORE 编码内核，profile 独立（冻结项 21）。
 
 ## 27.10 Bytecode 序列化（v1.2 新增，独立交付物 W1）
 
@@ -2323,9 +2326,11 @@ abi_change = "worker-restart"
 
 这是必须优先完成的 MVP。**不含 debugger/inspector**（依赖 W2）。
 
-现状注：Session = Runtime 的引擎侧原语（多 Runtime 共存、断言加固销毁、interrupt）已具备；本阶段主要工程量在 fun 侧 HostCore/SessionHostView 拆分与 BindingRouter，zjs 侧新增量以 Root Handle 表为主。
+现状注：Session = Runtime 的引擎侧能力大体具备（多 Runtime 共存、断言加固销毁、interrupt）；本阶段主要工程量在 fun 侧 HostCore/SessionHostView 拆分与 BindingRouter。zjs 侧不是零新增：小增量 = Root Handle 表 API 与 epoch-safe deref/release（§27.8，现不存在）。
 
-## 阶段 2：Scope 与异步安全
+## 阶段 2A：Scope 与异步安全（HR-P2A）
+
+异步安全正确性件。前置仅阶段 1（HR-P1），**不依赖任何序列化**。
 
 实现：
 
@@ -2337,9 +2342,20 @@ abi_change = "worker-restart"
 - event barrier。
 - stale callback 检测。
 - request drain。
-- 结构化状态序列化原语（§27.9，供 §15 使用）。
 
-## 阶段 3：ESM HMR
+## 阶段 2B：状态迁移（HR-P2B）
+
+snapshot/restore 状态迁移。前置 = 阶段 2A + SER-SNAPSHOT。
+
+实现：
+
+- 结构化状态序列化原语（§27.9 = SER-SNAPSHOT profile，供 §15 使用）。
+- §15 状态迁移策略（`none`/`best-effort`/`required`）与 §12.1 第
+  10/13 步的 snapshot/restore 接线。
+
+## 阶段 3：ESM HMR（HR-P3）
+
+前置 = 阶段 2A + bytecode metadata 侧车载体（PERF-SIDECAR，§27.6）。
 
 实现：
 
@@ -2606,7 +2622,7 @@ HostCore
 
 zjs Session（= JSRuntime）
     可以快速、彻底、确定性地销毁和重建
-    （引擎原语已具备）
+    （引擎原语大体具备；zjs 侧小增量 = Root Handle 表，§27.8）
 
 Framework Fast Refresh
     只保留框架能够证明兼容的状态

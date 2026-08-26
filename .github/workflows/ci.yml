@@ -13,6 +13,14 @@ permissions:
   contents: read
 
 jobs:
+  roadmap-lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: pip install pyyaml
+      - run: python3 tools/docs/roadmap_lint.py
+
   linux-arm64:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60

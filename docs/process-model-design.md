@@ -1,10 +1,11 @@
 # zjs 进程模型设计(Erlang 风格多线程)
 
-版本:0.4(roadmap v1.5 治理对齐:序列化改 SER-CORE+profile 术语,
-消除 PROC-D2 别名——同一工作项唯一 ID 为 SER-MESSAGE,本文 §13/§16.3
-的 D1/D2 引用相应映射:D1a=SER-CORE spec、D1b=SER-ARTIFACT、
+版本:0.5(正文归一化——D5 拆分+RT-LIFECYCLE 提取、旧术语清理〔两期
+交付/D1D2 别名/LIFO 残留〕;无新设计。
+0.4:roadmap v1.5 治理对齐——序列化改 SER-CORE+profile 术语,消除
+PROC-D2 别名,旧别名映射:D1a=SER-CORE spec、D1b=SER-ARTIFACT、
 D2=SER-MESSAGE;三 profile 共享 Core 编码内核,header/兼容策略/生命
-周期语义各自独立——「一次设计两期交付」升级为「一次 Core、三 profile」)  
+周期语义各自独立)  
 日期:2026-08-26  
 状态:设计探索共识稿(两轮拷问 + Erlang×JS 适配性复审 + 跨方案对账 +
 **技术合理性评审**后的决策记录;不承诺实现排期)  
@@ -160,6 +161,11 @@ TypedArray 数据段留 zero-copy view 钩子。
   Erlang。JS 生态本就把长 turn 视为反模式,文档告诫 + carrier 池冗余缓解;
   **dirty pool**(Erlang dirty scheduler 对应物,承接长计算/阻塞 native
   调用)留作演进钩子,不进 v1。
+- **交付切分(roadmap v1.7,详见 §16.3)**:per-thread Io = PROC-D5A
+  (无前置);pauseJobs/resumeJobs、带 reason 的 requestInterrupt 与
+  优先级仲裁(kill > reload drain > timeout)、生命周期取消钩子 =
+  RT-LIFECYCLE(与热更 HR-P2A、FNABI shutdown 共享,不三线各自实现);
+  调度池 + 预算 kill = PROC-D5B(前置:RT-LIFECYCLE)。
 
 ## 6. 邮箱与 receive(裁决 9、10、17)
 
@@ -177,17 +183,12 @@ const msg = await receive(m => m.type === 'job', { timeout: 5000 });
   receive)。
 - `await` 即让出 turn,与 §5 调度天然契合——阻塞式 receive 零 fiber 成本。
 
-**并发未决 receive:v1 禁止(v0.3 撤回 LIFO,技术评审 T2)**。第二个
-未决 receive 直接 throw,错误信息指向已有 receive 的注册点。receive
-注册时先扫既存邮箱。撤回理由:v0.2 的 LIFO 仲裁存在硬病理——两个消费
-循环谓词重叠时,后注册者处理完重注册永远保持「最后」位次,先注册的循环
-**永久饥饿**(FIFO 则交替);业界对并发接收者一致选 FIFO(Go channel
-sudog 队列/Kotlin fair channel);「Erlang 嵌套 receive 栈语义」类比缺
-成立前提——Erlang 的栈是 LIFO+**互斥**(内层活跃时外层不在等),去掉
-互斥的 LIFO 允许栈上永不出现的交错。LIFO 的最强动机(reply 拦截)已被
-§9 reply-出邮箱解决。禁止是可放松方向(throw→允许),仲裁顺序一旦发布
-即冻结——方向不可逆性完全偏向先禁。这也把 §10.3「一次一条消息」纪律在
-唯一要害处机制化。
+**并发未决 receive:v1 禁止(v0.3 撤回 LIFO 仲裁,技术评审 T2)**。第二个
+未决 receive 直接 throw(错误信息指向已有 receive 的注册点),receive
+注册时先扫既存邮箱;禁止是可放松方向(throw→允许),而仲裁顺序一旦发布
+即冻结,方向不可逆性完全偏向先禁,并把 §10.3「一次一条消息」纪律在唯一
+要害处机制化。撤回的病理分析(重叠谓词下 LIFO 永久饥饿、Erlang 栈类比缺
+互斥前提、reply 拦截动机已被 §9 reply-出邮箱消解)见 §20.2a 评审记录。
 
 **O(n) 扫描陷阱**:selective receive 对不匹配消息反复扫描是 Erlang 的著名
 性能坑(OTP 靠 ref 跳过缓解)。本设计中 call/reply 不过邮箱(§10),
@@ -358,14 +359,17 @@ Session 与 process 都是 Runtime 的生命周期包装(创建/预编译/销毁
   process 大量 spawn/销毁必须复用静态 class id 槽——热更 §38.1 同款约束,
   此处密度更高,压测必须覆盖。
 
-## 13. 序列化器:一次设计,两期交付(裁决 14)
+## 13. 序列化器:一次 Core,三 profile(裁决 14)
 
-设计阶段一次定死**共享框架**:类型标签空间、值遍历、循环检测、atom 重映射、
-版本化头,含 §4.2 单拷贝 wire 目标。交付分两期:
+设计阶段一次定死 **SER-CORE 编码内核**:类型标签空间、值遍历、循环检测、
+atom 重映射、版本化头,含 §4.2 单拷贝 wire 目标。三 profile 共享该内核,
+header/兼容策略/生命周期语义各自独立:
 
-- **一期(=热更 W1)**:框架 + 字节码序列化器。热更按原范围拿到东西,
-  不被多线程需求拖大。
-- **二期**:SC 值序列化器 + 三通道,挂同一框架。
+- **SER-ARTIFACT(=热更 W1)**:字节码 artifact profile。热更按原范围
+  拿到东西,不被多线程需求拖大。
+- **SER-SNAPSHOT**:热更 §27.9 结构化状态迁移 profile(允许类型集本就
+  是 SC 子集)。
+- **SER-MESSAGE**:SC 值序列化器 + 三通道零拷贝。
 
 **W1 锚定修正(对账裁决 24)**:热更与本文档 v0.1 都把联合设计对象写成
 「type-directed plan 的离线 emitter 输出」——对账证实那是 **Zig 源码→
@@ -377,13 +381,13 @@ plan **§10.5 fun 模块容器格式清单**(mmap 零拷贝对齐契约、禁编
 评估点提前到 W1 框架冻结前、站点自改写降级为运行时私有副本、identity
 统一引用表口径)见 §20 A3/A5。
 
-排期仲裁:D1 框架先行不变;热更 §27.9(结构化状态序列化,阶段 2)若先于
-D2 到期,**允许窄实现但必须挂 D1 框架**(其允许类型集本就是 SC 子集),
-后续被 D2 吸收——「禁止两种互不兼容落盘格式」保全,热更阶段 2 不被 D2
-全量阻塞。
+排期仲裁:SER-CORE 内核先行不变;热更 §27.9(SER-SNAPSHOT)若先于
+SER-MESSAGE 到期,**允许窄实现但必须挂 SER-CORE 内核**——「禁止不共享
+Core 的第二套编码体系」保全,热更侧不被 SER-MESSAGE 全量阻塞。
 
-风险控制点:**框架设计时 SC 需求必须在场**(pid 类型标签、共享段引用、
-transfer 语义、循环引用),避免一期器长成只适配字节码的形状。
+风险控制点:**内核设计时 SC 需求必须在场**(pid 类型标签、共享段引用、
+transfer 语义、循环引用),避免 artifact profile 先行使内核长成只适配
+字节码的形状。
 
 ## 14. 性能与验收(裁决 15 + 附带默认值)
 
@@ -437,7 +441,7 @@ test262 agent 测试节(Atomics/SAB waiter)迁移到新机制跑(
    无强边不变量;共享段**显式不进**保守扫描地址族(生命周期由段 rc 管,
    GC 不 retain;bloom filter 第三 population 的教训要求这是成文决定)。
    `ExternalMemoryToken` 的跨 Runtime transfer Adapter 是 §4.2 通道 1
-   的未设计前置件,列为 D2 前置。
+   的未设计前置件,列为 SER-MESSAGE 前置。
 4. 内建无字节码可共享(全是枚举分发 host function,实测 `function_bytecode
    = 0`),字节码共享只影响用户代码多进程加载,与热更 registry 多版本化
    (热更阶段 3)合流。
@@ -473,9 +477,9 @@ test262 agent 测试节(Atomics/SAB waiter)迁移到新机制跑(
 - `gc.zig:100-137` 七个进程级 stress `pub var` 在多线程 `Runtime.create`
   下是无同步并发写(值相同故行为无害,TSan 一开必报)——小修。
 - `pauseJobs`/`resumeJobs`(热更 §27.1 已列待补)正是 turn 调度器需要的
-  停/启进程 job 泵原语——并入共享生命周期基建层交付。
+  停/启进程 job 泵原语——归 **RT-LIFECYCLE**(§16.3 跨线共享工作项)交付。
 - `requestInterrupt` 无 reason 参数:多消费者仲裁(§20 B2)需要 reason
-  编码 + 优先级(kill > reload drain > timeout)。
+  编码 + 优先级(kill > reload drain > timeout)——归 **RT-LIFECYCLE** 交付。
 
 ### 16.3 交付依赖序(不承诺排期)
 
@@ -488,7 +492,12 @@ PROC-D3 跨 Runtime 投递 + 邮箱 + pid intern(依赖 SER-MESSAGE;
         多 Runtime 验收面第二批)
 PROC-D4 spawn/exit/link/monitor/call(依赖 D3;闭包 spawn 依赖
         SER-ARTIFACT + atom 重映射)
-PROC-D5 N:M 调度池 + 预算 kill + per-thread Io(无硬前置)
+PROC-D5A per-thread Io(无前置)
+RT-LIFECYCLE Runtime 生命周期共享件:pauseJobs/resumeJobs、带 reason 的
+        requestInterrupt(优先级仲裁 kill > reload drain > timeout)、
+        生命周期取消钩子——热更 HR-P2A 与 FNABI shutdown 共用,
+        避免三线各自实现(§16.2)
+PROC-D5B N:M 调度池 + 预算 kill(前置:RT-LIFECYCLE)
 PROC-D6 supervisor 库 + register/whereis(依赖 D4)
 PROC-D7 轻进程(依赖 gc/tracing 合入 + §15;含 checkpoint + 负载表)
 ```
@@ -510,10 +519,10 @@ PROC-D7 轻进程(依赖 gc/tracing 合入 + §15;含 checkpoint + 负载表)
 | 11 | 死 pid | send 静默丢+观测;call reject |
 | 12 | 容错分层 | link/monitor/exit+trap 进引擎;supervisor 进库 |
 | 13 | 热更关系 | 共享 Runtime 生命周期基建;Session=未来受监督具名 process 特例 |
-| 14 | 序列化切期 | 一次设计两期交付;框架设计时 SC 需求在场 |
+| 14 | 序列化切分 | 一次 Core、三 profile(SER-CORE 内核共享,profile 独立);内核设计时 SC 需求在场 |
 | 15 | 零税与验收 | **无条件编入+A/B 软门(偏离推荐)**+轻进程 checkpoint;双尺验收 |
 | 16 | rejection | unhandled rejection = 进程 crash(默认) |
-| 17 | reply 通道 | reply 直达 Promise 不进邮箱;~~并发 receive LIFO~~ **v0.3 修订:v1 禁止并发 receive**(§6.1) |
+| 17 | reply 通道 | reply 直达 Promise 不进邮箱;v1 禁止并发 receive(v0.3 修订,§6.1) |
 | 18 | pid | Symbol + per-Runtime intern;API 模块函数式;generation 防 ABA |
 | 19 | 值域细则 | 类实例降级/Symbol 不可克隆(pid 例外)/跨消息 identity 断裂=「消息=数据」纪律 |
 | 20 | 死亡清理 | in-flight IO/timer 取消语义:解耦原则已定(§10.2),逐类别清单仍欠 |
@@ -529,10 +538,8 @@ PROC-D7 轻进程(依赖 gc/tracing 合入 + §15;含 checkpoint + 负载表)
 - **深冻结对象图零拷贝共享**:硬点是 shape/hidden class 为 per-Runtime,
   共享对象的 shape 指针无处可指。需先出可行性 spike 再谈进主设计。
 - **可移植 class 定义**(class 随字节码跨进程,消息侧对象不再降级):
-  依赖 D1/D2 成熟后评估。
+  依赖 SER-ARTIFACT/SER-MESSAGE 成熟后评估。
 - **dirty pool**(长计算/阻塞 native 承接):见 §5。
-- **并发 receive LIFO 的边角**:同优先级同时注册(同一 turn 内两次
-  receive)的次序定义;实现期定案。
 - **共享段回收**:大不可变共享段的 atomic rc 与各进程 tracing GC 的
   协作(进程堆内 handle 死亡 → 段 rc 递减)细化;实现期定案。
 
@@ -541,8 +548,8 @@ PROC-D7 轻进程(依赖 gc/tracing 合入 + §15;含 checkpoint + 负载表)
 总判定:**结构级契合,非勉强移植**。receive↔`await`、turn 调度↔JS 反长
 任务文化、per-process 堆↔tracing GC 三处是同构。真正的风险不在机制,在
 两处:JS 错误文化对 let-it-crash 的侵蚀(§10.2 条款 16 + §10.3 纪律对冲),
-和邮箱与 Promise 双通道的交互语义(Erlang 无先例可抄,§6.1 LIFO + §9
-reply 出邮箱已定对)。
+和邮箱与 Promise 双通道的交互语义(Erlang 无先例可抄,§6.1 禁并发
+receive + §9 reply 出邮箱已定对)。
 
 | Erlang 机制 | 隐含前提 | JS 现实 | 判定 |
 |---|---|---|---|
@@ -554,7 +561,7 @@ reply 出邮箱已定对)。
 | 不可变 term | 无 identity 语义 | JS 对象有 `===`/Map-by-ref | 摩擦→「消息=数据」纪律 |
 | 哑数据 record | 无原型 | class 实例 SC 降级 | 摩擦→纪律+研究附录 |
 | let-it-crash | 语言推动 happy path | JS 全 catch 文化 | 文化风险→条款 16+库纪律 |
-| 单执行流 | 唯一未决 receive | JS 双执行源、并发 receive | 新问题→LIFO+reply 出邮箱 |
+| 单执行流 | 唯一未决 receive | JS 双执行源、并发 receive | 新问题→v1 禁并发 receive+reply 出邮箱 |
 
 ## 20. 跨方案对账与裁决(2026-08-26,v0.2)
 

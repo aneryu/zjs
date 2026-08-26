@@ -1,21 +1,24 @@
 # zjs 高性能执行引擎演进方案
 
-Version: 0.5(roadmap v1.5 治理对齐)
+Version: 0.6(正文归一化,roadmap v1.7 对齐)
 Date: 2026-08-26
 Status: approved-with-conditions — **Phase 0 批准立即执行**;
-**Phase 0.5 的批准状态修订(0.5)**:不再「立即执行」——动态反馈的
-立项证据由 roadmap 的 **PERF-DYN-SPIKE** 购买(最小 per-site
-feedback/单态臂/二态 PIC 臂,disposable 侧表),经 **G1-JIT** 裁决后
-方开工,且前置两项:SidecarCore 容器协议 spec(四方评审)与
-**08-17 IC 否证对账**(「快臂已 2-3 cyc、旁挂缓存付不起 miss 税」与
-08-25 op_get_field 哈希探测归因两轮证据的显式和解——回答反馈槽+侧车
-形态为何不重蹈否证);Phase 1-Z 附预门槛条件批准(已搁置直通
-Phase 2);Phase 1A 维持规划项;Phase 2+(baseline JIT)与原生 AOT
-为**两个 backend 的分叉**(共享上游 IR/lowering/helper ABI/GC slot
-抽象,不共享 emitter),先后由 roadmap Gate 1(G1-JIT/G1-AOT)裁决;
-baseline JIT 的硬输入是 canonical bytecode+动态反馈+VM 执行 ABI
-(PERF-VMABI),typed metadata 仅为可选增强。批准条件见 §5.6 与 §14。
-前版:0.1-0.3;0.4(评审定稿,2026-08-24)
+Phase 0.5 不再「立即执行」,经 **PERF-DYN-SPIKE→G1-FEEDBACK** 裁决
+通过后方立项 PERF-P05(立项方式/四态输出/全部前置见 §六 状态框);
+Phase 1-Z 已搁置归档(§7.0);Phase 1A/1B 为 incubator 项(§7.1);
+Phase 2(baseline JIT)由独立 **PERF-JIT-SPIKE→G1-JIT** 裁决,硬
+输入 = canonical bytecode + PERF-VMABI,动态反馈与 typed metadata 均
+仅为可选增强,与原生 AOT 为两个 backend 的分叉、不共享 emitter
+(§8.1)。批准条件见 §5.6 与 §14。
+前版:0.1-0.3;0.4(评审定稿,2026-08-24);0.5(roadmap v1.5 治理
+对齐,2026-08-26)
+
+Review note(0.5 → 0.6):正文归一化——页首裁决吸收进正文,删除被
+覆盖的旧结论;无新设计。gate/里程碑表述对齐 roadmap v1.7:动态反馈
+gate 定名 **G1-FEEDBACK**(0.5 沿用旧名 G1-JIT),输出四态
+disabled/collect-only/monomorphic/PIC2;JIT 硬输入收窄为 canonical
+bytecode+PERF-VMABI(动态反馈降为可选增强);FNABI M1 拆分
+M1A/M1B/M1C(§9.1)。落点:§六 状态框、§8.1、§3.4、§9.1、§7.1。
 
 Review note(0.3 → 0.4):吸收 2026-08-24 dispatch 重验战役的四组实测
 证据与源码核查,三项实质修正。其一,**§2.1 立项事实勘误**:热 JS→JS
@@ -41,8 +44,8 @@ baseline JIT 与 optimizing JIT 建立统一底座;同时不与进行中的 trac
 - **静态轴姊妹方案**:
   [type-directed-optimization-plan.md](type-directed-optimization-plan.md)
   (v0.8,DRAFT)——TS 类型驱动的 typed bytecode 与 AOT 路线,与本
-  方案的动态轴(反馈槽→JIT)互补;其 S1(F1/F2/F4)是 FNABI M1 的
-  硬前置。
+  方案的动态轴互补;FNABI 里程碑已拆分(roadmap v1.7):M1A 不依赖
+  本计划,M1B←F1,M1C←F2(不再整体挂 S1 全就绪)。
 - **原生插件 ABI**:
   [fun-native-plugin-design.md](fun-native-plugin-design.md)
   (FNABI v0.3,2026-08-25 采纳)——§9.1 的 NativeCallDescriptor 与
@@ -53,12 +56,14 @@ baseline JIT 与 optimizing JIT 建立统一底座;同时不与进行中的 trac
 
 ## 一、结论
 
-总路线保留(0.1→0.3 谱系):
+总路线(0.1→0.3 谱系,0.6 按 roadmap v1.7 治理归一):
 
-> 先把执行状态协议正式化为统一 VM ABI;在其上以最高 ROI 顺序建设
-> 反馈槽 → baseline JIT → IC/native direct call → optimizing tier;
-> 解释器骨架重造(labeled switch / asm)降级为条件项与平台保险单,
-> 由算术预门槛与 iOS 排期驱动,不再是主线前置。
+> 先把执行状态协议正式化为统一 VM ABI;其上的动态反馈与 baseline
+> JIT 各由独立 spike/gate 裁决(PERF-DYN-SPIKE→G1-FEEDBACK、
+> PERF-JIT-SPIKE→G1-JIT),不链式绑定;IC/native direct call →
+> optimizing tier 按层递进;解释器骨架重造(labeled switch / asm)
+> 降级为条件项与平台保险单,由算术预门槛与 iOS 排期驱动,不再是
+> 主线前置。
 
 0.4 相对 0.3 的三项核心修正(依据见 §2.4、§7.0):
 
@@ -77,12 +82,14 @@ baseline JIT 与 optimizing JIT 建立统一底座;同时不与进行中的 trac
    (双向,见 §7.0 风险)。
 3. **1-Z 增设算术预门槛。** Phase 0 的 helper 频率报告出来后先做投影:
    call-heavy 切片上 (warm-path bl/iter × 0.7c + Vm 载荷提升项) 的
-   上界 < 2% → 1-Z 搁置,ABI 按 tail-call 骨架定稿,直接进 Phase 2;
+   上界 < 2% → 1-Z 搁置,ABI 按 tail-call 骨架定稿(Phase 2 由其
+   独立 gate 裁决,§8.1);
    ≥ 2% → 1-Z 以 time-box 形式执行。1-Z 是保险单,不是主菜,不得
    挤占 Phase 2 窗口。
 
 保留自 0.3 的核心修正(第 1–7 项,依据见 §2、§3):RC 语义补全、
-tracing GC 排序前置、IC/反馈前置、call/return 入域(范围要求保留,
+tracing GC 排序前置、IC/反馈线(0.6 修订:立项经 PERF-DYN-SPIKE→
+G1-FEEDBACK 裁决,不再默认前置,§六)、call/return 入域(范围要求保留,
 理由按上文修正)、收益叙事对齐现状、labeled switch 先行于 asm、iOS
 确认为未来目标(asm AArch64-only)。
 
@@ -91,15 +98,17 @@ tracing GC 排序前置、IC/反馈前置、call/return 入域(范围要求保�
 ```text
 Phase 0    测量补全 + 执行状态 ABI 冻结(立即,治理门要求的证据)
   ├─ 前置裁决:asm 路线 vs tracing GC 迁移排序(已裁决:A,§3.1)
-  ├─ 前置裁决:qjs-faithful 宪章退役记录(Phase 0.5 落地前,§3.4)
-Phase 0.5  解释器级 property/call 反馈槽(纯 Zig,与 Phase 0 并行)
+  ├─ 前置裁决:qjs-faithful 宪章退役记录(Phase 0.5 前置之一,§3.4)
+Phase 0.5  解释器级 property/call 反馈槽(纯 Zig;经 PERF-DYN-SPIKE
+           →G1-FEEDBACK 裁决后启动,全部前置见 §六 状态框)
   ├─ 并行轨:NativeCallDescriptor 正式化(扩展 src/binding/ffi.zig)
 Phase 1-Z  labeled switch 解释器原型(条件项:预门槛 ≥2% 才启动;
            time-box;含 call/return 入域)
 Phase 1A   asm microkernel 原型(AArch64-only;启动 = 1-Z 未达标且
            iOS 排期进入执行窗口;门槛见 §14)
 Phase 1B   完整汇编解释器(1A 过门后;x86-64 asm port 已撤销)
-Phase 2    低延迟 baseline JIT(消费 0.5 的反馈槽)
+Phase 2    低延迟 baseline JIT(独立 PERF-JIT-SPIKE→G1-JIT 裁决;
+           硬输入=canonical bytecode+PERF-VMABI;反馈为可选增强)
 Phase 3    OSR + 完整 IC 状态机 + native direct call 融合
 Phase 4    Guard + Snapshot + Deoptimization
 Phase 5    Trace 或 Region Optimizing JIT(profile 后决定)
@@ -108,8 +117,9 @@ Phase 5    Trace 或 Region Optimizing JIT(profile 后决定)
 解释器轨道的决策规则(0.4)——**已走完(2026-08-24)**:
 
 - 预门槛 < 2% → 1-Z 搁置归档 ✅ **此分支成立**(owner 决议 D5-A,
-  依据 §2.4(g)):tail-call 为常青生产解释器,ABI 按其定稿,
-  Phase 2 在 Phase 0/0.5 后立即立项;
+  依据 §2.4(g)):tail-call 为常青生产解释器,ABI 按其定稿;
+  Phase 2(baseline JIT)由独立 PERF-JIT-SPIKE→G1-JIT 裁决,
+  不与 0.5 链式绑定(0.6 修订,§8.1);
 - ~~预门槛 ≥ 2% 且 1-Z 达标 → lswitch 转生产~~(未触发);
 - 1A 仅当 iOS 窗口开启时按 §7.1 评估重启,否则同搁置;
 - 最终退路即现实:现役 tail-call 解释器 + baseline JIT 原型路线。
@@ -169,8 +179,9 @@ Phase 5    Trace 或 Region Optimizing JIT(profile 后决定)
 1. microkernel/1-Z 不含 call/return 则测不出 ① 的真实权重(bl 密集
    点在 warm 构造器),call 必须入域(§7.6)——范围要求保留,理由按
    0.4 修正;
-2. 落后项与 GUI runtime 目标都指向 property/call 语义成本 → IC/反馈
-   前置(§6),NativeCallDescriptor 并行(§9.1);
+2. 落后项与 GUI runtime 目标都指向 property/call 语义成本 → 动态
+   反馈立项证据由 PERF-DYN-SPIKE 购买、经 G1-FEEDBACK 裁决(§6),
+   NativeCallDescriptor 轨见 §9.1;
 3. "打败 QuickJS"已完成;本方案按"逼近 JIT 级引擎"目标立项,Phase 1+
    批准以 Phase 0 PMU 证据为条件,满足治理门。
 
@@ -258,8 +269,9 @@ barrier。
 - iOS 禁 JIT → 该平台解释器即产品上限(**限定注 2026-08-25**:此
   上限仅指动态轴;静态轴的 typed AOT 路线见
   [type-directed-optimization-plan.md](type-directed-optimization-plan.md)
-  §5.1,该计划仍 DRAFT);第一性能杠杆是 Phase 0.5 的
-  解释器级 IC,其次是增量①;asm-vs-lswitch 差额在 Apple 大核
+  §5.1,该计划仍 DRAFT);该平台候选性能杠杆为解释器级动态反馈
+  (Phase 0.5,价值待 PERF-DYN-SPIKE 实证,§六)与增量①;
+  asm-vs-lswitch 差额在 Apple 大核
   (超宽乱序、大 L1I/BTB)上取区间下沿——§2.4(b) 在 X925 上已为
   零,Apple 大核只会更低;
 - 手写 `.S` 须满足 arm64e:PAC 与 BTI(§7.2);解释器无运行时代码
@@ -284,7 +296,10 @@ Phase 0.5 的反馈槽与三条现役裁决正面冲突:"qjs 没有的 fast path
 体例出具显式退役/接替记录**。**已完成并批准**:
 [qjs_alignment_charter_transition.md](qjs_alignment_charter_transition.md)
 (退役 R1-R3 / 保留 K1-K5 / 接替对标制度 / 历史地位声明),状态
-RATIFIED(owner,2026-08-24),Phase 0.5 已解锁。
+RATIFIED(owner,2026-08-24)。注(0.6):本记录仍是 Phase 0.5 前置
+之一,但不再是唯一前置——另有 PERF-DYN-SPIKE→G1-FEEDBACK 裁决、
+SidecarCore 容器协议 spec、08-17 IC 否证对账(全清单见 §六 状态框);
+「已解锁」仅指本条前置。
 
 ---
 
@@ -436,8 +451,21 @@ harness 就绪。
 
 ## 六、Phase 0.5:解释器级反馈槽
 
-不依赖任何解释器骨架工作,纯 Zig,在现役解释器落地;本方案 ROI 最高
-单项。**前置:§3.4 宪章退役记录。**
+**现行状态(0.6,roadmap v1.7)**:本章是**若 G1-FEEDBACK 裁决实施
+时的规范**,不是已批准执行项。动态反馈的立项证据由
+**PERF-DYN-SPIKE** 购买(最小 per-site feedback/单态臂/二态 PIC 臂,
+disposable 侧表),经 **G1-FEEDBACK** gate 裁决——输出四态:
+disabled / collect-only / monomorphic / PIC2——裁决通过后才建
+PERF-P05。开工前置(全部):①§3.4 宪章退役记录(已完成);
+②SidecarCore 容器协议 spec(四方评审);③**08-17 IC 否证对账**
+(「快臂已 2-3 cyc、旁挂缓存付不起 miss 税」与 08-25 op_get_field
+哈希探测归因两轮证据的显式和解——回答反馈槽+侧车形态为何不重蹈
+否证),对账未完成前不得开工。本章的反馈形态
+(monomorphic→溢出→megamorphic,不做链式 PIC)可能被 G1-FEEDBACK
+的输出 profile 修正:若 spike 证明只有 PIC2 赢,本章须先修订再实施。
+
+不依赖任何解释器骨架工作,纯 Zig,在现役解释器落地;价值待
+PERF-DYN-SPIKE 实证,预期主值 = Phase 2 的可选反馈输入(§6.2)。
 
 ### 6.1 形态
 
@@ -455,8 +483,10 @@ harness 就绪。
    级的真赢面在**原型链命中缓存**(直通路径每次重走链)与多态站点。
    验收锚定 pdfjs/typescript/box2d,不得用单态微基准立收益;
 2. Phase 2 baseline JIT:编译时读取反馈直接发射 monomorphic 快路
-   (Sparkplug 之所以薄,因 feedback vector 已存在)——**这是 0.5 的
-   主要价值**,解释器级收益是顺带;
+   (Sparkplug 之所以薄,因 feedback vector 已存在)——这是 0.5 的
+   主要预期价值,解释器级收益是顺带;注(0.6):对 baseline JIT
+   反馈只是**可选增强**而非硬输入(硬输入=canonical bytecode+
+   PERF-VMABI,§8.1),Phase 2 立项不以 0.5 为前提;
 3. Phase 5 optimizing tier:类型反馈采集起点。
 
 ### 6.3 失效纪律
@@ -475,7 +505,8 @@ shape transition / prototype mutation / builtin 替换必须失效;first 版
 **预门槛——已判定(owner 决议 D5-A,2026-08-24)**:依据 §2.4(g)
 侦察数据(投影 ≈ 0.0% « 2%,低估一个数量级仍不过线),owner 接受
 侦察为终判:**Phase 1-Z 正式搁置归档**。ABI 按 tail-call 骨架定稿;
-Phase 0 的 bl 频率仪器降级为可选项;Phase 0/0.5 之后直接 Phase 2。
+Phase 0 的 bl 频率仪器降级为可选项;Phase 2(baseline JIT)由独立
+PERF-JIT-SPIKE→G1-JIT 裁决,不与 0.5 链式绑定(0.6 修订,§8.1)。
 本节其余内容(范围/风险/验收)保留为档案——若未来前提翻转
 (如 iOS 窗口开启触发 1A 评估)按此重启。
 
@@ -536,6 +567,10 @@ asm 相对成功态 lswitch 的净余量 = ③ + `.text` 下界 + 免疫编译�
 
 ### 7.1 范围(1A 原型)
 
+**状态注(0.6,roadmap v1.7)**:1A/1B 为 incubator 项,不在现行
+active DAG;启动前置 = PERF-ASM-1A 通过 + GC 表示定型 + iOS 执行
+窗口打开。
+
 **AArch64-only**(§3.2);启动条件 = 1-Z 未达标 **且** iOS 排期进入
 执行窗口(0.4 收紧:两条件同时满足;iOS 窗口未开时 1-Z 失败仅归档)。
 
@@ -545,8 +580,8 @@ asm 相对成功态 lswitch 的净余量 = ③ + `.text` 下界 + 免疫编译�
   切换**;
 - 其余 opcode 统一走 Zig slow handler;checked 构建(§7.9)。
 
-只有 1A 过门(§14)才扩大覆盖(1B)。失败退路:保留现解释器,直接进
-baseline 原型。
+只有 1A 过门(§14)才扩大覆盖(1B)。失败退路:保留现解释器;
+baseline JIT 按其独立 gate(§8.1)推进。
 
 ### 7.2 固定寄存器约定
 
@@ -677,9 +712,17 @@ bailout fallback。
 
 ### 8.1 定位
 
+**立项方式(0.6,roadmap v1.7)**:Phase 2 由独立 **PERF-JIT-SPIKE→
+G1-JIT** 裁决,不与 Phase 0.5 链式绑定。硬输入 = canonical bytecode
++ **PERF-VMABI**(Phase 0 执行状态 ABI);动态反馈(§六)与 typed
+metadata(type-directed 计划)均为**可选增强**。baseline JIT 与原生
+AOT 为**两个 backend 的分叉**:共享上游 IR/lowering/helper ABI/GC
+slot 抽象,不共享 emitter,先后由 roadmap Gate(G1-JIT/G1-AOT)
+裁决。
+
 只解决确定成本:dispatch、decode、stack traffic、重复 tag check、通用
 call glue、native wrapper glue、monomorphic property access(消费
-Phase 0.5 反馈)、循环回边。不做:SSA、全局寄存器分配、LICM、GVN、
+动态反馈槽——可选增强,若 G1-FEEDBACK 裁决建设)、循环回边。不做:SSA、全局寄存器分配、LICM、GVN、
 aggressive inlining、投机循环变换、通用 deoptimization。准确称谓
 **linear baseline compiler**。
 
@@ -751,8 +794,9 @@ unwind。
 (2026-08-25),改对齐
 [fun-native-plugin-design.md](fun-native-plugin-design.md) §15.2;
 FNABI 裁决(2026-08-25)要求 `NativeCallPlan` 与本描述符统一为
-**单一 schema**,且 FNABI M1 硬依赖 type-directed S1(F1/F2/F4),
-本轨不再是自由并行轨:
+**单一 schema**;FNABI 里程碑已拆分(roadmap v1.7):M1A 不依赖
+本计划,M1B←F1,M1C←F2,本轨与 M1B/M1C 按该拆分关系耦合,不再是
+自由并行轨:
 
 ```zig
 pub const NativeCallDescriptor = struct {
@@ -915,7 +959,9 @@ dispatch/operand traffic 占比与热路径 bl/iter;**1-Z 预门槛算术与
 
 ### Phase 0.5
 
-前置:§3.4 宪章退役记录已入库。
+前置:PERF-DYN-SPIKE→G1-FEEDBACK 裁决通过并立项 PERF-P05(全部
+前置含 SidecarCore spec 与 08-17 IC 否证对账,见 §六 状态框);
+§3.4 宪章退役记录已入库(前置之一)。
 交付:反馈槽 side table、解释器命中路径、失效版本号、A/B 数据。
 验收:test262 无回归;zoo property/call 密集项(pdfjs/typescript/
 box2d)有可归因提升(单态微基准不作为收益证据);审计条款(§6.3)
@@ -940,10 +986,14 @@ box2d)有可归因提升(单态微基准不作为收益证据);审计条款(§6.
 - 满足证据门(冻结二进制 + 反汇编 + 多构建 PMU;沿用 pad 谱系协议)。
 
 决策:达标 → `-Dvm=lswitch` 转生产默认,1A 转 iOS 排期项;未达标 →
-证据归档,回 tail-call,Phase 2 立即接续。
+证据归档,回 tail-call;Phase 2 按其独立 gate(§8.1)推进,不受此
+绑定。
 
 ### Phase 1A(条件项)
 
+状态注(0.6):1A/1B 为 incubator 项,不在现行 active DAG;启动
+前置 = PERF-ASM-1A 通过 + GC 表示定型 + iOS 执行窗口打开
+(roadmap v1.7)。
 启动条件:1-Z 未达标 **且** iOS 排期进入执行窗口(两条件同时满足);
 AArch64-only。
 交付:§7.1 范围(**含 call/return**)、三 dispatch 版本、checked
@@ -966,9 +1016,13 @@ bench-v8 geomean ≥ 1.05 × 当时生产解释器
 
 - 维护成本评审:asm 行数、生成器占比、双人可读性(bus factor)。
 
-未过门:归档数据,保留当时生产解释器,直接进 Phase 2 原型。
+未过门:归档数据,保留当时生产解释器;Phase 2 按其独立 gate
+(§8.1)推进。
 
 ### Phase 1B
+
+状态注(0.6):incubator 项,不在现行 active DAG(前置同 Phase 1A,
+roadmap v1.7)。
 
 全 opcode 覆盖(复杂域保持 helper 出域)、hot/cold 布局、arm64e 合规
 (BTI/PAC)、profiler/disassembler 支持。前置:§3.1 裁决 A 的值表示
@@ -977,8 +1031,11 @@ bench-v8 geomean ≥ 1.05 × 当时生产解释器
 
 ### Phase 2
 
-MacroAssembler、code cache、function-entry 编译、v0 栈映射、PC map、
-safepoint、helper continuation、反馈槽消费。
+前置:独立 PERF-JIT-SPIKE→G1-JIT 裁决通过(§8.1,不与 0.5 链式
+绑定)。
+交付:MacroAssembler、code cache、function-entry 编译、v0 栈映射、
+PC map、safepoint、helper continuation、反馈槽消费(可选项,视
+G1-FEEDBACK 裁决)。
 验收:JIT on/off 语义一致;编译失败可安全永久回退;异常栈可映射回
 bytecode;warmed workload 明显优于当时生产解释器;compile latency /
 code bytes / bailout 可观测。
@@ -1038,7 +1095,7 @@ bytes、bailout/deopt counts、IC 状态分布。公开口径以
 | replicated dispatch 恶化 I-cache | 三版本 A/B;基线已是 replicated,central 是回归风险项 |
 | 多架构维护成本 | asm 收缩 AArch64-only;共享 ABI/metadata/测试;生成优先于手写 |
 | 单维护者 bus factor | 1A 验收含可读性评审;生成器占比指标;文档义务(§13) |
-| baseline 实际覆盖率低 | helper continuation;反馈槽保证 property 快路存在 |
+| baseline 实际覆盖率低 | helper continuation;反馈槽(若 G1-FEEDBACK 裁决建设)保证 property 快路存在 |
 | native direct call 绕过 JS 语义 | callee/realm/descriptor/argument guards;effects 显式 |
 | IC 失效不完整 | 版本号(0.5)→ dependency registry(P3)分级 |
 | JIT 过早复杂化 | baseline 禁 SSA/全局 RA/通用投机 deopt |
@@ -1051,14 +1108,14 @@ bytes、bailout/deopt counts、IC 状态分布。公开口径以
 | 优先级 | 工作项 | 结论 |
 | --- | --- | --- |
 | P0 | Phase 0 测量增量(helper 频率首位)+ VmExecState ABI | 立即;治理门证据;ABI 对骨架中立 |
-| P0 | 宪章退役记录(§3.4) | Phase 0.5 落地前 |
+| P0 | 宪章退役记录(§3.4) | 已完成(RATIFIED 2026-08-24);Phase 0.5 前置之一(非唯一,§六) |
 | P0 | GC 排序(已裁决 A)/ 平台矩阵 / Zig 例外 | 已裁决项记录入库 |
-| P0.5 | 解释器级 property/call 反馈槽 | 立即,与 P0 并行;最高 ROI(主要价值=Phase 2 输入) |
-| P1 | NativeCallDescriptor(扩展 ffi.zig) | 并行轨,不依赖解释器骨架;**注(2026-08-25)**:FNABI 裁决后与 `NativeCallPlan` 统一为单一 schema,FNABI M1 挂 type-directed S1 之后(§9.1) |
+| P0.5 | 解释器级 property/call 反馈槽 | 经 PERF-DYN-SPIKE→G1-FEEDBACK 裁决后立项 PERF-P05(§六 状态框);价值待 spike 实证,对 Phase 2 为可选增强 |
+| P1 | NativeCallDescriptor(扩展 ffi.zig) | 并行轨,不依赖解释器骨架;**注(2026-08-25)**:FNABI 裁决后与 `NativeCallPlan` 统一为单一 schema;里程碑拆分:M1A 不依赖本计划/M1B←F1/M1C←F2(§9.1) |
 | P1 | GC/exception/helper contract | 不可后补 |
 | P1(条件) | labeled switch 原型 1-Z | 预门槛 ≥2% 才启动;time-box;保险单非主菜 |
-| P1(条件) | asm microkernel 1A(AArch64-only) | 启动 = 1-Z 未达标 且 iOS 窗口;摸禁 JIT 平台上限 |
-| P2 | Zig MacroAssembler + linear baseline compiler | Phase 0/0.5 后主阶段,不等 1-Z |
+| P1(条件) | asm microkernel 1A(AArch64-only) | incubator 项;启动前置 = PERF-ASM-1A 通过+GC 表示定型+iOS 窗口打开(§7.1 状态注);摸禁 JIT 平台上限 |
+| P2 | Zig MacroAssembler + linear baseline compiler | 独立 PERF-JIT-SPIKE→G1-JIT 裁决(§8.1);硬输入=canonical bytecode+PERF-VMABI;不等 1-Z,不与 0.5 链式绑定 |
 | P2 | hot counter + JitMeta | baseline tiering |
 | P2 | 完整 Call/Property IC 状态机 + dependency registry | baseline specialization |
 | P3 | OSR | baseline 稳定后 |

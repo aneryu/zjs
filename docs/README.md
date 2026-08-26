@@ -30,14 +30,14 @@ when needed.
   appendix A).
 - [Process Model design](process-model-design.md): Erlang-style multithreading
   — Runtime-per-process → lightweight processes, turn-boundary scheduling,
-  selective receive, link/monitor/supervision (v0.4 design exploration,
+  selective receive, link/monitor/supervision (v0.5 design exploration,
   2026-08-26; §20 records the six-plan reconciliation verdicts and the
   per-document debt ledger).
-- [Roadmap](roadmap.md): the unified execution-baseline candidate (v1.5) —
-  authority hierarchy, global work-item IDs, canonical hard-dependency DAG
-  separated from the measurement queue, four independent gates, and WIP
-  limits; roadmap verdicts must be synchronized to domain docs in the same
-  commit.
+- [Roadmap](roadmap.md): the unified execution-baseline candidate (v1.7) —
+  authority matrix, canonical hard-dependency DAG, gates, WIP limits; the
+  machine-readable registry is [roadmap/work-items.yaml](roadmap/work-items.yaml),
+  validated on CI by `tools/docs/roadmap_lint.py`. Roadmap verdicts must be
+  synchronized to domain-doc bodies in the same commit.
 - [Limitations — Security Boundary](../LIMITATIONS.md): trusted-code
   assumptions; zjs is not a sandbox for hostile JavaScript.
 

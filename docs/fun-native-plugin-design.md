@@ -1,16 +1,17 @@
 # Fun Native Plugin 技术设计
 
-版本：0.4（第一批：M1 里程碑纵向拆分,与 roadmap v1.5 对齐）  
+版本：0.5（治理归一化,与 roadmap v1.7 对齐）  
 日期：2026-08-26  
-状态：评审修订版；完成 M0 后冻结 FNABI v1。**v0.4 第一批修订**:§33 的
-M1 拆为 M1A/M1B/M1C(见该节),消除「M1 整体硬依赖 F1/F2/F4」——M1A
-静态直调不需要 per-site 侧表,更早取得 plugin/builtin 同 NativeEntry 的
-端到端证明。全局工作项 ID:FN-M0/FN-M1A/FN-M1B/FN-M1C/FN-M2..M6
-(FN-M2 起对应本文 M2-M6 原编号)。**v0.4 剩余批次(开放欠账,见
-process-model-design.md §20.2/§20.2a)**:class id 分配规则新章、无在飞
-资源快速销毁路径与 finalizer 三态、循环事件通道原语(tsfn 对应物)、
-外部内存计价必填、§18.1 handle-scope 留门措辞、§22.7 side-by-side
-启用前提清单、epoch 作用域条款。  
+状态：评审修订版；**FN-M0F 冻结 FNABI v1,前置=FN-M0D 关闭全部
+freeze_blocker**(见 §33)。**0.5:治理归一化**——M0 拆
+FN-M0D/FN-M0I/FN-M0F、开放欠账分类表(§0.1)、FN-M1B/FN-M1C 并行化、
+删除正文残留的整体 M1 依赖表述;**无新设计内容**。全局工作项 ID:
+FN-M0D/FN-M0I/FN-M0F/FN-M1A/FN-M1B/FN-M1C/FN-M2..M6
+(FN-M2 起对应本文 M2-M6 原编号)。开放欠账(见
+process-model-design.md §20.2/§20.2a,本文 §0.1 逐条分类):class id
+分配规则新章、无在飞资源快速销毁路径与 finalizer 三态、循环事件通道
+原语(tsfn 对应物)、外部内存计价必填、§18.1 handle-scope 留门措辞、
+§22.7 side-by-side 启用前提清单、epoch 作用域条款。  
 适用范围：fun runtime、zjs VM、Fun Native ABI、Zig Native SDK、native package 构建与分发体系  
 规范性引用：[vm-value-representation-contract.md](vm-value-representation-contract.md)（v1，normative）、[type-directed-optimization-plan.md](type-directed-optimization-plan.md)（v0.8）、[engine-evolution-plan.md](engine-evolution-plan.md)、[runtime-plugin-abi.md](runtime-plugin-abi.md)（deprecated，见 §28.1）
 
@@ -18,11 +19,20 @@ process-model-design.md §20.2/§20.2a)**:class id 分配规则新章、无在�
 
 ## 0. 版本变更
 
-相对 0.2，本版按 2026-08-25 评审与 owner 四项裁决完成以下修订：
+**0.5（2026-08-26，治理归一化；无新设计内容）**，按 roadmap v1.7 裁决：
+
+- M0 拆为三段工作项：**FN-M0D**（ABI 决策闭合——开放欠账分类 + 六项裁决）、**FN-M0I**（schema/generator/golden layout tests 骨架，非争议部分先行）、**FN-M0F**（v1 freeze，仅在 M0D 全部 freeze_blocker 关闭后）。原「完成 M0 后冻结 FNABI v1」承诺由此三段取代（§33/§34）。
+- 新增 §0.1 开放欠账分类表（freeze_blocker/append_only_extension/runtime_internal/post_v1 四档），作为 FN-M0D 的输入。
+- **FN-M1B 与 FN-M1C 改为并行分支**：都只依赖 FN-M1A 加各自 PERF 前置（FN-M1B←PERF-SHAPE-ID，FN-M1C←PERF-SIDECAR），互不串行；FN-M1A 前置=FN-M0F+PERF-OPCODE-SPACE（opcode 编码方案已是 roadmap 独立工作项）。FN-M2 前置=FN-M1A+FN-M1B+FN-M1C。
+- 删除正文残留的「M1 整体硬依赖 type-directed S1（F1+F2+F4 全就绪）」表述，统一为上述工作项粒度依赖（§2.1、§33 时序总纲、§34 第 44 条）。
+
+**0.4（M1 里程碑纵向拆分，与 roadmap v1.5 对齐）**：§33 的 M1 拆为 M1A/M1B/M1C，消除「M1 整体硬依赖 F1/F2/F4」——M1A 静态直调不需要 per-site 侧表，更早取得 plugin/builtin 同 NativeEntry 的端到端证明。
+
+**0.3** 相对 0.2，按 2026-08-25 评审与 owner 四项裁决完成以下修订：
 
 1. **移除 `FunValue`**（owner 裁决）：公开 ABI 不引入独立值类型，managed 边界直接使用 zjs `JSValue`（16 字节 extern tagged，`{ payload: u64, tag: i64 }`）。Value ABI 版本锚定表示契约版本与 `JSValue.abi_encoding_revision`。
 2. **现行 `runtime-plugin-abi.md` 标记 deprecated**（owner 裁决）：FNABI 是继任者；zjs 内 `Plugin.load`/dlopen loader 随 M3 移交 fun 并移除。新增 §28.1 退役条款。
-3. **时序挂钩 type-directed 计划**（owner 裁决）：M0（纯合同层）与 type-directed S0/S1 并行；M1 起硬依赖 S1 交付物（F1 shape identity、F2/Phase 0.5 侧表、F4 opcode 空间方案），共享基建只建一次；`NativeCallPlan` 与 T3 `NativeCallDescriptor` 归一为单一 schema。
+3. **时序挂钩 type-directed 计划**（owner 裁决）：M0（纯合同层）与 type-directed S0/S1 并行；共享基建只建一次——shape identity/侧表/opcode 空间由 type-directed 计划交付；`NativeCallPlan` 与 T3 `NativeCallDescriptor` 归一为单一 schema。（0.3 原文的「M1 起硬依赖 S1 交付物全就绪」已被 0.4 拆分与 0.5 并行化取代，现行依赖=工作项粒度：PERF-OPCODE-SPACE→FN-M1A、PERF-SHAPE-ID→FN-M1B、PERF-SIDECAR→FN-M1C，见 §33。）
 4. **v1 不强制存量 builtin 全量迁移**（owner 裁决）：builtin/plugin 等价性验收改为「参照 builtin 对拍集」；存量迁移拆为独立分批计划，各批自带 zoo A/B、test262 与 I-cache 门禁。
 5. 新增 §2.1「现状对账与前置依赖」：明确 quickening/IC/shape identity 为待建能力而非既有能力，列出交付载体。
 6. guard/quicken 缓存的 callee/entry/type identity 增加**纪元/版本验证**强制条款（表示契约 §5.2；在册 ABA 前科）；补 quicken 同宽度编码约束与多态站点 backoff。
@@ -36,6 +46,28 @@ process-model-design.md §20.2/§20.2a)**:class id 分配规则新章、无在�
 0.2 的收敛内容（职责拆分、机器签名与 JS 语义分离、三类 Host capability、三层 artifact identity、纵向切片等）全部保留。
 
 本文中的“必须”“不得”表示 FNABI v1 的强制要求；“应”表示默认实现要求；“可”表示兼容的可选能力。
+
+## 0.1 开放欠账分类（v0.5，FN-M0D 的输入）
+
+头部所列开放欠账逐条分类如下。这是治理分类，不是设计：每条的实体设计仍待各自章节/M0D 裁决产出。四档定义：
+
+- **freeze_blocker**：不裁决/不解决不得冻结 v1（FN-M0F 的硬前置）。
+- **append_only_extension**：v1 冻结后可经 minor ABI 追加引入，不阻塞冻结。
+- **runtime_internal**：运行时行为/语义条款，不进入公开 ABI 结构。
+- **post_v1**：明确移出 v1 范围。
+
+| 欠账条款 | 分类 | 判据 |
+|---|---|---|
+| class id 分配规则（class ID 与 NativeType identity 规则） | **freeze_blocker** | 影响 NativeType identity 的公开语义（guard/纪元验证的比较对象），不定案则 v1 identity 合同不完整 |
+| AsyncToken epoch 位宽 | **freeze_blocker** | ABI 结构字段，冻结后位宽不可变更 |
+| external memory accounting（外部内存计价）是否必填 | **freeze_blocker** | descriptor 字段语义——必填与否改变既有字段的合同含义，非纯追加 |
+| 循环事件通道原语（tsfn 对应物） | **freeze_blocker**（待 M0D 裁决：原语 vs 组合） | 若裁为 ABI 原语则进入 v1 公开表面，必须随 v1 冻结；若裁为既有原语（thread-safe completion queue + AsyncToken）之上的组合模式，则降档为 append_only_extension |
+| handle scope 是否进入 v1 | **append_only_extension** | §18.1 措辞已留门（raw `JSValue` 默认只在当前 managed call 内有效，至多存活到调用结束），后续以追加 Host capability 方式引入不破坏 v1 |
+| 无在飞资源快速销毁路径 + finalizer 三态 | **runtime_internal** | 行为合同，不改公开结构；插件可见时序合同（finalizer 在 runtime thread、nothrow/nonblocking、exactly-once release）已由 §34 冻结项 24/28/29 覆盖，三态是其内部状态机，不新增插件可见时序承诺 |
+| §22.7 side-by-side 启用前提清单 / manifest 字段（process_singleton 等） | **post_v1**（manifest 预留字段位=append_only_extension） | v1 hot-reload 路径为 Worker Restart，side-by-side 不可达；manifest 本身支持追加字段，预留位不阻塞冻结 |
+| epoch 作用域（per-Runtime） | **runtime_internal** | 语义条款，不改 ABI 结构（位宽另列 freeze_blocker） |
+
+分类表本身待 FN-M0D 评审确认；档位存疑的条款一律先标 freeze_blocker，由 M0D 裁定后降档。
 
 ---
 
@@ -124,9 +156,9 @@ fun 不采用该模型。Native Plugin 必须直接建立在 zjs 的 NativeFunct
 | `JSValue` 16 字节 extern tagged、非搬移堆、调用内地址稳定 | **已成立**：表示契约 v1 硬承诺（§1.1/§1.2），`src/core/value.zig` 实物含 `abi_encoding_revision` | 直接引用，本方案是契约的登记利益方 |
 | ESM module graph / synthetic module | 已有（`src/exec/module_graph.zig`） | 直接使用 |
 | 统一 NativeEntry / typed native call | 无；builtin 走内部注册，现行 plugin ABI 为 `CallFrame` 形态（已 deprecated，§28.1） | 本方案 M1/M2 |
-| bytecode quickening 与 per-site 缓存 | 无运行时 quicken 机制 | type-directed Phase 0.5 侧表（F2）+ 本方案 M2 |
-| shape/prototype/callee identity guard | 无 IC；shape 无稳定身份（rc==1 原地变异 + relocate ABA，指针比对不 sound） | type-directed **F1 shape identity + F5 编译期 shape 注册**（硬前置） |
-| 新 opcode 编码空间（~25 个 `CALL_NATIVE_*`） | short 区 178-253 已满，20-40 个新 id 现平面放不下 | type-directed **F4 opcode 空间方案**（二级平面/前缀 op，T-gate 0 定案） |
+| bytecode quickening 与 per-site 缓存 | 无运行时 quicken 机制 | type-directed Phase 0.5 侧表（F2，roadmap 工作项 **PERF-SIDECAR**，FN-M1C 前置）+ 本方案 M2 |
+| shape/prototype/callee identity guard | 无 IC；shape 无稳定身份（rc==1 原地变异 + relocate ABA，指针比对不 sound） | type-directed **F1 shape identity + F5 编译期 shape 注册**（roadmap 工作项 **PERF-SHAPE-ID**，FN-M1B 前置） |
+| 新 opcode 编码空间（~25 个 `CALL_NATIVE_*`） | short 区 178-253 已满，20-40 个新 id 现平面放不下 | type-directed **F4 opcode 空间方案**（roadmap 独立工作项 **PERF-OPCODE-SPACE**，FN-M1A 前置；二级平面/前缀 op，T-gate 0 定案） |
 | conservative native root 扫描（tracing 权威期 managed 调用的根基础） | 仅 AArch64-Linux 实装；x86_64-linux/windows、aarch64-windows/macos 在显式未实现清单 | tracing 权威期前按 §32.6 平台矩阵补齐（跨计划工程量，显式列账） |
 
 规范性引用关系：值与 GC 承诺以 `vm-value-representation-contract.md` 为准（修改协议 = 先改契约递增版本，再动任一线代码）；共享基建与时序以 `type-directed-optimization-plan.md` §六 执行序列为准（见 §33）；`runtime-plugin-abi.md` 的退役见 §28.1。
@@ -1053,7 +1085,7 @@ Init Host 不得包含：
 
 所有 managed function 必须接收 `FunCallContextV1*` 或从该 context 获取的 scoped token。离开 native call 后 context 立即失效。
 
-0.3 明确：`FunCallContextV1` 对 plugin 是 **opaque 类型**——只经指针传递，plugin 不得解引用或依赖其大小。AsyncToken 与 `FunBufferLease` 的 C 句柄同为 opaque 指针类型。全部前向引用 ABI 类型在 M0 定案或显式声明 opaque（见 §33 M0 验收门）。
+0.3 明确：`FunCallContextV1` 对 plugin 是 **opaque 类型**——只经指针传递，plugin 不得解引用或依赖其大小。AsyncToken 与 `FunBufferLease` 的 C 句柄同为 opaque 指针类型。全部前向引用 ABI 类型在 M0 定案或显式声明 opaque（见 §33 FN-M0I 验收门）。
 
 #### Async Host
 
@@ -2938,18 +2970,38 @@ iOS arm64 static
 
 实现按纵向可验收切片推进，不先孤立完成全部 VM 或 loader。
 
-**时序总纲（0.3 裁决）**：M0 是纯合同层（schema/layout test/文档），不碰引擎，与 type-directed 计划的 S0/S1 **并行**推进；**M1 起硬依赖 S1 交付物**——F1 shape identity、F2/Phase 0.5 per-site 侧表、F4 opcode 空间方案——FNABI 不自建平行的 shape/侧表/opcode 基建，共享基建只建一次。`NativeCallPlan` 与 type-directed T3 的 `NativeCallDescriptor` 归一为**单一 schema**（§15.2 的 ID 生成源），两个计划共同消费。与 `gc/tracing` 合入窗口的协调遵循 type-directed P4 条款：shape/字节码大改不与 GC 合入同时在飞。
+**时序总纲（0.3 裁决，0.5 治理归一化）**：M0 三段（FN-M0D/FN-M0I/FN-M0F，见下）是纯合同层（裁决/schema/layout test/文档），不碰引擎，与 type-directed 计划的 S0/S1 **并行**推进；M1 起的依赖按**工作项粒度**挂 roadmap 前置——**PERF-OPCODE-SPACE**（F4 opcode 空间方案）→FN-M1A、**PERF-SHAPE-ID**（F1 shape identity）→FN-M1B、**PERF-SIDECAR**（F2/Phase 0.5 per-site 侧表）→FN-M1C，不存在「M1 整体依赖 S1 全就绪」——FNABI 不自建平行的 shape/侧表/opcode 基建，共享基建只建一次。`NativeCallPlan` 与 type-directed T3 的 `NativeCallDescriptor` 归一为**单一 schema**（§15.2 的 ID 生成源），两个计划共同消费。与 `gc/tracing` 合入窗口的协调遵循 type-directed P4 条款：shape/字节码大改不与 GC 合入同时在飞。
 
-### M0：冻结合同与生成源
+### M0：合同与生成源（v0.5 拆为 M0D/M0I/M0F）
 
-目标：建立唯一 ABI source of truth，禁止实现漂移。
+目标不变：建立唯一 ABI source of truth，禁止实现漂移。v0.5 按治理实质拆三段——决策闭合、非争议骨架、冻结决策性质不同，不互相等待、不混为一个门。
+
+#### FN-M0D：ABI 决策闭合
+
+输入 = §0.1 开放欠账分类表。六项必裁：
+
+1. AsyncToken epoch 位宽与作用域。
+2. external memory accounting 是否必填。
+3. 循环事件通道是 ABI 原语还是组合模式。
+4. side-by-side 是否需要 manifest 字段（process_singleton 等）。
+5. class ID 与 NativeType identity 规则。
+6. handle scope 是否进入 v1。
+
+验收门：
+
+- §0.1 分类表本身经评审确认（存疑条款裁定归档）。
+- 全部 freeze_blocker 关闭，裁决记录写入本文档并递增版本。
+
+#### FN-M0I：schema / generator / golden layout tests 骨架
+
+非争议部分，可先行，不等 M0D。
 
 `fun-native-abi`：
 
 - 定义 target contract。
 - 定义 Plugin/Fast/Value ABI 版本。
 - 定义 descriptor、Host table、signature 和 marshal schema。
-- 生成 C/Zig binding。
+- 生成 C/Zig binding（生成器 = 唯一 source of truth）。
 - 建立 layout golden tests。
 
 zjs：
@@ -2973,29 +3025,40 @@ Zig SDK：
 - C/Zig layout 全部一致，且全部公开结构验证无隐式 padding。
 - 全部前向引用 ABI 类型定案或显式声明 opaque：`FunPluginInitContextV1`、`NativeExportRegistration`、`FunCallContextV1`、AsyncToken 句柄、`FunBufferLease`、三张 Host table 及 `FunPluginInitHostV1`/`FunRuntimeTargetInfoV1`/`FunErrorSinkV1`。
 - C 头 `JSValue` 拼写定案（`zjs_JSValue` tag + 可关闭别名，§12.1）。
+- 涉及 M0D 未裁决项的字段以 reserved/opaque 占位，骨架不因此阻塞。
+
+#### FN-M0F：v1 freeze
+
+前置 = FN-M0D 全部 freeze_blocker 关闭；FN-M0I 交付物是被冻结的对象。
+
+验收门：
+
 - 表示契约修订完成评审：「plugin ABI fingerprint」承诺过渡到 FNABI ABI tuple（§28.1 第 4 条）。
-- ABI 兼容规则和 v1 freeze decision 通过评审。
-- 不允许在 M0 前发布第三方可依赖的 FNABI v1。
+- ABI 兼容规则和 v1 freeze decision（§34 清单）通过评审。
+- 不允许在 FN-M0F 前发布第三方可依赖的 FNABI v1。
 
-### M1：最小静态端到端链路(v0.4 拆为 M1A/M1B/M1C)
+### M1：最小静态端到端链路(FN-M1A / FN-M1B / FN-M1C)
 
-v0.3 曾把 M1 整体前置于 type-directed S1(F1+F2+F4 全就绪)。v0.4
-按需求实质拆三段——三种 export 对基建的依赖不同,不应互相等待:
+M1 按 export 对基建的依赖实质拆三段;**FN-M1B 与 FN-M1C 是并行
+分支,互不依赖**,按产品优先级排先后:
 
 **M1A(FN-M1A)静态 NativeEntry 端到端**——`add(i32,i32)->i32` 与
-`managedCreateObject()->object`。**只依赖最小 opcode 编码方案**
-(`CALL_NATIVE_*` 的编码位置),不需要 F1 shape identity、不需要
-F2/Phase 0.5 侧表。这是第一个「plugin 与 builtin 走同一 NativeEntry」
-的端到端证明,可与 typed 主线并行。
+`managedCreateObject()->object`。前置=**FN-M0F + PERF-OPCODE-SPACE**
+(`CALL_NATIVE_*` 的编码位置;opcode 编码方案已是 roadmap 独立工作项),
+不需要 shape identity、不需要 per-site 侧表。这是第一个「plugin 与
+builtin 走同一 NativeEntry」的端到端证明,可与 typed 主线并行。
 
 **M1B(FN-M1B)NativeClass 方法**——`World.step(f64)->void`。
-依赖 **F1 shape identity**(method guard 与纪元验证的依据)。
+前置=**FN-M1A + PERF-SHAPE-ID**(shape identity 是 method guard 与
+纪元验证的依据)。
 
-**M1C(FN-M1C)动态 call quickening**——依赖 **F2/Phase 0.5 侧表**
-(quicken 站点载体)。M1A/M1B 的静态直调不经此路径。
+**M1C(FN-M1C)动态 call quickening**——前置=**FN-M1A +
+PERF-SIDECAR**(per-site 侧表是 quicken 站点载体)。M1A/M1B 的静态
+直调不经此路径。
 
-依赖边:`FN-M0 → FN-M1A → FN-M1B → FN-M1C`(交付序);硬依赖仅
-`F1 → FN-M1B`、`F2 → FN-M1C`。
+依赖边:`FN-M0F + PERF-OPCODE-SPACE → FN-M1A`;
+`FN-M1A + PERF-SHAPE-ID → FN-M1B`;`FN-M1A + PERF-SIDECAR → FN-M1C`。
+M1B/M1C 互不依赖。FN-M2 前置=FN-M1A + FN-M1B + FN-M1C。
 
 目标不变:不做动态库/CAS,先证明 builtin/plugin 执行边界一致。
 
@@ -3035,6 +3098,8 @@ SDK：
 - plugin static descriptor 不直接泄漏到 zjs。
 
 ### M2：完成 zjs Native Execution Core
+
+前置 = FN-M1A + FN-M1B + FN-M1C 全部完成。
 
 zjs：
 
@@ -3172,7 +3237,7 @@ fun：
 
 ## 34. FNABI v1 冻结决策
 
-完成 M0 后，以下内容冻结：
+FN-M0F 通过后（前置=FN-M0D 全部 freeze_blocker 关闭，见 §33），以下内容冻结：
 
 1. VM 内不存在独立 `PluginFunction` 类型。
 2. builtin 和 plugin 都转换为 zjs 私有 `NativeEntry`。
@@ -3217,7 +3282,7 @@ fun：
 41. guard/quicken 缓存的 callee/entry/type identity 必须经纪元/版本验证；裸指针比较不构成 guard（表示契约 §5.2）。
 42. 现行 `runtime-plugin-abi.md` deprecated，由 FNABI 继任；M3 后 zjs 不含平台 loader（§28.1）。
 43. v1 不要求存量 builtin 全量迁移；builtin/plugin 等价性以参照对拍集为常驻验收，存量迁移走独立分批计划。
-44. FNABI M1 起挂 type-directed S1 之后；shape identity/侧表/opcode 空间/call descriptor schema 与 type-directed 计划共享，不重复建设。
+44. FNABI 里程碑依赖按工作项粒度挂 roadmap 前置：FN-M1A←FN-M0F+PERF-OPCODE-SPACE、FN-M1B←FN-M1A+PERF-SHAPE-ID、FN-M1C←FN-M1A+PERF-SIDECAR（M1B/M1C 并行分支，互不依赖）；shape identity/侧表/opcode 空间/call descriptor schema 与 type-directed 计划共享，不重复建设。
 
 ---
 

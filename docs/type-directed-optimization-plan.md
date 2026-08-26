@@ -1,12 +1,29 @@
 # zjs 类型导向优化方案（TypeScript type lint 静态轴）
 
-Version: 1.0（与 roadmap v1.5 治理对齐:Gate 分立、F3/F5 受 G1-AOT
-约束、两 backend 分叉、FN-M 拆分引用）
+Version: 1.1（正文归一化 + roadmap v1.7 对齐:TYPED-IR 双触发、
+shape 双域身份合同、PERF-T1/PERF-OPCODE-SPACE 正式工作项）
 Date: 2026-08-26
 Status: DRAFT — 待 owner 评审
 
-Review note（0.9 → 1.0,roadmap 同步批）:四处旧裁决按 roadmap v1.5
-修订,本 note 为权威、正文原句加标注:
+Review note（1.0 → 1.1,正文归一化批）:**1.0 note 五条裁决已直接
+吸收进正文,被覆盖的旧结论删除,全文残留删除线清理为单一现行文本**
+(账本性质的历史 note 保留于页首);另吸收 roadmap v1.7 两条新裁决,
+**无新增设计内容**:
+1. **TYPED-IR 双触发**——F3/F5 合并为工作项 **PERF-TYPED-IR**,
+   启动条件=「G1-TYPED 裁决实施解释器 T1」或「G1-AOT 判定 AOT
+   eligible」任一成立(取代 1.0 note 1 的"仅受 G1-AOT 约束",也不再
+   无条件开工);**AOT 的硬前置 = PERF-TYPED-IR + PERF-VMABI +
+   G1-AOT**。解释器 T1 升为正式工作项 **PERF-T1**(前置=G1-TYPED=
+   implement + PERF-TYPED-IR + PERF-SHAPE-ID + PERF-OPCODE-SPACE);
+   opcode 空间方案升为独立工作项 **PERF-OPCODE-SPACE**(§6.1 F4)。
+2. **shape 双域身份合同**——PERF-SHAPE-ID 交付物改定(§4.1):动态
+   可变 shape 用 u64 identity/version;typed/NativeClass 的
+   immutable canonical shape 允许 pinned pointer guard;不预设所有
+   场景走 u64,T-spike 双臂对比两机制。
+
+Review note（0.9 → 1.0,roadmap 同步批;**1.1 已吸收进正文**,其中
+note 1 的触发条件再被 v1.7 双触发更新）:四处旧裁决按 roadmap v1.5
+修订:
 1. **F3/F5「无论 spike 结果都要建」收回**——改为受 **G1-AOT** 约束:
    Gate 1 存在「AOT 后置」分支,F3/F5 作为 AOT IR 基建随其裁决,不再
    无条件开工。
@@ -35,9 +52,11 @@ Octane 预期归零、"全案最高 ROI"撤销、转入 incubator——仅当 fu
 真实负载证明重复源码率、预计命中率与编译时间占比达到立项线后,
 重新进入 roadmap。**"T5 对冲"逻辑(TS 解析让编译变贵)保留为
 incubator 的立项理由之一。ROI 首位移交 T-spike/N-spike。正文
-§三/§8 中 P2 各表述以本 note 为准,下方原文保留并加标注。
+§三/§8 中 P2 各表述以本 note 为准(1.1 归一:正文已清理为单一
+现行文本)。
 其余 0.9 修订同批登记于 process-model-design.md §20.2a(L1 seal、
-多态臂、u64 identity、侧车解耦),待下轮正文修订吸收。
+多态臂、u64 identity、侧车解耦),其中 u64 identity 与站点毒化阈值
+已随 1.1 吸收(§4.1 双域合同、滑动窗口 fail 率),余项待下轮吸收。
 
 Review note（0.7 → 0.8）：**owner 定向（2026-08-25）："AOT 不如
 直接 native 化"——原生 AOT 升为主线**，v0.7 的"字节码 AOT 先行"
@@ -104,8 +123,10 @@ Position: 本文是 [engine-evolution-plan.md](engine-evolution-plan.md) v0.4
 下游消费方（2026-08-26 更新）：FNABI
 （[fun-native-plugin-design.md](fun-native-plugin-design.md) v0.4）
 是 F1/F2/F4 与 T3 schema 的下游消费方。里程碑依赖已拆分:
-**FN-M1A 不等本计划**(仅需最小 opcode 编码);FN-M1B←F1;
-FN-M1C←F2——S1 滑期只阻塞 M1B/M1C,不再阻塞静态端到端链路。
+**FN-M1A 不等本计划**(仅需最小 opcode 编码,该编码由独立工作项
+**PERF-OPCODE-SPACE** 承载,§6.1 F4);FN-M1B←F1(PERF-SHAPE-ID);
+FN-M1C←F2(Phase 0.5 交付物,时序见 §6.2)——F1/F2 滑期只阻塞
+M1B/M1C,不再阻塞静态端到端链路。
 
 ---
 
@@ -227,8 +248,8 @@ L0 是无条件安全的起点：guard 是 1 条比较，仍远胜现役全动�
 - **编码与退化设计（0.3 新增）**：`get_field_slot` 热编码不携带
   atom——操作数 = 函数级 shape 引用表索引（u8/u16）+ slot（u8），
   期望 identity 经该表取得；guard-fail 冷路径经 per-function
-  站点→atom 恢复表走通用查找。同一站点连续 fail 超阈值 ⇒ 原地
-  改写回通用 `get_field`（字节码为函数私有可写，单线程窗口），
+  站点→atom 恢复表走通用查找。同一站点滑动窗口 fail 率超阈值 ⇒
+  原地改写回通用 `get_field`（字节码为函数私有可写，单线程窗口），
   杜绝"病理站点每次白付 guard"的负收益形态；
 - 逃逸语义：typed 对象被动态改形（加/删属性、换 proto）⇒ guard
   因 identity 变更自然 fail 回通用路；L1/L2 的 own-slot 免 guard
@@ -298,23 +319,23 @@ zjs 字节码编译器内做**局部**类型传播（从注解出发沿表达式
 
 | 项 | 机制上省什么 | 纸面估计（typed 场） | 置信度与依据 | 杀标 |
 | --- | --- | --- | --- | --- |
-| T1 own-slot | 免 atom 解码（~9 insn）+ 免哈希探测（~10-18 insn）；依赖装载链 4→2 | 属性密集基准 +10-20% | **中**。annotate 证明 stall 存在（23.3% 于桶装载后比较）；但 08-17 尸检定理警告实测快臂单价可能远低于纸面（2-3 cyc 单探）——净赢面必须 spike 实测 | T-spike：own-slot 形态在属性密集 typed 微基准上 < +8% ⇒ 静态属性赌注死，轴收缩至 FFI/eval-cache |
+| T1 own-slot | 免 atom 解码（~9 insn）+ 免哈希探测（~10-18 insn）；依赖装载链 4→2 | 属性密集基准 +10-20% | **中**。annotate 证明 stall 存在（23.3% 于桶装载后比较）；但 08-17 尸检定理警告实测快臂单价可能远低于纸面（2-3 cyc 单探）——净赢面必须 spike 实测 | T-spike：own-slot 形态在属性密集 typed 微基准上 < +8% ⇒ 静态属性赌注死，解释器级轴收缩至 typed FFI；PERF-TYPED-IR 仍按双触发条件裁决（§5.1） |
 | T1 proto-slot（双 guard/seal+单 guard） | 免整条原型链走查（每层一次探测） | 方法读密集（Richards/DeltaBlue 形态）+10-25% | **中偏高**。链走查是逐层依赖装载，缩短链的收益比 own-hit 更难被 OoO 吸收；JSC ProtoLoad 模式的存在性佐证 | 同上 spike 场含方法读负载 |
 | T2 免检算术 | 每 op 免 2-4 insn 可预测 tag 检查 | 低个位数 | **低**。「五分歧对抗定价 5/5 证伪：常数 insn 税多被 OoO 吸收」在册先例直接适用；且 L4 已判与 qjs 同构 | 频次普查 + 单族 A/B，不达噪声带 2x 即弃 |
 | T3 帧策略静态化 | 免 leaf 判别链（可预测分支为主） | 低个位数 | **低**。v0.4 已勘误 call 差距在"帧语义机器，换骨架删不掉"；判别链是其中最可预测的部分 | 同上 |
 | T3 typed FFI 直调 | 免通用 wrapper/装拆箱 | fun GUI 负载显著；Octane 无感 | **中**。机制同 v0.4 §9.1（已立项方向），静态签名只是提前兑现；量级无实测 | 以 fun 真实负载立验收，不用 Octane |
 | T4 typed 数组 | 免元素 tag 检查（unboxing 已推迟） | 低个位数 | **低**。真收益在 unboxed 存储，本阶段明确不做——v1 T4 是薄项，可降为 T2 的附属 | 并入 T2 杀标 |
-| P2 eval 缓存（非静态轴） | 免重复 parse+codegen | ~~CodeLoad 单项显著~~ **0.9 证伪:cacheBust() 使命中恒 0,Octane 预期归零,转 incubator(见头部 note)** | ~~高~~ 证伪 | 以 fun 真实负载重立项 |
+| P2 eval 缓存（非静态轴,incubator） | 免重复 parse+codegen | Octane 预期 ≈0（0.9 证伪:cacheBust() 使命中恒 0） | 证伪 | 以 fun 真实负载重立项 |
 
 综合结论：**本方案的效果核心押在 T1 一项上**（typed 属性访问，
 两种形态），T2/T3/T4 是搭车项（基建摊销后的低成本尝试，各自带
 杀标）；若 T-spike 杀标触发，静态轴的存活范围收缩为 typed FFI +
-eval 缓存 + "类型作为 Phase 2 baseline JIT 的免预热输入"（此项
-不依赖解释器级兑现，是静态轴的保底价值）。
+"类型作为 Phase 2 baseline JIT / AOT 的输入"（此项不依赖解释器
+级兑现，是静态轴的保底价值；eval 缓存已转 incubator 不计入）。
 
 ## 四、共享基建：静态轴与 Phase 0.5 是同一块地基
 
-v0.4 Phase 0.5（已批准解锁）要建：per-site side table（按 pc 索引，
+v0.4 Phase 0.5（时序 1.0 修订，见节末）要建：per-site side table（按 pc 索引，
 canonical bytecode 不改）+ monomorphic shape cache（shape 指针 +
 槽偏移 + 版本）+ 失效版本号。本文归因（2026-08-25 Octane v9 五引擎
 快照，[perf/bench-v8-status.md](perf/bench-v8-status.md)）补充了两个
@@ -322,13 +343,22 @@ canonical bytecode 不改）+ monomorphic shape cache（shape 指针 +
 
 1. **shape 现无稳定身份**：rc==1 原地变异（追加/tombstone/换
    proto/compact，`src/core/shape.zig:395-599`）+ relocate 换址
-   （ABA）。**0.2 定案设计：identity == version 单字段**——shape
-   增设一个 u32（或 u64）`identity` 字段，创建时与每次原地变异时
-   都从全局单调计数器取新值；缓存只存 identity，不存指针。guard
-   = 1 load + 1 cmp（与 JSC structureID 比较同级），id 永不复用
-   ⇒ 天然防 ABA，relocate 免疫（identity 随对象搬走）。这同时是
-   Phase 0.5 反馈槽与 T1 guard 的共同依据；字段布局需与 tracing
-   GC 的 shape 处理共同评审（shape 是 GC 对象）。
+   （ABA）。**1.1 定案（roadmap v1.7，PERF-SHAPE-ID）：双域身份
+   合同**——
+   - **动态可变 shape**：增设 u64 `identity` 字段（identity ==
+     version 单字段），创建时与每次原地变异时都从全局单调计数器
+     取新值；缓存只存 identity，不存指针。guard = 1 load + 1 cmp
+     （与 JSC structureID 比较同级），id 永不复用 ⇒ 天然防 ABA，
+     relocate 免疫（identity 随对象搬走）——解决 mutation/
+     relocation/ABA 三案；
+   - **typed/NativeClass 的 immutable canonical shape**：允许
+     **pinned pointer guard**（指针比较），前提四条全满足——
+     生命周期钉住、不 transition、不跨 Runtime、teardown 前统一
+     失效；
+   - **不预设所有场景走 u64**：T-spike 对两机制双臂对比（u64
+     identity vs pinned pointer）后按域定稿。
+   这同时是 Phase 0.5 反馈槽与 T1 guard 的共同依据；字段布局需
+   与 tracing GC 的 shape 处理共同评审（shape 是 GC 对象）。
 2. **归因对 Phase 0.5 §6.2 收益校准的补充（0.3 措辞收敛）**：
    annotate 证明 own-hit 每次仍付哈希桶 load-use stall（Box2D
    34.5% 单符号、23% 周期在桶装载后的比较）——但 08-17 尸检定理
@@ -340,7 +370,10 @@ canonical bytecode 不改）+ monomorphic shape cache（shape 指针 +
    （proto 方法读密集）。
 
 静态轴在此基建上的增量只有：预建 shape 注册表 + certificate 摄入 +
-特化 opcode 家族。**先做 Phase 0.5 不是绕路，是静态轴的第一步。**
+特化 opcode 家族。**时序（1.0 修订入正文）：Phase 0.5 不再是静态
+轴的第一步——它移出 S1、挂 G1-JIT 之后，立项证据由 PERF-DYN-SPIKE
+购买、经 G1-FEEDBACK 独立裁决（evolution v0.6）；两轴共享基建，
+不共享排期。**
 
 ## 五、与已批准阶段的汇合关系
 
@@ -351,7 +384,7 @@ canonical bytecode 不改）+ monomorphic shape cache（shape 指针 +
 | Phase 3 IC/native direct | typed site 免 IC；typed FFI 提前到解释器 |
 | Phase 4 deopt | L0 guard fail 走"原地降级回通用 op"，不需要 snapshot——静态轴在解释器阶段不引入 deopt 复杂度 |
 | 表示契约 | unboxing 推迟条款（§3 不做清单；帧内例外见 §5.1） |
-| **AOT（0.5 新增，owner 确认方向）** | typed bytecode 即 AOT IR；Phase 2 emitter 离线运行即 AOT 编译器（§5.1） |
+| **AOT（0.5 新增，owner 确认方向）** | typed bytecode 即 AOT IR；AOT 是独立 backend（发 Zig 源码交 zig/LLVM），与 baseline JIT 不共享 emitter（§5.1/§5.2）；硬前置 = PERF-TYPED-IR + PERF-VMABI + G1-AOT |
 
 ### 5.1 AOT 主线：直接原生化，经由 Zig 源码发射（0.8 定向）
 
@@ -441,12 +474,11 @@ apply 形态；v0.4 §2.4(c) bl 形态对照：现役冷契约 +10 cyc/冷事件
 v0.4 §7.2 已有条款）、typed↔untyped 边界互操作（复用 §2.2 L1 的
 边界检查设计——Static Hermes 经验中最难的部分，本方案的信任分级
 正是为此形状设计的）。AOT 比 JIT 模式更简单的部分：无 tiering/
-OSR/并发编译/运行时补丁。**emitter 共享说明(1.0 修订,头部 note 2 为准)**：v0.4 "解释器与
-JIT 不共享 emitter"的禁令是解释器↔JIT 之间的；~~JIT 与 AOT 是同一
-emitter 的两种驱动方式~~ **JIT 与 AOT 是两个 backend**——AOT 发 Zig
-源码交 zig/LLVM,baseline JIT 直接发机器码;只共享上游 typed IR、
-lowering contract、runtime helper ABI 与 GC slot 抽象。"emitter
-可离线运行"约束仅指 AOT 臂。
+OSR/并发编译/运行时补丁。**emitter 边界**：v0.4 "解释器与 JIT 不
+共享 emitter"的禁令是解释器↔JIT 之间的；**JIT 与 AOT 是两个
+backend、不共享 emitter**——AOT 发 Zig 源码交 zig/LLVM,baseline
+JIT 直接发机器码;只共享上游 typed IR、lowering contract、runtime
+helper ABI 与 GC slot 抽象。"emitter 可离线运行"约束仅指 AOT 臂。
 
 **类型在 AOT 的兑现（对照解释器兑现）**：属性访问 = 一条带偏移
 load/store 机器指令；算术 = 未装箱 double 驻 FP 寄存器跨表达式
@@ -469,11 +501,13 @@ AOT 原生码"。
 对策 = 选择性 AOT（仅热 typed 模块，字节码兜底常青）；动态特性
 仍需运行时兜底；边界互操作工程量前置计价。
 
-**对 T-spike 杀标的连带修订**：spike 只裁决**解释器级**特化的
-兑现；spike 未过 ⇒ 解释器特化形态（F4 新 opcode 的解释器收益）
-搁置，但 **F3 类型摄入与 F5 shape 注册作为 AOT IR 基建由 AOT
-方向独立支撑**，时序改挂 Phase 2 窗口——静态轴不再存在"全死"
-分支，最坏情形 = 解释器期收益为零、价值全部后置到 AOT/JIT 期。
+**T-spike 与工作项触发关系（1.1 归一）**：spike 只裁决**解释器级**
+特化的兑现（G1-TYPED 的证据输入）。**F3/F5 = PERF-TYPED-IR，启动
+条件为双触发**：「G1-TYPED 裁决实施解释器 T1」或「G1-AOT 判定
+AOT eligible」任一成立即开工——既不无条件开工，也不只挂 AOT。
+**AOT 的硬前置 = PERF-TYPED-IR + PERF-VMABI + G1-AOT** 三者齐备。
+Gate 1 含「JIT/AOT 两者均后置、投入转产品能力」的合法出口——
+正确表述是「spike 证据决定是否建,而非何时兑现」。
 
 ## 六、前置工作清单与执行序列
 
@@ -483,11 +517,11 @@ AOT 原生码"。
 
 | # | 前置项 | 为什么阻塞 | 状态与出处 |
 | --- | --- | --- | --- |
-| F1 | **shape identity 字段**（§4.1 设计） | 一切 per-site 缓存（Phase 0.5 反馈槽、T1 guard）的健全性依据；现状 rc==1 原地变异 + relocate ABA 使指针比对不可靠 | 未开工；设计已定案于 §4.1，需与 tracing GC 侧共同评审 |
-| F2 | **per-site metadata 侧表** | **仅动态轴（Phase 0.5 反馈槽）的载体**。0.3 修正：typed 站点的 guard 数据是编译期常量、编进操作数，运行时**不消费侧表**（这正是 §1.5 免于"miss 税"否证的机制根据）——T1 对 F2 无硬依赖，静态轴与 Phase 0.5 交付解耦；仅站点毒化计数、atom 恢复表等冷路径设施可复用其挂载点 | = Phase 0.5 交付物（v0.4 §6.1，已批准） |
-| F3 | **TS 语法解析（strip，可擦除子集）** | 引擎读不到注解则静态轴不存在 | 未开工，独立可交付（T-gate 0） |
-| F4 | **opcode id 空间盘点与扩展方案** | short 区 178-253 已被 temp 区+融合 op 占用（`bytecode.zig:348-424`）；T1-T4 预计需 20-40 个新 id，现平面放不下 | 未开工；候选=回收 temp 区/二级平面（前缀 op，参照 JSC wide 前缀）/复用 `using` 前缀机制，T-gate 0 内定案 |
-| F5 | **编译期 shape 注册机制**（typed class 声明 → shape 描述随字节码携带 → 首次执行物化） | T1 的"预建 shape"需要编译器能描述布局；现状 shape 全部运行时构建 | 未开工。**翻案说明**：zoo-r0 曾否决 `object_from_shape`（eligible literals ≪ G1 bar）——那是对 untyped 动态字面量的可证明率裁决；typed class 是显式声明，可证明率 100%，前提不同，旧裁决不适用 |
+| F1 | **shape identity（= PERF-SHAPE-ID，双域身份合同，§4.1）** | 一切 per-site 缓存（Phase 0.5 反馈槽、T1 guard）的健全性依据；现状 rc==1 原地变异 + relocate ABA 使指针比对不可靠 | 未开工；交付物 = §4.1 双域身份合同（1.1 定案：动态域 u64 identity + typed/NativeClass 域 pinned pointer guard），需与 tracing GC 侧共同评审 |
+| F2 | **per-site metadata 侧表** | **仅动态轴（Phase 0.5 反馈槽）的载体**。0.3 修正：typed 站点的 guard 数据是编译期常量、编进操作数，运行时**不消费侧表**（这正是 §1.5 免于"miss 税"否证的机制根据）——T1 对 F2 无硬依赖，静态轴与 Phase 0.5 交付解耦；仅站点毒化计数、atom 恢复表等冷路径设施可复用其挂载点 | = Phase 0.5 交付物（v0.4 §6.1；时序 1.0 修订：挂 G1-JIT 之后，由 PERF-DYN-SPIKE→G1-FEEDBACK 裁决） |
+| F3 | **TS 语法解析（strip，可擦除子集）** | 引擎读不到注解则静态轴不存在 | 未开工，独立可交付（T-gate 0）；与 F5 同属 **PERF-TYPED-IR**，启动条件 = 双触发（§5.1） |
+| F4 | **opcode 空间接入**（opcode namespace 方案已升为独立工作项 **PERF-OPCODE-SPACE**，roadmap v1.7） | short 区 178-253 已被 temp 区+融合 op 占用（`bytecode.zig:348-424`）；T1-T4 预计需 20-40 个新 id，现平面放不下 | 未开工；PERF-OPCODE-SPACE 范围 = wide/prefix/二级平面、编码版本策略、四消费方共享生成源（compiler/disassembler/serializer/JIT）、I-cache 与 decode 成本 A/B；本计划 F4 与 FN-M1A、SER-ARTIFACT 均依赖它 |
+| F5 | **编译期 shape 注册机制**（typed class 声明 → shape 描述随字节码携带 → 首次执行物化） | T1 的"预建 shape"需要编译器能描述布局；现状 shape 全部运行时构建 | 未开工。**翻案说明**：zoo-r0 曾否决 `object_from_shape`（eligible literals ≪ G1 bar）——那是对 untyped 动态字面量的可证明率裁决；typed class 是显式声明，可证明率 100%，前提不同，旧裁决不适用；与 F3 同属 **PERF-TYPED-IR**（双触发，§5.1） |
 | F6 | **测量尺修复（S0）** | −7~8pp 系统性偏移未归因前，类型轴所有 A/B 都在漂移的尺上；若是真回归须先修复，否则收益账不可信 | **已交付（2026-08-25 同批）**：偏移裁决为参考二进制漂移（qjs 同源 GCC-13→GCC-16），非 zjs 回归（[perf/bench-v8-status.md](perf/bench-v8-status.md)）；残余工作=每条发布记录钉参考二进制指纹（hash+compiler） |
 
 **强烈建议的前置优化**（非阻塞，但先做能让类型轴收益更实/施工更安全）：
@@ -495,9 +529,9 @@ AOT 原生码"。
 | # | 项 | 理由 |
 | --- | --- | --- |
 | P1 | **门禁扩容**：refactor gate 从 v7 的 8 基准扩到含 pdfjs/typescript/box2d/gbemu | v7 门禁盲区已让这一族无守卫滑坡数周；类型轴施工期（大量编译器/解释器改动）必须有全谱守卫。**已交付（2026-08-25）**：A/B 门禁随 Octane 2.0 扩到 16 项（`docs/refactor-policy.md:40-45`） |
-| P2 | **eval CompilationCache**（V8 四元组 key） | ~~CodeLoad 头顶 2.37x 的独立收益~~(0.9 证伪:cacheBust 使命中恒 0)+ **T5 的对冲**逻辑保留为 incubator 立项理由——TS 解析与类型传播会让编译变贵;是否立项以 fun 真实负载定 |
-| P3 | **原型链命中缓存先行落地**（Phase 0.5 范围内提前排序） | 归因显示 Richards/DeltaBlue 的方法读（proto-hit）是最大单项负载；且 T1 的 proto-slot 形态（带 guard）与它是同一机制——动态版先落地，typed 版只是预填 |
-| P4 | **tracing GC 合入窗口协调** | ~~`gc/tracing` 四门全绿待合入~~ **降级（2026-08-25）**：当日发现此前四门是在 major 从不触发的收集器上量的（`f10855c6`、`756a1d07`），合入窗口前须重新过门；F1 动 shape 布局、F2 引入新 GC 可达结构（缓存持 shape 引用），两个大改动不应同时在飞——建议 GC 重新过门合入或明确冻结窗口后再动 F1/F2 |
+| P2 | **eval CompilationCache**（V8 四元组 key，incubator） | Octane 收益 0.9 证伪（cacheBust 使命中恒 0）；**T5 的对冲**逻辑保留为 incubator 立项理由——TS 解析与类型传播会让编译变贵;是否立项以 fun 真实负载定 |
+| P3 | **原型链命中缓存**（Phase 0.5 范围内优先项；时序随 Phase 0.5 挂 G1-JIT 之后、由 PERF-DYN-SPIKE→G1-FEEDBACK 裁决，1.0 修订） | 归因显示 Richards/DeltaBlue 的方法读（proto-hit）是最大单项负载；且 T1 的 proto-slot 形态（带 guard）与它是同一机制——若立项则动态版先落地，typed 版只是预填 |
+| P4 | **tracing GC 合入窗口协调** | `gc/tracing` 状态降级（2026-08-25）：此前"四门全绿"是在 major 从不触发的收集器上量的（`f10855c6`、`756a1d07`），合入窗口前须重新过门；F1 动 shape 布局、F2 引入新 GC 可达结构（缓存持 shape 引用），两个大改动不应同时在飞——建议 GC 重新过门合入或明确冻结窗口后再动 F1/F2 |
 | P5 | **zlib indirect-eval 修复** | 正确性欠账（Octane 第 17 项跳过中）；与类型轴无依赖，但 eval 语义修复与 P2 同域，可顺路 |
 
 **明确不做的"前置"**（防止浪费）：通用哈希探测路径的微优化
@@ -511,29 +545,36 @@ AOT 原生码"。
 ```text
 S0  F6 测量尺裁决 + P1 门禁扩容（~1 天，一切 A/B 的前提）
     —— **两项均已交付（2026-08-25，见 §6.1 F6/P1 状态列）**
-S1  = Phase 0 + 0.5（已批准）：VmExecState ABI、helper 频率仪器、
-    F1 shape identity、F2 side table、property/call 反馈槽
-    （P3 原型链命中缓存优先排序；P4 与 gc/tracing 合入协调窗口）
-    ├─ 验收：pdfjs/typescript/box2d + Richards/DeltaBlue 可归因提升
+S1  = Phase 0（PERF-VMABI）：VmExecState ABI、helper 频率仪器。
+    **Phase 0.5 移出 S1**——F2 side table、property/call 反馈槽与
+    P3 原型链命中缓存及其验收锚随之外移,挂 G1-JIT 之后,由
+    PERF-DYN-SPIKE→G1-FEEDBACK 独立裁决（evolution v0.6）
+    ├─ F1 shape identity（PERF-SHAPE-ID）不随 0.5 外移:它是
+    │   PERF-T1 的硬前置,排期与 P4（gc/tracing 合入窗口）协调
     ├─ 并行：S2 的设计工作（T-gate 0 不依赖 S1 实现，只依赖其评审）
-    ├─ 并行小项：~~P2 eval CompilationCache(0.9 转 incubator)~~；P5 zlib 修复
-S2  T-gate 0（设计门）：F3 TS 语法解析 + F4 opcode 空间方案 +
+    ├─ 并行小项：P5 zlib 修复（P2 已转 incubator,0.9）
+S2  T-gate 0（设计门）：F3 TS 语法解析 + F4 opcode 空间接入
+    （方案本体 = 独立工作项 PERF-OPCODE-SPACE，roadmap v1.7）+
     F5 shape 注册机制 + certificate 格式 + 信任分级 + 子集 S 条款
     → owner 评审后开工
-    ├─ **T-spike（强制验证门，0.3 新增；0.5 修订波及范围）**：
-    │   2-3 天垂直原型——手工预建 shape + 手发 get_field_slot
-    │   （own-slot 与 proto-slot 双形态），在属性密集 typed 微
-    │   基准 + 一个移植循环上按测量契约 A/B。杀标见 §三效果表；
-    │   未过 ⇒ **解释器级特化搁置**（F4 解释器收益档），但 F3/F5
-    │   作为 AOT IR 基建由 AOT 方向独立支撑、时序改挂 Phase 2
-    │   窗口（§5.1）。这是 §1.5 尸检纪律（"纸面奖金按实测快臂
-    │   单价折算"）的制度化——先证效果，再建管线。
-S3  T1 typed 属性（先 L0 全程 guard）＋ typed 基准尺建立
+    ├─ **T-spike（强制验证门）**：2-3 天垂直原型——手工预建
+    │   shape + 手发 get_field_slot（own-slot 与 proto-slot 双
+    │   形态），在属性密集 typed 微基准 + 一个移植循环上按测量
+    │   契约 A/B；guard 机制按 §4.1 双域合同**双臂对比**（u64
+    │   identity vs pinned pointer）。杀标见 §三效果表；spike
+    │   证据进 **G1-TYPED**,裁决是否实施解释器 T1（PERF-T1）;
+    │   未过 ⇒ 解释器级特化搁置,F3/F5（PERF-TYPED-IR）仍按双
+    │   触发条件裁决（§5.1）。这是 §1.5 尸检纪律（"纸面奖金按
+    │   实测快臂单价折算"）的制度化——先证效果，再建管线。
+S3  PERF-T1 = T1 typed 属性（先 L0 全程 guard；前置 = G1-TYPED=
+    implement + PERF-TYPED-IR + PERF-SHAPE-ID + PERF-OPCODE-SPACE）
+    ＋ typed 基准尺建立
     （Octane 子集 typed 移植 raytrace/richards/deltablue + fun
     真实 workload；对照含 Hermes -O——同命题最近对标）
 S4  T2 算术免检族 + T3 调用特化 + T4 数组；逐族频次立项、A/B 过门
 S5  Phase 2 baseline JIT（按 v0.4，消费动态反馈 + 静态类型双源）
-S6  原生 AOT（0.8 主线）：N-spike（§5.1，与 T-spike 同期）过门后
+S6  原生 AOT（0.8 主线；硬前置 = PERF-TYPED-IR + PERF-VMABI +
+    G1-AOT）：N-spike（§5.1，与 T-spike 同期）过门后
     → Zig 源码发射编译器 v1（typed 子集直接槽读/FP 运算 + 通用
     op 走 runtime helper + 静态链接进 fun 应用）→ 边界互操作闭环；
     字节码容器（§10.5）降为动态加载模块的预编译子项
@@ -558,7 +599,7 @@ CodeLoad ≥ 现状（单遍编译不动摇）、SplayLatency/MandreelLatency
 | TS 类型系统不健全（any/cast/边界） | 信任分级；L0 默认全 guard；L1 边界检查 + own-slot 限定（§T1 免 guard 范围规则）；L2 仅 fun 内部显式 opt-in |
 | certificate 与源码漂移 | hash + 版本 + 配置签名绑定；不匹配静默降 L0 |
 | 特化 opcode 膨胀 I-cache（前端税是现役短板） | 每族按动态频次立项（.short 层既有纪律）；A/B 含 L1I/前端 stall 指标 |
-| opcode id 空间不足 | F4 前置定案（回收 temp 区 / 前缀二级平面）；无方案不开工 T1 |
+| opcode id 空间不足 | 独立工作项 **PERF-OPCODE-SPACE**（roadmap v1.7）前置定案；无方案不开工 PERF-T1——F4 与 FN-M1A、SER-ARTIFACT 均依赖它 |
 | typed/untyped 双路径语义漂移 | strip 差分 oracle 进 CI；特化 op 语义定义为"通用 op + 已证前提"，不独立发明语义 |
 | 与 tracing GC / 表示契约相撞 | unboxing 推迟；F1 identity 字段与 tracing GC 共同评审；P4 合入窗口协调 |
 | L2 模块被滥用为攻击面 | L2 仅可来自可信构建产物，装载路径受 [LIMITATIONS.md](../LIMITATIONS.md) 的 Security Boundary 节约束；untrusted 源一律 ≤ L0 |
@@ -579,7 +620,7 @@ CodeLoad ≥ 现状（单遍编译不动摇）、SplayLatency/MandreelLatency
 
 | 项 | 单基准效果 | 综合分效果（^1/17） | 置信 |
 | --- | --- | --- | --- |
-| P2 eval 缓存 | ~~CodeLoad ×1.5~2.2~~ ≈0(0.9 证伪) | ~~+2~4%~~ ≈0 | ~~高~~ 证伪 |
+| P2 eval 缓存（incubator） | ≈0（0.9 证伪） | ≈0 | 证伪 |
 | Phase 0.5（原型链缓存+多态） | Richards/DeltaBlue +3~6% | +0.5~1.5% | 中低（解释器级；主价值=Phase 2 输入） |
 | T2/T3/T4 对 untyped | 0 | 0 | — |
 
@@ -605,10 +646,10 @@ untyped——静态轴投资在 JIT 时代复利，不重复计价。
 | 项 | 成本（人日） | 效果 | ROI 判决 |
 | --- | --- | --- | --- |
 | S0 测量尺裁决+门禁扩容 | 1-2 | 保全所有后续 A/B | 无穷（风险口径） |
-| **P2 eval 缓存** | 3-5 | ~~Octane 综合 +2~4%~~ **0.9 证伪归零,转 incubator** | ~~全案最高,先做~~ **撤销;ROI 首位移交 T/N-spike** |
+| **P2 eval 缓存** | 3-5 | Octane 预期 0.9 证伪归零,转 incubator | ROI 首位撤销,移交 T/N-spike |
 | **T-spike** | 2-3 | 把 T1 的 35-55 人日投资决策从纸面变实测 | **信息购买，第二优先** |
-| Phase 0.5 全量 | 15-20 | Octane +0.5~1.5% + Phase 2 必需输入 | 单看解释器级偏低；战略必需（v0.4 已如此定价） |
-| F1+F3+F4+F5+T1（spike 过门后） | 35-55（F3 TS 语法 10-20 为大头） | typed 负载 +15~20%（基准档） | 取决于 fun 热代码的 typed 占比——占比高则为产品主杠杆 |
+| Phase 0.5 全量 | 15-20 | Octane +0.5~1.5% + Phase 2 必需输入 | 单看解释器级偏低；时序挂 G1-JIT 之后，立项证据由 PERF-DYN-SPIKE 购买（1.0 修订） |
+| F1+F3+F4+F5+T1（= PERF-SHAPE-ID + PERF-TYPED-IR + PERF-OPCODE-SPACE + PERF-T1，G1-TYPED 裁决实施后） | 35-55（F3 TS 语法 10-20 为大头） | typed 负载 +15~20%（基准档） | 取决于 fun 热代码的 typed 占比——占比高则为产品主杠杆 |
 | T2/T3/T4 | 各 2-8 | typed +1~3%/项 | 低，仅作基建摊销后的搭车项 |
 | P5 zlib 修复 | 2-4 | 正确性+第 17 项分数 | 正确性义务 |
 | （对照）Phase 2 baseline JIT | ~2-3 月 | 预期 1.5~2x 量级 | 大投入大回报；静态轴是其减险器 |
@@ -619,14 +660,14 @@ N-spike 实测定**；字节码容器子项保留动态加载模块免 parse 的
 CodeLoad 类收益（无优化管线）。v0.7 的字节码优化管线估算
 （typed 1.3~1.5x）随主线切换作废，存版本历史备回退。
 
-**决策要点（0.8 修订）**：(1) P2 + T-spike + **N-spike** 合计
-≤13 人日，先行——两个 spike 分别为解释器臂与原生臂定锚，主线
-量级以实测定稿；
-(2) ~~静态轴主投资开工条件放宽:F3/F5 无论 spike 结果都要建~~
-**(1.0 收回:F3/F5 受 G1-AOT 约束,见头部 note 1)**;(3) fun 热路径
-typed 占比（owner 掌握）决定的不再是"做不做"而是"解释器期做多深"；
-(4) ~~静态轴不存在全死分支~~ **(1.0 修正:Gate 1 含两者均后置分支,
-见头部 note 3)**。
+**决策要点（1.1 归一）**：(1) T-spike + **N-spike** 合计 ≤8 人日，
+先行（P2 已转 incubator，不在先行清单）——两个 spike 分别为解释
+器臂与原生臂定锚，主线量级以实测定稿；(2) F3/F5（PERF-TYPED-IR）
+按**双触发**条件启动:「G1-TYPED 裁决实施解释器 T1」或「G1-AOT
+判定 AOT eligible」任一成立即开工；(3) fun 热路径 typed 占比
+（owner 掌握）决定的不再是"做不做"而是"解释器期做多深"；(4)
+Gate 1 含「JIT/AOT 两者均后置、投入转产品能力」的合法出口——
+spike 证据决定是否建,而非何时兑现。
 
 ## 九、开放问题（owner 裁决项）
 
@@ -710,14 +751,14 @@ hole、越界 throw（SH FastArray 语义，对应 T4）；catch 参数恒 any�
 
 ### 10.4 S6 AOT 的三个设计决策点（SH 实证输入）
 
-1. **后端形态（新增备选）**：SH 发 **C 源码交系统 cc**（自身零
-   codegen；"未装箱驻 FP 寄存器"完全靠 cc 内联优化兑现，代价 =
-   `-fno-strict-aliasing` 与镜像结构体契约）。zjs 对应物 = **发
-   Zig 源码交 zig cc**——成本远低于把 Phase 2 MacroAssembler 改
-   离线，且 zjs 的 runtime helper 本来就是 Zig（无镜像结构体
-   问题，先例的最大风险项在 zjs 侧天然消失）。S6 改为两条备选
-   （Zig 源码发射 vs Phase 2 emitter 离线），T-spike 后按 Phase 2
-   排期定。
+1. **后端形态（1.0 定案，两 backend 分叉）**：SH 发 **C 源码交
+   系统 cc**（自身零 codegen；"未装箱驻 FP 寄存器"完全靠 cc 内联
+   优化兑现，代价 = `-fno-strict-aliasing` 与镜像结构体契约）。
+   zjs 对应物 = **发 Zig 源码交 zig cc**——且 zjs 的 runtime
+   helper 本来就是 Zig（无镜像结构体问题，先例的最大风险项在
+   zjs 侧天然消失）。**S6 后端 = Zig 源码发射单线**：JIT 与 AOT
+   是两个 backend、不共享 emitter（§5.2），"Phase 2 emitter 改
+   离线复用为 AOT"的备选取消。
 2. **GC 协作**：SH 用逐函数 SHLocals shadow-stack 注册 GC 可见
    locals（指针/非指针在寄存器分配期分类，非指针不进扫描集）。
    zjs 独有替代项：**tracing GC 已有保守栈扫描基建**（trace_stw
