@@ -1,8 +1,28 @@
 # zjs 类型导向优化方案（TypeScript type lint 静态轴）
 
-Version: 0.9（P2 eval 缓存 Octane ROI 证伪,降级 incubator）
+Version: 1.0（与 roadmap v1.5 治理对齐:Gate 分立、F3/F5 受 G1-AOT
+约束、两 backend 分叉、FN-M 拆分引用）
 Date: 2026-08-26
 Status: DRAFT — 待 owner 评审
+
+Review note（0.9 → 1.0,roadmap 同步批）:四处旧裁决按 roadmap v1.5
+修订,本 note 为权威、正文原句加标注:
+1. **F3/F5「无论 spike 结果都要建」收回**——改为受 **G1-AOT** 约束:
+   Gate 1 存在「AOT 后置」分支,F3/F5 作为 AOT IR 基建随其裁决,不再
+   无条件开工。
+2. **「JIT 与 AOT 是同一 emitter 的两种驱动」收回**——两者是**两个
+   backend**:AOT 发 Zig 源码交 zig/LLVM,baseline JIT 直接发机器码;
+   只共享上游 typed IR、lowering contract、runtime helper ABI 与
+   GC slot 抽象(表示契约 §5.3)。「emitter 可离线运行」约束仅指 AOT 臂。
+3. **「静态轴不存在全死分支」修正**——Gate 1 含「JIT/AOT 两者均后置、
+   投入转产品能力」的合法出口;正确表述是「spike 证据决定是否建,而非
+   何时兑现」。
+4. **FNABI 里程碑引用更新**——FN-M1A 不等本计划 S1(只需最小 opcode
+   编码);FN-M1B←F1;FN-M1C←F2(FNABI v0.4 §33)。「S1 滑期连带
+   阻塞第三个计划」的风险随之收窄到 M1B/M1C。
+5. **Phase 0.5 时序**——不再先于 spike:动态反馈的立项证据由
+   **PERF-DYN-SPIKE**(roadmap v1.5)购买,0.5 挂 G1-JIT 之后,且
+   前置 SidecarCore 容器协议与 08-17 IC 否证对账。
 
 Review note（0.8 → 0.9）：**P2 eval CompilationCache 的 Octane 收益
 断言被基准源码证伪**——`tools/perf/bench_v8/suite/code-load.js:1510-1524`
@@ -81,10 +101,11 @@ Position: 本文是 [engine-evolution-plan.md](engine-evolution-plan.md) v0.4
 零预热）。两轴共享同一块基建（§4），静态轴的每一项都让动态轴的
 对应项变便宜或变得不必要。
 
-下游消费方（2026-08-25 注）：FNABI
-（[fun-native-plugin-design.md](fun-native-plugin-design.md) v0.3，
-2026-08-25 采纳）是 F1/F2/F4 与 T3 schema 的下游消费方，其里程碑
-M1 挂在本计划 S1 交付之后——S1 滑期会连带阻塞第三个计划。
+下游消费方（2026-08-26 更新）：FNABI
+（[fun-native-plugin-design.md](fun-native-plugin-design.md) v0.4）
+是 F1/F2/F4 与 T3 schema 的下游消费方。里程碑依赖已拆分:
+**FN-M1A 不等本计划**(仅需最小 opcode 编码);FN-M1B←F1;
+FN-M1C←F2——S1 滑期只阻塞 M1B/M1C,不再阻塞静态端到端链路。
 
 ---
 
@@ -420,10 +441,12 @@ apply 形态；v0.4 §2.4(c) bl 形态对照：现役冷契约 +10 cyc/冷事件
 v0.4 §7.2 已有条款）、typed↔untyped 边界互操作（复用 §2.2 L1 的
 边界检查设计——Static Hermes 经验中最难的部分，本方案的信任分级
 正是为此形状设计的）。AOT 比 JIT 模式更简单的部分：无 tiering/
-OSR/并发编译/运行时补丁。**emitter 共享说明**：v0.4 "解释器与 JIT
-不共享 emitter"的禁令是解释器↔JIT 之间的；JIT 与 AOT 是同一
-emitter 的两种驱动方式，不冲突——建议 Phase 2 立项时把"emitter
-可离线运行"列为设计约束。
+OSR/并发编译/运行时补丁。**emitter 共享说明(1.0 修订,头部 note 2 为准)**：v0.4 "解释器与
+JIT 不共享 emitter"的禁令是解释器↔JIT 之间的；~~JIT 与 AOT 是同一
+emitter 的两种驱动方式~~ **JIT 与 AOT 是两个 backend**——AOT 发 Zig
+源码交 zig/LLVM,baseline JIT 直接发机器码;只共享上游 typed IR、
+lowering contract、runtime helper ABI 与 GC slot 抽象。"emitter
+可离线运行"约束仅指 AOT 臂。
 
 **类型在 AOT 的兑现（对照解释器兑现）**：属性访问 = 一条带偏移
 load/store 机器指令；算术 = 未装箱 double 驻 FP 寄存器跨表达式
@@ -599,13 +622,11 @@ CodeLoad 类收益（无优化管线）。v0.7 的字节码优化管线估算
 **决策要点（0.8 修订）**：(1) P2 + T-spike + **N-spike** 合计
 ≤13 人日，先行——两个 spike 分别为解释器臂与原生臂定锚，主线
 量级以实测定稿；
-(2) 静态轴主投资（~40 人日）的开工条件放宽：AOT 已确认为方向 ⇒
-F3/F5（类型摄入 + shape 注册，~20 人日）**无论 spike 结果都要建**
-（AOT IR 基建），spike 只裁决 F4/T1 解释器形态那 ~20 人日的时序
-（过门=现在做，未过=价值后置到 Phase 2/AOT 期）；(3) fun 热路径
+(2) ~~静态轴主投资开工条件放宽:F3/F5 无论 spike 结果都要建~~
+**(1.0 收回:F3/F5 受 G1-AOT 约束,见头部 note 1)**;(3) fun 热路径
 typed 占比（owner 掌握）决定的不再是"做不做"而是"解释器期做多深"；
-(4) 静态轴不存在全死分支——最坏情形 = 解释器期收益为零，价值
-全部后置到 AOT/JIT 期兑现。
+(4) ~~静态轴不存在全死分支~~ **(1.0 修正:Gate 1 含两者均后置分支,
+见头部 note 3)**。
 
 ## 九、开放问题（owner 裁决项）
 

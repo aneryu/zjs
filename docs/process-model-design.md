@@ -1,6 +1,10 @@
 # zjs 进程模型设计(Erlang 风格多线程)
 
-版本:0.3  
+版本:0.4(roadmap v1.5 治理对齐:序列化改 SER-CORE+profile 术语,
+消除 PROC-D2 别名——同一工作项唯一 ID 为 SER-MESSAGE,本文 §13/§16.3
+的 D1/D2 引用相应映射:D1a=SER-CORE spec、D1b=SER-ARTIFACT、
+D2=SER-MESSAGE;三 profile 共享 Core 编码内核,header/兼容策略/生命
+周期语义各自独立——「一次设计两期交付」升级为「一次 Core、三 profile」)  
 日期:2026-08-26  
 状态:设计探索共识稿(两轮拷问 + Erlang×JS 适配性复审 + 跨方案对账 +
 **技术合理性评审**后的决策记录;不承诺实现排期)  
@@ -476,13 +480,17 @@ test262 agent 测试节(Atomics/SAB waiter)迁移到新机制跑(
 ### 16.3 交付依赖序(不承诺排期)
 
 ```
-D1 序列化框架 + 字节码器(=热更 W1,联合 typed plan)
-D2 SC 值器 + 三通道零拷贝            (依赖 D1 框架)
-D3 L0:跨 Runtime 投递 + 邮箱 + pid intern(依赖 D2;唤醒复用 AtomicsWaiter)
-D4 spawn/exit/link/monitor/call      (依赖 D3;闭包 spawn 依赖 D1)
-D5 N:M 调度池 + 预算 kill + per-thread Io
-D6 supervisor 库 + register/whereis  (依赖 D4)
-D7 轻进程                            (依赖 gc/tracing 合入 + §15;含 checkpoint)
+SER-CORE     序列化编码内核 spec(=D1a;三方评审)
+SER-ARTIFACT 字节码 artifact profile(=D1b,热更 W1)
+SER-MESSAGE  SC 值器 + 三通道零拷贝(=旧 D2;依赖 SER-CORE)
+PROC-D3 跨 Runtime 投递 + 邮箱 + pid intern(依赖 SER-MESSAGE;
+        唤醒复用 AtomicsWaiter;前置:契约弱引用注册表立项+
+        多 Runtime 验收面第二批)
+PROC-D4 spawn/exit/link/monitor/call(依赖 D3;闭包 spawn 依赖
+        SER-ARTIFACT + atom 重映射)
+PROC-D5 N:M 调度池 + 预算 kill + per-thread Io(无硬前置)
+PROC-D6 supervisor 库 + register/whereis(依赖 D4)
+PROC-D7 轻进程(依赖 gc/tracing 合入 + §15;含 checkpoint + 负载表)
 ```
 
 ## 17. 裁决总表

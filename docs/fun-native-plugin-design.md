@@ -1,8 +1,16 @@
 # Fun Native Plugin 技术设计
 
-版本：0.3  
-日期：2026-08-25  
-状态：评审修订版（对账 2026-08-25 评审四裁决）；完成 M0 后冻结 FNABI v1  
+版本：0.4（第一批：M1 里程碑纵向拆分,与 roadmap v1.5 对齐）  
+日期：2026-08-26  
+状态：评审修订版；完成 M0 后冻结 FNABI v1。**v0.4 第一批修订**:§33 的
+M1 拆为 M1A/M1B/M1C(见该节),消除「M1 整体硬依赖 F1/F2/F4」——M1A
+静态直调不需要 per-site 侧表,更早取得 plugin/builtin 同 NativeEntry 的
+端到端证明。全局工作项 ID:FN-M0/FN-M1A/FN-M1B/FN-M1C/FN-M2..M6
+(FN-M2 起对应本文 M2-M6 原编号)。**v0.4 剩余批次(开放欠账,见
+process-model-design.md §20.2/§20.2a)**:class id 分配规则新章、无在飞
+资源快速销毁路径与 finalizer 三态、循环事件通道原语(tsfn 对应物)、
+外部内存计价必填、§18.1 handle-scope 留门措辞、§22.7 side-by-side
+启用前提清单、epoch 作用域条款。  
 适用范围：fun runtime、zjs VM、Fun Native ABI、Zig Native SDK、native package 构建与分发体系  
 规范性引用：[vm-value-representation-contract.md](vm-value-representation-contract.md)（v1，normative）、[type-directed-optimization-plan.md](type-directed-optimization-plan.md)（v0.8）、[engine-evolution-plan.md](engine-evolution-plan.md)、[runtime-plugin-abi.md](runtime-plugin-abi.md)（deprecated，见 §28.1）
 
@@ -2969,18 +2977,34 @@ Zig SDK：
 - ABI 兼容规则和 v1 freeze decision 通过评审。
 - 不允许在 M0 前发布第三方可依赖的 FNABI v1。
 
-### M1：最小静态端到端链路
+### M1：最小静态端到端链路(v0.4 拆为 M1A/M1B/M1C)
 
-前置（0.3）：type-directed S1 交付物就绪——F1 shape identity（method guard 与纪元验证的依据）、F2/Phase 0.5 侧表（quicken 站点载体）、F4 opcode 空间方案（`CALL_NATIVE_*` 家族的编码位置）。
+v0.3 曾把 M1 整体前置于 type-directed S1(F1+F2+F4 全就绪)。v0.4
+按需求实质拆三段——三种 export 对基建的依赖不同,不应互相等待:
 
-目标：不做动态库/CAS，先证明 builtin/plugin 执行边界一致。
+**M1A(FN-M1A)静态 NativeEntry 端到端**——`add(i32,i32)->i32` 与
+`managedCreateObject()->object`。**只依赖最小 opcode 编码方案**
+(`CALL_NATIVE_*` 的编码位置),不需要 F1 shape identity、不需要
+F2/Phase 0.5 侧表。这是第一个「plugin 与 builtin 走同一 NativeEntry」
+的端到端证明,可与 typed 主线并行。
 
-实现三个 export：
+**M1B(FN-M1B)NativeClass 方法**——`World.step(f64)->void`。
+依赖 **F1 shape identity**(method guard 与纪元验证的依据)。
+
+**M1C(FN-M1C)动态 call quickening**——依赖 **F2/Phase 0.5 侧表**
+(quicken 站点载体)。M1A/M1B 的静态直调不经此路径。
+
+依赖边:`FN-M0 → FN-M1A → FN-M1B → FN-M1C`(交付序);硬依赖仅
+`F1 → FN-M1B`、`F2 → FN-M1C`。
+
+目标不变:不做动态库/CAS,先证明 builtin/plugin 执行边界一致。
+
+三个 export:
 
 ```text
-add(i32, i32) -> i32
-managedCreateObject() -> object
-World.step(f64) -> void
+add(i32, i32) -> i32          (M1A)
+managedCreateObject() -> object   (M1A)
+World.step(f64) -> void       (M1B)
 ```
 
 zjs：

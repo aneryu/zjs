@@ -1,9 +1,13 @@
 # fun / zjs Hot Reload 与开发时更新系统设计
 
-版本：1.3  
+版本：1.4（roadmap v1.5 治理对齐:冻结项 21 修订为 SER-CORE+profile 模型）  
 日期：2026-08-26  
-状态：对抗性复审修订版（实现对账 + owner 裁决 + 三路对抗评审）  
-替代版本：1.2  
+状态：对抗性复审修订版（实现对账 + owner 裁决 + 三路对抗评审 + 序列化
+条款同步——冻结项 21、§27.10、§37 W1 的「同一交付物」表述统一改指
+SER-ARTIFACT profile,详见冻结项 21 v1.4 注;其余 v1.4 欠账仍开放,
+见 process-model-design.md §20.2/§20.2a:state 默认值、
+save-to-restored-state 指标、fire-and-forget 警示、A.11 接管等）  
+替代版本：1.3  
 涉及组件：fun、zjs、zabel、Native Plugin、CDP Inspector  
 目标读者：fun/zjs 核心开发者、图形运行时开发者、Native Plugin 开发者
 
@@ -42,7 +46,7 @@ v1.2 将设计与 zjs `main`（`bce28d11`）的实现现状逐项对账，并由
 |---|---|---|
 | Shadow Swap 的 JS 线程模型 | **v1 砍掉 Guarded Shadow Swap** | 整章移入附录 A（未来工作，未冻结）；线程模型裁决推迟到有真实需求时；v1 主线只保留 Fast Refresh / HMR / Sequential Reload / Worker Restart 四层 |
 | §26 与 FNABI v0.3 的关系 | **并入 FNABI** | plugin 生命周期以 `docs/fun-native-plugin-design.md`（FNABI v0.3）§22 为权威规范；本文只定义映射与增量；candidate_mode 等增量作为 FNABI v0.4 议题（附录 A） |
-| bytecode 序列化器 | **显式交付物 + 与 typed plan 联合设计** | v1 每次 Reload 付全量 re-parse + re-compile；heap-independent artifact 为独立工作项 W1，序列化格式与 type-directed plan 的离线 emitter 输出联合设计（同一交付物） |
+| bytecode 序列化器 | **显式交付物 + 与 typed plan 联合设计** | v1 每次 Reload 付全量 re-parse + re-compile；heap-independent artifact 为独立工作项 W1，序列化格式与 type-directed plan 的离线 emitter 输出联合设计（~~同一交付物~~ **v1.4 修订为 SER-CORE+profile 模型,见冻结项 21 注**） |
 | CDP Inspector | **移出阶段 1，列独立工作项** | 阶段 1 MVP 不含 debugger；「zjs 最小 CDP backend」为独立工作项 W2，阶段 6 依赖之 |
 
 **引擎现状对账要点（zjs main@`bce28d11`）：**
@@ -1893,7 +1897,7 @@ structuredDeserialize(bytes) JSValue
 
 现状：`FunctionBytecode` 内嵌 Realm 引用与 `JSValue` 常量池，atom id 编码在指令流内；引擎不存在任何 write/read 格式。
 
-裁决（v1.2）：heap-independent bytecode artifact 作为独立工作项 W1，**序列化格式与 type-directed plan 的离线 emitter 输出联合设计，是同一交付物**，禁止出现两种互不兼容的落盘格式。
+裁决（v1.2,**v1.4 修订**）：heap-independent bytecode artifact 作为独立工作项 W1(全局 ID SER-ARTIFACT),~~与离线 emitter 输出同一交付物~~ 按 SER-CORE+profile 模型交付——共享 Core 编码内核,profile 独立;typed 侧对接物=typed plan §10.5 容器清单(其离线 emitter 是 Zig 源码路线,非序列化格式)。禁止不共享 Core 的第二套编码体系。详见冻结项 21 v1.4 注。
 
 W1 落地前：
 
@@ -2369,7 +2373,7 @@ abi_change = "worker-restart"
 
 **W1：bytecode 序列化器**
 
-- heap-independent artifact 格式，与 type-directed plan 的离线 emitter 输出**联合设计，同一交付物**。
+- heap-independent artifact 格式(SER-ARTIFACT profile,挂 SER-CORE 编码内核;v1.4 修订,见冻结项 21 注)。
 - 落地后接入 DevCoordinator Build Cache 的 bytecode 层，并使 §12.1 的 compile 前移成为可能。
 - 阻塞项：无（v1 全量重编译可用）；但 save-to-first-frame 目标的达成大概率依赖它。
 
@@ -2569,7 +2573,7 @@ abi_change = "worker-restart"
 18. 所有异步 callback 携带 Session、Epoch 和 Scope——**方向冻结**；生产构建的每 job 元数据与检查的实现形态走 PERF-MECHANISM-LEDGER，A/B 定价后冻结。定价失败的降级形态：开发构建完整元数据，生产构建保留 Session 存活性验证所需的最小 owner 标记（§3.2 条 1/2 的硬前提，不可移除）。
 19. stale completion 必须完成 native cleanup。
 20. 生产同步 builtin path 不增加 reload branch。
-21. **bytecode 序列化格式与 type-directed plan 离线 emitter 输出为同一交付物**，不做两种落盘格式。
+21. ~~bytecode 序列化格式与 type-directed plan 离线 emitter 输出为同一交付物,不做两种落盘格式~~ **(v1.4 修订)**:序列化按 roadmap v1.5 的 **SER-CORE + profile** 模型——W1 的 artifact 格式是 **SER-ARTIFACT profile**,与 SER-SNAPSHOT(本文 §27.9/§15)、SER-MESSAGE(进程模型)共享 SER-CORE 编码内核(framing/section directory/atom 表原语/图遍历/版本空间/fuzz 基建),但各 profile 的 header、兼容策略与生命周期语义独立。禁止的是**不共享 Core 的第二套编码体系**,不是 profile 差异。typed plan 的「离线 emitter 输出」经 1.0 修订为 Zig 源码路线,不是序列化格式;artifact 的 typed 侧对接物是其 §10.5 容器清单。
 22. **CDP backend 为独立工作项 W2**，不进入阶段 1 MVP。
 23. Sequential init 失败同一 Update 最多自动重试一次。
 

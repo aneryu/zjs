@@ -1,11 +1,21 @@
 # zjs 高性能执行引擎演进方案
 
-Version: 0.4(评审定稿)
-Date: 2026-08-24
-Status: approved-with-conditions — Phase 0 与 Phase 0.5(附宪章条件)批准
-立即执行;Phase 1-Z 附预门槛条件批准;Phase 1A 维持规划项(门槛已修订);
-Phase 2+ 待 Phase 0 证据后批准。批准条件见 §5.6 与 §14。
-前版:0.1(架构建议稿,聊天存档);0.2(初版);0.3(评审修订稿,同日)
+Version: 0.5(roadmap v1.5 治理对齐)
+Date: 2026-08-26
+Status: approved-with-conditions — **Phase 0 批准立即执行**;
+**Phase 0.5 的批准状态修订(0.5)**:不再「立即执行」——动态反馈的
+立项证据由 roadmap 的 **PERF-DYN-SPIKE** 购买(最小 per-site
+feedback/单态臂/二态 PIC 臂,disposable 侧表),经 **G1-JIT** 裁决后
+方开工,且前置两项:SidecarCore 容器协议 spec(四方评审)与
+**08-17 IC 否证对账**(「快臂已 2-3 cyc、旁挂缓存付不起 miss 税」与
+08-25 op_get_field 哈希探测归因两轮证据的显式和解——回答反馈槽+侧车
+形态为何不重蹈否证);Phase 1-Z 附预门槛条件批准(已搁置直通
+Phase 2);Phase 1A 维持规划项;Phase 2+(baseline JIT)与原生 AOT
+为**两个 backend 的分叉**(共享上游 IR/lowering/helper ABI/GC slot
+抽象,不共享 emitter),先后由 roadmap Gate 1(G1-JIT/G1-AOT)裁决;
+baseline JIT 的硬输入是 canonical bytecode+动态反馈+VM 执行 ABI
+(PERF-VMABI),typed metadata 仅为可选增强。批准条件见 §5.6 与 §14。
+前版:0.1-0.3;0.4(评审定稿,2026-08-24)
 
 Review note(0.3 → 0.4):吸收 2026-08-24 dispatch 重验战役的四组实测
 证据与源码核查,三项实质修正。其一,**§2.1 立项事实勘误**:热 JS→JS
