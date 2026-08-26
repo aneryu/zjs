@@ -182,7 +182,7 @@ items:
     state: now
     wip_slot: decision
     hard_prerequisites: []
-    notes: consumers = FN-M1A, PERF-T1, CALL_NATIVE_*/typed families, SER-ARTIFACT opcode versioning
+    notes: "consumers = FN-M1A, PERF-T1, CALL_NATIVE_*/typed families, SER-ARTIFACT opcode versioning. Survey landed 2026-08-27 (docs/perf/opcode-space-survey.md, four engines read from local source): zjs is at 254/256 ids, the most crowded of the five, and the wall already bit (the T-spike prototype could claim only one id, so property writes stayed generic). Key correction to this item own framing: V8/JSC prefix planes extend OPERAND WIDTH, not numbering, and cost an extra indirect jump plus tripled handlers. Measured census: 152 of 254 ids are held by opcodes outside every benchmark top-40; the typed family needs 20-40"
     authority: {file: docs/type-directed-optimization-plan.md, section: "F4 / opcode space"}
   - id: PERF-SHAPE-ID
     title: Shape identity dual-domain contract (mutable u64 per-Runtime counter; pinned-pointer for immutable typed shapes)
