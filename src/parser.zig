@@ -11076,7 +11076,7 @@ pub const parser_core = struct {
         if (s.in_constructor and s.class_has_extends) {
             if (value_on_stack) {
                 // qjs emit_return derived constructor (quickjs.c:28453-28472): if_false skips this substitution.
-                try Emitter.op(s, opcode.op.check_ctor_return);
+                try Emitter.opU8(s, opcode.op.using, opcode.using_sub.check_ctor_return);
                 var return_value: Label = .{};
                 try Emitter.newLabel(s, &return_value);
                 try Emitter.jump(s, opcode.op.if_false, &return_value);

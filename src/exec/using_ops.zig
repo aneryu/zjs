@@ -14,6 +14,7 @@ const stack_mod = @import("stack.zig");
 const call_runtime = @import("call_runtime.zig");
 const disposable_ops = @import("disposable_ops.zig");
 const promise_ops = @import("promise_ops.zig");
+const vm_call = @import("vm_call.zig");
 const vm_value = @import("vm_value.zig");
 
 pub const Step = enum {
@@ -85,6 +86,12 @@ pub noinline fn execVm(
         bytecode.opcode.using_sub.create => createStackVm(ctx, global, stack, frame, catch_target, output),
         bytecode.opcode.using_sub.dispose => disposeStackVm(ctx, output, global, stack, frame, catch_target, .normal),
         bytecode.opcode.using_sub.dispose_throw => disposeStackVm(ctx, output, global, stack, frame, catch_target, .throw),
+        // Cold-plane reclamation (opcode-space survey §7): zero executions
+        // in the benchmark suite, so the second-level branch is free.
+        bytecode.opcode.using_sub.check_ctor_return => {
+            _ = try vm_call.checkCtorReturnVm(ctx, output, stack, frame, catch_target, global);
+            return .done;
+        },
         bytecode.opcode.using_sub.is_undefined => {
             try vm_value.isUndefined(ctx.runtime, stack);
             return .done;

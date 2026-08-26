@@ -696,11 +696,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             _ = try vm_call.checkCtorVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global);
         }
     }.b);
-    t[op.check_ctor_return] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try vm_call.checkCtorReturnVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global);
-        }
-    }.b);
     t[op.init_ctor] = h(struct {
         fn b(vm: *Vm) HostError!void {
             _ = try vm_call.initCtorVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);

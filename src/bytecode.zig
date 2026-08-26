@@ -147,7 +147,6 @@ pub const opcode = struct {
         pub const apply: u8 = 39;
         pub const @"return": u8 = 40;
         pub const return_undef: u8 = 41;
-        pub const check_ctor_return: u8 = 42;
         pub const check_ctor: u8 = 43;
         pub const init_ctor: u8 = 44;
         pub const check_brand: u8 = 45;
@@ -443,7 +442,18 @@ pub const opcode = struct {
         pub const rot4l: u8 = 12;
         pub const dup3: u8 = 13;
         pub const dup1: u8 = 14;
-        pub const add_base: u8 = 16;
+
+        /// Cold-plane reclamations (2026-08-27, opcode-space reclaim). These
+        /// opcodes execute 0 times in 41.9 billion across the benchmark suite;
+        /// they pay a second-level branch they will never notice, and hand
+        /// their first-class ids to the typed family. See
+        /// docs/perf/opcode-space-survey.md §7.
+        pub const check_ctor_return: u8 = 15;
+
+        /// Add-resource hints occupy everything from here up, so the free
+        /// sub-slots are the gap below it. Raised from 16 to 64 to open that
+        /// gap (encoding is internal to a single compilation).
+        pub const add_base: u8 = 64;
 
         pub fn add(hint: u8) u8 {
             return add_base + hint;
@@ -471,6 +481,7 @@ pub const opcode = struct {
                 rot3r => 3,
                 dup3 => 3,
                 dup1 => 2,
+                check_ctor_return => 1,
                 else => 0,
             };
         }
@@ -487,6 +498,7 @@ pub const opcode = struct {
                 rot3r => 3,
                 dup3 => 6,
                 dup1 => 3,
+                check_ctor_return => 2,
                 else => 0,
             };
         }
@@ -539,7 +551,7 @@ pub const opcode = struct {
         .{ .name = "apply", .size = 3, .n_pop = 3, .n_push = 1, .fmt = .u16 }, // [39] id 39
         .{ .name = "return", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none }, // [40] id 40
         .{ .name = "return_undef", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [41] id 41
-        .{ .name = "check_ctor_return", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [42] id 42
+        .{ .name = "unused_42", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [42] id 42 -- RECLAIMED 2026-08-27, available
         .{ .name = "check_ctor", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [43] id 43
         .{ .name = "init_ctor", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [44] id 44
         .{ .name = "check_brand", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [45] id 45

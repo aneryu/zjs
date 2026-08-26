@@ -320,3 +320,68 @@ second-level branch those opcodes will never notice.
 Do the families whole. Per-opcode cherry-picking is where a demotion of
 something warm would slip in — the `call_constructor` finding above is the
 proof that group-level numbers are not enough on their own.
+
+---
+
+# 8. Implementation plan (approved 2026-08-27) and status
+
+## 8.1 Mechanism: extend the existing `using` cold plane
+
+zjs already has the carrier. `using` (id 244, fmt `.u8`, size 2) has a
+sub-opcode byte and `using_sub` has already absorbed 14 cold opcodes. Two
+facts make it the right vehicle:
+
+- `pipeline_stack_size` **already** handles a carrier whose stack effect
+  depends on its sub-byte (`if (op == opcode.op.using)` → `using_sub.stackPop/
+  stackPush`). That was the one place in the engine that reads n_pop/n_push
+  by opcode id, so no new mechanism is needed.
+- `using_ops.execVm` already switches on the sub-byte in the cold shell, and
+  every demotion target is **cold-shell-only today** — none has a resident
+  fast handler to give up.
+
+`add_base` was raised from 16 to 64, opening sub-slots 15..63 (49 free) for
+reclamations. The sub encoding is internal to a single compilation, so this
+is not an artifact-format change.
+
+**Constraint discovered during design**: a carrier can only absorb opcodes
+that share `(size, fmt)`, because `Info.size` must stay a pure table lookup
+(every decoder, atom scanner, validator and disassembler depends on that).
+The stack effect does *not* constrain it, thanks to the sub-table above. In
+the target set, 17 opcodes share `(size=1, fmt=none)` — that is the bulk and
+the first wave.
+
+## 8.2 Per-opcode procedure (two steps, verifiable between)
+
+**Step A — stop emitting the opcode (id still allocated):**
+1. add `pub const <op>: u8 = <free sub>;` to `using_sub`
+2. add its `stackPop` / `stackPush` arms, copying n_pop/n_push from the
+   opcode's `opcode_info` row
+3. add a `using_ops.execVm` switch arm calling the same function the cold
+   handler called
+4. rewrite emit sites: `Emitter.op(s, op.X)` → `Emitter.opU8(s, op.using,
+   using_sub.X)`; `builder.emitOp(op.X)` → `builder.emitOpU8(op.using,
+   using_sub.X)`
+5. `zig build test` — any test that asserts the old encoding fails here, and
+   the failure names itself
+
+**Step B — free the id:**
+6. delete `pub const X: u8 = N;` from `op`
+7. rename the `opcode_info` row to `unused_N` (size 1, pop 0, push 0, fmt
+   none) — the row must stay so table indices do not shift
+8. delete the `t[op.X]` cold-table entry
+9. `zig build test`
+
+## 8.3 Status
+
+| wave | opcodes | ids freed | state |
+|---|---|---|---|
+| pilot | `check_ctor_return` | 42 | **done, 2364/0 green** |
+| 1 | remaining 14 of `class/private/super` (`check_ctor`, `init_ctor`, `add_brand`, `check_brand`, `get_super`, `get_super_value`, `put_super_value`, `set_home_object`, `set_proto`, `set_name_computed`, `get_private_field`, `put_private_field`, `define_private_field`, `private_in`) | ~14 | next |
+| 2 | `get_ref_value`, `put_ref_value` + Tier A retirements (`nip1`, `put_loc0_get_loc0`) | ~4 | after wave 1 |
+| 3 | second carrier for `(size=3, fmt=var_ref)` — 5 ops; third for `(size=10, fmt=atom_label_u8)` — the `with_*` family, 5 ops | ~8 | reserve |
+
+The pilot ran clean on the first attempt with no test churn, which is the
+signal that the procedure is right: nothing in the suite asserted that
+opcode's encoding, and the cold shell took the sub-arm unchanged.
+
+`call_constructor` is excluded from every wave (§7.5).
