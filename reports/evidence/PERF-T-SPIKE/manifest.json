@@ -1,0 +1,191 @@
+{
+ "manifest_version": 1,
+ "work_item": "PERF-T-SPIKE",
+ "date": "2026-08-26",
+ "commits": {
+  "zjs_main_baseline": {
+   "commit": "177bd2e6",
+   "dirty": false,
+   "note": "main HEAD at build time"
+  },
+  "spike_prototype": {
+   "commit": "967cabc3",
+   "dirty": false,
+   "ref": "spike/perf-t"
+  }
+ },
+ "binary_sha256": {
+  "base_main": {
+   "path": "/home/aneryu/zjs-frozen/tspike-2026-08-26/zjs-base-main",
+   "sha256": "d3695191fc30af6824c05c0fa5db027f7a89bf323e2e9ce56cde67537d3ec736",
+   "recipe": "main @177bd2e6, zig build zjs -Doptimize=ReleaseFast"
+  },
+  "spike_u64": {
+   "path": "/home/aneryu/zjs-frozen/tspike-2026-08-26/zjs-spike-u64",
+   "sha256": "f377827ca5c2f9365d37d557015c806aed645d3d07e371006d554069ccda13ca",
+   "recipe": "spike/perf-t @967cabc3, -Doptimize=ReleaseFast -Dzjs_tspike_guard=u64"
+  },
+  "spike_ptr": {
+   "path": "/home/aneryu/zjs-frozen/tspike-2026-08-26/zjs-spike-ptr",
+   "sha256": "257a4b92065bfdf8ead8a7dbd376c9a7668ad31e29e30b54c97ff4f3a5e30050",
+   "recipe": "spike/perf-t @967cabc3, -Doptimize=ReleaseFast -Dzjs_tspike_guard=ptr"
+  }
+ },
+ "toolchain": {
+  "zig": "0.16.0"
+ },
+ "policy_sha256": {
+  "policies/spikes/perf-t-spike-v1.json": "ba1619ec28cc920766216f5c1d2f012c4c888973477e2ee2cab532a05a81fcc9"
+ },
+ "host": {
+  "os": "Linux 6.17.0-1014-nvidia aarch64",
+  "cpu_pin": "19 (armv8_pmuv3_1)",
+  "official_run_conditions": "host quiet (only idle daemons); host lock held; a second session's measurement queued behind the lock, confirming serialization",
+  "directional_run_conditions": "a concurrent compile was running (load ~1.65); kept as a reproducibility check, not as the gate reading"
+ },
+ "command": [
+  "ZJS_MEASUREMENT_LOCK=... flock -x /tmp/zjs-host-heavy.lock taskset -c 19 python3 tools/perf/tspike/run_tspike_ab.py --base <base> --spike-u64 <u64> --spike-ptr <ptr> --samples 8 --cpu 19"
+ ],
+ "raw_artifacts": [
+  {
+   "path": "reports/evidence/PERF-T-SPIKE/tspike-ab-official.json",
+   "sha256": "afaca59a6821df82ae0b0300d9fcebf5eb8235c9380d96ed0e9da46d8596d8fa",
+   "note": "gate reading, quiet host"
+  },
+  {
+   "path": "reports/evidence/PERF-T-SPIKE/tspike-ab-directional.json",
+   "sha256": "258a63fc85451b8cf1ca3e1f587479afe5a10b952a9305076641ce9bd5e4a1e6",
+   "note": "independent repeat under a concurrent compile; reproduces the gate reading"
+  },
+  {
+   "path": "reports/evidence/PERF-T-SPIKE/run_tspike_ab.py",
+   "sha256": "4c2cb333b9261cd432c53b65be10728ac21bf436babea935203b5c4a7c5d40be",
+   "note": "harness"
+  }
+ ],
+ "arms": {
+  "A base": "main ReleaseFast",
+  "B binctl": "spike build, feature off (binary-layout delta)",
+  "C fusectl": "spike build, ZJS_TSPIKE=fuseoff (fusion loss only)",
+  "D u64": "spike build, ZJS_TSPIKE=1, u64 identity guard",
+  "E ptr": "spike build (ptr guard), ZJS_TSPIKE=1, pinned-pointer guard"
+ },
+ "result": {
+  "primary_metric": {
+   "definition": "own-slot mechanism effect, fusion-neutral = D/C on own_slot.js (fixed work, paired ABBA, 8 samples)",
+   "value": 0.9625,
+   "as_speedup_percent": 3.9,
+   "policy_minimum_effect_percent": 8.0,
+   "verdict_vs_kill_line": "BELOW the +8% kill line"
+  },
+  "official_ratios": {
+   "own_slot": {
+    "mechanism_u64_over_fusectl": 0.9625,
+    "mechanism_ptr_over_fusectl": 0.964,
+    "endtoend_u64_over_base": 0.9777,
+    "endtoend_ptr_over_base": 0.9792,
+    "binary_delta_binctl_over_base": 1.0014,
+    "fusion_cost_fusectl_over_binctl": 1.0143,
+    "insn_u64_over_fusectl": null,
+    "cycles_u64_over_fusectl": null
+   },
+   "proto_slot": {
+    "mechanism_u64_over_fusectl": 0.9827,
+    "mechanism_ptr_over_fusectl": 0.9832,
+    "endtoend_u64_over_base": 0.9835,
+    "endtoend_ptr_over_base": 0.984,
+    "binary_delta_binctl_over_base": 1.0012,
+    "fusion_cost_fusectl_over_binctl": 0.9995,
+    "insn_u64_over_fusectl": null,
+    "cycles_u64_over_fusectl": null
+   },
+   "poly_stress": {
+    "mechanism_u64_over_fusectl": 1.0652,
+    "mechanism_ptr_over_fusectl": 1.0602,
+    "endtoend_u64_over_base": 1.0696,
+    "endtoend_ptr_over_base": 1.0647,
+    "binary_delta_binctl_over_base": 1.0023,
+    "fusion_cost_fusectl_over_binctl": 1.0018,
+    "insn_u64_over_fusectl": null,
+    "cycles_u64_over_fusectl": null
+   },
+   "untyped_control": {
+    "mechanism_u64_over_fusectl": 1.0004,
+    "mechanism_ptr_over_fusectl": 1.024,
+    "endtoend_u64_over_base": 1.0571,
+    "endtoend_ptr_over_base": 1.0821,
+    "binary_delta_binctl_over_base": 1.067,
+    "fusion_cost_fusectl_over_binctl": 0.9904,
+    "insn_u64_over_fusectl": null,
+    "cycles_u64_over_fusectl": null
+   }
+  },
+  "directional_repeat_ratios": {
+   "own_slot": {
+    "mechanism_u64_over_fusectl": 0.9616,
+    "mechanism_ptr_over_fusectl": 0.964,
+    "endtoend_u64_over_base": 0.9784,
+    "endtoend_ptr_over_base": 0.9808,
+    "binary_delta_binctl_over_base": 1.0024,
+    "fusion_cost_fusectl_over_binctl": 1.0151,
+    "insn_u64_over_fusectl": null,
+    "cycles_u64_over_fusectl": null
+   },
+   "proto_slot": {
+    "mechanism_u64_over_fusectl": 0.9837,
+    "mechanism_ptr_over_fusectl": 0.9843,
+    "endtoend_u64_over_base": 0.9832,
+    "endtoend_ptr_over_base": 0.9837,
+    "binary_delta_binctl_over_base": 1.0003,
+    "fusion_cost_fusectl_over_binctl": 0.9992,
+    "insn_u64_over_fusectl": null,
+    "cycles_u64_over_fusectl": null
+   },
+   "poly_stress": {
+    "mechanism_u64_over_fusectl": 1.0659,
+    "mechanism_ptr_over_fusectl": 1.0661,
+    "endtoend_u64_over_base": 1.0678,
+    "endtoend_ptr_over_base": 1.068,
+    "binary_delta_binctl_over_base": 1.0016,
+    "fusion_cost_fusectl_over_binctl": 1.0002,
+    "insn_u64_over_fusectl": null,
+    "cycles_u64_over_fusectl": null
+   },
+   "untyped_control": {
+    "mechanism_u64_over_fusectl": 0.9953,
+    "mechanism_ptr_over_fusectl": 1.004,
+    "endtoend_u64_over_base": 1.0463,
+    "endtoend_ptr_over_base": 1.0555,
+    "binary_delta_binctl_over_base": 1.054,
+    "fusion_cost_fusectl_over_binctl": 0.9974,
+    "insn_u64_over_fusectl": null,
+    "cycles_u64_over_fusectl": null
+   }
+  },
+  "max_cv_by_bench": {
+   "own_slot": 0.0030733155552396855,
+   "proto_slot": 0.04959873136208322,
+   "poly_stress": 0.01171886795580419,
+   "untyped_control": 0.029380715634101634
+  },
+  "findings": [
+   "Own-slot: removing the entire per-access probe chain (shape -> mask -> prop_size -> bucket -> Property -> atom compare) buys only 3.8% -- the baseline fast arm was already too cheap for the probe to be the cost centre. Consistent with the 2026-08-17 IC refutation (fast arm already 2-3 cyc).",
+   "Guard arms are indistinguishable: u64 identity 0.963 vs pinned pointer 0.964 (own-slot). The extra identity load costs nothing measurable, so the SOUND u64 identity can be used everywhere -- a direct input to PERF-SHAPE-ID, which had reserved pinned-pointer guards for immutable typed shapes on cost grounds.",
+   "Polymorphic sites REGRESS 6.5% (poly_stress D/C 1.065): on an alternating-shape site the guard never hits, so every access pays guard + miss + generic fallback. The monomorphic win is smaller than the polymorphic loss.",
+   "Proto (method-read) sites gain only 1.7% (D/C 0.983) despite the double guard replacing a full chain walk.",
+   "Untyped controls are mechanism-neutral (D/C 1.000) but the spike BINARY is 6.7% slower there (B/A 1.067) purely from code layout -- the known layout lottery. This is why the fusion-neutral D/C ratio, not end-to-end D/A, is the honest mechanism reading."
+  ],
+  "prototype_biases_acknowledged": [
+   "Writes keep the generic path (only opcode 254 was claimable), so own_slot's 3 writes per body are unspecialized: the measured win is a conservative lower bound.",
+   "Site capture happens on the first cold visit; steady state is guard + load with no side table.",
+   "Resident handler verified leaf (no prologue), matching baseline op_get_field, after an earlier draft that would have under-priced the mechanism."
+  ]
+ },
+ "correctness_gates": {
+  "zig build test": "2364 passed / 0 failed on spike/perf-t, matching main exactly",
+  "checksum_equivalence": "all four workloads produce byte-identical output across all five arms",
+  "guard_soundness": "no guard-free own-slot access exists in the prototype; every access is guarded or falls back"
+ },
+ "verdict": "FAIL vs the frozen minimum_effect: own-slot +3.8% < +8%. Per policy: the interpreter-level static-property bet is dead; the static axis survives as typed FFI + backend (JIT/AOT) input. G1-TYPED is the owner's gate call.",
+ "owner_decision": null
+}

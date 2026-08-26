@@ -71,7 +71,7 @@ items:
     title: "Typed interpreter verdict after T-spike"
     type: gate
     verdicts: [implement, ir_only, pause]
-    state: blocked
+    state: ready
     wip_slot: none
     hard_prerequisites: [PERF-T-SPIKE]
     authority: {file: docs/roadmap.md, section: "2"}
@@ -130,9 +130,11 @@ items:
   - id: PERF-T-SPIKE
     title: Typed-slot interpreter benefit spike (polymorphic arm; u64 vs pinned-pointer guard arms)
     type: spike
-    state: now
-    wip_slot: implementation
-    notes: "started 2026-08-26 by owner order; the two basis=proposed policy thresholds (untyped-controls geomean cap 1.005; hard stop 5 person-days) were ratified with the start order. Prototype quarantined to branch spike/perf-t; the official A/B queues behind any G2 measurement"
+    state: done
+    wip_slot: none
+    completion_commit: pending-this-commit
+    evidence: reports/evidence/PERF-T-SPIKE/manifest.json
+    notes: "ran 2026-08-26 (same day). Result: own-slot mechanism effect +3.8% (fusion-neutral D/C 0.963), BELOW the frozen +8% kill line; polymorphic sites regress 6.5%; both guard arms indistinguishable (u64 0.963 vs pinned-ptr 0.964). Prototype on spike/perf-t, suite 2364/0. Feeds G1-TYPED"
     activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
     acceptance_policy: {path: policies/spikes/perf-t-spike-v1.json, status: frozen}
