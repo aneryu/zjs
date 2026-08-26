@@ -255,3 +255,68 @@ about, on evidence drawn from workloads that do not represent it.
 - Encoding-version policy and the shared generator for the four consumers
   (compiler / disassembler / serializer / future JIT) remain open and are
   unaffected by this ruling.
+
+## 7.5 How much can we reclaim? (family analysis, 2026-08-27)
+
+Asked after the ruling: is the pool bigger than the 20-40 the typed family
+needs? Yes — but only after one correction that the group-level numbers hid.
+
+**Family view of the whole 256-id space** shows the read/write asymmetry in
+closure variables: `get_var_ref*` (5 ids) is 4.46% of all executions, while
+`put_var_ref*` (5 ids) is 0.000%. Reads of captured variables dominate
+writes by four orders of magnitude.
+
+**The correction**: the `class/private/super` group looked like 0.063% of
+executions, which would have been too warm to demote. Per-opcode it is one
+opcode:
+
+```
+call_constructor         26,593,289   0.06349%
+define_method                    39   0.00000%
+private_symbol / check_ctor / init_ctor / check_brand / add_brand /
+get_super / define_class / set_home_object / set_proto / ...   ALL ZERO
+```
+
+`call_constructor` is 26,593,289 of the group's 26,593,328. Demoting it
+would put a second-level branch on every `new X()` — exactly the shape
+typed OO workloads are made of. It is excluded; the other 20 are free.
+
+**Wide-vs-short variants** are a second seam. Some wide forms are cold while
+their short twin is hot, and only the cold one is a candidate:
+
+| cold (demotable) | hot (keep) |
+|---|---|
+| `push_const` 25,524 | `push_const8` 9,550,185 |
+| `fclosure` 10,557 | `fclosure8` 2,642,022 |
+| `call` 1,144,018 | `call1` 48,048,859 |
+
+But not all wide forms are cold — `get_loc` (266M), `put_loc` (180M),
+`get_arg` (128M), `get_var_ref` (242M) are alive and stay.
+
+**Safe demotable pool, after the corrections:**
+
+| family group | ids | executions | share |
+|---|---|---|---|
+| with / eval / ref machinery | 20 | 560 | 0.0000000% |
+| class / private / super (minus `call_constructor`) | 20 | 39 | 0.0000000% |
+| var_ref write side | 8 | 1,151,868 | 0.0027% |
+| stack shuffles + cold wide variants + misc | 36 | 102,925 | 0.0002% |
+| **total** | **84** | | **all <= 0.003%** |
+
+Plus Tier A retirements (`put_loc0_get_loc0`, `nip1`).
+
+**One plane id carries 256 sub-slots**, so demoting 84 opcodes behind a
+single id nets **83 free ids**. There is no mechanism reason to be timid
+about the count; the cost is engineering effort per demoted opcode plus a
+second-level branch those opcodes will never notice.
+
+## 7.6 Staged plan
+
+| phase | scope | ids freed | why |
+|---|---|---|---|
+| 1 | Tier A retirements + `with/eval/ref` family + `class/private/super` family | ~42 | Unblocks the typed family (needs 20-40) on its own. Both families are whole-family moves, which is far less error-prone than per-opcode surgery, and both are at 0.0000000% |
+| 2 | var_ref write side + stack shuffles + cold wide variants | ~44 | Reserve for FNABI `CALL_NATIVE_*`, SER-ARTIFACT versioning, and whatever the backends need |
+
+Do the families whole. Per-opcode cherry-picking is where a demotion of
+something warm would slip in — the `call_constructor` finding above is the
+proof that group-level numbers are not enough on their own.
