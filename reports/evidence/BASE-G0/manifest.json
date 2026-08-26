@@ -1,8 +1,7 @@
 {
-  "manifest_version": 1,
+  "manifest_version": 2,
   "work_item": "BASE-G0",
   "date": "2026-08-26",
-
   "commits": {
     "zjs_main": {
       "commit": "8893c56b92eb3d6beb1937f421f7160f87e20dfd",
@@ -16,10 +15,10 @@
       "note": "merge-base(main, gc/tracing); GC-GAP baseline source"
     },
     "zjs_gc_candidate": {
-      "commit": "62061f94e235c2ade9082df0f2c49ad8b7ac972d",
+      "commit": "bf624deabd32de4b49b2f37f46e4eb752f33af22",
       "dirty": false,
-      "ref": "frozen/gc-tracing-2026-08-26",
-      "note": "gc/tracing tip (Block heap Step 2), pinned by the public immutable tag frozen/gc-tracing-2026-08-26. RE-FREEZE RULE: if gc/tracing advances before GC-GAP runs, bump manifest_version with new fingerprints first. The working copy at /home/aneryu/worktrees/gc-tracing carried uncommitted WIP at freeze time and is NOT part of the candidate."
+      "ref": "frozen/gc-tracing-2026-08-26b",
+      "note": "gc/tracing tip (lazy sweep + aged block decommit), pinned by the public immutable tag frozen/gc-tracing-2026-08-26b (pushed). RE-FREEZE RULE: if gc/tracing advances before the gate's official samples, bump manifest_version with new fingerprints first. Worktree was clean at freeze time."
     },
     "quickjs": {
       "commit": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
@@ -32,7 +31,6 @@
       "note": "chromium/octane vendored unmodified into tools/perf/bench_v8/suite/ (BenchmarkSuite.version = 9); per-case hashes below are the in-repo ground truth"
     }
   },
-
   "binary_sha256": {
     "qjs_official_yardstick": {
       "path": "/home/aneryu/quickjs/qjs",
@@ -46,17 +44,18 @@
       "recipe": "git worktree at 14b0618d (clean); zig build zjs (ReleaseFast defaults, gc=rc)"
     },
     "zjs_tracestw_candidate": {
-      "path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zjs-tracestw-candidate-62061f94",
-      "sha256": "eae503818748e45aa60aa2683423e3c17821ee139294d0da6ca7154bddecd5ea",
-      "recipe": "git worktree at 62061f94 (clean); zig build zjs -Dzjs_gc=trace_stw"
+      "path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zjs-tracestw-candidate-bf624dea",
+      "sha256": "01bdf2d4ae37f782249fe7f6969ba3b6241f07b4a92d35474d2e0c5880ed5109",
+      "recipe": "git worktree at bf624dea (clean); zig build zjs -Doptimize=ReleaseFast -Dzjs_gc=trace_stw",
+      "supersedes": "zjs-tracestw-candidate-62061f94 (sha256 eae50381..., retained on disk for GC-GAP account provenance)"
     },
     "zjs_rc_branchtip_diagnostic": {
-      "path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zjs-rc-branchtip-62061f94",
-      "sha256": "e7f14b80fa1d1dd0e3251618a1e9033d3b1b01edf053d3cfef0b33d93af0f646",
-      "recipe": "git worktree at 62061f94 (clean); zig build zjs -Dzjs_gc=rc — diagnostic arm only (separates branch deltas from the collector switch)"
+      "path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zjs-rc-branchtip-bf624dea",
+      "sha256": "d1cbdf868bf8c4d0be068fd0b74145d2ffbad19583db8147395352b5ec0f9450",
+      "recipe": "git worktree at bf624dea (clean); zig build zjs -Doptimize=ReleaseFast -Dzjs_gc=rc -- diagnostic arm only, never a gate input",
+      "supersedes": "zjs-rc-branchtip-62061f94 (sha256 e7f14b80..., retained on disk)"
     }
   },
-
   "suite": {
     "name": "bench_v8 / Octane 2.0 (V8 suite version 9)",
     "path": "tools/perf/bench_v8/suite/",
@@ -85,12 +84,10 @@
       "zlib.js": "d8c4bca32e84b38f573d3ee50a38b194afc9fb4e2f79754d952524bff01a898c"
     }
   },
-
   "toolchain": {
     "zig": "0.16.0",
     "qjs_cc": "GCC 16.0.1 20260315 (Ubuntu 16-20260315-1ubuntu1~24~ppa1)"
   },
-
   "policy_sha256": {
     "tools/compare/measurement_policy.json": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68",
     "policies/gc_merge_policy.json": "7772ec44f6a46311fb0c3ea97ba91c3b287941618d37f84493707d7b9bf33fd5",
@@ -99,12 +96,10 @@
     "policies/spikes/perf-jit-spike-v1.json": "e1228adda33b2feacfeed3466e6852741aea543f85ffd325eabfb49c497ef6ed",
     "policies/spikes/perf-n-spike-v1.json": "7c2a03b7f61f82d0785f9000597f0cac08c13f95aea6b0262e60cd86156ae203"
   },
-
   "host": {
     "os": "Linux 6.17.0-1014-nvidia aarch64",
     "cpu": "big.LITTLE, Cortex-X925 + Cortex-A725; big cores 5-9,15-19 (pmu armv8_pmuv3_1); official reads pinned per docs/perf/README.md"
   },
-
   "command": [
     "zig build zjs (worktree @14b0618d)",
     "zig build zjs -Dzjs_gc=trace_stw (worktree @62061f94)",
@@ -112,13 +107,23 @@
     "sha256sum over binaries, suite files, and policy files",
     "git tag -a frozen/gc-tracing-2026-08-26 62061f94"
   ],
-
   "raw_artifacts": [
-    {"path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/SHA256SUMS", "note": "frozen binary digest list"},
-    {"path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zig-version.txt", "note": "0.16.0"}
+    {
+      "path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/SHA256SUMS",
+      "note": "frozen binary digest list"
+    },
+    {
+      "path": "/home/aneryu/zjs-frozen/base-g0-2026-08-26/zig-version.txt",
+      "note": "0.16.0"
+    }
   ],
-
   "result": "Measurement baseline frozen: official qjs yardstick ruled (GCC-16 build), zjs merge-base + GC candidate binaries pinned, suite revision + per-case hashes recorded, tracing candidate published as immutable tag, gc_merge_policy + four spike policies preregistered, evidence layout established.",
   "verdict": null,
-  "owner_decision": "delegated execution 2026-08-26 (owner: '继续' after roadmap review). Ratifications 2026-08-26 (owner: '1.没问题；3.同意'): (1) qjs GCC-16 binary as official yardstick — RATIFIED; (3) main required-checks ruleset — APPROVED, implemented as ruleset 21546820 (roadmap-lint/linux-arm64/linux-x86_64, repository-admin bypass=always preserving the direct-push workflow). Still pending per-spike: (2) thresholds marked basis=proposed in the spike policies must be owner-approved before that spike starts; gc_merge margin deferred to G1-GC per policy."
+  "owner_decision": "delegated execution 2026-08-26 (owner: '继续' after roadmap review). Ratifications 2026-08-26 (owner: '1.没问题；3.同意'): (1) qjs GCC-16 binary as official yardstick — RATIFIED; (3) main required-checks ruleset — APPROVED, implemented as ruleset 21546820 (roadmap-lint/linux-arm64/linux-x86_64, repository-admin bypass=always preserving the direct-push workflow). Still pending per-spike: (2) thresholds marked basis=proposed in the spike policies must be owner-approved before that spike starts; gc_merge margin deferred to G1-GC per policy.",
+  "refreeze": {
+    "date": "2026-08-26",
+    "reason": "gc/tracing advanced past 62061f94 (lazy sweep + plan doc + aged block decommit) before G2's first official look; RE-FREEZE RULE applied.",
+    "supersedes_candidate": "62061f94e235c2ade9082df0f2c49ad8b7ac972d",
+    "note": "GC-GAP account (gcgap-account.json, manifest.json version 1 figures) was measured on 62061f94. Delta to bf624dea: aged decommit of idle free blocks (throughput-neutral by design, RSS shrink-case improvement) + plan-doc commit. Attribution debts resolved in reports/evidence/GC-GAP/attribution-debts-2026-08-26.md: SplayLatency 0.805 ruled a bimodal sampling artifact (same-binary replays give 0.959 serial / 1.157 parallel); splay RSS decomposed to peak-footprint retention (brk high-water + intra-block fragmentation + 3.8x account peak). Whether GC-GAP re-runs on the new candidate is a driver-session decision; the four correctness gates were re-run green on bf624dea (unit 2405/0 + 2369/0, test262 0/49778 both modes)."
+  }
 }
