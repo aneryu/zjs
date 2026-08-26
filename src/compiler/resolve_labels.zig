@@ -747,19 +747,40 @@ const Resolver = struct {
     // per site (process-wide counter; sites past the registry capacity stay
     // generic), and suppresses the fusions whose B side is get_field so the
     // sites survive to the rewrite. Diagnostic only, like ZJS_FUSE_V4.
+    // Modes: "1" = suppress get_field-B fusions AND rewrite the sites into
+    // the guarded direct-slot ops. "fuseoff" = suppress the same fusions but
+    // do NOT rewrite — the fusion-loss-only control arm, so the A/B can price
+    // the direct-slot mechanism fusion-neutrally instead of charging it for
+    // the fusions the rewrite has to give up. Anything else = off.
     var tspike_ready: bool = false;
-    var tspike_enabled: bool = false;
+    var tspike_rewrite: bool = false;
+    var tspike_fuse_off: bool = false;
     var tspike_next_site: u16 = 0;
 
-    fn tspikeOn() bool {
-        if (!tspike_ready) {
-            tspike_ready = true;
-            if (std.c.getenv("ZJS_TSPIKE")) |raw| {
-                const s = std.mem.span(raw);
-                tspike_enabled = s.len != 0 and s[0] == '1';
-            }
+    fn tspikeLoad() void {
+        if (tspike_ready) return;
+        tspike_ready = true;
+        const raw = std.c.getenv("ZJS_TSPIKE") orelse return;
+        const s = std.mem.span(raw);
+        if (std.mem.eql(u8, s, "1")) {
+            tspike_rewrite = true;
+            tspike_fuse_off = true;
+        } else if (std.mem.eql(u8, s, "fuseoff")) {
+            tspike_fuse_off = true;
         }
-        return tspike_enabled;
+    }
+
+    /// Site rewriting (get_field/put_field -> guarded direct-slot ops).
+    fn tspikeOn() bool {
+        tspikeLoad();
+        return tspike_rewrite;
+    }
+
+    /// Fusion suppression: on in BOTH non-off modes, so the control arm sees
+    /// exactly the instruction stream the rewrite arm starts from.
+    fn tspikeFuseOff() bool {
+        tspikeLoad();
+        return tspike_fuse_off;
     }
 
     inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
@@ -771,7 +792,7 @@ const Resolver = struct {
         switch (opc) {
             op.get_loc0 => {
                 self.last_sz = 1;
-                self.fuse_b = if (tspikeOn()) 0 else op.get_field;
+                self.fuse_b = if (tspikeFuseOff()) 0 else op.get_field;
                 self.fuse_op = op.get_loc0_field;
                 self.fuse_b2 = 0;
             },
@@ -807,7 +828,7 @@ const Resolver = struct {
             },
             op.get_loc2 => {
                 self.last_sz = 1;
-                self.fuse_b = if (tspikeOn()) 0 else op.get_field;
+                self.fuse_b = if (tspikeFuseOff()) 0 else op.get_field;
                 self.fuse_op = op.get_loc2_field;
                 self.fuse_b2 = op.get_field2;
                 self.fuse_op2 = op.get_loc2_field2;
@@ -820,13 +841,13 @@ const Resolver = struct {
             },
             op.get_field => {
                 self.last_sz = 5;
-                self.fuse_b = if (tspikeOn()) 0 else op.get_field2;
+                self.fuse_b = if (tspikeFuseOff()) 0 else op.get_field2;
                 self.fuse_op = op.get_field_field2;
                 self.fuse_b2 = 0;
             },
             op.get_var => {
                 self.last_sz = 3;
-                self.fuse_b = if (tspikeOn()) 0 else op.get_field;
+                self.fuse_b = if (tspikeFuseOff()) 0 else op.get_field;
                 self.fuse_op = op.get_var_field;
                 self.fuse_b2 = 0;
             },
