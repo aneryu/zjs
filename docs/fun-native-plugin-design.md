@@ -1,6 +1,6 @@
 # Fun Native Plugin 技术设计
 
-版本：0.6（v1.8 语义闭合:§22.7 side-by-side 移 post-v1、finalizer 三态裁决方案 B、引用版本更新;0.5:治理归一化）  
+版本：0.7（**FN-M0D 六项裁决闭合**,2026-08-26 owner 批复:epoch=u64/per-Runtime、外部内存计价必填、事件通道=组合模式降档、manifest 不预留 side-by-side 字段、class-id 静态槽新章 §19.2a、handle scope 不进 v1;0.6:side-by-side 移 post-v1、finalizer 方案 B）  
 日期：2026-08-26  
 状态：评审修订版；**FN-M0F 冻结 FNABI v1,前置=FN-M0D 关闭全部
 freeze_blocker**(见 §33)。**0.5:治理归一化**——M0 拆
@@ -18,6 +18,37 @@ process-model-design.md §20.2/§20.2a,本文 §0.1 逐条分类):class id
 ---
 
 ## 0. 版本变更
+
+**0.7（2026-08-26，FN-M0D 六项裁决闭合；owner 逐项批复「按建议来」）**：
+
+1. **AsyncToken epoch = u64、per-Runtime、永不复用**（§21.2）。无回绕语义
+   ——单调 u64 构造上不可达用尽；跨 Runtime 表达用 (runtime identity,
+   epoch) 二元组。与 shape identity 裁决同一原则（u32 回绕=ABA 复活；
+   进程级全局计数器=跨 Runtime 争用+单线程路径税，ledger §20.2a 在册）。
+2. **external memory accounting 必填**（§20.4）。tracing GC 的
+   allocation_debt 只由 external-bytes 注册喂（gc.zig:1247/1262），可选
+   计价=GC 不可见堆外内存（「漏内存读起来像快」前科）。SDK 默认填
+   byte_length。
+3. **事件通道=组合模式**（§21.7）：thread-safe completion queue +
+   AsyncToken 之上的 batching/ring/shared-buffer 组合，不设 tsfn 型 ABI
+   原语；按 §0.1 降档 append_only_extension。若 FN-M4 真实负载证明组合
+   不足，原语以追加 Host capability 引入。
+4. **manifest 不预留 side-by-side 具名字段**（§22.7/§24.1）：manifest 为
+   JSON 天然可追加，post-v1 激活时字段随设计一起进；同 commit 修正
+   §34 第 33 条与 §22.7 v0.6 裁决的矛盾（side-by-side → Worker Restart）。
+5. **class-id 静态槽新章 §19.2a**：进程级稀缺 u16、`ClassIdSlot` 按
+   「插件×class 声明」一次分配、跨 Runtime/generation 复用；NativeType
+   identity = (class id, image generation, runtime) 三元组;§12.6 loader
+   增槽校验行、§31.7/§32.3 增 spawn-kill 指标与「class id 不增长」测试行。
+   内化 process ledger §20.2 FNABI v0.4 欠账①（~13k spawn 耗尽 u16）。
+6. **handle scope 不进 v1**（§18.1/§18.2）：v1 合同=作用域整调用
+   （FunLocal/FunPersistent/FunWeak 不变），future scope 走 append-only
+   Host capability;§18.1 补「至多存活到调用结束」句（表/正文对齐）、
+   §18.2 内化 FunPersistent=persistent-root C ABI Adapter 条款
+   （ledger §20.2 欠账⑤）。
+
+§0.1 分类表经 M0D 评审确认（8 行档位均维持）。FN-M0D 关闭；FN-M0F
+待 FN-M0I 会合。
 
 **0.5（2026-08-26，治理归一化；无新设计内容）**，按 roadmap v1.7 裁决：
 
@@ -58,16 +89,16 @@ process-model-design.md §20.2/§20.2a,本文 §0.1 逐条分类):class id
 
 | 欠账条款 | 分类 | 判据 |
 |---|---|---|
-| class id 分配规则（class ID 与 NativeType identity 规则） | **freeze_blocker** | 影响 NativeType identity 的公开语义（guard/纪元验证的比较对象），不定案则 v1 identity 合同不完整 |
-| AsyncToken epoch 位宽 | **freeze_blocker** | ABI 结构字段，冻结后位宽不可变更 |
-| external memory accounting（外部内存计价）是否必填 | **freeze_blocker** | descriptor 字段语义——必填与否改变既有字段的合同含义，非纯追加 |
-| 循环事件通道原语（tsfn 对应物） | **freeze_blocker**（待 M0D 裁决：原语 vs 组合） | 若裁为 ABI 原语则进入 v1 公开表面，必须随 v1 冻结；若裁为既有原语（thread-safe completion queue + AsyncToken）之上的组合模式，则降档为 append_only_extension |
-| handle scope 是否进入 v1 | **append_only_extension** | §18.1 措辞已留门（raw `JSValue` 默认只在当前 managed call 内有效，至多存活到调用结束），后续以追加 Host capability 方式引入不破坏 v1 |
+| class id 分配规则（class ID 与 NativeType identity 规则） | **freeze_blocker（已裁 2026-08-26）** | 裁决=静态槽复用：`ClassIdSlot` 按「插件×class 声明」进程内一次分配、跨 Runtime/generation 复用；identity=(class id, image generation, runtime) 三元组。规范正文 §19.2a |
+| AsyncToken epoch 位宽 | **freeze_blocker（已裁 2026-08-26）** | 裁决=**u64**，per-Runtime 单调、永不复用、无回绕语义（构造上不可达）。§21.2 |
+| external memory accounting（外部内存计价）是否必填 | **freeze_blocker（已裁 2026-08-26）** | 裁决=**必填**（SDK 默认=byte_length）。GC 的 allocation_debt 只由 external-bytes 注册喂，可选=GC 不可见堆外内存。§20.4 |
+| 循环事件通道原语（tsfn 对应物） | **append_only_extension（已裁 2026-08-26 降档）** | 裁决=**组合模式**（thread-safe completion queue + AsyncToken 之上，§21.7），不设 tsfn 型 ABI 原语；FN-M4 真实负载验证，不足时以追加 Host capability 引入原语 |
+| handle scope 是否进入 v1 | **append_only_extension（已裁 2026-08-26：不进 v1）** | §18.1 措辞已留门（raw `JSValue` 默认只在当前 managed call 内有效，至多存活到调用结束），后续以追加 Host capability 方式引入不破坏 v1 |
 | 无在飞资源快速销毁路径 + finalizer 三态 | **runtime_internal**(已裁 2026-08-26,方案 B) | **FN-M0D 裁决:插件 destructor 合同 reason-independent——始终执行同一幂等、nothrow 清理语义,不提供 FunFinalizeReason 参数,插件不得按退出原因分支**;三态(普通 GC/normal 退出/kill)只控制 runtime 的调度、等待与堆外收尾。需要区分退出策略的资源走 begin_shutdown/CancellationToken/AsyncOperation,不由 finalizer 承担策略(N-API 先例:reason 依赖的析构是事故源)。插件可见时序合同已由 §34 冻结项 24/28/29 覆盖。process-model v0.6 已同步撤回「插件 finalizer 合同扩三态」要求 |
-| §22.7 side-by-side 启用前提清单 / manifest 字段（process_singleton 等） | **post_v1**（manifest 预留字段位=append_only_extension） | v1 hot-reload 路径为 Worker Restart，side-by-side 不可达；manifest 本身支持追加字段，预留位不阻塞冻结 |
-| epoch 作用域（per-Runtime） | **runtime_internal** | 语义条款，不改 ABI 结构（位宽另列 freeze_blocker） |
+| §22.7 side-by-side 启用前提清单 / manifest 字段（process_singleton 等） | **post_v1（已裁 2026-08-26：v1 不预留具名字段）** | v1 hot-reload 路径为 Worker Restart，side-by-side 不可达；manifest 为 JSON 天然可追加，预留名=给未设计语义占坑，post-v1 激活时字段随设计一起进 |
+| epoch 作用域（per-Runtime） | **runtime_internal（已裁 2026-08-26 确认）** | per-Runtime；跨 Runtime 表达用 (runtime identity, epoch) 二元组（§21.2）。与 PERF-SHAPE-ID 计数器作用域裁决同款 |
 
-分类表本身待 FN-M0D 评审确认；档位存疑的条款一律先标 freeze_blocker，由 M0D 裁定后降档。
+分类表经 FN-M0D 评审确认（2026-08-26，owner 批复）：8 行档位均维持，六项裁决如上并落各自章节正文。
 
 ---
 
@@ -1031,6 +1062,8 @@ fun 至少验证：
 - export kind、signature、marshal policy 和 flag 组合。
 - required target 非 null。
 - class method 名称和 ownership 配置。
+- class 声明的 `ClassIdSlot` 合法性（§19.2a）：槽声明与静态注册一致、
+  无重复占用；重复加载/重建 Runtime 复用既有槽，不得触发新分配。
 - metadata size 与 kind 一致。
 - reserved/显式垫片字段全部为零（§11.4 验零条款）。
 - dynamic dependency 和 code address provenance。
@@ -1506,7 +1539,10 @@ managed entry 直接使用 zjs `JSValue`（§11.3、§12.1）：公开类型与 
 规则：
 
 1. plugin 不得直接解引用 heap reference（tag 判别可本地做，heap payload 只能经 Host API）。
-2. raw `JSValue` 默认只在当前 managed call 内有效。
+2. raw `JSValue` 默认只在当前 managed call 内有效，**至多存活到调用
+   结束**。v1 不提供更细粒度的 handle scope（M0D 裁决 2026-08-26：
+   scope=整个调用；future 细粒度 scope 以追加 Host capability 引入，
+   不破坏本条合同）。
 3. 当前调用的 arguments 和 Host API 返回值由 native frame/handle scope 保持存活。
 4. 跨调用保存必须转换为 persistent handle。
 5. worker thread 不得保存 raw `JSValue`。
@@ -1525,8 +1561,15 @@ FunWeak
 
 - `FunLocal` 只在当前 `FunCallContext` 有效。
 - `FunPersistent` 跨调用保活 JS value，必须显式 release。
+  **GC 合同（M0D 内化，ledger §20.2 欠账⑤）**：`FunPersistent` 是
+  tracing GC 文档 §7.3 预言的「persistent-root Interface 的 C ABI
+  Adapter」——插件自管内存里的 JSValue 容器对保守栈扫描不可见，
+  必须经 precise root record 注册为根；carrier 线程栈边界注册是本
+  条的显式依赖（tracing 权威期条款）。
 - `FunWeak` 不阻止回收，回调由 zjs 在 runtime thread 调度。
 - SDK 高级 API 默认返回 local handle wrapper，减少 raw value 误用。
+- v1 无 handle-scope API（§18.1 规则 2）；批量临时值场景用
+  persistent handle 手动管理或拆分调用。
 
 ### 18.3 Leaf call
 
@@ -1591,7 +1634,7 @@ void* self
 
 ```text
 NativeType
-├── runtime-local type identity
+├── type identity = (class id, image generation, runtime) 三元组（§19.2a）
 ├── NativeBindingOwner
 ├── constructor entry
 ├── method/getter/setter entries
@@ -1605,8 +1648,33 @@ NativeType
 
 - type identity 必须区分 NativeImage generation。
 - hot reload 后 image A 与 image B 的同名 class 具有不同 NativeType identity。
-- `instanceof`、method receiver check 和 unwrap 都以 runtime-local identity 为准。
+- `instanceof`、method receiver check 和 unwrap 都以 runtime-local identity 为准
+  ——「runtime-local」指**比较作用域**（identity 比较仅同 Runtime 内有效），
+  不指 class id 的分配作用域（分配见 §19.2a，进程级静态槽）。
 - plugin 不得伪造或比较 zjs 内部 `NativeType*`。
+
+### 19.2a Class id 分配（M0D 裁决 2026-08-26；内化 ledger §20.2 FNABI v0.4 欠账①）
+
+class id 是引擎对象头/shape 层的类标识，**进程级稀缺资源（u16，上限
+65,536，分配器不回收）**。加宽会触碰对象头/shape 表示=表示契约领地，
+不成比例；因此稀缺性靠分配纪律解决：
+
+1. **`ClassIdSlot`（静态槽）**：class id 属于插件的**静态注册声明**。
+   进程内每个「插件 × class 声明」分配**一次**，其后：
+   - 跨 Runtime 创建/销毁**复用**同一槽（Runtime 不烧新 id）；
+   - 跨 NativeImage generation（hot reload）**复用**同一槽；
+   - 同一插件重复 load/unload 复用同一槽。
+2. **禁止 per-Runtime 分配**：任何「Runtime 创建时为其 class 分配
+   新 id」的实现都是缺陷——轻进程负载下每 Runtime 约数个 class,
+   ~13,000 次 spawn 即 `ClassIdExhausted`,进程死。
+3. **identity 三元组**：「哪一代、哪个 Runtime 的这个类」不靠新 id
+   区分，由 **(class id, image generation, runtime)** 三元组区分；
+   guard/纪元验证的比较对象是三元组（配 §34 第 41 条纪元验证），
+   比较仅同 Runtime 内有效。
+4. **loader 校验**（§12.6）：槽声明与静态注册一致、无重复占用、
+   重建 Runtime 不触发新分配。
+5. **可观测**：进程级 class id 表计数进诊断面；§31.7/§32.3 的
+   spawn-kill 指标与「class id 不增长」断言行是本章的常驻验收。
 
 ### 19.3 Constructor
 
@@ -1782,7 +1850,11 @@ plugin 可创建 external ArrayBuffer，但必须提供：
 - release callback。
 - release payload。
 - callback thread policy。
-- optional memory accounting size。
+- **memory accounting size（必填，M0D 裁决 2026-08-26）**：计入 GC
+  pressure 的字节数。SDK 默认填 byte_length；仅当该内存已在别处
+  记账（如同一大块上的多个 view）时才显式填更小值。理由：tracing
+  GC 的 `allocation_debt` 只由 external-bytes 注册喂,可选计价=GC
+  不可见的堆外内存（「漏内存读起来像快」在册前科）。
 
 zjs 负责：
 
@@ -1851,6 +1923,13 @@ Pending
 - 被拒绝并记录 diagnostic；
 - 仍正确释放第二个 payload；
 - 不得再次 resolve/reject Promise。
+
+**epoch 合同（M0D 裁决 2026-08-26）**：epoch 为 **u64**，**per-Runtime**
+单调递增、永不复用；**无回绕语义**（单调 u64 构造上不可达用尽，
+不定义回绕行为）。epoch 比较仅同 Runtime 内有效；跨 Runtime 表达
+用 (runtime identity, epoch) 二元组。ABI 结构中的 epoch 字段位宽
+随 v1 冻结为 64 位。与 shape identity 同一原则（u32 回绕=ABA 复活；
+进程级全局计数器=跨 Runtime 争用+单线程路径税）。
 
 AsyncToken 包含或关联：
 
@@ -1928,6 +2007,14 @@ fun 负责：
 - 应记录 late-completion 计数和 package/export 信息。
 
 ### 21.7 高频 Native → JS 事件
+
+**M0D 裁决（2026-08-26）：事件通道=组合模式，v1 不设 tsfn 型 ABI
+原语**。高频通道由既有原语组合：thread-safe completion queue（fun，
+§21.5）+ AsyncToken（§21.2）+ 本节 batching 规则；SDK 可提供非 ABI
+的助手库。理由：zjs 明文不负责 event loop（§8.2），原语会把队列/
+背压/abort 语义拖进冻结面（N-API tsfn 反面教材在册）。升级路径：
+FN-M4 以真实 Buffer/Async 负载验证组合形态；若不足，原语以**追加
+Host capability**（append_only_extension）引入，不破坏 v1。
 
 高频事件必须使用：
 
@@ -2073,7 +2160,10 @@ load once
 
 **v1 现行规范**:plugin artifact 变化 → **Worker Restart** → 以最新
 artifact 重建 Runtime(热更设计 §26.3 同款)。FN-M0F **不冻结**
-side-by-side 语义。
+side-by-side 语义。**Manifest 裁决(M0D 2026-08-26):v1 不预留
+side-by-side 具名字段**(`process_singleton` 等)——manifest 为 JSON
+天然可追加(§24.2 已示范追加路径),预留名=给未设计的语义占坑;
+post-v1 激活时字段随设计一起进。
 
 **Post-v1 / Incubator:Side-by-side NativeImage**(启用前置见 §0.1
 post_v1 行——process_singleton、静态构造双重初始化、依赖库单例、
@@ -2874,6 +2964,8 @@ world.step(dt);
 - TypedArray borrowed/retained bulk call。
 - async start/completion。
 - builtin/plugin 对照。
+- `create_instance`/`destroy_instance` 延迟与 per-instance 常驻内存
+  （进程模型 spawn 路径的成本输入；ledger §20.2 欠账③）。
 
 指标：
 
@@ -2927,6 +3019,9 @@ compiler invocation count
 - NativeObject owner edge。
 - external buffer finalizer。
 - retained buffer lease 与 detach/resize race。
+- **Runtime spawn-kill 循环压测**（§19.2a 常驻验收）：断言进程级
+  class id 表**不增长**（`ClassIdSlot` 复用生效）、per-instance
+  常驻内存回归基线。
 
 ### 32.4 Async 与 race 测试
 
@@ -2978,21 +3073,21 @@ iOS arm64 static
 
 目标不变：建立唯一 ABI source of truth，禁止实现漂移。v0.5 按治理实质拆三段——决策闭合、非争议骨架、冻结决策性质不同，不互相等待、不混为一个门。
 
-#### FN-M0D：ABI 决策闭合
+#### FN-M0D：ABI 决策闭合（**已关闭 2026-08-26，v0.7**）
 
-输入 = §0.1 开放欠账分类表。六项必裁：
+输入 = §0.1 开放欠账分类表。六项已裁（owner 批复「按建议来」）：
 
-1. AsyncToken epoch 位宽与作用域。
-2. external memory accounting 是否必填。
-3. 循环事件通道是 ABI 原语还是组合模式。
-4. side-by-side 是否需要 manifest 字段（process_singleton 等）。
-5. class ID 与 NativeType identity 规则。
-6. handle scope 是否进入 v1。
+1. AsyncToken epoch 位宽与作用域 → **u64 / per-Runtime / 无回绕**（§21.2）。
+2. external memory accounting → **必填，SDK 默认=byte_length**（§20.4）。
+3. 循环事件通道 → **组合模式**，降档 append_only；FN-M4 验证（§21.7）。
+4. side-by-side manifest 字段 → **不预留**；§34 第 33 条同步修正（§22.7）。
+5. class ID 与 NativeType identity → **静态槽+三元组**（§19.2a 新章）。
+6. handle scope → **不进 v1**，append 路径常开（§18.1/§18.2）。
 
-验收门：
+验收门（均已达成）：
 
-- §0.1 分类表本身经评审确认（存疑条款裁定归档）。
-- 全部 freeze_blocker 关闭，裁决记录写入本文档并递增版本。
+- [x] §0.1 分类表经评审确认（8 行档位维持，裁决入表）。
+- [x] 全部 freeze_blocker 关闭，裁决记录写入本文档并递增版本（v0.7）。
 
 #### FN-M0I：schema / generator / golden layout tests 骨架
 
@@ -3273,7 +3368,7 @@ FN-M0F 通过后（前置=FN-M0D 全部 freeze_blocker 关闭，见 §33），�
 30. bytecode cache 不保存 NativeEntry/target 裸地址。
 31. method fast path 必须守护普通 JS property/prototype 语义。
 32. 默认不 `dlclose`。
-33. hot reload 使用 side-by-side image/type/instance。
+33. hot reload v1 = Worker Restart 单线（§22.7 v0.6 裁决）；side-by-side image/type/instance 为 post-v1 incubator，其语义不随 v1 冻结。
 34. cache 使用 Recipe Key、Build Key 和 Artifact Digest。
 35. package lockfile 解析出的 SDK 决定 build recipe，runtime bundled SDK 不得强制替换。
 36. 安装优先 exact artifact、本地 recipe candidate、registry prebuilt，最后源码构建。

@@ -176,7 +176,7 @@ items:
   - id: PERF-OPCODE-SPACE
     title: Opcode namespace plan (wide/prefix planes, versioning, shared generator, decode A/B)
     type: spec
-    state: ready
+    state: now
     wip_slot: decision
     hard_prerequisites: []
     notes: consumers = FN-M1A, PERF-T1, CALL_NATIVE_*/typed families, SER-ARTIFACT opcode versioning
@@ -388,8 +388,10 @@ items:
   - id: FN-M0D
     title: ABI decision closure (freeze-blocker verdicts; finalizer plan B recorded 2026-08-26)
     type: governance
-    state: now
-    wip_slot: decision
+    state: done
+    wip_slot: none
+    completion_commit: pending-this-commit
+    evidence: docs/fun-native-plugin-design.md v0.7 (§0 changelog + §0.1 table + §33 M0D)
     hard_prerequisites: []
     notes: "SIX verdicts per doc §33 (registry previously listed five): AsyncToken epoch width/scope; external memory accounting mandatory?; event channel primitive vs pattern; side-by-side manifest fields (process_singleton reservation); class-id/NativeType identity rules; handle scope in v1?. Plus M0D gate: confirm the §0.1 classification table itself. Doc debts found 2026-08-26 (fix with the verdict write, FNABI v0.7): §34 item 33 still says side-by-side hot reload (contradicts §22.7 v0.6); §18.1 lacks the 至多存活到调用结束 clause §0.1 credits it with; class-id ledger ruling (u16 scarcity/ClassIdSlot/triple identity) never internalized into normative text"
     authority: {file: docs/fun-native-plugin-design.md, section: "33 M0D"}
