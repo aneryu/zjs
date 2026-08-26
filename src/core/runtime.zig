@@ -2780,7 +2780,18 @@ pub const JSRuntime = struct {
         // survive a finish, and this call's promise is full precision. The
         // abort discards only work; the fresh trace below re-derives the rest.
         if (comptime gc.trace_stw_enabled) {
-            if (!self.gc_running) self.gc.abortIncrementalCycle();
+            if (!self.gc_running) {
+                // Destruction is irreversible: complete it, then discard any
+                // open marking cycle. Order matters only in that both must be
+                // resolved before the STW collector below touches the lists.
+                if (self.gc.doomed_pending) {
+                    self.gc_running = true;
+                    @import("gc_trace_stw.zig").finishPendingDestruction(self);
+                    self.gc_running = false;
+                    _ = self.finishDoomedCompletion(0);
+                }
+                self.gc.abortIncrementalCycle();
+            }
         }
         // `gc_running` covers the major driver. The refcount/cycle phases also
         // invoke allocation and callback boundaries, and a previously queued
@@ -2862,6 +2873,21 @@ pub const JSRuntime = struct {
         // maximum reclaim now, and a finished-early cycle would honor its
         // floating garbage.
         if (comptime gc.trace_stw_enabled) {
+            // Sliced destruction first: a morgue can only exist after a cycle
+            // finished, so the two branches are mutually exclusive, and the
+            // reclaim in progress should complete before anything new begins.
+            // Destruction is irreversible, so urgency FINISHES it (one pause)
+            // where it merely aborts an open marking cycle.
+            if (self.gc.doomed_pending and !self.gc_running and self.gc.phase == .none) {
+                if (mode == .urgent) {
+                    self.gc_running = true;
+                    @import("gc_trace_stw.zig").finishPendingDestruction(self);
+                    self.gc_running = false;
+                    _ = self.finishDoomedCompletion(0);
+                } else {
+                    return self.destroySlicePoll();
+                }
+            }
             if (self.gc.concurrent.markingActive() and !self.gc_running and self.gc.phase == .none) {
                 if (mode == .urgent) {
                     self.gc.abortIncrementalCycle();
@@ -3046,9 +3072,14 @@ pub const JSRuntime = struct {
             return .{};
         }
 
-        // Frontier empty: final remark, weak processing and sweep, one pause.
+        // Frontier empty: final remark and weak processing, then CONDEMN --
+        // destruction runs in bounded slices at later polls, because the
+        // phase probe put it at 99.5% of this slice's cost. The cycle's
+        // result and the threshold reset land at the destruction-completion
+        // poll; the account has not shrunk yet, so resetting here would price
+        // the next cycle off a heap full of corpses.
         self.memory.samplePeakAtCollection();
-        const freed = stw.finishIncrementalCycle(self, roots, mode.rootScan()) catch |err| {
+        _ = stw.finishIncrementalCycle(self, roots, mode.rootScan()) catch |err| {
             self.gc.abortIncrementalCycle();
             const mapped: gc.CollectionError = switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -3058,13 +3089,58 @@ pub const JSRuntime = struct {
             self.gc.requestGC(.collection_failed, .soon);
             return mapped;
         };
+        if (forced) {
+            // The safety valve wanted memory back, not a promise: destroy now.
+            stw.finishPendingDestruction(self);
+        }
         const ended = profile.nowNanos();
         const slice = if (ended > began) ended - began else 0;
         self.gc.recordMajorSlicePause(slice);
+        if (!self.gc.doomed_pending) return self.finishDoomedCompletion(slice);
+        // Reset the threshold NOW, pricing the morgue's bytes as already
+        // reclaimed. Waiting for the destruction slices left the account
+        // over-threshold for the whole window, and worse, the eventual reset
+        // included every byte the window allocated: the 1.75x factor
+        // amplified that into a compounding loop that peaked an 841 MB heap
+        // over a ~50 MB live set. The completion poll refines this from the
+        // truly-shrunk account.
+        self.resetGCThresholdExcludingDoomed();
+        return .{};
+    }
+
+    fn resetGCThresholdExcludingDoomed(self: *JSRuntime) void {
+        const settled = self.memory.allocated_bytes -| self.gc.doomed_bytes;
+        const saved = self.memory.allocated_bytes;
+        // Reuse the one rule rather than duplicating it: present the account
+        // net of corpses, compute, restore. Single-threaded, no observer.
+        self.memory.allocated_bytes = settled;
+        self.resetGCThreshold();
+        self.memory.allocated_bytes = saved;
+    }
+
+    /// One bounded destruction slice; the cycle's result lands at the poll
+    /// whose slice empties the morgue.
+    fn destroySlicePoll(self: *JSRuntime) gc.CollectionError!gc.CollectionResult {
+        const stw = @import("gc_trace_stw.zig");
+        self.gc_running = true;
+        defer self.gc_running = false;
+        const began = profile.nowNanos();
+        _ = stw.destroyDoomedSlice(self, gc.incremental_mark_budget_ns);
+        const ended = profile.nowNanos();
+        const slice = if (ended > began) ended - began else 0;
+        self.gc.recordMajorSlicePause(slice);
+        if (!self.gc.doomed_pending) return self.finishDoomedCompletion(slice);
+        return .{};
+    }
+
+    /// The morgue is empty: deliver the cycle's CollectionResult and reset the
+    /// growth threshold from the account the destruction actually shrank.
+    fn finishDoomedCompletion(self: *JSRuntime, last_slice_ns: u64) gc.CollectionResult {
         const result: gc.CollectionResult = .{
-            .freed_objects = freed,
-            .duration_ns = slice,
+            .freed_objects = self.gc.doomed_destroyed,
+            .duration_ns = last_slice_ns,
         };
+        self.gc.doomed_destroyed = 0;
         self.gc.recordIncrementalCycleSuccess(result);
         self.resetGCThreshold();
         return result;
@@ -3409,11 +3485,13 @@ pub const JSRuntime = struct {
         // allocation into an arbitrary pause, which is what a concurrent
         // collector exists to prevent.
         if (self.gc_running or self.gc.phase != .none) return;
-        // While an incremental cycle is open the account is over the (not yet
-        // reset) threshold, so each boundary re-records `.allocation_threshold`
-        // above and this gate stays open -- the boundary drives the cycle's
-        // increments without any cycle-specific plumbing here.
-        if (!self.gc.hasPendingMajorRequest()) return;
+        // While marking is open the account is over the (not yet reset)
+        // threshold, so each boundary re-records `.allocation_threshold` above
+        // and this gate stays open for the increments unaided. Destruction is
+        // different: the threshold resets at condemn time (net of corpses), so
+        // the account may be UNDER it while the morgue still holds memory --
+        // the explicit `doomed_pending` term is what keeps the slices moving.
+        if (!self.gc.doomed_pending and !self.gc.hasPendingMajorRequest()) return;
         _ = self.pollGC(null, .normal) catch {};
     }
 

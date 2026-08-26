@@ -1066,6 +1066,36 @@ pub const Registry = struct {
     // that fail halfway through construction.
     concurrent: if (concurrent_enabled) ConcurrentState else void =
         if (concurrent_enabled) .{} else {},
+    /// Condemned by an incremental cycle's finish, awaiting sliced
+    /// destruction at later polls.
+    ///
+    /// Everything here is unreachable (the remark's full trace proved it) and
+    /// weak-cleared (processWeak ran first), so the mutator cannot reach it,
+    /// cannot re-derive a pointer to it, and cannot observe its destruction
+    /// order. What CAN still find it is a conservative scan: a parked corpse
+    /// keeps `heap_accounted` until its destructor runs, so a stale stack word
+    /// would resolve it and the tracer would walk freed payloads. That is why
+    /// minors and new cycles are gated while this list is non-empty -- no
+    /// collection, no scan, no resurrection-by-residue.
+    doomed_list: GCObjectHeader = .{},
+    /// Sliced-destruction cursor: which kind pass and where in the list.
+    /// The list is stable between slices -- the mutator cannot touch it -- so
+    /// a plain cursor resumes exactly where the budget ran out.
+    doomed_phase: u8 = 0,
+    /// Resume point within the current phase. Sound to hold across slices
+    /// because nothing touches the list between them: collections are gated
+    /// and the mutator has no path to a condemned object.
+    doomed_cursor: ?*GCObjectHeader = null,
+    doomed_pending: bool = false,
+    /// Objects destroyed by the slices of the current morgue, for the
+    /// completion poll's CollectionResult.
+    doomed_destroyed: usize = 0,
+    /// Heap bytes the morgue holds: already condemned, not yet returned.
+    /// The growth threshold subtracts this at finish -- pricing the next
+    /// cycle off a heap full of corpses was a compounding feedback loop
+    /// (measured: an 841 MB peak on a ~50 MB live set).
+    doomed_bytes: usize = 0,
+
     /// Objects the marking barrier shaded GREY: marked, children still to be
     /// traced. The remark drains it; overflow downgrades to a rescan of every
     /// marked object (`gc_trace_stw.drainBarrierQueue`). Lives on the Registry
@@ -1105,6 +1135,7 @@ pub const Registry = struct {
         listInit(&self.gc_obj_list);
         listInit(&self.tmp_obj_list);
         listInit(&self.zero_ref_list);
+        listInit(&self.doomed_list);
         self.cycle_deferred_frees.init();
     }
 
@@ -2084,6 +2115,16 @@ pub const Registry = struct {
         if (comptime concurrent_enabled) {
             if (self.concurrent.markingActive()) return false;
         }
+        // Minors run even while sliced destruction is pending. The first
+        // version gated them, and the gate was the disease: destruction
+        // windows with no minor let the young set grow to the millions
+        // (measured 1.7M at minor start on splay), the completion-time
+        // account ballooned, and the 1.75x threshold amplified it into a
+        // five-fold heap. What made the gate necessary -- a minor's
+        // conservative scan resolving a parked corpse -- is handled at the
+        // one point every scan funnels through: `shade` refuses
+        // `cycle_visited` headers, the bit `detachCycleCandidate` already
+        // stamps on everything in the morgue.
         return self.generation.stats.young_count >= minor_young_threshold;
     }
 
@@ -2100,11 +2141,29 @@ pub const Registry = struct {
     /// value turns out to be old or primitive costs one re-trace of an object
     /// the minor would otherwise skip; missing one frees a live object.
     ///
-    /// The concurrent arm is deliberately absent: shading needs the exact
-    /// target, which a choke point does not have. Callers on that path must
-    /// still shade per value once the marker thread is wired (§8.4).
+    /// The marking arm RE-QUEUES THE OWNER. An earlier version said the
+    /// concurrent arm was "deliberately absent" because a choke point cannot
+    /// shade the exact target -- true, and it did not need to: re-tracing the
+    /// owner finds every child the bulk write installed, including the new
+    /// one. What "absent" actually meant was that a black array's appends
+    /// were invisible to the remark (the remembered set is retired at cycle
+    /// begin and consumed only by minors), so anything reachable only through
+    /// a mid-cycle dense append was condemned alive. richards, crypto and
+    /// raytrace all failed on exactly this the first time destruction slices
+    /// widened the mutator windows enough to expose it.
+    ///
+    /// A hot array appended in a loop re-pushes once per bulk write -- the
+    /// mark bit cannot dedup an owner that must be re-traced -- so the ring
+    /// can overflow. Overflow is the queue's sound downgrade: the remark
+    /// rescans every marked object. Worse pause, never a lost object.
     pub inline fn rememberOwnerForBulkWrite(self: *Registry, owner: *GCObjectHeader) void {
         if (comptime !generation_enabled) return;
+        if (comptime concurrent_enabled) {
+            if (self.concurrent.markingActive()) {
+                _ = self.concurrent_mark_queue.push(owner);
+                return;
+            }
+        }
         if (self.generation.isYoung(owner)) return;
         self.generation.rememberOwner(addressRegistryAllocator(), owner);
     }

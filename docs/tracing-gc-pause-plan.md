@@ -318,6 +318,49 @@ increment is bounded regardless of heap size, so it is not needed for the
 pause row). Time-to-safepoint instrumentation (unmeasurable until a marker
 thread exists; in mutator-conducted mode the safepoint IS the poll).
 
+## 4b. Phase 3, first tranche — sliced destruction (executed 2026-08-26)
+
+The trigger fired immediately: the finish-slice probe put destruction at
+99.5% of the p99 pause (63.9 of 64.2 ms on splay; remark itself is 0.3 ms).
+The finish now only CONDEMNS -- detach unmarked objects onto a morgue, retire
+survivor young bits, delist condemned shapes from the transition table -- and
+destruction runs in bounded slices at later polls, under `.remove_cycles`
+parking with a single deferred-free drain after the last slice, preserving
+the five-pass kind order across slices via a persistent phase cursor.
+
+Result: **major p99 64 ms -> 33.6 ms, max 67.7 -> 34.8 ms** on splay; what
+remains of the tail is the two O(heap) walks (begin's clearMarks, the condemn
+walk), which are the versioned-marks item. Throughput: geomean 1.29 -> 1.31
+(the slice tax), splay 2.79 -> 2.87.
+
+Three defects found by the gates and one by the panel, all of the same
+species -- **the mutator window between condemn and destruction is a new
+liveness domain, and everything that assumed "condemned means gone within
+this pause" had to be found**:
+
+- The grey queue held entries across mutator windows, and rc-counted kinds
+  (shapes, replacement churn) could be freed while queued: pops now
+  revalidate through `containsHeader`, whose arena-membership check also
+  keeps the read off potentially unmapped pages.
+- `rememberOwnerForBulkWrite`'s "deliberately absent" concurrent arm was a
+  hole, not a design: dense-array appends into black arrays were invisible to
+  the remark (the remembered set is retired at begin), and richards, crypto
+  and raytrace all condemned live objects through it. The marking arm
+  re-queues the owner.
+- The shape transition table kept serving condemned shapes through the
+  window: a live parent's dead transition child was still in the buckets, a
+  mutator re-performing the transition adopted the corpse, and a later slice
+  freed it under a live object. Condemned shapes are delisted at condemn.
+  Found by bisection: synchronous destruction through the identical code path
+  was green, so the window itself was the defect surface.
+- Gating minors for the window was itself a disease: young grew to 1.7M
+  objects, the completion-time account ballooned, and the 1.75x threshold
+  amplified it into an 841 MB peak on a ~50 MB live set. Minors now run
+  through the window -- `shade` refuses `cycle_visited` corpses, the bit
+  `detachCycleCandidate` already stamps -- and the threshold resets at
+  condemn time NET OF the morgue's bytes, with the completion poll refining
+  it from the truly shrunk account.
+
 ## 5. Phase 3 — deferred, with their triggers
 
 | Item | Trigger |

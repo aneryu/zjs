@@ -1163,6 +1163,22 @@ pub const Registry = struct {
         self.insertShapeHash(shape);
     }
 
+    /// Make a condemned shape unfindable without destroying it.
+    ///
+    /// Sliced destruction opens a window between condemnation and the
+    /// destructor, and the transition table kept serving corpses through it: a
+    /// LIVE parent shape whose transition child died with all its objects
+    /// still had that child in the buckets, so a mutator re-performing the
+    /// same transition adopted the corpse, and a later destruction slice
+    /// freed the shape out from under a live object -- crypto and richards
+    /// both rebuild same-shaped objects in loops and both failed exactly
+    /// there. Delisting at condemn time closes the window; the struct stays
+    /// for the destructor, which tolerates an already-empty bucket.
+    pub fn delistCondemnedShape(self: *Registry, header: *gc.Header) void {
+        const shape: *Shape = @alignCast(@fieldParentPtr("header", header));
+        self.removeShapeHashEverywhere(shape);
+    }
+
     fn removeShapeHashEverywhere(self: *Registry, shape: *Shape) void {
         if (self.shape_hash_buckets.len == 0) return;
         for (self.shape_hash_buckets) |*bucket| {

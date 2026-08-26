@@ -884,6 +884,11 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *const engine.core.gc
             "gc: incremental cycles {d} (aborted {d}, forced {d}), increments {d}, cycle stw last {d} ns max {d} ns\n",
             .{ cs.cycles_completed, cs.cycles_aborted, cs.forced_finishes, cs.increments, cs.last_cycle_stw_ns, cs.max_cycle_stw_ns },
         );
+        const fp = engine.core.gc_trace_stw.last_finish_phases;
+        try writer.print(
+            "gc: last finish slice remark {d} ns, weak {d} ns, sweep+destroy {d} ns\n",
+            .{ fp.remark_ns, fp.weak_ns, fp.sweep_ns },
+        );
         try writer.print("gc: assist batches {d} marked {d} mean {d} ns\n", .{
             cs.assist_batches,
             cs.assist_marked,

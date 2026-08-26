@@ -494,6 +494,20 @@ pub fn incrementalMarkStep(rt: *JSRuntime, budget_ns: u64) CollectError!bool {
     const started = profile.nowNanos();
     var since_clock: usize = 0;
     while (queue.pop()) |header| {
+        // The mutator ran between increments, and rc-counted kinds -- shapes,
+        // whose replacement churn is constant -- can be freed while sitting
+        // in this queue. Nothing purges the queue on free (a scan per free
+        // would be the wrong trade), so the pop validates instead: resolve
+        // the address as the conservative scanner would. A freed slab block
+        // reads unaccounted; a freed standalone loses its occupant entry; a
+        // released arena is absent from the set, which matters because its
+        // pages may be unmapped and even reading the byte would fault. A slot
+        // reused by a NEW object resolves and is traced, which is sound --
+        // tracing any live object is always sound, and costs at most some
+        // floating marks. The STW collector never needed this: its work list
+        // does not outlive a pause, and this queue's whole purpose is to.
+        if (!rt.gc.address_registry.containsHeader(header)) continue;
+        if (header.meta().flags.cycle_visited) continue;
         try collector.traceHeader(header);
         if (collector.err) |err| return err;
         since_clock += 1;
@@ -510,6 +524,14 @@ pub fn incrementalMarkStep(rt: *JSRuntime, budget_ns: u64) CollectError!bool {
 /// stack slots are not barriered, so the conservative rescan is what catches
 /// white objects referenced only from native frames -- drains what that and
 /// the barrier produced, then runs the ordinary weak/sweep tail.
+/// Wall-time split of the last finish slice, for deciding which phase the
+/// next pause tranche attacks. Nanoseconds; written every finish.
+pub var last_finish_phases: struct {
+    remark_ns: u64 = 0,
+    weak_ns: u64 = 0,
+    sweep_ns: u64 = 0,
+} = .{};
+
 pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
     std.debug.assert(rt.gc.concurrent.markingActive());
     rt.gc.stats.collections += 1;
@@ -517,6 +539,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
 
+    const t_remark = profile.nowNanos();
     try collector.seedRoots();
     if (collector.conservative_on) try collector.seedConservativeRoots();
     try collector.drain();
@@ -526,26 +549,69 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // Marking is over before anything is freed (§8.6 step 12 before 13).
     rt.gc.concurrent.major_marking_active.store(false, .monotonic);
 
+    const t_weak = profile.nowNanos();
     collector.processWeak();
+    const t_sweep = profile.nowNanos();
     collector.beginSweepModelSweep();
     if (!rt.gc.arenaSetWhole()) {
         collector.report.skipped_sweep_incomplete_arenas = true;
         last_report = collector.report;
         return 0;
     }
-    const live_before_sweep = collector.liveHeapBytes();
-    const swept = collector.sweepUnmarked();
-    collector.report.reclaimed_bytes = live_before_sweep -| collector.liveHeapBytes();
-    if (comptime gc.sweep_model_enabled) {
-        rt.gc.sweep_model.last_sweep_debt = collector.report.reclaimed_bytes;
+
+    // Condemn, do not destroy. The walk detaches every unmarked, unpinned
+    // object onto the morgue and retires the survivors' young bits; the
+    // destruction -- which the phase probe measured at 99.5% of this slice
+    // (63.9 of 64.2 ms on splay) -- happens in bounded slices at later polls.
+    // Weak state is already clear and the trace already proved these
+    // unreachable, so the mutator cannot tell the difference; what it buys is
+    // the whole reason Phase 2 exists.
+    var condemned: usize = 0;
+    var doomed_bytes: usize = 0;
+    var iterator = rt.gc.objectIterator();
+    while (iterator.next()) |header| {
+        if (header.metaConst().flags.mark) {
+            header.meta().flags.young = false;
+            continue;
+        }
+        if (header.metaConst().flags.is_pinned) {
+            header.meta().flags.young = false;
+            continue;
+        }
+        doomed_bytes +|= gc.Registry.heapByteSizeFromHeader(rt, header);
+        rt.gc.detachCycleCandidate(header);
+        gc.listAddTail(&rt.gc.doomed_list, header);
+        // A condemned shape must leave the transition table NOW, not at its
+        // destructor: the mutator runs before the destruction slices, and a
+        // table that still serves the corpse lets a live object adopt a shape
+        // that is already scheduled to be freed. Realms and modules sit on
+        // membership lists that only collections walk, and those are gated
+        // while the morgue is open; the shape table is the one engine-global
+        // structure the MUTATOR consults.
+        if (header.metaConst().flags.kind == .shape) {
+            rt.shapes.delistCondemnedShape(header);
+        }
+        condemned += 1;
     }
+    rt.gc.doomed_phase = 0;
+    rt.gc.doomed_cursor = null;
+    rt.gc.doomed_destroyed = 0;
+    rt.gc.doomed_bytes = doomed_bytes;
+    rt.gc.doomed_pending = condemned != 0;
+    if (condemned == 0) rt.gc.concurrent.stats.cycles_completed += 1;
+
+    const t_end = profile.nowNanos();
+    last_finish_phases = .{
+        .remark_ns = t_weak -| t_remark,
+        .weak_ns = t_sweep -| t_weak,
+        .sweep_ns = t_end -| t_sweep,
+    };
     collector.endSweepModelSweep();
 
     clearYoungState(rt);
     rt.gc.generation.decayLowYieldStreak();
-    rt.gc.concurrent.stats.cycles_completed += 1;
     last_report = collector.report;
-    last_report.swept = swept;
+    last_report.swept = condemned;
     if (gc.arena_audit) {
         const stale = rt.gc.address_registry.auditArenas();
         const missing = auditLiveObjectsResolve(rt);
@@ -557,7 +623,108 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
             @panic("arena invariant violated");
         }
     }
-    return swept;
+    return condemned;
+}
+
+/// Destruction order for the morgue: identical to `destroyCondemned`'s five
+/// passes (qjs `gc_free_cycles`), spelled as a phase index so a bounded slice
+/// can resume where its budget ran out. Objects first; realms, modules and
+/// function bytecode after; cells and shapes last, because earlier
+/// destructors still read them.
+const doomed_phase_kinds = [_]gc.GcKind{ .object, .realm_context, .module, .function_bytecode, .var_ref };
+
+/// Destroy up to `budget_ns` of the morgue. Returns true when it is empty.
+///
+/// Runs under `.remove_cycles` so every struct free parks on
+/// `cycle_deferred_frees`; the drain happens ONCE, after the last slice, which
+/// is what keeps a destructor in a later slice reading a sibling from an
+/// earlier one as stripped-but-allocated memory instead of freed memory --
+/// the same mid-pass guarantee the monolithic sweep had, stretched across
+/// polls. The list is stable between slices: everything on it is unreachable,
+/// weak-cleared, and invisible to collections (which are gated while the
+/// morgue is open).
+pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
+    std.debug.assert(rt.gc.doomed_pending);
+    const started = profile.nowNanos();
+    var destroyed: usize = 0;
+    var since_clock: usize = 0;
+
+    const old_phase = rt.gc.phase;
+    rt.gc.phase = .remove_cycles;
+    defer rt.gc.phase = old_phase;
+
+    while (rt.gc.doomed_phase < doomed_phase_kinds.len + 1) {
+        const final_pass = rt.gc.doomed_phase == doomed_phase_kinds.len;
+        var cursor = rt.gc.doomed_cursor orelse rt.gc.doomed_list.next;
+        while (cursor) |h| {
+            if (h == &rt.gc.doomed_list) break;
+            const next = h.next;
+            const kind = h.meta().flags.kind;
+            const wanted = if (final_pass)
+                kind == .shape
+            else
+                kind == doomed_phase_kinds[rt.gc.doomed_phase];
+            if (wanted) {
+                gc.listDel(h);
+                rt.gc.sweep_current = h;
+                switch (kind) {
+                    .object => Object.destroyFromHeader(rt, h),
+                    .realm_context => {
+                        rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                        context_mod.JSContext.destroyFromHeader(rt, h);
+                    },
+                    .module => {
+                        rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                        module_mod.ModuleRecord.destroyFromHeader(rt, h);
+                    },
+                    .function_bytecode => {
+                        rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                        function_bytecode_mod.destroyFromHeader(rt, h);
+                    },
+                    .var_ref => {
+                        rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                        var_ref_mod.VarRef.destroyFromHeader(rt, h);
+                    },
+                    .shape => {
+                        if (!h.meta().flags.finalizing) rt.shapes.destroyFromHeader(h);
+                    },
+                    else => unreachable,
+                }
+                rt.gc.sweep_current = null;
+                if (kind != .function_bytecode) destroyed += 1;
+                since_clock += 1;
+                if (since_clock == 32) {
+                    since_clock = 0;
+                    if (profile.nowNanos() -| started >= budget_ns) {
+                        rt.gc.doomed_cursor = next;
+                        rt.gc.doomed_destroyed += destroyed;
+                        return destroyed;
+                    }
+                }
+            }
+            cursor = next;
+        }
+        rt.gc.doomed_phase += 1;
+        rt.gc.doomed_cursor = null;
+    }
+
+    // Morgue empty: return the parked memory in one drain, same condition the
+    // monolithic sweep used.
+    rt.gc.doomed_pending = false;
+    rt.gc.doomed_cursor = null;
+    rt.gc.doomed_destroyed += destroyed;
+    if (!rt.hasPendingDeferredClassPayloadFinalizers()) object_gc.drainCycleDeferredFrees(rt);
+    rt.gc.concurrent.stats.cycles_completed += 1;
+    return destroyed;
+}
+
+/// Complete any pending sliced destruction synchronously. Explicit
+/// collections and teardown call this: destruction is irreversible, so unlike
+/// an open marking cycle it cannot be aborted, only finished.
+pub fn finishPendingDestruction(rt: *JSRuntime) void {
+    if (comptime !gc.trace_stw_enabled) return;
+    if (!rt.gc.doomed_pending) return;
+    _ = destroyDoomedSlice(rt, std.math.maxInt(u64));
 }
 
 /// Drain the concurrent barrier queue the way the final remark does, for
@@ -789,6 +956,13 @@ const Collector = struct {
         const addr = @intFromPtr(header);
         if (addr < 4096 or !std.mem.isAligned(addr, @alignOf(gc.Header))) return;
         if (header.meta().flags.mark) return;
+        // A condemned corpse awaiting its destruction slice. No precise root
+        // can name it -- the remark proved it unreachable and processWeak
+        // cleared its identities -- so the only way here is conservative
+        // stack residue resolving a parked slab block that still reads
+        // `heap_accounted`. Shading it would trace freed payloads.
+        // `detachCycleCandidate` already stamps the bit; this is the read.
+        if (header.meta().flags.cycle_visited) return;
         header.meta().flags.mark = true;
         if (self.shade_to_queue) {
             // A failed push is the queue's overflow contract: the object is
@@ -920,6 +1094,9 @@ const Collector = struct {
         var drained: usize = 0;
         while (queue.pop()) |header| {
             drained += 1;
+            // Same dangling-entry hazard as `incrementalMarkStep`: entries
+            // queued in earlier mutator windows may have been rc-freed since.
+            if (!self.rt.gc.address_registry.containsHeader(header)) continue;
             try self.traceHeader(header);
             if (self.err) |err| return err;
             try self.drain();

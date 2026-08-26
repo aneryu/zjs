@@ -14221,7 +14221,7 @@ test "a crossed whole-heap threshold is answered by a major, never by a minor" {
     // remark so the completion counter can move. What must NOT move, at any
     // of these polls, is the minor counter.
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -14439,7 +14439,7 @@ test "an incremental cycle frees threshold garbage across bounded polls" {
     try std.testing.expect(rt.gc.concurrent.markingActive());
 
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -14484,7 +14484,7 @@ test "a store during an incremental cycle keeps the stored subgraph alive to the
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }

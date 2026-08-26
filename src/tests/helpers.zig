@@ -970,7 +970,7 @@ pub fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, 
 pub fn finishGcCycles(rt: anytype) void {
     if (comptime !zjs.core.gc.trace_stw_enabled) return;
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         std.debug.assert(polls < 100_000);
         _ = rt.pollGC(null, .safepoint) catch return;
     }
