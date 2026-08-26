@@ -889,6 +889,14 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *const engine.core.gc
             "gc: last finish slice remark {d} ns, weak {d} ns, sweep+destroy {d} ns\n",
             .{ fp.remark_ns, fp.weak_ns, fp.sweep_ns },
         );
+        try writer.print(
+            "gc: last begin clear {d} ns, seed {d} ns\n",
+            .{ fp.begin_clear_ns, fp.begin_seed_ns },
+        );
+        try writer.print(
+            "gc: slice max begin {d} ns, increment {d} ns, destroy {d} ns, finish {d} ns\n",
+            .{ cs.slice_max_ns[0], cs.slice_max_ns[1], cs.slice_max_ns[2], cs.slice_max_ns[3] },
+        );
         try writer.print("gc: assist batches {d} marked {d} mean {d} ns\n", .{
             cs.assist_batches,
             cs.assist_marked,

@@ -3025,7 +3025,7 @@ pub const JSRuntime = struct {
                 };
                 self.gc_running = false;
                 const ended = profile.nowNanos();
-                self.gc.recordMajorSlicePause(if (ended > began) ended - began else 0);
+                self.gc.recordMajorSlicePause(if (ended > began) ended - began else 0, .begin);
                 return .{};
             }
         }
@@ -3076,7 +3076,7 @@ pub const JSRuntime = struct {
         }
         if (!frontier_empty) {
             const ended = profile.nowNanos();
-            self.gc.recordMajorSlicePause(if (ended > began) ended - began else 0);
+            self.gc.recordMajorSlicePause(if (ended > began) ended - began else 0, .increment);
             return .{};
         }
 
@@ -3103,7 +3103,7 @@ pub const JSRuntime = struct {
         }
         const ended = profile.nowNanos();
         const slice = if (ended > began) ended - began else 0;
-        self.gc.recordMajorSlicePause(slice);
+        self.gc.recordMajorSlicePause(slice, .finish);
         if (!self.gc.doomed_pending) return self.finishDoomedCompletion(slice);
         // Reset the threshold NOW, pricing the morgue's bytes as already
         // reclaimed. Waiting for the destruction slices left the account
@@ -3136,7 +3136,7 @@ pub const JSRuntime = struct {
         _ = stw.destroyDoomedSlice(self, gc.incremental_mark_budget_ns);
         const ended = profile.nowNanos();
         const slice = if (ended > began) ended - began else 0;
-        self.gc.recordMajorSlicePause(slice);
+        self.gc.recordMajorSlicePause(slice, .destroy);
         if (!self.gc.doomed_pending) return self.finishDoomedCompletion(slice);
         return .{};
     }

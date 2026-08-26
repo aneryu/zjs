@@ -2760,9 +2760,15 @@ pub const Registry = struct {
     /// answers "how long does this collector stop the world at once", and an
     /// incremental cycle stops it many times briefly. The per-cycle total is
     /// accumulated separately for §1.3's cumulative-STW row.
-    pub fn recordMajorSlicePause(self: *Registry, ns: u64) void {
+    pub const SliceKind = enum(u2) { begin, increment, destroy, finish };
+
+    pub fn recordMajorSlicePause(self: *Registry, ns: u64, kind: SliceKind) void {
         self.recordPauseSample(ns);
-        if (comptime concurrent_enabled) self.concurrent.cycle_stw_ns += ns;
+        if (comptime concurrent_enabled) {
+            self.concurrent.cycle_stw_ns += ns;
+            const slot = &self.concurrent.stats.slice_max_ns[@intFromEnum(kind)];
+            if (ns > slot.*) slot.* = ns;
+        }
     }
 
     /// Cycle-completion accounting for an incremental major. Mirrors

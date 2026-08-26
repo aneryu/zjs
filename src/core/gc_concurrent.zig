@@ -54,6 +54,8 @@ pub const Stats = struct {
     /// The cycle finished early because allocation outran marking past the
     /// safety valve, forcing a full-drain finish in one pause.
     forced_finishes: usize = 0,
+    /// Worst slice per kind: begin, increment, destroy, finish.
+    slice_max_ns: [4]u64 = @splat(0),
     /// Request-to-acknowledge latency at safepoints (§1.3's row).
     safepoint_wait_ns_total: u64 = 0,
     safepoint_wait_ns_max: u64 = 0,

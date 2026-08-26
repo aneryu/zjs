@@ -549,9 +549,21 @@ pub fn destroyRuntimeCyclesWithValueRoots(rt: *JSRuntime, roots: ?*const runtime
 /// leftovers whose owners skipped them via cycle_visited. Does not delete
 /// `cycle_visited`, does not touch RC teardown or ScanIncref.
 pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
+    _ = drainCycleDeferredFreesBudgeted(rt, std.math.maxInt(usize));
+}
+
+/// Return up to `budget` parked struct frees to the allocator. Returns true
+/// when the queue is empty. The park's only obligation is to outlive every
+/// destructor of the same condemned set; once destruction is complete the
+/// frees can trickle out across polls -- a single-shot drain of a large
+/// morgue was a 6.8 ms pause hiding at the tail of the last slice.
+pub fn drainCycleDeferredFreesBudgeted(rt: *JSRuntime, budget: usize) bool {
     const parked = &rt.gc.cycle_deferred_frees;
+    var remaining = budget;
     var cursor = gc.listFirst(&parked.sentinel);
     while (cursor) |h| {
+        if (remaining == 0) return false;
+        remaining -= 1;
         const next = parked.nextAfter(h);
         parked.remove(h);
         switch (h.meta().flags.kind) {
@@ -579,6 +591,7 @@ pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
         }
         cursor = next;
     }
+    return true;
 }
 
 pub fn releaseCallbackOwnedFunctionBytecodeCycles(rt: *JSRuntime) void {

@@ -100,6 +100,10 @@ pub const Block = extern struct {
     size_class: u16 = 0,
     sweep_state: sweep.SweepState = .fresh,
     flags: u8 = 0,
+    /// Intrusive doomed-block link (address; 0 = not linked; 1 = tail). A
+    /// block joins at condemnation when its snapshot finds dead cells, and
+    /// leaves when the destruction slices empty its doomed bitmap.
+    doomed_link: usize = 0,
     /// Intrusive young-block link (address; 0 = not linked). A block joins
     /// the list the first time a cycle publishes a young object into it --
     /// including an OLD block that hands out a recycled cell, which is what
@@ -214,6 +218,45 @@ pub const Block = extern struct {
         return (self.flags & flag_young) != 0;
     }
 
+    /// Snapshot this block's dead cells (allocated, unmarked in `epoch`)
+    /// into the doomed bitmap -- the block's third bitmap, which the
+    /// remembered-set design reserved and nothing else uses yet. Word
+    /// arithmetic only: the whole heap's condemnation becomes microseconds
+    /// of STW instead of a walk that touches every corpse.
+    ///
+    /// Returns dead count; bytes are count * cell_size by construction.
+    pub fn snapshotDoomed(self: *Block, epoch: u64) u32 {
+        const maps = self.bitmaps();
+        var dead: u32 = 0;
+        const stale = self.mark_epoch != epoch;
+        for (maps.alloc, 0..) |alloc_word_raw, i| {
+            const alloc_word = @atomicLoad(u64, &maps.alloc[i], .monotonic);
+            _ = alloc_word_raw;
+            const mark_word = if (stale) 0 else @atomicLoad(u64, &maps.mark[i], .monotonic);
+            const doomed = alloc_word & ~mark_word;
+            maps.remember[i] = doomed;
+            dead += @popCount(doomed);
+        }
+        return dead;
+    }
+
+    /// Pop the next doomed cell index at or after `start`, clearing its bit.
+    pub fn takeDoomedCell(self: *Block, start: u32) ?u32 {
+        const maps = self.bitmaps();
+        var word_index = start / 64;
+        var shifted: u6 = @intCast(start % 64);
+        while (word_index * 64 < self.cell_count) : (word_index += 1) {
+            const word = maps.remember[word_index] >> shifted;
+            if (word != 0) {
+                const index: u32 = @intCast(word_index * 64 + shifted + @ctz(word));
+                maps.remember[index / 64] &= ~(@as(u64, 1) << @intCast(index % 64));
+                return index;
+            }
+            shifted = 0;
+        }
+        return null;
+    }
+
     pub fn ensureMarkEpoch(self: *Block, epoch: u64) void {
         if (self.mark_epoch == epoch) return;
         self.flags |= flag_epoch_transition;
@@ -243,6 +286,9 @@ pub const Heap = struct {
     active: [space.class_count]?*Block = @splat(null),
     /// Head of the young-block list (see `noteYoungCell`).
     young_blocks: ?*Block = null,
+    /// Head of the doomed-block list: blocks whose snapshot found dead cells,
+    /// consumed by the destruction slices.
+    doomed_blocks: ?*Block = null,
     stats: Stats = .{},
     mark_epoch: u64 = 0,
 
@@ -323,6 +369,30 @@ pub const Heap = struct {
             cursor = if (link <= 1) null else @ptrFromInt(link);
         }
         self.young_blocks = null;
+    }
+
+    /// Condemn every dead cell in the heap by bitmap snapshot. Blocks that
+    /// hold any go on the doomed list. Returns total dead cells and bytes.
+    pub fn snapshotAllDoomed(self: *Heap, epoch: u64) struct { count: usize, bytes: usize } {
+        var count: usize = 0;
+        var bytes: usize = 0;
+        for (self.superblocks.items) |sb| {
+            if (sb.kind != .classed) continue;
+            var i: usize = 0;
+            while (i < blocks_per_superblock) : (i += 1) {
+                const block: *Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + i * block_bytes);
+                if (block.magic != block_magic) continue;
+                const dead = block.snapshotDoomed(epoch);
+                if (dead == 0) continue;
+                count += dead;
+                bytes += @as(usize, dead) * block.cell_size;
+                if (block.doomed_link == 0) {
+                    block.doomed_link = if (self.doomed_blocks) |head| @intFromPtr(head) else 1;
+                    self.doomed_blocks = block;
+                }
+            }
+        }
+        return .{ .count = count, .bytes = bytes };
     }
 
     pub fn blockOf(self: *const Heap, ptr: [*]u8) ?*Block {

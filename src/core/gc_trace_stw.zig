@@ -478,9 +478,14 @@ pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.Va
     defer collector.deinit();
     collector.shade_to_queue = true;
 
+    const t0 = profile.nowNanos();
     collector.clearMarks();
+    const t1 = profile.nowNanos();
     try collector.seedRoots();
     if (collector.conservative_on) try collector.seedConservativeRoots();
+    const t2 = profile.nowNanos();
+    last_finish_phases.begin_clear_ns = t1 -| t0;
+    last_finish_phases.begin_seed_ns = t2 -| t1;
 
     // §8.6 initial mark step 3. O(young) via the suffix and the young-block
     // list.
@@ -489,6 +494,7 @@ pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.Va
     if (comptime gc.block_heap_enabled) rt.gc.block_heap.clearYoungBlocks();
     rt.gc.young_head = null;
     rt.gc.generation.retireYoungSet();
+    last_finish_phases.begin_retire_ns = profile.nowNanos() -| last_finish_phases.begin_seed_ns;
 
     rt.gc.concurrent.major_marking_active.store(true, .monotonic);
 }
@@ -535,6 +541,9 @@ pub var last_finish_phases: struct {
     remark_ns: u64 = 0,
     weak_ns: u64 = 0,
     sweep_ns: u64 = 0,
+    begin_clear_ns: u64 = 0,
+    begin_seed_ns: u64 = 0,
+    begin_retire_ns: u64 = 0,
 } = .{};
 
 pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
@@ -571,31 +580,32 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // Weak state is already clear and the trace already proved these
     // unreachable, so the mutator cannot tell the difference; what it buys is
     // the whole reason Phase 2 exists.
-    // Dead-scan condemnation: the block phase computes alloc & ~mark a word
-    // at a time and never touches a survivor -- the survivors' young bits are
-    // retired by the young-block list in `clearYoungState`, not here. The
-    // list phase still carries the per-header test for the non-block kinds.
+    // Condemnation in two strokes. Block cells: a bitmap snapshot --
+    // alloc & ~mark captured into each block's doomed bitmap, word arithmetic
+    // only, microseconds for the whole heap, and no corpse is touched until
+    // its destruction slice. Pinned cells cannot appear in it: pinning is
+    // rare and pinned objects are roots, so the trace marked them. The list:
+    // the non-block kinds plus standalone objects, walked as before -- it is
+    // small now.
     var condemned: usize = 0;
     var doomed_bytes: usize = 0;
-    var iterator = rt.gc.deadCandidateIterator();
-    while (iterator.next()) |header| {
-        if (!gc.Registry.isBlockCellHeader(header)) {
-            // List phase: mark test as always, and fold the survivors' young
-            // retirement into the same touch.
-            if (rt.gc.headerMarked(header)) {
-                header.meta().flags.young = false;
-                continue;
-            }
+    if (comptime gc.block_heap_enabled) {
+        const snap = rt.gc.block_heap.snapshotAllDoomed(rt.gc.block_heap.mark_epoch);
+        condemned += snap.count;
+        // Ledger parity: the account carries object sizes, not cell sizes.
+        doomed_bytes +|= snap.bytes -| (snap.count * gc.metadata_prefix_size);
+    }
+    var cursor_node = rt.gc.gc_obj_list.next;
+    while (cursor_node) |header| {
+        if (header == &rt.gc.gc_obj_list) break;
+        const next_node = header.next;
+        defer cursor_node = next_node;
+        if (rt.gc.headerMarked(header)) {
+            header.meta().flags.young = false;
+            continue;
         }
         if (header.metaConst().flags.is_pinned) continue;
-        // The byte total only feeds the threshold's condemn-time reset; for a
-        // block corpse the cell class is close enough, and precise
-        // `heapByteSizeFromHeader` reads the corpse's shape -- one cache miss
-        // per dead object, on the slice that is the pause tail.
-        doomed_bytes +|= if (gc.Registry.isBlockCellHeader(header))
-            BlockHeapMod.Block.fromCellTrusted(@intFromPtr(header) - gc.metadata_prefix_size).cell_size - gc.metadata_prefix_size
-        else
-            gc.Registry.heapByteSizeFromHeader(rt, header);
+        doomed_bytes +|= gc.Registry.heapByteSizeFromHeader(rt, header);
         rt.gc.detachCycleCandidate(header);
         gc.listAddTail(&rt.gc.doomed_list, header);
         // A condemned shape must leave the transition table NOW, not at its
@@ -615,7 +625,10 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     rt.gc.doomed_destroyed = 0;
     rt.gc.doomed_bytes = doomed_bytes;
     rt.gc.doomed_pending = condemned != 0;
-    if (condemned == 0) rt.gc.concurrent.stats.cycles_completed += 1;
+    if (comptime gc.block_heap_enabled) {
+        if (rt.gc.block_heap.doomed_blocks != null) rt.gc.doomed_pending = true;
+    }
+    if (!rt.gc.doomed_pending) rt.gc.concurrent.stats.cycles_completed += 1;
 
     const t_end = profile.nowNanos();
     last_finish_phases = .{
@@ -669,6 +682,34 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
     const old_phase = rt.gc.phase;
     rt.gc.phase = .remove_cycles;
     defer rt.gc.phase = old_phase;
+
+    // Block corpses first: they are all plain objects, which is exactly the
+    // kind order's first pass, so draining them before the list phases keeps
+    // "objects before realms before shapes" intact -- standalone objects on
+    // the list still get their turn in pass 0 below.
+    if (comptime gc.block_heap_enabled) {
+        while (rt.gc.block_heap.doomed_blocks) |block| {
+            while (block.takeDoomedCell(0)) |index| {
+                const header: *gc.Header = @ptrFromInt(block.cellBase(index) + gc.metadata_prefix_size);
+                std.debug.assert(header.meta().flags.kind == .object);
+                rt.gc.sweep_current = header;
+                Object.destroyFromHeader(rt, header);
+                rt.gc.sweep_current = null;
+                destroyed += 1;
+                since_clock += 1;
+                if (since_clock == 8) {
+                    since_clock = 0;
+                    if (profile.nowNanos() -| started >= budget_ns) {
+                        rt.gc.doomed_destroyed += destroyed;
+                        return destroyed;
+                    }
+                }
+            }
+            const link = block.doomed_link;
+            block.doomed_link = 0;
+            rt.gc.block_heap.doomed_blocks = if (link <= 1) null else @ptrFromInt(link);
+        }
+    }
 
     while (rt.gc.doomed_phase < doomed_phase_kinds.len + 1) {
         const final_pass = rt.gc.doomed_phase == doomed_phase_kinds.len;
@@ -725,13 +766,19 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
         rt.gc.doomed_cursor = null;
     }
 
-    // Morgue empty: return the parked memory in one drain, same condition the
-    // monolithic sweep used.
-    rt.gc.doomed_pending = false;
-    rt.gc.doomed_cursor = null;
+    // Morgue empty: the parked memory trickles back under the same budget.
+    // The park's obligation ends with the last destructor; a one-shot drain
+    // here was a 6.8 ms pause hiding at the tail of the last slice (found by
+    // the per-kind slice maxima -- the budget checks guarded every destroy
+    // but not this).
     rt.gc.doomed_destroyed += destroyed;
-    if (!rt.hasPendingDeferredClassPayloadFinalizers()) object_gc.drainCycleDeferredFrees(rt);
-    rt.gc.concurrent.stats.cycles_completed += 1;
+    if (rt.hasPendingDeferredClassPayloadFinalizers() or
+        object_gc.drainCycleDeferredFreesBudgeted(rt, 4096))
+    {
+        rt.gc.doomed_pending = false;
+        rt.gc.doomed_cursor = null;
+        rt.gc.concurrent.stats.cycles_completed += 1;
+    }
     return destroyed;
 }
 
