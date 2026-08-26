@@ -16,6 +16,15 @@ pub fn build(b: *std.Build) void {
     const zjs_test_seed = b.option(u32, "zjs_test_seed", "Seed passed to Zig test runners (defaults to 0 for reproducible cached builds)") orelse 0;
     b.graph.random_seed = zjs_test_seed;
     const zjs_enable_opcode_profile = b.option(bool, "zjs_enable_opcode_profile", "Enable per-opcode profiling scopes") orelse false;
+    // PERF-T-SPIKE (branch-quarantined): off | u64 | ptr. Non-off compiles the
+    // guarded direct-slot opcodes and the shape-identity field; the guard arm
+    // is baked per build so neither arm pays a runtime branch. Default off:
+    // zero trace in production builds.
+    const zjs_tspike_guard = b.option([]const u8, "zjs_tspike_guard", "T-spike guard arm: off (default) | u64 | ptr") orelse "off";
+    if (!std.mem.eql(u8, zjs_tspike_guard, "off") and !std.mem.eql(u8, zjs_tspike_guard, "u64") and !std.mem.eql(u8, zjs_tspike_guard, "ptr")) {
+        std.debug.print("error: invalid -Dzjs_tspike_guard value '{s}': expected off, u64, or ptr\n", .{zjs_tspike_guard});
+        std.process.exit(1);
+    }
     // QCP-1: the engine has exactly one compiler. `-Dzjs_compiler` retired with
     // the legacy production path; the component stays in the configuration
     // signature so an artifact still NAMES the compiler it was built from and
@@ -127,6 +136,7 @@ pub fn build(b: *std.Build) void {
     // field whose correct value depends on the artifact's own optimize mode.
     const engine_option_inputs: config.EngineOptionInputs = .{
         .enable_opcode_profile = zjs_enable_opcode_profile,
+        .tspike_guard = zjs_tspike_guard,
         .compiler_layout = zjs_compiler_layout,
         .expect_config = expect_config,
         .oom_coverage = zjs_oom_coverage,

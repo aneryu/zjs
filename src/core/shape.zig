@@ -80,7 +80,8 @@ pub const Shape = extern struct {
         // `property_storage: []u8` slice — the storage is no longer a second
         // heap allocation. `extern` pins the field order so the FAM begins at
         // exactly `@sizeOf(Shape)`.
-        std.debug.assert(@sizeOf(@This()) == 56);
+        // PERF-T-SPIKE branch: +8 bytes for tspike_identity (56 -> 64).
+        std.debug.assert(@sizeOf(@This()) == 64);
     }
     header: gc.GCObjectHeader = .{},
     is_hashed: bool = false,
@@ -91,6 +92,13 @@ pub const Shape = extern struct {
     deleted_prop_count: u32 = 0,
     registry_hash_next: ?*Shape = null,
     proto: ?*Object = null,
+    /// PERF-T-SPIKE (branch-quarantined): monotonic shape identity per the
+    /// PERF-SHAPE-ID contract shape — a NEW value at creation and before every
+    /// in-place mutation; PRESERVED across grow-relocation (same logical
+    /// layout, new address => ABA-immune); never reused. Single-runtime
+    /// counter: the spike measures one Runtime; per-Runtime scoping is the
+    /// production design, not prototyped here.
+    tspike_identity: u64 = 0,
     // Inline flexible array member follows at `@sizeOf(Shape)`:
     //   [props: Property × prop_size] [hash buckets: u32 × bucketCount()]
     // Props first: every hot property access (lookup walks, transition
@@ -293,6 +301,14 @@ pub const Registry = struct {
         return result;
     }
 
+    /// PERF-T-SPIKE identity counter (see Shape.tspike_identity).
+    var tspike_next_identity: u64 = 1;
+    fn tspikeFreshIdentity() u64 {
+        const id = tspike_next_identity;
+        tspike_next_identity += 1;
+        return id;
+    }
+
     fn createShape(self: *Registry, proto: ?*Object) !*Shape {
         // Single GC allocation = struct + inline FAM (qjs js_new_shape).
         // createWithFam initializes metadata once; the constructor initializes
@@ -306,6 +322,7 @@ pub const Registry = struct {
             .prop_hash_mask = @intCast(initial_hash_size - 1),
             .prop_size = initial_prop_size,
             .hash = initialHash(proto),
+            .tspike_identity = tspikeFreshIdentity(),
         };
         // qjs js_new_shape_nohash (quickjs.c:5228) only zeros the hash table.
         // Unused prop slots are written on append; walking uses prop_count.
@@ -336,6 +353,7 @@ pub const Registry = struct {
             .prop_size = @intCast(property_capacity),
             .prop_hash_mask = if (bucket_count == 0) no_property_hash else @as(u32, @intCast(bucket_count - 1)),
             .hash = initialHash(proto),
+            .tspike_identity = tspikeFreshIdentity(),
         };
         if (shape.hashBuckets().len != 0) {
             @memset(shape.hashBuckets(), no_property_index);
@@ -400,6 +418,8 @@ pub const Registry = struct {
         try self.reservePropertyAppend(shape_ptr, property_capacity);
         try self.appendProperty(shape_ptr, atom_id, flags);
         const shape = shape_ptr.*;
+        // rc==1 in-place append: new logical layout, new identity.
+        shape.tspike_identity = tspikeFreshIdentity();
         if (shape.is_hashed) {
             shape.hash = transitionHash(old_hash, atom_id, flags);
             self.rehashShape(shape, old_hash);
@@ -444,9 +464,14 @@ pub const Registry = struct {
             current.is_hashed = false;
             std.debug.assert(self.shape_hash_count != 0);
             self.shape_hash_count -= 1;
+            // In-place mutation follows: this is a NEW logical layout.
+            current.tspike_identity = tspikeFreshIdentity();
             return;
         }
-        if (current.header.meta().rc == 1) return;
+        if (current.header.meta().rc == 1) {
+            current.tspike_identity = tspikeFreshIdentity();
+            return;
+        }
         const clone = try self.cloneForMutation(current);
         shape_ptr.* = clone;
         self.release(current);
@@ -504,6 +529,10 @@ pub const Registry = struct {
             .deleted_prop_count = old.deleted_prop_count,
             .registry_hash_next = null, // re-established by insertShapeHash below
             .proto = old.proto, // proto ref MOVES to the new shape (old freed w/o proto cleanup)
+            // Grow-relocation keeps the SAME logical layout: identity is
+            // preserved (ABA-immunity comes from never reusing values, not
+            // from the address).
+            .tspike_identity = old.tspike_identity,
         };
 
         // Copy the prop descriptors (atom ownership moves with them).
@@ -866,6 +895,7 @@ pub const Registry = struct {
             .proto = proto,
             .prop_size = capacity,
             .prop_hash_mask = if (bucket_count == 0) no_property_hash else @as(u32, @intCast(bucket_count - 1)),
+            .tspike_identity = tspikeFreshIdentity(),
         };
         @memset(shape.props(), .{});
         if (shape.hashBuckets().len != 0) @memset(shape.hashBuckets(), no_property_index);

@@ -105,6 +105,7 @@ pub fn pinnedExpectedConfig(
 /// that legitimately differs between them.
 pub const EngineOptionInputs = struct {
     enable_opcode_profile: bool,
+    tspike_guard: []const u8,
     compiler_layout: []const u8,
     expect_config: []const u8,
     oom_coverage: bool,
@@ -122,6 +123,7 @@ pub const EngineOptionInputs = struct {
 pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption(bool, "zjs_enable_opcode_profile", in.enable_opcode_profile);
+    options.addOption([]const u8, "zjs_tspike_guard", in.tspike_guard);
     options.addOption([]const u8, "zjs_compiler_layout", in.compiler_layout);
     options.addOption([]const u8, "zjs_expect_config", in.expect_config);
     options.addOption(bool, "zjs_oom_coverage", in.oom_coverage);

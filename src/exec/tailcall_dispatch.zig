@@ -28,6 +28,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const vm_profile = @import("vm_profile.zig");
+const tspike = @import("tspike.zig");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
@@ -3888,6 +3889,93 @@ fn op_put_field_release_old_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
 fn op_put_field_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     (sp - 2)[0].freeObjectAssumeObjectDuringActiveBytecode(vm.ctx.runtime);
     return cont(pc + 5, sp - 2, var_buf, vm);
+}
+
+// ---- PERF-T-SPIKE handlers (branch-quarantined; policy
+// policies/spikes/perf-t-spike-v1.json; registry/capture in tspike.zig).
+// Size-6 instructions (atom u32 at pc+1 for capture/fallback, registry index
+// at pc+5); every miss tails to cold_table[pc[0]] = h_field, whose
+// vm_property_field.field arms handle these ops generically.
+
+fn op_tspike_get_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.property_holder.value().freeObjectAssumeObjectDuringActiveBytecode(vm.ctx.runtime);
+    return cont(pc + 6, sp, var_buf, vm);
+}
+
+fn op_tspike_put_release_old_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const rt = vm.ctx.runtime;
+    (sp - 1)[0].freeDuringActiveBytecode(rt);
+    (sp - 2)[0].freeObjectAssumeObjectDuringActiveBytecode(rt);
+    return cont(pc + 6, sp - 2, var_buf, vm);
+}
+
+fn op_tspike_put_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    (sp - 2)[0].freeObjectAssumeObjectDuringActiveBytecode(vm.ctx.runtime);
+    return cont(pc + 6, sp - 2, var_buf, vm);
+}
+
+pub fn op_tspike_get_slot(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    if (!receiver.isObject())
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const rt = vm.ctx.runtime;
+    const obj = object_ops.objectFromValue(receiver) orelse unreachable;
+    const e = &tspike.registry[pc[5]];
+    const shape_ptr = obj.shape_ref;
+    var holder = obj;
+    if (tspike.guardOwn(shape_ptr, e)) {
+        // own hit: holder stays the receiver
+    } else if (tspike.guardProtoRecv(shape_ptr, e)) {
+        const proto_obj = shape_ptr.proto orelse
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        if (!tspike.guardProtoHolder(proto_obj.shape_ref, e))
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        holder = proto_obj;
+    } else if (e.state == .empty) {
+        const atom_id = readInt(u32, pc + 1);
+        if (!tspike.capture(obj, atom_id, e, false))
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        if (e.state == .proto) holder = shape_ptr.proto orelse unreachable;
+    } else {
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    }
+    const slot = &holder.prop_values[e.slot_index].slot.data;
+    const value = loadValueAsIntPair(slot);
+    _ = value.dup();
+    storeValueAsIntPair(&(sp - 1)[0], value);
+    if (receiver.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
+        vm.property_holder = object_ops.objectFromValue(receiver) orelse unreachable;
+        return @call(.always_tail, op_tspike_get_release_receiver_tail, .{ pc, sp, var_buf, vm });
+    }
+    return cont(pc + 6, sp, var_buf, vm);
+}
+
+pub fn op_tspike_put_slot(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const receiver = (sp - 2)[0];
+    if (!receiver.isObject())
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const rt = vm.ctx.runtime;
+    const obj = object_ops.objectFromValue(receiver) orelse unreachable;
+    const e = &tspike.registry[pc[5]];
+    if (!tspike.guardOwn(obj.shape_ref, e)) {
+        if (e.state != .empty)
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        const atom_id = readInt(u32, pc + 1);
+        if (!tspike.capture(obj, atom_id, e, true))
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    }
+    const slot = &obj.prop_values[e.slot_index].slot.data;
+    const old_value = loadValueAsIntPair(slot);
+    const value = loadValueAsIntPair(&(sp - 1)[0]);
+    storeValueAsIntPair(slot, value); // consumes the stack's ref on value
+    if (old_value.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {
+        storeValueAsIntPair(&(sp - 1)[0], old_value);
+        return @call(.always_tail, op_tspike_put_release_old_tail, .{ pc, sp, var_buf, vm });
+    }
+    if (receiver.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
+        return @call(.always_tail, op_tspike_put_release_receiver_tail, .{ pc, sp, var_buf, vm });
+    }
+    return cont(pc + 6, sp - 2, var_buf, vm);
 }
 
 fn op_get_array_el_atom_key(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {

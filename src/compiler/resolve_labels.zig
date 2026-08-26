@@ -742,6 +742,26 @@ const Resolver = struct {
         return (v4Mask() & bit) != 0;
     }
 
+    // PERF-T-SPIKE (branch-quarantined): ZJS_TSPIKE=1 rewrites get_field /
+    // put_field sites into the guarded direct-slot ops, one registry index
+    // per site (process-wide counter; sites past the registry capacity stay
+    // generic), and suppresses the fusions whose B side is get_field so the
+    // sites survive to the rewrite. Diagnostic only, like ZJS_FUSE_V4.
+    var tspike_ready: bool = false;
+    var tspike_enabled: bool = false;
+    var tspike_next_site: u16 = 0;
+
+    fn tspikeOn() bool {
+        if (!tspike_ready) {
+            tspike_ready = true;
+            if (std.c.getenv("ZJS_TSPIKE")) |raw| {
+                const s = std.mem.span(raw);
+                tspike_enabled = s.len != 0 and s[0] == '1';
+            }
+        }
+        return tspike_enabled;
+    }
+
     inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
         self.last_pc = pc;
         self.fuse_b3 = 0;
@@ -751,7 +771,7 @@ const Resolver = struct {
         switch (opc) {
             op.get_loc0 => {
                 self.last_sz = 1;
-                self.fuse_b = op.get_field;
+                self.fuse_b = if (tspikeOn()) 0 else op.get_field;
                 self.fuse_op = op.get_loc0_field;
                 self.fuse_b2 = 0;
             },
@@ -787,7 +807,7 @@ const Resolver = struct {
             },
             op.get_loc2 => {
                 self.last_sz = 1;
-                self.fuse_b = op.get_field;
+                self.fuse_b = if (tspikeOn()) 0 else op.get_field;
                 self.fuse_op = op.get_loc2_field;
                 self.fuse_b2 = op.get_field2;
                 self.fuse_op2 = op.get_loc2_field2;
@@ -800,13 +820,13 @@ const Resolver = struct {
             },
             op.get_field => {
                 self.last_sz = 5;
-                self.fuse_b = op.get_field2;
+                self.fuse_b = if (tspikeOn()) 0 else op.get_field2;
                 self.fuse_op = op.get_field_field2;
                 self.fuse_b2 = 0;
             },
             op.get_var => {
                 self.last_sz = 3;
-                self.fuse_b = op.get_field;
+                self.fuse_b = if (tspikeOn()) 0 else op.get_field;
                 self.fuse_op = op.get_var_field;
                 self.fuse_b2 = 0;
             },
@@ -2616,6 +2636,30 @@ const Resolver = struct {
                         try self.attachSource();
                         try self.appendByte(op.get_length);
                         try self.consumeAtomsRange(position, position_next, null);
+                    } else if (tspikeOn() and tspike_next_site < 256) {
+                        // PERF-T-SPIKE: same atom operand (ownership moves
+                        // with the copied bytes), plus the site's registry
+                        // index. Capture happens on first execution.
+                        try self.attachSource();
+                        try self.appendByte(op.tspike_get_slot);
+                        try self.appendU32(try readU32At(self.code, position, 1));
+                        try self.appendByte(@intCast(tspike_next_site));
+                        tspike_next_site += 1;
+                        try self.consumeInstructionAtom(position, instruction, true);
+                    } else {
+                        try self.copyDefault(layout, position, instruction);
+                    }
+                },
+
+                // PERF-T-SPIKE: put sites get their own registry entries.
+                op.put_field => {
+                    if (tspikeOn() and tspike_next_site < 256) {
+                        try self.attachSource();
+                        try self.appendByte(op.tspike_put_slot);
+                        try self.appendU32(try readU32At(self.code, position, 1));
+                        try self.appendByte(@intCast(tspike_next_site));
+                        tspike_next_site += 1;
+                        try self.consumeInstructionAtom(position, instruction, true);
                     } else {
                         try self.copyDefault(layout, position, instruction);
                     }

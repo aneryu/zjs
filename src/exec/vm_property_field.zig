@@ -185,8 +185,10 @@ pub noinline fn field(
     const site_pc = frame.pc - 1;
     const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
+    // PERF-T-SPIKE ops carry one extra operand byte (registry index).
+    if (opc == op.tspike_get_slot or opc == op.tspike_put_slot) frame.pc += 1;
     switch (opc) {
-        op.get_field, op.get_field_field2 => {
+        op.get_field, op.get_field_field2, op.tspike_get_slot => {
             if (stack.len() == 0) return error.StackUnderflow;
             const top_index = stack.len() - 1;
             const receiver = stack.values[top_index];
@@ -266,7 +268,7 @@ pub noinline fn field(
             errdefer value.free(ctx.runtime);
             try stack.pushOwned(value);
         },
-        op.put_field => {
+        op.put_field, op.tspike_put_slot => {
             const value = try stack.pop();
             var value_consumed = false;
             defer if (!value_consumed) value.free(ctx.runtime);
