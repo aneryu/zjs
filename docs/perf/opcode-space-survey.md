@@ -129,28 +129,12 @@ large, well-understood risk.
 JSC's approach is the interesting outlier: **it buys narrow encoding by
 remapping operand values, not by minting opcodes.**
 
-## 5. zjs cold/hot census (measured 2026-08-27)
+## 5. zjs cold/hot census
 
-Using the existing profiling build (`zig build zjs-profile
---profile-opcodes`) over 12 zoo benchmarks (richards, deltablue, crypto,
-raytrace, navier-stokes, earley-boyer, regexp, splay, pdfjs, typescript,
-box2d, code-load):
-
-```
-final-stream opcodes:                    254
-appear in some benchmark's top-40:       102
-never in any benchmark's top-40:         152
-```
-
-**152 of 254 ids are held by opcodes that never enter any benchmark's hot
-40.** The typed family needs 20-40. The room exists; it is just occupied by
-cold code.
-
-Caveat, stated plainly: "not in a top-40" is not "never executed" — the
-profiler's output is capped at 40 rows per run, so warm-but-not-hot opcodes
-(`apply`, `call`, `catch`, `delete`) are inside this 152. A precise census
-needs that cap lifted; the number above is an upper bound on what is
-reclaimable, not a committed budget.
+Superseded by the precise census in §7.1 below. (An earlier pass used the
+profiler's default 40-row cap as a proxy and reported "152 outside every
+top-40"; that number conflated warm-but-not-hot opcodes with cold ones and
+also mis-sorted the 19 temp opcodes. §7.1 lifts the cap and separates them.)
 
 ## 6. Reading
 
@@ -169,3 +153,105 @@ For zjs specifically:
 4. JSC's dormant two-byte-id-in-wide-plane design is the only genuine
    numbering extension anyone has built. It is the right reference if we
    ever need thousands of opcodes; it is over-engineering for needing forty.
+
+---
+
+# 7. Decision and reclaim plan (owner-approved 2026-08-27)
+
+**Ruling: reclaim, following V8's pattern. No prefix plane.**
+
+## 7.1 Measured census
+
+Profiling build (`ZJS_PROFILE_ALL=1 zjs-profile --profile-opcodes`, the row
+cap is now lifted by that env var) over 15 zoo benchmarks — richards,
+deltablue, crypto, raytrace, navier-stokes, earley-boyer, regexp, splay,
+pdfjs, typescript, box2d, code-load, gbemu, mandreel, zlib:
+
+```
+opcode executions observed:              41,888,384,774
+final-stream opcodes:                    254   (all 256 ids claimed)
+temp opcodes sharing ids with short ops:  19   (never in a final stream)
+executed at least once:                  156
+NEVER executed:                           79
+executed but < 0.0001% of all opcodes:    23
+=> cold pool at &lt;= 0.0001%:              102
+```
+
+The typed family needs 20-40 ids. The pool is 2-3x that.
+
+## 7.2 Our own fusion opcodes, priced
+
+Every zjs-added fusion earns its keep except one:
+
+| fusion | executions | share |
+|---|---|---|
+| push_0_or | 3,768,876,208 | 9.00% |
+| get_loc8_push_2 | 816,208,860 | 1.95% |
+| put_loc8_get_loc8 | 600,756,243 | 1.43% |
+| get_loc8_push_1 | 599,826,174 | 1.43% |
+| push_2_sar | 470,159,471 | 1.12% |
+| sar_get_array_el | 456,529,784 | 1.09% |
+| push_0_shr | 395,847,723 | 0.95% |
+| eq_if_false8 | 280,044,525 | 0.67% |
+| cmp_if_false8 | 277,096,862 | 0.66% |
+| get_loc0_field | 216,054,046 | 0.52% |
+| push_this_put_loc0 | 108,967,999 | 0.26% |
+| get_loc2_field | 74,268,031 | 0.18% |
+| get_field2_call_method | 63,527,185 | 0.15% |
+| get_var_field | 24,552,997 | 0.06% |
+| get_loc2_field2 | 21,890,348 | 0.05% |
+| get_field_field2 | 21,334,593 | 0.05% |
+| **put_loc0_get_loc0** | **8** | **0.000%** |
+
+`put_loc0_get_loc0` is our `Ldr*`: an id, a handler, and I-cache footprint
+buying eight executions out of forty-two billion.
+
+## 7.3 Tiers
+
+Static check of every candidate (does the compiler still emit it?) matters:
+most cold opcodes ARE still emitted — `swap` 27 emit sites, `nip` 10,
+`gosub` 10, `to_propkey` 7 — benchmarks simply do not reach them. Those can
+be demoted but not deleted.
+
+**Tier A — retire (delete/merge). Zero runtime cost; V8 reports this can
+help I-cache.**
+- `put_loc0_get_loc0` — fusion with 8 executions in 42 billion.
+- `nip1` — zero emit sites in the compiler, 3 references total.
+- Further candidates require the same static check before they qualify.
+
+**Tier B — demote to a sub-opcode plane (cold but live).** Second-level
+dispatch is acceptable precisely because these are per-class-definition or
+per-with-block, never per-loop-iteration:
+- with/eval/ref machinery: `with_*`, `make_*_ref`, `*_ref_check`,
+  `get_ref_value`/`put_ref_value`, `apply_eval`, `eval`
+- class/private: `add_brand`, `check_brand`, `private_*`, `*_private_field`,
+  `define_class*`, `init_ctor`, `check_ctor*`, `set_home_object`,
+  `set_name_computed`
+- super: `get_super`, `get_super_value`, `put_super_value`
+- rare stack shuffles: `perm4`, `rot3l`, `nip`, `swap` (verify each against
+  its emit-site count first)
+
+zjs has already run this play once: `using` (id 244) carries a u8
+sub-operand and absorbed 11 cold opcodes.
+
+**Tier C — do NOT demote despite benchmark coldness.** The census corpus is
+sync, CPU-bound, old-style JS; fun is a runtime.
+- async/generator: `await`, `yield`, `yield_star`, `async_yield_star`,
+  `for_await_of_*`, `return_async`, `initial_yield` — zero in benchmarks,
+  everywhere in a real runtime.
+- iterator/for-of: `for_of_*`, `iterator_*` — benchmarks predate for-of.
+- `throw`, `catch`.
+
+Demoting a Tier C opcode would tax exactly the workloads the product cares
+about, on evidence drawn from workloads that do not represent it.
+
+## 7.4 What this does not settle
+
+- The exact Tier A list needs a per-opcode emit-site audit, not just
+  frequency (the `swap`/`nip`/`gosub` result above shows why).
+- Sub-opcode dispatch cost in zjs is a second-level branch (QuickJS shape),
+  not Hermes's absorbed-into-a-call shape. Cost should be A/B'd on the
+  demoted set before the plane is widened.
+- Encoding-version policy and the shared generator for the four consumers
+  (compiler / disassembler / serializer / future JIT) remain open and are
+  unaffected by this ruling.

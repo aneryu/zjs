@@ -837,7 +837,14 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         try output.print("\nOPCODE                 COUNT      TOTAL_NS       AVG_NS       SLOW\n", .{});
     }
 
-    const limit = @min(row_count, 40);
+    // The default 40-row cap keeps the profile readable. `ZJS_PROFILE_ALL=1`
+    // prints every executed opcode, which is what an opcode-space census
+    // needs: the cold tail is exactly the part the cap hides.
+    const print_all = if (std.c.getenv("ZJS_PROFILE_ALL")) |raw| blk: {
+        const v = std.mem.span(raw);
+        break :blk v.len != 0 and v[0] == '1';
+    } else false;
+    const limit = if (print_all) row_count else @min(row_count, 40);
     for (rows[0..limit]) |row| {
         const name = zjs.OpcodeProfile.opcodeName(row.opcode);
         const display_name = if (name.len == 0) "<invalid>" else name;
