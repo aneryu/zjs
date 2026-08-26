@@ -56,10 +56,16 @@ def run_once(binary, env_extra, js, cpu):
     for line in p.stderr.splitlines():
         parts = line.split(",")
         if len(parts) >= 3 and parts[0] not in ("", "<not counted>", "<not supported>"):
-            try:
-                counters[parts[2]] = int(parts[0])
-            except ValueError:
-                pass
+            # Event names carry the PMU prefix on this big.LITTLE host
+            # ("armv8_pmuv3_1/instructions/"); the rows for the cluster the
+            # process is not pinned to read "<not counted>" and are skipped
+            # above. Match on the event substring, not on an exact name.
+            for want in ("instructions", "cycles"):
+                if want in parts[2]:
+                    try:
+                        counters[want] = int(parts[0])
+                    except ValueError:
+                        pass
     return {"wall_s": wall, "stdout": p.stdout.strip(),
             "instructions": counters.get("instructions"), "cycles": counters.get("cycles")}
 
