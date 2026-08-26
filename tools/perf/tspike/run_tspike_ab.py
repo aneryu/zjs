@@ -25,7 +25,7 @@ Usage (must hold the host lock and be pinned):
 import argparse, json, os, re, statistics as st, subprocess, sys, time
 from pathlib import Path
 
-BENCHES = ["own_slot", "proto_slot", "poly_stress", "untyped_control"]
+BENCHES = ["chain_walk", "prop_dense", "own_slot", "proto_slot", "poly_stress", "untyped_control"]
 HERE = Path(__file__).resolve().parent
 EVENTS = "instructions,cycles"
 
