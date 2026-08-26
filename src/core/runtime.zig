@@ -3151,6 +3151,7 @@ pub const JSRuntime = struct {
         self.gc.doomed_destroyed = 0;
         self.gc.recordIncrementalCycleSuccess(result);
         self.resetGCThreshold();
+        if (comptime gc.block_heap_enabled) _ = self.gc.block_heap.releaseFreeBlockPages();
         return result;
     }
 

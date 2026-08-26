@@ -62,6 +62,11 @@ pub const Stats = struct {
     large_reserves: usize = 0,
     failed_reserves: usize = 0,
     mark_epoch: u64 = 0,
+    /// Bytes handed back to the OS from fully-free blocks (cumulative), and
+    /// bytes re-faulted when such a block was reopened. The difference is the
+    /// currently-decommitted figure already subtracted from `committed_bytes`.
+    decommitted_bytes: usize = 0,
+    recommitted_bytes: usize = 0,
 
     pub fn committedLiveMilli(self: Stats) usize {
         if (self.live_bytes == 0) return 0;
@@ -116,12 +121,24 @@ pub const Block = extern struct {
     remember_bits_off: u32 = 0,
     bitmap_words: u32 = 0,
     next_free: usize = 0,
+    /// Heap `mark_epoch` when the block went on the free list. A block is
+    /// decommitted only after surviving a full major on the list: splay's
+    /// steady state cycles every free block back into service within one
+    /// round, and decommitting those returned 337MB only to re-fault 299MB
+    /// of it (measured 2026-08-26) -- pure syscall + page-fault tax.
+    free_epoch: u64 = 0,
 
     pub const flag_young: u8 = 1 << 0;
     const flag_remembered: u8 = 1 << 1;
     const flag_overflow: u8 = 1 << 2;
     const flag_bailout: u8 = 1 << 3;
     const flag_epoch_transition: u8 = 1 << 4;
+    /// The block's cell pages (everything past the header page) have been
+    /// returned to the OS with MADV_DONTNEED. The header page stays mapped
+    /// and populated, so the free-list link, magic, and bitmaps remain valid;
+    /// `resetBlock` clears this flag on reuse because it rewrites the whole
+    /// header anyway and the cells are rebuilt from `bump = 0`.
+    const flag_decommitted: u8 = 1 << 5;
 
     pub fn fromAddrChecked(addr: usize) ?*Block {
         return fromAddr(addr);
@@ -395,6 +412,33 @@ pub const Heap = struct {
         return .{ .count = count, .bytes = bytes };
     }
 
+    /// Hand the cell pages of every fully-free block back to the OS. The
+    /// header page (magic, links, bitmaps -- all under 2KB) stays mapped, so
+    /// the free list keeps working, conservative candidates still resolve
+    /// through an intact magic + all-zero alloc bitmap, and `openBlock`
+    /// rebuilds the cells from `bump = 0` exactly as it would for a fresh
+    /// block. Called once per completed major, off every pause path: without
+    /// it splay's free lists pinned ~97MB of dead pages for the process
+    /// lifetime (committed 180MB over 83MB live, 2026-08-26).
+    pub fn releaseFreeBlockPages(self: *Heap) usize {
+        var released: usize = 0;
+        for (self.free_blocks) |head| {
+            var cursor = head;
+            while (cursor) |block| {
+                cursor = if (block.next_free == 0) null else @ptrFromInt(block.next_free);
+                if (block.flags & Block.flag_decommitted != 0) continue;
+                if (block.free_epoch >= self.mark_epoch) continue; // not idle for a full major yet
+                const cells: [*]align(page_bytes) u8 = @ptrFromInt(@intFromPtr(block) + page_bytes);
+                std.posix.madvise(cells, block_bytes - page_bytes, std.posix.MADV.DONTNEED) catch continue;
+                block.flags |= Block.flag_decommitted;
+                released += block_bytes - page_bytes;
+            }
+        }
+        self.stats.decommitted_bytes += released;
+        self.stats.committed_bytes -= released;
+        return released;
+    }
+
     pub fn blockOf(self: *const Heap, ptr: [*]u8) ?*Block {
         // Arithmetic first, membership second, DEREFERENCE LAST. This is fed
         // arbitrary conservative candidates now, and the old order -- mask,
@@ -452,6 +496,7 @@ pub const Heap = struct {
             const class_idx = block.size_class;
             if (self.active[class_idx] == block) return;
             block.sweep_state = .swept;
+            block.free_epoch = self.mark_epoch;
             block.next_free = if (self.free_blocks[class_idx]) |head| @intFromPtr(head) else 0;
             self.free_blocks[class_idx] = block;
         }
@@ -463,6 +508,12 @@ pub const Heap = struct {
                 null
             else
                 @ptrFromInt(block.next_free);
+            if (block.flags & Block.flag_decommitted != 0) {
+                // The pages re-fault as zero on first touch; only the account
+                // moves here. `resetBlock` clears the flag with the rest.
+                self.stats.recommitted_bytes += block_bytes - page_bytes;
+                self.stats.committed_bytes += block_bytes - page_bytes;
+            }
             self.resetBlock(block, class_idx, cell_size);
             block.sweep_state = .active;
             return block;

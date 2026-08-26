@@ -925,6 +925,10 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
                 st.mark_epoch,
             },
         );
+        try writer.print(
+            "gc: block heap decommitted {d} recommitted {d}\n",
+            .{ st.decommitted_bytes, st.recommitted_bytes },
+        );
     }
 }
 
