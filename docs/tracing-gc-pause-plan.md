@@ -443,6 +443,35 @@ and the combined workload caught all):
   outright -- a published container can briefly hold a pointer to an object
   still being built, and tracing through it reached undefined fields.
 
+## 4e. Block heap Steps 2-3 and lazy sweep (2026-08-27): the pause target is met
+
+Step 2 moved the mark authority for block cells into per-block bitmaps under
+the heap's mark epoch (begin's clearMarks became one epoch bump -- the sound
+form of what the retracted parity flip attempted), delisted objects from
+gc_obj_list behind a composite iterator that kept every consumer source-
+compatible, made young tracking block-granular, and turned condemnation into
+a dead-scan. Its honest ledger: the first cut was 6% slower with a worse
+p99, and three profile-led fixes (word-skipping enumeration, list-only
+clearMarks, allocation-time cell-index stamping) brought it to throughput
+parity at p99 8.4 -> 6.1ms. One latent defect: isBlockCellHeader compared
+the whole alloc_info byte and publication's accounted bit defeated it --
+every published block object double-counted on the first audit.
+
+The lazy-sweep tranche finished the job. Condemnation is a word-arithmetic
+bitmap snapshot into each block's doomed bitmap (microseconds, no corpse
+touched -- the frozen-window semantics that lets destruction slice across
+polls without mistaking new allocations for corpses); doomed blocks queue on
+an intrusive list the destruction slices drain under budget. The tail moved
+twice and the per-kind slice maxima caught it both times: the single-shot
+parked-frees drain at the last slice's tail (6.8ms for a whole morgue; now
+budgeted like everything else), then begin's rare 3.5ms conservative-scan
+max, which the p99 does not see.
+
+**splay, fixed work: major p50 42us, p95 1.003ms, p99 1.007ms, max 3.53ms.
+§1.3's major-pause row -- p99 below 2ms -- is met on the workload that
+paused 112ms per collection when this plan began. Throughput parity held
+throughout.**
+
 ## 5. Phase 3 — deferred, with their triggers
 
 | Item | Trigger |
