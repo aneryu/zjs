@@ -1,14 +1,14 @@
 # Tracing GC: pause-first execution plan
 
-**Status (2026-08-26): Phases 0-2 executed and landed on `gc/tracing`; every
-outcome, including the two missed lines, is recorded in its phase's Outcome
-paragraph. Phase 3 items remain trigger-gated tranches. Standing against
-§1.3 after Phase 2: minor pauses mean 1.0 ms / max 2.7 ms; major-ring p50
-1.00 ms and p95 1.007 ms with the p99 at 64 ms on the remark+sweep slice --
-the one slice only Phase 3's lazy sweep and versioned marks can shrink. Of
-Phase 3's triggers, incremental sweep's has already fired (the sweep share of
-the tail slice exceeds the remark share); it is the next tranche when this
-line of work resumes.**
+**Status (2026-08-26): Phases 0-2 and Phase 3's first tranche (sliced
+destruction, §4b) executed and landed on `gc/tracing`; every outcome,
+including the two missed lines, is recorded in its section. Standing against
+§1.3: minor pauses mean 1.0 ms / max 2.8 ms; major-ring p50 1.00 ms, p95
+1.007 ms, p99 33.6 ms, max 34.8 ms -- the tail is now exactly the two O(heap)
+walks (begin's clearMarks and the condemn walk), which fall with versioned
+marks and the block heap. Throughput geomean 1.31, bench-v8 combined 0.79 of
+rc, with splay carrying nearly the whole residue in both. Remaining Phase 3
+items stay trigger-gated.**
 
 Companion to `tracing-gc-design.md`. That document says what the collector
 should be; this one sequences the work from where the implementation stands on
