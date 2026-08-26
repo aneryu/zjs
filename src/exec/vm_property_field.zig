@@ -9,6 +9,7 @@ const frame_mod = @import("frame.zig");
 const property_direct = @import("property_direct.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
+const tspike = @import("tspike.zig");
 const value_ops = @import("value_ops.zig");
 
 const call_runtime = @import("call_runtime.zig");
@@ -185,8 +186,31 @@ pub noinline fn field(
     const site_pc = frame.pc - 1;
     const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
-    // PERF-T-SPIKE ops carry one extra operand byte (registry index).
-    if (opc == op.tspike_get_slot or opc == op.tspike_put_slot) frame.pc += 1;
+    // PERF-T-SPIKE ops carry one extra operand byte (registry index). The
+    // site is captured HERE, on its first cold visit, so the resident
+    // handlers stay leaf (see tspike.zig fairness rule 1): this visit still
+    // answers generically, and the next execution takes the guarded path.
+    if (opc == op.tspike_get_slot or opc == op.tspike_put_slot) {
+        frame.pc += 1;
+        const site_index = function.byteCode()[site_pc + 5];
+        const entry = &tspike.registry[site_index];
+        if (entry.state == tspike.state_empty) {
+            const is_put = opc == op.tspike_put_slot;
+            const depth: usize = if (is_put) 2 else 1;
+            if (stack.len() >= depth) {
+                const receiver = stack.values[stack.len() - depth];
+                if (core.value_semantics.objectFromValue(receiver)) |obj| {
+                    if (is_put) {
+                        _ = tspike.capture(obj, atom_id, entry, true);
+                    } else {
+                        _ = tspike.capture(obj, atom_id, entry, false);
+                    }
+                } else {
+                    entry.state = tspike.state_poisoned;
+                }
+            }
+        }
+    }
     switch (opc) {
         op.get_field, op.get_field_field2, op.tspike_get_slot => {
             if (stack.len() == 0) return error.StackUnderflow;

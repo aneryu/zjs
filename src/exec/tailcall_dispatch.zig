@@ -3893,9 +3893,13 @@ fn op_put_field_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: 
 
 // ---- PERF-T-SPIKE handlers (branch-quarantined; policy
 // policies/spikes/perf-t-spike-v1.json; registry/capture in tspike.zig).
-// Size-6 instructions (atom u32 at pc+1 for capture/fallback, registry index
-// at pc+5); every miss tails to cold_table[pc[0]] = h_field, whose
-// vm_property_field.field arms handle these ops generically.
+// Size-6 instructions: atom u32 at pc+1 (capture + generic fallback),
+// registry index at pc+5.
+//
+// The resident handlers below must stay LEAF, like op_get_field: capture
+// and every miss leg live in tail handlers, because inlining capture here
+// costs a callee-saved prologue on every HIT and would under-price the
+// mechanism this spike exists to price (see tspike.zig fairness rule 1).
 
 fn op_tspike_get_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
     vm.property_holder.value().freeObjectAssumeObjectDuringActiveBytecode(vm.ctx.runtime);
@@ -3916,35 +3920,26 @@ fn op_tspike_put_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf:
 
 pub fn op_tspike_get_slot(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section_tail) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
-    if (!receiver.isObject())
+    const obj = object_ops.objectFromValue(receiver) orelse
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    const rt = vm.ctx.runtime;
-    const obj = object_ops.objectFromValue(receiver) orelse unreachable;
     const e = &tspike.registry[pc[5]];
     const shape_ptr = obj.shape_ref;
+    if (tspike.shapeKey(shape_ptr) != e.guard_key)
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     var holder = obj;
-    if (tspike.guardOwn(shape_ptr, e)) {
-        // own hit: holder stays the receiver
-    } else if (tspike.guardProtoRecv(shape_ptr, e)) {
+    if (e.proto_key != 0) {
         const proto_obj = shape_ptr.proto orelse
             return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        if (!tspike.guardProtoHolder(proto_obj.shape_ref, e))
+        if (tspike.shapeKey(proto_obj.shape_ref) != e.proto_key)
             return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         holder = proto_obj;
-    } else if (e.state == .empty) {
-        const atom_id = readInt(u32, pc + 1);
-        if (!tspike.capture(obj, atom_id, e, false))
-            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        if (e.state == .proto) holder = shape_ptr.proto orelse unreachable;
-    } else {
-        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     }
     const slot = &holder.prop_values[e.slot_index].slot.data;
     const value = loadValueAsIntPair(slot);
     _ = value.dup();
     storeValueAsIntPair(&(sp - 1)[0], value);
-    if (receiver.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
-        vm.property_holder = object_ops.objectFromValue(receiver) orelse unreachable;
+    if (receiver.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(vm.ctx.runtime)) {
+        vm.property_holder = obj;
         return @call(.always_tail, op_tspike_get_release_receiver_tail, .{ pc, sp, var_buf, vm });
     }
     return cont(pc + 6, sp, var_buf, vm);
@@ -3952,18 +3947,14 @@ pub fn op_tspike_get_slot(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
 
 pub fn op_tspike_put_slot(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section_tail) callconv(.c) Outcome {
     const receiver = (sp - 2)[0];
-    if (!receiver.isObject())
+    const obj = object_ops.objectFromValue(receiver) orelse
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const e = &tspike.registry[pc[5]];
+    // Writes never take the prototype leg: a proto hit would be a shadowing
+    // add, which is the generic path's business.
+    if (tspike.shapeKey(obj.shape_ref) != e.guard_key or e.proto_key != 0)
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const rt = vm.ctx.runtime;
-    const obj = object_ops.objectFromValue(receiver) orelse unreachable;
-    const e = &tspike.registry[pc[5]];
-    if (!tspike.guardOwn(obj.shape_ref, e)) {
-        if (e.state != .empty)
-            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        const atom_id = readInt(u32, pc + 1);
-        if (!tspike.capture(obj, atom_id, e, true))
-            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    }
     const slot = &obj.prop_values[e.slot_index].slot.data;
     const old_value = loadValueAsIntPair(slot);
     const value = loadValueAsIntPair(&(sp - 1)[0]);
