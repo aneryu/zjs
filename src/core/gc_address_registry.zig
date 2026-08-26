@@ -14,11 +14,14 @@ const gc = @import("gc.zig");
 const memory = @import("memory.zig");
 
 const Slab = memory.SmallObjectSlab;
+const block_heap_mod = @import("gc_block_heap.zig");
 
 pub const enabled = gc.address_registry_enabled;
 
 pub const page_shift: u6 = 12;
 pub const page_size: usize = 1 << page_shift;
+
+pub const SuperblockRange = struct { lo: usize, hi: usize };
 
 pub const Kind = enum(u8) {
     gc_object,
@@ -107,6 +110,22 @@ pub const Table = struct {
     /// conservative candidate, so sweeping is unsound; the collector marks
     /// only. See `noteArenaCreated`.
     arenas_incomplete: bool = false,
+
+    /// The collector's block heap, for resolving candidates into its cells.
+    /// Installed by `serveObjectCells`; null until then (and forever in
+    /// builds without the block heap), which every block arm treats as "no
+    /// such population".
+    block_heap: if (gc.block_heap_enabled) ?*const block_heap_mod.Heap else void =
+        if (gc.block_heap_enabled) null else {},
+    /// Superblock address ranges, refreshed with the scan filter, sorted and
+    /// coalesced (adjacent mappings merge, so the count stays small even when
+    /// the heap holds hundreds of superblocks). A range check rather than
+    /// bloom membership: a 2 MiB contiguous mapping ORs so many distinct
+    /// 4 KiB patterns into a one-word filter that it saturates. The first
+    /// version was a fixed [8] array, and earley-boyer's ninth superblock made
+    /// its words invisible to the scan -- live objects condemned; a
+    /// population's index must never have a silent capacity.
+    superblock_ranges: std.ArrayListUnmanaged(SuperblockRange) = .empty,
 
     /// One-word bloom filter over every 4 KiB base a candidate could resolve
     /// through: arena bases OR'd with occupant-table page bases. `ruleOut` is
@@ -319,6 +338,101 @@ pub const Table = struct {
         var page_it = self.pages.keyIterator();
         while (page_it.next()) |page| bits |= page.* << page_shift;
         self.scan_filter = bits;
+
+        // Superblock geometry rides the same refresh cadence: a scan must not
+        // dismiss a word that points into a block cell, and must not read a
+        // magic out of an unmapped page to find out.
+        self.superblock_ranges.clearRetainingCapacity();
+        if (comptime gc.block_heap_enabled) {
+            if (self.block_heap) |heap| {
+                const allocator = gc.Registry.markQueueAllocator();
+                for (heap.superblocks.items) |sb| {
+                    const lo = @intFromPtr(sb.bytes.ptr);
+                    const hi = lo + sb.bytes.len;
+                    self.superblock_ranges.append(allocator, .{ .lo = lo, .hi = hi }) catch {
+                        // An unlisted superblock is invisible to the scan --
+                        // the use-after-free direction. Same discipline as a
+                        // failed arena insert: refuse to sweep until whole.
+                        self.arenas_incomplete = true;
+                        break;
+                    };
+                    if (lo < self.bounds_lo) self.bounds_lo = lo;
+                    if (hi + 1 > self.bounds_hi) self.bounds_hi = hi + 1;
+                }
+                const items = self.superblock_ranges.items;
+                std.mem.sort(SuperblockRange, items, {}, struct {
+                    fn lessThan(_: void, a: SuperblockRange, b: SuperblockRange) bool {
+                        return a.lo < b.lo;
+                    }
+                }.lessThan);
+                var write: usize = 0;
+                for (items) |range| {
+                    if (write != 0 and items[write - 1].hi == range.lo) {
+                        items[write - 1].hi = range.hi;
+                    } else {
+                        items[write] = range;
+                        write += 1;
+                    }
+                }
+                self.superblock_ranges.shrinkRetainingCapacity(write);
+            }
+        }
+    }
+
+    inline fn inSuperblock(self: *const Table, addr: usize) bool {
+        if (comptime !gc.block_heap_enabled) return false;
+        for (self.superblock_ranges.items) |range| {
+            if (addr >= range.lo and addr < range.hi) return true;
+        }
+        return false;
+    }
+
+    /// Cold-path form: asks the heap directly instead of the scan-cadence
+    /// range cache, because `resolveAny`/`containsHeader` are called outside
+    /// any scan and the cache is only refreshed at scan starts.
+    fn resolveInBlockCell(self: *const Table, addr: usize) ?*gc.Header {
+        if (comptime !gc.block_heap_enabled) return null;
+        const heap = self.block_heap orelse return null;
+        const block = heap.blockOf(@ptrFromInt(addr)) orelse return null;
+        const index = block.cellIndexInterior(addr) orelse return null;
+        if (!block.cellAllocated(index)) return null;
+        const header: *gc.Header = @ptrFromInt(block.cellBase(index) + gc.metadata_prefix_size);
+        if (!header.metaConst().alloc_info.heap_accounted) return null;
+        return header;
+    }
+
+    /// Resolve `addr` (and its one-past-end neighbour) into block cells.
+    /// The alloc bitmap answers "is this cell handed out"; the prefix's
+    /// `heap_accounted` answers "is it a PUBLISHED object" -- the same two-
+    /// stage test the slab arm makes, with the bitmap in place of the free
+    /// chain.
+    fn forEachGcObjectInBlocks(
+        self: *Table,
+        addr: usize,
+        context: *anyopaque,
+        visit: *const fn (*anyopaque, *gc.Header) void,
+    ) usize {
+        if (comptime !gc.block_heap_enabled) return 0;
+        var hits: usize = 0;
+        var reported: usize = 0;
+        var probe = addr;
+        while (true) {
+            if (self.inSuperblock(probe)) resolve: {
+                const block = block_heap_mod.Block.fromAddrChecked(probe) orelse break :resolve;
+                const index = block.cellIndexInterior(probe) orelse break :resolve;
+                if (!block.cellAllocated(index)) break :resolve;
+                const user = block.cellBase(index) + gc.metadata_prefix_size;
+                const header: *gc.Header = @ptrFromInt(user);
+                if (!header.metaConst().alloc_info.heap_accounted) break :resolve;
+                if (reported == user) break :resolve;
+                reported = user;
+                hits += 1;
+                visit(context, header);
+            }
+            if (probe != addr or addr == 0) break;
+            probe = addr - 1;
+        }
+        return hits;
     }
 
     /// Two ALU ops: can this 4 KiB base possibly be registered?
@@ -327,6 +441,7 @@ pub const Table = struct {
     }
 
     pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
+        self.superblock_ranges.deinit(gc.Registry.markQueueAllocator());
         self.arenas.deinit(allocator);
         var iterator = self.pages.iterator();
         while (iterator.next()) |entry| {
@@ -470,6 +585,13 @@ pub const Table = struct {
         // The `addr - 1` probe can land in the PREVIOUS page when `addr` is
         // page-aligned, so both bases must clear the filter before the word
         // can be dismissed.
+        if (self.inSuperblock(addr) or self.inSuperblock(addr -% 1)) {
+            const block_hits = self.forEachGcObjectInBlocks(addr, context, visit);
+            if (block_hits != 0) self.stats.lookup_hits += 1;
+            // Superblock mappings and slab/standalone pages are disjoint
+            // address ranges; a word in one cannot resolve in the other.
+            return block_hits;
+        }
         const base = addr & ~(Slab.arena_size - 1);
         const prev_base = (addr -% 1) & ~(Slab.arena_size - 1);
         if (self.filterRulesOut(base) and self.filterRulesOut(prev_base)) return 0;
@@ -493,6 +615,21 @@ pub const Table = struct {
 
     pub fn resolveAny(self: *Table, addr: usize) ?Hit {
         self.stats.lookup_calls += 1;
+        // The block arm precedes the bounds window: bounds cover the arena
+        // and occupant populations, and a runtime whose objects all live in
+        // block cells may have no arenas at all, leaving the window empty.
+        if (comptime gc.block_heap_enabled) {
+            if (self.resolveInBlockCell(addr)) |header| {
+                self.stats.lookup_hits += 1;
+                return .{ .gc_object = header };
+            }
+            if (addr != 0) {
+                if (self.resolveInBlockCell(addr - 1)) |header| {
+                    self.stats.lookup_hits += 1;
+                    return .{ .gc_object = header };
+                }
+            }
+        }
         if (addr < self.bounds_lo or addr >= self.bounds_hi) return null;
         if (self.resolveInArena(addr)) |header| {
             self.stats.lookup_hits += 1;
@@ -523,6 +660,16 @@ pub const Table = struct {
     /// the occupant table still holds.
     pub fn containsHeader(self: *const Table, header: *const gc.Header) bool {
         const addr = @intFromPtr(header);
+        if (comptime gc.block_heap_enabled) {
+            if (self.block_heap) |heap| {
+                if (heap.blockOf(@ptrFromInt(addr))) |block| {
+                    const index = block.cellIndexInterior(addr) orelse return false;
+                    if (!block.cellAllocated(index)) return false;
+                    if (block.cellBase(index) + gc.metadata_prefix_size != addr) return false;
+                    return header.metaConst().alloc_info.heap_accounted;
+                }
+            }
+        }
         const base = addr & ~(Slab.arena_size - 1);
         if (self.arenas.contains(base)) {
             if (Slab.userPtrWithinArena(base, addr)) |user| {

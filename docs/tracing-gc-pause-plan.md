@@ -406,6 +406,43 @@ requires removing ~70% of remaining GC time, and only two paths do that:
    splay ~2.9 -> ~1.9 by arithmetic) and is capped by that row, since steady-
    state peak/live equals the factor. Owner's call, not a tuning decision.
 
+## 4d. Block heap tranche, Step 1 — objects served from block cells (2026-08-26)
+
+Path A, first step: plain objects allocate from the collector's block heap
+(`[8B metadata prefix][object]` cells, `alloc_info = 0x1F` as the route
+marker), with the slab as graceful fallback and the rc build untouched (its
+hook is null). The conservative resolver gained the block population --
+superblock ranges ride the scan-filter refresh, cold APIs ask the heap
+directly, and the dereference-before-membership order in `blockOf` was
+inverted before it could read an unmapped page.
+
+Measured, same protocol as every gate: splay 2.87 -> **2.09**, geomean
+1.31 -> **1.21**, bench-v8 combined 0.79 -> **0.865**, and the pause tail
+collapsed: splay major p99 33.6 -> **8.4 ms**, max 34.8 -> 8.5 ms. The cell
+economy is simply better than the slab's for this population, and the
+condemn walk got most of its locality back.
+
+The defect ledger for this step is a study in publication semantics, all
+found by the gate ladder (macro caught none of them alone; test262's volume
+and the combined workload caught all):
+
+- A fixed [8] superblock-range cache silently truncated: earley-boyer's ninth
+  superblock made its words invisible to the scan. Dynamic, sorted, coalesced
+  now; a population index must never have a silent capacity.
+- §8.6's "black-published AND all initial strong edges are shaded" was
+  implemented as published-grey -- push the object at publication -- and the
+  first version pushed EVERY kind, replanting both mines just cleared:
+  shapes (mutator-freeable) back in the queue, and FunctionBytecode clones
+  popped mid-construction. The settled rule: **published-grey is for plain
+  objects only**. Every other kind becomes reachable through a store made
+  after its construction completes, and that store's barrier greys it at a
+  moment it is fully traceable; until then it stays white under its
+  creator's stack reference, which the remark's conservative rescan honors.
+- The write barrier now ignores unpublished owners AND unpublished targets
+  (construction is not mutation), and `shade` refuses unpublished headers
+  outright -- a published container can briefly hold a pointer to an object
+  still being built, and tracing through it reached undefined fields.
+
 ## 5. Phase 3 — deferred, with their triggers
 
 | Item | Trigger |

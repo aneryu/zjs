@@ -603,6 +603,18 @@ pub const MemoryAccount = struct {
     trace_writer: ?*std.Io.Writer = null,
     trace_failed: bool = false,
     profile_alloc_count: ?*u64 = null,
+    /// Cell allocator hooks: when installed (the tracing collector does, at
+    /// registry init), fixed-size GC objects are served from the collector's
+    /// own block heap instead of the slab. Function pointers because this
+    /// module sits below `gc.zig` and must not import it; null in the rc
+    /// build, which costs its allocation path one predictable branch.
+    gc_cell_alloc_fn: ?*const fn (ctx: *anyopaque, bytes: usize) ?[*]u8 = null,
+    gc_cell_free_fn: ?*const fn (ctx: *anyopaque, cell: [*]u8) void = null,
+    gc_cell_ctx: *anyopaque = undefined,
+    /// Which `gc_kind_tag` the hooks serve (the collector starts with plain
+    /// objects); 255 matches nothing.
+    gc_cell_kind_tag: u8 = 255,
+
     trigger_gc_fn: ?*const fn (ctx: ?*anyopaque, size: usize) void = null,
     trigger_gc_ctx: ?*anyopaque = null,
     /// Collect-and-retry hook for an allocation that would cross `limit`.
@@ -1082,6 +1094,14 @@ pub const MemoryAccount = struct {
         return self.backing_allocator.rawAlloc(bytes, alignment, @returnAddress()) orelse error.OutOfMemory;
     }
 
+    /// `alloc_info` value marking a GC object served from the collector's
+    /// block heap rather than the slab: class field saturated (31, one past
+    /// the slab's 30 real classes), large/accounted/standalone bits all zero
+    /// -- which is exactly what the account's existing branches need to do
+    /// nothing special with it. The cell is `[8B metadata prefix][object]`,
+    /// 16-aligned, and `destroy` routes on this byte back to the block heap.
+    pub const alloc_info_block_cell: u8 = 0x1F;
+
     /// Byte 2 of the GC prefix (`gc.Metadata.alloc_info`): bits 0..4 slab
     /// class index, bit 6 heap-accounted (registry-owned), bit 7 standalone
     /// prefix. Bit positions are asserted against gc.AllocInfo in gc.zig.
@@ -1102,6 +1122,15 @@ pub const MemoryAccount = struct {
     /// allocation (null = standalone prefix); it lands in the alloc_info byte,
     /// mirroring qjs `JSMallocBlockHeader`'s adjacent block_size_idx +
     /// gc_obj_type:7|mark:1 bytes (quickjs.c:275-277) with one u16 store.
+    /// Prefix writer for a block-heap cell: same field layout as
+    /// `initGcPrefix`, info byte fixed to the block-cell marker.
+    inline fn initGcPrefixBlockCell(comptime T: type, meta: [*]u8) void {
+        comptime std.debug.assert(T.gc_kind_tag < 8);
+        std.mem.writeInt(u16, meta[0..2], 0, .little);
+        std.mem.writeInt(u16, meta[2..4], @as(u16, alloc_info_block_cell) | (@as(u16, T.gc_kind_tag) << 8), .little);
+        @as(*align(4) i32, @ptrCast(@alignCast(meta + 4))).* = 1;
+    }
+
     inline fn initGcPrefix(comptime T: type, meta: [*]u8, slab_class: ?usize) void {
         // The kind must stay inside the low 3 bits of the shared kind/flags
         // byte (gc.BlockFlags.kind).
@@ -1127,6 +1156,26 @@ pub const MemoryAccount = struct {
             @sizeOf(T),
             if (is_gc) gcAlignment(T) else std.mem.Alignment.of(T),
         );
+        // Collector-served cell: the tracing build routes fixed-size objects
+        // of the hooked kind to its block heap. One null test plus a comptime
+        // tag compare on the hot path; the rc build's hook is null.
+        if (comptime is_gc) {
+            if (self.gc_cell_alloc_fn) |cell_alloc| {
+                if (T.gc_kind_tag == self.gc_cell_kind_tag) {
+                    const bytes: usize = gc_prefix_size + @sizeOf(T);
+                    try self.checkAllocation(bytes);
+                    if (comptime trigger_gc) self.triggerGCBeforeAllocation(bytes);
+                    if (cell_alloc(self.gc_cell_ctx, bytes)) |cell| {
+                        initGcPrefixBlockCell(T, cell);
+                        self.creditAlloc(bytes, null);
+                        self.noteAllocDiagnostics(true, @sizeOf(T), 1, @intFromPtr(cell) + gc_prefix_size);
+                        return @ptrFromInt(@intFromPtr(cell) + gc_prefix_size);
+                    }
+                    // Block heap declined (OOM in its backing): the slab
+                    // still serves, which is the graceful direction.
+                }
+            }
+        }
         if (comptime slab_class != null) {
             if (self.small_slab_enabled) {
                 const bytes: usize = @sizeOf(T);
@@ -1176,6 +1225,19 @@ pub const MemoryAccount = struct {
         const is_gc = comptime isGcObject(T);
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
         const bytes_ptr: [*]u8 = @ptrCast(ptr);
+        // Collector-served cell goes home first: the marker byte is in the
+        // prefix this free is already about to touch.
+        if (comptime is_gc) {
+            if (self.gc_cell_free_fn) |cell_free| {
+                if (gcAllocInfoByte(ptr) == alloc_info_block_cell) {
+                    const bytes: usize = gc_prefix_size + @sizeOf(T);
+                    self.debitAlloc(bytes, null);
+                    self.noteFreeDiagnostics(true);
+                    cell_free(self.gc_cell_ctx, @ptrFromInt(@intFromPtr(ptr) - gc_prefix_size));
+                    return;
+                }
+            }
+        }
         // Straight-line slab arm mirroring qjs `__js_free`'s small-block path
         // (quickjs.c:1613); the class index is comptime for a sized type.
         const slab_class = comptime SmallObjectSlab.classIndex(@sizeOf(T), if (is_gc) gcAlignment(T) else std.mem.Alignment.of(T));

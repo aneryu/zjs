@@ -7741,10 +7741,13 @@ test "address registry tracks published objects and interior pointers" {
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     defer obj.value().free(rt);
-    // A bare context installs its builtins lazily, so this is the allocation
-    // that first needs a slab arena; asserting before it would assert about
-    // the fixture rather than about the registry.
-    try std.testing.expect(rt.gc.address_registry.stats.arenas_live > 0);
+    // Plain objects are served from the collector's block heap now, so the
+    // structure this creation must populate is a block cell, not an arena.
+    if (comptime core.gc.block_heap_enabled) {
+        try std.testing.expect(rt.gc.block_heap.stats.live_count > 0);
+    } else {
+        try std.testing.expect(rt.gc.address_registry.stats.arenas_live > 0);
+    }
     const header = &obj.header;
     const bytes = obj.allocationSize(rt);
     const occupant = core.gc_address_registry.Table.occupantFor(header, bytes);
@@ -14263,8 +14266,8 @@ test "a minor does not move the major's threshold" {
     try std.testing.expectEqual(threshold_before, rt.gcThreshold());
 }
 
-test "arena resolution stops at the arena header and at the last block" {
-    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
+test "cell resolution stops at the block header and at unallocated cells" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -14273,14 +14276,16 @@ test "arena resolution stops at the arena header and at the last block" {
     defer obj.value().free(rt);
     const header = &obj.header;
 
-    const arena_size = core.memory.SmallObjectSlab.arena_size;
-    const base = @intFromPtr(header) & ~(arena_size - 1);
-    try std.testing.expect(rt.gc.address_registry.arenas.contains(base));
+    // Plain objects are block cells now; this is the block-arm analogue of
+    // the arena boundary test it replaced. The object resolves from its
+    // header and from an interior byte; the BLOCK's own header/bitmap region
+    // is not a cell and must not; a never-allocated cell index must not.
+    const block_bytes = core.gc_block_heap.block_bytes;
+    const base = @intFromPtr(header) & ~@as(usize, block_bytes - 1);
+    try std.testing.expect(rt.gc.block_heap.blockOf(@ptrFromInt(@intFromPtr(header))) != null);
 
-    // The object itself resolves; the arena's own header is not an object and
-    // must not. Resolution is deliberately wide -- it accepts size-class slack
-    // and probes one-past-end -- and nothing else bounds how wide it may get.
     try std.testing.expectEqual(header, rt.gc.address_registry.resolve(@intFromPtr(header)));
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(@intFromPtr(header) + 8));
     try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(base));
     try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(base + 8));
 }

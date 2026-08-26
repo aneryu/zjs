@@ -113,6 +113,10 @@ pub const Block = extern struct {
     const flag_bailout: u8 = 1 << 3;
     const flag_epoch_transition: u8 = 1 << 4;
 
+    pub fn fromAddrChecked(addr: usize) ?*Block {
+        return fromAddr(addr);
+    }
+
     fn fromAddr(addr: usize) ?*Block {
         if (addr < block_bytes) return null;
         const base = addr & ~@as(usize, block_bytes - 1);
@@ -144,6 +148,26 @@ pub const Block = extern struct {
         const index: u32 = @intCast(off / self.cell_size);
         if (index >= self.cell_count) return null;
         return index;
+    }
+
+    /// Interior-pointer resolution: the cell containing `ptr`, or null when
+    /// `ptr` lands in the header/bitmap region or past the last cell. Unlike
+    /// `cellIndex` this does not require the exact cell base -- a conservative
+    /// stack word may point anywhere inside an object.
+    pub fn cellIndexInterior(self: *const Block, ptr: usize) ?u32 {
+        const base = @intFromPtr(self) + self.cells_offset;
+        if (ptr < base) return null;
+        const index: u32 = @intCast((ptr - base) / self.cell_size);
+        if (index >= self.cell_count) return null;
+        return index;
+    }
+
+    pub fn cellAllocated(self: *Block, index: u32) bool {
+        return testBit(self.bitmaps().alloc, index);
+    }
+
+    pub fn cellBase(self: *const Block, index: u32) usize {
+        return @intFromPtr(self) + self.cells_offset + index * self.cell_size;
     }
 
     pub fn ensureMarkEpoch(self: *Block, epoch: u64) void {
@@ -235,8 +259,17 @@ pub const Heap = struct {
     }
 
     pub fn blockOf(self: *const Heap, ptr: [*]u8) ?*Block {
-        const block = Block.fromAddr(@intFromPtr(ptr)) orelse return null;
+        // Arithmetic first, membership second, DEREFERENCE LAST. This is fed
+        // arbitrary conservative candidates now, and the old order -- mask,
+        // read the magic, then check membership -- read one word out of
+        // whatever page the mask landed in, which for a stray stack integer
+        // is as likely unmapped as not.
+        const addr = @intFromPtr(ptr);
+        if (addr < block_bytes) return null;
+        const base = addr & ~@as(usize, block_bytes - 1);
+        const block: *Block = @ptrFromInt(base);
         if (!self.containsBlock(block)) return null;
+        if (block.magic != block_magic) return null;
         return block;
     }
 

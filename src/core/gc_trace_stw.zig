@@ -950,6 +950,15 @@ const Collector = struct {
         const addr = @intFromPtr(header);
         if (addr < 4096 or !std.mem.isAligned(addr, @alignOf(gc.Header))) return;
         if (self.rt.gc.headerMarked(header)) return;
+        // UNPUBLISHED: a published container can briefly hold a pointer to an
+        // object still under construction (the store happens, the barrier
+        // correctly skips it), and tracing through the container reaches it
+        // here with its fields undefined. Skipping is the only sound answer,
+        // and it is complete: an unpublished object is not on `gc_obj_list`,
+        // so no sweep can condemn it, and its edges are covered by the
+        // published-grey push the moment registration completes -- or it
+        // dies unconstructed, in which case there was nothing to keep.
+        if (!header.meta().alloc_info.heap_accounted) return;
         // A condemned corpse awaiting its destruction slice. No precise root
         // can name it -- the remark proved it unreachable and processWeak
         // cleared its identities -- so the only way here is conservative

@@ -2114,6 +2114,17 @@ pub const Registry = struct {
         // vanishing case where the owner is itself rc-managed, fall back to
         // the queue's overflow contract: mark the target and set the flag, so
         // the remark's marked-object rescan traces its children.
+        // An UNPUBLISHED owner's stores are construction, not mutation: the
+        // object is queued grey at publication and its trace shades every
+        // initial edge, so the barrier owes these writes nothing. Queueing
+        // the owner here instead was the corpse factory -- a failed
+        // construction's errdefer-destroy left the queue naming a recycled
+        // cell.
+        if (!owner.meta().alloc_info.heap_accounted) return;
+        // Mirror rule for the target: an unpublished target queues itself
+        // grey at publication, and pushing it now would name a cell whose
+        // construction can still fail and free it.
+        if (!target.meta().alloc_info.heap_accounted) return;
         const kind = target.meta().flags.kind;
         if (kind == .shape or kind == .realm_context) {
             const owner_kind = owner.meta().flags.kind;
@@ -2211,7 +2222,11 @@ pub const Registry = struct {
         if (comptime !generation_enabled) return;
         if (comptime concurrent_enabled) {
             if (self.concurrent.markingActive()) {
-                _ = self.concurrent_mark_queue.push(owner);
+                // Same publication rule as the value barrier: an unpublished
+                // owner's edges are covered by its published-grey trace.
+                if (owner.meta().alloc_info.heap_accounted) {
+                    _ = self.concurrent_mark_queue.push(owner);
+                }
                 return;
             }
         }
@@ -2282,6 +2297,37 @@ pub const Registry = struct {
     /// its owning block by masking; all the registry needs is to know which
     /// masked bases are real arenas. Installing this is what lets
     /// `registerLiveAddress` stop inserting per published object.
+    /// Route fixed-size plain objects to the collector's block heap.
+    ///
+    /// This is `serves_gc_nodes` becoming true in deed: the cell carries the
+    /// same 8-byte metadata prefix the slab overlays, so `Header.meta()` and
+    /// every existing consumer see an identical object -- only the memory
+    /// under it and the free route differ. Objects first because they are the
+    /// overwhelming majority of the heap (space histogram: 18.4M of 18.4M
+    /// small allocations) and fixed-size, so the routing predicate is one
+    /// comptime tag compare.
+    pub fn serveObjectCells(self: *Registry, account: *memory.MemoryAccount) void {
+        if (comptime !block_heap_enabled) return;
+        // The conservative resolver needs the block geometry before the first
+        // cell can appear in a stack slot.
+        self.address_registry.block_heap = &self.block_heap;
+        account.gc_cell_ctx = self;
+        account.gc_cell_kind_tag = @intFromEnum(GcKind.object);
+        account.gc_cell_alloc_fn = struct {
+            fn call(ctx: *anyopaque, bytes: usize) ?[*]u8 {
+                const registry: *Registry = @ptrCast(@alignCast(ctx));
+                const cell = registry.block_heap.alloc(bytes) catch return null;
+                return cell.ptr;
+            }
+        }.call;
+        account.gc_cell_free_fn = struct {
+            fn call(ctx: *anyopaque, cell: [*]u8) void {
+                const registry: *Registry = @ptrCast(@alignCast(ctx));
+                registry.block_heap.free(cell);
+            }
+        }.call;
+    }
+
     pub fn observeSlabArenas(self: *Registry, slab: *memory.SmallObjectSlab) void {
         if (comptime !address_registry_enabled) return;
         // Kept so a failed arena registration can be recovered by re-walking
@@ -2339,12 +2385,37 @@ pub const Registry = struct {
     /// allocation.
     inline fn markPublishedYoung(self: *Registry, header: *GCObjectHeader) void {
         if (comptime !generation_enabled) return;
-        // §8.6 concurrent mark: "new objects are black-published". While a
-        // cycle is open, an object allocated now is alive now, and unmarked it
-        // would be condemned by the remark's sweep. When no cycle is open the
-        // prefix's zeroed byte already means unmarked.
+        // §8.6 concurrent mark: "new objects are black-published AND ALL
+        // INITIAL STRONG EDGES ARE SHADED". Both halves, and the second is
+        // load-bearing: field initialisation happens BEFORE publication, so
+        // the write barrier fires on an owner that is not yet a real object
+        // -- and the barrier must skip those (see shadeForConcurrentMark),
+        // because queueing an unpublished owner plants a landmine: its
+        // errdefer-destroy on a failed construction frees the cell while the
+        // queue still names it, and the reused cell is a half-constructed
+        // corpse at pop time (found by a test262 core dump, byte for byte).
+        // Publication queues the object itself instead -- published-grey --
+        // and its one trace covers every construction-time edge at once.
         if (comptime concurrent_enabled) {
-            if (self.concurrent.markingActive()) self.setHeaderMarked(header);
+            if (self.concurrent.markingActive()) {
+                // Published-grey applies to PLAIN OBJECTS ONLY. An object is
+                // the one kind a published container can hold before its
+                // construction settles, so its initial edges need the push.
+                // Every other kind becomes reachable through a store made
+                // AFTER its construction completes -- a closure adopting its
+                // FunctionBytecode, a frame linking a var_ref -- and that
+                // store's barrier greys it at a moment it is fully traceable;
+                // until then it stays WHITE, protected by its creator's stack
+                // reference, which the remark's conservative rescan honors.
+                // The first version pushed every kind here and re-planted
+                // both mines this file had just cleared: shapes back in the
+                // queue (mutator-freeable), and FunctionBytecode clones
+                // popped mid-construction.
+                if (header.meta().flags.kind == .object) {
+                    self.setHeaderMarked(header);
+                    _ = self.concurrent_mark_queue.push(header);
+                }
+            }
         }
         header.meta().flags.young = true;
         self.generation.stats.young_count += 1;

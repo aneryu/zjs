@@ -1349,6 +1349,7 @@ pub const JSRuntime = struct {
         // installed after the registry reaches its stable field address, for
         // the same reason `activateRuntimeAccounting` waits above.
         rt.gc.observeSlabArenas(&rt.memory.small_slab);
+        rt.gc.serveObjectCells(&rt.memory);
         rt.atoms = atom.AtomTable.init(&rt.memory);
         rt.atoms.runtime = rt;
         try rt.classes.initInPlace(&rt.memory, &rt.atoms);
