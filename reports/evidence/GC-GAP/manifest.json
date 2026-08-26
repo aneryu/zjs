@@ -410,6 +410,6 @@
    "block_heap_committed": 232783872.0
   }
  },
- "verdict": null,
- "owner_decision": null
+ "verdict": "G1-GC=continue",
+ "owner_decision": "2026-08-26: owner assigned a dedicated GC session to continue the tracing line with this account on the table (de facto continue; recorded in the registry). Owed at this gate, due before the first G2-GC-MERGE look: frozen non-inferiority margin + throughput-triangle answer (ledger 20.2a) written into gc_merge_policy.json."
 }

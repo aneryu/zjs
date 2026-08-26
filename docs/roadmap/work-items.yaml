@@ -60,9 +60,12 @@ items:
     title: "GC verdict after GC-GAP"
     type: gate
     verdicts: [continue, time_box, pause]
-    state: ready
+    verdict: continue
+    state: done
     wip_slot: none
+    completion_commit: pending-this-commit
     hard_prerequisites: [GC-GAP]
+    notes: "ruled continue 2026-08-26 (owner assigned a dedicated GC session to carry the line forward with the GC-GAP account on the table). STILL OWED at this gate per gc_merge_policy: the frozen non-inferiority margin + the throughput-triangle answer (ledger 20.2a) — must be written into gc_merge_policy.json before the first G2-GC-MERGE look."
     authority: {file: docs/roadmap.md, section: "2"}
   - id: G1-TYPED
     title: "Typed interpreter verdict after T-spike"
@@ -279,10 +282,11 @@ items:
   - id: GC-P3
     title: Lazy sweep + versioned marks + throughput-tax recovery
     type: implementation
-    state: gated
+    state: now
     wip_slot: implementation
     activation: {all: [{item: G1-GC, verdict: continue}]}
     hard_prerequisites: []
+    notes: "LANE: dedicated GC session (separate Claude), branch gc/tracing only — no main-side edits. Lazy sweep landed on-branch (9ff52b2a: splay major p99 1.007ms); remaining: throughput-tax recovery + the two GC-GAP attribution debts (SplayLatency 0.805 under rc on the branch arm; splay 544MB allocator retention). Branch tip has moved past the BASE-G0 frozen candidate — re-freeze rule applies before any G2 look."
     authority: {file: docs/tracing-gc-design.md, section: "pause plan 5"}
   - id: VM-CONTRACT-GC
     title: Representation-contract revision for the tracing switch (versioned, reviewed)
@@ -344,11 +348,11 @@ items:
   - id: HR-P1
     title: HostCore + Disposable Session + Sequential Reload
     type: implementation
-    state: now
+    state: ready
     wip_slot: implementation
     estimate_class: L
     hard_prerequisites: []
-    notes: "fun-side main effort; zjs increment = Root Handle table + epoch-safe deref/release. Internal slices: P1a Root Handle API, P1b disposable-session CLI loop, P1c HostCore/BindingRouter, P1d watcher + error overlay"
+    notes: "fun-side main effort; zjs increment = Root Handle table + epoch-safe deref/release. Internal slices: P1a Root Handle API, P1b disposable-session CLI loop, P1c HostCore/BindingRouter, P1d watcher + error overlay. Yielded its WIP slot to GC-P3 2026-08-26 (root-handle/GC coupling also argues for waiting out the GC churn); next in the implementation queue"
     authority: {file: docs/fun-dev-hot-reload-design.md, section: "12 / 37"}
   - id: HR-P2A
     title: Scope + async safety (CancellationToken, stale callbacks, drain, native-only completion)

@@ -231,14 +231,21 @@ G1-LIGHT-PROCESS-WORKLOAD。
 
 **Now(遵守 §4 WIP)**
 ```
-owner-decision: FN-M0D;**G1-GC 待裁**(GC-GAP 已出数 2026-08-26:
-                fixed-work geomean 1.206、suite composite 0.832、
-                splay pause p99 6.87ms vs rc 42.4ms、splay RSS 3.63x;
-                证据 reports/evidence/GC-GAP/manifest.json)
-implementation: HR-P1 · FN-M0I(仅非争议骨架,不执行 freeze)
+owner-decision: FN-M0D(driver 会话)
+implementation: GC-P3(GC 专属会话,分支 gc/tracing,不碰 main)
+                · FN-M0I(driver 会话;仅非争议骨架,不执行 freeze)
 measurement:    (空;队列下一位 = PERF-T-SPIKE,占 implementation
                 槽,开工前须批 policy 中 basis=proposed 阈值)
 ```
+
+**双会话分工(2026-08-26 入册)**:GC 线(gc/tracing 分支、GC-P3、
+两笔 GC-GAP 归因债、pause plan 文档)= GC 专属会话;其余全部
+(治理/registry、FN/HR/SER 线、spike 与测量队列、evidence 登记册、
+G2 合入 gate 的统计机器)= driver 会话。G1-GC 已裁 continue
+(GC-GAP 账在案:fixed-work geomean 1.206、suite 0.832、splay pause
+p99 6.87ms vs rc 42.4ms、splay RSS 3.63x;裁决时欠账=非劣效 margin
+与吞吐三角答案,须在 G2 首个 look 前写入 gc_merge_policy.json)。
+HR-P1 让出 WIP 槽排队(root-handle 与 GC 耦合,亦宜等 GC 线收敛)。
 
 **证据购买(implementation slot 释放后;测量队列串行)**
 ```
@@ -302,12 +309,12 @@ fun 面    HR-P1 HR-P2A HR-P2B HR-P3 DBG-W2 FN-M0D FN-M0I FN-M0F FN-M1A FN-M1B F
 
 <!-- BEGIN GENERATED: STATUS -->
 ```
-now        HR-P1 FN-M0D FN-M0I
-ready      G1-GC G1-LIGHT-PROCESS-WORKLOAD PERF-T-SPIKE PERF-DYN-SPIKE PERF-N-SPIKE PERF-VMABI PERF-OPCODE-SPACE PERF-SIDECAR SER-CORE SER-TRANSFER DBG-W2 RT-LIFECYCLE GC-MULTIRT-GATE VM-WEAK-REGISTRY PROC-D5A
-gated      PERF-SHAPE-ID PERF-TYPED-IR PERF-T1 PERF-P05 PERF-JIT PERF-AOT GC-P3 VM-CONTRACT-GC
+now        GC-P3 FN-M0D FN-M0I
+ready      G1-LIGHT-PROCESS-WORKLOAD PERF-T-SPIKE PERF-DYN-SPIKE PERF-N-SPIKE PERF-VMABI PERF-OPCODE-SPACE PERF-SIDECAR SER-CORE SER-TRANSFER HR-P1 DBG-W2 RT-LIFECYCLE GC-MULTIRT-GATE VM-WEAK-REGISTRY PROC-D5A
+gated      PERF-SHAPE-ID PERF-TYPED-IR PERF-T1 PERF-P05 PERF-JIT PERF-AOT VM-CONTRACT-GC
 blocked    G1-TYPED G1-FEEDBACK G1-JIT G1-AOT BACKEND-ORDER G2-GC-MERGE PERF-JIT-SPIKE GC-MERGE SER-ARTIFACT SER-SNAPSHOT SER-MESSAGE HR-P2A HR-P2B HR-P3 FN-M0F FN-M1A FN-M1B FN-M1C PROC-D3 PROC-D4 PROC-D5B PROC-D6 PROC-D7
 later      FN-M2 FN-M3 FN-M4 FN-M5 FN-M6
 incubator  PERF-ASM-1A PERF-ASM-1B
-done       BASE-DOC-NORM BASE-ROADMAP-LINT BASE-G0 GC-GAP
+done       BASE-DOC-NORM BASE-ROADMAP-LINT BASE-G0 G1-GC GC-GAP
 ```
 <!-- END GENERATED: STATUS -->
