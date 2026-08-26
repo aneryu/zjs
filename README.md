@@ -20,7 +20,7 @@ replacement.
 | --- | --- |
 | What is it? | An embeddable JavaScript engine, library, and CLI |
 | What is it written in? | Zig 0.16.0 |
-| What defines JavaScript behavior? | Bellard QuickJS is the semantic reference |
+| What defines JavaScript behavior? | ECMA-262 as validated by test262; QuickJS is the comparison reference |
 | How do Zig applications use it? | Through the `zjs` module's Zig-native embedding API |
 | Does it support TypeScript? | Partial syntax erasure; it is not a type checker or full `tsc` replacement |
 | What is the compatibility evidence? | The repository's pinned test262 profile and checked results |
@@ -33,47 +33,19 @@ for untrusted code, the QuickJS C ABI, or complete TypeScript language support.
 
 ## Performance: bench-v8
 
-The public comparison uses **bench-v8**, the V8 benchmark suite version 7
-that upstream QuickJS publishes its own scores with. The suite is vendored
-in this repository (`tools/perf/bench_v8/`). Scores are the suite's
-self-reported numbers (higher is better); the ratio below is relative to
-QuickJS.
+The public comparison uses **bench-v8**, vendored in this repository
+(`tools/perf/bench_v8/`). Since 2026-08-25 the vendored suite is **Octane
+2.0 (V8 suite version 9)**; the current cross-engine snapshot (zjs/QuickJS
+composite ratio 0.9611 against a GCC 16.0.1 reference build) is recorded in
+[docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md). Scores are the
+suite's self-reported numbers (higher is better). Suite scores are not
+comparable across suite versions or reference binaries, and which build is
+the official yardstick is an open owner decision; the superseded version-7
+records were removed on 2026-08-25 and live in git history.
 
-Current-head preservation check (2026-08-24): ReleaseFast `71505d11` versus
-its direct parent `7f9873e6` measured **0.9965** (protocol-local composite
-medians 2,575 / 2,584). The repository runner used 8 samples per binary on
-parallel CPU clusters `5-9` and `15-19`, swapping the engine-to-cluster
-assignment halfway. This clears the `0.995` refactor gate, and all 8 suite
-ratios remain within their historical dispersion envelopes. Only the ratio is
-comparable under this parallel protocol; the absolute public comparison below
-remains serial.
-
-Published cross-engine snapshot from 2026-08-21, using 8 samples per engine
-and medians:
-
-| Engine | Build / revision | Composite Score | vs QuickJS |
-| --- | --- | ---: | ---: |
-| zjs | ReleaseFast / `47cf81ef` | 2,714 | 1.0469 |
-| QuickJS | release / `04be2460` | 2,592.5 | 1.0000 |
-| V8 | `--jitless` / `999f1b39` | 4,048 | 1.5614 |
-| Hermes | Release / `dac0be31` | 4,241 | 1.6359 |
-
-| Benchmark | zjs | QuickJS | V8 `--jitless` | Hermes |
-| --- | ---: | ---: | ---: | ---: |
-| Richards | 1,693 | 1,617 | 2,120 | 2,540 |
-| DeltaBlue | 1,461 | 1,415 | 2,019 | 2,448.5 |
-| Crypto | 2,341 | 2,200.5 | 1,736.5 | 3,888.5 |
-| RayTrace | 3,657.5 | 3,382 | 6,942 | 8,960.5 |
-| EarleyBoyer | 3,995 | 4,507 | 10,035 | 9,346 |
-| RegExp | 994 | 844.5 | 6,627 | 1,191.5 |
-| Splay | 7,306 | 7,297.5 | 7,994.5 | 6,530.5 |
-| NavierStokes | 4,860.5 | 4,307 | 2,631.5 | 6,685.5 |
-
-This is a single-machine snapshot, not a portable ranking. Measurements used
-serial CPU-19 execution under the exclusive host lock, with forward/reverse
-engine ordering to reduce drift. All 32 invocations exited successfully and
-produced all 8 benchmark results. The detailed protocol and QuickJS baseline
-are recorded in [docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md).
+This is a single-machine snapshot, not a portable ranking. The detailed
+protocol and reference-binary fingerprints are recorded in
+[docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md).
 
 ## Compatibility
 
@@ -81,7 +53,7 @@ The checked test262 profile records the current validation boundary:
 
 | Prepared | Passed | Failed | Feature-skipped |
 | ---: | ---: | ---: | ---: |
-| 49,775 | **44,581** | **0** | 5,194 |
+| 49,778 | **44,584** | **0** | 5,194 |
 
 The feature-skipped set includes Intl, Temporal, ShadowRealm, and the other
 groups listed in `test262.conf`. These numbers describe the configured profile,
@@ -140,8 +112,8 @@ pub fn main(init: std.process.Init) !void {
 ```
 
 See [docs/embedding-cookbook.md](docs/embedding-cookbook.md) for host
-functions, handles, strings and bytes, memory limits, interrupts, modules, and
-runtime plugins. The examples are covered by the embedding test target.
+functions, handles, strings and bytes, memory limits, interrupts, and
+modules. The examples are covered by the embedding test target.
 
 ## Runtime And Ownership Boundary
 
@@ -151,9 +123,8 @@ The runtime is single-threaded. Host-owned `JSValue`s must remain in a
 state. Embedders must release owning values with the runtime that created them.
 
 Memory and interrupt limits are reliability controls for trusted embeddings;
-they are not a security boundary for untrusted JavaScript. See
-[LIMITATIONS.md](LIMITATIONS.md) and
-[docs/security-boundary.md](docs/security-boundary.md).
+they are not a security boundary for untrusted JavaScript. See the Security
+Boundary section in [LIMITATIONS.md](LIMITATIONS.md).
 
 ## Vision And Roadmap
 
@@ -188,5 +159,8 @@ QuickJS's role as the reference for in-scope JavaScript behavior.
 - [CONTRIBUTING.md](CONTRIBUTING.md): contribution workflow.
 - [GUIDE.md](GUIDE.md): engineering rules and validation commands.
 
-QuickJS remains the reference when an in-scope JavaScript behavior differs.
-Intentional divergences must be explicit, reviewed, and covered by tests.
+The semantic authority is ECMA-262 as validated by test262; QuickJS is the
+comparison reference implementation, not the standard (owner ruling
+2026-08-22). Where the pinned QuickJS deviates from the spec, zjs follows the
+spec and records the divergence. Intentional divergences must be explicit,
+reviewed, and covered by tests.

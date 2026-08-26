@@ -14,7 +14,36 @@ such as a full Node.js or Deno competitor.
 - `zjs` is not a Node.js, Deno, browser, or drop-in `libquickjs` C API
   replacement.
 - The engine-only Production v1 target is trusted-code embedding, not
-  hostile-code sandboxing. See [docs/security-boundary.md](docs/security-boundary.md).
+  hostile-code sandboxing. See the Security Boundary section below.
+
+## Security Boundary
+
+Production v1 targets trusted-code embedding. It does not claim hostile-code
+sandboxing.
+
+Supported assumptions:
+
+- JavaScript source is trusted or pre-vetted by the embedder.
+- One runtime is used from one thread.
+- The embedder owns OS isolation, process limits, filesystem policy, network
+  policy, and wall-clock supervision.
+- Native host functions are trusted and can compromise the process if written
+  incorrectly.
+
+The engine exposes memory limits, stack size, GC threshold, and cooperative
+interrupt hooks. These controls are required for reliability and runaway-code
+mitigation in trusted embeddings. They are not a complete sandbox because
+they do not prevent all CPU starvation, host API misuse, side channels,
+allocator fragmentation pressure, or bugs in native host code.
+
+Out of scope for v1: running attacker-controlled JavaScript in-process,
+cross-thread runtime use, capability-secure module loading, browser /
+Node.js / Deno permission models, deterministic execution across hosts, and
+hard real-time interruption.
+
+Any Production v1 release notes must state: `zjs` is a production-targeted
+embeddable JavaScript engine for trusted code. It is not an in-process
+sandbox for hostile JavaScript.
 
 ## CLI Lifecycle
 
@@ -82,9 +111,11 @@ module loading are not supported.
 
 ## Performance
 
-The public QuickJS comparison is the bench-v8 composite score in
-[docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md). That headline is composite-score
-parity, not every-benchmark parity.
+The public QuickJS comparison is the bench-v8 composite-score ratio in
+[docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md); the current
+value and its reference binary are recorded there (the Octane-2.0 reading
+has not yet gone through an owner ruling to become the published metric).
+The headline is a composite-score ratio, not every-benchmark parity.
 
 There is no checked performance gate: benchmark, single-script, and
 runtime-profile artifacts are all diagnostic. Do not treat external-process

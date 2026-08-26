@@ -4,8 +4,56 @@
 
 Target **0.2.0-dev** (unpublished). Maintainability campaign (2026-08-18):
 breaking public-API cleanup is approved for this cycle; hot-path structural
-refactors are deferred to `docs/maintainability-backlog.md` and land only
-under the refactor-policy gates.
+refactors are deferred to `docs/backlog.md` and land only under the
+refactor-policy gates.
+
+- **Docs: tree reorganized around a single work queue** (2026-08-25). The
+  four queue documents (`impl-quality-backlog.md`,
+  `maintainability-backlog.md`, `code-volume.md`,
+  `perf/shared-vm-decomposition.md`) merged into `docs/backlog.md`;
+  `security-boundary.md` merged into `LIMITATIONS.md`;
+  `agents/issue-tracker.md` merged into `agents/project-experience.md`;
+  `stack_bytecode_vm_design.md` merged into `docs/architecture.md` (Stack
+  Bytecode VM Status chapter — the §8 PMU governance gate reference moved
+  with it); the frozen 2026-07-27 qjs-align subsystem difference baseline
+  removed. Git history retains all removed content.
+
+- **Docs: superseded v7-suite historical records and the frozen zoo
+  baseline (`docs/perf/zoo-status.md`) removed from the active tree**
+  (2026-08-25 stale-doc cleanup; git history retains them).
+
+- **Deprecated: the runtime plugin ABI** (2026-08-25, owner decision). The
+  dynamic-plugin surface (`zjs.runtime.Plugin`, `PluginInstallOptions`, the
+  `src/binding/ffi.zig` ABI) is frozen — correctness fixes only — and is
+  superseded by the Fun Native Plugin design (FNABI v0.3,
+  `docs/fun-native-plugin-design.md`); the loader moves to the `fun`
+  repository at FNABI milestone M3. See `docs/runtime-plugin-abi.md` for the
+  freeze terms.
+
+- **bench-v8 now vendors Octane 2.0 (V8 suite version 9)** instead of the
+  8-benchmark version-7 suite (17 named results, 16 running, zlib
+  skip-listed). The same commit adjudicated the apparent composite regression
+  as reference-binary drift: the pinned QuickJS commit had been rebuilt with
+  a newer compiler (GCC 13.3.0 → 16.0.1), which alone moves the composite by
+  ~6.6%. Every published record must now carry the reference binary's
+  fingerprint (hash + compiler); see `docs/perf/bench-v8-status.md`.
+
+- **Adopted: the engine evolution plan (`docs/engine-evolution-plan.md`),
+  the VM value-representation contract
+  (`docs/vm-value-representation-contract.md`), and the QuickJS-alignment
+  charter transition (`docs/qjs_alignment_charter_transition.md`)**
+  (2026-08-24). The type-directed optimization plan
+  (`docs/type-directed-optimization-plan.md`) was proposed alongside them.
+
+- **Reduced interpreter and runtime code size** across
+  `internal_builtins.zig`, `promise_ops.zig`, and `tailcall_dispatch.zig`
+  under the refactor-policy identity gates.
+
+- **`--gc-stats` reports GC pause percentiles again** (`p50`/`p95`/`p99`
+  per collection ring). This supersedes the earlier entry below that removed
+  the unimplemented "major GC" surface: the percentile *panel* returned with
+  a real producer and consumer, while the removed phase/policy/page-geometry
+  surface stays gone.
 
 - **Each out-of-line payload now keeps its cycle-trace arm beside its
   destroy method.** `OrdinaryPayload`, `IteratorPayload`, `CollectionPayload`,
@@ -89,7 +137,7 @@ under the refactor-policy gates.
   meant writing a Zig test; it can now be done against a real script.
 
 - **The GC statistics struct no longer advertises numbers it does not keep.**
-  `GeStats.cycles_collected` was assigned the *object* count on every
+  `GCStats.cycles_collected` was assigned the *object* count on every
   successful collection — a different quantity from the name, with no reader;
   `rc_inc` / `rc_dec` and `CollectionResult.freed_bytecodes` had no references
   at all, and refcount traffic is deliberately left uninstrumented because a

@@ -57,8 +57,8 @@ comptime {
 Thin shells live under `src/` so relative imports cannot walk out of the
 module root. Today: `src/core_tests.zig`, `src/parser_tests.zig`,
 `src/bytecode_tests.zig`, `src/exec_tests.zig`, `src/builtins_tests.zig`,
-`src/runner_tests.zig`, and `src/embedding_tests.zig` (see attest exception
-below).
+`src/runner_tests.zig`, `src/leak_census_tests.zig`, and
+`src/embedding_tests.zig` (see attest exception below).
 
 ### Independent options (rule C)
 
@@ -83,7 +83,8 @@ must never import it.
 | scoped Class-A shells | `@import("config_signature.zig").attest("test-X")` | Debug-pinned |
 | `test-runner` shell | attests the same string as `run_test262.zig` | Two attestations of one value are harmless |
 | `test-embedding` | **does not attest** | Public module does not export `config_signature`; same choice as the plugin fixtures |
-| `test-oom` | `tests/oom.zig` attests `"oom-tests"` | |
+| `test-oom` | `src/tests/oom.zig` attests `"oom-tests"` | |
+| `test-leak-census` | `src/leak_census_tests.zig` attests `"test-leak-census"` | |
 
 ## Filter naming
 
@@ -97,13 +98,16 @@ Each scoped target is `src/<area>_tests.zig` × a trailing-dot filter:
 | `test-exec` | `src/exec_tests.zig` | `tests.exec.` |
 | `test-builtins` | `src/builtins_tests.zig` | `tests.builtins.` |
 | `test-runtime` | `src/runtime_tests.zig` | `runtime.` |
-| `test-runner` | `src/runner_tests.zig` | `cli.run_test262.` |
+| `test-runner` | `src/runner_tests.zig` | `cli.run_test262` |
 | `test-compiler` | `src/compiler_tests.zig` | `compiler.` |
 | `test-embedding` | `src/embedding_tests.zig` | `tests.embedding_examples.` |
+| `test-leak-census` | `src/leak_census_tests.zig` | (none — reruns the shared exec + builtins tiers twice with the leak census armed) |
 
-The trailing dot is the namespace boundary. `test-embedding` uses an
-independent Debug `zjs` module rooted at `src/root.zig` and hangs on
-`engine-production-gate`, not checkpoint.
+The trailing dot is the namespace boundary (`test-runner`'s filter omits it
+in `build/tests.zig`; the `cli.run_test262` prefix has no sibling
+namespaces to exclude). `test-embedding` uses an independent Debug `zjs`
+module rooted at `src/root.zig` and hangs on `engine-production-gate`, not
+checkpoint.
 
 ## Step naming
 
@@ -121,7 +125,7 @@ runs unprompted.
 | Workflow | Primary job | Steps it runs |
 |---|---|---|
 | `ci.yml` (push to `main`, pull requests) | `linux-arm64` | `zjs`, `checkpoint-gate`, the compiler-stage boundary lint, and `test262-check` |
-| `nightly.yml` (scheduled) | `linux-arm64` | `engine-production-gate`, `test -Doptimize=ReleaseSafe`, `test-oom`, and `test -Dzjs_ownership_audit=true` |
+| `nightly.yml` (scheduled) | `linux-arm64` | `engine-production-gate`, `test -Doptimize=ReleaseSafe`, `test-oom`, `test-leak-census`, and `test -Dzjs_ownership_audit=true` |
 
 `test262-check` is a zero-failure gate — any failed or newly-fixed case fails
 the step — which makes it the sharpest semantic-regression signal available. It

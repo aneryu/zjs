@@ -1,6 +1,6 @@
 # GUIDE.md — Project Development Guide
 
-Last updated: 2026-08-17
+Last updated: 2026-08-25
 
 This guide is the engineering rulebook: Zig style, ownership, errors, and the
 validation command ladder. Historical plans and campaign ledgers live in git
@@ -356,7 +356,8 @@ zig build test -Doptimize=ReleaseSafe --summary all
 ```
 
 **Instrumentation tiers.** `zig build test-oom --summary all` (allocator / OOM
-behavior) and `zig build test -Dzjs_ownership_audit=true --summary all` (atom
+behavior), `zig build test-leak-census --summary all` (allocation-leak
+census), and `zig build test -Dzjs_ownership_audit=true --summary all` (atom
 ownership) run in nightly CI, so they are a machine's job, not a memory test.
 Run them locally *before* a PR when you changed the matching subsystem — that
 is the cheap feedback — but a missed local run is now caught rather than lost.

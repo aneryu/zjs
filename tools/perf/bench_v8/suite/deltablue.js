@@ -23,8 +23,8 @@
 // more like a JavaScript program.
 
 
-var DeltaBlue = new BenchmarkSuite('DeltaBlue', 66118, [
-  new Benchmark('DeltaBlue', deltaBlue)
+var DeltaBlue = new BenchmarkSuite('DeltaBlue', [66118], [
+  new Benchmark('DeltaBlue', true, false, 4400, deltaBlue)
 ]);
 
 
@@ -46,12 +46,15 @@ var DeltaBlue = new BenchmarkSuite('DeltaBlue', 66118, [
 
 /* --- O b j e c t   M o d e l --- */
 
-Object.prototype.inheritsFrom = function (shuper) {
-  function Inheriter() { }
-  Inheriter.prototype = shuper.prototype;
-  this.prototype = new Inheriter();
-  this.superConstructor = shuper;
-}
+Object.defineProperty(Object.prototype, "inheritsFrom", {
+  
+  value: function (shuper) {
+    function Inheriter() { }
+    Inheriter.prototype = shuper.prototype;
+    this.prototype = new Inheriter();
+    this.superConstructor = shuper;
+  }
+});
 
 function OrderedCollection() {
   this.elms = new Array();
@@ -121,23 +124,23 @@ Strength.strongest = function (s1, s2) {
 
 Strength.prototype.nextWeaker = function () {
   switch (this.strengthValue) {
-    case 0: return Strength.STRONG_PREFERRED;
-    case 1: return Strength.PREFERRED;
-    case 2: return Strength.STRONG_DEFAULT;
-    case 3: return Strength.NORMAL;
-    case 4: return Strength.WEAK_DEFAULT;
-    case 5: return Strength.WEAKEST;
+    case 0: return Strength.WEAKEST;
+    case 1: return Strength.WEAK_DEFAULT;
+    case 2: return Strength.NORMAL;
+    case 3: return Strength.STRONG_DEFAULT;
+    case 4: return Strength.PREFERRED;
+    case 5: return Strength.REQUIRED;
   }
 }
 
 // Strength constants.
-Strength.REQUIRED         = new Strength(0, "required");
-Strength.STRONG_PREFERRED = new Strength(1, "strongPreferred");
-Strength.PREFERRED        = new Strength(2, "preferred");
-Strength.STRONG_DEFAULT   = new Strength(3, "strongDefault");
-Strength.NORMAL           = new Strength(4, "normal");
-Strength.WEAK_DEFAULT     = new Strength(5, "weakDefault");
-Strength.WEAKEST          = new Strength(6, "weakest");
+Strength.REQUIRED        = new Strength(0, "required");
+Strength.STONG_PREFERRED = new Strength(1, "strongPreferred");
+Strength.PREFERRED       = new Strength(2, "preferred");
+Strength.STRONG_DEFAULT  = new Strength(3, "strongDefault");
+Strength.NORMAL          = new Strength(4, "normal");
+Strength.WEAK_DEFAULT    = new Strength(5, "weakDefault");
+Strength.WEAKEST         = new Strength(6, "weakest");
 
 /* --- *
  * C o n s t r a i n t
@@ -790,7 +793,7 @@ Plan.prototype.execute = function () {
  * In case 1, the added constraint is stronger than the stay
  * constraint and values must propagate down the entire length of the
  * chain. In case 2, the added constraint is weaker than the stay
- * constraint so it cannot be accommodated. The cost in this case is,
+ * constraint so it cannot be accomodated. The cost in this case is,
  * of course, very low. Typical situations lie somewhere between these
  * two extremes.
  */

@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Fixed bench-v8 comparison against a reference binary.
 
-This is the V8 benchmark suite version 7 -- the suite Bellard's QuickJS
-publishes its scores with (bellard.org/quickjs/bench.html). The suite is
-vendored unmodified under tools/perf/bench_v8/suite/ (BSD license headers
-retained); only driver.js is ours.
+This is Octane 2.0 (V8 benchmark suite version 9) -- vendored unmodified
+from chromium/octane under tools/perf/bench_v8/suite/ (each file keeps its
+own original license header; see suite/LICENSE.octane and README.md for the
+per-file exceptions to the default BSD header). Only driver.js is ours.
+
+Version 9 is NOT the suite QuickJS's published bench.html numbers use --
+that page reports version 7's narrower 8-benchmark suite. Comparisons run
+through this tool are therefore no longer directly comparable to the
+published QuickJS numbers; a fresh local qjs run against this same suite is
+needed for any qjs comparison (see docs/perf/bench-v8-status.md).
 
 Two modes, differing only in what the reference binary is:
 
@@ -18,7 +24,7 @@ so an A/B result can never be misread later as a QuickJS comparison.
 
 Scores are self-reported and higher-is-better. The reported ratio is
 zjs / reference, so below 1.0 means the candidate is slower. The headline is
-the suite's own composite "Score (version 7)" ratio (geometric mean per the
+the suite's own composite "Score (version 9)" ratio (geometric mean per the
 suite's definition), computed from per-engine median composites.
 
 Discipline (same spirit as tools/perf/zoo/run_zoo_compare.py):
@@ -80,10 +86,31 @@ SUITE_ORDER = [
     "regexp.js",
     "splay.js",
     "navier-stokes.js",
+    "pdfjs.js",
+    "mandreel.js",
+    "gbemu-part1.js",
+    "gbemu-part2.js",
+    "code-load.js",
+    "box2d.js",
+    "zlib.js",
+    "zlib-data.js",
+    "typescript.js",
+    "typescript-input.js",
+    "typescript-compiler.js",
 ]
 
-RESULT_RE = re.compile(r"^([A-Za-z]+): (\d+(?:\.\d+)?)$")
-SCORE_RE = re.compile(r"^Score \(version 7\): (\d+(?:\.\d+)?)$")
+# Octane's own result names include a digit (Box2D), so the class is
+# alphanumeric, not just letters.
+RESULT_RE = re.compile(r"^([A-Za-z0-9]+): (\d+(?:\.\d+)?)$")
+SKIP_RE = re.compile(r"^([A-Za-z0-9]+): Skipped$")
+SCORE_RE = re.compile(r"^Score \(version 9\): (\d+(?:\.\d+)?)$")
+
+# zlib is skip-listed in driver.js pending a zjs engine fix (see
+# docs/perf/bench-v8-status.md): indirect eval() of emscripten-generated
+# code throws. Skipped suites report no numeric score for either engine, so
+# they are excluded from the ratio table rather than expected as numeric.
+SKIPPED_SUITES = {"zlib"}
+EXPECTED_SUITES = 17 - len(SKIPPED_SUITES)  # 15 BenchmarkSuite registrations + SplayLatency + MandreelLatency
 
 
 def md5(path: Path) -> str:
@@ -106,16 +133,24 @@ def run_once(binary: Path, script: Path, cpu: int) -> dict:
     if proc.returncode != 0:
         raise RuntimeError(f"{binary} exited {proc.returncode}: {proc.stderr[:400]}")
     suites: dict[str, float] = {}
+    skipped: set[str] = set()
     score = None
     for line in proc.stdout.splitlines():
-        if m := RESULT_RE.match(line.strip()):
+        stripped = line.strip()
+        if m := SKIP_RE.match(stripped):
+            if m.group(1) not in SKIPPED_SUITES:
+                raise RuntimeError(f"{binary}: unexpected skip not in SKIPPED_SUITES: {line}")
+            skipped.add(m.group(1))
+        elif m := RESULT_RE.match(stripped):
             if "ERROR" in line:
                 raise RuntimeError(f"{binary}: {line}")
             suites[m.group(1)] = float(m.group(2))
-        elif m := SCORE_RE.match(line.strip()):
+        elif m := SCORE_RE.match(stripped):
             score = float(m.group(1))
-    if score is None or len(suites) != 8:
-        raise RuntimeError(f"{binary}: incomplete output ({len(suites)} suites, score={score})")
+    if score is None or len(suites) != EXPECTED_SUITES or skipped != SKIPPED_SUITES:
+        raise RuntimeError(
+            f"{binary}: incomplete output ({len(suites)} suites, skipped={skipped}, score={score})"
+        )
     return {"suites": suites, "score": score}
 
 
@@ -274,12 +309,12 @@ def main() -> int:
         print(f"per-suite median (zjs / {ref_name}, higher is better):")
         for s in suite_names:
             print(f"  {s:14} {med['zjs']['suites'][s]:8.0f} / {med[ref_name]['suites'][s]:8.0f}  ratio {ratios[s]:.4f}")
-        print(f"\ncomposite Score (version 7) medians: zjs {med['zjs']['score']:.0f} / {ref_name} {med[ref_name]['score']:.0f}")
+        print(f"\ncomposite Score (version 9) medians: zjs {med['zjs']['score']:.0f} / {ref_name} {med[ref_name]['score']:.0f}")
         print(f"headline ratio (zjs/{ref_name}): {headline:.4f}")
 
         artifact = {
             "tool": "run_benchv8_compare",
-            "suiteVersion": "7",
+            "suiteVersion": "9",
             "mode": "published-metric" if args.qjs else "refactor-ab",
             "referenceRole": ref_name,
             "scoreDirection": "higher-is-better",

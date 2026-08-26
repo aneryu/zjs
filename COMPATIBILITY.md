@@ -26,8 +26,8 @@ zig build run-test262 --summary all
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```
 
-The checked 2026-08-05 report has 44,581 passes, 0 checked-in known failures,
-0 unexpected failures, and 5,194 feature skips, out of 49,775 prepared cases.
+The checked 2026-08-22 report has 44,584 passes, 0 checked-in known failures,
+0 unexpected failures, and 5,194 feature skips, out of 49,778 prepared cases.
 It was recorded under the production default
 (`zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off`);
 the v2 compiler (`src/compiler/`) is the only compiler. `zig build test262-check` writes local
@@ -37,9 +37,10 @@ bucket, per-directory, feature-skip, and failure reports under
 `test262_errors.txt` is empty: there is no remaining checked-in known-failure
 set, so the gate has no tolerated-failure surface at all and any non-zero error
 count is a regression. The historical 25-file known-failure set and its
-zjs-to-pinned-QuickJS classification are recorded in the
-[subsystem difference baseline](docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)
-(a frozen 2026-07-27 snapshot; see its errata header).
+zjs-to-pinned-QuickJS classification are recorded in the frozen 2026-07-27
+subsystem difference baseline
+(`docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md`, removed
+2026-08-25; recover it from git history).
 
 ## Configured Skips and Excludes
 

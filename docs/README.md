@@ -20,45 +20,61 @@ when needed.
   the embedding test target.
 - [Public API Contract](public-api-contract.md): the supported Zig API surface
   and ownership rules.
-- [Runtime Plugin ABI](runtime-plugin-abi.md): dynamic native plugins.
-- [Security Boundary](security-boundary.md): trusted-code assumptions; zjs is
-  not a sandbox for hostile JavaScript.
+- [Runtime Plugin ABI](runtime-plugin-abi.md): dynamic native plugins
+  (**deprecated 2026-08-25** — superseded by the
+  [Fun Native Plugin design](fun-native-plugin-design.md)).
+- [Fun Dev Hot Reload design](fun-dev-hot-reload-design.md): the fun/zjs
+  hot-reload and dev-update system — HostCore/Session split, Sequential
+  Session Reload, ESM HMR, and the zjs capability list (v1.3,
+  adversarially reviewed 2026-08-26; Shadow Swap deferred to its
+  appendix A).
+- [Process Model design](process-model-design.md): Erlang-style multithreading
+  — Runtime-per-process → lightweight processes, turn-boundary scheduling,
+  selective receive, link/monitor/supervision (v0.2 design exploration,
+  2026-08-26; §20 records the six-plan reconciliation verdicts and the
+  per-document debt ledger).
+- [Roadmap](roadmap.md): the unified ordering-and-dependency view across the
+  six active plans (five tracks, cross-track dependency table, near/mid/far
+  slices); individual design docs remain authoritative for their domains.
+- [Limitations — Security Boundary](../LIMITATIONS.md): trusted-code
+  assumptions; zjs is not a sandbox for hostile JavaScript.
 
 ## Understanding And Changing The Engine (Contributors)
 
 - [Contributing](../CONTRIBUTING.md): pull requests, QuickJS semantics, test rules.
 - [Guide](../GUIDE.md): Zig engineering rules and the validation command ladder.
-- [Architecture](architecture.md): current source tour and layer map.
+- [Architecture](architecture.md): current source tour, layer map, and the
+  Stack Bytecode VM Status chapter (VM mechanisms, the §8 PMU governance
+  gate); evolution scope lives in the
+  [Engine Evolution Plan](engine-evolution-plan.md).
 - [API Boundary](api-boundary.md): layering rules between public API, core,
   runtime, bindings, and CLI.
 - [Testing Graph](testing-graph.md): compile-root chain, shell classes, step names.
-- [Stack Bytecode VM](stack_bytecode_vm_design.md): VM status and evolution boundary.
 - [Compiler Contract](compiler-contract.md): normative compiler identity rules.
 - [Borrowed Atom Audit](borrowed_atom_audit.md): atom-ownership contract and
   the `-Dzjs_ownership_audit` / lint governance protocol.
 
 ## Performance
 
-- [bench-v8 status vs QuickJS](perf/bench-v8-status.md): the public
-  performance claim (V8 suite v7 — the suite upstream QuickJS publishes
-  with) — the single authoritative score source.
-- [Zoo status vs QuickJS](perf/zoo-status.md): internal 15-benchmark
-  diagnostic suite (broader coverage; last zoo baseline preserved).
+- [bench-v8 status](perf/bench-v8-status.md): the public performance claim
+  (Octane 2.0, V8 suite v9, vendored since 2026-08-25) — the single
+  authoritative score source.
+- [Zoo runner](../tools/perf/zoo/README.md): standalone-file attribution
+  instrument (bench-v8's Octane coverage now matches or exceeds it; the
+  last zoo baseline was removed 2026-08-25 — recover from git history).
+- [GC baseline](perf/gc-baseline.md): refcounting-collector behavior
+  baseline captured before the GC refactor.
 - [Performance Workflow](perf/README.md): measurement contract, diagnostic
   benchmarks, profiling, PMU discipline.
 - [Object And Shape Implementation](perf/object-shape-design.md): fixed
-  layouts, invariants, and the no-inline-cache rule.
-- [Shared VM Decomposition](perf/shared-vm-decomposition.md):
-  `call_runtime.zig` split map and move criteria.
+  layouts, invariants, and the no-inline-cache-today status.
 - [Refactor Tax Policy](refactor-policy.md): risk zones and identity gates;
   hot-path moves need a bench-v8 A/B.
-- [Maintainability Backlog](maintainability-backlog.md): priced HOT-zone
-  refactor queue (H1–H12).
-- [Implementation Quality Backlog](impl-quality-backlog.md): 2026-08-21
-  review queue — GC/parser/object.zig blind-spot findings, spec-bug
-  stragglers, and gated structural moves.
-- [Code Volume](code-volume.md): line-count composition, the remaining
-  reduction queue, and what was ruled unrecoverable (and why).
+- [Backlog](backlog.md): the single priced work queue — HOT-zone refactors
+  (H7/H9/H10/H11), implementation-quality open items (Q11 T3/T4, Q12, Q13),
+  `call_runtime.zig` candidate domains, and the code-volume queue with its
+  ruled-unrecoverable record. Merged 2026-08-25 from four former queue
+  documents; their closed records live in git history.
 
 ## Status And Release
 
@@ -78,23 +94,21 @@ These paths are build-graph inputs or local write-outs.
 
 ## Agent Workflow
 
-- [Project experience](agents/project-experience.md): domain-context routing
-  and cross-session lessons.
-- [Issue tracker](agents/issue-tracker.md): local `.scratch/` issue
-  conventions and triage labels.
+- [Project experience](agents/project-experience.md): domain-context routing,
+  cross-session lessons, and the local `.scratch/` issue conventions and
+  triage labels (§11).
 
 ## Historical (frozen — read for provenance, not current status)
 
 - [QCP-1 Switch Decision](qcp1_switch_decision.md): close-out record — shipped
   compiler configuration, final verdicts, and the layout-sensitivity rulings
   (§9); full evidence lives in this file's git history.
-- [zjs / QuickJS Subsystem Difference Baseline](qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md):
-  frozen 2026-07-27 measurement baseline with an errata header for facts that
-  later work superseded.
 
 All other campaign reports (QCP-1 scorecards, V2 audits, anchor-split
-classification, dated comparisons) were removed from the active tree on
-2026-08-18; recover them from git history.
+classification, dated comparisons, the frozen 2026-07-27 zjs/QuickJS
+subsystem difference baseline, and the superseded v7-suite score records)
+were removed from the active tree on 2026-08-18 and 2026-08-25; recover
+them from git history.
 
 ## Documentation Rules
 

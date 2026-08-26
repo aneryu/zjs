@@ -4,9 +4,11 @@ Contributions are GitHub pull requests against this repository.
 
 ## Semantics
 
-QuickJS is the semantic reference. When Zig behavior and QuickJS disagree on an
-in-scope feature, treat the difference as a bug unless the change records an
-intentional, reviewed divergence.
+The semantic authority is ECMA-262 as validated by test262; QuickJS is a
+reference implementation for comparison, not the standard (owner ruling
+2026-08-22). When Zig behavior and the spec disagree on an in-scope feature,
+treat the difference as a bug. Where the pinned QuickJS deviates from the
+spec, follow the spec and record the divergence.
 
 ## Tests
 

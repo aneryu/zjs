@@ -2,13 +2,22 @@
 
 The "before" picture for the GC refactor: what the current collector does on
 a real workload, measured with the shipped binary. Captured 2026-08-23 at
-`a3e36a19`, the commit that added `--gc-stats`.
+`a3e36a19` (pre-squash lineage, reachable only from
+`backup/pre-squash-2026-08-23`; the corresponding main commit is `5e944e78`),
+the commit that added `--gc-stats`.
 
 Without this, a refactor can only argue from the composite benchmark score,
 which says nothing about how much the collector ran, how long a single pause
 was, or whether rounds were aborting.
 
 ## How to reproduce
+
+> **Workload changed 2026-08-25.** `tools/perf/bench_v8/suite/` was swapped
+> from the V8 suite v7 (8 benchmarks) to full Octane 2.0 on 2026-08-25.
+> Running the command below today produces a different workload whose counters
+> are **not comparable** to the tables in this document. To reproduce this
+> baseline, restore the v7 suite first, e.g. from
+> `git show 7f9873e6:tools/perf/bench_v8/suite`.
 
 ```sh
 zig build zjs -Doptimize=ReleaseFast
@@ -22,7 +31,8 @@ EOF
 ./zig-out/bin/zjs --gc-stats /tmp/benchv8-combined.js
 ```
 
-The whole V8 suite in one process, so the numbers are cumulative across all
+The whole V8 suite (v7, 8 benchmarks — the suite vendored at capture time) in
+one process, so the numbers are cumulative across all
 eight benchmarks. This is a maintainer single-machine measurement (ARM
 Cortex-X925, Linux 6.17), unpinned — the counters are stable across runs even
 though the score is not.
@@ -100,6 +110,9 @@ usable as refactor evidence rather than decoration.
 
 ## First use of this baseline (G4, `a837a17e`)
 
+(`a837a17e` is likewise pre-squash lineage on `backup/pre-squash-2026-08-23`;
+the work is on main in `7f9873e6`.)
+
 Moving each payload's trace arm beside its destroy method was expected to be
 behaviour-neutral. Re-measuring says it mostly was, and shows one thing the
 A/B could not:
@@ -129,4 +142,7 @@ reference point rather than as a regression.
 Re-measure with the same command after any GC change and record the same
 table. Deltas in the counters are attributable to the change; deltas in the
 score are not (the score is dispersion-dominated, see
-[refactor-policy.md](../refactor-policy.md)).
+[refactor-policy.md](../refactor-policy.md)). The suite version is part of
+the baseline: swapping the vendored suite (as happened 2026-08-25 with
+Octane 2.0) invalidates these tables for the new workload, which needs its
+own capture.

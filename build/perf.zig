@@ -23,7 +23,7 @@ pub fn addPerfSteps(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts) void {
     // on the measurement machine, never CI).
     const run_bench_v8 = b.addSystemCommand(&.{ "python3", "tools/perf/bench_v8/run_local.py" });
     run_bench_v8.addArtifactArg(zjs_exe);
-    const perf_bench_v8_step = b.step("perf-bench-v8", "Run the vendored bench-v8 (V8 suite v7) once on zjs");
+    const perf_bench_v8_step = b.step("perf-bench-v8", "Run the vendored bench-v8 (Octane 2.0, V8 suite v9) once on zjs");
     perf_bench_v8_step.dependOn(&run_bench_v8.step);
 
     const perf_runtime_profiles_step = b.step("perf-runtime-profiles", "Record zjs runtime profiles for focused benchmark scripts");

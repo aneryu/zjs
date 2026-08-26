@@ -13,6 +13,29 @@ Status: normative — 本契约是
 `src/core/gc_concurrent.zig`、`src/core/gc_conservative.zig`、
 `src/core/gc_trace_stw.zig`(均为分支路径)。
 
+## Errata(2026-08-25,登记欠账;条款本体未修订)
+
+- **导出锚点已过期**:`gc/tracing` 分支自 `5bc8373b` 起又推进 35
+  commits(tip `756a1d07`),含 conservative-root 机制重写
+  (`9e62e098`)与 collector policy 修正(`f10855c6`)。本契约按
+  2026-08-24 冻结快照读;与分支现物的偏差以本节为准。
+- **§4"页 radix 地址注册表"机制已被分支取代**:`9e62e098` 改为
+  arena-geometry 验证(per-object registration 移除,注册表仅剩
+  standalone-prefix 残余用途)。"候选永不解引用"不变量仍成立;
+  机制描述待契约修订。
+- **§4 conservative_on forcing function 描述与分支代码不符**:现行
+  定义(gc_trace_stw.zig:435)为
+  `if (!builtin.is_test) !rt.gc.host_quiescent else (rt.test_root_scan_override orelse scan) == .engine_active`
+  ——forcing function 仅适用于 host-quiescent 触发;engine-active
+  扫描在测试态**开启** conservative(精确模式在该场景被证不
+  sound)。
+- **§1.1"plugin ABI fingerprint 不变"承诺将过渡**:按 2026-08-25
+  裁决(FNABI v0.3),该承诺过渡为 FNABI ABI tuple
+  (`FUN_VALUE_ABI` = 表示契约版本 + `JSValue.abi_encoding_revision`,
+  [fun-native-plugin-design.md](fun-native-plugin-design.md)
+  §11.3)。过渡须按本契约自身规则"先改本契约并递增版本号"执行;
+  本 errata 只登记欠账,不执行修订。
+
 ---
 
 ## 1. 三条硬承诺(引擎线可以直接依赖)

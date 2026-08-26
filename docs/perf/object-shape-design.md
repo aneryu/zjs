@@ -8,9 +8,10 @@ This note describes the current object/shape contract. The source of truth is:
 - `src/exec/property_direct.zig`
 - `src/exec/vm_property*.zig`
 
-The dated
-[zjs / QuickJS subsystem baseline](../qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)
-contains the field-level comparison and current behavior probes.
+The dated zjs / QuickJS subsystem baseline
+(`docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md`, removed
+2026-08-25; recover from git history) contains the field-level comparison
+and behavior probes as of its freeze date.
 
 ## Fixed Layout
 
@@ -84,7 +85,7 @@ points to `TypedArrayPayload`, which contains live length/data and participates
 in the backing buffer's view list. Element fast paths must not bypass
 detach/resize/immutable checks.
 
-## Property Fast Paths: No Inline Cache
+## Property Fast Paths: No Inline Cache Today
 
 The former shape-keyed per-bytecode-site inline cache has been removed:
 
@@ -106,8 +107,20 @@ The retained `dataPropertyValueForFastPath` signature always misses and
 routes to the authoritative current-state lookup. It does not retain shapes
 or versions.
 
-Performance work must therefore describe a property result as a direct
-shape/hash fast-path hit or a slow/exotic path, never as an IC hit.
+Ruling status (2026-08-25): the IC-removal resolution itself (retired clause
+R2, "runtime structural alignment with qjs") was retired with the charter
+transition adopted in `14b0618d` — see
+[qjs_alignment_charter_transition.md](../qjs_alignment_charter_transition.md)
+§2. Phase 0.5 feedback slots are approved
+([engine-evolution-plan.md](../engine-evolution-plan.md) §3.4), and the
+typed-slot reconciliation of the 2026-08-17 IC disproof lives in
+[type-directed-optimization-plan.md](../type-directed-optimization-plan.md)
+§1.5. This document describes the current implementation only; it no longer
+forbids future cache work.
+
+When describing the current implementation, a property result is a direct
+shape/hash fast-path hit or a slow/exotic path — never an IC hit, because no
+IC exists in the tree today.
 
 ## Validation
 

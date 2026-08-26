@@ -10,8 +10,10 @@ Status: **RATIFIED**(owner 批准,2026-08-24,决议 D1-A)。自本时刻起
 
 "对齐并打败 QuickJS"阶段目标已完成:bench-v8 composite
 **1.0464×QuickJS**(zjs 2706 / qjs 2586,7/8 基准 ≥ 1.0,
-[perf/bench-v8-status.md](perf/bench-v8-status.md));test262 44,584
-pass / 0 unexpected failures。项目目标改立为"逼近 JIT 级引擎 +
+[perf/bench-v8-status.md](perf/bench-v8-status.md);**口径注
+2026-08-25**:此数为 V8 suite v7 / GCC-13 参考二进制口径的历史
+数字,套件其后换为 Octane 2.0——批准不因口径更替失效);test262
+44,584 pass / 0 unexpected failures。项目目标改立为"逼近 JIT 级引擎 +
 native-heavy GUI runtime"(engine-evolution-plan §2.3)。原宪章中以
 "忠实于 qjs 实现形态"为**约束**的条款,与新目标下的反馈槽/IC/JIT 工作
 直接冲突,须显式退役——否则后续工作在双轨规则下进行,测量与审计的
@@ -32,7 +34,7 @@ native-heavy GUI runtime"(engine-evolution-plan §2.3)。原宪章中以
 | K1 | 测量合同全部条款(ABBA/绑核/insn+cyc 同测/pad 谱系/频次裁决/驱动亲验产物指纹等) | **不变**。合同约束的是测量有效性,与对标对象无关 |
 | K2 | 通用性原则(形态特判禁止;通用机制走 PERF-MECHANISM-LEDGER) | **不变且升格**:反馈槽/IC 必须作为通用机制落地并过同一审计门——benchmark 特化仍然禁止 |
 | K3 | QuickJS differential oracle(正确性差分) | **不变**。qjs 仍是语义正确性的参照实现 |
-| K4 | 治理门([stack_bytecode_vm_design.md](stack_bytecode_vm_design.md) §8:字节码架构重估须 PMU 证据) | **不变** |
+| K4 | 治理门([architecture.md](architecture.md) "Stack Bytecode VM Status" §8:字节码架构重估须 PMU 证据) | **不变** |
 | K5 | ES2015 PTC 等已文档化分歧(`LIMITATIONS.md`) | **不变**,维持既有记录方式 |
 
 ## 4. 接替:性能对标制度
@@ -40,14 +42,21 @@ native-heavy GUI runtime"(engine-evolution-plan §2.3)。原宪章中以
 - **公开记分口径**:bench-v8 composite 契约延续
   ([perf/bench-v8-status.md](perf/bench-v8-status.md)),qjs 作为
   **历史锚点与回归哨兵**保留在套件中——分数不得跌破已达成的
-  1.0464× 无解释;
+  1.0464× 无解释。**冻结注(2026-08-25)**:该下限定义于
+  (V8 suite v7, GCC-13 参考二进制)口径;套件已换 Octane 2.0,且
+  参考二进制漂移已裁决(同源 qjs 换编译器即致 6.6% 复合差,
+  bench-v8-status.md)——跨口径 ratio 不可比,官方 yardstick 归属
+  是 open owner call。在 owner 重设口径前本条款按原口径冻结,
+  **不得**拿 v9/GCC-16 口径的 0.9611 判违反;
 - **新参照系**:反馈槽/JIT 各阶段的验收以**自身冻结基线**的受控
   A/B 为准(engine-evolution-plan §14 各门);JIT-class 引擎
   (JSC/V8 解释器+baseline 层)对照作为**方向性参考**引入,不作
   gate——引入时须为其建立与测量合同同等级的采集契约,禁止引用
-  未受契约约束的外部数字作裁决;
-- zoo 内部诊断口径([perf/zoo-status.md](perf/zoo-status.md))继续
-  作为归因工具。
+  未受契约约束的外部数字作裁决。**进展注(2026-08-25)**:五引擎
+  串行快照已存在(zjs/qjs/Hermes/V8-jitless/JSC-jitless,
+  bench-v8-status.md);其采集契约是否满足本条款要求待确认;
+- zoo 内部诊断口径(工具见 `tools/perf/zoo/README.md`;其冻结基线
+  文档已于 2026-08-25 移出树)继续作为归因工具。
 
 ## 5. 历史地位声明
 

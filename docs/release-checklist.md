@@ -44,7 +44,8 @@ shortcuts. Do not rerun them as prerequisites for the aggregate release gate.
 
 - Architecture lints pass as part of `engine-production-gate`, including
   dependency rules.
-- `docs/security-boundary.md` is accurate for the release.
+- The Security Boundary section in `LIMITATIONS.md` is accurate for the
+  release.
 - `COMPATIBILITY.md` and `LIMITATIONS.md` do not overclaim.
 - Release notes state that the engine is trusted-code only.
 

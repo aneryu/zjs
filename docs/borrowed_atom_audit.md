@@ -318,10 +318,10 @@ run. Each reproduces on a clean tree and is unrelated to this audit:
 
 | Assert | Scope |
 |---|---|
-| `src/core/string.zig:1560` `destroyRope` | 447 files, all `built-ins/RegExp/CharacterClassEscapes/*` |
+| `src/core/string.zig:1588` `destroyRope` | 447 files, all `built-ins/RegExp/CharacterClassEscapes/*` |
 | `src/core/runtime.zig` `assert(self.context_head == null)` | 52 files in `staging/sm` (a `JSContext` outliving its runtime) |
-| `src/exec/builtin_dispatch.zig:49` `nativeIsExc` | 19 files in `built-ins/Iterator/{zip,zipKeyed}`. The OOM route into this assert was fixed on 2026-08-19 (and `zig build test-oom` is green again); these files reach it by a different path — a native Iterator helper returns the exception sentinel without a pending exception — so the seam invariant, not the allocator, is what to look at |
-| `src/core/string.zig:686` `releaseFromHeader` | `language/arguments-object/S10.6_A5_T4.js` |
+| `src/exec/builtin_dispatch.zig:48` `nativeIsExc` | 19 files in `built-ins/Iterator/{zip,zipKeyed}`. The OOM route into this assert was fixed on 2026-08-19 (and `zig build test-oom` is green again); these files reach it by a different path — a native Iterator helper returns the exception sentinel without a pending exception — so the seam invariant, not the allocator, is what to look at. (Note 2026-08-25: Q16 Stage 1, `bd5b4a76`, made `nativeFromHostError` fail closed with its own pending-exception assert, which changes the population of paths that can reach this one; the 19-file count has not been re-verified since.) |
+| `src/core/string.zig:695` `releaseFromHeader` | `language/arguments-object/S10.6_A5_T4.js` |
 
 Until those are fixed, run the blocked directories with `-d` per subtree, or
 file-by-file within them.

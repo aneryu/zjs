@@ -5,6 +5,16 @@ Date: 2026-08-23
 Status: reviewed against the source; research and migration plan, not the
 production collector
 
+Status addendum (2026-08-25): the implementation lives on branch `gc/tracing`
+and is not merged to `main`; `main`'s default collector is still rc. The branch
+is now ~35 commits ahead of this document's evidentiary basis (`5bc8373b` →
+`756a1d07`), so the code is ahead of the doc in several sections (noted
+inline). The 2026-08-25 defect batch — the major collection never triggered
+(`f10855c6`), and the tested/measured/shipped configurations were three
+different collectors (`756a1d07`) — invalidates all throughput and pause
+numbers previously collected under `trace_stw`; re-gate before any merge
+window.
+
 Review note (0.4 -> 0.5): every factual claim this document makes about the
 current engine was checked against the code — `JSValue`'s 16-byte layout, the
 eight `gc.RefKind`s, the 4 KiB small-object arena, the 4-byte string RC prefix,
@@ -134,7 +144,7 @@ not universal promises for every program:
 
 | Metric | Experimental gate | Production-default target |
 |---|---:|---:|
-| bench-v8 composite vs frozen RC | at least the repository's `0.995` refactor threshold | no statistically supported regression; eight-benchmark geomean at least RC baseline |
+| bench-v8 composite vs frozen RC | at least the repository's `0.995` refactor threshold | no statistically supported regression; v9 composite (Octane 2.0, 16 running benchmarks) at least RC baseline |
 | Richards / DeltaBlue | report separately | 15-25% improvement is a hypothesis to validate, not a correctness gate |
 | RayTrace / EarleyBoyer vs V8 jitless | report separately | 70-85% remains a product aspiration; it cannot be attributed to GC alone |
 | minor pause | record p50/p95/p99/max | p99 below 1 ms in the declared interactive workload |
@@ -149,17 +159,16 @@ workload, heap limits, sample count, warm-up, and maximum. A host callback that
 does not poll is reported separately; the collector cannot promise a sub-ms
 safepoint while arbitrary native code owns the runtime thread.
 
-**The pause rows are now evaluable, and the RC collector already fails one.**
-`--gc-stats` reports p50/p95/p99/max over a retained window of round
-durations. On the V8 suite the current collector reads p50 0.71 ms, p95
-0.86 ms, **p99 2.45 ms**, max 46.6 ms over 844 rounds — so it is already above
-the 2 ms major-pause target in this table, before any tracing work begins.
-
-That distribution also corrects the shape of the problem: with a median of
-0.71 ms and a maximum 65× higher, this is a tail, not a uniformly slow
-collector. A tracing design should be judged on whether it flattens that tail;
-improving mean collection time while leaving the tail intact would satisfy the
-throughput row and miss the point of the pause rows entirely.
+**Pause-distribution evidence retracted (2026-08-25).** The pause readings
+published here on 2026-08-23 (from `--gc-stats` over the V8 suite) are
+withdrawn: `756a1d07` found the census ran inside the region timed for the
+pause distribution (inflating its own subject) and `recordSuccess` pushed
+minor rounds into the major ring, so the reported distribution mixed
+populations and cannot support any conclusion — including the tail-shape
+reading previously drawn from it. The 2 ms major-pause p99 target in the
+table above stands; whether the current collector meets it is unknown until
+the corrected instrument re-measures on the Octane v9 suite, and any
+tail-versus-uniform characterization must be re-established then.
 
 **Every GC change needs two kinds of evidence, not one.** The bench-v8 A/B is
 necessary but demonstrably insufficient: moving each payload's trace arm beside
@@ -382,6 +391,9 @@ intrusive list links, epoch-transition state
 Any word read or written by both marker and mutator is atomic. Block lookup
 from a conservative candidate uses an address registry before touching block
 metadata; it never derives and dereferences an arbitrary header address.
+(2026-08-25: on branch `gc/tracing`, `9e62e098` replaced registry lookup with
+arena-geometry validation as the primary mechanism; per-object registration is
+removed and the registry serves only standalone-prefix allocations.)
 
 Classes start at 16 bytes. Up to 128 bytes they use 16-byte steps; larger
 classes use a measured geometric progression near 1.20-1.25. Classes are
@@ -445,7 +457,9 @@ Mark, allocated, remembered, overflow, bailout, sweep, and generation state
 remain in side metadata. `type_tag` and `trace_class` are immutable after
 publication. The address registry plus block class identifies an allocation's
 start and bounds for interior-pointer resolution; medium/large entries carry
-explicit extents. Strings/ropes are either migrated into this representation
+explicit extents. (2026-08-25: superseded on branch by arena-geometry
+validation, `9e62e098`; the registry remains only for standalone-prefix
+allocations.) Strings/ropes are either migrated into this representation
 or retain a separately registered leaf/rope descriptor—there is no untracked
 hybrid allocation.
 
@@ -821,7 +835,8 @@ Thread registration supplies stack bounds. The existing `@frameAddress()`
 stack-overflow check is not a root scanner and cannot be the sole endpoint.
 For each aligned machine word, candidate lookup tries the raw word and defined
 tag/offset decodings, then validates it through the heap address registry
-before dereference. Interior pointers for registered object bodies, strings,
+before dereference (2026-08-25: on branch, arena-geometry validation replaced
+the registry as the primary validator, `9e62e098`). Interior pointers for registered object bodies, strings,
 medium objects, large objects, and optionally one-past-end are resolved to the
 owning allocation.
 
@@ -1183,10 +1198,13 @@ generation and never expose GC metadata.
 ownership for `SharedBufferStore`, loaded DSO artifacts, class-generation pins,
 and other non-GC or cross-thread resources remains in place.
 
-`zjs_tsfn_*` is not part of this GC design. The current runtime plugin ABI
-explicitly excludes async completion, cross-thread completion queues, and
-general root-token services. A thread-safe function API needs its own RFC with
-queue ownership, shutdown, cancellation, and runtime-lifetime semantics.
+`zjs_tsfn_*` is not part of this GC design. The runtime plugin ABI
+(deprecated 2026-08-25; superseded by
+[FNABI](fun-native-plugin-design.md)) explicitly excludes async completion,
+cross-thread completion queues, and general root-token services; FNABI's
+threading and reentry rules are the governing successor text. A thread-safe
+function API needs its own RFC with queue ownership, shutdown, cancellation,
+and runtime-lifetime semantics.
 
 ## 12. Failure, OOM, and teardown
 
@@ -1239,11 +1257,14 @@ Delivered 2026-08-23 (the G1-G6 preparation tranche):
 
 Still open in this stage:
 
-- ~~pause histograms~~ — **delivered 2026-08-23**: the collector retains its
-  last 1024 round durations and `--gc-stats` reports p50/p95/p99/max, with an
-  empty distribution printed as "no collection completed" rather than as
-  zeros. The measurement immediately showed the current p99 exceeds this
-  document's own 2 ms target (§1.3);
+- ~~pause histograms~~ — **delivered 2026-08-23; initial readings retracted
+  2026-08-25**: the collector retains its last 1024 round durations and
+  `--gc-stats` reports p50/p95/p99/max, with an empty distribution printed
+  as "no collection completed" rather than as zeros. The 2026-08-23 readings
+  were withdrawn (`756a1d07`: the census ran inside the timed region and
+  minors leaked into the major ring); re-measure with the corrected
+  instrument on the v9 suite before citing any distribution as gate
+  evidence;
 - reason/phase counters, root counts, conservative hits, mark and sweep debt
   (several of these have no meaning until the corresponding mechanism exists,
   and should land with it rather than as empty fields — the panel was just
@@ -1313,7 +1334,9 @@ fall back mid-runtime to RC.
 
 Deliver the small/medium/large spaces, side metadata, address registry, epochs,
 and mutator-only lazy sweep. Migrate strings/ropes explicitly. Preserve public
-`JSValue` and native handle Interfaces.
+`JSValue` and native handle Interfaces. (2026-08-25: on branch, candidate
+validation is arena-geometry-primary, `9e62e098`; the address registry is a
+residual for standalone-prefix allocations, not a per-object table.)
 
 Gate: allocator fragmentation/committed-memory envelope, interior-candidate
 lookup, OOM, sweep debt, and frozen bench-v8 A/B. Header/object representation
@@ -1395,9 +1418,12 @@ required because stress alone does not prove absence of a missed interleaving.
    normal collection cost?
 10. At what stage, if any, is replacing the current 8-byte metadata plus
     16-byte intrusive header worth its representation and code-layout cost?
-11. Does the next plugin ABI require all JavaScript payload edges to be
+11. ~~Does the next plugin ABI require all JavaScript payload edges to be
     engine-owned persistent handles, or add a no-allocation/no-reentry tracing
-    callback? Reclaiming tracing cannot call the current reentrant tracer.
+    callback? Reclaiming tracing cannot call the current reentrant tracer.~~
+    **Closed (2026-08-25)** by the FNABI adoption:
+    [fun-native-plugin-design.md](fun-native-plugin-design.md) §18 fixes the
+    JSValue/Handle/GC/reentry rules, including finalizer restrictions.
 
 ## References
 

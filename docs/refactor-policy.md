@@ -9,15 +9,16 @@ performance tax. The rules below are the policy.
 > 15-benchmark zoo. bench-v8 is the published metric, so the gate protects the
 > number the project actually claims, and its serial protocol costs about an
 > hour per item instead of the zoo's half day — the cost that drove the gate
-> into suspension in the first place. The zoo stays as the broader attribution
-> instrument; it is not a merge gate.
+> into suspension in the first place. The zoo stays as the standalone-file
+> attribution instrument (its coverage advantage ended 2026-08-25 when
+> bench-v8 vendored full Octane 2.0); it is not a merge gate.
 
 1. Maintainability refactors proceed by risk zone. COLD-zone work — docs,
    build graph, test harnesses, tools, dead-asset removal, and files outside
    the hot path — may proceed freely under the normal validation ladder.
    HOT-zone work (the call chain, array/property runtime, the dispatch core,
    `src/parser.zig`, `src/bytecode.zig`, `src/core/object.zig`) is tracked in
-   [maintainability-backlog.md](maintainability-backlog.md) and lands only
+   [backlog.md](backlog.md) and lands only
    item by item under rule 2.
 2. Any split, move, or rename that involves a hot-path file must pass a
    bench-v8 A/B before merge: the candidate `zjs` against a frozen build of
@@ -36,6 +37,13 @@ performance tax. The rules below are the policy.
    so the result cannot later be misread as a QuickJS comparison. Both
    binaries must be frozen before the first sample and the measurement field
    must be clean (no orphan builds, affinity pinned as the script enforces).
+
+   Coverage note (2026-08-25): the vendored suite expanded from the
+   8-benchmark V8 suite v7 to full Octane 2.0, so every rule 2 A/B now
+   covers all 16 running benchmarks — including pdfjs, typescript, box2d
+   and gbemu, which the v7-era gate never saw. The 2026-08-19→25 window,
+   during which that family regressed unguarded, is why the wider gate
+   matters; nothing else about the protocol changed.
 
    The A/B runs the two-cluster parallel protocol: each lane starts both
    engines at the same instant, one per cluster, and the engine-to-cluster
@@ -71,9 +79,13 @@ performance tax. The rules below are the policy.
 >    bench-v8 A/B. Pass when the composite ratio is at least `0.995` and every
 >    suite remains inside its historical dispersion envelope. Run pad lineage
 >    only when the change mechanically adds work to benchmark-hot paths or the
->    composite is below `0.995`. Campaign-ledger calibration (`n = 10`):
->    composite readings `0.9973`–`1.0081`; RegExp `±3.5` percentage points,
->    Splay and Richards `±2.0` points, and every other suite `±1.5` points.
+>    composite is below `0.995`. Campaign-ledger calibration (`n = 10`,
+>    calibrated 2026-08-21/22 on the v7 8-suite composite): composite
+>    readings `0.9973`–`1.0081`; RegExp `±3.5` percentage points, Splay and
+>    Richards `±2.0` points, and every other v7 suite `±1.5` points. The 8
+>    Octane-only suites added 2026-08-25 (pdfjs, typescript, box2d, gbemu,
+>    mandreel, code-load, and the Latency sub-scores) have no dispersion
+>    envelope yet.
 > 4. **Batch windows.** Test262, and Tier-2 A/B when several small hot items
 >    land together, may gate once at the lane tip for a merge window of at
 >    most three items. A red result is bisected within the window; per-item
@@ -89,7 +101,7 @@ performance tax. The rules below are the policy.
 
 3. Pure test-harness and build-graph splits have no layout risk and are
    exempt from rule 2.
-4. Mechanical identity gates may substitute for the zoo A/B in rule 2,
+4. Mechanical identity gates may substitute for the bench-v8 A/B in rule 2,
    because bit-identical machine code is a stronger guarantee than a
    statistical verdict:
    - **Binary-identity gate**: comment-only edits (including section
@@ -126,7 +138,10 @@ performance tax. The rules below are the policy.
    - **Baseline registry**: `reports/identity/baseline.json` records that
      admissible set for the current baseline commit. A gate check samples the
      candidate and compares against the registry; do not re-sample the
-     baseline each time. Refresh the registry when main moves.
+     baseline each time. Refresh the registry when main moves. (As of
+     2026-08-25 the registry still pins `11ca5f84`, a pre-squash commit
+     reachable only from `backup/pre-squash-2026-08-21`; it must be refreshed
+     against current main before it can adjudicate a gate.)
    - **Batch tier** (owner-approved 2026-08-19): mechanical rename/alias
      campaigns may accumulate on a branch with per-change test evidence
      only, then pass **one** identity closure for the whole batch before

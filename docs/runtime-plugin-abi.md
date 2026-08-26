@@ -1,5 +1,13 @@
 # Runtime Plugin ABI
 
+> **Deprecated (2026-08-25, owner decision).** Superseded by the Fun Native
+> Plugin design ([fun-native-plugin-design.md](fun-native-plugin-design.md),
+> §28.1). This ABI is frozen: no extensions, critical correctness fixes only.
+> The in-engine dynamic loader (`Plugin.load`) and install path move to the
+> fun runtime at FNABI milestone M3 and will then be removed from zjs. The
+> representation contract's "plugin ABI fingerprint" promise transitions to
+> the FNABI ABI tuple as part of that milestone (contract revision first).
+
 This document defines the first dynamic runtime plugin ABI. The ABI is useful
 but intentionally small: load one dynamic library, validate one descriptor,
 install synchronous native functions into one ordinary target object, expose

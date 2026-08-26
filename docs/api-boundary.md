@@ -1,6 +1,8 @@
 # API Boundary
 
-ZJS is a QuickJS C to Zig rewrite. QuickJS remains the semantic reference. The
+ZJS is a QuickJS C to Zig rewrite. ECMA-262 as validated by test262 is the
+semantic authority; QuickJS is the comparison reference (owner ruling
+2026-08-22). The
 Zig surface should improve embedding ergonomics without moving host/runtime
 policy into the JavaScript engine core.
 
@@ -23,9 +25,13 @@ property-name, host-callback, native-object, and FFI descriptors. There is no
 landed `src/kernel/` directory; earlier "kernel API" language maps to this
 adapter layer plus `src/root.zig`.
 
-`src/runtime/` owns host/runtime policy such as event-loop helpers, module file
-graph helpers, cleanup helpers, ArrayBuffer detach integration, and dynamic
-runtime plugins.
+`src/runtime/` owns host/runtime policy. On disk it holds the event loop
+(`event_loop.zig`), the dynamic plugin loader (`plugin.zig` — deprecated
+2026-08-25, frozen until FNABI M3), and the facade files (`public.zig`,
+`root.zig`). Module file graph helpers, Atomics waiter cleanup, and
+ArrayBuffer detach integration are implemented in `src/exec/` and re-exported
+through `runtime/root.zig`; they are runtime *surface*, not runtime-owned
+files.
 
 `src/internal_root.zig` is repository-local aggregation for CLI, test262, and
 internal tests. It is not the public embedding contract.
@@ -75,7 +81,7 @@ appear in `docs/public-api-contract.md`. JSContext host-reference ownership
 
 ## Performance Shape
 
-QuickJS provides the reference shape as well as the semantic reference:
+QuickJS provides the reference performance shape:
 
 - `JSRuntime`, `JSContext`, `JSValue`, atom-like property names, class IDs, and
   opaque payloads are explicit primitives.
@@ -98,7 +104,9 @@ exception materialization.
 
 The runtime layer may expose event loops, timers, I/O policy, module file graph
 helpers, dynamic plugins, SharedArrayBuffer wake/cleanup hooks, and CLI
-integration. Those policies do not move into `src/core/`.
+integration (the module-graph, wake/cleanup, and detach helpers are
+implemented in `src/exec/` and re-exported). Those policies do not move into
+`src/core/`.
 
 The `zjs` CLI is a thin benchmark and smoke-test shell. Its default
 JavaScript-visible host surface is intentionally small:
@@ -111,7 +119,7 @@ profiles. Any future product-runtime profile must be explicit.
 
 `run-test262` installs its own harness globals and may retain harness-only
 shortcuts. Ordinary object, property, call, string, bytes, realm, module,
-event-loop, exception, and cleanup paths should use public kernel/runtime
+event-loop, exception, and cleanup paths should use public binding/runtime
 helpers.
 
 ## Current Exceptions

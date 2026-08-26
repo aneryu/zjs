@@ -68,7 +68,7 @@ scope.
 ## Agent skills
 
 Issues and PRDs live under `.scratch/<feature>/`; conventions and triage
-labels: `docs/agents/issue-tracker.md`.
+labels: `docs/agents/project-experience.md` §11.
 Cross-session project lessons, domain-context routing, and evidence rules:
 `docs/agents/project-experience.md`.
 

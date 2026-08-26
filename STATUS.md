@@ -1,11 +1,13 @@
 # STATUS
 
 This page is the single authoritative status source for `zjs`.
-README keeps only a pointer here.
+README carries condensed copies of the headline tables; when they disagree,
+this page and the documents it names win.
 
 ## test262
 
-Checked report date: 2026-08-05 (source: `COMPATIBILITY.md`).
+Checked report date: 2026-08-22 (full-suite run recorded under Known defects
+below; `COMPATIBILITY.md` carries the same numbers).
 
 - 49,778 prepared / 44,584 pass / 0 checked-in known failures / 0 unexpected failures / 5,194 feature skips
 - Configuration = repository `test262.conf` + submodule pin `4249661388e5d3f92a85186213da140a6481490f`
@@ -16,34 +18,49 @@ source-phase imports, and PTC.
 
 ## Performance
 
-The authoritative score source is `docs/perf/bench-v8-status.md` (the V8
-benchmark suite v7 — the suite upstream QuickJS publishes with, vendored in
-`tools/perf/bench_v8/`); this page does not maintain its own copy of the
-numbers.
+The authoritative score source is `docs/perf/bench-v8-status.md`; this page
+does not maintain its own copy of the numbers. Since 2026-08-25 the vendored
+suite (`tools/perf/bench_v8/`) is Octane 2.0 (V8 suite version 9); the
+current five-engine snapshot there reads zjs/qjs composite 0.9611 against a
+GCC 16.0.1 reference build. Per the 2026-08-25 reference-drift adjudication,
+every published record must carry the reference binary's fingerprint
+(hash + compiler); ratios are not comparable across suite versions or
+reference binaries, and which build is the official yardstick is an open
+owner decision.
 
-Current headline (2026-08-19, `main@da875a7d`, serial pinned 8-sample
-ABBA protocol): composite Score ratio **1.0464** (zjs 2706 / qjs 2586),
-7/8 benchmarks at or above 1.0. The remaining laggard is EarleyBoyer
-(0.879). The 15-benchmark zoo suite stays as an internal diagnostic
-(`docs/perf/zoo-status.md`, last baseline geomean 1.0304).
+The 15-benchmark zoo suite stays as a standalone-file attribution
+instrument (usage: `tools/perf/zoo/README.md`). Its last baseline (geomean
+1.0304, v7 suite / GCC-13 reference) was removed from the active tree with
+the 2026-08-25 stale-doc cleanup; recover it from git history. The
+superseded version-7 headline records (2026-08-19 composite 1.0464) were
+removed the same way.
 
 This is a maintainer single-machine measurement; there is no independent
 reproduction yet.
 
 - Machine: ARM Cortex-X925 (3.9 GHz big cores, pinned), Linux 6.17.
 - QuickJS reference pin: commit `04be246`, upstream Makefile default release
-  build (GCC 13.3.0, aarch64).
+  build. Two reference binaries exist for this same commit (GCC 13.3.0 and
+  GCC 16.0.1, aarch64), and the compiler difference alone moves the composite
+  by ~6.6%; record the binary fingerprint with every measurement (see
+  `docs/perf/bench-v8-status.md`).
 - Campaign ledgers and attribution reports were moved out of the active tree;
-  recover them from tag `v0.1.0` (`reports/perf/qjs-align/`) or git history.
-  Raw sample files were deleted during campaign close; re-measurement must
-  re-run the measurement contract.
+  recover them from git history at `90eb9385^` (`reports/perf/qjs-align/` —
+  the directory was deleted in the release commit itself, so the `v0.1.0`
+  tag does not contain it). Raw sample files were deleted during campaign
+  close; re-measurement must re-run the measurement contract.
 
 Measurement contract: `tools/compare/measurement_contract.js` with
 `tools/compare/measurement_policy.json`; the prose incident register
-(16 clauses) is preserved at tag `v0.1.0` under
-`reports/perf/qjs-align/measurement-contracts.md`.
+(16 clauses) is preserved in git history at
+`90eb9385^:reports/perf/qjs-align/measurement-contracts.md`.
 
 ## Gates
+
+The dated cells below are snapshots from the runs they name, not continuous
+results. The most recent full-suite evidence is 2026-08-22: full suite 2332
+passed / 1 skipped / 0 failed, test262 `0/49778 errors, passed 44584` (see
+the frame-teardown entry under Known defects).
 
 | Gate | What it covers | This lane |
 |------|----------------|-----------|
@@ -193,4 +210,5 @@ Direct test262 runner (after `zig build run-test262 --summary all`):
 
 [![CI](https://github.com/aneryu/zjs/actions/workflows/ci.yml/badge.svg)](https://github.com/aneryu/zjs/actions/workflows/ci.yml)
 
-x86-64 and macOS lanes start as advisory; they become required once green.
+All lanes (Linux arm64, Linux x86-64, macOS, Windows) are required; none is
+marked advisory (`continue-on-error`) in `.github/workflows/ci.yml`.

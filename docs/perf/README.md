@@ -11,12 +11,34 @@ a frozen merge-base build before any hot-path split, move, or rename lands.
 
 Current design notes:
 
-- [bench-v8 status vs Bellard QuickJS](bench-v8-status.md) — the public claim
-- [Zoo status (internal diagnostic)](zoo-status.md)
+- [bench-v8 status](bench-v8-status.md) — the public claim
+- [Zoo runner (standalone-file attribution instrument)](../../tools/perf/zoo/README.md)
+  — its frozen baseline doc was removed 2026-08-25 (git history)
+- [GC behaviour baseline](gc-baseline.md) — pre-refactor collector counters
 - [Object and shape implementation](object-shape-design.md)
-- [`exec/call_runtime.zig` decomposition map](shared-vm-decomposition.md)
+- [`exec/call_runtime.zig` candidate domains and move criteria](../backlog.md)
 - Frozen subsystem baseline (historical):
-  [../qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md](../qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)
+  `docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md` — removed
+  2026-08-25; recover from git history
+
+## bench-v8 (Octane 2.0, v9) — the public-metric tooling
+
+The vendored suite in `tools/perf/bench_v8/suite/` is full Octane 2.0
+(since 2026-08-25; zlib skip-listed — see
+[tools/perf/bench_v8/README.md](../../tools/perf/bench_v8/README.md) for the
+skip contract and provenance). The three entry points:
+
+```sh
+zig build perf-bench-v8                                # single-engine local diagnostic
+python3 tools/perf/bench_v8/run_benchv8_compare.py \
+  --zjs <candidate> --baseline <merge-base build> ...  # refactor-policy rule 2 A/B
+python3 tools/perf/bench_v8/run_benchv8_multiengine.py # N-way engine snapshot
+```
+
+Under the v9 suite there is no owner-ruled *published* metric yet, and
+ratios are only comparable against the same reference-binary fingerprint
+(hash + compiler) — see the 2026-08-25 reference-drift adjudication in
+[bench-v8-status.md](bench-v8-status.md).
 
 ## Current Benchmark Entries
 
@@ -187,7 +209,10 @@ No benchmark result JSON is checked in.
 
 The 2026-06-13 QuickJS-ng `*-vs-quickjs*` snapshots were removed from the
 active tree. Do not recover them as a current Bellard-QuickJS comparison.
-The public claim is [bench-v8-status.md](bench-v8-status.md); the zoo suite stays as an internal diagnostic ([zoo-status.md](zoo-status.md)).
+The public claim is [bench-v8-status.md](bench-v8-status.md); the zoo suite stays as a standalone-file attribution instrument ([tools/perf/zoo/README.md](../../tools/perf/zoo/README.md)).
+As of 2026-08-25, no v9-suite number has passed an owner ruling to become
+the published metric, and any quoted ratio is only valid against the named
+reference-binary fingerprint.
 
 Runtime-profile source scripts live in `reports/perf/current/scripts/`;
 profile JSON is written locally under `.zig-cache/perf/` and is not checked

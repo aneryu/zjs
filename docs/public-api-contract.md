@@ -25,8 +25,10 @@ The stable public groups are:
   names;
 - `zjs.context`, `zjs.module`, and `zjs.job` for explicit helper
   families;
-- `zjs.runtime` for runtime policy helpers and dynamic plugins;
-- `zjs.ffi` for dynamic plugin descriptors and C ABI structures.
+- `zjs.runtime` for runtime policy helpers and dynamic plugins (the plugin
+  surface is deprecated 2026-08-25 — see the note under Runtime Namespace);
+- `zjs.ffi` for dynamic plugin descriptors and C ABI structures (same
+  deprecation).
 
 The intended groups above are the contract. The embedding snapshot test
 lists every current public declaration on those groups. Update the list when
@@ -68,7 +70,7 @@ helpers such as `freeObjectAssumeObject` and
 (backlog H9). Cookbook and embedding examples must not call those internal
 names.
 
-`JSRuntime` currently publishes 167 public declarations. Its count is pinned
+`JSRuntime` currently publishes 168 public declarations. Its count is pinned
 beside the `JSValue` count in the embedding surface test, so any addition or
 removal requires an explicit public-contract update.
 
@@ -225,6 +227,13 @@ must use explicit hook policy.
 - SharedArrayBuffer wake/cleanup helpers;
 - ArrayBuffer detach helper;
 - `zjs.runtime.Plugin` and `zjs.runtime.PluginInstallOptions`.
+
+`zjs.runtime.Plugin` / `PluginInstallOptions` (and the `zjs.ffi` plugin ABI
+behind them) are **deprecated** as of 2026-08-25: the surface is frozen —
+correctness fixes only — and is removed at FNABI milestone M3, when the
+loader moves to the `fun` repository. Do not build new embeddings on it; see
+`docs/runtime-plugin-abi.md` for the freeze terms and
+`docs/fun-native-plugin-design.md` for the successor.
 
 It must not become an `Engine` facade and must not re-export internal runtime
 modules as public contract.

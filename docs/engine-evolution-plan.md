@@ -26,6 +26,19 @@ corpus 0.000%、helper-dense 单体 ~3.5% cyc 等已有冻结二进制 PMU 结�
 baseline JIT 与 optimizing JIT 建立统一底座;同时不与进行中的 tracing GC
 迁移计划([tracing-gc-design.md](tracing-gc-design.md))互相锁死。
 
+关联方案(2026-08-25 注,总纲双向引用):
+
+- **静态轴姊妹方案**:
+  [type-directed-optimization-plan.md](type-directed-optimization-plan.md)
+  (v0.8,DRAFT)——TS 类型驱动的 typed bytecode 与 AOT 路线,与本
+  方案的动态轴(反馈槽→JIT)互补;其 S1(F1/F2/F4)是 FNABI M1 的
+  硬前置。
+- **原生插件 ABI**:
+  [fun-native-plugin-design.md](fun-native-plugin-design.md)
+  (FNABI v0.3,2026-08-25 采纳)——§9.1 的 NativeCallDescriptor 与
+  FNABI 的 `NativeCallPlan` 统一为单一 schema;runtime-plugin-abi.md
+  已 deprecated。
+
 ---
 
 ## 一、结论
@@ -102,21 +115,21 @@ Phase 5    Trace 或 Region Optimizing JIT(profile 后决定)
 
 | 事实 | 出处 |
 | --- | --- |
-| bench-v8 composite **1.0464×QuickJS**(zjs 2706 / qjs 2586,7/8 ≥ 1.0);唯一落后 EarleyBoyer 0.879 | [perf/bench-v8-status.md](perf/bench-v8-status.md) |
-| zoo 内部诊断:geomean 1.0304;落后项 pdfjs 0.849、earley-boyer 0.886、box2d 0.955、typescript 0.958,均以分配/调用密集为主 | [perf/zoo-status.md](perf/zoo-status.md) |
+| bench-v8 composite **1.0464×QuickJS**(zjs 2706 / qjs 2586,7/8 ≥ 1.0);唯一落后 EarleyBoyer 0.879。**历史口径注(2026-08-25)**:此数为 V8 suite v7 / GCC-13 参考二进制口径;套件已于 2026-08-25 换为 Octane 2.0(v9),跨套件/跨参考二进制的 ratio 不可比,现行快照与官方 yardstick 归属(owner 待裁决)见 [perf/bench-v8-status.md](perf/bench-v8-status.md) | [perf/bench-v8-status.md](perf/bench-v8-status.md) |
+| zoo 内部诊断:geomean 1.0304;落后项 pdfjs 0.849、earley-boyer 0.886、box2d 0.955、typescript 0.958,均以分配/调用密集为主。**历史口径注(2026-08-25)**:同为 GCC-13 参考口径的冻结基线,基线文档已移出树(git history 可回溯) | 工具见 `tools/perf/zoo/README.md` |
 | test262:44,584 pass / 0 unexpected failures,语义已稳定 | `STATUS.md` |
 | dispatch 现状:每 opcode 一个 `callconv(.c)` handler,`@call(.always_tail)` 经 256 表尾跳;pc/sp/var_buf 驻参数寄存器,其余挂 `*Vm`(x3);热 handler 帧 ~80–150B,叶级热臂零 prologue | `src/exec/tailcall_dispatch.zig` |
 | **热 JS→JS 调用不往返 driver(0.4 勘误)**:warm exact-args / capture-leaf / plain 家族经 `pushWarmExactArgsLeafAndEnter`/`pushAndEnter` 域内进入 callee;`return .tail` → driver 仅存于 generic `execCall` 兜底、`op_apply`、spread 构造器等冷形态 | 同上 opCall 段;冷形态频次先例:padded-leaf 0.0015% 普查删除(在册注释) |
 | 3504B 帧问题已被 tail-call 拆分解决(comptime-delete bisection 证明),不是现役痛点 | 同上头注 |
-| 现役布局防御税:section 钉扎、源码顺序布局约定、"handler 零非尾调用"铁律、retired-slot 复用;合并 handler 需冻结二进制+反汇编+多构建 PMU 证据 | 同上;[stack_bytecode_vm_design.md](stack_bytecode_vm_design.md) §3 |
+| 现役布局防御税:section 钉扎、源码顺序布局约定、"handler 零非尾调用"铁律、retired-slot 复用;合并 handler 需冻结二进制+反汇编+多构建 PMU 证据 | 同上;[architecture.md](architecture.md)(Stack Bytecode VM Status 章)§3 |
 | `JSValue` = 16 字节 extern tagged + 引用计数;VM 存活协议 = refcount-on-push + 确定性 teardown | `src/core/value.zig`、[gc-invariants.md](gc-invariants.md) |
-| tracing GC 迁移是已过评审的并行大工程,分阶段 gate,RC 迁移期间保持权威 | [tracing-gc-design.md](tracing-gc-design.md) v0.5 |
-| 今天没有任何 IC:`FunctionBytecode` 无 site/slot 表;`property_direct.zig` 为非缓存直通 fast path(probe-first、实测链长 1.0、命中率 100%) | [stack_bytecode_vm_design.md](stack_bytecode_vm_design.md) §4 |
+| tracing GC 迁移是已过评审的并行大工程,分阶段 gate,RC 迁移期间保持权威。**状态注(2026-08-25)**:实现在分支 `gc/tracing`(未合 main);08-25 缺陷批次(major 从不触发,`f10855c6`)作废此前全部吞吐证据,合入前须重新过门 | [tracing-gc-design.md](tracing-gc-design.md) v0.5 |
+| 今天没有任何 IC:`FunctionBytecode` 无 site/slot 表;`property_direct.zig` 为非缓存直通 fast path(probe-first、实测链长 1.0、命中率 100%) | [architecture.md](architecture.md)(Stack Bytecode VM Status 章)§4 |
 | ES2015 PTC 已实现(strict 平调用尾折叠为 `tail_call`,常量栈),文档化分歧 | 同上 §5;`LIMITATIONS.md` |
 | opcode 级 profiling 构建已存在(`zig build zjs-profile`) | 同上 §7 |
 | 中断/停点机制:`active_dispatch_tbl` 换表实现 L0 stop seam | `src/exec/tailcall_dispatch.zig` |
 | 测量契约已冻结:单机、钉核、ABBA 交错、偶数样本 | [perf/bench-v8-status.md](perf/bench-v8-status.md) |
-| 治理门:仅当 PMU 证据显示 operand traffic / dispatch 为主瓶颈时才重估字节码架构 | [stack_bytecode_vm_design.md](stack_bytecode_vm_design.md) §8 |
+| 治理门:仅当 PMU 证据显示 operand traffic / dispatch 为主瓶颈时才重估字节码架构 | [architecture.md](architecture.md)(Stack Bytecode VM Status 章)§8 |
 
 ### 2.2 边际收益校准(0.4 修订)
 
@@ -232,7 +245,10 @@ barrier。
 
 - asm 解释器范围收缩为 **AArch64-only**;x86-64 asm port 撤销,x86
   平台由 lswitch/tail-call 解释器覆盖(§7.8);
-- iOS 禁 JIT → 该平台解释器即产品上限;第一性能杠杆是 Phase 0.5 的
+- iOS 禁 JIT → 该平台解释器即产品上限(**限定注 2026-08-25**:此
+  上限仅指动态轴;静态轴的 typed AOT 路线见
+  [type-directed-optimization-plan.md](type-directed-optimization-plan.md)
+  §5.1,该计划仍 DRAFT);第一性能杠杆是 Phase 0.5 的
   解释器级 IC,其次是增量①;asm-vs-lswitch 差额在 Apple 大核
   (超宽乱序、大 L1I/BTB)上取区间下沿——§2.4(b) 在 X925 上已为
   零,Apple 大核只会更低;
@@ -437,7 +453,7 @@ harness 就绪。
 
 shape transition / prototype mutation / builtin 替换必须失效;first 版
 版本号验证(读时比对),dependency registry 留给 Phase 3。受既有审计
-条款约束([stack_bytecode_vm_design.md](stack_bytecode_vm_design.md)
+条款约束([architecture.md](architecture.md) Stack Bytecode VM Status 章
 §6:可观察边界 + 受控 A/B + 门禁)。
 
 ---
@@ -720,8 +736,13 @@ unwind。
 
 ### 9.1 NativeCallDescriptor(并行轨,可自 Phase 1 起)
 
-基于 `src/binding/ffi.zig` 既有描述符扩展,对齐
-[runtime-plugin-abi.md](runtime-plugin-abi.md):
+基于 `src/binding/ffi.zig` 既有描述符扩展。**对齐目标修订
+(2026-08-25)**:原对齐对象 runtime-plugin-abi.md 已 deprecated
+(2026-08-25),改对齐
+[fun-native-plugin-design.md](fun-native-plugin-design.md) §15.2;
+FNABI 裁决(2026-08-25)要求 `NativeCallPlan` 与本描述符统一为
+**单一 schema**,且 FNABI M1 硬依赖 type-directed S1(F1/F2/F4),
+本轨不再是自由并行轨:
 
 ```zig
 pub const NativeCallDescriptor = struct {
@@ -866,9 +887,8 @@ pub const OpcodeInfo = struct {
 };
 ```
 
-文档义务:[architecture.md](architecture.md) 与
-[stack_bytecode_vm_design.md](stack_bytecode_vm_design.md) 各阶段同步
-更新;§3 裁决记录(含 §3.4 宪章退役)入 `docs/`,参照
+文档义务:[architecture.md](architecture.md)(含 Stack Bytecode VM
+Status 章)各阶段同步更新;§3 裁决记录(含 §3.4 宪章退役)入 `docs/`,参照
 [qcp1_switch_decision.md](qcp1_switch_decision.md) 体例。
 
 ---
@@ -1024,7 +1044,7 @@ bytes、bailout/deopt counts、IC 状态分布。公开口径以
 | P0 | 宪章退役记录(§3.4) | Phase 0.5 落地前 |
 | P0 | GC 排序(已裁决 A)/ 平台矩阵 / Zig 例外 | 已裁决项记录入库 |
 | P0.5 | 解释器级 property/call 反馈槽 | 立即,与 P0 并行;最高 ROI(主要价值=Phase 2 输入) |
-| P1 | NativeCallDescriptor(扩展 ffi.zig) | 并行轨,不依赖解释器骨架 |
+| P1 | NativeCallDescriptor(扩展 ffi.zig) | 并行轨,不依赖解释器骨架;**注(2026-08-25)**:FNABI 裁决后与 `NativeCallPlan` 统一为单一 schema,FNABI M1 挂 type-directed S1 之后(§9.1) |
 | P1 | GC/exception/helper contract | 不可后补 |
 | P1(条件) | labeled switch 原型 1-Z | 预门槛 ≥2% 才启动;time-box;保险单非主菜 |
 | P1(条件) | asm microkernel 1A(AArch64-only) | 启动 = 1-Z 未达标 且 iOS 窗口;摸禁 JIT 平台上限 |
@@ -1081,4 +1101,4 @@ bytes、bailout/deopt counts、IC 状态分布。公开口径以
 - guard/snapshot/deopt 作为 optimizing 硬前置,deopt 优先落 baseline;
 - 不预锁 trace/region;backend 不接 LLVM;
 - 不做 register bytecode(与
-  [stack_bytecode_vm_design.md](stack_bytecode_vm_design.md) §1 一致)。
+  [architecture.md](architecture.md) Stack Bytecode VM Status 章 §1 一致)。
