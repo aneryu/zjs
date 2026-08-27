@@ -11,6 +11,12 @@ chosen after results exist.
 - `spikes/perf-dyn-spike-v1.json` — dynamic-feedback spike (`PERF-DYN-SPIKE`).
 - `spikes/perf-jit-spike-v1.json` — baseline-JIT spike (`PERF-JIT-SPIKE`).
 - `spikes/perf-n-spike-v1.json` — native AOT shape spike (`PERF-N-SPIKE`).
+- `spikes/perf-opcode-e1-v1.json` — per-handler cycle attribution for the
+  bytecode-architecture question (`PERF-OPCODE-SPACE`). **status: proposed**
+  — thresholds need owner approval before the run. Not an A/B: it profiles
+  the shipping binary and produces the PMU evidence the K4 gate
+  (`architecture.md` §8) requires before a register-machine re-evaluation
+  can be justified.
 
 Amendment rule (applies to every file here): before the first official
 sample governed by a policy is taken, the policy may be amended by bumping

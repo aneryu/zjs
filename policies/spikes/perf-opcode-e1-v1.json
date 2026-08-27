@@ -1,0 +1,89 @@
+{
+  "policy_id": "perf-opcode-e1",
+  "policy_version": 1,
+  "status": "proposed",
+  "date_drafted": "2026-08-27",
+  "work_item": "PERF-OPCODE-SPACE",
+  "gate": "K4 third precondition (docs/architecture.md §8 Stack Bytecode VM Status: \"Re-evaluate the bytecode architecture only when ... PMU evidence shows operand traffic / dispatch as the main bottleneck\"), preserved by qjs_alignment_charter_transition.md K4",
+  "instrument_class": "attribution, NOT an A/B",
+  "why_this_is_not_a_spike": "E1 profiles the shipping engine on the shipping suite. It builds no candidate binary, changes no code, and compares nothing. It therefore does not touch the 2026-08-27 ruling that deferred the register-vs-stack spike (decision 2); it produces the evidence K4 requires before that spike could even be justified.",
+  "spec_basis": [
+    "docs/perf/opcode-design.md §9.5 (evidence ladder E1/E1.5/E2), §2.2 (58 ids and roughly a third of dynamic instructions are stack-machine bookkeeping; 34.1%/37.6% across two harnesses), §6.4 (the three-skeleton floor pinned cost-per-dispatch, not dispatch count)",
+    "docs/architecture.md §8 (K4 preconditions)",
+    "docs/perf/measurement-contracts.md (all clauses; clause 8 insn+cycles same run)"
+  ],
+  "question": "What share of suite cycles is spent inside the handlers that a register machine would not execute at all?",
+  "scope": {
+    "measured_set": "the 58 handlers a register machine would not execute: 48 slot moves (get/put/set x loc/arg/var_ref x {0,1,2,3,8,wide}), 9 stack shuffles (dup/swap/nip/nip_catch/insert2/insert3/perm3/perm4/rot3l) and drop. Verified against src/bytecode.zig on 2026-08-27; together they are about a third of dynamic instructions -- 34.1% on the zoo census and 37.6% when reproduced on the bench_v8 driver harness, which skips zlib. The spread is why this policy's thresholds are set at 10/20% rather than near the measured value: the quantity being bounded is harness-dependent to within a few points.",
+    "reference_set": "all other hot-island handlers, reported alongside so the share is a share of something",
+    "excluded": "nothing is excluded a priori. The earlier draft excluded cold-shell handlers on the assumption that they share function bodies; that was checked on 2026-08-27 and is false -- each coldStd(body) instantiation is comptime-distinct. What is real is the 15 shared-entry groups in method.resolution_measured, none of which straddles the measured/reference boundary."
+  },
+  "target_workloads": {
+    "primary": "the 15 zoo benchmarks that produced the 41.9e9-execution census (richards, deltablue, crypto, raytrace, navier-stokes, earley-boyer, regexp, splay, pdfjs, typescript, box2d, code-load, gbemu, mandreel, zlib)",
+    "reporting": "per-benchmark breakdown is MANDATORY, not just a geomean. Rationale: the census corpus is synchronous, CPU-bound, old-style JS and fun is a runtime (opcode-design.md §4.7 limit four). A share that is carried by two benchmarks is a different fact from one that is uniform.",
+    "controls": "none required -- there is no candidate arm"
+  },
+  "primary_metric": "fraction of total suite cycles attributed to the measured set, computed per benchmark and reported as a distribution (min / median / max across benchmarks), with instructions reported in the same run",
+  "interpretation_bound": {
+    "statement": "The primary metric is an UPPER BOUND on the interpreter-side prize of option B, not an estimate of it.",
+    "why_upper": "A measured handler's cycles include work that survives the model change (the slot read becomes an operand fetch folded into the consumer). A register machine removes the dispatch, the stack round trip and the refcount pair, not necessarily all of the handler body.",
+    "why_not_lower": "It excludes second-order effects that could go either way -- I-cache footprint from fewer handlers, and the register machine's own added costs (liveness map for the exception path, opcode-design.md §9.3)."
+  },
+  "minimum_effect": {
+    "continue": ">= 20% of suite cycles in the measured set, at the median benchmark -> K4's third precondition is met on the dispatch/operand-traffic axis; proceed to E1.5, and E2 becomes justifiable",
+    "kill": "< 10% of suite cycles at the median benchmark -> the interpreter-side prize of option B cannot support a 6721-line dispatch rewrite plus a compiler operand-allocation rewrite; option B drops to `later` and effort goes to option A in full",
+    "ambiguous": "10-20% -> do E1.5 (TOS caching) first; it isolates the stack-round-trip component and is a deliverable of option A either way",
+    "basis": "proposed -- owner approval required before the run, per roadmap §0.2 clause 5"
+  },
+  "maximum_regression": {
+    "not_applicable": "no candidate arm exists; nothing can regress",
+    "basis": "n/a"
+  },
+  "validity_requirements": [
+    "Attribution MUST go through the dispatch table (see `method`), not through handler symbol names. Registered prior art for why symbol-level attribution needs a cross-check in this project: perf symbol merging has produced wrong attribution at least three times (2026-08-07 CodeLoad stage attribution, 2026-08-10 RayTrace, 2026-08-10/11 T6 counter diagnosis, which overturned three attributions and T7). IP -> handler must be resolved from the binary with nm -S ranges.",
+    "SPE share numbers are not admissible on their own (registered: 'SPE occupancy unreliable, trust only addr2line').",
+    "Handlers must be verified distinct in the measured binary: measured 216 distinct entries for 245 opcodes with zero unresolvable and no shared group straddling the measured/reference boundary (2026-08-27). Re-verify on any binary this is re-run against -- if LLVM ever merges two handlers across that boundary, the affected opcodes are reported as one bucket, never split by guess.",
+    "Measurement contract applies in full: pinned big core, host-heavy flock, insn and cycles in the same run, >= 8 samples, CV <= 5% or lengthen the workload.",
+    "The profiling build must NOT be used: -Dzjs_enable_opcode_profile=true adds noteDispatch to every dispatch and would be measuring the instrument. Use the shipping ReleaseFast binary; opcode identity comes from the dispatch table (see `method`), not from a counter and not from a symbol name.",
+    "Cold-shell handlers were checked and are NOT shared bodies: each coldStd(body) instantiation is comptime-distinct per opcode (nip, perm4 and rot3l resolve to three different coldStd__struct_*.h symbols). The earlier blanket caveat about the cold shell sharing function bodies was over-broad; the real sharing is the 15 groups listed in `method.resolution_measured`."
+  ],
+  "correctness_gates": {
+    "not_applicable": "E1 changes no code",
+    "binary_provenance": "must record the frozen zjs binary sha256 and merge-base per BASE-G0, so the attribution can be re-run against the same artifact"
+  },
+  "size_cost_limit": {
+    "timebox_person_days": 1,
+    "hard_stop_person_days": 2,
+    "basis": "proposed -- one profiling run plus the table-location and nm -S mapping, which was already built and verified on 2026-08-27, so the remaining work is the perf run itself"
+  },
+  "sample_protocol": "measurement contract (tools/compare/measurement_policy.json); >= 8 samples per benchmark, pinned big core, insn+cycles same run",
+  "verdicts": {
+    "continue": "median >= 20% -> record as K4 third-precondition evidence; E1.5 authorized; decision 2 (the E2 spike) becomes ripe for re-deliberation with a sharper residual question",
+    "ambiguous": "median 10-20% -> E1.5 first; re-read this policy after E1.5 with the stack-round-trip component subtracted",
+    "kill": "median < 10% -> option B goes to `later` on interpreter-benefit grounds. NOTE: this kills option B's INTERPRETER argument only. It does not touch the FNABI three-address island (opcode-design.md §9.2), which needs slot-operand encoding regardless, nor does it revive the id-shortage argument (already dissolved in §9.1)."
+  },
+  "preregistration_note": "Thresholds are fixed BEFORE the run precisely because both directions have strong post-hoc rationalisation pull: option B is architecturally attractive, and option A is the safe incumbent. Registered prior art for why this matters: PERF-T-SPIKE was written up as FAIL on 2026-08-26 and withdrawn on 2026-08-27 after the first-round workload was shown to hide the mechanism entirely.",
+  "method": {
+    "status": "verified end-to-end on the shipping binary, 2026-08-27, before the run",
+    "why_not_symbol_names": "The hottest measured handlers are not named after their opcode. the get_loc* family is 33.57% of dynamic instructions and its handler is emitted by the comptime factory opLoc(kind, idx_src), which returns an anonymous struct method; nm shows it as exec.tailcall_dispatch.opLoc__struct_108206.h. The symbols exist and no two share an address (no ICF merging), but the name does not say which opcode it serves. Attributing by symbol name would have silently mis-assigned exactly the set this policy exists to measure.",
+    "steps": [
+      "1. Locate the dispatch table in the binary: scan 8-byte-aligned windows for a run of 256 pointers into .text.zjs.op_handlers (vma 0x1070000, size 0x284a0 in the 2026-08-27 build).",
+      "2. SELF-CHECK, mandatory: cross-check the candidate table against the handlers that DO have op_<name> symbols. Measured: offset 0x3cb088 matches 72 of 73; the one difference is id 14 pointing at op_drop_fast rather than op_drop, which is the specialization the hot table is supposed to use. A candidate that does not clear this check is not the table.",
+      "3. nm -S gives (address, size) for every handler including the anonymous comptime instantiations.",
+      "4. Attribute each sampled IP to the handler whose [entry, entry+size) contains it."
+    ],
+    "engine_changes_required": "none",
+    "resolution_measured": {
+      "opcodes_in_use": 245,
+      "distinct_handler_entries": 216,
+      "attributable_per_opcode": 201,
+      "attributable_only_per_group": 44,
+      "groups": 15,
+      "unresolvable": 0,
+      "resolution": "216/245 = 88%",
+      "largest_shared_groups": "push_0..7 + push_minus1 (9), put_arg* (5), set_arg* (5), make_*_ref (3)",
+      "validity_note": "No shared group straddles the measured-set / reference-set boundary: put_arg* and set_arg* are wholly inside the measured set, push_N and make_*_ref wholly inside the reference set. For this policy's question -- the measured set's share of cycles -- the 88% figure costs nothing."
+    },
+    "binary_dependence": "The table offset and section VMA are build-specific. Step 2's self-check is what makes the method safe to re-run against a different binary: re-locate, re-verify against the named handlers, and only then attribute."
+  }
+}
