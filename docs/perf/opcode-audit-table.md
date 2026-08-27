@@ -1,5 +1,7 @@
 # zjs opcode 逐条审计表（附录）
 
+> 正文见 [`opcode-design.md`](opcode-design.md)（单一现行文本）。本文件只放原始逐条数据。
+
 生成自 15 个 zoo 基准的全量 opcode 剖析（`ZJS_PROFILE_ALL=1`），共 41,888,384,774 次执行。
 
 发射方式分类：`direct` = parser/compiler 里有字面发射点；`lowering` = 由 `bytecode.zig` 的下降代码写入；

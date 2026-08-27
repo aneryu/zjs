@@ -239,11 +239,14 @@ owner-decision: PERF-OPCODE-SPACE(driver 会话)**已升为最高优先级
                 前置项**(owner 裁决 2026-08-27 第二次):范围从
                 「编号/命名空间方案」扩为**整套指令集重新设计**,参照
                 V8/JSC/Hermes。⏸ **增量回收执行暂停**,停在 9 个编号
-                (with_* 合并是最后一笔已落地改动);剩余回收清单仍作
-                输入保留,但在重设计定案前不执行——整套重设计可能让
-                单项合并作废或改变其形态。下游凡是编码/编译/序列化/
-                手写 opcode 的项现在都硬依赖本项:PERF-T1、FN-M1A、
-                PERF-P05、PERF-JIT、PERF-ASM-1A、SER-ARTIFACT。
+                (245 在用/11 空闲);剩余清单仍作输入保留但不执行。
+                **单一现行文本 = `docs/perf/opcode-design.md`**(已合并
+                取代 08-27 的三份工作文档;逐条数据在
+                opcode-audit-table.md),**§1 有四项待 owner 裁决**——
+                其中「qjs 代码级忠实对齐的地位」建议先表态,它决定
+                register-vs-stack spike 值不值得买。下游凡是编码/编译/
+                序列化/手写 opcode 的项现在都硬依赖本项:PERF-T1、
+                FN-M1A、PERF-P05、PERF-JIT、PERF-ASM-1A、SER-ARTIFACT。
                 FN-M0F 已裁并冻结(2026-08-26,FNABI v0.8+表示契约 v2)
 implementation: GC-P3(GC 专属会话,分支 gc/tracing,不碰 main);
                 PERF-T-SPIKE **重开**(driver 会话):08-26 的 FAIL 判定
