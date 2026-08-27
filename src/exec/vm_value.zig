@@ -310,16 +310,6 @@ pub fn nip(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(top);
 }
 
-pub fn nip1(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    try requireStackLen(stack, 3);
-    const c = try stack.pop();
-    const b = try stack.pop();
-    const a = try stack.pop();
-    a.free(ctx.runtime);
-    stack.pushOwnedAssumeCapacity(b);
-    stack.pushOwnedAssumeCapacity(c);
-}
-
 pub fn dup2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 2);

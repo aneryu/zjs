@@ -111,7 +111,6 @@ pub const opcode = struct {
         pub const rest: u8 = 13;
         pub const drop: u8 = 14;
         pub const nip: u8 = 15;
-        pub const nip1: u8 = 16;
         pub const dup: u8 = 17;
         /// Fusion last-round (using-prefix reclaim of zoo-cold `dup1`). `get_loc8` + leftover `push_i8`.
         pub const get_loc8_push_i8: u8 = 18;
@@ -180,7 +179,6 @@ pub const opcode = struct {
         pub const define_field: u8 = 73;
         pub const set_name: u8 = 74;
         pub const set_name_computed: u8 = 75;
-        pub const set_proto: u8 = 76;
         pub const set_home_object: u8 = 77;
         pub const define_array_el: u8 = 78;
         pub const append: u8 = 79;
@@ -449,6 +447,7 @@ pub const opcode = struct {
         /// their first-class ids to the typed family. See
         /// docs/perf/opcode-space-survey.md §7.
         pub const check_ctor_return: u8 = 15;
+        pub const set_proto: u8 = 16;
 
         /// Add-resource hints occupy everything from here up, so the free
         /// sub-slots are the gap below it. Raised from 16 to 64 to open that
@@ -482,6 +481,7 @@ pub const opcode = struct {
                 dup3 => 3,
                 dup1 => 2,
                 check_ctor_return => 1,
+                set_proto => 2,
                 else => 0,
             };
         }
@@ -499,6 +499,7 @@ pub const opcode = struct {
                 dup3 => 6,
                 dup1 => 3,
                 check_ctor_return => 2,
+                set_proto => 1,
                 else => 0,
             };
         }
@@ -525,7 +526,7 @@ pub const opcode = struct {
         .{ .name = "rest", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .u16 }, // [13] id 13
         .{ .name = "drop", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none }, // [14] id 14
         .{ .name = "nip", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [15] id 15
-        .{ .name = "nip1", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [16] id 16
+        .{ .name = "unused_16", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [16] id 16 -- RETIRED 2026-08-27 (no emission site, 0 executions in 41.9e9), available
         .{ .name = "dup", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [17] id 17
         .{ .name = "get_loc8_push_i8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [18] id 18
         .{ .name = "push_0_or", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [19] id 19
@@ -585,7 +586,7 @@ pub const opcode = struct {
         .{ .name = "define_field", .size = 5, .n_pop = 2, .n_push = 1, .fmt = .atom }, // [73] id 73
         .{ .name = "set_name", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [74] id 74
         .{ .name = "set_name_computed", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [75] id 75
-        .{ .name = "set_proto", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [76] id 76
+        .{ .name = "unused_76", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [76] id 76 -- RECLAIMED 2026-08-27 (cold plane), available
         .{ .name = "set_home_object", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [77] id 77
         .{ .name = "define_array_el", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [78] id 78
         .{ .name = "append", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [79] id 79
@@ -8010,10 +8011,10 @@ pub const pipeline_stack_size = struct {
                     catch_pos = @intCast(pos);
                 },
                 opcode.op.for_of_start, opcode.op.for_await_of_start => catch_pos = @intCast(pos),
-                opcode.op.drop, opcode.op.nip, opcode.op.nip1, opcode.op.iterator_close => {
+                opcode.op.drop, opcode.op.nip, opcode.op.iterator_close => {
                     const catch_level = if (op == opcode.op.iterator_close)
                         stack_len + 2
-                    else if (op == opcode.op.nip or op == opcode.op.nip1) blk: {
+                    else if (op == opcode.op.nip) blk: {
                         if (stack_len == 0) return error.StackUnderflow;
                         break :blk stack_len - 1;
                     } else stack_len;

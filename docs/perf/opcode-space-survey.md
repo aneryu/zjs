@@ -375,7 +375,9 @@ the first wave.
 
 | wave | opcodes | ids freed | state |
 |---|---|---|---|
-| pilot | `check_ctor_return` | 42 | **done, 2364/0 green** |
+| pilot | `check_ctor_return` (demoted) | 42 | **done, 2364/0** |
+| A-1 | `nip1` (**retired**, not demoted) | 16 | **done, 2364/0** |
+| 1' | `set_proto` (demoted) | 76 | **done, 2364/0** |
 | 1 | remaining 14 of `class/private/super` (`check_ctor`, `init_ctor`, `add_brand`, `check_brand`, `get_super`, `get_super_value`, `put_super_value`, `set_home_object`, `set_proto`, `set_name_computed`, `get_private_field`, `put_private_field`, `define_private_field`, `private_in`) | ~14 | next |
 | 2 | `get_ref_value`, `put_ref_value` + Tier A retirements (`nip1`, `put_loc0_get_loc0`) | ~4 | after wave 1 |
 | 3 | second carrier for `(size=3, fmt=var_ref)` — 5 ops; third for `(size=10, fmt=atom_label_u8)` — the `with_*` family, 5 ops | ~8 | reserve |
@@ -419,7 +421,32 @@ than by frequency:
 | 2' | pinned-stream opcodes, done with pins recomputed from the emitted bytes | `check_ctor`, `init_ctor`, `add_brand`, `set_home_object`, `get_super*`, `put_super_value` |
 | 3' | size-oracle opcodes | the private-field family |
 
-The pilot stands: one id freed, suite green. The lesson for the estimate in
+Three ids freed so far (42, 16, 76), suite green after each. The lesson for the estimate in
 §7.5 is that "84 ids are cold" remains true, but the *cost per id* is not
 uniform — it is set by how tightly the opcode is pinned by tests, not by how
 rarely it runs.
+
+
+## 8.5 The zero-emission census, and why it needs reading rather than grepping
+
+Run after the pilot to find Tier A retirements — opcodes the compiler can no
+longer produce at all, which V8 removes outright (`Nop`, `Ldr*`, `ToBoolean`).
+A literal search for `op.X` outside the handlers reports **45 candidates**, but
+most are false positives, in two distinct ways:
+
+- **Arithmetically generated short opcodes.** `push_4`, `get_loc1`, `call1`,
+  `get_arg2` and friends are produced as `op.push_0 + val` / `op.get_loc0 +
+  idx` by `put_short_code` / `push_short_int`, so no literal reference exists.
+  Several run hundreds of millions of times. `get_loc1` alone: 900,764,620.
+- **Indirectly emitted opcodes.** `check_brand`, `get_private_field` and the
+  rest of the private-field family are written by the lowering code inside
+  `bytecode.zig` itself (`output[out_idx.*] = opcode.op.check_brand`), which a
+  search restricted to `parser.zig` and `src/compiler/` never sees.
+
+Only `nip1` survived reading: a handler, a table row, an implementation
+function, and one peephole *classification* switch — no write of the byte
+anywhere, and zero executions in 41.9 billion. Retired.
+
+The lesson is the same one the `call_constructor` finding taught, one level
+down: **a frequency table plus a grep is a candidate generator, not a
+verdict.** Each retirement needs someone to read the emission paths.

@@ -1558,6 +1558,21 @@ fn readRelTarget32(bytes: []const u8, op_offset: usize) usize {
     return @intCast(@as(i64, @intCast(operand_offset)) + @as(i64, diff));
 }
 
+/// Cold-plane counterpart: reclaimed opcodes are encoded as `{using, sub}`,
+/// so presence checks scan for the pair (docs/perf/opcode-space-survey.md §8).
+fn countSubOpcode(code: []const u8, sub: u8) usize {
+    var count: usize = 0;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const opcode_id = code[pc];
+        if (opcode_id == op.using and pc + 1 < code.len and code[pc + 1] == sub) count += 1;
+        const size = engine.bytecode.opcode.sizeOf(opcode_id);
+        if (size == 0) break;
+        pc += size;
+    }
+    return count;
+}
+
 fn countOpcode(code: []const u8, opcode: u8) usize {
     var count: usize = 0;
     var pc: usize = 0;
@@ -2567,7 +2582,7 @@ test "M3.1 F4: object literal __proto__ emits set_proto" {
     defer fn_bc.deinit(env.rt);
 
     try std.testing.expectEqual(op.object, fn_bc.code[0]);
-    try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.set_proto) != null);
+    try std.testing.expect(countSubOpcode(fn_bc.code, engine.bytecode.opcode.using_sub.set_proto) > 0);
 }
 
 test "M3.1 F4: object method shorthand emits define_method" {
@@ -2737,7 +2752,7 @@ test "M3.1 F4: computed __proto__ duplicate is permitted" {
     var fn_bc = try parseExpr(&env, "{ __proto__: null, [\"__proto__\"]: 1 }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.set_proto) != null);
+    try std.testing.expect(countSubOpcode(fn_bc.code, engine.bytecode.opcode.using_sub.set_proto) > 0);
     try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.define_array_el) != null);
 }
 

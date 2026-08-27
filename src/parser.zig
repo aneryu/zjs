@@ -7360,7 +7360,7 @@ pub const parser_core = struct {
                 if (name_info.is_proto) {
                     if (proto_field_seen.*) return s.failUnexpectedToken();
                     proto_field_seen.* = true;
-                    try Emitter.op(s, opcode.op.set_proto);
+                    try Emitter.opU8(s, opcode.op.using, opcode.using_sub.set_proto);
                 } else {
                     try setObjectName(s, name);
                     try Emitter.opAtom(s, opcode.op.define_field, name);

@@ -492,11 +492,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             _ = try vm_literal.defineField(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
-    t[op.set_proto] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            try vm_literal.setProto(vm.ctx, vm.stack);
-        }
-    }.b);
     t[op.set_home_object] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try object_ops.setHomeObject(vm.ctx, vm.stack);
@@ -607,11 +602,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.nip] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try vm_value.nip(vm.ctx, vm.stack);
-        }
-    }.b);
-    t[op.nip1] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            try vm_value.nip1(vm.ctx, vm.stack);
         }
     }.b);
     keep[11] = h(struct {
