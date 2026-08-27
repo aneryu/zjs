@@ -61,13 +61,13 @@ V8 在 2016 年 5 月加了 5 个 `Ldr*` 融合 opcode（`25b3fe7961f`），
 
 | 族 | zjs 编号数 | 15 基准执行次数 | V8 | JSC | Hermes | 他们用什么 |
 |---|---|---|---|---|---|---|
-| **TDZ 检查变体** | **9** | **0** | 0 | 1 | 1 | **哨兵值 + 一条独立检查 op** |
+| **TDZ 检查变体** | **9** | **0** | 4 | 2 | 3 | **检查与访问分离**（见 §4.1 修订） |
 | **Reference 具体化** | **6** | **0** | 0 | 0 | 0 | 不具体化（寄存器机基址可复用） |
 | **`with` 专用访问** | **5** | **120** | 0 | 0 | 0（不支持 with） | 只留「建 with 作用域」，访问退化到通用动态查找 |
 | **super** | **4** | **0** | 1 | 0 | 0 | 复用通用 `*_with_this` / `WithReceiver` 形式 |
 | 类定义/命名 | 6 | 1,662,159 | 0 | 1 | 4 | flag 操作数挂在通用 define 上 |
 | 栈洗牌 | 9 | 128,992,268 | 0 | 0 | 0 | 寄存器机不需要 |
-| 一元 `+` / `pow` / `to_object` / `to_propkey` | 4 | 602 | 3 | 4 | 2 | `plus` 三家都没有，一律 `ToNumber`/`ToNumeric` |
+| 一元 `+` / `pow` / `to_object` / `to_propkey` | 4 | 602 | 3 | 4 | 2 | ~~`plus` 三家都没有~~ **作废：`plus` 就是我们的 ToNumber**（§10） |
 
 逐族说明：
 
@@ -77,18 +77,35 @@ V8 在 2016 年 5 月加了 5 个 `Ldr*` 融合 opcode（`25b3fe7961f`），
 `set_loc_check`、`set_loc_uninitialized`、`get_var_ref_check`、
 `put_var_ref_check`、`put_var_ref_check_init`。
 
-**三家没有一家给「带检查的读」配变体。** 统一做法是哨兵值 + 一条独立检查：
+**修订（2026-08-27，逐条读实现后）：三家不是「只有一条检查 op」，而是
+「检查与访问分离」。** 各自的检查型 opcode 数量：
 
-- V8：`LdaTheHole` 写入未初始化槽，读出后由 `ThrowReferenceErrorIfHole`
-  检查（`bytecodes.h:92, 484`）。
-- JSC：`is_empty` 谓词 + `check_tdz`（`BytecodeList.rb:1347, 1259`）。
-- Hermes：`LoadConstEmpty` + `ThrowIfEmpty <dst> <src>`，**把检查和 move
-  融合成一条**（`BytecodeList.def:772, 672`）。
+- V8 **4 条**：`ThrowReferenceErrorIfHole`、`ThrowSuperNotCalledIfHole`、
+  `ThrowSuperAlreadyCalledIfNotHole`、`ThrowIfNotSuperConstructor`
+  （`bytecodes.h:484-488`），配 `LdaTheHole` 哨兵。
+- JSC **2 条**：`check_tdz` + `is_empty` 谓词。
+- Hermes **3 条**：`ThrowIfEmpty`、`ThrowIfUndefined`、
+  `ThrowIfThisInitialized`。
 
-**检查与读取解耦之后，就不需要给每种变量类型（loc/arg/var_ref × get/put/
-set × check/check_init）各配一个变体。** 这是全表最直接的省编号点：
-9 → 1~2，净省 7~8 个编号。代价是改语义实现（哨兵表示 + 检查点插入），
-不是单纯降级。
+真正的结构差异不是数量，是**组合方式**：我们的 9 条是
+「检查 × 访问」的笛卡尔积（3 种检查语义 × get/put/set 三种访问形式），
+它们的 2~4 条是**纯检查**，对任何访问形式复用。
+
+因此省编号的估计要下修：**9 → 约 3，净省约 6**（不是 7~8）。
+
+**并且对栈机要换一种分解方式。** 寄存器机的 `ThrowIfHole <reg>` 直接读
+寄存器、不动栈，所以「load + check + store」是自然的。我们是栈机，照抄
+会让写侧从 `put_loc_check idx`（3 字节）膨胀成
+`get_loc; throw_if_uninit; drop; put_loc`（4 条指令 10 字节）。适合栈机
+的形态是**不碰栈的原地检查**：
+
+```
+check_tdz_loc <idx>        // size 3, pop 0, push 0：局部槽为哨兵则抛
+check_tdz_var_ref <idx>    // 闭包变量版
+```
+
+于是 `get_loc_check idx` → `check_tdz_loc idx; get_loc idx`（2 条 6 字节），
+写侧同理，扩张是 3→6 字节而不是 3→10。这些路径在 15 个基准里执行 0 次。
 
 ### 4.2 Reference 具体化（6 个编号，0 次执行）
 
@@ -135,10 +152,13 @@ flag 位挂在已有的 define 指令上**（V8 的
 `DefineKeyedOwnPropertyFlag::kSetFunctionName`），或干脆编译期决定写进
 函数表（Hermes）。
 
-### 4.7 一元 `+`（602 次）
+### 4.7 一元 `+`（602 次）——**本条已作废，见 §10**
 
-`plus`。**三家零个**，一律用 `ToNumber`/`ToNumeric`。我们这条可以直接
-并入 `to_number` 语义，是一个零风险的合并候选。
+初稿写的是「三家零个，一律用 `ToNumber`/`ToNumeric`，我们可以并入」。
+读实现后作废：**我们根本没有 `to_number`/`to_numeric` opcode——`plus`
+就是我们的 ToNumber**（`value_ops.zig:255,263`：数值直通、BigInt 抛
+TypeError，正是 ToNumber 语义）。三家管它叫 `ToNumber`，我们叫 `plus`，
+是同一条指令的不同名字。删掉它等于没有 ToNumber。
 
 ## 5. 省编号的三种正统手法（各有源码或 commit 证据）
 
@@ -245,3 +265,32 @@ demote（冷，走尺寸预言机/下降路径）  13
    同步学会看子字节）
 
 第三条最隐蔽，因为它不会让测试变红。
+
+
+## 10. 审计自身的修订记录（第五次「名字不等于设计」）
+
+初稿的 §4.7 把 `plus`（一元 `+`）列为「三家都没有、可零风险并入
+`to_number`」的合并候选。**动手前读实现，作废了这一条**：我们根本没有
+`to_number`/`to_numeric` opcode，`plus` 就是我们的 ToNumber
+（`src/exec/value_ops.zig:255` 数值直通、`:263` BigInt 抛 TypeError）。
+三家叫它 `ToNumber`，我们叫 `plus`，是同一条指令的两个名字。
+
+同一轮复核还下修了 TDZ 一行：三家不是「0~1 条检查 op」，而是 2~4 条
+（V8 有 4 条 throw-check）；真正的差异是**我们把检查和访问做成笛卡尔积，
+它们把检查独立出来复用**。
+
+这是本次工作里第五次出现同一个错误形态：
+
+| # | 错误 | 纠正方式 |
+|---|---|---|
+| 1 | `call_constructor` 被组级 0.063% 掩盖 | 逐条看频次 |
+| 2 | 短指令「无发射点」 | 读到 `op.push_0 + val` 的算术生成 |
+| 3 | 私有字段族「无发射点」 | 读到 `bytecode.zig` 内部的下降写入 |
+| 4 | `and`/`or`/`catch`「无发射点」 | Zig 关键字要写成 `op.@"and"` |
+| 5 | **`plus`「三家都没有」** | **读实现：那是 ToNumber 的别名** |
+
+前四次是**分类器**的问题，第五次是**跨引擎对照**的问题——而且它更危险，
+因为它会把一条「删掉这个 opcode」的建议送进执行队列。
+
+**结论写进方法论：跨引擎对照必须按语义读实现，不能按名字匹配。** 本文
+§4 的每一行在执行前都要重做一次这个检查；§7 的节省估计因此应视为上界。
