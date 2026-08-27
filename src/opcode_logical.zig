@@ -1137,3 +1137,107 @@ pub const branch_stack: []const BranchStack = &.{
     // make_ref keep it underneath, put consumes the stored value.
     .{ .form = .dyn_env_probe, .shape = .{ .operand_table_from_legacy = .{ .operand_index = 2 } } },
 };
+
+// ---------------------------------------------------------------------------
+// Traits (invariant 5: fail-closed)
+// ---------------------------------------------------------------------------
+
+/// Scanner policy travels with the declaration. This is the structural fix
+/// for the defect class in 5.2 clause 3: `scanSmallInlineEligible` and
+/// `isForwardForbiddenOp` were hand-written lists keyed on opcode identity,
+/// so demoting an opcode behind a carrier made it invisible to them and
+/// silently widened optimisation coverage -- with no test turning red,
+/// because the difference is only in what gets optimised.
+///
+/// Invariant 5 says there is no implicit default here. During migration the
+/// values mirror the old lists and the join asserts the two agree exactly;
+/// at G0 the mirror goes and a new opcode without a policy stops compiling.
+pub const InlinePolicy = enum {
+    /// May appear in a body that is a candidate for small-function inlining.
+    allowed,
+    /// Its presence disqualifies the body.
+    forbidden,
+};
+
+/// Whether a form may appear in a body eligible for apply-arguments
+/// forwarding (L1).
+pub const ForwardPolicy = enum { allowed, forbidden };
+
+pub const Traits = struct {
+    inline_policy: InlinePolicy,
+    forward_policy: ForwardPolicy,
+};
+
+/// The cold-plane resident a carrier tag selects. Null for a tag no
+/// resident claims -- callers treat that as undecodable rather than
+/// guessing, which is what an identity-matching scanner could not do.
+pub fn subForm(tag: u8) ?LogicalOpcode {
+    // Comptime-built dense table: the enum fields cannot be indexed with a
+    // runtime tag, and a linear scan per lookup would put a loop on a
+    // scanner path.
+    const table = comptime blk: {
+        var t = [_]?LogicalOpcode{null} ** 256;
+        for (@typeInfo(LogicalOpcode).@"enum".fields) |f| {
+            if (f.value < 400) continue;
+            t[f.value - 400] = @enumFromInt(f.value);
+        }
+        break :blk t;
+    };
+    return table[tag];
+}
+
+pub fn traitsOf(form: LogicalOpcode) Traits {
+    return .{
+        .inline_policy = switch (form) {
+            .eval,
+            .apply_eval,
+            .special_object,
+            .fclosure,
+            .fclosure8,
+            .apply,
+            .rest,
+            .initial_yield,
+            .yield,
+            .yield_star,
+            .async_yield_star,
+            .@"await",
+            .return_async,
+            .get_super,
+            .get_super_value,
+            .get_private_field,
+            .put_private_field,
+            .define_private_field,
+            .define_class,
+            .define_class_computed,
+            .import,
+            .dyn_env_probe,
+            .make_loc_ref,
+            .make_arg_ref,
+            .make_var_ref_ref,
+            .make_var_ref,
+            .gosub,
+            .@"catch",
+            .nip_catch,
+            .tail_call,
+            .tail_call_method,
+            // Demoted behind the `using` carrier, and the reason the
+            // hand-written scanner needed a special case: an identity match
+            // cannot see a carrier resident. Declaring the policy on the
+            // form removes the need for that case.
+            .using_put_super_value,
+            => .forbidden,
+            else => .allowed,
+        },
+        .forward_policy = switch (form) {
+            .apply,
+            .apply_eval,
+            .rest,
+            .eval,
+            .dyn_env_probe,
+            .fclosure,
+            .fclosure8,
+            => .forbidden,
+            else => .allowed,
+        },
+    };
+}

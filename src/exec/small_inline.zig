@@ -428,17 +428,12 @@ fn isPutArg(opc: u8) bool {
 }
 
 fn isForwardForbiddenOp(opc: u8) bool {
-    return switch (opc) {
-        op.apply,
-        op.apply_eval,
-        op.rest,
-        op.eval,
-        op.dyn_env_probe,
-        op.fclosure,
-        op.fclosure8,
-        => true,
-        else => false,
-    };
+    // F0b: policy travels with the declaration (invariant 5). The list this
+    // replaces was the second of the two hand-maintained identity tables
+    // that 5.2 clause 3 is about.
+    if (bytecode.opcode.physical.stateOf(opc) != .claimed) return true;
+    const form: bytecode.opcode.logical.LogicalOpcode = @enumFromInt(opc);
+    return bytecode.opcode.logical.traitsOf(form).forward_policy == .forbidden;
 }
 
 /// S1–S8 static predicate for L1 apply-arguments-forwarding. Dataflow only:

@@ -1355,6 +1355,63 @@ pub const opcode = struct {
             }
         }
 
+        // Invariant 5 migration mirror, proved rather than assumed: the
+        // derived inline policy must reproduce the hand-written reject list
+        // exactly, form for form, before that list is deleted. A silent
+        // difference here is precisely the defect class this replaces --
+        // nothing else would notice, because the only observable effect is
+        // which bodies get inlined.
+        {
+            const hand_written = [_]u8{
+                op.eval,            op.apply_eval,          op.special_object,
+                op.fclosure,        op.fclosure8,           op.apply,
+                op.rest,            op.initial_yield,       op.yield,
+                op.yield_star,      op.async_yield_star,    op.await,
+                op.return_async,    op.get_super,           op.get_super_value,
+                op.get_private_field, op.put_private_field, op.define_private_field,
+                op.define_class,    op.define_class_computed, op.import,
+                op.dyn_env_probe,   op.make_loc_ref,        op.make_arg_ref,
+                op.make_var_ref_ref, op.make_var_ref,       op.gosub,
+                op.@"catch",        op.nip_catch,           op.tail_call,
+                op.tail_call_method,
+            };
+            for (0..256) |raw| {
+                const id: u8 = @intCast(raw);
+                if (physical.stateOf(id) != .claimed) continue;
+                var in_list = false;
+                for (hand_written) |listed| {
+                    if (listed == id) in_list = true;
+                }
+                const form: logical.LogicalOpcode = @enumFromInt(id);
+                const declared = logical.traitsOf(form).inline_policy == .forbidden;
+                if (in_list != declared)
+                    @compileError("declared inline policy disagrees with the hand-written reject list");
+            }
+            // The carrier resident the old list could only reach through a
+            // special case must be declared forbidden on the form itself.
+            if (logical.traitsOf(.using_put_super_value).inline_policy != .forbidden)
+                @compileError("demoted put_super_value lost its inline policy");
+
+            // Same proof for the second hand-written table, which lived in
+            // exec/small_inline.zig.
+            const forward_list = [_]u8{
+                op.apply, op.apply_eval, op.rest, op.eval,
+                op.dyn_env_probe, op.fclosure, op.fclosure8,
+            };
+            for (0..256) |raw| {
+                const id: u8 = @intCast(raw);
+                if (physical.stateOf(id) != .claimed) continue;
+                var in_list = false;
+                for (forward_list) |listed| {
+                    if (listed == id) in_list = true;
+                }
+                const form: logical.LogicalOpcode = @enumFromInt(id);
+                const declared = logical.traitsOf(form).forward_policy == .forbidden;
+                if (in_list != declared)
+                    @compileError("declared forward policy disagrees with the hand-written list");
+            }
+        }
+
         // P0-2 authority direction: the declaration states the burned-in
         // value and this checks `direct_id - base_id` against it. Never the
         // reverse -- an id that is aliased or moved to a carrier would leave
@@ -1677,6 +1734,34 @@ pub const opcode = struct {
             return pc < code.len and code[pc] == @as(u8, @intCast(raw));
         }
     };
+
+    test "a demoted opcode keeps its scanner policy (5.2 clause 3)" {
+        // The defect this replaces: `put_super_value` was demoted behind the
+        // `using` carrier, and the scanner matched on opcode identity, so a
+        // body containing `super.x = v` silently became inlinable. No test
+        // went red then, because the only observable difference is which
+        // bodies get optimised. Policy now travels with the form, so the
+        // carrier is asked about its resident.
+        const resident = logical.subForm(using_sub.put_super_value).?;
+        try std.testing.expectEqual(logical.LogicalOpcode.using_put_super_value, resident);
+        try std.testing.expectEqual(
+            logical.InlinePolicy.forbidden,
+            logical.traitsOf(resident).inline_policy,
+        );
+
+        // Every resident is reachable from its tag, and a tag no resident
+        // claims decodes to null rather than to something plausible.
+        inline for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            if (f.value >= 400) {
+                const tag: u8 = @intCast(f.value - 400);
+                try std.testing.expectEqual(
+                    @as(?logical.LogicalOpcode, @enumFromInt(f.value)),
+                    logical.subForm(tag),
+                );
+            }
+        }
+        try std.testing.expectEqual(@as(?logical.LogicalOpcode, null), logical.subForm(200));
+    }
 
     test "decode layer round-trips every direct form against the raw reads" {
         // The decoder must agree with the hand-written reads it replaces, on
@@ -11066,59 +11151,23 @@ const function_mod = struct {
         if (@as(usize, fb.arg_count) + @as(usize, fb.var_count) > small_inline_max_slots) return false;
         if (fb.stack_size > small_inline_max_stack) return false;
 
-        var pc: usize = 0;
+        // F0b: the reject set is derived from the declaration, so a form
+        // that moves behind a carrier keeps its policy. The hand-written
+        // list this replaces matched on opcode identity and therefore could
+        // not see a carrier resident at all -- which is how demoting
+        // `put_super_value` silently made `super.x = v` bodies inlinable,
+        // with no test turning red (5.2 clause 3). A carrier is now asked
+        // about its resident instead of being special-cased.
+        var pc: u32 = 0;
         while (pc < code.len) {
-            const op_id = code[pc];
-            const size: usize = opcode.sizeOf(op_id);
-            if (size == 0 or pc + size > code.len) return false;
-            switch (op_id) {
-                opcode.op.eval,
-                opcode.op.apply_eval,
-                opcode.op.special_object,
-                opcode.op.fclosure,
-                opcode.op.fclosure8,
-                opcode.op.apply,
-                opcode.op.rest,
-                opcode.op.initial_yield,
-                opcode.op.yield,
-                opcode.op.yield_star,
-                opcode.op.async_yield_star,
-                opcode.op.await,
-                opcode.op.return_async,
-                opcode.op.get_super,
-                opcode.op.get_super_value,
-                opcode.op.get_private_field,
-                opcode.op.put_private_field,
-                opcode.op.define_private_field,
-                opcode.op.define_class,
-                opcode.op.define_class_computed,
-                opcode.op.import,
-                opcode.op.dyn_env_probe,
-                opcode.op.make_loc_ref,
-                opcode.op.make_arg_ref,
-                opcode.op.make_var_ref_ref,
-                opcode.op.make_var_ref,
-                opcode.op.gosub,
-                opcode.op.@"catch",
-                opcode.op.nip_catch,
-                opcode.op.tail_call,
-                opcode.op.tail_call_method,
-                => return false,
-                // Cold-plane carrier: a demoted opcode is invisible to an
-                // identity match, so the scanner has to look at the sub byte.
-                // Demoting an opcode into the plane silently widens every
-                // scanner that pattern-matches on opcode identity unless this
-                // is kept in step (docs/perf/opcode-audit.md).
-                opcode.op.using => {
-                    if (pc + 1 >= code.len) return false;
-                    switch (code[pc + 1]) {
-                        opcode.using_sub.put_super_value => return false,
-                        else => {},
-                    }
-                },
-                else => {},
+            const h = opcode.decode.headerAt(.final, code, pc) catch return false;
+            if (opcode.logical.traitsOf(h.form).inline_policy == .forbidden) return false;
+            if (h.form == .using) {
+                const sub = opcode.decode.operandAt(h, code, 0, u8) catch return false;
+                const resident = opcode.logical.subForm(sub) orelse return false;
+                if (opcode.logical.traitsOf(resident).inline_policy == .forbidden) return false;
             }
-            pc += size;
+            pc = h.next_pc;
         }
         return true;
     }
