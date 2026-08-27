@@ -89,6 +89,11 @@ pub const opcode = struct {
         // `zig build zjs` and is caught only by `zig build test`. An
         // assertion that runs in one build configuration is not a guard.
         _ = physical.ledger;
+        // Same lazy-analysis trap as `physical`, hit a second time: without
+        // this, `decode.layout_table` is never evaluated in a build that does
+        // not use it, and a declaration hole injected into the legacy runs
+        // compiles clean under `zig build zjs`. Verified by injection.
+        _ = decode.layout_table.len;
     }
 
     /// Flags byte (operand offset 9) of `dyn_env_probe`, the single opcode
@@ -1377,6 +1382,314 @@ pub const opcode = struct {
                     @compileError("legacy embedded run spills into another semantic family");
             }
         }
+    }
+
+    /// F0b (§10.8 合同 2): the structured decode layer. Consumers stop
+    /// reading `code[pc + 1]` and stop switching on the physical id.
+    ///
+    /// Two layers, per P1-1: hot consumers take a `Header` and reach for
+    /// `operandAt` only when they need a value; the fully expanded view is
+    /// for cold consumers (disassembler, validator, diff tooling) and is
+    /// composed from these two. Zero allocation, no ledger copying, and the
+    /// layout is resolved through a comptime table so nothing is recomputed
+    /// per call.
+    pub const decode = struct {
+        pub const Domain = enum { lowered, final };
+
+        pub const Encoding = union(enum) {
+            direct: u8,
+            carrier: struct { carrier: u8, tag: u8 },
+        };
+
+        pub const OperandSlot = struct {
+            kind: logical.OperandKind,
+            flow: ?logical.Flow,
+            /// Byte offset from `payload_pc`, or null for a burned-in value.
+            offset: ?u8,
+            width: ?logical.Width,
+            fixed: i33,
+        };
+
+        pub const max_operands = blk: {
+            var m: usize = 0;
+            for (@typeInfo(logical.Format).@"enum".fields) |f| {
+                const fmt: logical.Format = @enumFromInt(f.value);
+                if (logical.operandTemplate(fmt)) |t| {
+                    if (t.len > m) m = t.len;
+                }
+            }
+            for (logical.operand_overrides) |o| {
+                if (o.operands.len > m) m = o.operands.len;
+            }
+            break :blk m;
+        };
+
+        pub const OperandLayout = struct {
+            len: u8,
+            slots: [max_operands]OperandSlot,
+        };
+
+        const layout_table_len = blk: {
+            var m: usize = 0;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                if (f.value > m) m = f.value;
+            }
+            break :blk m + 1;
+        };
+
+        /// Sparse but stable: indexed by the logical id so `layoutOf` hands
+        /// back a pointer rather than rebuilding a layout per decode.
+        const layout_table: [layout_table_len]?OperandLayout = blk: {
+            @setEvalBranchQuota(60000);
+            var table = [_]?OperandLayout{null} ** layout_table_len;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                if (f.value >= 400) continue; // carrier residents: F0c
+                const id: u8 = if (f.value >= 300)
+                    op.op_temp_start + @as(u8, @intCast(f.value - 300))
+                else
+                    @intCast(f.value);
+                const info = if (f.value >= 300) phase1Info(id).? else finalInfo(id).?;
+                const form: logical.LogicalOpcode = @enumFromInt(f.value);
+                const fmt: logical.Format = @enumFromInt(@intFromEnum(info.fmt));
+                const operands = logical.operandsOf(form, fmt);
+                var layout = OperandLayout{ .len = @intCast(operands.len), .slots = undefined };
+                var offset: u8 = 0;
+                for (operands, 0..) |operand, i| {
+                    switch (operand.source) {
+                        .payload => |pl| {
+                            const w: u8 = switch (pl.width) {
+                                .u8, .i8 => 1,
+                                .u16, .i16 => 2,
+                                .u32, .i32 => 4,
+                            };
+                            layout.slots[i] = .{
+                                .kind = operand.kind,
+                                .flow = operand.flow,
+                                .offset = offset,
+                                .width = pl.width,
+                                .fixed = 0,
+                            };
+                            offset += w;
+                        },
+                        .fixed => {
+                            // The template's fixed value is a placeholder --
+                            // `.none_loc` cannot know whether it is get_loc0
+                            // or get_loc2. The real value comes from the
+                            // legacy run (P0-2's authority direction:
+                            // declaration states base, member value is
+                            // base + step). A burned-in operand with no run
+                            // covering it is a declaration hole, so this
+                            // fails closed rather than defaulting to zero.
+                            var resolved: ?i33 = null;
+                            for (logical.legacy_embedded) |run| {
+                                if (run.operand_index != i) continue;
+                                const base: u16 = @intFromEnum(run.first);
+                                if (f.value < base or f.value >= base + run.count) continue;
+                                resolved = run.base_value + @as(i33, f.value - base);
+                            }
+                            const value = resolved orelse
+                                @compileError("burned-in operand has no legacy embedded run: " ++ f.name);
+                            // Cross-check against an authority that is not
+                            // the legacy table: the opcode's own name, which
+                            // comes from the physical row. `get_loc2`'s slot
+                            // must be 2 whatever the run declares. Without
+                            // this a wrong base_value is self-consistent and
+                            // nothing catches it -- verified by injection.
+                            if (nameEncodedOperand(f.name)) |from_name| {
+                                if (from_name != value)
+                                    @compileError("burned-in value disagrees with the opcode name: " ++ f.name);
+                            }
+                            layout.slots[i] = .{
+                                .kind = operand.kind,
+                                .flow = operand.flow,
+                                .offset = null,
+                                .width = null,
+                                .fixed = value,
+                            };
+                        },
+                    }
+                }
+                var j = operands.len;
+                while (j < max_operands) : (j += 1) {
+                    layout.slots[j] = .{ .kind = .imm, .flow = null, .offset = null, .width = null, .fixed = 0 };
+                }
+                table[f.value] = layout;
+            }
+            break :blk table;
+        };
+
+        /// The value a burned-in operand carries according to the opcode's
+        /// own name: `get_loc2` -> 2, `push_3` -> 3, `call1` -> 1,
+        /// `push_minus1` -> -1, `get_loc2_field` -> 2. Null when the name
+        /// encodes nothing, which is the honest answer for the forms whose
+        /// fixed value is not in their name.
+        fn nameEncodedOperand(name: []const u8) ?i33 {
+            if (std.mem.eql(u8, name, "push_minus1")) return -1;
+            const markers = [_][]const u8{ "_var_ref", "_loc", "_arg", "push_", "call" };
+            for (markers) |marker| {
+                const at = std.mem.indexOf(u8, name, marker) orelse continue;
+                const rest = name[at + marker.len ..];
+                if (rest.len == 0 or rest[0] < '0' or rest[0] > '9') continue;
+                var value: i33 = 0;
+                var i: usize = 0;
+                while (i < rest.len and rest[i] >= '0' and rest[i] <= '9') : (i += 1)
+                    value = value * 10 + (rest[i] - '0');
+                return value;
+            }
+            return null;
+        }
+
+        pub fn layoutOf(form: logical.LogicalOpcode) *const OperandLayout {
+            return &(layout_table[@intFromEnum(form)].?);
+        }
+
+        pub const Header = struct {
+            domain: Domain,
+            form: logical.LogicalOpcode,
+            family: logical.SemanticFamily,
+            encoding: Encoding,
+            /// False when an alias was hit. Aliases are never emitted, so a
+            /// consumer that cares about provenance can tell them apart.
+            canonical: bool,
+            instruction_pc: u32,
+            payload_pc: u32,
+            next_pc: u32,
+            size: u8,
+            layout: *const OperandLayout,
+        };
+
+        pub const Error = error{ InvalidOpcode, BytecodeOverflow };
+
+        pub fn headerAt(domain: Domain, code: []const u8, pc: u32) Error!Header {
+            if (pc >= code.len) return error.BytecodeOverflow;
+            const id = code[pc];
+            const info = switch (domain) {
+                .final => finalInfo(id) orelse return error.InvalidOpcode,
+                .lowered => phase1Info(id) orelse return error.InvalidOpcode,
+            };
+            if (physical.stateOf(id) != .claimed) return error.InvalidOpcode;
+            const size = info.size;
+            const next = @as(usize, pc) + size;
+            if (next > code.len) return error.BytecodeOverflow;
+
+            // Carrier members are F0c: the sub space has no layout yet, so a
+            // carrier decodes as itself and the tag is read as its operand.
+            const form: logical.LogicalOpcode = switch (domain) {
+                .final => @enumFromInt(id),
+                .lowered => if (id >= op.op_temp_start and id < op.op_temp_end)
+                    @enumFromInt(@as(u16, 300) + (id - op.op_temp_start))
+                else
+                    @enumFromInt(id),
+            };
+            return .{
+                .domain = domain,
+                .form = form,
+                .family = logical.familyOf(form),
+                .encoding = .{ .direct = id },
+                .canonical = true,
+                .instruction_pc = pc,
+                .payload_pc = pc + 1,
+                .next_pc = @intCast(next),
+                .size = size,
+                .layout = layoutOf(form),
+            };
+        }
+
+        /// Burned-in operands are restored to their declared value, so a
+        /// consumer never has to know which forms carry payload bytes.
+        pub fn operandAt(h: Header, code: []const u8, index: usize, comptime T: type) Error!T {
+            if (index >= h.layout.len) return error.InvalidOpcode;
+            const slot = h.layout.slots[index];
+            const offset = slot.offset orelse return @intCast(slot.fixed);
+            const at = h.payload_pc + offset;
+            return switch (slot.width.?) {
+                .u8 => @intCast(code[at]),
+                .i8 => @intCast(@as(i8, @bitCast(code[at]))),
+                .u16 => @intCast(std.mem.readInt(u16, code[at..][0..2], .little)),
+                .i16 => @intCast(std.mem.readInt(i16, code[at..][0..2], .little)),
+                .u32 => @intCast(std.mem.readInt(u32, code[at..][0..4], .little)),
+                .i32 => @intCast(std.mem.readInt(i32, code[at..][0..4], .little)),
+            };
+        }
+
+        /// One byte compare for a direct form -- the hot matcher must not
+        /// pay for the structured path (P1-1).
+        pub inline fn matchesFormAt(code: []const u8, pc: u32, form: logical.LogicalOpcode) bool {
+            const raw = @intFromEnum(form);
+            if (raw >= 300) return false;
+            return pc < code.len and code[pc] == @as(u8, @intCast(raw));
+        }
+    };
+
+    test "decode layer round-trips every direct form against the raw reads" {
+        // The decoder must agree with the hand-written reads it replaces, on
+        // every form, or migrating a consumer is a coin flip. Build a
+        // one-instruction stream per form and compare.
+        @setEvalBranchQuota(200000);
+        var buf: [16]u8 = undefined;
+        inline for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            if (f.value < 300) {
+                const id: u8 = @intCast(f.value);
+                const info = finalInfo(id).?;
+                @memset(&buf, 0);
+                buf[0] = id;
+                // Distinguishable payload so an off-by-one offset shows up.
+                for (1..info.size) |i| buf[i] = @intCast(0x10 + i);
+                const h = try decode.headerAt(.final, buf[0..info.size], 0);
+                try std.testing.expectEqual(@as(u32, info.size), h.next_pc);
+                try std.testing.expectEqual(@as(u32, 1), h.payload_pc);
+                try std.testing.expect(h.canonical);
+                try std.testing.expectEqual(f.value, @intFromEnum(h.form));
+
+                // Every payload operand must read back exactly what a raw
+                // read at the same offset would give.
+                for (0..h.layout.len) |i| {
+                    const slot = h.layout.slots[i];
+                    const offset = slot.offset orelse continue;
+                    const at = 1 + @as(usize, offset);
+                    const expected: i64 = switch (slot.width.?) {
+                        .u8 => buf[at],
+                        .i8 => @as(i8, @bitCast(buf[at])),
+                        .u16 => std.mem.readInt(u16, buf[at..][0..2], .little),
+                        .i16 => std.mem.readInt(i16, buf[at..][0..2], .little),
+                        .u32 => std.mem.readInt(u32, buf[at..][0..4], .little),
+                        .i32 => std.mem.readInt(i32, buf[at..][0..4], .little),
+                    };
+                    try std.testing.expectEqual(expected, try decode.operandAt(h, buf[0..info.size], i, i64));
+                }
+            }
+        }
+    }
+
+    test "decode layer restores burned-in operands and rejects bad input" {
+        var buf = [_]u8{0} ** 4;
+
+        // A burned-in operand has no payload byte; the decoder must hand back
+        // the declared value so consumers need not know which forms are
+        // which. get_loc2's slot is 2, push_3's immediate is 3.
+        buf[0] = op.get_loc2;
+        var h = try decode.headerAt(.final, buf[0..1], 0);
+        try std.testing.expectEqual(@as(u16, 2), try decode.operandAt(h, buf[0..1], 0, u16));
+        try std.testing.expectEqual(logical.OperandKind.local_slot, h.layout.slots[0].kind);
+        try std.testing.expectEqual(logical.Flow.read_write, h.layout.slots[0].flow.?);
+
+        buf[0] = op.push_3;
+        h = try decode.headerAt(.final, buf[0..1], 0);
+        try std.testing.expectEqual(@as(i32, 3), try decode.operandAt(h, buf[0..1], 0, i32));
+
+        // A reclaimed id is not decodable, and a truncated instruction is an
+        // overflow rather than a silent short read.
+        buf[0] = 114; // reclaimed by the with_* merge
+        try std.testing.expectError(error.InvalidOpcode, decode.headerAt(.final, buf[0..1], 0));
+        buf[0] = op.push_i32; // size 5
+        try std.testing.expectError(error.BytecodeOverflow, decode.headerAt(.final, buf[0..3], 0));
+
+        // The hot matcher stays a byte compare and never claims a
+        // compiler-only form.
+        buf[0] = op.get_loc2;
+        try std.testing.expect(decode.matchesFormAt(buf[0..1], 0, .get_loc2));
+        try std.testing.expect(!decode.matchesFormAt(buf[0..1], 0, .get_loc3));
+        try std.testing.expect(!decode.matchesFormAt(buf[0..1], 0, .enter_scope));
     }
 
     test "logical forms and physical rows are one instruction set" {
