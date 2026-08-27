@@ -54,23 +54,29 @@ parser/lowered stream 既可沿用旧 direct id，也必须兼容已经落地的
 `{using, sub}`，未来扩展再用 compiler-only carrier；项目已有 temp/short
 同 id、按 phase 解码的先例。
 
-**当前计划（§11）**：
+**当前计划（§11）与裁决状态（owner 复审 2026-08-27，全文见 §11.7）**：
 
-| 期界 | 物理编号目标 | 含义 |
+| 期界 | 物理编号目标 | 裁决状态 |
 |---|---:|---|
 | 基线 | 245/11 | 已验证 |
-| 第一检查点 | ≤228/≥28 | 覆盖已审计的近端需求，并验证批量机制 |
-| 容量目标 | ≤212/≥44 | 覆盖仍在册的 43 个保守需求上限，并留 1 位 |
-| 设计上界 | ≤196/≥60 | 旧候选预算经安全架构重算后的目标，不是预先承诺 |
+| 第一检查点 | ≤228/≥28 | **已批准（D5）**；到达后强制复盘 |
+| 容量目标 | ≤212/≥44 | **暂缓为条件性目标（D6）**：typed/FNABI 提交具名 demand ledger 后才推进，不是无条件 KPI |
+| 设计上界 | ≤196/≥60 | **非规范 envelope（D6）**：仅留在 rationale，不进里程碑表 |
 
 第一步不是批量降级，而是完成 §10 的声明/解码基础；唯一确定亏损的融合
-`put_loc0_get_loc0` 可独立并行退役。基础完成后再用一个普通冷 opcode 做
-late-encoding 试点；试点通过后单独切换剩余声明派生产物，只有这一步也过门，
-才扩大候选池。
+`put_loc0_get_loc0` 可独立并行退役（R0，已批准）。基础完成后再用一个普通冷
+opcode 做 late-encoding 试点；试点通过后单独切换剩余声明派生产物，只有
+这一步也过门，才扩大候选池。
 
-**状态**：本文只设计方案，不授权实现。裁决 4 的“暂停执行”仍生效；
-owner 批准 §11 的架构与期界后，才按 §11.4 逐包实施。机器模型证据线
-（§6.2–§6.4、§9.2–§9.5）继续缓议，且不是本方案前置。
+**状态（owner 二轮复审 2026-08-27，D1–D12）**：架构原则**已批准**（D1）；
+**立即可实施的只有 R0 与 F0a0（物理表镜像、编号账、现表等价断言）**（D9）。
+F0a1（LogicalOpcode/Operand/Effects/fingerprint 声明）暂缓：**§10.8 尚未
+冻结**，必须先闭合四个基础模型——lowered form → final form（D10）、
+logical operand → 物理编码（P0-2）、纯 spec → exec handler 绑定（P0-3）、
+物理槽位 alias/quarantine/free 生命周期（D11）。F0b–F0d 暂缓并按 §10.8
+的逐片 gate 评审；F0e 只批设计方向；C0 及以后继续暂停。裁决 4 的“暂停
+执行”仅对 R0/F0a0 解除。机器模型证据线（§6.2–§6.4、§9.2–§9.5）继续
+缓议（D8），且不是本方案前置。
 
 ---
 
@@ -81,11 +87,15 @@ owner 批准 §11 的架构与期界后，才按 §11.4 逐包实施。机器模
 | 1 | 单一声明源 + 生成器 | **已批准**；按 §10 修订后的逻辑/物理描述实现，是批量精简的前置 |
 | 2 | register-vs-stack spike | **缓议且移出当前范围**；不阻塞 §11 |
 | 3 | qjs 代码级忠实对齐 | **降为工具**；qjs 仍是性能尺与差分参照，不约束内部编码 |
-| 4 | 增量回收 | **实现暂停、设计继续**；待 owner 批准 §11 后逐包恢复，不得把“目标确认”解读为实现授权 |
+| 4 | 增量回收 | **部分解除**：R0 与 F0a0 获准实施（D3/D9）；其余包按 §11.7 逐项开闸，不得把“目标确认”解读为整体实现授权 |
+| 5 | 架构复审 D1–D8（2026-08-27） | **已裁**，全文见 §11.7；§10.8 合同冻结是 F0a1+ 的硬前置（D2/D9） |
+| 6 | 二轮复审 D9–D12（2026-08-27） | **已裁**：F0a 收窄为 F0a0/F0a1；final form selection 与 physical encoding 拆分；alias 成为正式槽位状态；profile 以 form 为主键。**§10.8 判未冻结**——P0-1…P0-6 修订（已并入本文）经 owner 确认后才冻结 |
 
-现行次序：**R0 与 §11 F0（含 §10 阶段 1–3）可并行；二者完成后
-C0 → G0（§10 阶段 5 的声明源切换，净 0）→ C1 → 28 个空闲
-检查点 → 44 个空闲容量目标 → 再决定是否继续到 60**。裁决 2 不在这条路径上。
+现行次序：**R0 ∥ F0a0 → §10.8 冻结（P0-1…P0-6 确认）→ F0a1 →
+F0b–F0d（逐片评审，gate 见 §10.8 末表）→ C0 → G0（§10 阶段 5 的声明源
+切换，净 0）→ C1 → 28 个空闲检查点（强制复盘）→（demand ledger 触发后）
+44 个空闲容量目标**。F0e 只批设计方向，实现后置到新增逻辑指令或 28 检查点
+之前，不是 C0 前置。60 不进 normative 里程碑。裁决 2 不在这条路径上。
 以下小节保留裁决时的论证；与本段冲突时，本段为准。
 
 ### 裁决 1：是否照批「第一步」——单一声明源 + 生成器
@@ -153,13 +163,15 @@ C0 → G0（§10 阶段 5 的声明源切换，净 0）→ C1 → 28 个空闲
 
 ### 裁决 4：增量回收清单的处置
 
-**现行裁定：实现继续暂停，方案设计已恢复。**原清单的数字与机制已经被
-本轮读码推翻：`make_*_ref` 不能按旧方案无成本 4→1；TDZ 也不能拆成两条
-纯检查指令。§11 以逻辑/物理身份分离重新给出方案。
+**现行裁定（2026-08-27 二轮复审更新）：R0 与 F0a0 已解除暂停（D3/D9），
+其余包继续暂停。**原清单的数字与机制已经被本轮读码推翻：`make_*_ref`
+不能按旧方案无成本 4→1；TDZ 也不能拆成两条纯检查指令。§11 以逻辑/物理
+身份分离重新给出方案。
 
-暂停解除条件不再是“寄存器 VM 定案”，而是 owner 批准 §11，并且 §10 的
-effect/decoder 基础满足对应包的前置。批准后也只能**逐包恢复**，不是把
-84 个冷池一次性全部降级。
+后续包的解除条件：§10.8 冻结（P0-1…P0-6 修订经 owner 确认），然后
+F0a1/F0b–F0d 按 §10.8 末表的合同 gate 逐片评审，并且 §10 的
+effect/decoder 基础满足对应包的前置。任何时候都只能**逐包恢复**，
+不是把 84 个冷池一次性全部降级。
 
 ### 1.5 K4（仅约束停议中的机器模型线）
 
@@ -864,12 +876,14 @@ A — 声明（不改编码）
   3. 与现有 direct/landed-carrier 编码逐字段等价断言，套件全绿
 
 B — late-encoding 试点（旧 id 仍是 final 保留位）
-  4. final canonical emit 改为 carrier+sub；旧 direct 暂列 decode alias
+  4. final canonical emit 改为 carrier+sub；旧 direct 转 executable_alias
+     （handler 表项保留，进 decode fingerprint；§10.3 PhysicalSlotState）
   5. 证明 final artifact 的所有消费者解回同一 logical identity/effects
   6. 语义、字节码尺寸与性能门全绿
 
 C — 释放物理 id
-  7. 删旧 final decode alias、将该 id 标为 unused；compiler 域保留 logical row
+  7. 删旧 final alias（decode fingerprint 随之改变）、将该 id 标为
+     quarantined_unused；compiler 域保留 logical row
   8. 断言 final artifact 不再出现旧 direct id
   9. 单条关账后才迁下一条
 ```
@@ -1018,9 +1032,9 @@ decoded `next_pc`。只改 `resolve_labels` 不闭环。
 3. 退役无价值 opcode；其余冷而活的逻辑指令在 final 边界打包进 carrier；
 4. TDZ 等族只合并物理编码，不折叠可观察语义。
 
-先以 **≥28 个空闲**作为机制检查点，再以 **≥44 个空闲**覆盖保守容量预算；
-旧候选预算的设计上界为 60。每个数字都必须逐条审计后才能记账，不能再用
-“84 个冷池”直接推导 83 个收益。
+先以 **≥28 个空闲**作为机制检查点（已批准，到达后强制复盘）；**≥44**
+是需求触发的条件性容量目标（D6）；60 只是非规范 envelope。每个数字都
+必须逐条审计后才能记账，不能再用“84 个冷池”直接推导 83 个收益。
 
 **不改变的**：动态指令数、栈机寻址、22 条融合中 R0 之外的 21 条与热 handler。
 主要风险是冷指令多一个字节/二级选择，以及分相 decoder 漏传 effect；§10
@@ -1201,8 +1215,10 @@ leaf 调用热路径确实撑得起独立编号——marshalling 占主导，二
 本项必须保留 **20–40**。
 
 ⇒ 当前可辩护的容量预算是 **FNABI 2–3 + typed 20–40 = 22–43**。它低于
-旧 45–65，但高于此前写入本文的无依据 10–25。§11 以 44 个空闲覆盖上限；
-编号压力仍然支持物理精简，却不足以支持机器模型分叉，后者仍须过 K4。
+旧 45–65，但高于此前写入本文的无依据 10–25。§11 的 44 个空闲可覆盖该
+上限，但按 D6 只在 typed/FNABI 提交具名 demand ledger 后推进——不为
+未经命名的 40 个潜在 opcode 提前给产品路径加 carrier tax。编号压力仍然
+支持物理精简，却不足以支持机器模型分叉，后者仍须过 K4。
 
 ### 9.2 FNABI 已经是一座三地址孤岛（停议材料）
 
@@ -1399,8 +1415,9 @@ effect 与 operand offset，实际实现以 §10 为准。
 
 ### 9.7 两个不必等分叉的下游解锁
 
-- **SER-ARTIFACT**：只需声明表派生的 ISA 指纹即可从“重设计定案”解锁；
-  完整理由与版本键设计只保留在 §10.7。
+- **SER-ARTIFACT**：声明表派生的 bytecode decode fingerprint 是它的
+  **格式组件**，F0a1 完成才可交付（D9）；完整 cache key 还需要
+  producer/consumer 两侧 semantic epoch，见 §10.7 的拆分。
 - **FN-M1A**：按 §9.1，它只需 **2–3 个**签名变体，现有 11 个空闲编号
   已装得下；§11 达到 44 个空闲的容量目标后可覆盖仍在册的 typed 上限。
   它不需要等待机器模型分叉。
@@ -1453,8 +1470,10 @@ trait 收敛成**一处声明**，其余 comptime 派生。它不仅减少六处
 | `npopx` | 4 | `call0..3` |
 | **合计** | **53** | **占在用指令的 22%** |
 
-⇒ **`Operand` 必须支持 `width = 0` 且值来自 logical family ordinal 的编码**
-（现有 direct 形式可断言它等于 `id − base`）。没有它，
+⇒ **`Operand` 必须支持零字节来源**：值烧死在声明里
+（`OperandSource.fixed`，§10.3/P0-2），现有 direct 形式的历史压缩关系由
+`LegacyEmbeddedEncoding` 单独断言（direct_id − base_id == 声明值）——
+物理 id 不是语义 operand 的权威来源。没有它，
 生成器无法回答「哪些指令读局部变量」——而那正是扫描器 trait 和将来任何
 寄存器机翻译都要问的问题。
 
@@ -1519,13 +1538,19 @@ handler 要绑定热/冷两个形态、冷壳只做前半、任何配对分析�
 
 ```zig
 const Decl = struct {
-    logical: LogicalOpcode,       // 稳定语义身份；不等于 final 物理 id
+    /// form 粒度（§10.8 合同 1）：`get_loc0`/`get_loc8`/`get_loc` 是三个
+    /// row；宽度规范化是未来独立工作项，F0 不顺手做。
+    logical: LogicalOpcode,       // 即 LogicalForm；不等于 final 物理 id
+    family: SemanticFamily,       // 派生分组，不替代 form 身份（§10.8 合同 1，D12）
     name: []const u8,
     encodings: PhaseEncodings,    // 各域 canonical emit + 临时 decode aliases
     payload: []const Operand,     // 不含 carrier tag；offset 由所在域编码派生
     effects: Effects,
-    handler: ?HandlerBinding = null, // 每个可执行 final row 必填；compiler-only 可空
-    traits: Traits = .{},
+    /// P0-3：符号化 handler 身份，不是 exec 函数指针——声明源被 parser/
+    /// compiler/exec 共同导入，持有 concrete Handler 会造成 import cycle。
+    /// exec 层 `resolveHandler(key)` 绑定（§10.8 合同 4）。
+    handler_key: ?HandlerKey = null, // 可执行 final row 必填；compiler-only 为 null
+    traits: Traits = .{},         // 缺省仅限 compiler-only row（§10.8 不变量 5）
     /// §10.2b：融合指令只占自己 1 个字节，尾跳进后一条指令的 handler。
     /// 声明它是为了让生成器能绑定热/冷两个形态并保住「两条之间可停」。
     /// ⚠️ 后继**可能不止一个**：`op_get_loc8_push_i8` 按 `pc[2]` 尾跳进
@@ -1556,7 +1581,15 @@ const CarrierDecl = struct {
         shared: []const Operand,
         per_logical,              // 仅 compiler_ext：先读 tag，再按 logical 解 payload
     },
-    handler: ?CarrierHandlerBinding, // compiler-only carrier 为 null
+    adapter_key: ?CarrierAdapterKey, // 符号化，exec 层解析；compiler-only carrier 为 null
+    /// P1-5：§11.4 C2 的 CarrierCompatibilityClass 落进 schema，成员
+    /// requirement 与 carrier 逐项 comptime 断言一致。C2 前必须填实；
+    /// F0 的 synthetic fixture 可占位。
+    relocation_policy: RelocationPolicy,
+    ownership_policy: OwnershipPolicy,
+    operand_cursor_policy: OperandCursorPolicy,
+    site_pc_policy: SitePcPolicy,
+    adapter_abi: AdapterAbiKey,
 };
 
 const Encoding = union(enum) {
@@ -1580,14 +1613,32 @@ const TagEncoding = union(enum) {
     },
 };
 
+/// P0-4 / D11：每个 final 物理 id 的槽位状态是声明的一部分，alias 不再
+/// 只是 PhaseEncoding 的附属列表。规则：encoder 永不选择任何 alias；
+/// `executable_alias` 必须保留 direct handler 表项（decoder、validator、
+/// dispatch 三方一致接受）；`decoder_only_alias` 仅供迁移测试解码，
+/// production artifact validator 必须拒绝；decode fingerprint 覆盖全部
+/// executable encoding，删除 alias 必然改变 fingerprint（§10.7）；
+/// `quarantined_unused` 与 `reusable_free` 解码都拒绝，仅账本状态不同
+/// （§11.0 生命周期）。
+const PhysicalSlotState = union(enum) {
+    reserved_invalid,
+    canonical_direct: LogicalOpcode,
+    carrier: CarrierId,
+    executable_alias: LogicalOpcode,
+    decoder_only_alias: LogicalOpcode,
+    quarantined_unused,
+    reusable_free,
+};
+
 const Operand = struct {
     kind: Kind,
-    /// ⚠️ 与 kind 正交（§10.2a 实测）：`loc8` 是 local/1B，`loc` 是 local/2B。
-    /// `.burned_in` = 0 字节，值来自 logical family ordinal；
-    /// direct 编码可断言 ordinal == id − base。覆盖 53 条指令（22%）。
-    width: Width,                 // burned_in | u8 | u16 | u32 | i8 | i16 | i32
     /// 仅 slot/register 类必填；atom/label/imm/count/flags 等为 null。
     flow: ?Flow = null,           // read | write | read_write  ← 抄 V8
+    /// P0-2：逻辑 operand 的值来源**显式声明**。物理 id 不是权威来源——
+    /// id 正是本轮要回收/重配的东西。`fixed` 覆盖 §10.2a 的 53 条
+    /// 零字节指令（22%）。
+    source: OperandSource,
 
     const Kind = enum {
         // 与机器模型无关的
@@ -1599,8 +1650,29 @@ const Operand = struct {
     };
 };
 
+const OperandSource = union(enum) {
+    /// 从 payload 字节读。width 与 kind 正交（§10.2a 实测：`loc8` 是
+    /// local/1B，`loc` 是 local/2B）。
+    payload: struct { index: u8, width: Width }, // u8|u16|u32|i8|i16|i32
+    /// 值烧死在声明里：`get_loc0` 的 slot operand = fixed(0)，
+    /// `push_2` = fixed(2)。fusion form 的隐含 slot/constant 同样走 fixed。
+    fixed: u32,
+};
+
+/// P0-2：legacy direct 编码的历史压缩关系（get_loc0..3 连续排布等）
+/// **单独声明、单独断言**。权威方向是「Decl 声明 operand = fixed(0)，
+/// 断言 direct_id − base_id == 0」；不是「用 direct_id − base 反推语义
+/// operand」——否则 id 一旦 alias/carrier/重配，逻辑 decoder 失去定义。
+const LegacyEmbeddedEncoding = struct {
+    operand_index: u8,
+    base_id: u8,
+    base_value: u32,
+};
+
 const Effects = struct {
-    stack: StackEffect,
+    // §10.8 不变量 5：这些缺省只是草案示意。可执行 row 逐项显式；迁移期
+    // 由旧表生成 mirror，G0 后缺项编译失败（断言 16）。
+    stack: StackEffectExpr,
     control: ControlFlow = .fallthrough,
     catch: CatchEffect = .none,
     continuation: bool = false,   // `ret` 可同时 terminal + continuation
@@ -1608,20 +1680,33 @@ const Effects = struct {
     checks_balanced_exit: bool = false, // `return` / `return_undef`
 };
 
-const StackEffect = union(enum) {
+/// P0-6：不用任意函数指针——它无法做 comptime 等价断言、无法进 canonical
+/// fingerprint、把 effect 逻辑藏回任意 Zig 代码、还会生成间接调用。动态
+/// effect 种类不多，用封闭表达式：`dyn_env_probe`/`using` sub 走
+/// operand_table，call argc 走 affine。求值宽度为 u32（`npop_u16` 的
+/// 参数数目不截断，说明 5）；派生产物是直接 switch/table。
+const StackEffectExpr = union(enum) {
     fixed: struct { pop: u32, push: u32 },
-    from_operand: struct {
+    operand_table: struct {
         operand_index: u8,
-        decode: *const fn (u32) ?struct { pop: u32, push: u32 },
+        rows: []const struct { value: u32, pop: u32, push: u32 },
+    },
+    affine: struct {
+        operand_index: u8,
+        pop_base: i16,
+        pop_scale: i16,
+        push_base: i16,
+        push_scale: i16,
     },
 };
 
-const EdgeStackDelta = union(enum) {
+const EdgeStackDeltaExpr = union(enum) {
     fixed: i16,
-    from_operand: struct {
+    operand_table: struct {
         operand_index: u8,
-        decode: *const fn (u32) ?i16,
+        rows: []const struct { value: u32, delta: i16 },
     },
+    affine: struct { operand_index: u8, base: i16, scale: i16 },
 };
 
 const ControlFlow = union(enum) {
@@ -1629,7 +1714,7 @@ const ControlFlow = union(enum) {
     terminal,
     branch: struct {
         label_operand: u8,
-        taken_stack_delta: EdgeStackDelta,
+        taken_stack_delta: EdgeStackDeltaExpr,
         has_fallthrough: bool,
     },
 };
@@ -1654,13 +1739,17 @@ const CatchEffect = union(enum) {
    stream，`resolve_labels` 产出 final；`small_inline.rewriteBody` 消费并重写
    final，仍属于 final 域。每个消费方必须选择自己的 decode table，不能把
    CFG 归进 final consumer。
-2. **`logical` 与各域 `encoding` 是本次修订的核心。**optimizer/scanner 比较
-   `LogicalOpcode`；只有该域 writer/decoder 看 byte id。降级不再要求
-   重写所有 matcher。parser/lowered encoding 必须同时声明现役 direct 与
-   已落地的 `using` carrier；这条兼容路径不授权新增 early carrier。
-   `emit` 是该域唯一规范写法；`decode_aliases` 只服务 B→C 迁移窗口，例如
-   C0 已改发 `{using, sub.to_propkey}`、但 id 112 尚保留可解码。释放 id 时
-   必须先删 alias。
+2. **`logical` 与各域 `encoding` 是本次修订的核心。**form 是身份主键：
+   peephole、carrier economics 与 profile 都用精确 form；`SemanticFamily`
+   只是**派生分组，不替代 form 身份**（D12）——宽度无关的 scanner policy
+   可从 family 继承，JIT lowering 以 family 为入口再读 operand/traits，
+   effect/inline policy 最终仍落到具体 form。只有该域 writer/decoder 看
+   byte id。降级不再要求重写所有 matcher。parser/lowered encoding 必须
+   同时声明现役 direct 与已落地的 `using` carrier；这条兼容路径不授权
+   新增 early carrier。`emit` 是该域唯一规范写法；`decode_aliases` 只
+   服务 B→C 迁移窗口（alias 的槽位状态与执行语义见 `PhysicalSlotState`），
+   例如 C0 已改发 `{using, sub.to_propkey}`、但 id 112 尚保留为
+   executable_alias。释放 id 时必须先删 alias。
 3. **`flow` 抄 V8**（`Reg` / `RegOut` / `RegInOut`，`bytecode-operands.h`）。
    有了它，每条指令的读写集是**派生的**，不必另写一张表——这对将来的
    JIT lowering 和 typed 分析都是白拿的。
@@ -1676,11 +1765,14 @@ const CatchEffect = union(enum) {
 6. **`metadata` 槽预留但不实现**。JSC 把内联缓存/profile 做成指令声明的
    一部分（49 条带 `metadata:`），这正是 PERF-SIDECAR 要建的东西。现在
    只留字段，不建机制。
-7. **`HandlerBinding` 绑定逻辑语义入口，不绑定“假定 `pc[0]` 就是原 id”的
-   物理壳。**direct adapter 与 carrier adapter 都由它派生；后者先消费 tag，
-   把 `frame.pc` 对齐到原 payload，并把 instruction/site pc 与 logical kind
-   显式传给共享语义体。不得靠伪造 `pc`、让 helper 回读 carrier id，或继续
-   用 `frame.pc-1/-size` 猜指令起点来恢复语义。
+7. **`handler_key` 绑定逻辑语义入口，不绑定“假定 `pc[0]` 就是原 id”的
+   物理壳，也不跨层持有 exec 函数指针**（P0-3：声明源被 parser/compiler/
+   exec 共同导入，concrete `Handler` 会形成 import cycle 或迫使编译器
+   引入执行层）。exec 层 `resolveHandler(key)` 解析，direct adapter 与
+   carrier adapter 都由它派生；后者先消费 tag，把 `frame.pc` 对齐到原
+   payload，并把 instruction/site pc 与 logical kind 显式传给共享语义体。
+   不得靠伪造 `pc`、让 helper 回读 carrier id，或继续用 `frame.pc-1/-size`
+   猜指令起点来恢复语义。
 
 `CarrierDecl` 与 logical `Decl` 同属这一个 comptime 声明源。它集中占有
 carrier 的各域物理 id、tag width、payload 纪律和物理 dispatch；logical row
@@ -1715,11 +1807,11 @@ decode/dispatch 成本仍按 §11.2/§11.5 单独计价，不能用“comptime�
 | `encodedSize(phase, logical, payload)` 与 decoded size/fmt | `payload` + carrier tag width；供 output capacity、jump relaxation 与 inline budget 共用 |
 | atom/label/slot operand offset | `payload` + 对应域 encoding，不再假设 `pc+1` |
 | stack/control/catch/edge/return-balance effect | `effects`；carrier 按 tag 解 logical row |
-| 冷/热 handler、operand-cursor adapter 与 final carrier 接线 | logical `handler` + `CarrierDecl.handler` |
+| 冷/热 handler、operand-cursor adapter 与 final carrier 接线 | logical `handler_key` + `CarrierDecl.adapter_key`，由 exec 层 `resolveHandler` 绑定（P0-3） |
 | profiling logical key、名称、dispatch/slow/IC 表与 dump | final decoder + LogicalOpcode 表；新增 sidecar，保留现有 256 项 physical view |
 | scanner 集合（inline/forward forbidden、continuation 等） | `traits` / `effects` |
 | 反汇编器的逻辑名与操作数打印 | `decodeLogicalAt` + `payload` |
-| **ISA 指纹**（供 SER-ARTIFACT，§9.7） | final 物理编码表的 comptime 哈希 |
+| **bytecode decode fingerprint**（SER-ARTIFACT 的格式组件，§10.7） | final 物理编码表 **+ 全部 executable alias**（P0-4）的**显式 canonical 序列化**再 comptime 哈希；不得哈希 struct 原始内存、slice/函数指针或声明地址 |
 
 **comptime 断言（写错就编译不过）**：
 
@@ -1732,16 +1824,24 @@ decode/dispatch 成本仍按 §11.2/§11.5 单独计价，不能用“comptime�
 3. production final carrier 的 tag width 固定为 u8，`compiler_ext` 为 u16；
    fixed tag 不重复，range 不重叠且落在声明的 tag width 内
 4. `using.add_base + hint` 与 fixed sub 不相撞；hint 范围完整验证
-5. final 表密度：0..255 每个 id 要么 direct/carrier、`reserved_invalid`，
-   要么显式 unused
+5. final 表密度：0..255 每个 id 恰有一个 `PhysicalSlotState`——
+   canonical_direct / carrier / reserved_invalid / executable_alias /
+   decoder_only_alias / quarantined_unused / reusable_free（P0-4）
 6. size 自洽：direct = 1 + payload；fixed-tag carrier = 1 + tag + payload；
-   from-operand tag 要从 payload 中扣掉已编码进 tag 的来源 operand
-7. 三域 canonical encode/decode round-trip，以及每个 alias decode，均回到同一 row
-8. production final carrier 至少有一个成员且只容纳 shared layout；
-   `per_logical` carrier 不得有 final id
-9. 每个可解码 final row 都有 logical handler，final CarrierDecl 还有物理
-   dispatch；compiler-only row 不要求 runtime handler；每个可到达 row 的
-   stack/control/catch/edge/return-balance effect 完整
+   from-operand tag 与 `OperandSource.fixed` 的 operand 不占 payload 字节；
+   `LegacyEmbeddedEncoding` 断言 direct_id − base_id == 声明的 fixed 值
+7. 物理编码 round-trip 在 **final form 层**闭合（P0-1）：
+   `planPhysicalEncoding(form, operands)` 的输出 decode 回同一 form；
+   `selectFinalForm` 的 form 替换发生在 encode 之前，不参与本断言；
+   每个 alias decode 也回到其声明的 form
+8. 既有 production carrier（`using`）≥1 成员；**新建** production carrier
+   ≥2 已落地成员且净收益 > 0（与 §11.0 停止规则一致，P1-6）；
+   synthetic/test carrier 显式标 `test_only`，不进 production 表；
+   final carrier 只容纳 shared layout；`per_logical` carrier 不得有 final id
+9. 每个可执行 final row 恰有一个 `HandlerKey`，exec 层 `resolveHandler`
+   对每个 key 恰好解析一次；carrier adapter key 与 direct key 分开；
+   compiler-only row 无 key（P0-3）；final CarrierDecl 另有物理 dispatch；
+   每个可到达 row 的 stack/control/catch/edge/return-balance effect 完整
 10. atom/label offset 落在 payload 内；carrier tag 自动平移
 11. final emit 与 aliases 都为空的 compiler-only row 不可能进入 final
     artifact；存在 final alias 时必须同时有 canonical final emit
@@ -1751,6 +1851,16 @@ decode/dispatch 成本仍按 §11.2/§11.5 单独计价，不能用“comptime�
 14. 布局相等（抄 Hermes 的 ASSERT_EQUAL_LAYOUT）：
    声明为「同布局兄弟」的两条指令，操作数序列逐字段相同
 15. slot/register operand 必须有 flow；非寻址 operand 的 flow 必须为 null
+16. fail-closed（§10.8 不变量 5）：可执行 final row 的 inline/forward policy、
+    may_call_user_code、may_throw、may_suspend、safepoint、control、catch
+    逐项显式；G0 后缺项编译失败，缺省形态只属于 compiler-only row
+17. effect expression 封闭（P0-6）：operand_table 覆盖该 operand 的全部
+    合法值，malformed tag/value 显式拒绝；表达式无函数指针、可 canonical
+    序列化进 fingerprint
+18. alias 语义（P0-4/D11）：executable_alias 保留 direct handler 表项且
+    decoder/validator/dispatch 三方一致；decoder_only_alias 不得通过
+    production artifact validator；encoder 不选择任何 alias；decode
+    fingerprint 覆盖全部 executable encoding，删 alias 必然改变 fingerprint
 ```
 
 第 14 条现在就有两处用途：`dyn_env_probe` 的 kind 变体要共享一套 payload
@@ -1763,21 +1873,41 @@ decode/dispatch 成本仍按 §11.2/§11.5 单独计价，不能用“comptime�
 logical decode，最后才允许一个 opcode 使用 carrier。批量回收不得
 越过这三阶段。
 
-F0 是伞形前置，不是一笔 mega-diff：阶段 1、2、3 分别作为可回滚 review
-单元；阶段 2 还按 parser → lowered → final/compiler consumers → runtime
-lookahead/profile 切片。每片都在编码不变时交付 artifact-equivalence 证据，
-但只有全部完成后才允许进入 C0。
+F0 是伞形前置，不是一笔 mega-diff。按 D4/D9 的批准粒度拆成六个独立评审
+片，与本节阶段的映射如下；每片都在编码不变时交付 artifact-equivalence
+证据。gate 列引用 §10.8 的合同（1–4）与不变量（5–6）编号（P1-4）：
+
+| 片 | 内容 | 对应阶段 | 授权与 gate |
+|---|---|---|---|
+| **F0a0** | **物理** opcode 表镜像、机械生成编号账、现表等价断言（不含 logical 层新概念） | 阶段 1（物理半） | **已批准，立即可做（D9）** |
+| **F0a1** | LogicalOpcode/Operand/Effects/fingerprint 声明 | 阶段 1（logical 半） | 暂缓；gate = 合同 1 + 不变量 5、6 |
+| **F0b** | `DecodedHeader`/`DecodedInstruction` 与全部 reader 迁移 | 阶段 2（reader） | 暂缓；gate = 合同 1、2 + 不变量 5 |
+| **F0c** | `selectFinalForm` + `planPhysicalEncoding` 与所有 final writer 收口；final carrier registry 与 synthetic final-carrier fixture | 阶段 2/3（writer） | 暂缓；gate = 合同 1、3、4 + 不变量 5 |
+| **F0d** | logical profiler sidecar（form 主键，D12）、runtime lookahead 迁移、raw-access CI gate | 阶段 2（runtime 切片） | 暂缓；gate = 合同 1、2 + 不变量 5 |
+| **F0e** | parser/lowered `compiler_ext`：u16 logical tag、per-logical payload decode | 阶段 3（独立于 C0 前置） | 设计方向已批（D9）；实现暂不开始，须在新增逻辑指令或 28 空闲检查点前落地；gate = 合同 1、2 + 不变量 5 |
+
+C0 以 F0a–F0d 完成为前置；F0e **不是** C0 前置。五个阶段本身：
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | **1** | 声明所有现役 logical/direct、parser/lowered `using` carrier 与 `reserved_invalid`，派生只读镜像，逐字段断言等于现表 | 编译证明忠实；`zig build test` |
 | **2** | 派生三域 decoder、logical matcher/next-pc、operand offset、effects、traits；CFG/optimizer、`pipeline_stack_size`/`FinalArtifactValidator`、`publishExecutionFlags`/small-inline、反汇编器/profiler/runtime lookahead 分别改用对应域 API，编码仍不变 | 套件 + test262 + bench；三域 direct/carrier round-trip 全覆盖；final artifact/sidecar（新增 logical profile section 除外）逐字段相同 |
-| **3** | 加 `compiler_ext`、carrier registry 与不占生产 id 的 synthetic final-carrier fixture；`resolve_labels.run`/`runForPackedFinalize` 及 `small_inline.rewriteBody` 等 final writer 的新建/改写指令走 instruction-level encoder；仅允许逐条 decode 验证后的 canonical final 指令原样复制 | standalone/packed-finalize 两路径 + compiler `layout=short/plain` A/B + malformed carrier + 43 个 synthetic logical id fixture；F0 自身 final-id Δ=0（若 R0 已落地则为 244/12，否则 245/11） |
-| **4** | 用 `to_propkey` 做单成员 final carrier 试点：先保留旧 direct decode alias，过门后删 alias 并释放 id；R0 可与阶段 1–3 独立并行 | §11.5 全门；final artifact 无旧 direct id |
+| **3** | 加 final carrier registry 与不占生产 id 的 synthetic final-carrier fixture（F0c；`compiler_ext` 属 F0e，独立后置，**不是 C0 前置**，P1-3）；`resolve_labels.run`/`runForPackedFinalize` 及 `small_inline.rewriteBody` 等 final writer 的新建/改写指令走 `selectFinalForm` + `planPhysicalEncoding`（§10.8 合同 3）；原样复制按 `CopyDisposition` 逐条 decode 验证 | standalone/packed-finalize 两路径 + compiler `layout=short/plain` A/B + malformed carrier + 43 个 synthetic logical id fixture；F0 自身 final-id Δ=0（若 R0 已落地则为 244/12，否则 245/11） |
+| **4** | 用 `to_propkey` 做单成员 final carrier 试点：迁移窗口内旧 direct id 转 `executable_alias`，过门后删 alias 并释放 id；R0 可与阶段 1–3 独立并行 | §11.5 全门；final artifact 无旧 direct id |
 | **5** | C0 过门后，把剩余 op 常量、`opcode_info` 与既有 direct-handler 表切到派生产物，删除重复手写表；此后 C1/C2/S1 的 ISA 接线只改声明（测试/证据照常更新） | artifact equivalence + objdump + bench 单独过门；不得与首批 C1 混测 |
 
 阶段 2 是最有价值的一步，因为它结构性消灭 §5.2(3) 的缺陷类；scanner
 消费 logical trait/effect，不再消费散落的物理 id 名单。
+
+**封口不能只靠“已迁移所有 consumer”的人工声明**——现存大量 `code[pc]`、
+`op.X` 物理匹配、`emitByte(op.X)`、raw `emitSlice`、`sizeOf(opcode)`、
+`frame.pc-1/-size`。F0d 必须交付**机器可执行的 raw-access CI gate**：
+
+1. final writer 的 raw byte emit 只能位于 encoder 模块；
+2. 对 final bytecode 的 `op.X` 物理比较只能位于 generated matcher 或显式
+   allowlist；
+3. `code[pc + N]` 的 operand 读取只能位于 decoder/adapter；
+4. CI 脚本扫描违规位置；allowlist 每项注明原因与移除阶段。
 
 **生成 handler 表时的一条限定**：热 handler 岛的对齐 pin 与 `linksection`
 必须保持逐字节不变——这是既有的 I-cache 布局合同，与停议中的 E1 是否执行
@@ -1787,26 +1917,292 @@ lookahead/profile 切片。每片都在编码不变时交付 artifact-equivalenc
 ### 10.6 与现行精简方案的关系
 
 §10 不再只是“三个机器模型方案的公共前缀”，而是 §11 的安全前置：
-R0 退役可以独立审查；C0 试点必须完成阶段 1–3，任何 carrier 批量迁移还必须
-完成阶段 5 的 G0 切换。机器模型未来若重开仍可复用声明，但不是当前设计理由。
+R0 退役可以独立审查；C0 试点必须完成 F0a–F0d（阶段 1–3 中除 `compiler_ext`
+外），任何 carrier 批量迁移还必须完成阶段 5 的 G0 切换。机器模型未来若
+重开仍可复用声明，但不是当前设计理由。
 
-### 10.7 顺带解锁 SER-ARTIFACT
+### 10.7 SER-ARTIFACT：只解锁“解码指纹”组件，不是完整 cache key
 
-声明表的 comptime 哈希 = **ISA 指纹**。`src/config_signature.zig` 的
-`attest()` 已有配置签名的先例，机制现成。
+声明表派生 **bytecode decode fingerprint**，覆盖 physical id、carrier
+id/tag、operand width/order、endianness、canonical encoding、相关
+value/target ABI，**以及全部 executable_alias**（P0-4/P1-7）。指纹描述
+的是“这个 build 接受并能执行哪些编码”，不只是“它发射哪些编码”——否则
+build A 接受旧 direct alias、build B 删除该 alias 时 canonical emit 未变、
+指纹不变，A 产的旧 artifact 被 B 当作兼容缓存载入后 B 已无法解码执行。
+删除 executable alias 必然改变指纹；`decoder_only_alias` 不出现在
+production artifact 中（断言 18），不进 production 指纹。哈希输入必须是
+**显式 canonical 序列化**——不得哈希 Zig struct 原始内存、slice 指针、
+函数指针或声明地址。`src/config_signature.zig` 的 `attest()` 已有签名
+先例，机制现成。
 
-SER-ARTIFACT 是 **build cache**（registry `acceptance` 写明 "feeds Build
-Cache"），**要的是失效检测而不是 ISA 稳定**——拿 ISA 指纹做版本键，指令集
-变了缓存自然失效、重建即可。⇒ 它的硬前置可以从「重设计定案」降为
-**「声明表落地」**，即阶段 1 完成即可解锁。
+但 decode fingerprint **不能直接充当完整 build-cache 键**（一轮复审已
+裁，二轮 P1-7 补全 consumer 侧）。物理编码完全不变时，以下变化同样要求
+作废缓存：
+
+- **producer 侧**（`compiler_semantics_epoch`）：lowering 语义、
+  peephole/fusion 规则、TDZ/const 生成规则、compiler bug 修复、
+  source ownership/relocation 规则；
+- **consumer 侧**（`runtime_bytecode_semantics_epoch`）：handler 对同一
+  编码的运行时解释变化——同一 byte 序列、不同语义。两个 epoch 可合并为
+  一个手工维护的 `bytecode_semantics_epoch`；关键是 producer 与 consumer
+  两侧都被覆盖。
+
+现有 config signature 覆盖 compiler identity、layout、representation、
+optimize、force-GC、ownership audit，**不覆盖这类 semantic epoch**。
+完整键必须是：
+
+```
+artifact_cache_key =
+    source_content_key
+  + compiler_semantics_epoch          (producer 侧)
+  + bytecode_decode_fingerprint       (canonical emit + executable alias)
+  + runtime_bytecode_semantics_epoch  (consumer 侧；可与 producer 合并)
+  + config_signature
+```
+
+⇒ fingerprint 组件属 F0a1 交付物（D9 之后不在立即可做的 F0a0 内）；
+SER-ARTIFACT 的完整缓存有效性还需要两侧 semantic epoch 纪律，不得仅凭
+ISA 哈希宣称已解决。
+
+### 10.8 实施合同 addendum（D2/D9；**未冻结**）
+
+一轮复审（D2）要求先补全并冻结本节，F0b 起的实现才获批。二轮复审
+（D9–D12）进一步裁定：本节由**四个核心 ABI 合同**加**两个跨切面不变量**
+组成（P1-4，不再笼统称“四个合同”）；本节判 **未冻结**——P0-1…P0-6 的
+修订已并入下文，owner 逐条确认后才冻结，冻结前 F0a1 亦不得开始。必须
+先闭合的四个基础模型：
+
+```
+lowered form    → final form                  （合同 3，D10）
+logical operand → physical operand 编码       （合同 1 + §10.3 OperandSource）
+纯 opcode spec  → exec handler 绑定           （合同 4，P0-3）
+物理槽位        → alias/quarantine/free 生命周期（§10.3 PhysicalSlotState，D11）
+```
+
+#### 合同 1：LogicalOpcode 粒度 = form；family 是派生视图
+
+`get_loc0`、`get_loc8`、`get_loc` 是**三个** logical row（form 粒度），
+不是一个 semantic row 的三组编码。理由：若一个 row 的 final encoding 由
+slot 值、layout mode、jump distance、shortening、fusion context 共同决定，
+`PhaseEncoding.emit: ?Encoding` 的单值合同就不成立；保留 form 粒度可以
+不在 F0 顺手重写 QuickJS 式 shortening 模型。宽度变体的统一规范化是
+未来独立工作项，不属于本轮。
+
+每条声明同时给出（已并入 §10.3 的 `Decl`）：
+
+```zig
+logical: LogicalOpcode,   // 即 LogicalForm，enum(u16) 显式赋值
+family: SemanticFamily,   // get_loc / put_loc / call / branch / ...
+```
+
+**form 是身份主键，family 只是生成的聚合视图（D12/P0-5）。**同族不同
+form 的冷热可差几个数量级（§2.2：`push_const` 25,524 次 vs
+`push_const8` 9,550,185 次）；若 profile 只按 family 聚合，C1/C2 将无法
+给具体物理 id 定价。分角色：
+
+- peephole：精确 form；
+- carrier economics / profile：精确 form——
+  `logical_form_count[LogicalOpcode]` 是原始计数，`family_count` 是
+  生成的 rollup 视图；
+- 宽度无关的 scanner policy：可从 family 继承；
+- effect/inline policy：最终仍落到具体 form；
+- JIT lowering：以 family 为入口，再读 operand/traits。
+
+**burned-in operand 来源显式化（P0-2）**：见 §10.3 `OperandSource`
+（`fixed`/`payload`）与 `LegacyEmbeddedEncoding`。权威方向固定为
+「声明给值（`get_loc0` 的 operand = fixed(0)），legacy 断言验证
+direct_id − base_id == 声明值」；物理 id 永远不是语义 operand 的来源，
+id 正是要回收/重配的东西。decode 时 fixed operand 还原为实际值（合同 2）。
+
+**Logical id 稳定性（P1-2，已定案）**：`LogicalOpcode = enum(u16)`
+显式赋值，删除保留 tombstone；不再保留“ordinal 仅限进程内”的备选。
+理由：`compiler_ext` 把它编进（进程内）byte stream；profiler 需要稳定键；
+malformed fixture 需要稳定值；debug dump 与差分测试要求跨提交可比；对约
+250–300 个 form，显式 id 的维护成本很低。即便 `compiler_ext` 明确不落盘，
+也不依赖 enum 声明顺序。
+
+#### 合同 2：`DecodedHeader`/`DecodedInstruction` —— 结构化返回值 + 性能合同
+
+只定义 decoder 函数名不够；consumer 不得自行读 `code[pc + 1]`。但也
+不能让每个 runtime lookahead、stack-size walker、scanner 都构造通用
+operand 容器（P1-1）。冻结为两层：
+
+```zig
+const DecodedHeader = struct {
+    domain: Domain,           // parser | lowered | final
+    form: LogicalOpcode,
+    family: SemanticFamily,
+    encoding: Encoding,       // 实际命中的编码
+    canonical: bool,          // false = 命中 alias（语义见断言 18）
+    instruction_pc: u32,
+    payload_pc: u32,
+    next_pc: u32,
+    layout: *const OperandLayout,
+};
+
+fn decodeHeaderAt(domain: Domain, code: []const u8, pc: u32) !DecodedHeader;
+/// burned-in（OperandSource.fixed）与被 tag 吸收的 operand 均由此还原。
+fn decodeOperand(h: DecodedHeader, comptime index: usize, comptime T: type) !T;
+
+/// 全展开视图：仅冷消费者（反汇编器/validator/dump/差分工具）使用，
+/// 由上面两层组合生成。
+const DecodedInstruction = struct { header: DecodedHeader, operands: OperandValues };
+```
+
+**性能与存储硬约束（P1-1）**：零堆分配；不复制 atom/label ledger；
+`OperandValues` 为有界内联存储（最大 operand 数由声明表 comptime 得出），
+带 atom/label/slot 的 typed accessor 与显式 signed/unsigned 表示；
+direct form 的 `matchesFormAt` 保持一次 byte compare，carrier form 才读
+tag；热路径（matcher、lookahead、stack walker）只用 `DecodedHeader` +
+按需 `decodeOperand`，不构造全量 `OperandValues`。
+
+- atom/label/slot offset 一律从 decoded result 或声明派生；
+- alias 命中必须可识别，不得与 canonical 混同；
+- 验收即“没有半迁移”：接了 decoder 却仍手工读 payload 的 consumer 记
+  F0b 失败。
+
+#### 合同 3：final form selection 与 physical encoding 是两个阶段（D10）
+
+一轮草案的单一 `planEncoding` 同时做 `get_loc0/get_loc8/get_loc` 选择、
+`goto8/goto16/goto` 选择、short/plain、fusion replacement，与合同 1 的
+form 粒度直接冲突（P0-1）：lowered 输入 row 是 `get_loc(idx=0)`、输出
+物理 id 是 `op.get_loc0`，decode 回来是 `get_loc0`——encode/decode
+不可能回到同一 row。职责拆分：
+
+```zig
+// 阶段 A —— 语义层 form 替换：shortening、宽度选择、jump form 选择
+//（含 relaxation goto8→goto16→goto）、fusion/peephole replacement。
+// 输出一个新的 final LogicalOpcode form。
+fn selectFinalForm(
+    input: DecodedInstruction,
+    context: FinalizeContext,
+) !FinalInstruction;
+
+const FinalInstruction = struct {
+    form: LogicalOpcode,      // final form；断言 7 的 round-trip 在此层闭合
+    operands: OperandValues,
+};
+
+// 阶段 B —— 同一 final form 的物理编码：只在 direct 与 carrier+tag 之间
+// 选择，不再改 form；alias 永不参与 emit。
+fn planPhysicalEncoding(instruction: FinalInstruction) !EncodingPlan;
+
+const EncodingPlan = struct {
+    physical: Encoding,
+    encoded_size: u32,
+    operand_layout: EncodedOperandLayout,
+    relocation_plan: RelocationPlan,
+};
+```
+
+- `EncodingPlan.canonical` 已删除：encoder 只能发 canonical encoding，
+  恒为 true 的字段不表达信息。raw-copy 资格改由独立的 `CopyDisposition`
+  表达——final writer 对已逐条 decode 验证、canonical 且无需 relocation
+  的完整指令可原样复制，其余走阶段 A + B；
+- output capacity、jump relaxation 与实际 writer 消费**同一个** plan
+  （或同一个纯 selector）；`encodedSize` 与 `emitInstruction` 不得各自
+  维护一套条件分支；
+- short/plain layout 影响的是阶段 A 的 form 选择输入（`LayoutContext`
+  并入 `FinalizeContext`），阶段 B 对同一 form 在两种 layout 下的物理
+  编码结果一致可断言。
+
+#### 合同 4：`handler_key` 纯数据 spec + exec 侧绑定 + `InstructionContext`
+
+这是实现风险最大的部分。现役 tail-call ABI
+`fn (pc, sp, var_buf, vm) callconv(.c) Outcome` 带 musttail、零本地
+non-tail call、handler island 对齐与 source-order 合同；大量共享 handler
+直接用 `pc[0]` 判逻辑语义（checked local、var-ref、binary/compare/unary、
+make-slot-ref、define-class、for-of/for-await、field/global）。carrier 下
+`pc[0]` 是 carrier id、`pc[1]` 是 tag、payload 后移、`frame.pc - 1` 不再
+是 instruction pc、共享 handler 无法从原 id 恢复 kind——“生成 adapter”
+不是简单接线。
+
+**模块分层（P0-3）**：现依赖方向是 exec 导入 `bytecode.zig`（tail-call
+dispatcher `@import("../bytecode.zig")` 并在其上组装 handler 表）。共享
+声明源若直接持有 concrete `Handler` 指针，就形成
+`opcode spec → exec handlers → opcode spec` 的 import cycle，即使侥幸能
+编译也会迫使 parser/compiler 引入执行层。一轮草案的
+`HandlerBinding{direct_exact: ?Handler, ...}` 因此废弃，冻结为纯数据
+spec + exec 侧解析：
+
+```zig
+// opcode spec（parser/compiler/bytecode/exec 均可导入）：
+// Decl.handler_key: ?HandlerKey（§10.3）——符号化 handler 身份。
+const HandlerKey = enum { get_loc, checked_loc, binary, to_propkey, ... };
+
+// exec 层单独解析（如 exec/opcode_handlers.zig）：
+fn resolveHandler(key: HandlerKey) Handler {
+    return switch (key) {
+        .get_loc => op_get_loc,
+        .checked_loc => h_checkedloc,
+        // ...
+    };
+}
+
+const InstructionContext = struct {
+    form: LogicalOpcode,
+    instruction_pc: u32,
+    payload_pc: u32,
+    next_pc: u32,
+    site_pc: u32,
+    operands: OperandValues,
+};
+```
+
+comptime 断言（已并入 §10.4 断言 9）：每个可执行 logical row 恰有一个
+`HandlerKey`；每个 key 在 exec 层恰好解析一次；compiler-only row 无
+key；carrier adapter key（`CarrierDecl.adapter_key`）与 direct key 分开。
+
+纪律（逐条发生，不得在 F0 批量重构 244 条 handler）：
+
+1. F0/G0 不改未迁移 hot direct handler 的函数体或 ABI；
+2. 生成表只经 `resolveHandler` 引用现有 handler，不改变指针集合与
+   handler island 布局；
+3. carrier adapter 只为迁移成员生成；
+4. adapter 调用显式 semantic helper（传 `InstructionContext`），不把
+   carrier `pc` 传给依赖 `pc[0]` 的旧 handler；
+5. direct handler 与 carrier semantic helper 的分离逐条发生；
+   `BuiltTable.keep`（回收槽位后保留 handler geometry）先例沿用。
+
+#### 不变量 5：fail-closed —— 忘写声明必须编译失败
+
+`traits: Traits = .{}` 与 effect 隐式缺省会部分重现本文正在修的缺陷类：
+新增/迁移一条 opcode 时忘写 `inline_forbidden`，编译照过，优化覆盖静默
+变化。单一声明源只消除“多处名单”，不消除“忘记声明”。规则：
+
+- 可执行 logical row 的 `inline_policy`、`forward_policy`、
+  `may_call_user_code`、`may_throw`、`may_suspend`、`safepoint`、
+  `control`、`catch` **不设隐式允许缺省**，逐项显式填写；
+- 迁移期可由旧表/旧 scanner 自动生成 mirror；G0 后新增 opcode 缺字段 =
+  编译失败（§10.4 断言 16）；
+- 缺省形态只保留给 compiler-only synthetic row。
+
+#### 不变量 6：fingerprint / cache-key 纪律
+
+decode fingerprint ≠ artifact_cache_key。fingerprint 覆盖 canonical
+emit + 全部 executable alias；完整 cache key 另需 producer/consumer
+两侧 semantic epoch。全文见 §10.7。
+
+#### 实施 gate（P1-4；取代“冻结四合同后 F0b–F0e 一起开闸”）
+
+本节冻结后各片仍按下表逐片评审（与 §10.5 分片表一致）：
+
+| 片 | 需要冻结的合同/不变量 |
+|---|---|
+| F0a1 | 1、5、6 |
+| F0b | 1、2、5 |
+| F0c | 1、3、4、5 |
+| F0d | 1、2、5 |
+| F0e | 1、2、5 |
 
 ---
 
-## 11. 物理 opcode 精简方案 v2（现行设计，待 owner 批）
+## 11. 物理 opcode 精简方案 v2（owner 已按 §11.7 D1–D12 有条件批准）
 
 > 本节取代旧 §11 v1 的执行清单。目标是减少 **final-form 物理 id**；
-> LogicalOpcode 可以继续存在于编译器内部。本文变更只完成方案设计，不授权
-> 实施。机器模型、E1/E2 与 TOS caching 明确不在本节范围内。
+> LogicalOpcode 可以继续存在于编译器内部。实施授权按 §11.7：R0 与 F0a0
+> 立即可做（D3/D9）；F0a1 起以 §10.8 冻结为硬前置，之后按其末表逐片
+> gate（D2/D9）。机器模型、E1/E2 与 TOS caching 明确不在本节范围内（D8）。
 
 ### 11.0 目标、账本与停止规则
 
@@ -1816,14 +2212,30 @@ Cache"），**要的是失效检测而不是 ISA 稳定**——拿 ISA 指纹做
 | R0 后 | **244/12** | `put_loc0_get_loc0` 退役，设计已核，待实施 |
 | C0 后 | **243/13** | 一个 late-encoding carrier 试点 |
 | G0 后 | **243/13** | 声明源最终切换；净 0，与 C1 性能分开计 |
-| 第一检查点 | **≤228/≥28** | 验证机制并覆盖已审计近端需求 |
-| 容量目标 | **≤212/≥44** | 覆盖 §9.1 保守上限 43，再留 1 位 |
-| 设计上界 | **≤196/≥60** | 旧候选预算的最大目标；逐条审计前不得承诺 |
+| 第一检查点 | **≤228/≥28** | **已批准（D5）**：验证机制并覆盖已审计近端需求；到达后强制复盘 |
+| 容量目标（条件性） | **≤212/≥44** | **暂缓（D6）**：typed/FNABI 提交具名 `OpcodeDemandLedger` 并证明未来两个 milestone 需求超过现有空位后，才继续推进 |
+| 设计上界（非规范） | **≤196/≥60** | 仅保留为 rationale envelope，不进 normative 里程碑；逐条审计前不得承诺 |
 
-**停止规则**：28 个空闲时先复盘机制；44 个空闲即完成容量目标。若继续
-只为追平其他引擎数字，或会增加热路径成本/扩大语义面，则停止。60 是可选
-上界，不是 KPI。除已存在的 `using` 外，不得先占一个 production carrier id
+**停止规则**：到达 28 个空闲后**强制复盘并暂停**；向 44 推进只由具名
+demand ledger 触发（D6），不是本项的无条件完成定义。若继续只为追平其他
+引擎数字，或会增加热路径成本/扩大语义面，则停止。60 是非规范 envelope，
+不是 KPI。除已存在的 `using` 外，不得先占一个 production carrier id
 再等待成员；新 carrier 必须与至少两个合格成员同包落地，包后净收益 > 0。
+
+**物理 id 生命周期**（单条回滚承诺的前提，见 §11.5；状态定义即 §10.3
+`PhysicalSlotState`，D11）：
+
+```
+occupied → executable_alias（迁移窗口；handler 表项保留，进 decode fingerprint）
+         [或 decoder_only_alias：仅迁移测试解码，production validator 拒绝]
+→ quarantined_unused → reusable_free → reassigned
+```
+
+回收的 id 至少在包验收关账并通过 28 空闲复盘前保持 `quarantined_unused`；
+此期间恢复旧 direct encoding 即可完成单 LogicalOpcode 回滚。删除 alias
+必然改变 decode fingerprint（§10.7）。一旦
+`reassigned`（空位被 FNABI/typed 新 opcode 占用），回滚粒度升级为：连带
+新 opcode 一起回滚、或提升 artifact/ISA epoch、或重新分配另一个空位。
 
 `using_sub` 现用 0–18，19–63 有 45 个 sub 空位；容量足够，但**容量不是
 正确性证明**。新 payload carrier 每个占一个物理 id，组内 `N` 个逻辑成员
@@ -1858,7 +2270,8 @@ Cache"），**要的是失效检测而不是 ISA 稳定**——拿 ISA 指纹做
    `atom_u16` 自身净省 2；额外收益来自与 `private_symbol`/`delete_var`
    共用另一个 `atom` carrier。
 6. **旧“需求 10–25”作废。**它用寄存器机形态下调了仍运行在栈机上的 typed
-   预算。现行保守预算为 22–43；28 只是首个机制检查点，容量目标是 44。
+   预算。现行保守预算为 22–43；28 只是首个机制检查点，44 为需求触发的
+   条件性容量目标（D6）。
 7. 审计表仍有已知漂移：`put_super_value`/`to_object` 已回收，
    `invalid`/`nop` 不应标 demote，id 139 已是 `to_number`，
    `push_const`/`fclosure` 的 size/fmt 不应为 0/`?`。
@@ -1875,7 +2288,7 @@ Cache"），**要的是失效检测而不是 ISA 稳定**——拿 ISA 指纹做
 | effects | stack、control、catch、direct-eval、continuation、balanced-exit 是否完整？ |
 | semantics | caller/current realm、const/init、所有权与可观察错误是否仍进入原语义体？ |
 | operands | atom/label/slot 的 final offset；instruction/site pc 如何传递；谁 retain/free/relocate/validate？ |
-| execution | 两套 corpus 的 **logical-opcode** 频次；是否属于 async/module/class 等代表性缺口？ |
+| execution | 两套 corpus 的 **logical-opcode** 频次，且必须按 workload 分层：`aggregate_share`、`max_single_workload_share`、`p95_workload_share`、`representative_product_share`。carrier eligibility 主要看 `max_single_workload_share`——总占比极低的 opcode 可能在单一 workload 中占 3%–10%；是否属于 async/module/class 等代表性缺口？ |
 | dispatch | cold-only 还是 resident；共享 handler 还是专用 handler？ |
 | economics | 组内净省几条、每次多几字节、是否损失既有短化/融合？ |
 | verdict | keep / retire / carrier candidate / landed，并附源码坐标与验证证据 |
@@ -1898,7 +2311,9 @@ lowering writer 已多次制造假阴性。
    原样复制一条已经 final-decode、确认是 canonical 且无需 relocation 的完整
    指令。不能对不透明 byte slice 做事后 opcode rewrite，否则
    label/source/atom relocation 与 jump relaxation 都要重算。
-   `resolve_labels.run` 与 `runForPackedFinalize` 必须共享这条路径。
+   `resolve_labels.run` 与 `runForPackedFinalize` 必须共享这条路径；
+   form 选择与物理编码的唯一决策入口是 §10.8 合同 3 的
+   `selectFinalForm` + `planPhysicalEncoding`。
 3. **消费方按域解逻辑身份。**parser CFG/`resolve_variables`/`resolve_labels`
    分别用 parser/lowered decoder；`pipeline_stack_size`、`FinalArtifactValidator`、
    `publishExecutionFlags`/small-inline、反汇编器，以及 `vm_property*`/
@@ -1913,8 +2328,9 @@ lowering writer 已多次制造假阴性。
    instruction/site pc 与 logical kind 显式传给语义体，不能原样调用依赖
    `pc[0]`、`frame.pc-1/-size` 或旧 operand cursor 的物理 handler。
    tail-call dispatch table 与 `using_ops.execVm`/新增 carrier adapter 都由
-   同一声明接线；TDZ 这类 semantic carrier 也必须保留每个 kind 的原错误与
-   所有权纪律。
+   同一声明接线；adapter 与语义体之间按 §10.8 合同 4 的
+   `InstructionContext` 传递；TDZ 这类 semantic carrier 也必须保留每个
+   kind 的原错误与所有权纪律。
 6. **编号回收与 handler-island 重排分开验证。**第一步可先取消旧 direct
    table 映射、但把旧 handler 留作不可达 geometry keep，以隔离编码变化；
    是否删函数体、改变对齐/地址布局是后一项独立的 objdump + bench A/B，
@@ -1922,21 +2338,33 @@ lowering writer 已多次制造假阴性。
 
 ### 11.4 包顺序
 
-**F0 — 事实与基础（净 0，所有 carrier 的硬前置）**
+**F0 — 事实与基础（净 0，所有 carrier 的硬前置；按 D4/D9 分片授权）**
+
+F0 按 §10.5 的表拆成 **F0a0/F0a1 + F0b–F0e** 六个独立评审片：F0a0
+（物理表镜像/编号账/现表等价断言）**已批准立即开始（D9）**；F0a1
+（LogicalOpcode/Operand/Effects/fingerprint 声明）在 §10.8 冻结后先行；
+F0b（`DecodedHeader` + reader 迁移）、F0c（`selectFinalForm` +
+`planPhysicalEncoding` + final writer 收口）、F0d（logical profiler、
+runtime lookahead、raw-access CI gate）按 §10.8 末表的合同 gate 逐片
+评审；F0e（`compiler_ext`）设计方向已批、实现暂不开始、**不是 C0 前置**
+（P1-3），须在新增逻辑指令或 28 空闲检查点前落地。各片共同要求：
 
 - 同步审计表的已知漂移，并从 final 表机械生成编号账；F0 自身断言
   final-id Δ=0，不把 245/11 写成会与并行 R0 冲突的实现常量；
-- 完成 §10 阶段 1–3：三域声明/decoder、完整 effects/operand offset、
-  `compiler_ext`、carrier registry 与不占 production id 的 synthetic fixture；
+- 完成 §10 阶段 1–3（`compiler_ext` 除外，属 F0e）：三域声明/decoder、
+  完整 effects/operand offset、final carrier registry 与不占
+  production id 的 synthetic fixture；
 - parser/lowered decoder 覆盖并逐条往返现有 `using` sub；新增 early-carrier
   发射在 F0 后禁止；
 - 把 runtime 相邻指令 lookahead 迁到 generated logical matcher/decoded
   `next_pc`，direct 目标的生成代码保持原直接比较；
 - 把 `resolve_labels` 与 `small_inline.rewriteBody` 等所有 final 发射 helper
-  收口到 instruction-level encoder，并加断言/测试证明新建/改写指令没有
-  raw opcode byte 绕过；只允许已 decode、canonical、无需 relocation 的整条
-  final 指令原样复制；output capacity、jump relaxation 与 inline byte budget
-  使用同一个 generated `encodedSize`；
+  收口到 instruction-level encoder（唯一决策入口 = §10.8 合同 3 的
+  `selectFinalForm` + `planPhysicalEncoding`），并以 §10.5 的 raw-access
+  CI gate 证明新建/改写指令没有 raw opcode byte 绕过；原样复制按
+  `CopyDisposition` 限于已 decode、canonical、无需 relocation 的整条
+  final 指令；output capacity、jump relaxation 与 inline byte budget
+  消费同一个 `EncodingPlan`；
 - `pipeline_stack_size` 与 `FinalArtifactValidator` 改按 decoded logical row
   读取 size/effect/atom offset；standalone 与 packed-finalize 共用同一证明；
 - tail-call dispatch/`using_ops.execVm`/carrier adapter 的每个可达 sub 都由
@@ -1949,9 +2377,9 @@ lowering writer 已多次制造假阴性。
 - profiler 按 logical sub 拆开现有 `using` 后，重跑两套 corpus，刷新 C1/C2
   候选频次；不得继续拿聚合的物理 `using` 行给单个 sub 定价。
 
-R0 不使用 carrier，可在 owner 批准后与 F0 并行开发/评审；落地时后合入者
+R0 不使用 carrier，已批准（D3/D9）与 F0a0 并行开发/评审；落地时后合入者
 按 source-generated 账本 rebase，不能各自硬编码 245/11。C0 及之后必须等
-F0、R0 都完成。
+F0a–F0d 与 R0 都完成；F0e 可后置到新增逻辑指令或 28 检查点之前。
 
 **R0 — 退役亏损融合（净 +1 → 244/12）**
 
@@ -1964,14 +2392,24 @@ F0、R0 都完成。
 
 **C0 — 单成员 late-encoding 试点（净 +1 → 243/13）**
 
-- 首选 `to_propkey`：无 payload、现为 cold handler、当前 finalizer 路径
-  最终落到 `copyDefault`，无 control/catch effect；
+- **默认候选** `to_propkey`（D7）：无 payload、现为 cold handler、当前
+  finalizer 路径最终落到 `copyDefault`，无 control/catch effect。**最终
+  选择由 F0d 刷新后的 representative logical profile 决定**，不是预先
+  固定的判决；
 - `to_propkey` 继续使用当前 direct parser/lowered encoding，phase decoder
   解为 `LogicalOpcode.to_propkey`；只有 final stream 变成 `{using,
   sub.to_propkey}`；
-- 先把 final id 112 保留为只读 decode alias；所有门通过后删除 alias、标
-  unused，届时才记净 +1。任一门失败就把 direct 恢复为 canonical（carrier
-  删除或降为临时 alias），不占用新 id；
+- **语义门（D7）**：`ToPropertyKey` 可执行用户代码并抛异常，不能只按
+  “fallthrough、无 control/catch effect”验收。fixture 必须覆盖：
+  primitive 与 Symbol；`@@toPrimitive`；`valueOf`/`toString` 重入；
+  coercion 抛错并被当前 catch 捕获；backtrace/source pc；small-inline
+  重写后的指令；physical profile 仍记 `using` 而 logical sidecar 单独记
+  `to_propkey`；malformed/unknown sub 拒绝；
+- 迁移窗口内 final id 112 转 `executable_alias`（D11：handler 表项保留、
+  decoder/validator/dispatch 三方一致接受、进 decode fingerprint）；所有
+  门通过后删除 alias（fingerprint 随之改变）、标 `quarantined_unused`
+  （§11.0 生命周期），届时才记净 +1。任一门失败就把 direct 恢复为
+  canonical（carrier 删除或降为临时 alias），不占用新 id；
 - 试点目标是验证架构，不是追求这一条的收益。任何 final consumer 仍按
   物理 id 写死即判失败，先修基础再重试。
 
@@ -1983,6 +2421,9 @@ F0、R0 都完成。
   必须逐字段相同；
 - 单独做 objdump + bench A/B；若 native layout 或性能过门失败，先修 G0，
   不把回归摊进下一批 demotion；
+- 物理 carrier 改用中性内部名（如 `ext0`/`cold0`），logical 名保留
+  `using_create`/`using_dispose`/…；id 244 与字节编码不变。纯内部命名，
+  避免 explicit-resource-management 与后续迁入的无关冷组长期混淆；
 - G0 通过后再冻结 C1 parent；从此 C1/C2/S1 每条的 ISA 接线只改
   logical/carrier declaration（另加测试/证据），不维护平行手写表。
 
@@ -1997,8 +2438,9 @@ F0、R0 都完成。
    本包。
 
 旧 envelope 在无 payload 平面有约 30 条候选；R0+C0 后只需其中再有 15 条
-通过完整审计，即到 **228/28**。到达后先关账，不因“还有 sub 空位”盲目迁；
-是否继续由 44 个容量目标与候选成本共同决定。
+通过完整审计，即到 **228/28**。到达后关账并**强制复盘（D5）**，不因
+“还有 sub 空位”盲目迁；向 44 推进只由 typed/FNABI 的具名
+`OpcodeDemandLedger` 触发（D6）。
 `set_name_computed`、`define_array_el`、`append`、`is_undefined_or_null`
 可作为首批审计对象；这不是预先的 demote 判决。
 
@@ -2008,7 +2450,7 @@ F0、R0 都完成。
 逐条填完 §11.2 后再决定；`nip`、`swap`、`undefined`、`import` 已因
 effect/resident/代表性问题从首批排除。
 
-**C2 — payload carrier（28 空闲复盘后，按容量缺口启动）**
+**C2 — payload carrier（28 空闲复盘后，由 demand ledger 触发的容量缺口启动）**
 
 旧清单按布局得到以下候选预算：
 
@@ -2020,7 +2462,24 @@ effect/resident/代表性问题从首批排除。
 | `cold_var_ref` | `get_var_undef`、`put_var_init`、`put_var_ref`、`set_var_ref` | +3 |
 | `cold_u16` | `rest`、`apply`、`apply_eval` | +2 |
 
-合计最大 +12。每组必须整体证明 generated atom offset、instruction/site pc、
+合计最大 +12。**分组资格不止 payload layout**（2026-08-27 复审）；每组
+必须定义并证明完整的 **CarrierCompatibilityClass**：
+
+```
+CarrierCompatibilityClass =
+    物理 payload layout
+  + relocation policy
+  + atom/constant ownership policy
+  + operand cursor 约定
+  + instruction/site-pc 约定
+  + adapter ABI
+```
+
+组内以上六项必须一致；stack/control/catch effect 可按 logical row 不同。
+特别是 `cold_atom_u8` 的 `throw_error`/`define_method`/`define_class*`
+字节布局相同，但 terminal/error 路径、helper ABI、ownership 与可观察重入
+差异很大——必须证明它们共享的是 carrier 壳，不是被迫共用一段含糊的语义
+handler。每组还须整体证明 generated atom offset、instruction/site pc、
 operand-cursor/logical-kind adapter、terminal/direct-eval effect 与 optimizer
 short/fusion 不变；少于两名合格成员的组取消，因为净收益 ≤0。`push_const`/`fclosure`
 不在本包：它们先在 finalizer 变成 const8，且大模块尺寸证据不足。
@@ -2046,18 +2505,30 @@ R0 1 + 无 payload 全 envelope 30（含 C0） + C2 12 + S1 6 = 49
 
 ### 11.5 验收与回滚
 
-每条迁移的回滚粒度是一个 LogicalOpcode；每个包都必须满足：
+每条迁移的回滚粒度是一个 LogicalOpcode——**仅在旧 id 处于 `reassigned`
+之前成立**（§11.0 生命周期）：回收 id 至少保持 `quarantined_unused` 到
+包验收关账与 28 空闲复盘；空位一旦被新 opcode 占用，回滚升级为连带回滚、
+epoch 提升或重配空位。每个包都必须满足：
 
 1. parser/lowered/final 三域的 canonical direct/carrier encode/decode
    round-trip，以及所有 decode alias 的单向 round-trip；包括全部现役
    parser/lowered `using` sub；
 2. final artifact 中旧 direct id 计数为 0；parser/lowered 中出现不算失败；
-3. profiling build 仍按 LogicalOpcode 分行计数，carrier sub 不得聚合或丢失；
+3. profiling build 仍按 LogicalOpcode **form** 分行计数（D12：
+   `logical_form_count` 是主键，family 只是生成的 rollup 视图），carrier
+   sub 不得聚合或丢失；
 4. targeted compiler/bytecode/exec tests + GUIDE B.6 对应最低覆盖档；
 5. 包边界 `zig build test`、`zig build test262-check` 全绿；
 6. bench-v8 对 immediate parent、245/11 project-root 都交错三次；C1 及以后
-   另与 G0 carrier-root 比较以归因。中位数回归不超过 1%，project-root 的
-   **1% 是累计门**，不能在每条或 28/44 检查点重置；
+   另与 G0 carrier-root 比较以归因。**门槛以测量噪声为单位，不以裸点值**：
+   任何包合入前，先用同一构建做 A/A 交错测量，把该机器/该套件的噪声区间
+   记进包验收记录；超出噪声区间即失败，噪声区间宽于 1% 时必须先收敛测量
+   方法而不是放宽门。F0 各片因 artifact 逐字节相同，运行时预期是
+   **统计零**（可归因的只剩引擎二进制布局漂移，由第 10/11 条捕捉），
+   不享受 1% 空间。1% 中位数上限只适用于 C 包，且是对 245/11
+   project-root 的**累计中止线**——触线即停止后续包，不能在每条或 28/44
+   检查点重置；本方案设计收益为 0，任何真实回归都是净亏，1% 不是可花费
+   的预算；
 7. corpus 总字节码同时报告 parent delta 与 245/11 project-root cumulative
    delta，任一口径 +0.3% 预警；另报 p95 单函数膨胀，防总量掩盖长尾；
 8. `pipeline_stack_size`/`FinalArtifactValidator` 的 payload-carrier atom-offset、
@@ -2068,13 +2539,29 @@ R0 1 + 无 payload 全 envelope 30（含 C0） + C2 12 + S1 6 = 49
 9. 按 `docs/qcp1_switch_decision.md` §9 核对 layout-sensitive compiler 变更；
    production attestation 仍是 `layout=short`，plain 只作 A/B，不改变发布配置；
 10. objdump 对照 handler island；旧 handler body 的删除与 id/encoding 迁移
-   分开 A/B，不把地址重排噪声混进 carrier 判定。
+   分开 A/B，不把地址重排噪声混进 carrier 判定。direct-form
+   `matchesFormAt` 与 runtime lookahead 的生成 matcher 另有**反汇编
+   fixture**：证明对 direct 目标仍编译为一次 byte compare、无间接调用
+   （P1-1 的 codegen 证据，合同文本不能替代对生成代码的核对）；
+11. **编译器开销与 F0 的 decoder/encoder 改造同包计量**（它影响每一条
+    字节码，不只是被降级的冷 opcode）：`resolve_variables`、
+    `resolve_labels`、packed-finalize 的 ns/byte；大型 TypeScript/module
+    编译耗时；峰值临时内存；compiler `.text`/`.rodata` 增量；Zig
+    comptime/build time 增量。opcode runtime bench 全绿不能替代这组数字；
+    判定同样以第 6 条的 A/A 噪声区间为单位。
 
 F0 额外证明 production artifact（新增 logical profile section 除外）逐字段
 不变；R0 额外证明“不再发射”；C0 额外遍历所有 final-phase consumer；G0
 额外证明派生表与旧手写表逐字段相同，并单独关账 native layout；S1 额外跑
 test262 `let`/`const`/`class` 相关切片，并差分 derived-this、double-super、
 closure const write 与普通 lexical overwrite。
+
+**随时可停是本方案的特性，不是失败模式**：每个包独立关账，任何一包
+触门就停在上一包的终态，已落地的包不需要回滚。特别地，停在 F0（甚至
+F0b）意味着运行时风险为零、声明源与 decoder 的维护收益已全部落袋、
+carrier 线一条未迁——没有 alias 或迁移窗口欠账（R0 只在账本留一格
+`quarantined_unused`）。C 包只在 §11.7 授权与 demand 证据就位时才重启，
+不因“基础设施已建好”而自动继续。
 
 ### 11.6 明确排除
 
@@ -2089,13 +2576,64 @@ closure const write 与普通 lexical overwrite。
 - 仅因某个 corpus 为 0、仅因别的引擎没有同名指令、或仅因 sub 空间有余量
   而发起的降级。
 
-### 11.7 待 owner 裁决
+### 11.7 owner 裁决（2026-08-27 两轮，复审对象 `main@f43a78e9`）
 
-1. 是否批准“LogicalOpcode 与 final physical encoding 分离”作为总架构；
-2. 是否批准 **28 个空闲为第一检查点、44 个为空间目标、60 个为非绑定上界**；
-3. 是否批准 **R0 ∥ F0 → C0 → G0 → C1**，到 28 个空闲先复盘；
-4. C1 余量、C2 与 S1 是否在复盘后按“单位风险/净省 id”排序逐包另批；
-5. 裁决 2 继续缓议并保持在本项范围外。
+一轮总裁定：**有条件批准总体架构，不按复审前文本直接解除实施暂停。**
+
+> **D1 — 批准。**Logical instruction/form 与 parser、lowered、final
+> physical encoding 分离；逻辑身份至少存活到全部优化与 label resolution
+> 完成。
+>
+> **D2 — 条件批准。**§10 实施前补充并冻结 `LogicalForm/SemanticFamily`、
+> `DecodedInstruction`、`EncodingPlan`、carrier `InstructionContext` 四个
+> 合同（§10.8）。
+>
+> **D3 — 批准。**R0 可与 F0a 并行实施；`put_loc0_get_loc0` 退役。
+>
+> **D4 — 分阶段批准。**立即批准 F0a；F0b–F0e 分别评审。任何 production
+> carrier 仍须等待所有 final consumer 与 writer 完成迁移。
+>
+> **D5 — 批准。**28 个空闲为第一检查点。到达后强制复盘。
+>
+> **D6 — 暂缓。**44 个空闲改为需求触发的容量目标；typed/FNABI 必须先提交
+> 具名 demand ledger。60 仅保留为非规范性 envelope。
+>
+> **D7 — 批准。**C0 默认候选为 `to_propkey`，但最终选择须由刷新后的
+> representative logical profile 决定，并补齐 coercion/throw/backtrace
+> fixture。
+>
+> **D8 — 批准。**register VM、TOS caching、E1/E2 继续保持在本工作项范围外。
+
+二轮复审不推翻 D1–D8，追加 D9–D12，并对当轮文本判定：D1 架构原则
+**通过**；R0 **通过**；物理表镜像与编号账 **通过**；**§10.8 冻结未通
+过**；**完整 F0a 未通过**；F0b/F0c/F0d 继续暂停。P0-1…P0-6 的修订已并
+入 §10.3/§10.4/§10.7/§10.8，待 owner 确认后冻结：
+
+> **D9 — 收窄 F0a 授权。**立即可实施的只有物理 opcode 表镜像、编号账和
+> 现表等价断言（F0a0）。LogicalOpcode/Operand/Effects/fingerprint 声明
+> （F0a1）等待 form selection、embedded operand、effect expression 与
+> 模块分层冻结。
+>
+> **D10 — 编码职责拆分。**final form selection 与 physical encoding 是
+> 两个阶段。shortening、jump width 和 fusion 产生新的 final
+> LogicalOpcode form；physical encoder 只在 direct/carrier 之间选择
+> （§10.8 合同 3）。
+>
+> **D11 — alias 是正式物理槽位状态。**区分 executable alias 与
+> decoder-only alias；前者保留 handler 并进入 decode fingerprint，后者
+> 不得通过 production validator（§10.3 `PhysicalSlotState`、断言 18）。
+>
+> **D12 — profile 以 form 为主键。**每个 LogicalOpcode form 独立计数，
+> SemanticFamily 仅作为生成的聚合视图（§10.8 合同 1）。
+
+一轮复审同时留下两项**非阻塞跟进**：
+
+1. **文档再拆分**：normative 主文（架构/schema/包序/验收）与 rationale
+   （机器模型、E1/E2、历史错误、方案对照、修订史）分离到
+   `opcode-rationale.md`，主文控制在可一次完整 review 的规模；当前
+   “停议材料若冲突以 §0/§11 为准”的阅读规则本身就是风险。
+2. **性能证据补齐**：按 workload 的 `max_single_workload_share` 分层
+   （已并入 §11.2）与编译器开销计量（已并入 §11.5(11)）在 F0 期间落地。
 
 ---
 
@@ -2113,7 +2651,7 @@ closure const write 与普通 lexical overwrite。
 | 冷平面载体与子表 | `src/bytecode.zig` `using_sub`（`add_base` 历史上由 16 抬到 64） |
 | 现役 parser/lowered early carrier | `src/parser.zig` 的 `Emitter.opU8(... op.using ...)`；`src/compiler/resolve_variables.zig` 的 `using_sub.is_undefined` |
 | 现有按 sub 读动态栈效应处（尚不覆盖 control/catch） | `src/bytecode.zig` `pipeline_stack_size`（`using` / `dyn_env_probe` 两个分支） |
-| final atom 固定偏移假设 | `src/bytecode.zig` `FinalArtifactValidator.validateKnownInstruction` |
+| final atom 固定偏移假设 | `src/bytecode.zig:7860` `FinalArtifactValidator.validateKnownInstruction`（`pipeline_stack_size` 容器内的**非 pub 嵌套 struct**，`main@f43a78e9` 实存；顶层符号搜索会漏，二轮 P2 已核） |
 | standalone/packed-finalize 入口 | `src/compiler/resolve_labels.zig` `run` / `runForPackedFinalize` |
 | 按身份匹配的扫描器 | `src/bytecode.zig` `scanSmallInlineEligible`；`src/exec/small_inline.zig` `isForwardForbiddenOp` |
 | post-final bytecode writer | `src/exec/small_inline.zig` `rewriteBody` / `emitByte` / `emitSlice` |
