@@ -1612,6 +1612,63 @@ pub const opcode = struct {
             };
         }
 
+        pub const StackEffect = struct { pop: u32, push: u32 };
+
+        /// The fall-through stack effect, resolved through the declaration.
+        /// Dynamic forms evaluate their declared expression; everything else
+        /// mirrors the physical row, which is the sanctioned migration path
+        /// (invariant 5: at G0 the mirror goes away and a form without a
+        /// declared effect stops compiling).
+        pub fn stackEffect(h: Header, code: []const u8) Error!StackEffect {
+            for (logical.dynamic_stack) |d| {
+                if (d.form != h.form) continue;
+                switch (d.shape) {
+                    .affine => |expr| switch (expr) {
+                        .affine => |a| {
+                            const v = try operandAt(h, code, a.operand_index, i64);
+                            return .{
+                                .pop = @intCast(@as(i64, a.pop_base) + @as(i64, a.pop_scale) * v),
+                                .push = @intCast(@as(i64, a.push_base) + @as(i64, a.push_scale) * v),
+                            };
+                        },
+                        .fixed => |f| return .{ .pop = f.pop, .push = f.push },
+                        .operand_table => return error.InvalidOpcode,
+                    },
+                    .operand_table_from_legacy => |t| {
+                        const raw = try operandAt(h, code, t.operand_index, u8);
+                        return switch (h.form) {
+                            .using => .{ .pop = using_sub.stackPop(raw), .push = using_sub.stackPush(raw) },
+                            .dyn_env_probe => blk: {
+                                const flags = dyn_env.decode(raw) orelse return error.InvalidOpcode;
+                                break :blk .{ .pop = flags.stackPop(), .push = flags.stackPush() };
+                            },
+                            else => error.InvalidOpcode,
+                        };
+                    },
+                }
+            }
+            const info = switch (h.domain) {
+                .final => finalInfo(@intCast(@intFromEnum(h.form))) orelse return error.InvalidOpcode,
+                .lowered => phase1Info(@intCast(@intFromEnum(h.form))) orelse return error.InvalidOpcode,
+            };
+            return .{ .pop = info.n_pop, .push = info.n_push };
+        }
+
+        /// A jump target is a decoded value, not an offset the consumer
+        /// recomputes. The base is the label operand's own address, which is
+        /// exactly the arithmetic every hand-rolled site had to repeat.
+        pub fn targetOfLabel(h: Header, code: []const u8, index: usize) Error!u32 {
+            if (index >= h.layout.len) return error.InvalidOpcode;
+            const slot = h.layout.slots[index];
+            if (slot.kind != .label) return error.InvalidOpcode;
+            const offset = slot.offset orelse return error.InvalidOpcode;
+            const diff = try operandAt(h, code, index, i64);
+            const base: i64 = @as(i64, h.payload_pc) + offset;
+            const target = base + diff;
+            if (target < 0 or target > code.len) return error.BytecodeOverflow;
+            return @intCast(target);
+        }
+
         /// One byte compare for a direct form -- the hot matcher must not
         /// pay for the structured path (P1-1).
         pub inline fn matchesFormAt(code: []const u8, pc: u32, form: logical.LogicalOpcode) bool {
@@ -1635,7 +1692,7 @@ pub const opcode = struct {
                 buf[0] = id;
                 // Distinguishable payload so an off-by-one offset shows up.
                 for (1..info.size) |i| buf[i] = @intCast(0x10 + i);
-                const h = try decode.headerAt(.final, buf[0..info.size], 0);
+                const h = try opcode.decode.headerAt(.final, buf[0..info.size], 0);
                 try std.testing.expectEqual(@as(u32, info.size), h.next_pc);
                 try std.testing.expectEqual(@as(u32, 1), h.payload_pc);
                 try std.testing.expect(h.canonical);
@@ -1655,7 +1712,7 @@ pub const opcode = struct {
                         .u32 => std.mem.readInt(u32, buf[at..][0..4], .little),
                         .i32 => std.mem.readInt(i32, buf[at..][0..4], .little),
                     };
-                    try std.testing.expectEqual(expected, try decode.operandAt(h, buf[0..info.size], i, i64));
+                    try std.testing.expectEqual(expected, try opcode.decode.operandAt(h, buf[0..info.size], i, i64));
                 }
             }
         }
@@ -1668,21 +1725,21 @@ pub const opcode = struct {
         // the declared value so consumers need not know which forms are
         // which. get_loc2's slot is 2, push_3's immediate is 3.
         buf[0] = op.get_loc2;
-        var h = try decode.headerAt(.final, buf[0..1], 0);
-        try std.testing.expectEqual(@as(u16, 2), try decode.operandAt(h, buf[0..1], 0, u16));
+        var h = try opcode.decode.headerAt(.final, buf[0..1], 0);
+        try std.testing.expectEqual(@as(u16, 2), try opcode.decode.operandAt(h, buf[0..1], 0, u16));
         try std.testing.expectEqual(logical.OperandKind.local_slot, h.layout.slots[0].kind);
         try std.testing.expectEqual(logical.Flow.read_write, h.layout.slots[0].flow.?);
 
         buf[0] = op.push_3;
-        h = try decode.headerAt(.final, buf[0..1], 0);
-        try std.testing.expectEqual(@as(i32, 3), try decode.operandAt(h, buf[0..1], 0, i32));
+        h = try opcode.decode.headerAt(.final, buf[0..1], 0);
+        try std.testing.expectEqual(@as(i32, 3), try opcode.decode.operandAt(h, buf[0..1], 0, i32));
 
         // A reclaimed id is not decodable, and a truncated instruction is an
         // overflow rather than a silent short read.
         buf[0] = 114; // reclaimed by the with_* merge
-        try std.testing.expectError(error.InvalidOpcode, decode.headerAt(.final, buf[0..1], 0));
+        try std.testing.expectError(error.InvalidOpcode, opcode.decode.headerAt(.final, buf[0..1], 0));
         buf[0] = op.push_i32; // size 5
-        try std.testing.expectError(error.BytecodeOverflow, decode.headerAt(.final, buf[0..3], 0));
+        try std.testing.expectError(error.BytecodeOverflow, opcode.decode.headerAt(.final, buf[0..3], 0));
 
         // The hot matcher stays a byte compare and never claims a
         // compiler-only form.
@@ -8715,7 +8772,15 @@ pub const pipeline_stack_size = struct {
             const pos = pending_pc[pending_len];
             var stack_len = stack_level_tab[pos];
             var catch_pos = catch_pos_tab[pos];
-            const op = bytecode[pos];
+            // F0b: one structured decode per instruction. Nothing below reads
+            // a payload byte by hand, and the control-flow switch keys on the
+            // logical form rather than the physical id -- which is the point:
+            // a reclaimed or re-encoded id must not silently change what this
+            // pass believes an instruction is.
+            const h = opcode.decode.headerAt(.final, bytecode, pos) catch |err| switch (err) {
+                error.InvalidOpcode => return error.InvalidOpcode,
+                error.BytecodeOverflow => return error.BytecodeOverflow,
+            };
             var frontier_meta: ?*const opcode.CompactInfo = null;
             if (!final_artifact_invalid) {
                 if (final_validator) |*validator| {
@@ -8727,50 +8792,41 @@ pub const pipeline_stack_size = struct {
                         // Let the stack verifier diagnose an invalid opcode.
                         // On the valid production path this is still the one
                         // metadata lookup shared by both proofs.
-                        frontier_meta = opcode.finalCompactInfo(op);
+                        frontier_meta = opcode.finalCompactInfo(h.encoding.direct);
                     }
                 }
             }
-            if (op == 0) return error.InvalidOpcode;
-            // QuickJS takes one `short_opcode_info(op)` pointer and consumes
-            // all metadata fields from that row. Keep the same one-lookup
-            // shape: the previous size/name/pop/push/format helpers each
-            // repeated the final-opcode index calculation.
+            if (h.form == .invalid) return error.InvalidOpcode;
+            // The compact row is now needed only by the final-artifact
+            // validator, which is its own consumer with its own migration.
+            // Its id comes from the decoded header rather than a second read
+            // of the same byte.
             const meta = frontier_meta orelse
-                (opcode.finalCompactInfo(op) orelse return error.InvalidOpcode);
-            const pos_next = pos + meta.size;
-            if (pos_next > bytecode.len) return error.BytecodeOverflow;
+                (opcode.finalCompactInfo(h.encoding.direct) orelse return error.InvalidOpcode);
+            const pos_next = h.next_pc;
 
-            // Compute n_pop, accounting for npop/npop_u16/npopx variable forms.
-            var n_pop: u32 = meta.n_pop;
-            var n_push: u32 = meta.n_push;
-            switch (meta.fmt) {
-                .npop, .npop_u16 => {
-                    if (pos + 1 + 2 > bytecode.len) return error.BytecodeOverflow;
-                    n_pop += std.mem.readInt(u16, bytecode[pos + 1 ..][0..2], .little);
-                },
-                .npopx => {
-                    // OP_call0..call3: extra args = (op - OP_call0).
-                    n_pop += @as(u32, op) - @as(u32, opcode.op.call0);
-                },
-                else => {},
-            }
+            // Effects come from the declaration, not from a format switch
+            // here. `npop`, `npop_u16` and `npopx` (call0..3, whose count is
+            // burned into the opcode) all evaluate the same affine
+            // expression, and `using`/`dyn_env_probe` read their operand
+            // table -- the three special cases this pass used to carry are
+            // now one call.
+            const effect = opcode.decode.stackEffect(h, bytecode) catch |err| switch (err) {
+                error.InvalidOpcode => return error.InvalidOpcode,
+                error.BytecodeOverflow => return error.BytecodeOverflow,
+            };
+            const n_pop: u32 = effect.pop;
+            const n_push: u32 = effect.push;
             // Two opcodes carry their stack effect in an operand byte instead
             // of the table: the `using` cold plane's sub-opcode, and
             // `dyn_env_probe`'s kind.
             var dyn_env_flags: ?opcode.dyn_env.Flags = null;
-            if (op == opcode.op.using) {
-                if (pos + 2 > bytecode.len) return error.BytecodeOverflow;
-                const sub = bytecode[pos + 1];
-                n_pop = opcode.using_sub.stackPop(sub);
-                n_push = opcode.using_sub.stackPush(sub);
-            } else if (op == opcode.op.dyn_env_probe) {
-                if (pos + 10 > bytecode.len) return error.BytecodeOverflow;
-                const flags = opcode.dyn_env.decode(bytecode[pos + 9]) orelse
-                    return error.InvalidOpcode;
-                dyn_env_flags = flags;
-                n_pop = flags.stackPop();
-                n_push = flags.stackPush();
+            // Only the branch edge still needs the decoded flags; the
+            // fall-through effect already came from `stackEffect`.
+            if (h.form == .dyn_env_probe) {
+                const raw = opcode.decode.operandAt(h, bytecode, 2, u8) catch
+                    return error.BytecodeOverflow;
+                dyn_env_flags = opcode.dyn_env.decode(raw) orelse return error.InvalidOpcode;
             }
 
             if (stack_len < n_pop) {
@@ -8796,84 +8852,64 @@ pub const pipeline_stack_size = struct {
             // QuickJS dispatches directly on the numeric opcode. Apart from
             // avoiding string comparisons, this keeps all control-flow
             // classification auditable against compute_stack_size's switch.
-            switch (op) {
-                opcode.op.@"return", opcode.op.return_undef => {
+            switch (h.form) {
+                .@"return", .return_undef => {
                     // `stack_len` already includes the return-value pop.
                     if (stack_len != 0) {
                         if (options.returns_balanced_out) |out| out.* = false;
                     }
                     continue;
                 },
-                opcode.op.return_async,
-                opcode.op.throw,
-                opcode.op.throw_error,
-                opcode.op.tail_call,
-                opcode.op.tail_call_method,
-                opcode.op.ret,
+                .return_async,
+                .throw,
+                .throw_error,
+                .tail_call,
+                .tail_call_method,
+                .ret,
                 => continue,
-                opcode.op.goto => {
-                    const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
-                    const target = relTarget(pos, 1, diff);
+                .goto, .goto16, .goto8 => {
+                    const target = try opcode.decode.targetOfLabel(h, bytecode, 0);
                     try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
                     continue;
                 },
-                opcode.op.goto16 => {
-                    const diff = std.mem.readInt(i16, bytecode[pos + 1 ..][0..2], .little);
-                    const target = relTarget(pos, 1, @intCast(diff));
-                    try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
-                    continue;
-                },
-                opcode.op.goto8 => {
-                    const diff: i8 = @bitCast(bytecode[pos + 1]);
-                    const target = relTarget(pos, 1, @intCast(diff));
-                    try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
-                    continue;
-                },
-                opcode.op.if_true, opcode.op.if_false => {
-                    const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
-                    const target = relTarget(pos, 1, diff);
+                .if_true, .if_false, .if_true8, .if_false8 => {
+                    const target = try opcode.decode.targetOfLabel(h, bytecode, 0);
                     try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
                 },
-                opcode.op.if_true8, opcode.op.if_false8 => {
-                    const diff: i8 = @bitCast(bytecode[pos + 1]);
-                    const target = relTarget(pos, 1, @intCast(diff));
-                    try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
-                },
-                opcode.op.gosub => {
-                    const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
-                    const target = relTarget(pos, 1, diff);
+                .gosub => {
+                    const target = try opcode.decode.targetOfLabel(h, bytecode, 0);
                     try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len + 1, catch_pos);
                 },
-                opcode.op.dyn_env_probe => {
-                    const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
-                    const target = relTarget(pos, 5, diff);
+                .dyn_env_probe => {
+                    const target = try opcode.decode.targetOfLabel(h, bytecode, 1);
                     const delta = (dyn_env_flags orelse return error.InvalidOpcode).branchStackDelta();
                     const branch_level = @as(i32, stack_len) + delta;
                     if (branch_level < 0) return error.StackUnderflow;
                     if (branch_level > JS_STACK_SIZE_MAX) return error.StackOverflow;
                     try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, @intCast(branch_level), catch_pos);
                 },
-                opcode.op.@"catch" => {
-                    const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
-                    const target = relTarget(pos, 1, diff);
+                .@"catch" => {
+                    const target = try opcode.decode.targetOfLabel(h, bytecode, 0);
                     try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
                     catch_pos = @intCast(pos);
                 },
-                opcode.op.for_of_start, opcode.op.for_await_of_start => catch_pos = @intCast(pos),
-                opcode.op.drop, opcode.op.nip, opcode.op.iterator_close => {
-                    const catch_level = if (op == opcode.op.iterator_close)
-                        stack_len + 2
-                    else if (op == opcode.op.nip) blk: {
-                        if (stack_len == 0) return error.StackUnderflow;
-                        break :blk stack_len - 1;
-                    } else stack_len;
+                .for_of_start, .for_await_of_start => catch_pos = @intCast(pos),
+                .drop, .nip, .iterator_close => {
+                    const catch_level = switch (h.form) {
+                        .iterator_close => stack_len + 2,
+                        .nip => blk: {
+                            if (stack_len == 0) return error.StackUnderflow;
+                            break :blk stack_len - 1;
+                        },
+                        else => stack_len,
+                    };
                     catch_pos = maybePopCatchPos(bytecode, stack_level_tab, catch_pos_tab, catch_pos, catch_level);
                 },
-                opcode.op.nip_catch => {
+                .nip_catch => {
                     if (catch_pos < 0) return error.InvalidOpcode;
                     const catch_idx: usize = @intCast(catch_pos);
                     stack_len = stack_level_tab[catch_idx];
-                    if (bytecode[catch_idx] != opcode.op.@"catch") stack_len += 1;
+                    if (!opcode.decode.matchesFormAt(bytecode, @intCast(catch_idx), .@"catch")) stack_len += 1;
                     stack_len += 1;
                     catch_pos = catch_pos_tab[catch_idx];
                 },
