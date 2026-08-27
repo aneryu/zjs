@@ -3011,7 +3011,6 @@ test "compiler.fuse: legacy opcode sizes stay put" {
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.cmp_if_false8));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.put_loc8_get_loc8));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.push_this_put_loc0));
-    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.put_loc0_get_loc0));
     try std.testing.expectEqual(@as(u8, 5), opcode.sizeOf(qop.get_field2_call_method));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.get_loc2_field));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.eq_if_false8));
@@ -3121,7 +3120,11 @@ test "compiler.fuse: cmp_if_false8 emit and execute" {
     );
 }
 
-test "compiler.fuse: push_this_put_loc0 and put_loc0_get_loc0 emit and execute" {
+test "compiler.fuse: push_this_put_loc0 emits; put_loc0_get_loc0 is retired (R0)" {
+    // R0 (opcode-design.md 11.1): `put_loc0_get_loc0` executed 8 times in
+    // 41.9e9 -- an id, a handler and I-cache footprint for nothing. Its only
+    // producer was the resolve_labels fusion rule, now removed. The behaviour
+    // this program exercises must be unchanged; only the encoding is.
     try compileRunAndCount(
         \\(function () {
         \\    function C() { this.x = 1; }
@@ -3133,8 +3136,48 @@ test "compiler.fuse: push_this_put_loc0 and put_loc0_get_loc0 emit and execute" 
         \\})();
     ,
         1,
-        &.{ qop.push_this_put_loc0, qop.put_loc0_get_loc0 },
+        &.{qop.push_this_put_loc0},
     );
+}
+
+test "no compiled program emits a reclaimed opcode id (R0 + F0a0)" {
+    // Stronger than pinning the one id R0 retires: sweep every id the F0a0
+    // ledger classifies as reclaimed. This stays correct as further ids are
+    // reclaimed, and it is the check that would have caught a reclaimed row
+    // whose emitter was left behind.
+    const shapes = [_][]const u8{
+        "(function () { function C() { this.x = 1; } C.prototype.m = function () { var t = this; return t.x; }; return new C().m(); })();",
+        "(function (a) { var t = a; return t + 1; })(1);",
+        "(function () { var o = { v: 2 }; var t = o; return (function () { return t.v; })(); })();",
+        "(function () { var t = 3; t = t + 1; return t; })();",
+        "(function () { var s = ''; for (var i = 0; i < 3; i++) { s += i; } return s; })();",
+    };
+    for (shapes) |src| {
+        var h: V2Exec = undefined;
+        try h.init(src);
+        defer h.deinit();
+        try h.state.enableReturnCompletion();
+        try P.parseProgramStatements(
+            &h.state,
+            P.DeclMask{ .func = true, .func_with_label = true, .other = true },
+        );
+        try h.state.finalizeEvalReturn();
+        const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
+            &h.state.function_def,
+            .{ .realm = h.ctx },
+        );
+        const fb = &fb_slice[0];
+        var fb_value = core.JSValue.functionBytecode(&fb.header);
+        defer fb_value.free(h.rt);
+        for (0..256) |raw| {
+            const id: u8 = @intCast(raw);
+            if (opcode.physical.stateOf(id) != .reclaimed) continue;
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                try countInstalledOpcode(fb, id),
+            );
+        }
+    }
 }
 
 test "compiler.fuse: get_field2_call_method emit and execute" {

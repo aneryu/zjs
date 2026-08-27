@@ -455,7 +455,6 @@ pub const opcode = struct {
         pub const push_this_put_loc0: u8 = 252;
         /// Emit-time fusion: `put_loc0` + `get_loc0`. Size/stack match
         /// `put_loc0`; the following `get_loc0` stays in the stream.
-        pub const put_loc0_get_loc0: u8 = 253;
 
         // Temporary opcodes (phase-1 emit, erased before resolve_labels).
         // Ids overlap the short opcodes above; phase-1 streams and final
@@ -864,7 +863,7 @@ pub const opcode = struct {
         .{ .name = "cmp_if_false8", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [269] id 250
         .{ .name = "put_loc8_get_loc8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .loc8 }, // [270] id 251
         .{ .name = "push_this_put_loc0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [271] id 252
-        .{ .name = "put_loc0_get_loc0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [272] id 253
+        .{ .name = "unused_253", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [272] id 253 -- RETIRED 2026-08-27 (R0): 8 executions in 41.9e9; fusion rule removed, available
     };
 
     /// Name-free production view of `opcode_info`, matching QuickJS's
@@ -1144,10 +1143,10 @@ pub const opcode = struct {
         // The three facts the roadmap and the design documents quote. They are
         // pinned here so a reclaim lands as one declaration edit and the
         // budget follows, instead of being restated in prose.
-        try std.testing.expectEqual(@as(u16, 245), physical.ledger.claimed);
-        try std.testing.expectEqual(@as(u16, 9), physical.ledger.reclaimed);
+        try std.testing.expectEqual(@as(u16, 244), physical.ledger.claimed);
+        try std.testing.expectEqual(@as(u16, 10), physical.ledger.reclaimed);
         try std.testing.expectEqual(@as(u16, 2), physical.ledger.no_row);
-        try std.testing.expectEqual(@as(u16, 11), physical.ledger.free());
+        try std.testing.expectEqual(@as(u16, 12), physical.ledger.free());
         try std.testing.expectEqual(@as(u16, 256), physical.ledger.total());
 
         // Spot-check the classification against ids verified by hand.

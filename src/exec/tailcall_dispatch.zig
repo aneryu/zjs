@@ -5838,35 +5838,6 @@ pub fn op_push_this_put_loc0_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]J
     return coldNext(var_buf, vm);
 }
 
-/// `put_loc0` then musttail `get_loc0`. Last-ref overwrite tails to cold.
-pub fn op_put_loc0_get_loc0(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
-    const old = var_buf[0];
-    if (old.requiresRefCount()) {
-        if (old.refCountHeader()) |header| {
-            if (header.metaConst().rc == 1)
-                return @call(.always_tail, op_put_loc0_get_loc0_cold, .{ pc, sp, var_buf, vm });
-            var_buf[0] = (sp - 1)[0];
-            header.meta().rc -= 1;
-        } else if (old.stringHeader()) |header| {
-            if (header.rc == 1)
-                return @call(.always_tail, op_put_loc0_get_loc0_cold, .{ pc, sp, var_buf, vm });
-            var_buf[0] = (sp - 1)[0];
-            header.rc -= 1;
-        } else {
-            return @call(.always_tail, op_put_loc0_get_loc0_cold, .{ pc, sp, var_buf, vm });
-        }
-    } else {
-        var_buf[0] = (sp - 1)[0];
-    }
-    return @call(.always_tail, opLoc(.get, .c0), .{ pc + 1, sp - 1, var_buf, vm });
-}
-
-pub fn op_put_loc0_get_loc0_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.put_loc0) catch |e| return vm.fail(e);
-    return coldNext(var_buf, vm);
-}
-
 /// Dedicated cold handler for OP_inc_loc/OP_dec_loc's non-int32 operand (float /
 /// BigInt / object counter — the `for (var x=0.5; …; x++)` shape). Installed as the
 /// cold_table entry for inc_loc/dec_loc, so op_update_loc reaches it via the same

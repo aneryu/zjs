@@ -396,7 +396,7 @@ const ApplyForwardPlan = struct {
 
 fn locIndexOf(opc: u8, src: []const u8, pc: usize) ?u16 {
     return switch (opc) {
-        op.get_loc0, op.put_loc0, op.get_loc0_field, op.put_loc0_get_loc0 => 0,
+        op.get_loc0, op.put_loc0, op.get_loc0_field => 0,
         op.get_loc1, op.put_loc1 => 1,
         op.get_loc2, op.put_loc2, op.get_loc2_field => 2,
         op.get_loc3, op.put_loc3 => 3,
@@ -408,7 +408,7 @@ fn locIndexOf(opc: u8, src: []const u8, pc: usize) ?u16 {
 
 fn isPutLoc(opc: u8) bool {
     return switch (opc) {
-        op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc8, op.put_loc, op.put_loc8_get_loc8, op.put_loc0_get_loc0 => true,
+        op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc8, op.put_loc, op.put_loc8_get_loc8 => true,
         else => false,
     };
 }
@@ -801,8 +801,8 @@ fn rewriteBody(
             op.get_loc2_field => {
                 if (!emitLocOp(&out, true, var_base + 2)) return null;
             },
-            op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc0_get_loc0 => {
-                const idx: u16 = if (opc == op.put_loc0_get_loc0) 0 else @intCast(opc - op.put_loc0);
+            op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3 => {
+                const idx: u16 = @intCast(opc - op.put_loc0);
                 if (!emitLocOp(&out, false, var_base + idx)) return null;
             },
             op.push_this_put_loc0 => {

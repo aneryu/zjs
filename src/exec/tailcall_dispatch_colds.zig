@@ -810,7 +810,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.eq_if_false8] = dispatch.op_eq_if_false8_cold;
     t[op.put_loc8_get_loc8] = dispatch.op_put_loc8_get_loc8_cold;
     t[op.push_this_put_loc0] = dispatch.op_push_this_put_loc0_cold;
-    t[op.put_loc0_get_loc0] = dispatch.op_put_loc0_get_loc0_cold;
     t[op.push_0_or] = dispatch.op_push_0_or_cold;
     t[op.sar_get_array_el] = dispatch.op_sar_get_array_el_cold;
     t[op.push_2_sar] = dispatch.op_push_2_sar_cold;
@@ -950,7 +949,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.inc_loc] = dispatch.op_update_loc;
     t[op.put_loc8_get_loc8] = dispatch.op_put_loc8_get_loc8;
     t[op.push_this_put_loc0] = dispatch.op_push_this_put_loc0;
-    t[op.put_loc0_get_loc0] = dispatch.op_put_loc0_get_loc0;
     t[op.dec_loc] = dispatch.op_update_loc;
     t[op.get_field] = dispatch.op_get_field; // inline-cache fast path; IC miss → cold h_field
     t[op.get_loc0_field] = dispatch.op_get_loc0_field;

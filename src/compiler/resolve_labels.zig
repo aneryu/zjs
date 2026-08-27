@@ -771,12 +771,6 @@ const Resolver = struct {
                 self.fuse_op = op.push_this_put_loc0;
                 self.fuse_b2 = 0;
             },
-            op.put_loc0 => {
-                self.last_sz = 1;
-                self.fuse_b = op.get_loc0;
-                self.fuse_op = op.put_loc0_get_loc0;
-                self.fuse_b2 = 0;
-            },
             op.get_field2 => {
                 self.last_sz = 5;
                 self.fuse_b = op.call_method;
