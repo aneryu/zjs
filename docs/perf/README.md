@@ -271,6 +271,12 @@ default `zjs` binary does not collect opcode counts and fails closed on
 `--profile-opcodes` (exit 2). The `perf-runtime-profiles` gate requires a
 minimum count, so an all-zero profile cannot pass.
 
+The listing is capped at 40 rows to stay readable. Set `ZJS_PROFILE_ALL=1`
+to print every opcode — required for a census, since the cap silently
+conflates warm-but-not-hot opcodes with cold ones (see
+[`opcode-design.md`](opcode-design.md) appendix B.2 for the reading error
+that produced).
+
 Compare two runtime-profile artifacts:
 
 ```sh
