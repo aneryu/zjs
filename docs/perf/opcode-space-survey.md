@@ -9,7 +9,7 @@ JSC (`/home/aneryu/WebKit`), Hermes (`/home/aneryu/hermes`), QuickJS
 
 | | ids used | free | note |
 |---|---|---|---|
-| **zjs** | **254** | **2** | 255 is the byte the invalid-opcode test feeds; 254 was taken by the T-spike prototype |
+| **zjs** | **245** | **11** | as of 2026-08-27; was 254/2 when this survey opened. 255 is the byte the invalid-opcode test feeds; 254 was taken by the T-spike prototype. Nine ids reclaimed since: 42, 16, 76, 72, 111 (demoted into the `using` cold plane) and 114-117 (the `with_*` merge, §8.7) |
 | QuickJS | 244 | 12 | our upstream shape |
 | V8 Ignition | 215 | 41 | |
 | Hermes | 220 | 36 | |
@@ -380,7 +380,8 @@ the first wave.
 | 1' | `set_proto` (demoted) | 76 | **done, 2364/0** |
 | 1 | remaining 14 of `class/private/super` (`check_ctor`, `init_ctor`, `add_brand`, `check_brand`, `get_super`, `get_super_value`, `put_super_value`, `set_home_object`, `set_proto`, `set_name_computed`, `get_private_field`, `put_private_field`, `define_private_field`, `private_in`) | ~14 | next |
 | 2 | `get_ref_value`, `put_ref_value` + Tier A retirements (`nip1`, `put_loc0_get_loc0`) | ~4 | after wave 1 |
-| 3 | second carrier for `(size=3, fmt=var_ref)` — 5 ops; third for `(size=10, fmt=atom_label_u8)` — the `with_*` family, 5 ops | ~8 | reserve |
+| 3 | second carrier for `(size=3, fmt=var_ref)` — 5 ops | ~4 | reserve |
+| M-1 | `with_*` family **merged**, not demoted: 5 ops → one `dyn_env_probe` with a kind field | **4** | **done, 2365/0 + test262 0/49778** |
 
 The pilot ran clean on the first attempt with no test churn, which is the
 signal that the procedure is right: nothing in the suite asserted that
@@ -421,7 +422,8 @@ than by frequency:
 | 2' | pinned-stream opcodes, done with pins recomputed from the emitted bytes | `check_ctor`, `init_ctor`, `add_brand`, `set_home_object`, `get_super*`, `put_super_value` |
 | 3' | size-oracle opcodes | the private-field family |
 
-Three ids freed so far (42, 16, 76), suite green after each. The lesson for the estimate in
+Nine ids freed so far — 42, 16, 76, 72, 111 by demotion and 114-117 by the
+`with_*` merge — suite green after each. The lesson for the estimate in
 §7.5 is that "84 ids are cold" remains true, but the *cost per id* is not
 uniform — it is set by how tightly the opcode is pinned by tests, not by how
 rarely it runs.
@@ -450,3 +452,46 @@ anywhere, and zero executions in 41.9 billion. Retired.
 The lesson is the same one the `call_constructor` finding taught, one level
 down: **a frequency table plus a grep is a candidate generator, not a
 verdict.** Each retirement needs someone to read the emission paths.
+
+
+## 8.7 A third mechanism: merging, and when it beats demotion
+
+The `with_*` family (§8.3 wave M-1) was slated for demotion into a third
+carrier. Reading the implementation showed a better mechanism was already
+half-built, and it costs nothing at runtime.
+
+**Demotion moves an opcode behind a carrier**: the id is freed but the
+instruction grows a byte and the handler gains an indirection.
+
+**Merging removes the opcode outright**: several opcodes that differ only in
+*which operation runs* collapse into one that names the operation in an
+operand it already carries. The id is freed with no size and no dispatch
+cost.
+
+The precondition is narrow but checkable, and all three parts held here:
+
+1. **The handlers already share their body.** Four of the five with_* forms
+   were one function; only a tail `switch (opc)` differed. If the compiler
+   has already been told the opcodes are the same code, the opcode identity
+   is doing no work that a value could not do.
+2. **The compiler already holds the distinction as a value.** There was a
+   `{read, delete, put, get_ref, make_ref}` enum mapped *into* an opcode id
+   by `probeOpcode()`, which the handler then mapped back out. A round trip
+   through the opcode space is a merge waiting to happen.
+3. **There is spare room in an existing operand.** The instruction already
+   carried a u8 whose sole use was one boolean. Three bits were free.
+
+When (3) fails the merge still works but costs a byte, at which point it is
+no better than demotion. When (1) or (2) fails, the opcodes are genuinely
+different instructions and merging just moves a `switch` around — this is
+what the §12.4/§12.5 verification found for the super and class-naming
+families, where the "generic form" the other engines merge into does not
+exist in our instruction set at all.
+
+**Cost transferred, not eliminated:** an opcode's stack effect comes from
+the info table, which has one row per id. If the merged forms differ in
+stack effect — as `put` (2/1) did from the other four (1/0) — the effect
+must move into the operand too. That mechanism already existed for the
+`using` cold plane (`using_sub.stackPop/stackPush`), so this was a second
+user rather than a new mechanism, but a merge across differing stack effects
+in a codebase without that precedent would have to build it first.

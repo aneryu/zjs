@@ -1137,6 +1137,45 @@ fn countSetVarRefStores(code: []const u8) usize {
         countOpcode(code, op.set_var_ref3);
 }
 
+fn countDynEnvProbe(code: []const u8, kind: engine.bytecode.opcode.dyn_env.ProbeKind) usize {
+    var count: usize = 0;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const size = engine.bytecode.opcode.sizeOf(code[pc]);
+        if (size == 0 or size > code.len - pc) break;
+        if (code[pc] == op.dyn_env_probe) {
+            if (engine.bytecode.opcode.dyn_env.decode(code[pc + 9])) |flags| {
+                if (flags.kind == kind) count += 1;
+            }
+        }
+        pc += size;
+    }
+    return count;
+}
+
+fn countDynEnvProbeInFunctionBytecode(
+    fb: *const engine.bytecode.FunctionBytecode,
+    kind: engine.bytecode.opcode.dyn_env.ProbeKind,
+) usize {
+    var count = countDynEnvProbe(fb.byteCode(), kind);
+    for (fb.cpoolSlice()) |value| {
+        if (functionBytecodeFromValue(value)) |child| {
+            count += countDynEnvProbeInFunctionBytecode(child, kind);
+        }
+    }
+    return count;
+}
+
+fn countDynEnvProbeRecursive(function: anytype, kind: engine.bytecode.opcode.dyn_env.ProbeKind) usize {
+    var count = countDynEnvProbe(rootCode(function), kind);
+    for (rootConstants(function)) |value| {
+        if (functionBytecodeFromValue(value)) |fb| {
+            count += countDynEnvProbeInFunctionBytecode(fb, kind);
+        }
+    }
+    return count;
+}
+
 fn countOpcodeInFunctionBytecode(fb: *const engine.bytecode.FunctionBytecode, opcode: u8) usize {
     var count = countOpcode(fb.byteCode(), opcode);
     for (fb.cpoolSlice()) |value| {
@@ -3915,7 +3954,7 @@ test "W5: production with atom-label target threads past destructuring fallback 
         const opcode_id = code[pc];
         const size = engine.bytecode.opcode.sizeOf(opcode_id);
         try std.testing.expect(size != 0 and pc + size <= code.len);
-        if (opcode_id == op.with_get_var and
+        if (opcode_id == op.dyn_env_probe and
             std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == y_atom)
         {
             with_pc = pc;
@@ -3935,7 +3974,7 @@ test "W5: production with atom-label target threads past destructuring fallback 
     try std.testing.expect(target_i64 >= 0);
     const probe_target: usize = @intCast(target_i64);
 
-    // Pinned QuickJS phase 2 emits `with_get_var y, L; get_arg y; L: goto
+    // Pinned QuickJS phase 2 emits `dyn_env_probe y, L, read; get_arg y; L: goto
     // destructure`. resolve_labels retargets the taken edge straight to the
     // destructuring entry while retaining the fallback path's own goto.
     try std.testing.expect(expected_target < probe_pc);
@@ -4544,7 +4583,7 @@ test "F5: destructuring dynamic reference publishes an exact long-tail label" {
     );
     defer parsed.deinit();
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expect(countOpcodeRecursive(&parsed, qop.with_make_ref) >= 1);
+    try std.testing.expect(countDynEnvProbeRecursive(&parsed, .make_ref) >= 1);
     try std.testing.expect(countOpcodeRecursive(&parsed, qop.put_ref_value) >= 1);
 }
 
@@ -10665,10 +10704,10 @@ test "named function self-binding writes do not reach var-ref stores" {
     defer dynamic.deinit();
     try std.testing.expect(dynamic.syntax_error == null);
     // qjs get_lvalue snapshots the selected reference with scope_make_ref;
-    // resolve_variables lowers the dynamic probe to with_make_ref, followed
-    // by get_ref_value/put_ref_value. Both the defining frame and captured
+    // resolve_variables lowers the dynamic probe to dyn_env_probe/make_ref,
+    // followed by get_ref_value/put_ref_value. Both the defining frame and captured
     // self-binding must use that transport rather than re-resolving a store.
-    try std.testing.expect(countOpcodeRecursive(&dynamic, qop.with_make_ref) >= 2);
+    try std.testing.expect(countDynEnvProbeRecursive(&dynamic, .make_ref) >= 2);
     try std.testing.expect(countOpcodeRecursive(&dynamic, qop.put_ref_value) >= 2);
     try std.testing.expectEqual(@as(usize, 0), countVarRefStoresRecursive(&dynamic));
 
@@ -12513,7 +12552,7 @@ test "parameter direct eval keeps arg var object ahead of declaration globals" {
     try std.testing.expect(parsed.closureVars().len >= 2);
     try std.testing.expectEqual(atom.ids.arg_var_object, parsed.closureVars()[0].var_name);
     try std.testing.expectEqual(function_def.ClosureType.local, parsed.closureVars()[0].closureType());
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.byteCode(), op.with_delete_var));
+    try std.testing.expectEqual(@as(usize, 1), countDynEnvProbe(parsed.byteCode(), .delete));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.byteCode(), op.define_field));
 }
 
@@ -12565,7 +12604,7 @@ test "QuickJS direct eval destructuring declares through the variable object" {
     };
     // The escaping arrow first captures the dynamic variable environment,
     // then keeps the ordinary global fallback. This is the exact qjs lookup
-    // chain: get_var_ref(<var>), with_get_var(name), get_var(name).
+    // chain: get_var_ref(<var>), dyn_env_probe(name, read), get_var(name).
     try std.testing.expectEqual(atom.ids.var_object, arrow.closureVar()[0].var_name);
     try std.testing.expectEqual(function_def.ClosureType.ref, arrow.closureVar()[0].closureType());
     try std.testing.expectEqual(@as(u16, 0), arrow.closureVar()[0].var_idx);

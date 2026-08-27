@@ -532,11 +532,11 @@ const Resolver = struct {
         self: *Resolver,
         atom_id: core.atom.Atom,
         probe: rules.EvalVarObjectProbeAlias,
-        probe_op: u8,
+        kind: opcode.dyn_env.ProbeKind,
         label_done: u32,
     ) Error!void {
         const accessor_size = rules.evalVarObjectProbeAccessorSize(self.ctx, probe);
-        const probe_size = opcode.sizeOf(probe_op);
+        const probe_size = opcode.sizeOf(op.dyn_env_probe);
         if (probe_size != 10) return error.InvalidBytecode;
         const code_need = std.math.add(usize, accessor_size, probe_size) catch
             return error.BytecodeOverflow;
@@ -551,13 +551,13 @@ const Resolver = struct {
         try rules.writeEvalVarObjectProbeAccessor(self.ctx, output, &out_idx, probe);
         if (out_idx != accessor_size or out_idx + probe_size > output.len)
             return error.InvalidBytecode;
-        output[out_idx] = probe_op;
+        output[out_idx] = op.dyn_env_probe;
         std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
         std.mem.writeInt(u32, output[out_idx + 5 ..][0..4], label_done, .little);
-        output[out_idx + 9] = if (probe_op == op.with_put_var)
-            @intFromEnum(rules.evalVarObjectPutProbeMode(probe))
-        else
-            @intFromBool(rules.evalVarObjectProbeIsWith(probe));
+        output[out_idx + 9] = (opcode.dyn_env.Flags{
+            .kind = kind,
+            .is_with = rules.evalVarObjectProbeIsWith(probe),
+        }).encode();
         self.product.atom_operands[atom_start] = self.ctx.function.atoms.dup(atom_id);
         out_atom_idx = 1;
         out_idx += probe_size;
@@ -608,7 +608,7 @@ const Resolver = struct {
         self: *Resolver,
         atom_id: core.atom.Atom,
         scope_level: i32,
-        probe_op: u8,
+        kind: opcode.dyn_env.ProbeKind,
         binding: rules.ScopeVarBindingAlias,
         oracle_plan: ?rules.ScopeVarProbePlanAlias,
     ) Error!?u32 {
@@ -619,7 +619,7 @@ const Resolver = struct {
         var with_iter = rules.localWithProbeIteratorInit(self.ctx, atom_id, scope_level);
         while (rules.localWithProbeIteratorNext(&with_iter)) |idx| {
             const label_index = try self.ensureDynamicEnvLabel(&label_done);
-            try self.emitDynamicEnvProbe(atom_id, .{ .with_local = idx }, probe_op, label_index);
+            try self.emitDynamicEnvProbe(atom_id, .{ .with_local = idx }, kind, label_index);
         }
 
         if (!rules.resolvedBindingStopsDynamicEnvProbes(
@@ -634,7 +634,7 @@ const Resolver = struct {
                 try self.emitDynamicEnvProbe(
                     atom_id,
                     .{ .local = @intCast(fd.var_object_idx) },
-                    probe_op,
+                    kind,
                     label_index,
                 );
             }
@@ -643,7 +643,7 @@ const Resolver = struct {
                 try self.emitDynamicEnvProbe(
                     atom_id,
                     .{ .local = @intCast(fd.arg_var_object_idx) },
-                    probe_op,
+                    kind,
                     label_index,
                 );
             }
@@ -654,7 +654,7 @@ const Resolver = struct {
                 try self.emitDynamicEnvProbe(
                     atom_id,
                     rules.evalVarObjectClosureProbe(fd.closure_var[idx], idx),
-                    probe_op,
+                    kind,
                     label_index,
                 );
             }
@@ -1707,7 +1707,7 @@ const Resolver = struct {
                     label_done = try self.emitDynamicEnvProbes(
                         atom_id,
                         scope_operand.level,
-                        rules.scopeVarProbeOpcode(kind),
+                        rules.scopeVarProbeWireKind(kind),
                         rules.resolvedScopeVarPlanBinding(plan),
                         oracle_plan,
                     );
@@ -1765,7 +1765,7 @@ const Resolver = struct {
                 label_done = try self.emitDynamicEnvProbes(
                     atom_id,
                     scope_operand.level,
-                    rules.scopeVarProbeOpcode(probe_kind),
+                    rules.scopeVarProbeWireKind(probe_kind),
                     binding,
                     oracle_plan,
                 );
@@ -1879,7 +1879,7 @@ const Resolver = struct {
             try self.emitDynamicEnvProbes(
                 atom_id,
                 scope_operand.level,
-                op.with_make_ref,
+                .make_ref,
                 binding,
                 oracle_plan,
             )
@@ -3586,7 +3586,7 @@ test "compiler.resolve_variables: dynamic environment probe uses product label" 
     var product = try harness.resolve();
     defer product.deinitUncommitted();
     try std.testing.expectEqual(op.get_loc0, product.code[0]);
-    try std.testing.expectEqual(op.with_get_var, product.code[1]);
+    try std.testing.expectEqual(op.dyn_env_probe, product.code[1]);
     try std.testing.expectEqual(
         dynamic_name,
         std.mem.readInt(u32, product.code[2..6], .little),

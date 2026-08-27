@@ -84,10 +84,80 @@ pub const opcode = struct {
         if (@sizeOf(CompactInfo) != 4) @compileError("CompactInfo must mirror production QuickJS JSOpCode");
     }
 
-    pub const WithPutMode = enum(u8) {
-        var_object_probe = 0,
-        selected_reference = 1,
-        with_probe = 2,
+    /// Flags byte (operand offset 9) of `dyn_env_probe`, the single opcode
+    /// covering all five dynamic-environment binding operations.  `kind`
+    /// selects what runs once the binding is found; `is_with` selects whether
+    /// @@unscopables participates.  These used to be five opcodes, and the
+    /// with/var-object axis was spelled two different ways depending on which
+    /// one it was (a bool for four of them, a three-valued enum for the put
+    /// form whose third value had no emitter).
+    pub const dyn_env = struct {
+        /// Not named `Kind`: the enclosing `opcode` namespace already has one
+        /// (the normal/temp/short opcode phase).
+        pub const ProbeKind = enum(u3) {
+            read = 0,
+            delete = 1,
+            put = 2,
+            get_ref = 3,
+            make_ref = 4,
+        };
+
+        const kind_mask: u8 = 0b0000_0111;
+        const is_with_bit: u8 = 0b0000_1000;
+
+        pub const Flags = struct {
+            kind: ProbeKind,
+            /// A `with (obj)` environment consults @@unscopables before it
+            /// accepts the binding.  An eval variable object has no such hook.
+            is_with: bool,
+
+            pub fn encode(self: Flags) u8 {
+                return @as(u8, @intFromEnum(self.kind)) |
+                    (if (self.is_with) is_with_bit else 0);
+            }
+
+            /// Fall-through (binding absent) stack effect.  The taken branch
+            /// is described by `branchStackDelta`.
+            pub fn stackPop(self: Flags) u8 {
+                return switch (self.kind) {
+                    .put => 2,
+                    else => 1,
+                };
+            }
+
+            pub fn stackPush(self: Flags) u8 {
+                return switch (self.kind) {
+                    .put => 1,
+                    else => 0,
+                };
+            }
+
+            /// Stack level at the `done` label, relative to the level after
+            /// the fall-through effect above.
+            pub fn branchStackDelta(self: Flags) i8 {
+                return switch (self.kind) {
+                    // Drops the probed object, pushes the result.
+                    .read, .delete => 1,
+                    // Keeps the probed object underneath the result.
+                    .get_ref, .make_ref => 2,
+                    // Consumes the stored value the fall-through leaves alone.
+                    .put => -1,
+                };
+            }
+        };
+
+        pub fn decode(byte: u8) ?Flags {
+            if (byte & ~(kind_mask | is_with_bit) != 0) return null;
+            const kind: ProbeKind = switch (byte & kind_mask) {
+                0 => .read,
+                1 => .delete,
+                2 => .put,
+                3 => .get_ref,
+                4 => .make_ref,
+                else => return null,
+            };
+            return .{ .kind = kind, .is_with = byte & is_with_bit != 0 };
+        }
     };
 
     /// zjs extension carried by the existing `throw_error` opcode for
@@ -213,11 +283,7 @@ pub const opcode = struct {
         pub const ret: u8 = 109;
         pub const nip_catch: u8 = 110;
         pub const to_propkey: u8 = 112;
-        pub const with_get_var: u8 = 113;
-        pub const with_put_var: u8 = 114;
-        pub const with_delete_var: u8 = 115;
-        pub const with_make_ref: u8 = 116;
-        pub const with_get_ref: u8 = 117;
+        pub const dyn_env_probe: u8 = 113;
         pub const make_loc_ref: u8 = 118;
         pub const make_arg_ref: u8 = 119;
         pub const make_var_ref_ref: u8 = 120;
@@ -630,11 +696,13 @@ pub const opcode = struct {
         .{ .name = "nip_catch", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [110] id 110
         .{ .name = "unused_111", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [111] id 111 -- RECLAIMED 2026-08-27 (cold plane), available
         .{ .name = "to_propkey", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [112] id 112
-        .{ .name = "with_get_var", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [113] id 113
-        .{ .name = "with_put_var", .size = 10, .n_pop = 2, .n_push = 1, .fmt = .atom_label_u8 }, // [114] id 114
-        .{ .name = "with_delete_var", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [115] id 115
-        .{ .name = "with_make_ref", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [116] id 116
-        .{ .name = "with_get_ref", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [117] id 117
+        // The row carries the non-put stack effect; the put form's 2/1 comes
+        // from the flags byte, like the `using` cold plane's sub table.
+        .{ .name = "dyn_env_probe", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [113] id 113
+        .{ .name = "unused_114", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [114] id 114 -- MERGED 2026-08-27 into dyn_env_probe (was with_put_var), available
+        .{ .name = "unused_115", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [115] id 115 -- MERGED 2026-08-27 into dyn_env_probe (was with_delete_var), available
+        .{ .name = "unused_116", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [116] id 116 -- MERGED 2026-08-27 into dyn_env_probe (was with_make_ref), available
+        .{ .name = "unused_117", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [117] id 117 -- MERGED 2026-08-27 into dyn_env_probe (was with_get_ref), available
         .{ .name = "make_loc_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [118] id 118
         .{ .name = "make_arg_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [119] id 119
         .{ .name = "make_var_ref_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [120] id 120
@@ -942,6 +1010,44 @@ pub const opcode = struct {
         return if (phase1Info(op_id)) |info| info.n_push else 0;
     }
 
+    test "dyn_env_probe flags round-trip and reject undefined encodings" {
+        for ([_]dyn_env.ProbeKind{ .read, .delete, .put, .get_ref, .make_ref }) |kind| {
+            for ([_]bool{ false, true }) |is_with| {
+                const flags = dyn_env.Flags{ .kind = kind, .is_with = is_with };
+                const decoded = dyn_env.decode(flags.encode()) orelse
+                    return error.TestExpectedEqual;
+                try std.testing.expectEqual(kind, decoded.kind);
+                try std.testing.expectEqual(is_with, decoded.is_with);
+            }
+        }
+        // The kind field has three unassigned values and the top three bits
+        // are reserved; both must fail closed rather than alias a real kind.
+        try std.testing.expectEqual(@as(?dyn_env.Flags, null), dyn_env.decode(5));
+        try std.testing.expectEqual(@as(?dyn_env.Flags, null), dyn_env.decode(7));
+        try std.testing.expectEqual(@as(?dyn_env.Flags, null), dyn_env.decode(0b0010_0000));
+
+        // The row carries the four non-put kinds; the put form's effect comes
+        // from the flags byte, so the two must not drift apart.
+        const row_pop = nPopOf(op.dyn_env_probe);
+        const row_push = nPushOf(op.dyn_env_probe);
+        for ([_]dyn_env.ProbeKind{ .read, .delete, .get_ref, .make_ref }) |kind| {
+            const flags = dyn_env.Flags{ .kind = kind, .is_with = false };
+            try std.testing.expectEqual(row_pop, flags.stackPop());
+            try std.testing.expectEqual(row_push, flags.stackPush());
+        }
+        const put = dyn_env.Flags{ .kind = .put, .is_with = false };
+        try std.testing.expectEqual(@as(u8, 2), put.stackPop());
+        try std.testing.expectEqual(@as(u8, 1), put.stackPush());
+
+        // The taken edge lands one deeper for a value-producing probe, two for
+        // a reference-producing one, and one shallower for a store.
+        try std.testing.expectEqual(@as(i8, 1), (dyn_env.Flags{ .kind = .read, .is_with = true }).branchStackDelta());
+        try std.testing.expectEqual(@as(i8, 1), (dyn_env.Flags{ .kind = .delete, .is_with = true }).branchStackDelta());
+        try std.testing.expectEqual(@as(i8, 2), (dyn_env.Flags{ .kind = .get_ref, .is_with = true }).branchStackDelta());
+        try std.testing.expectEqual(@as(i8, 2), (dyn_env.Flags{ .kind = .make_ref, .is_with = true }).branchStackDelta());
+        try std.testing.expectEqual(@as(i8, -1), put.branchStackDelta());
+    }
+
     test "opcode metadata exposes size format and stack effects" {
         try std.testing.expectEqual(@as(u8, 5), sizeOf(op.push_i32));
         try std.testing.expectEqual(Format.i32, formatOf(op.push_i32));
@@ -992,7 +1098,7 @@ pub const opcode = struct {
         try std.testing.expectEqual(@as(u8, 5), sizeOfPhase1(op.push_bigint_i32));
         try std.testing.expectEqual(@as(u8, 5), sizeOfPhase1(op.eval));
         try std.testing.expectEqual(@as(u8, 3), sizeOfPhase1(op.apply_eval));
-        try std.testing.expectEqual(@as(u8, 10), sizeOfPhase1(op.with_get_var));
+        try std.testing.expectEqual(@as(u8, 10), sizeOfPhase1(op.dyn_env_probe));
         try std.testing.expectEqual(sizeOf(op.get_length), sizeOfPhase1(op.get_length));
         try std.testing.expectEqual(sizeOf(op.if_false8), sizeOfPhase1(op.if_false8));
         try std.testing.expectEqual(sizeOf(op.get_field_field2), sizeOfPhase1(op.get_field_field2));
@@ -6094,13 +6200,13 @@ pub const binding_rules = struct {
             };
         }
 
-        fn probeOpcode(self: EvalVarObjectProbeKind) u8 {
+        fn wireKind(self: EvalVarObjectProbeKind) opcode.dyn_env.ProbeKind {
             return switch (self) {
-                .read => opcode.op.with_get_var,
-                .delete => opcode.op.with_delete_var,
-                .put => opcode.op.with_put_var,
-                .get_ref => opcode.op.with_get_ref,
-                .make_ref => opcode.op.with_make_ref,
+                .read => .read,
+                .delete => .delete,
+                .put => .put,
+                .get_ref => .get_ref,
+                .make_ref => .make_ref,
             };
         }
     };
@@ -6123,12 +6229,15 @@ pub const binding_rules = struct {
         // precede ordinary user bindings at the call site.
         if (atom_id == atom.ids.ret) return null;
         const fd = ctx.function_def orelse return null;
-        const probe_op = kind.probeOpcode();
+        // Every kind now lowers to the same opcode, so the size oracle no
+        // longer varies with it.  It is still read from the table rather than
+        // written as a literal, so a format change stays a one-line edit.
+        const probe_size = opcode.sizeOf(opcode.op.dyn_env_probe);
         var plan = EvalVarObjectProbePlan{};
         var with_iter = LocalWithProbeIterator.init(ctx, atom_id, scope_level);
         while (with_iter.next()) |idx| {
             plan.count += 1;
-            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .with_local = idx }) + opcode.sizeOf(probe_op);
+            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .with_local = idx }) + probe_size;
         }
         if (staticBindingStopsDynamicEnvProbes(ctx, atom_id, scope_level)) {
             return if (plan.count == 0) null else plan;
@@ -6138,16 +6247,16 @@ pub const binding_rules = struct {
         // current eval unit's hoisted-name list.
         if (!scopeUsesArgumentEnvironmentOnly(fd, scope_level) and fd.var_object_idx >= 0) {
             plan.count += 1;
-            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .local = @intCast(fd.var_object_idx) }) + opcode.sizeOf(probe_op);
+            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .local = @intCast(fd.var_object_idx) }) + probe_size;
         }
         if (fd.arg_var_object_idx >= 0) {
             plan.count += 1;
-            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .local = @intCast(fd.arg_var_object_idx) }) + opcode.sizeOf(probe_op);
+            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .local = @intCast(fd.arg_var_object_idx) }) + probe_size;
         }
         var closure_iter = ClosureDynamicEnvProbeIterator.init(ctx, atom_id);
         while (closure_iter.next()) |idx| {
             plan.count += 1;
-            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, evalVarObjectClosureProbe(fd.closure_var[idx], idx)) + opcode.sizeOf(probe_op);
+            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, evalVarObjectClosureProbe(fd.closure_var[idx], idx)) + probe_size;
         }
         return if (plan.count == 0) null else plan;
     }
@@ -6403,10 +6512,6 @@ pub const binding_rules = struct {
             .with_local, .with_ref => true,
             .local, .ref => false,
         };
-    }
-
-    fn evalVarObjectPutProbeMode(probe: EvalVarObjectProbe) opcode.WithPutMode {
-        return if (evalVarObjectProbeIsWith(probe)) .with_probe else .var_object_probe;
     }
 
     fn evalVarObjectClosureProbe(cv: function_def_mod.ClosureVar, idx: usize) EvalVarObjectProbe {
@@ -7619,7 +7724,7 @@ pub const binding_rules = struct {
         pub const closureVarRangeHasDynamicEnvObjects = binding_rules.closureVarRangeHasDynamicEnvObjects;
 
         pub const scopeVarProbeKind = binding_rules.scopeVarProbeKind;
-        pub const scopeVarProbeOpcode = EvalVarObjectProbeKind.probeOpcode;
+        pub const scopeVarProbeWireKind = EvalVarObjectProbeKind.wireKind;
         pub const evalVarObjectProbePlan = binding_rules.evalVarObjectProbePlan;
         pub const scopeVarDynamicProbeEligible = binding_rules.scopeVarDynamicProbeEligible;
         pub const evalVarObjectProbeAccessorSize = binding_rules.evalVarObjectProbeAccessorSize;
@@ -7633,7 +7738,6 @@ pub const binding_rules = struct {
         pub const resolvedBindingStopsDynamicEnvProbes = binding_rules.resolvedBindingStopsDynamicEnvProbes;
         pub const scopeUsesArgumentEnvironmentOnly = binding_rules.scopeUsesArgumentEnvironmentOnly;
         pub const evalVarObjectClosureProbe = binding_rules.evalVarObjectClosureProbe;
-        pub const evalVarObjectPutProbeMode = binding_rules.evalVarObjectPutProbeMode;
         pub const evalVarObjectProbeIsWith = binding_rules.evalVarObjectProbeIsWith;
 
         pub const loweredScopeDeleteVarSize = binding_rules.loweredScopeDeleteVarSize;
@@ -7917,11 +8021,22 @@ pub const pipeline_stack_size = struct {
                 },
                 else => {},
             }
+            // Two opcodes carry their stack effect in an operand byte instead
+            // of the table: the `using` cold plane's sub-opcode, and
+            // `dyn_env_probe`'s kind.
+            var dyn_env_flags: ?opcode.dyn_env.Flags = null;
             if (op == opcode.op.using) {
                 if (pos + 2 > bytecode.len) return error.BytecodeOverflow;
                 const sub = bytecode[pos + 1];
                 n_pop = opcode.using_sub.stackPop(sub);
                 n_push = opcode.using_sub.stackPush(sub);
+            } else if (op == opcode.op.dyn_env_probe) {
+                if (pos + 10 > bytecode.len) return error.BytecodeOverflow;
+                const flags = opcode.dyn_env.decode(bytecode[pos + 9]) orelse
+                    return error.InvalidOpcode;
+                dyn_env_flags = flags;
+                n_pop = flags.stackPop();
+                n_push = flags.stackPush();
             }
 
             if (stack_len < n_pop) {
@@ -7995,21 +8110,14 @@ pub const pipeline_stack_size = struct {
                     const target = relTarget(pos, 1, diff);
                     try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len + 1, catch_pos);
                 },
-                opcode.op.with_get_var, opcode.op.with_delete_var => {
+                opcode.op.dyn_env_probe => {
                     const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
                     const target = relTarget(pos, 5, diff);
-                    try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len + 1, catch_pos);
-                },
-                opcode.op.with_make_ref, opcode.op.with_get_ref => {
-                    const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
-                    const target = relTarget(pos, 5, diff);
-                    try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len + 2, catch_pos);
-                },
-                opcode.op.with_put_var => {
-                    const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
-                    const target = relTarget(pos, 5, diff);
-                    if (stack_len == 0) return error.StackUnderflow;
-                    try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len - 1, catch_pos);
+                    const delta = (dyn_env_flags orelse return error.InvalidOpcode).branchStackDelta();
+                    const branch_level = @as(i32, stack_len) + delta;
+                    if (branch_level < 0) return error.StackUnderflow;
+                    if (branch_level > JS_STACK_SIZE_MAX) return error.StackOverflow;
+                    try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, @intCast(branch_level), catch_pos);
                 },
                 opcode.op.@"catch" => {
                     const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
@@ -10222,11 +10330,7 @@ const function_mod = struct {
                 opcode.op.define_class,
                 opcode.op.define_class_computed,
                 opcode.op.import,
-                opcode.op.with_get_var,
-                opcode.op.with_put_var,
-                opcode.op.with_delete_var,
-                opcode.op.with_make_ref,
-                opcode.op.with_get_ref,
+                opcode.op.dyn_env_probe,
                 opcode.op.make_loc_ref,
                 opcode.op.make_arg_ref,
                 opcode.op.make_var_ref_ref,
@@ -10512,6 +10616,16 @@ pub const dump = struct {
                 try writeAtomOperand(writer, atoms, body);
                 if (body.len >= 10) {
                     const lbl = std.mem.readInt(u32, body[5..][0..4], .little);
+                    if (body[0] == opcode.op.dyn_env_probe) {
+                        if (opcode.dyn_env.decode(body[9])) |flags| {
+                            try writer.print(", L{d}, {s}{s}", .{
+                                lbl,
+                                @tagName(flags.kind),
+                                if (flags.is_with) ",with" else "",
+                            });
+                            return;
+                        }
+                    }
                     try writer.print(", L{d}, {d}", .{ lbl, body[9] });
                 }
             },

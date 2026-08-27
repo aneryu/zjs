@@ -31,7 +31,11 @@ const setGlobalWritableDataStoreForFastPathOwned = property_direct.setGlobalWrit
 
 const op = bytecode.opcode.op;
 
-pub noinline fn withGetOrDelete(
+/// `dyn_env_probe`: test whether the object on top of the stack supplies a
+/// binding for the operand atom and, if it does, run the operation named by
+/// the flags byte and jump to the operand label. The five with_*/eval
+/// variable-object opcodes this replaces differed only in that operation.
+pub noinline fn dynEnvProbe(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -39,11 +43,28 @@ pub noinline fn withGetOrDelete(
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-    opc: u8,
+) !Step {
+    const flags = bytecode.opcode.dyn_env.decode(function.byteCode()[frame.pc + 8]) orelse
+        return error.InvalidBytecode;
+    return switch (flags.kind) {
+        .put => dynEnvProbeStore(ctx, output, global, stack, function, frame, catch_target, flags.is_with),
+        else => dynEnvProbeAccess(ctx, output, global, stack, function, frame, catch_target, flags),
+    };
+}
+
+fn dynEnvProbeAccess(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.FunctionBytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    flags: bytecode.opcode.dyn_env.Flags,
 ) !Step {
     const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     const diff = readInt(i32, function.byteCode()[frame.pc + 4 ..][0..4]);
-    const is_with = function.byteCode()[frame.pc + 8] != 0;
+    const is_with = flags.is_with;
     const operand_pc = frame.pc;
     frame.pc += 9;
     const obj_value = stack.peek() orelse return error.StackUnderflow;
@@ -69,19 +90,19 @@ pub noinline fn withGetOrDelete(
         dropped.free(ctx.runtime);
         return .continue_loop;
     }
-    const still_has_binding = if (opc == op.with_get_var or opc == op.with_get_ref)
+    const still_has_binding = if (flags.kind == .read or flags.kind == .get_ref)
         object_ops.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         }
     else
         true;
-    if (opc == op.with_get_var and !still_has_binding and (function.isStrictMode() or function.runtimeStrictMode())) {
+    if (flags.kind == .read and !still_has_binding and (function.isStrictMode() or function.runtimeStrictMode())) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
-    switch (opc) {
-        op.with_get_var => {
+    switch (flags.kind) {
+        .read => {
             const value = if (still_has_binding)
                 try object_ops.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame)
             else
@@ -91,7 +112,7 @@ pub noinline fn withGetOrDelete(
             dropped.free(ctx.runtime);
             try stack.pushOwned(value);
         },
-        op.with_delete_var => {
+        .delete => {
             var deleted_cell_value = core.JSValue.undefinedValue();
             var has_deleted_cell = false;
             if (!is_with) {
@@ -123,7 +144,7 @@ pub noinline fn withGetOrDelete(
             dropped.free(ctx.runtime);
             try stack.pushOwned(core.JSValue.boolean(deleted));
         },
-        op.with_get_ref => {
+        .get_ref => {
             const value = if (still_has_binding)
                 try object_ops.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame)
             else
@@ -131,12 +152,12 @@ pub noinline fn withGetOrDelete(
             errdefer value.free(ctx.runtime);
             try stack.pushOwned(value);
         },
-        op.with_make_ref => {
+        .make_ref => {
             const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
             errdefer key_value.free(ctx.runtime);
             try stack.pushOwned(key_value);
         },
-        else => unreachable,
+        .put => unreachable,
     }
     frame.pc = @intCast(@as(i64, @intCast(operand_pc + 4)) + diff);
     return .done;
@@ -354,7 +375,7 @@ pub noinline fn putRefValueVm(
     return .done;
 }
 
-pub noinline fn withPut(
+fn dynEnvProbeStore(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -362,27 +383,22 @@ pub noinline fn withPut(
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
+    is_with: bool,
 ) !Step {
     const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     const diff = readInt(i32, function.byteCode()[frame.pc + 4 ..][0..4]);
-    const mode: bytecode.opcode.WithPutMode = switch (function.byteCode()[frame.pc + 8]) {
-        @intFromEnum(bytecode.opcode.WithPutMode.var_object_probe) => .var_object_probe,
-        @intFromEnum(bytecode.opcode.WithPutMode.selected_reference) => .selected_reference,
-        @intFromEnum(bytecode.opcode.WithPutMode.with_probe) => .with_probe,
-        else => return error.InvalidBytecode,
-    };
     const operand_pc = frame.pc;
     frame.pc += 9;
     const obj = try stack.pop();
     defer obj.free(ctx.runtime);
     if (obj.isUndefined()) return .continue_loop;
-    if (mode != .selected_reference) {
+    {
         const has_binding = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         if (!has_binding) return .continue_loop;
-        if (mode == .with_probe) {
+        if (is_with) {
             const blocked = call_runtime.isBlockedByUnscopables(ctx, output, global, obj, atom_id, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;

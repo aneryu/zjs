@@ -225,7 +225,7 @@ fn resolvedJumpAddress(
     output_len: u32,
     jump: JumpSlot,
 ) Error!u32 {
-    const opcode_delta: u32 = if (isWithOp(jump.op)) 5 else 1;
+    const opcode_delta: u32 = if (isDynEnvProbe(jump.op)) 5 else 1;
     if (jump.pos < opcode_delta or jump.pos > output_len or
         @as(usize, jump.pos) + jump.size > output_len or
         output[jump.pos - opcode_delta] != jump.op)
@@ -277,10 +277,8 @@ fn isJumpOp(op_id: u8) bool {
         op_id == op.@"catch" or op_id == op.gosub;
 }
 
-fn isWithOp(op_id: u8) bool {
-    return op_id == op.with_get_var or op_id == op.with_put_var or
-        op_id == op.with_delete_var or op_id == op.with_make_ref or
-        op_id == op.with_get_ref;
+fn isDynEnvProbe(op_id: u8) bool {
+    return op_id == op.dyn_env_probe;
 }
 
 fn hasAtomFormat(format: opcode.Format) bool {
@@ -364,7 +362,7 @@ fn validateProductCode(product: *const resolve_variables.ResolvedProduct) Error!
                 if (label_index >= product.label_len) return error.InvalidBytecode;
             },
             .atom_label_u8 => {
-                if (!isWithOp(instruction.op_id) or instruction.size != 10)
+                if (!isDynEnvProbe(instruction.op_id) or instruction.size != 10)
                     return error.InvalidBytecode;
                 const label_index = try readU32At(code, position, 5);
                 if (label_index >= product.label_len) return error.InvalidBytecode;
@@ -1707,12 +1705,7 @@ const Resolver = struct {
                         -1,
                     );
                 },
-                op.with_get_var,
-                op.with_put_var,
-                op.with_delete_var,
-                op.with_make_ref,
-                op.with_get_ref,
-                => {
+                op.dyn_env_probe => {
                     _ = try updateLabel(
                         self.product,
                         try readU32At(self.code, position, 5),
@@ -2209,8 +2202,8 @@ const Resolver = struct {
         return match.end;
     }
 
-    /// qjs:35099 atom_label_u8 family.
-    fn emitWithProbe(
+    /// qjs:35099 atom_label_u8 family (all five with_* forms, now one opcode).
+    fn emitDynEnvProbe(
         self: *Resolver,
         position: u32,
         position_next: u32,
@@ -2433,12 +2426,7 @@ const Resolver = struct {
                 },
 
                 // qjs:35099-35135.
-                op.with_get_var,
-                op.with_put_var,
-                op.with_delete_var,
-                op.with_make_ref,
-                op.with_get_ref,
-                => try self.emitWithProbe(
+                op.dyn_env_probe => try self.emitDynEnvProbe(
                     position,
                     position_next,
                     instruction.op_id,
@@ -4798,18 +4786,18 @@ test "compiler.resolve_labels: shared with probes resolve operand-relative done 
     var product = try harness.resolve();
     defer product.deinitUncommitted();
     try std.testing.expectEqual(@as(u32, 2), product.jump_size);
-    try std.testing.expectEqual(op.with_get_var, product.code[3]);
-    try std.testing.expectEqual(op.with_get_var, product.code[16]);
+    try std.testing.expectEqual(op.dyn_env_probe, product.code[3]);
+    try std.testing.expectEqual(op.dyn_env_probe, product.code[16]);
     try run(.short, &harness.function, null, &product);
 
     var expected = [_]u8{0} ** 26;
     expected[0] = op.get_loc0;
-    expected[1] = op.with_get_var;
+    expected[1] = op.dyn_env_probe;
     std.mem.writeInt(u32, expected[2..6], name, .little);
     std.mem.writeInt(i32, expected[6..10], 19, .little);
     expected[10] = 0;
     expected[11] = op.get_loc1;
-    expected[12] = op.with_get_var;
+    expected[12] = op.dyn_env_probe;
     std.mem.writeInt(u32, expected[13..17], name, .little);
     std.mem.writeInt(i32, expected[17..21], 8, .little);
     expected[21] = 0;

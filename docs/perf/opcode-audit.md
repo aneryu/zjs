@@ -436,3 +436,88 @@ flag。这是全表性价比最高的一项，也是唯一一个「审计估计�
 
 **六族里，一族完全成立、两族数字降了、两族机制错了、一族整个作废。**
 这就是「按名字对照」与「按实现核对」之间的差距，也是本次全量核对的价值。
+
+## 15. `with` 族合并已落地（2026-08-27）
+
+§13 表 A 的第一项已执行完毕。**5 → 1，四个编号（114/115/116/117）释放**，
+全表可用编号从 5 个增至 9 个。
+
+### 15.1 落地形态
+
+新 opcode **`dyn_env_probe`**（id 113，沿用五者中最小的编号，size 10，
+`atom_label_u8`，与旧形式逐字节同布局）。名字取自编译器自己的词汇
+（`emitDynamicEnvProbe` / `needsDynamicEnvProbes` / `isDynamicEnvObjectAtom`），
+不是新造的——旧名 `with_*` 也不准确，这一族同时服务 `with` 对象与 eval
+变量对象，后者与 `with` 语句无关。
+
+操作数第 9 字节（原 `is_with` 布尔位）改为 flags：
+
+```
+bit 0..2  kind   0=read 1=delete 2=put 3=get_ref 4=make_ref
+bit 3     is_with
+bit 4..7  保留，必须为 0
+```
+
+`read` + 非 with 编码为 0，与旧 `with_get_var` 的 `is_with=false` 逐字节
+相同——两处按字节钉死指令流的测试（`resolve_labels.zig` 与
+`resolve_variables.zig`）因此只需改 opcode 名，期望字节数组一字未动。
+
+### 15.2 核对时才发现的一件事：同一语义轴有两套编码
+
+`with_put_var` 的第 9 字节不是布尔，而是三值枚举 `WithPutMode`
+{`var_object_probe`=0, `selected_reference`=1, `with_probe`=2}；另外四个是
+布尔 {0,1}。**同一个「是不是 with 环境」的语义轴，put 编码成 0/2，其余四个
+编码成 0/1。**
+
+更进一步：`selected_reference` **没有任何发射点**。唯一的写入者
+`emitDynamicEnvProbe` 通过 `evalVarObjectPutProbeMode()` 取值，而该函数只
+返回另外两个；`emitWithProbe` 只是原样转抄。所以这是一个死分支，且它的
+存在正是两套编码分叉的原因。合并时一并删除，语义轴统一为一个 `is_with`
+位。
+
+**这条只有读实现才看得到**：审计表里 `with_put_var` 与其余四个的
+`fmt` 同为 `atom_label_u8`、`size` 同为 10，从表上看不出第 9 字节含义不同。
+
+### 15.3 合并前检查清单（§9 三项）的落实
+
+1. **尺寸预言机路径**：`evalVarObjectProbePlan` 用
+   `opcode.sizeOf(kind.probeOpcode())` 累加前缀尺寸。改为
+   `opcode.sizeOf(op.dyn_env_probe)` 一次求值——仍从表里读，格式若变仍是
+   一行改动。
+2. **按字节偏移钉死的测试**：布局未变、`read`+非 with 编码为 0，两处期望
+   数组无需改动（见 §15.1）。
+3. **按身份匹配的扫描器**：`scanSmallInlineEligible`（bytecode.zig）与
+   `isForwardForbiddenOp`（small_inline.zig）原本都完整列出五个，收敛为一
+   个条目，行为不变。`resolve_labels.zig` 的 `isWithOp`（已改名
+   `isDynEnvProbe`）从五项析取变为单次比较。
+
+### 15.4 栈效应转由操作数承载
+
+`put` 形式是 2/1，其余四个是 1/0；三种 kind 的**跳转边**栈高也不同
+（read/delete +1、get_ref/make_ref +2、put −1）。合并后信息表的行只能带
+一组数字，因此 `computeStackSize` 改为从 flags 字节取——**与 `using` 冷
+平面的 sub-opcode 走同一条既有机制**（`using_sub.stackPop/stackPush`），
+不是新增机制。新增单测钉住「表里的行 = 四个非 put kind 的效应」，防止两
+者日后漂移。
+
+非法 flags（未定义的 kind 值、保留位非零）在编译期栈计算与运行时 handler
+两处都 fail closed。
+
+### 15.5 验收
+
+- `zig build test`：2365/0（比合并前多一个，即新增的 flags 编解码单测）
+- `zig build test262-check`：0/49778
+- 手工对拍：read/put/delete/复合赋值（get_ref+put_ref）/`@@unscopables`
+  屏蔽/eval 变量对象六种形态，与 QuickJS 输出逐字符相同
+
+### 15.6 顺带的改名
+
+- `with_*`（5 个） → `dyn_env_probe`（1 个）
+- `withGetOrDelete` → `dynEnvProbeAccess`，`withPut` → `dynEnvProbeStore`，
+  入口 `dynEnvProbe`
+- `h_with_get_or_delete` → `h_dyn_env_probe`
+- `isWithOp` → `isDynEnvProbe`，`emitWithProbe` → `emitDynEnvProbe`
+- `EvalVarObjectProbeKind.probeOpcode()` → `.wireKind()`（目标从「一个
+  opcode 编号」变成「一个 3 bit 字段」）
+- 反汇编器对该 opcode 打印 `kind`/`with` 名字而非裸字节，否则合并后
+  `dyn_env_probe atom, L3, 9` 无法阅读

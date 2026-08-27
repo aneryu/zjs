@@ -111,9 +111,10 @@ pub const h_put_var = coldStd(struct {
         _ = try vm_property_globals.putVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, dispatch.strictUnresolvedGetVar(vm), dispatch.evalGlobalVarBindings(vm), dispatch.isEvalCode(vm));
     }
 }.b);
-pub const h_with_get_or_delete = coldStd(struct {
+pub const h_dyn_env_probe = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try vm_property_ref.withGetOrDelete(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0]);
+        _ = pc;
+        _ = try vm_property_ref.dynEnvProbe(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
     }
 }.b);
 pub const h_make_slot_ref = coldStd(struct {
@@ -424,12 +425,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             _ = try vm_property_ref.putRefValueVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
-    inline for ([_]u8{ op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref }) |o| t[o] = h_with_get_or_delete;
-    t[op.with_put_var] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try vm_property_ref.withPut(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
-        }
-    }.b);
+    t[op.dyn_env_probe] = h_dyn_env_probe;
 
     // --- fields / private / array_el / super ---
     inline for ([_]u8{ op.get_field, op.get_field2, op.put_field }) |o| t[o] = h_field;

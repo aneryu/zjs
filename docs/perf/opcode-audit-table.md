@@ -120,11 +120,11 @@
 | 110 | `nip_catch` | 1 | none | 2/1 | 43 | 0.0000% | direct | demote |
 | 111 | `to_object` | 1 | none | 1/1 | 0 | 0 | direct | demote |
 | 112 | `to_propkey` | 1 | none | 1/1 | 0 | 0 | direct | demote |
-| 113 | `with_get_var` | 10 | atom_label_u8 | 1/0 | 120 | 0.0000% | direct | demote |
-| 114 | `with_put_var` | 10 | atom_label_u8 | 2/1 | 0 | 0 | direct | demote |
-| 115 | `with_delete_var` | 10 | atom_label_u8 | 1/0 | 0 | 0 | direct | demote |
-| 116 | `with_make_ref` | 10 | atom_label_u8 | 1/0 | 0 | 0 | direct | demote |
-| 117 | `with_get_ref` | 10 | atom_label_u8 | 1/0 | 0 | 0 | direct | demote |
+| 113 | `dyn_env_probe` | 10 | atom_label_u8 | 1/0 | 120 | 0.0000% | direct | MERGED 2026-08-27: absorbed 114-117 |
+| 114 | *(free)* | - | - | - | - | - | - | RECLAIMED 2026-08-27: merged into `dyn_env_probe` (was `with_put_var`) |
+| 115 | *(free)* | - | - | - | - | - | - | RECLAIMED 2026-08-27: merged into `dyn_env_probe` (was `with_delete_var`) |
+| 116 | *(free)* | - | - | - | - | - | - | RECLAIMED 2026-08-27: merged into `dyn_env_probe` (was `with_make_ref`) |
+| 117 | *(free)* | - | - | - | - | - | - | RECLAIMED 2026-08-27: merged into `dyn_env_probe` (was `with_get_ref`) |
 | 118 | `make_loc_ref` | 7 | atom_u16 | 0/2 | 0 | 0 | lowering | demote (size-oracle path) |
 | 119 | `make_arg_ref` | 7 | atom_u16 | 0/2 | 0 | 0 | lowering | demote (size-oracle path) |
 | 120 | `make_var_ref_ref` | 7 | atom_u16 | 0/2 | 0 | 0 | lowering | demote (size-oracle path) |
