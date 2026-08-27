@@ -301,6 +301,29 @@ pub const LogicalOpcode = enum(u16) {
     cmp_if_false8 = 250,
     put_loc8_get_loc8 = 251,
     push_this_put_loc0 = 252,
+    // Cold-plane residents (400+). Without these the sixteen opcodes
+    // demoted into the `using` carrier would sit outside the single
+    // declaration source -- which is exactly how an identity-matching
+    // scanner goes blind (5.2 clause 3). `plane` says where each lives.
+    using_create = 400,
+    using_dispose = 401,
+    using_dispose_throw = 402,
+    using_is_undefined = 403,
+    using_typeof_is_undefined = 404,
+    using_typeof_is_function = 405,
+    using_insert4 = 406,
+    using_rot5l = 407,
+    using_perm5 = 408,
+    using_dup2 = 409,
+    using_swap2 = 410,
+    using_rot3r = 411,
+    using_rot4l = 412,
+    using_dup3 = 413,
+    using_dup1 = 414,
+    using_check_ctor_return = 415,
+    using_set_proto = 416,
+    using_put_super_value = 417,
+    using_to_object = 418,
     // compiler-only (temp) forms; physical ids 178..196 overlap the short opcodes
     enter_scope = 300,
     leave_scope = 301,
@@ -323,8 +346,26 @@ pub const LogicalOpcode = enum(u16) {
     line_num = 318,
 };
 
+/// Where a form lives physically. P0-4/D11 puts alias and quarantine on the
+/// physical slot; this is the complementary logical fact -- a form is either
+/// a first-class id or a resident of a carrier's sub space.
+pub const Plane = union(enum) {
+    /// Owns a physical id outright (or, for compiler-only forms, a temp id).
+    main,
+    /// Lives behind a carrier at `slot` in its sub space.
+    sub: struct { carrier: LogicalOpcode, slot: u8 },
+};
+
+pub fn planeOf(form: LogicalOpcode) Plane {
+    const raw = @intFromEnum(form);
+    if (raw < 400) return .main;
+    return .{ .sub = .{ .carrier = .using, .slot = @intCast(raw - 400) } };
+}
+
 /// Derived rollup view (contract 1 / P0-5). Never an identity key.
 pub const SemanticFamily = enum {
+    /// Rollup for every resident of the `using` carrier's sub space.
+    using_sub,
     add,
     add_brand,
     add_loc,
@@ -535,6 +576,25 @@ pub const SemanticFamily = enum {
 
 pub fn familyOf(form: LogicalOpcode) SemanticFamily {
     return switch (form) {
+        .using_create => .using_sub,
+        .using_dispose => .using_sub,
+        .using_dispose_throw => .using_sub,
+        .using_is_undefined => .using_sub,
+        .using_typeof_is_undefined => .using_sub,
+        .using_typeof_is_function => .using_sub,
+        .using_insert4 => .using_sub,
+        .using_rot5l => .using_sub,
+        .using_perm5 => .using_sub,
+        .using_dup2 => .using_sub,
+        .using_swap2 => .using_sub,
+        .using_rot3r => .using_sub,
+        .using_rot4l => .using_sub,
+        .using_dup3 => .using_sub,
+        .using_dup1 => .using_sub,
+        .using_check_ctor_return => .using_sub,
+        .using_set_proto => .using_sub,
+        .using_put_super_value => .using_sub,
+        .using_to_object => .using_sub,
         .invalid => .invalid,
         .push_i32 => .push_i32,
         .push_const => .push_const,

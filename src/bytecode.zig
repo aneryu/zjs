@@ -1167,7 +1167,7 @@ pub const opcode = struct {
         // halves one instruction set rather than two lists.
         var seen = [_]bool{false} ** 256;
         for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-            if (f.value >= 300) continue; // compiler-only form
+            if (f.value >= 300) continue; // compiler-only or cold-plane form
             if (f.value > 255)
                 @compileError("final logical form has a value outside the 8-bit id space");
             const id: u8 = @intCast(f.value);
@@ -1191,11 +1191,13 @@ pub const opcode = struct {
         // that actually ships, and it is why kind and width are separate
         // axes -- `loc8` is a local in one byte, `loc` a local in two.
         for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-            // Compiler-only forms carry logical ids at 300+, but their rows
-            // live at their physical temp id in the phase-1 view. Four of
-            // the operand overrides are temp forms (enter_scope,
-            // leave_scope, set_class_name, line_num), so skipping them here
-            // would leave a quarter of the override table unproven.
+            // Three ranges: final forms below 300 own a physical id;
+            // compiler-only forms at 300+ have their row at their temp id in
+            // the phase-1 view (four of the operand overrides are temp forms,
+            // so skipping them would leave a quarter of the override table
+            // unproven); cold-plane residents at 400+ own no id at all and
+            // are checked separately.
+            if (f.value >= 400) continue;
             const id: u8 = if (f.value >= 300)
                 op.op_temp_start + @as(u8, @intCast(f.value - 300))
             else
@@ -1234,6 +1236,7 @@ pub const opcode = struct {
         // format that is not must not be.
         for (logical.operand_overrides) |o| {
             const raw: u16 = @intFromEnum(o.form);
+            if (raw >= 400) @compileError("cold-plane form cannot use an operand override yet");
             const id: u8 = if (raw >= 300)
                 op.op_temp_start + @as(u8, @intCast(raw - 300))
             else
@@ -1318,6 +1321,35 @@ pub const opcode = struct {
                 @compileError("dyn_env_probe branch-edge height disagrees with contract 5a");
         }
 
+        // The declared cold-plane slot must be the slot the carrier actually
+        // uses. Without this the sixteen demoted opcodes are declared but
+        // unanchored, which is the same blindness the demotion caused in the
+        // first place -- a name in one place and a number in another.
+        for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            if (f.value < 400) continue;
+            const form: logical.LogicalOpcode = @enumFromInt(f.value);
+            const plane = logical.planeOf(form);
+            switch (plane) {
+                .sub => |sub| {
+                    if (sub.carrier != .using)
+                        @compileError("only the `using` carrier exists today");
+                    // The logical name is `using_<sub>`; the slot must match
+                    // the `using_sub` constant of that name.
+                    const bare = f.name["using_".len..];
+                    var matched = false;
+                    for (@typeInfo(using_sub).@"struct".decls) |d| {
+                        if (!std.mem.eql(u8, d.name, bare)) continue;
+                        if (@field(using_sub, d.name) != sub.slot)
+                            @compileError("declared cold-plane slot disagrees with using_sub");
+                        matched = true;
+                    }
+                    if (!matched)
+                        @compileError("cold-plane form names a sub that using_sub does not declare");
+                },
+                .main => @compileError("a 400+ logical id must be a cold-plane resident"),
+            }
+        }
+
         // P0-2 authority direction: the declaration states the burned-in
         // value and this checks `direct_id - base_id` against it. Never the
         // reverse -- an id that is aliased or moved to a carrier would leave
@@ -1352,13 +1384,21 @@ pub const opcode = struct {
         const counts = comptime blk: {
             var final_count: usize = 0;
             var temp_count: usize = 0;
+            var sub_count: usize = 0;
             for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
-                if (f.value >= 300) temp_count += 1 else final_count += 1;
+                if (f.value >= 400) sub_count += 1 else if (f.value >= 300) temp_count += 1 else final_count += 1;
             }
-            break :blk .{ .final = final_count, .temp = temp_count };
+            break :blk .{ .final = final_count, .temp = temp_count, .sub = sub_count };
         };
         try std.testing.expectEqual(@as(usize, 244), counts.final);
         try std.testing.expectEqual(@as(usize, 19), counts.temp);
+        // The `using` carrier's residents: three of its own operations plus
+        // the sixteen opcodes demoted into it. Declaring them is what keeps
+        // the demoted set inside the single source rather than outside it.
+        try std.testing.expectEqual(@as(usize, 19), counts.sub);
+        try std.testing.expectEqual(logical.SemanticFamily.using_sub, logical.familyOf(.using_set_proto));
+        try std.testing.expect(logical.planeOf(.using_set_proto) == .sub);
+        try std.testing.expect(logical.planeOf(.get_loc0) == .main);
         try std.testing.expectEqual(@as(u16, 244), physical.ledger.claimed);
 
         // Family is a rollup, never an identity: the width variants of one
