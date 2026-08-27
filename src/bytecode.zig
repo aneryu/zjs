@@ -8653,51 +8653,55 @@ pub const pipeline_stack_size = struct {
         pc: usize = 0,
         owner_index: usize = 0,
 
+        /// F0b: driven by the decoded header. The operand kinds carry what
+        /// this used to rediscover from the format, and the two closure-slot
+        /// arms collapse into one -- a `var_ref_slot` is a `var_ref_slot`
+        /// whether its value sits in a payload byte or in the opcode.
+        ///
+        /// The arm that went away is the one P0-2 rules out by name: the old
+        /// `none_var_ref` case recovered the slot as `op_id - get_var_ref0`,
+        /// deriving a semantic operand from the physical id. That derivation
+        /// loses its definition the moment an id is aliased or moved behind a
+        /// carrier, which is exactly what this work does to ids.
         fn validateKnownInstruction(
             self: *FinalArtifactValidator,
             bytecode: []const u8,
-            meta: *const opcode.CompactInfo,
+            h: opcode.decode.Header,
         ) Error!void {
-            const pos = self.pc;
-            const size: usize = meta.size;
-            if (size == 0 or size > bytecode.len - pos)
+            const size: usize = h.size;
+            if (size == 0 or size > bytecode.len - self.pc)
                 return error.InvalidFinalArtifact;
 
-            const has_atom = meta.fmt == .atom or meta.fmt == .atom_u8 or
-                meta.fmt == .atom_u16 or meta.fmt == .atom_label_u8 or
-                meta.fmt == .atom_label_u16;
-            if (has_atom) {
-                if (size < 5 or self.owner_index >= self.config.atom_owners.len)
-                    return error.InvalidFinalArtifact;
-                const encoded_atom = std.mem.readInt(u32, bytecode[pos + 1 ..][0..4], .little);
-                if (encoded_atom != self.config.atom_owners[self.owner_index])
-                    return error.InvalidFinalArtifact;
-                self.owner_index += 1;
-            }
-
-            switch (meta.fmt) {
-                .var_ref => {
-                    if (size < 3) return error.InvalidFinalArtifact;
-                    const idx = std.mem.readInt(u16, bytecode[pos + 1 ..][0..2], .little);
-                    if (idx >= self.config.closure_var_count)
-                        return error.InvalidFinalArtifact;
-                },
-                .none_var_ref => {
-                    const op_id = bytecode[pos];
-                    const idx: usize = switch (op_id) {
-                        opcode.op.get_var_ref0...opcode.op.get_var_ref3 => op_id - opcode.op.get_var_ref0,
-                        opcode.op.put_var_ref0...opcode.op.put_var_ref3 => op_id - opcode.op.put_var_ref0,
-                        opcode.op.set_var_ref0...opcode.op.set_var_ref3 => op_id - opcode.op.set_var_ref0,
-                        else => return error.InvalidFinalArtifact,
-                    };
-                    if (idx >= self.config.closure_var_count)
-                        return error.InvalidFinalArtifact;
-                },
-                else => {},
+            for (0..h.layout.len) |i| {
+                switch (h.layout.slots[i].kind) {
+                    .atom => {
+                        if (self.owner_index >= self.config.atom_owners.len)
+                            return error.InvalidFinalArtifact;
+                        const encoded = opcode.decode.operandAt(h, bytecode, i, u32) catch
+                            return error.InvalidFinalArtifact;
+                        if (encoded != self.config.atom_owners[self.owner_index])
+                            return error.InvalidFinalArtifact;
+                        self.owner_index += 1;
+                    },
+                    .var_ref_slot => {
+                        const idx = opcode.decode.operandAt(h, bytecode, i, u32) catch
+                            return error.InvalidFinalArtifact;
+                        if (idx >= self.config.closure_var_count)
+                            return error.InvalidFinalArtifact;
+                    },
+                    else => {},
+                }
             }
             self.pc += size;
         }
 
+        /// F0b behaviour change, deliberate: `headerAt` rejects an id that
+        /// the ledger says is reclaimed, where the old metadata lookup would
+        /// hand back the `unused_N` row and walk it as a one-byte
+        /// instruction. A reclaimed id must never appear in a final artifact
+        /// (11.5 clause 2), so failing validation is the correct reading; the
+        /// old path could have let one through.
+        ///
         /// Validate physical instructions before `limit`. Overshooting `limit`
         /// is intentional: a malformed jump into an operand remains the stack
         /// verifier's diagnosis, while the linear proof still consumes the
@@ -8708,9 +8712,9 @@ pub const pipeline_stack_size = struct {
             limit: usize,
         ) Error!void {
             while (self.pc < limit) {
-                const meta = opcode.finalCompactInfo(bytecode[self.pc]) orelse
+                const h = opcode.decode.headerAt(.final, bytecode, @intCast(self.pc)) catch
                     return error.InvalidFinalArtifact;
-                try self.validateKnownInstruction(bytecode, meta);
+                try self.validateKnownInstruction(bytecode, h);
             }
         }
 
@@ -8781,28 +8785,17 @@ pub const pipeline_stack_size = struct {
                 error.InvalidOpcode => return error.InvalidOpcode,
                 error.BytecodeOverflow => return error.BytecodeOverflow,
             };
-            var frontier_meta: ?*const opcode.CompactInfo = null;
             if (!final_artifact_invalid) {
                 if (final_validator) |*validator| {
                     validator.validateBefore(bytecode, pos) catch |err| switch (err) {
                         error.InvalidFinalArtifact => final_artifact_invalid = true,
                         else => return err,
                     };
-                    if (!final_artifact_invalid and validator.pc == pos) {
-                        // Let the stack verifier diagnose an invalid opcode.
-                        // On the valid production path this is still the one
-                        // metadata lookup shared by both proofs.
-                        frontier_meta = opcode.finalCompactInfo(h.encoding.direct);
-                    }
                 }
             }
             if (h.form == .invalid) return error.InvalidOpcode;
-            // The compact row is now needed only by the final-artifact
-            // validator, which is its own consumer with its own migration.
-            // Its id comes from the decoded header rather than a second read
-            // of the same byte.
-            const meta = frontier_meta orelse
-                (opcode.finalCompactInfo(h.encoding.direct) orelse return error.InvalidOpcode);
+            // Both proofs now share the one decoded header instead of a
+            // separately looked-up metadata row.
             const pos_next = h.next_pc;
 
             // Effects come from the declaration, not from a format switch
@@ -8841,7 +8834,7 @@ pub const pipeline_stack_size = struct {
             if (!final_artifact_invalid) {
                 if (final_validator) |*validator| {
                     if (validator.pc == pos) {
-                        validator.validateKnownInstruction(bytecode, meta) catch |err| switch (err) {
+                        validator.validateKnownInstruction(bytecode, h) catch |err| switch (err) {
                             error.InvalidFinalArtifact => final_artifact_invalid = true,
                             else => return err,
                         };

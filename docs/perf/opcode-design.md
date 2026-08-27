@@ -1890,7 +1890,7 @@ F0 是伞形前置，不是一笔 mega-diff。按 D4/D9 的批准粒度拆成六
 |---|---|---|---|
 | **F0a0** | **物理** opcode 表镜像、机械生成编号账、现表等价断言（不含 logical 层新概念） | 阶段 1（物理半） | **已批准，立即可做（D9）** |
 | **F0a1** | LogicalOpcode/Operand/Effects/fingerprint 声明 | 阶段 1（logical 半） | 暂缓；gate = 合同 1 + 不变量 5、6 |
-| **F0b** | `DecodedHeader`/`DecodedInstruction` 与全部 reader 迁移 | 阶段 2（reader） | **进行中**：decode 层已落地（`headerAt`/`operandAt`/`targetOfLabel`/`stackEffect`/`matchesFormAt`），第一个完整迁移的 consumer = `pipeline_stack_size`。gate = 合同 1、2 + 不变量 5 |
+| **F0b** | `DecodedHeader`/`DecodedInstruction` 与全部 reader 迁移 | 阶段 2（reader） | **进行中**：decode 层已落地（`headerAt`/`operandAt`/`targetOfLabel`/`stackEffect`/`matchesFormAt`），已完整迁移的 consumer = `pipeline_stack_size`、`FinalArtifactValidator`（两者现共用同一个 header）。gate = 合同 1、2 + 不变量 5 |
 | **F0c** | `selectFinalForm` + `planPhysicalEncoding` 与所有 final writer 收口；final carrier registry 与 synthetic final-carrier fixture | 阶段 2/3（writer） | 暂缓；gate = 合同 1、3、4 + 不变量 5 |
 | **F0d** | logical profiler sidecar（form 主键，D12）、runtime lookahead 迁移、raw-access CI gate | 阶段 2（runtime 切片） | 暂缓；gate = 合同 1、2 + 不变量 5 |
 | **F0e** | parser/lowered `compiler_ext`：u16 logical tag、per-logical payload decode | 阶段 3（独立于 C0 前置） | 设计方向已批（D9）；实现暂不开始，须在新增逻辑指令或 28 空闲检查点前落地；gate = 合同 1、2 + 不变量 5 |
