@@ -69,13 +69,14 @@ opcode 做 late-encoding 试点；试点通过后单独切换剩余声明派生�
 这一步也过门，才扩大候选池。
 
 **状态（owner 二轮复审 2026-08-27，D1–D12）**：架构原则**已批准**（D1）；
-**立即可实施的只有 R0 与 F0a0（物理表镜像、编号账、现表等价断言）**（D9）。
-F0a1（LogicalOpcode/Operand/Effects/fingerprint 声明）暂缓：**§10.8 尚未
-冻结**，必须先闭合四个基础模型——lowered form → final form（D10）、
+**R0 与 F0a0 已落地**（`6ea4c927` / `e9aaf765`，244/12）。**§10.8 已于
+2026-08-27 冻结**（P0-1…P0-6 + 不变量 5、6 逐条确认，外加合同 5a
+`Effects.branch_stack`），**F0a1 由此解除暂停并成为当前工作**。冻结前需
+先闭合的四个基础模型——lowered form → final form（D10）、
 logical operand → 物理编码（P0-2）、纯 spec → exec handler 绑定（P0-3）、
-物理槽位 alias/quarantine/free 生命周期（D11）。F0b–F0d 暂缓并按 §10.8
-的逐片 gate 评审；F0e 只批设计方向；C0 及以后继续暂停。裁决 4 的“暂停
-执行”仅对 R0/F0a0 解除。机器模型证据线（§6.2–§6.4、§9.2–§9.5）继续
+物理槽位 alias/quarantine/free 生命周期（D11）。F0b–F0d 仍按 §10.8 的逐片 gate 评审；
+F0e 只批设计方向；C0 及以后继续暂停。裁决 4 的“暂停执行”现对 R0/F0a0/
+F0a1 解除。机器模型证据线（§6.2–§6.4、§9.2–§9.5）继续
 缓议（D8），且不是本方案前置。
 
 ---
@@ -89,9 +90,9 @@ logical operand → 物理编码（P0-2）、纯 spec → exec handler 绑定（
 | 3 | qjs 代码级忠实对齐 | **降为工具**；qjs 仍是性能尺与差分参照，不约束内部编码 |
 | 4 | 增量回收 | **部分解除**：R0 与 F0a0 获准实施（D3/D9）；其余包按 §11.7 逐项开闸，不得把“目标确认”解读为整体实现授权 |
 | 5 | 架构复审 D1–D8（2026-08-27） | **已裁**，全文见 §11.7；§10.8 合同冻结是 F0a1+ 的硬前置（D2/D9） |
-| 6 | 二轮复审 D9–D12（2026-08-27） | **已裁**：F0a 收窄为 F0a0/F0a1；final form selection 与 physical encoding 拆分；alias 成为正式槽位状态；profile 以 form 为主键。**§10.8 判未冻结**——P0-1…P0-6 修订（已并入本文）经 owner 确认后才冻结 |
+| 6 | 二轮复审 D9–D12（2026-08-27） | **已裁**：F0a 收窄为 F0a0/F0a1；final form selection 与 physical encoding 拆分；alias 成为正式槽位状态；profile 以 form 为主键。**§10.8 已于 2026-08-27 冻结**——P0-1…P0-6 与不变量 5、6 经 owner 逐条确认，外加冻结时补入的合同 5a（`Effects.branch_stack`）。F0a1 由此解除暂停 |
 
-现行次序：**R0 ∥ F0a0 → §10.8 冻结（P0-1…P0-6 确认）→ F0a1 →
+现行次序：**R0 ✅ ∥ F0a0 ✅ → §10.8 冻结 ✅（2026-08-27）→ F0a1（当前）→
 F0b–F0d（逐片评审，gate 见 §10.8 末表）→ C0 → G0（§10 阶段 5 的声明源
 切换，净 0）→ C1 → 28 个空闲检查点（强制复盘）→（demand ledger 触发后）
 44 个空闲容量目标**。F0e 只批设计方向，实现后置到新增逻辑指令或 28 检查点
@@ -1672,7 +1673,15 @@ const LegacyEmbeddedEncoding = struct {
 const Effects = struct {
     // §10.8 不变量 5：这些缺省只是草案示意。可执行 row 逐项显式；迁移期
     // 由旧表生成 mirror，G0 后缺项编译失败（断言 16）。
+    /// fall-through 的栈效应。
     stack: StackEffectExpr,
+    /// 合同 5a（冻结时补入，owner 确认 2026-08-27）：**跳转边目标处的栈高
+    /// 相对 fall-through 的差**。绝大多数跳转在目标处与 fall-through 同高
+    /// （`null`），但实测有两条不是——`gosub` 是常量 +1，`dyn_env_probe`
+    /// 是取决于操作数的三值（read/delete +1、get_ref/make_ref +2、put −1）。
+    /// 冻结前的模型没有地方放它，F0a1/F0b 实现时必然撞上。复用同一套封闭
+    /// 表达式，因此是补充不是新机制。
+    branch_stack: ?StackEffectExpr = null,
     control: ControlFlow = .fallthrough,
     catch: CatchEffect = .none,
     continuation: bool = false,   // `ret` 可同时 terminal + continuation
@@ -1964,13 +1973,27 @@ artifact_cache_key =
 SER-ARTIFACT 的完整缓存有效性还需要两侧 semantic epoch 纪律，不得仅凭
 ISA 哈希宣称已解决。
 
-### 10.8 实施合同 addendum（D2/D9；**未冻结**）
+### 10.8 实施合同 addendum（D2/D9；**已冻结 2026-08-27**）
 
 一轮复审（D2）要求先补全并冻结本节，F0b 起的实现才获批。二轮复审
 （D9–D12）进一步裁定：本节由**四个核心 ABI 合同**加**两个跨切面不变量**
-组成（P1-4，不再笼统称“四个合同”）；本节判 **未冻结**——P0-1…P0-6 的
-修订已并入下文，owner 逐条确认后才冻结，冻结前 F0a1 亦不得开始。必须
-先闭合的四个基础模型：
+组成（P1-4，不再笼统称“四个合同”）。
+
+> **冻结记录（owner 确认 2026-08-27）**：P0-1…P0-6 与不变量 5、6 **逐条
+> 确认，本节冻结**，外加冻结前提出的一处补充——**`Effects` 增加
+> `branch_stack`**（见合同 5a）。**F0a1 由此解除暂停**；F0b–F0e 仍按本节
+> 末表逐片评审。冻结**不**解冻 C0 及以后、不承诺 44 空闲容量目标、不重开
+> 机器模型（D8 停议不变）。
+>
+> 确认时逐条核实的证据：P0-2 的 53 条（22%）零字节指令为本仓实测；P0-3
+> 的 import 方向为实测（49 个 `src/exec/*.zig` 导入 `bytecode.zig`，反向
+> 为 0，环成立）；P0-5 的同族冷热差为本仓普查（`push_const` 25,524 vs
+> `push_const8` 9,550,185）；P0-6 的封闭表达式充分性为实测（引擎中全部
+> 动态栈效应形态——`npop`/`npop_u16`/`npopx`/`using` sub/`dyn_env_probe`
+> ——均可归约为 `fixed`/`operand_table`/`affine`）；不变量 5 由 F0a0 实测
+> 的「嵌套容器惰性分析导致断言只在 test 构建开火」直接支持。
+
+必须先闭合的四个基础模型：
 
 ```
 lowered form    → final form                  （合同 3，D10）
@@ -2164,6 +2187,24 @@ key；carrier adapter key（`CarrierDecl.adapter_key`）与 direct key 分开。
 5. direct handler 与 carrier semantic helper 的分离逐条发生；
    `BuiltTable.keep`（回收槽位后保留 handler geometry）先例沿用。
 
+#### 合同 5a：跳转边栈高（冻结时补入，owner 确认 2026-08-27）
+
+冻结前的 `Effects` 只有 fall-through 的 `stack`，没有位置放**跳转边目标处
+的栈高**。扫过栈计算的全部 `seed` 调用后：8 条跳转（`goto`/`goto8`/
+`goto16`/`if_true`/`if_false`/`if_true8`/`if_false8`/`catch`）在目标处与
+fall-through 同高，但**两条不是**——
+
+| opcode | 目标处栈高 | 形态 |
+|---|---|---|
+| `gosub` | `stack_len + 1` | 常量 |
+| `dyn_env_probe` | +1 / +2 / −1 | **取决于操作数**（read/delete、get_ref/make_ref、put） |
+
+所以 `Effects` 增加 `branch_stack: ?StackEffectExpr`：`gosub` 是
+`fixed(+1)`，`dyn_env_probe` 是 `operand_table`，同高的跳转是 `null`。
+**复用 P0-6 的同一套封闭表达式，是补充不是新机制。**
+
+不补的后果是确定的：F0a1/F0b 实现时撞上，届时「已冻结」的合同要重开。
+
 #### 不变量 5：fail-closed —— 忘写声明必须编译失败
 
 `traits: Traits = .{}` 与 effect 隐式缺省会部分重现本文正在修的缺陷类：
@@ -2189,7 +2230,7 @@ emit + 全部 executable alias；完整 cache key 另需 producer/consumer
 
 | 片 | 需要冻结的合同/不变量 |
 |---|---|
-| F0a1 | 1、5、6 |
+| F0a1 | 1、5a、5、6 |
 | F0b | 1、2、5 |
 | F0c | 1、3、4、5 |
 | F0d | 1、2、5 |
