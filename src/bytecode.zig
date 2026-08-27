@@ -1185,6 +1185,65 @@ pub const opcode = struct {
                 @compileError("a claimed physical id has no final logical form");
         }
 
+        // Contract 1: operand declaration and physical row must agree on
+        // size. Payload widths sum to `size - 1`; burned-in operands add
+        // nothing. This is what proves the templates describe the encoding
+        // that actually ships, and it is why kind and width are separate
+        // axes -- `loc8` is a local in one byte, `loc` a local in two.
+        for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            // Compiler-only forms carry logical ids at 300+, but their rows
+            // live at their physical temp id in the phase-1 view. Four of
+            // the operand overrides are temp forms (enter_scope,
+            // leave_scope, set_class_name, line_num), so skipping them here
+            // would leave a quarter of the override table unproven.
+            const id: u8 = if (f.value >= 300)
+                op.op_temp_start + @as(u8, @intCast(f.value - 300))
+            else
+                @intCast(f.value);
+            const info = if (f.value >= 300) phase1Info(id).? else finalInfo(id).?;
+            const form: logical.LogicalOpcode = @enumFromInt(f.value);
+            const fmt: logical.Format = @enumFromInt(@intFromEnum(info.fmt));
+            const operands = logical.operandsOf(form, fmt);
+            var payload: usize = 0;
+            for (operands) |operand| {
+                switch (operand.source) {
+                    .payload => |pl| payload += switch (pl.width) {
+                        .u8, .i8 => 1,
+                        .u16, .i16 => 2,
+                        .u32, .i32 => 4,
+                    },
+                    .fixed => {},
+                }
+                // Assertion 15: addressing operands carry a dataflow
+                // direction, everything else must not pretend to.
+                const addressing = switch (operand.kind) {
+                    .local_slot, .arg_slot, .var_ref_slot => true,
+                    else => false,
+                };
+                if (addressing and operand.flow == null)
+                    @compileError("slot operand is missing its flow");
+                if (!addressing and operand.flow != null)
+                    @compileError("non-addressing operand declares a flow");
+            }
+            if (payload + 1 != info.size)
+                @compileError("declared operand widths do not sum to the physical row size");
+        }
+
+        // Invariant 5 applied to the override table: exactly one source of
+        // truth per form. A format that is ambiguous must be overridden; a
+        // format that is not must not be.
+        for (logical.operand_overrides) |o| {
+            const raw: u16 = @intFromEnum(o.form);
+            const id: u8 = if (raw >= 300)
+                op.op_temp_start + @as(u8, @intCast(raw - 300))
+            else
+                @intCast(raw);
+            const info = if (raw >= 300) phase1Info(id).? else finalInfo(id).?;
+            const fmt: logical.Format = @enumFromInt(@intFromEnum(info.fmt));
+            if (logical.operandTemplate(fmt) != null)
+                @compileError("operand override shadows an unambiguous format template");
+        }
+
         // P0-2 authority direction: the declaration states the burned-in
         // value and this checks `direct_id - base_id` against it. Never the
         // reverse -- an id that is aliased or moved to a carrier would leave

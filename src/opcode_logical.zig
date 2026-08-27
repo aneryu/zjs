@@ -898,3 +898,115 @@ pub const legacy_embedded: []const LegacyEmbeddedEncoding = &.{
     .{ .first = .get_loc2_field, .count = 1, .operand_index = 0, .base_value = 2 },
     .{ .first = .get_loc2_field2, .count = 1, .operand_index = 0, .base_value = 2 },
 };
+
+// ---------------------------------------------------------------------------
+// Operand templates (contract 1) — position and width come from the format,
+// kind does not.
+// ---------------------------------------------------------------------------
+
+/// For most formats the operand kinds follow from the format itself. For six
+/// of them they do not, and that is a fact about this instruction set rather
+/// than a modelling choice: `fmt = .u8` is a sub-opcode selector on `using`
+/// and a flags byte on `special_object`; `fmt = .u16` is a boolean on
+/// `apply`, a scope index on `enter_scope` and an argument slot on `rest`.
+/// Those formats return null here and MUST be supplied by
+/// `operand_overrides`; the join in bytecode.zig asserts every form has
+/// exactly one of the two, never both and never neither (invariant 5).
+pub fn operandTemplate(fmt: Format) ?[]const Operand {
+    return switch (fmt) {
+        .none => &.{},
+        // Burned-in operands: zero payload bytes, value from `legacy_embedded`.
+        .none_int => &.{.{ .kind = .imm, .source = .{ .fixed = 0 } }},
+        .none_loc => &.{.{ .kind = .local_slot, .flow = .read_write, .source = .{ .fixed = 0 } }},
+        .none_arg => &.{.{ .kind = .arg_slot, .flow = .read_write, .source = .{ .fixed = 0 } }},
+        .none_var_ref => &.{.{ .kind = .var_ref_slot, .flow = .read_write, .source = .{ .fixed = 0 } }},
+        .npopx => &.{.{ .kind = .count, .source = .{ .fixed = 0 } }},
+
+        // Payload operands. Width and kind are orthogonal: `loc8` is a local
+        // in one byte, `loc` is a local in two.
+        .loc8 => &.{.{ .kind = .local_slot, .flow = .read_write, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }},
+        .loc => &.{.{ .kind = .local_slot, .flow = .read_write, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }},
+        .arg => &.{.{ .kind = .arg_slot, .flow = .read_write, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }},
+        .var_ref => &.{.{ .kind = .var_ref_slot, .flow = .read_write, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }},
+        .const8 => &.{.{ .kind = .constant, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }},
+        .@"const" => &.{.{ .kind = .constant, .source = .{ .payload = .{ .index = 0, .width = .u32 } } }},
+        .label8 => &.{.{ .kind = .label, .source = .{ .payload = .{ .index = 0, .width = .i8 } } }},
+        .label16 => &.{.{ .kind = .label, .source = .{ .payload = .{ .index = 0, .width = .i16 } } }},
+        .label => &.{.{ .kind = .label, .source = .{ .payload = .{ .index = 0, .width = .i32 } } }},
+        .atom => &.{.{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } }},
+        .npop => &.{.{ .kind = .count, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }},
+        .i8 => &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .i8 } } }},
+        .i16 => &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .i16 } } }},
+        .i32 => &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .i32 } } }},
+        .npop_u16 => &.{
+            .{ .kind = .count, .source = .{ .payload = .{ .index = 0, .width = .u16 } } },
+            .{ .kind = .imm, .source = .{ .payload = .{ .index = 1, .width = .u16 } } },
+        },
+        .atom_u8 => &.{
+            .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
+            .{ .kind = .flags, .source = .{ .payload = .{ .index = 1, .width = .u8 } } },
+        },
+        .atom_u16 => &.{
+            .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
+            .{ .kind = .imm, .source = .{ .payload = .{ .index = 1, .width = .u16 } } },
+        },
+        .atom_label_u8 => &.{
+            .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
+            .{ .kind = .label, .source = .{ .payload = .{ .index = 1, .width = .i32 } } },
+            .{ .kind = .flags, .source = .{ .payload = .{ .index = 2, .width = .u8 } } },
+        },
+        .atom_label_u16 => &.{
+            .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
+            .{ .kind = .label, .source = .{ .payload = .{ .index = 1, .width = .i32 } } },
+            .{ .kind = .imm, .source = .{ .payload = .{ .index = 2, .width = .u16 } } },
+        },
+        .label_u16 => &.{
+            .{ .kind = .label, .source = .{ .payload = .{ .index = 0, .width = .i32 } } },
+            .{ .kind = .imm, .source = .{ .payload = .{ .index = 1, .width = .u16 } } },
+        },
+
+        // Ambiguous by format; see `operand_overrides`.
+        .u8, .u16, .u32 => null,
+    };
+}
+
+pub const OperandOverride = struct { form: LogicalOpcode, operands: []const Operand };
+
+/// The eighteen forms whose operand kind does not follow from the format.
+/// Every kind here was read out of the implementation rather than inferred
+/// from the name -- the recurring failure in this work has been treating a
+/// name as a design.
+pub const operand_overrides: []const OperandOverride = &.{
+    // fmt u8
+    .{ .form = .using, .operands = &.{.{ .kind = .sub_opcode, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }} },
+    .{ .form = .special_object, .operands = &.{.{ .kind = .flags, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }} },
+    .{ .form = .copy_data_properties, .operands = &.{.{ .kind = .flags, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }} },
+    .{ .form = .define_method_computed, .operands = &.{.{ .kind = .flags, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }} },
+    .{ .form = .iterator_call, .operands = &.{.{ .kind = .flags, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }} },
+    // `for_of_next` reads a stack depth, not a flag set (iterator_ops.zig:575).
+    .{ .form = .for_of_next, .operands = &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }} },
+
+    // fmt u16
+    // `apply`/`apply_eval` read `is_new`, a boolean (vm_call.zig:909).
+    .{ .form = .apply, .operands = &.{.{ .kind = .flags, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }} },
+    .{ .form = .apply_eval, .operands = &.{.{ .kind = .flags, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }} },
+    // `rest` reads `first_arg_idx` -- an argument slot, read-only
+    // (vm_literal.zig:499).
+    .{ .form = .rest, .operands = &.{.{ .kind = .arg_slot, .flow = .read, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }} },
+    .{ .form = .enter_scope, .operands = &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }} },
+    .{ .form = .leave_scope, .operands = &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }} },
+
+    // fmt u32
+    .{ .form = .line_num, .operands = &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .u32 } } }} },
+    // Compiler-only marker patched back into the earlier define_class
+    // (parser.zig:14573); the operand is a position, not an atom.
+    .{ .form = .set_class_name, .operands = &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .u32 } } }} },
+};
+
+pub fn operandsOf(form: LogicalOpcode, fmt: Format) []const Operand {
+    for (operand_overrides) |o| {
+        if (o.form == form) return o.operands;
+    }
+    return operandTemplate(fmt) orelse
+        @panic("form has an ambiguous format and no operand override");
+}
