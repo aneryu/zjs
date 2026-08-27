@@ -1139,6 +1139,109 @@ pub const opcode = struct {
         }
     };
 
+    /// F0a1 (§10.8 合同 1 + 5a、不变量 5/6；gate 见 §10.8 末表): the logical
+    /// half of the declaration source lives in `src/opcode_logical.zig`,
+    /// which imports nothing from here so the dependency stays
+    /// exec -> bytecode -> logical (P0-3). This block is the join: it proves
+    /// the logical declaration and the physical table describe the same
+    /// instruction set.
+    pub const logical = @import("opcode_logical.zig");
+
+    comptime {
+        @setEvalBranchQuota(40000);
+
+        // Format mirror agrees field for field. Ownership of Format moves to
+        // the declaration source at G0; until then a reorder here must break
+        // the build rather than silently re-map every operand template.
+        const mine = @typeInfo(Format).@"enum".fields;
+        const theirs = @typeInfo(logical.Format).@"enum".fields;
+        if (mine.len != theirs.len)
+            @compileError("logical.Format has a different field count than opcode.Format");
+        for (mine, theirs) |a, b| {
+            if (!std.mem.eql(u8, a.name, b.name) or a.value != b.value)
+                @compileError("logical.Format disagrees with opcode.Format field for field");
+        }
+
+        // Every final logical form names a claimed physical id, and every
+        // claimed id has exactly one final form. This is what makes the two
+        // halves one instruction set rather than two lists.
+        var seen = [_]bool{false} ** 256;
+        for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            if (f.value >= 300) continue; // compiler-only form
+            if (f.value > 255)
+                @compileError("final logical form has a value outside the 8-bit id space");
+            const id: u8 = @intCast(f.value);
+            if (physical.stateOf(id) != .claimed)
+                @compileError("final logical form names an id that is not claimed");
+            const info = finalInfo(id).?;
+            if (!std.mem.eql(u8, info.name, f.name))
+                @compileError("final logical form and physical row disagree on the name");
+            if (seen[id]) @compileError("two final logical forms claim the same id");
+            seen[id] = true;
+        }
+        for (0..256) |raw| {
+            const id: u8 = @intCast(raw);
+            if (physical.stateOf(id) == .claimed and !seen[id])
+                @compileError("a claimed physical id has no final logical form");
+        }
+
+        // P0-2 authority direction: the declaration states the burned-in
+        // value and this checks `direct_id - base_id` against it. Never the
+        // reverse -- an id that is aliased or moved to a carrier would leave
+        // the reverse derivation undefined.
+        for (logical.legacy_embedded) |run| {
+            const base_id: u16 = @intFromEnum(run.first);
+            if (base_id >= 300) @compileError("legacy embedded run starts at a compiler-only form");
+            var k: u8 = 0;
+            while (k < run.count) : (k += 1) {
+                const id: u16 = base_id + k;
+                if (id > 255) @compileError("legacy embedded run leaves the id space");
+                const member_id: u8 = @intCast(id);
+                if (physical.stateOf(member_id) != .claimed)
+                    @compileError("legacy embedded run covers an unclaimed id");
+                // direct_id - base_id must equal the declared step.
+                if (@as(i33, id) - @as(i33, base_id) != @as(i33, k))
+                    @compileError("legacy embedded run is not contiguous");
+                // Contiguity alone is too weak: ids 195..203 are get_loc0..3
+                // then put_loc0..3, so a run declared four too long stays
+                // claimed and contiguous while silently spilling into the
+                // next family. Verified by injection -- without this check
+                // `get_loc0 count = 9` compiles clean.
+                const member: logical.LogicalOpcode = @enumFromInt(member_id);
+                if (logical.familyOf(member) != logical.familyOf(run.first))
+                    @compileError("legacy embedded run spills into another semantic family");
+            }
+        }
+    }
+
+    test "logical forms and physical rows are one instruction set" {
+        // 263 forms: 244 final (one per claimed id) plus 19 compiler-only.
+        const counts = comptime blk: {
+            var final_count: usize = 0;
+            var temp_count: usize = 0;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                if (f.value >= 300) temp_count += 1 else final_count += 1;
+            }
+            break :blk .{ .final = final_count, .temp = temp_count };
+        };
+        try std.testing.expectEqual(@as(usize, 244), counts.final);
+        try std.testing.expectEqual(@as(usize, 19), counts.temp);
+        try std.testing.expectEqual(@as(u16, 244), physical.ledger.claimed);
+
+        // Family is a rollup, never an identity: the width variants of one
+        // family must share it while remaining distinct forms.
+        try std.testing.expectEqual(logical.SemanticFamily.get_loc, logical.familyOf(.get_loc0));
+        try std.testing.expectEqual(logical.SemanticFamily.get_loc, logical.familyOf(.get_loc8));
+        try std.testing.expectEqual(logical.SemanticFamily.get_loc, logical.familyOf(.get_loc));
+        try std.testing.expect(logical.LogicalOpcode.get_loc0 != logical.LogicalOpcode.get_loc8);
+
+        // The rollup must not collapse the frequency asymmetry that makes it
+        // unusable as an identity key (push_const 25,524 vs push_const8
+        // 9,550,185 in the census).
+        try std.testing.expectEqual(logical.familyOf(.push_const), logical.familyOf(.push_const8));
+        try std.testing.expect(logical.LogicalOpcode.push_const != logical.LogicalOpcode.push_const8);
+    }
+
     test "physical ledger is derived, not asserted by hand" {
         // The three facts the roadmap and the design documents quote. They are
         // pinned here so a reclaim lands as one declaration edit and the
