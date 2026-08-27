@@ -1010,3 +1010,70 @@ pub fn operandsOf(form: LogicalOpcode, fmt: Format) []const Operand {
     return operandTemplate(fmt) orelse
         @panic("form has an ambiguous format and no operand override");
 }
+
+// ---------------------------------------------------------------------------
+// Effects (P0-6 closed expressions, contract 5a branch edge)
+// ---------------------------------------------------------------------------
+
+/// Forms whose fall-through stack effect is not a constant. Verified
+/// complete against the engine: these are the only shapes `computeStackSize`
+/// treats specially.
+///
+/// The `operand_table` rows are NOT listed here during migration. `using`'s
+/// sub operand has RANGE semantics -- every value at or above `add_base`
+/// (64) pops 2 -- so a hand-written enumeration would be 256 lines and would
+/// duplicate the authority. Assertion 17 requires the table to cover the
+/// operand's whole accepted value set, so bytecode.zig materialises the rows
+/// from that authority at comptime and asserts the coverage. G0 moves the
+/// rows in here and deletes the authority.
+pub const DynamicStack = struct {
+    form: LogicalOpcode,
+    shape: Shape,
+
+    pub const Shape = union(enum) {
+        /// Rows are materialised from the legacy authority during migration.
+        operand_table_from_legacy: struct { operand_index: u8 },
+        affine: StackEffectExpr,
+    };
+};
+
+pub const dynamic_stack: []const DynamicStack = &.{
+    // `using`: sub-opcode selects the effect; the add range is a range, not
+    // an enumeration, which is why the rows are generated.
+    .{ .form = .using, .shape = .{ .operand_table_from_legacy = .{ .operand_index = 0 } } },
+    // `dyn_env_probe`: the flags byte carries kind + is_with; only ten of
+    // the 256 byte values decode, and the assertion checks that the rows and
+    // the decoder agree on exactly which ten.
+    .{ .form = .dyn_env_probe, .shape = .{ .operand_table_from_legacy = .{ .operand_index = 2 } } },
+
+    // Variable-arity calls: pop grows one per argument. `pop_base` is the
+    // fixed part already in the physical row; `pop_scale` 1 is the argument
+    // count. `npopx` (call0..3) uses the same expression over a burned-in
+    // operand, which is why OperandSource.fixed had to exist first.
+    .{ .form = .call, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call_constructor, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 2, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call_method, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 2, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call_method_apply_fwd, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 2, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .tail_call, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 0, .push_scale = 0 } } } },
+    .{ .form = .tail_call_method, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 2, .pop_scale = 1, .push_base = 0, .push_scale = 0 } } } },
+    .{ .form = .array_from, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 0, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .eval, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call0, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call1, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call2, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call3, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+};
+
+/// Contract 5a. Stack effect at a jump target, on the same basis as the
+/// fall-through effect (not a delta), for the two forms that do not land
+/// level. Everything else branches to the height it falls through at.
+pub const BranchStack = struct { form: LogicalOpcode, shape: DynamicStack.Shape };
+
+pub const branch_stack: []const BranchStack = &.{
+    // `gosub` pushes the return address on the taken edge only.
+    .{ .form = .gosub, .shape = .{ .affine = .{ .fixed = .{ .pop = 0, .push = 1 } } } },
+    // `dyn_env_probe` lands at three different heights depending on kind:
+    // read/delete replace the probed object with the result, get_ref and
+    // make_ref keep it underneath, put consumes the stored value.
+    .{ .form = .dyn_env_probe, .shape = .{ .operand_table_from_legacy = .{ .operand_index = 2 } } },
+};

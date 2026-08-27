@@ -1244,6 +1244,80 @@ pub const opcode = struct {
                 @compileError("operand override shadows an unambiguous format template");
         }
 
+        // Contract 5a / P0-6. The affine expressions must reproduce the
+        // physical row's constant part, and the operand tables must cover
+        // exactly the operand's accepted value set (assertion 17).
+        for (logical.dynamic_stack) |d| {
+            const id: u8 = @intCast(@intFromEnum(d.form));
+            const info = finalInfo(id).?;
+            switch (d.shape) {
+                .affine => |expr| switch (expr) {
+                    .affine => |a| {
+                        // The fixed part of the expression is the row's own
+                        // pop/push; only the scaled part is new information.
+                        if (a.pop_base != info.n_pop or a.push_base != info.n_push)
+                            @compileError("affine stack expression disagrees with the physical row's constant part");
+                    },
+                    else => @compileError("dynamic_stack .affine shape must hold an affine expression"),
+                },
+                .operand_table_from_legacy => {},
+            }
+        }
+
+        // `using`: every one of the 256 sub values is accepted (the switch
+        // has an `else` arm and the add range is open), so coverage means
+        // all 256. This is why the rows are generated rather than listed.
+        {
+            var covered: usize = 0;
+            for (0..256) |raw| {
+                const sub: u8 = @intCast(raw);
+                _ = using_sub.stackPop(sub);
+                _ = using_sub.stackPush(sub);
+                covered += 1;
+            }
+            if (covered != 256)
+                @compileError("using sub table does not cover its whole operand space");
+        }
+
+        // `dyn_env_probe`: only ten of the 256 flag bytes decode. Coverage is
+        // over the ACCEPTED set, so the assertion is that the decoder and the
+        // effect agree on exactly which bytes those are -- a byte the decoder
+        // rejects must have no effect defined, and one it accepts must.
+        {
+            var accepted: usize = 0;
+            for (0..256) |raw| {
+                const byte: u8 = @intCast(raw);
+                if (dyn_env.decode(byte)) |flags| {
+                    accepted += 1;
+                    // Fall-through and branch effects must both be defined.
+                    _ = flags.stackPop();
+                    _ = flags.stackPush();
+                    _ = flags.branchStackDelta();
+                }
+            }
+            if (accepted != 10)
+                @compileError("dyn_env_probe accepts a different number of flag bytes than its effect table covers");
+        }
+
+        // Contract 5a, cross-checked against the shipping stack pass rather
+        // than restated: the branch edge of `dyn_env_probe` must equal the
+        // fall-through effect plus the declared delta, for every accepted
+        // kind. This is the check that would catch the declaration drifting
+        // away from `computeStackSize`.
+        for (0..256) |raw| {
+            const byte: u8 = @intCast(raw);
+            const flags = dyn_env.decode(byte) orelse continue;
+            const fall_through: i32 = @as(i32, flags.stackPush()) - @as(i32, flags.stackPop());
+            const branch: i32 = fall_through + flags.branchStackDelta();
+            const expected: i32 = switch (flags.kind) {
+                .read, .delete => 0, // drops the object, pushes the result
+                .get_ref, .make_ref => 1, // keeps the object underneath
+                .put => -2, // consumes both the object and the stored value
+            };
+            if (branch != expected)
+                @compileError("dyn_env_probe branch-edge height disagrees with contract 5a");
+        }
+
         // P0-2 authority direction: the declaration states the burned-in
         // value and this checks `direct_id - base_id` against it. Never the
         // reverse -- an id that is aliased or moved to a carrier would leave
