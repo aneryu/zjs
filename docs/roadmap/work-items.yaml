@@ -177,12 +177,12 @@ items:
     hard_prerequisites: []
     authority: {file: docs/engine-evolution-plan.md, section: "5"}
   - id: PERF-OPCODE-SPACE
-    title: Opcode namespace plan (wide/prefix planes, versioning, shared generator, decode A/B)
+    title: Opcode set redesign (whole instruction set, informed by V8/JSC/Hermes) + namespace/versioning plan
     type: spec
     state: now
     wip_slot: decision
     hard_prerequisites: []
-    notes: "consumers = FN-M1A, PERF-T1, CALL_NATIVE_*/typed families, SER-ARTIFACT opcode versioning. Two design inputs landed 2026-08-27: docs/perf/opcode-space-survey.md (extension vs reclaim mechanisms; V8/JSC prefix planes extend OPERAND WIDTH not numbering) and docs/perf/opcode-audit.md (per-opcode audit of all 251 against four engines). Ruling: reclaim, V8 pattern. Reclaimed so far: 9 ids (245 used / 11 free, from 254/2) -- 42, 16, 76, 72, 111 by demotion into the `using` cold plane, and 114-117 by the with_* merge (5 opcodes -> one `dyn_env_probe` carrying the operation in a kind field it already had room for; zero byte cost, zero dispatch cost; suite 2365/0 + test262 0/49778). Merging is a third mechanism alongside extension and demotion, documented in opcode-space-survey.md 8.7; its precondition (handlers already shared, compiler already holds the distinction as a value, spare operand bits) was verified to fail for the super and class-naming families. Audit headline: zjs spends 43 ids on seven families where the other three engines spend 0-4, and four of those families execute exactly 0 times in 41.9e9 (TDZ variants 9, Reference materialisation 6, with-specific access 5, super 4); the ~26-id estimate was superseded 2026-08-27 by a full per-family verification against the code (opcode-audit.md 12-14): of six families one held exactly, two had their numbers cut, two had the wrong mechanism (super and class naming are demotions, not redesigns) and one was void. Revised: 13 ids from three genuine variant merges (with_* DONE 4; make_*_ref 3; TDZ ~6 at ~70 edit sites) plus 13 by demotion"
+    notes: "OWNER RULING 2026-08-27 (second): rescoped from a numbering/namespace plan to a redesign of the instruction set as a whole, taking V8/JSC/Hermes as references, and raised to the highest-priority prerequisite. Incremental reclaim EXECUTION IS PAUSED at 9 ids (the with_* merge was the last landed change); the remaining reclaim list stays valid as input but is not to be executed until the redesign settles, because a whole-set redesign may make individual merges moot or reshape them. Everything downstream that encodes, compiles, serializes or hand-writes opcodes now hard-depends on this item. || consumers = FN-M1A, PERF-T1, CALL_NATIVE_*/typed families, SER-ARTIFACT opcode versioning. Two design inputs landed 2026-08-27: docs/perf/opcode-space-survey.md (extension vs reclaim mechanisms; V8/JSC prefix planes extend OPERAND WIDTH not numbering) and docs/perf/opcode-audit.md (per-opcode audit of all 251 against four engines). Ruling: reclaim, V8 pattern. Reclaimed so far: 9 ids (245 used / 11 free, from 254/2) -- 42, 16, 76, 72, 111 by demotion into the `using` cold plane, and 114-117 by the with_* merge (5 opcodes -> one `dyn_env_probe` carrying the operation in a kind field it already had room for; zero byte cost, zero dispatch cost; suite 2365/0 + test262 0/49778). Merging is a third mechanism alongside extension and demotion, documented in opcode-space-survey.md 8.7; its precondition (handlers already shared, compiler already holds the distinction as a value, spare operand bits) was verified to fail for the super and class-naming families. Audit headline: zjs spends 43 ids on seven families where the other three engines spend 0-4, and four of those families execute exactly 0 times in 41.9e9 (TDZ variants 9, Reference materialisation 6, with-specific access 5, super 4); the ~26-id estimate was superseded 2026-08-27 by a full per-family verification against the code (opcode-audit.md 12-14): of six families one held exactly, two had their numbers cut, two had the wrong mechanism (super and class naming are demotions, not redesigns) and one was void. Revised: 13 ids from three genuine variant merges (with_* DONE 4; make_*_ref 3; TDZ ~6 at ~70 edit sites) plus 13 by demotion"
     authority: {file: docs/type-directed-optimization-plan.md, section: "F4 / opcode space"}
   - id: PERF-SHAPE-ID
     title: Shape identity dual-domain contract (mutable u64 per-Runtime counter; pinned-pointer for immutable typed shapes)
@@ -228,7 +228,7 @@ items:
     state: gated
     wip_slot: implementation
     activation: {all: [{item: G1-FEEDBACK, verdict_not: disabled}]}
-    hard_prerequisites: [PERF-SHAPE-ID, PERF-SIDECAR]
+    hard_prerequisites: [PERF-SHAPE-ID, PERF-SIDECAR, PERF-OPCODE-SPACE]
     notes: acceptance checklist also requires the 08-17 IC-refutation reconciliation and the GC-line joint review
     authority: {file: docs/engine-evolution-plan.md, section: "6"}
   - id: PERF-JIT
@@ -240,7 +240,7 @@ items:
       all:
         - {item: G1-JIT, verdict: eligible}
         - {item: BACKEND-ORDER, verdict_not: both_later}
-    hard_prerequisites: [PERF-VMABI]
+    hard_prerequisites: [PERF-VMABI, PERF-OPCODE-SPACE]
     notes: PERF-P05 and PERF-TYPED-IR are optional enhancements, not hard prerequisites
     authority: {file: docs/engine-evolution-plan.md, section: "8"}
   - id: PERF-AOT
@@ -259,7 +259,7 @@ items:
     type: implementation
     state: incubator
     wip_slot: none
-    hard_prerequisites: []
+    hard_prerequisites: [PERF-OPCODE-SPACE]
     notes: "activation: iOS execution window opens + GC representation stable"
     authority: {file: docs/engine-evolution-plan.md, section: "7"}
   - id: PERF-ASM-1B
@@ -329,7 +329,7 @@ items:
     type: implementation
     state: blocked
     wip_slot: implementation
-    hard_prerequisites: [SER-CORE]
+    hard_prerequisites: [SER-CORE, PERF-OPCODE-SPACE]
     acceptance: round-trip property tests + fuzz + hot-reload test rows; feeds Build Cache
     authority: {file: docs/fun-dev-hot-reload-design.md, section: "27.10"}
   - id: SER-SNAPSHOT

@@ -95,12 +95,13 @@ G1-JIT + G1-AOT -> BACKEND-ORDER
 GC-P3 -> G2-GC-MERGE
 PERF-VMABI -> PERF-JIT-SPIKE
 PERF-TYPED-IR + PERF-SHAPE-ID + PERF-OPCODE-SPACE -> PERF-T1
-PERF-SHAPE-ID + PERF-SIDECAR -> PERF-P05
-PERF-VMABI -> PERF-JIT
+PERF-SHAPE-ID + PERF-SIDECAR + PERF-OPCODE-SPACE -> PERF-P05
+PERF-VMABI + PERF-OPCODE-SPACE -> PERF-JIT
 PERF-TYPED-IR + PERF-VMABI -> PERF-AOT
+PERF-OPCODE-SPACE -> PERF-ASM-1A
 PERF-ASM-1A + GC-MERGE -> PERF-ASM-1B
 VM-CONTRACT-GC -> GC-MERGE
-SER-CORE -> SER-ARTIFACT
+SER-CORE + PERF-OPCODE-SPACE -> SER-ARTIFACT
 SER-CORE -> SER-SNAPSHOT
 SER-CORE + SER-TRANSFER -> SER-MESSAGE
 HR-P1 + RT-LIFECYCLE -> HR-P2A
@@ -234,9 +235,16 @@ G1-LIGHT-PROCESS-WORKLOAD。
 
 **Now(遵守 §4 WIP)**
 ```
-owner-decision: PERF-OPCODE-SPACE(driver 会话)。FN-M0F 已裁并冻结
-                (2026-08-26,FNABI v0.8+表示契约 v2);FN-M1A 只剩等
-                PERF-OPCODE-SPACE
+owner-decision: PERF-OPCODE-SPACE(driver 会话)**已升为最高优先级
+                前置项**(owner 裁决 2026-08-27 第二次):范围从
+                「编号/命名空间方案」扩为**整套指令集重新设计**,参照
+                V8/JSC/Hermes。⏸ **增量回收执行暂停**,停在 9 个编号
+                (with_* 合并是最后一笔已落地改动);剩余回收清单仍作
+                输入保留,但在重设计定案前不执行——整套重设计可能让
+                单项合并作废或改变其形态。下游凡是编码/编译/序列化/
+                手写 opcode 的项现在都硬依赖本项:PERF-T1、FN-M1A、
+                PERF-P05、PERF-JIT、PERF-ASM-1A、SER-ARTIFACT。
+                FN-M0F 已裁并冻结(2026-08-26,FNABI v0.8+表示契约 v2)
 implementation: GC-P3(GC 专属会话,分支 gc/tracing,不碰 main);
                 PERF-T-SPIKE **重开**(driver 会话):08-26 的 FAIL 判定
                 08-27 撤回——受控 demo 证明首轮负载(混浮点)会完全
@@ -274,8 +282,9 @@ JIT/AOT 双 eligible 时按产品价值排序:
   − 体积/构建时间/边界成本/平台限制
 ```
 
-**并行可启(WIP 有空位)**:SER-CORE、PERF-SIDECAR、
-PERF-OPCODE-SPACE、DBG-W2、PROC-D5A、RT-LIFECYCLE。
+**并行可启(WIP 有空位)**:SER-CORE、PERF-SIDECAR、DBG-W2、
+PROC-D5A、RT-LIFECYCLE。(PERF-OPCODE-SPACE 已不在此列——它占
+owner-decision 槽且是最高优先级前置项,见上。)
 
 **Later**:SER 三 profile 下游、FN-M1A→M1B/M1C、HR-P2A/P2B/P3、
 PROC-D3→D4→D6、G2-GC-MERGE→VM-CONTRACT-GC→GC-MERGE→PROC-D7、
