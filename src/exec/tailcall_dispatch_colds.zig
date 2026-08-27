@@ -430,11 +430,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             _ = try vm_property_ref.withPut(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
-    t[op.to_object] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try vm_value.toObjectVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global);
-        }
-    }.b);
 
     // --- fields / private / array_el / super ---
     inline for ([_]u8{ op.get_field, op.get_field2, op.put_field }) |o| t[o] = h_field;
@@ -463,11 +458,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.get_super_value] = h(struct {
         fn b(vm: *Vm) HostError!void {
             _ = try object_ops.getSuperValue(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
-        }
-    }.b);
-    t[op.put_super_value] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try object_ops.putSuperValue(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
     t[op.get_length] = h(struct {

@@ -175,7 +175,6 @@ pub const opcode = struct {
         pub const get_array_el3: u8 = 69;
         pub const put_array_el: u8 = 70;
         pub const get_super_value: u8 = 71;
-        pub const put_super_value: u8 = 72;
         pub const define_field: u8 = 73;
         pub const set_name: u8 = 74;
         pub const set_name_computed: u8 = 75;
@@ -213,7 +212,6 @@ pub const opcode = struct {
         pub const gosub: u8 = 108;
         pub const ret: u8 = 109;
         pub const nip_catch: u8 = 110;
-        pub const to_object: u8 = 111;
         pub const to_propkey: u8 = 112;
         pub const with_get_var: u8 = 113;
         pub const with_put_var: u8 = 114;
@@ -448,6 +446,8 @@ pub const opcode = struct {
         /// docs/perf/opcode-space-survey.md §7.
         pub const check_ctor_return: u8 = 15;
         pub const set_proto: u8 = 16;
+        pub const put_super_value: u8 = 17;
+        pub const to_object: u8 = 18;
 
         /// Add-resource hints occupy everything from here up, so the free
         /// sub-slots are the gap below it. Raised from 16 to 64 to open that
@@ -482,6 +482,8 @@ pub const opcode = struct {
                 dup1 => 2,
                 check_ctor_return => 1,
                 set_proto => 2,
+                put_super_value => 4,
+                to_object => 1,
                 else => 0,
             };
         }
@@ -500,6 +502,8 @@ pub const opcode = struct {
                 dup1 => 3,
                 check_ctor_return => 2,
                 set_proto => 1,
+                put_super_value => 0,
+                to_object => 1,
                 else => 0,
             };
         }
@@ -582,7 +586,7 @@ pub const opcode = struct {
         .{ .name = "get_array_el3", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [69] id 69
         .{ .name = "put_array_el", .size = 1, .n_pop = 3, .n_push = 0, .fmt = .none }, // [70] id 70
         .{ .name = "get_super_value", .size = 1, .n_pop = 3, .n_push = 1, .fmt = .none }, // [71] id 71
-        .{ .name = "put_super_value", .size = 1, .n_pop = 4, .n_push = 0, .fmt = .none }, // [72] id 72
+        .{ .name = "unused_72", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [72] id 72 -- RECLAIMED 2026-08-27 (cold plane; 3/3 engines have no super-write opcode), available
         .{ .name = "define_field", .size = 5, .n_pop = 2, .n_push = 1, .fmt = .atom }, // [73] id 73
         .{ .name = "set_name", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [74] id 74
         .{ .name = "set_name_computed", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [75] id 75
@@ -621,7 +625,7 @@ pub const opcode = struct {
         .{ .name = "gosub", .size = 5, .n_pop = 0, .n_push = 0, .fmt = .label }, // [108] id 108
         .{ .name = "ret", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none }, // [109] id 109
         .{ .name = "nip_catch", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [110] id 110
-        .{ .name = "to_object", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [111] id 111
+        .{ .name = "unused_111", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [111] id 111 -- RECLAIMED 2026-08-27 (cold plane), available
         .{ .name = "to_propkey", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [112] id 112
         .{ .name = "with_get_var", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [113] id 113
         .{ .name = "with_put_var", .size = 10, .n_pop = 2, .n_push = 1, .fmt = .atom_label_u8 }, // [114] id 114
@@ -10209,7 +10213,6 @@ const function_mod = struct {
                 opcode.op.return_async,
                 opcode.op.get_super,
                 opcode.op.get_super_value,
-                opcode.op.put_super_value,
                 opcode.op.get_private_field,
                 opcode.op.put_private_field,
                 opcode.op.define_private_field,
@@ -10231,6 +10234,18 @@ const function_mod = struct {
                 opcode.op.tail_call,
                 opcode.op.tail_call_method,
                 => return false,
+                // Cold-plane carrier: a demoted opcode is invisible to an
+                // identity match, so the scanner has to look at the sub byte.
+                // Demoting an opcode into the plane silently widens every
+                // scanner that pattern-matches on opcode identity unless this
+                // is kept in step (docs/perf/opcode-audit.md).
+                opcode.op.using => {
+                    if (pc + 1 >= code.len) return false;
+                    switch (code[pc + 1]) {
+                        opcode.using_sub.put_super_value => return false,
+                        else => {},
+                    }
+                },
                 else => {},
             }
             pc += size;

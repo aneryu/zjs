@@ -14,6 +14,7 @@ const stack_mod = @import("stack.zig");
 const call_runtime = @import("call_runtime.zig");
 const disposable_ops = @import("disposable_ops.zig");
 const promise_ops = @import("promise_ops.zig");
+const object_ops = @import("object_ops.zig");
 const vm_call = @import("vm_call.zig");
 const vm_literal = @import("vm_literal.zig");
 const vm_value = @import("vm_value.zig");
@@ -89,6 +90,14 @@ pub noinline fn execVm(
         bytecode.opcode.using_sub.dispose_throw => disposeStackVm(ctx, output, global, stack, frame, catch_target, .throw),
         // Cold-plane reclamation (opcode-space survey §7): zero executions
         // in the benchmark suite, so the second-level branch is free.
+        bytecode.opcode.using_sub.put_super_value => {
+            _ = try object_ops.putSuperValue(ctx, output, global, stack, function, frame, catch_target);
+            return .done;
+        },
+        bytecode.opcode.using_sub.to_object => {
+            _ = try vm_value.toObjectVm(ctx, output, stack, frame, catch_target, global);
+            return .done;
+        },
         bytecode.opcode.using_sub.set_proto => {
             try vm_literal.setProto(ctx, stack);
             return .done;

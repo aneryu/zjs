@@ -5032,7 +5032,7 @@ pub const parser_core = struct {
             .super_value => {
                 // qjs put_lvalue (quickjs.c:26187-26189): store through the
                 // preserved super receiver/base/key triple.
-                try emitterOpNoSource(s, opcode.op.put_super_value);
+                try emitterOpU8NoSource(s, opcode.op.using, opcode.using_sub.put_super_value);
             },
         }
     }
@@ -8083,6 +8083,13 @@ pub const parser_core = struct {
     /// v2 mirror of `State.emitOpU8` (marker'd).
     fn emitterOpU8(s: *State, op_id: u8, val: u8) Error!void {
         s.builderEmitOpU8(op_id, val) catch |err| return mapBuilderError(err);
+    }
+
+    /// `emitterOpNoSource` counterpart for the cold plane: a carrier opcode
+    /// plus its sub byte, with no source marker (the demoted opcode had none).
+    fn emitterOpU8NoSource(s: *State, op_id: u8, val: u8) Error!void {
+        s.activeBuilder().emitOpU8(op_id, val) catch |err| return mapBuilderError(err);
+        s.builderRecordPlainControl(op_id) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpU16` (marker'd).
@@ -11540,7 +11547,7 @@ pub const parser_core = struct {
         };
         // qjs TOK_WITH lowering (quickjs.c:29553-29570): coerce the
         // expression and store the with-object binding at the same source.
-        try Emitter.op(s, opcode.op.to_object);
+        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.to_object);
         try Emitter.opU16(s, opcode.op.put_loc, with_idx);
 
         const saved_with_atom = s.active_with_atom;
@@ -13940,7 +13947,7 @@ pub const parser_core = struct {
 
     fn parseObjectPatternBody(s: *State, mode: PatternMode, has_rest: bool) Error!void {
         try s.expectToken('{');
-        try Emitter.op(s, opcode.op.to_object);
+        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.to_object);
         if (has_rest) {
             try Emitter.op(s, opcode.op.object);
             try Emitter.op(s, opcode.op.swap);
