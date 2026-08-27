@@ -8,8 +8,8 @@ pub const max_captures = 255;
 const register_count_max = 255;
 pub const max_exec_slots = max_captures * 2 + register_count_max;
 pub const small_exec_slots = 64;
-const static_bt_frame_count = 16;
-const static_undo_count = 32;
+const static_bt_frame_count: usize = 64;
+const static_undo_count: usize = 64;
 const interrupt_counter_init = 10000;
 
 pub const flags = struct {
@@ -71,7 +71,9 @@ pub const ExecOptions = struct {
     check_timeout: ?CheckTimeout = null,
 };
 
-const REBytecodeHeader = struct {
+const REBytecodeHeader = Header;
+
+pub const Header = struct {
     flags: u16,
     capture_count: usize,
     register_count: usize,
@@ -177,10 +179,19 @@ const ExecSafety = enum {
     trusted,
 };
 
+const ExecReadError = error{BytecodeCorrupt};
+
+fn ReadRet(comptime safety: ExecSafety, comptime T: type) type {
+    return if (safety == .trusted) T else ExecReadError!T;
+}
+
 const REExecStateEnum = enum(u3) {
     split,
     lookahead,
     negative_lookahead,
+    // One frame covers a greedy class8/not_class8 run: restore to `cptr`,
+    // then re-push a shorter candidate while `cptr` is still above `min_cptr`.
+    greedy_shrink,
 };
 
 const no_slot_value = std.math.maxInt(usize);
@@ -190,6 +201,7 @@ const REBTFrame = extern struct {
     pc_off: u32,
     cptr: u32,
     undo_top: u32,
+    min_cptr: u32,
     typ: u8,
 };
 
@@ -399,6 +411,10 @@ pub const Compiled = struct {
         self.bytecode = &.{};
     }
 
+    pub fn header(self: Compiled) ?Header {
+        return parseHeader(self.bytecode) catch null;
+    }
+
     pub fn captureCount(self: Compiled) usize {
         return captureCountFromBytecode(self.bytecode);
     }
@@ -575,7 +591,10 @@ fn execCaptureSlotsParsed(
     @memset(capture[0..alloc_count], no_slot_value);
     const bytecode_end = header_len + header.bytecode_len;
     const matched = switch (cbuf_type) {
-        .latin1 => try lreExecBacktrack(safety, .latin1, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr),
+        .latin1 => if (comptime safety == .trusted)
+            try @call(.always_inline, lreExecBacktrack, .{ safety, .latin1, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr })
+        else
+            try lreExecBacktrack(safety, .latin1, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr),
         .utf16_units => try lreExecBacktrack(safety, .utf16_units, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr),
         .utf16_unicode => try lreExecBacktrack(safety, .utf16_unicode, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr),
     };
@@ -609,6 +628,12 @@ const ExecState = struct {
     undo_len: usize,
     undo_end: usize,
     cbuf_end: usize,
+    greedy_pending: bool,
+    greedy_pc: [*]const u8,
+    greedy_cptr: usize,
+    greedy_min: usize,
+    greedy_undo: usize,
+    greedy_bt_len: usize,
 
     fn init(
         s: *REExecContext,
@@ -640,6 +665,12 @@ const ExecState = struct {
             .undo_len = 0,
             .undo_end = s.undo_stack.len,
             .cbuf_end = s.cbuf_end,
+            .greedy_pending = false,
+            .greedy_pc = bc_ptr,
+            .greedy_cptr = 0,
+            .greedy_min = 0,
+            .greedy_undo = 0,
+            .greedy_bt_len = 0,
         };
     }
 
@@ -750,6 +781,46 @@ const ExecState = struct {
         return @bitCast(try self.getU32(safety));
     }
 
+    inline fn takeU8(self: *ExecState, comptime safety: ExecSafety) ReadRet(safety, u8) {
+        if (comptime safety == .trusted) {
+            const value = self.pc[0];
+            self.pc += 1;
+            return value;
+        }
+        return self.getU8(.checked);
+    }
+
+    inline fn takeU16(self: *ExecState, comptime safety: ExecSafety) ReadRet(safety, u16) {
+        if (comptime safety == .trusted) {
+            const value = std.mem.readInt(u16, self.pc[0..2], .little);
+            self.pc += 2;
+            return value;
+        }
+        return self.getU16(.checked);
+    }
+
+    inline fn takeU32(self: *ExecState, comptime safety: ExecSafety) ReadRet(safety, u32) {
+        if (comptime safety == .trusted) {
+            const value = std.mem.readInt(u32, self.pc[0..4], .little);
+            self.pc += 4;
+            return value;
+        }
+        return self.getU32(.checked);
+    }
+
+    inline fn takeI32(self: *ExecState, comptime safety: ExecSafety) ReadRet(safety, i32) {
+        if (comptime safety == .trusted) return @bitCast(self.takeU32(.trusted));
+        return self.getI32(.checked);
+    }
+
+    inline fn takePc(self: *ExecState, comptime safety: ExecSafety, offset: i32) ReadRet(safety, [*]const u8) {
+        if (comptime safety == .trusted) {
+            const delta: usize = @bitCast(@as(isize, offset));
+            return @ptrFromInt(@intFromPtr(self.pc) +% delta);
+        }
+        return self.pcWithOffset(.checked, offset);
+    }
+
     inline fn compactIndex(comptime safety: ExecSafety, value: usize) !u32 {
         if (comptime safety == .checked) {
             if (value >= compact_no_slot_value) return error.BytecodeCorrupt;
@@ -787,7 +858,7 @@ const ExecState = struct {
 
     inline fn frameType(comptime safety: ExecSafety, frame: REBTFrame) !REExecStateEnum {
         if (comptime safety == .checked) {
-            if (frame.typ > @intFromEnum(REExecStateEnum.negative_lookahead)) return error.BytecodeCorrupt;
+            if (frame.typ > @intFromEnum(REExecStateEnum.greedy_shrink)) return error.BytecodeCorrupt;
         }
         return @enumFromInt(frame.typ);
     }
@@ -799,9 +870,77 @@ const ExecState = struct {
             .pc_off = try self.pcOffset(safety, pc),
             .cptr = try compactIndex(safety, self.cptr),
             .undo_top = undo_top,
+            .min_cptr = 0,
             .typ = @intFromEnum(typ),
         };
         self.bt_len += 1;
+    }
+
+    inline fn pushGreedyShrink(
+        self: *ExecState,
+        comptime safety: ExecSafety,
+        pc: [*]const u8,
+        cptr: usize,
+        min_cptr: usize,
+        undo_top: usize,
+    ) !void {
+        try self.checkFrameSpace(safety, 1);
+        self.bt_frames[self.bt_len] = .{
+            .pc_off = try self.pcOffset(safety, pc),
+            .cptr = try compactIndex(safety, cptr),
+            .undo_top = try compactIndex(safety, undo_top),
+            .min_cptr = try compactIndex(safety, min_cptr),
+            .typ = @intFromEnum(REExecStateEnum.greedy_shrink),
+        };
+        self.bt_len += 1;
+    }
+
+    inline fn armGreedyShrink(
+        self: *ExecState,
+        comptime safety: ExecSafety,
+        pc: [*]const u8,
+        cptr: usize,
+        min_cptr: usize,
+    ) !void {
+        if (self.greedy_pending) {
+            try self.pushGreedyShrink(safety, self.greedy_pc, self.greedy_cptr, self.greedy_min, self.greedy_undo);
+        }
+        self.greedy_pending = true;
+        self.greedy_pc = pc;
+        self.greedy_cptr = cptr;
+        self.greedy_min = min_cptr;
+        self.greedy_undo = self.undo_len;
+        self.greedy_bt_len = self.bt_len;
+    }
+
+    inline fn greedyStepBack(
+        self: *const ExecState,
+        comptime safety: ExecSafety,
+        comptime cbuf_type: CbufType,
+        cptr: usize,
+        min_cptr: usize,
+    ) ?usize {
+        if (comptime cbuf_type == .latin1) return cptr - 1;
+        var prev = cptr;
+        _ = self.getPrevCharAtBounded(safety, cbuf_type, &prev, min_cptr) orelse return null;
+        return prev;
+    }
+
+    inline fn applyGreedyPending(self: *ExecState, comptime safety: ExecSafety, comptime cbuf_type: CbufType) !bool {
+        if (!self.greedy_pending or self.bt_len != self.greedy_bt_len) return false;
+        try self.restoreUndoTo(safety, self.greedy_undo);
+        self.pc = self.greedy_pc;
+        self.cptr = self.greedy_cptr;
+        // One in-place shrink, then park the rest as a stack chain and clear
+        // pending. Leaving pending armed lets a later `*` consume given-back
+        // chars as extra iterations (test262 S15.10.2.8_A3_T32/T33).
+        if (self.cptr > self.greedy_min) {
+            if (self.greedyStepBack(safety, cbuf_type, self.cptr, self.greedy_min)) |prev| {
+                try self.pushGreedyShrink(safety, self.greedy_pc, prev, self.greedy_min, self.greedy_undo);
+            }
+        }
+        self.greedy_pending = false;
+        return true;
     }
 
     inline fn saveCapture(self: *ExecState, comptime safety: ExecSafety, idx: usize, value: usize) !void {
@@ -1063,6 +1202,16 @@ const ExecState = struct {
         return false;
     }
 
+    inline fn class8Consumes(bitmap: [*]const u8, inverted: bool, code_point: u21) bool {
+        const in_class = class8CodePointMatches(bitmap, code_point);
+        return if (inverted) !in_class else in_class;
+    }
+
+    inline fn class8ConsumesByte(bitmap: [*]const u8, inverted: bool, byte: u8) bool {
+        const in_class = byte < class8_char_count and class8BitmapContains(bitmap, byte);
+        return if (inverted) !in_class else in_class;
+    }
+
     inline fn scanGreedyClass8(
         self: *ExecState,
         comptime safety: ExecSafety,
@@ -1072,33 +1221,51 @@ const ExecState = struct {
         min: u8,
         continuation_pc: [*]const u8,
     ) !bool {
-        var count: usize = 0;
-        var last_candidate: ?usize = if (min == 0) self.cptr else null;
-        while (self.cptr < self.cbuf_end) {
+        var remaining_min: u8 = min;
+        while (remaining_min > 0) {
+            if (self.cptr >= self.cbuf_end) return false;
             const before = self.cptr;
             const c = self.getCharUnchecked(cbuf_type);
-            const matched = class8CodePointMatches(bitmap, c);
-            if (if (inverted) matched else !matched) {
+            if (!class8Consumes(bitmap, inverted, c)) {
                 self.cptr = before;
-                break;
+                return false;
             }
-            count += 1;
-            if (count >= min) {
-                const after = self.cptr;
-                if (last_candidate) |candidate| {
-                    self.cptr = candidate;
-                    try self.pushExecState(safety, continuation_pc, .split);
-                    self.cptr = after;
+            remaining_min -= 1;
+        }
+        const min_pos = self.cptr;
+
+        if (comptime cbuf_type == .latin1) {
+            var cptr = self.cptr;
+            const end = self.cbuf_end;
+            const input = self.cbuf;
+            while (cptr < end) {
+                if (!class8ConsumesByte(bitmap, inverted, input[cptr])) break;
+                cptr += 1;
+                if (cptr & 0xff == 0) try self.s.pollTimeout();
+            }
+            self.cptr = cptr;
+        } else {
+            var scanned: usize = 0;
+            while (self.cptr < self.cbuf_end) {
+                const before = self.cptr;
+                const c = self.getCharUnchecked(cbuf_type);
+                if (!class8Consumes(bitmap, inverted, c)) {
+                    self.cptr = before;
+                    break;
                 }
-                last_candidate = after;
+                scanned += 1;
+                if (scanned == 256) {
+                    scanned = 0;
+                    try self.s.pollTimeout();
+                }
             }
-            try self.s.pollTimeout();
         }
-        if (last_candidate) |candidate| {
-            self.cptr = candidate;
-            return true;
+
+        if (self.cptr > min_pos) {
+            const prev = self.greedyStepBack(safety, cbuf_type, self.cptr, min_pos) orelse return error.BytecodeCorrupt;
+            try self.armGreedyShrink(safety, continuation_pc, prev, min_pos);
         }
-        return false;
+        return true;
     }
 
     inline fn matchRawForward(self: *ExecState, comptime safety: ExecSafety, comptime cbuf_type: CbufType, start: usize, end: usize) bool {
@@ -1150,7 +1317,7 @@ fn lreExecBacktrack(
 
     main: while (true) {
         dispatch_once: {
-            const opcode_byte = try st.getU8(safety);
+            const opcode_byte: u8 = if (comptime safety == .trusted) st.takeU8(.trusted) else try st.takeU8(.checked);
             const opcode = if (comptime safety == .trusted)
                 @as(REOPCodeEnum, @enumFromInt(opcode_byte))
             else
@@ -1159,6 +1326,7 @@ fn lreExecBacktrack(
                 .invalid => return error.BytecodeCorrupt,
                 .match => return true,
                 .lookahead_match => {
+                    st.greedy_pending = false;
                     while (true) {
                         if (st.bt_len == 0) return error.BytecodeCorrupt;
                         const frame = try st.popFrameKeepUndo(safety);
@@ -1169,6 +1337,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .negative_lookahead_match => {
+                    st.greedy_pending = false;
                     while (true) {
                         if (st.bt_len == 0) return error.BytecodeCorrupt;
                         const frame = try st.popFrameRestore(safety);
@@ -1177,7 +1346,7 @@ fn lreExecBacktrack(
                     break :dispatch_once;
                 },
                 .char32, .char32_i => {
-                    const expected = try st.getU32(safety);
+                    const expected = if (comptime safety == .trusted) st.takeU32(.trusted) else try st.takeU32(.checked);
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
                     var c = st.getCharUnchecked(cbuf_type);
                     if (opcode == .char32_i) {
@@ -1187,7 +1356,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .char, .char_i => {
-                    const expected: u32 = try st.getU16(safety);
+                    const expected: u32 = if (comptime safety == .trusted) st.takeU16(.trusted) else try st.takeU16(.checked);
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
                     var c = st.getCharUnchecked(cbuf_type);
                     if (opcode == .char_i) {
@@ -1197,23 +1366,23 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .split_goto_first, .split_next_first => {
-                    const offset = try st.getI32(safety);
+                    const offset = if (comptime safety == .trusted) st.takeI32(.trusted) else try st.takeI32(.checked);
                     const pc1 = if (opcode == .split_next_first)
-                        try st.pcWithOffset(safety, offset)
+                        if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset)
                     else
                         st.pc;
-                    if (opcode == .split_goto_first) st.pc = try st.pcWithOffset(safety, offset);
+                    if (opcode == .split_goto_first) st.pc = if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset);
                     try st.pushExecState(safety, pc1, .split);
                     continue :main;
                 },
                 .lookahead, .negative_lookahead => {
-                    const offset = try st.getI32(safety);
-                    try st.pushExecState(safety, try st.pcWithOffset(safety, offset), if (opcode == .lookahead) .lookahead else .negative_lookahead);
+                    const offset = if (comptime safety == .trusted) st.takeI32(.trusted) else try st.takeI32(.checked);
+                    try st.pushExecState(safety, if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset), if (opcode == .lookahead) .lookahead else .negative_lookahead);
                     continue :main;
                 },
                 .goto_ => {
-                    const offset = try st.getI32(safety);
-                    st.pc = try st.pcWithOffset(safety, offset);
+                    const offset = if (comptime safety == .trusted) st.takeI32(.trusted) else try st.takeI32(.checked);
+                    st.pc = if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset);
                     try st.s.pollTimeout();
                     continue :main;
                 },
@@ -1269,14 +1438,14 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .scan_until_char8 => {
-                    const needle = try st.getU8(safety);
-                    const offset = try st.getI32(safety);
+                    const needle = if (comptime safety == .trusted) st.takeU8(.trusted) else try st.takeU8(.checked);
+                    const offset = if (comptime safety == .trusted) st.takeI32(.trusted) else try st.takeI32(.checked);
                     if (!st.scanUntilChar8(cbuf_type, needle)) break :dispatch_once;
-                    st.pc = try st.pcWithOffset(safety, offset);
+                    st.pc = if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset);
                     continue :main;
                 },
                 .loop_class8_g, .loop_not_class8_g => {
-                    const min = try st.getU8(safety);
+                    const min = if (comptime safety == .trusted) st.takeU8(.trusted) else try st.takeU8(.checked);
                     if (min > 1) return error.BytecodeCorrupt;
                     try st.ensurePc(safety, st.pc, class8_bitmap_len);
                     const bitmap = st.pc;
@@ -1285,7 +1454,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .save_start, .save_end => {
-                    const val = try st.getU8(safety);
+                    const val = if (comptime safety == .trusted) st.takeU8(.trusted) else try st.takeU8(.checked);
                     if (comptime safety == .checked) {
                         if (val >= st.s.capture_count) return error.BytecodeCorrupt;
                     }
@@ -1335,7 +1504,7 @@ fn lreExecBacktrack(
                     const next_value = value - 1;
                     try st.saveCaptureCheck(safety, st.registerSlot(reg), next_value);
                     if (next_value != 0) {
-                        st.pc = try st.pcWithOffset(safety, offset);
+                        st.pc = if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset);
                         try st.s.pollTimeout();
                     }
                     continue :main;
@@ -1359,7 +1528,7 @@ fn lreExecBacktrack(
                     const next_value = value - 1;
                     try st.saveCaptureCheck(safety, st.registerSlot(reg), next_value);
                     if (next_value > limit) {
-                        st.pc = try st.pcWithOffset(safety, offset);
+                        st.pc = if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset);
                         try st.s.pollTimeout();
                     } else {
                         if (needs_advance_check and st.capture[st.registerSlot(@as(usize, reg) + 1)] == st.cptr and next_value != limit) {
@@ -1367,10 +1536,10 @@ fn lreExecBacktrack(
                         }
                         if (next_value != 0) {
                             const pc1 = if (opcode == .loop_split_next_first or opcode == .loop_check_adv_split_next_first)
-                                try st.pcWithOffset(safety, offset)
+                                if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset)
                             else
                                 st.pc;
-                            if (opcode == .loop_split_goto_first or opcode == .loop_check_adv_split_goto_first) st.pc = try st.pcWithOffset(safety, offset);
+                            if (opcode == .loop_split_goto_first or opcode == .loop_check_adv_split_goto_first) st.pc = if (comptime safety == .trusted) st.takePc(.trusted, offset) else try st.takePc(.checked, offset);
                             try st.pushExecState(safety, pc1, .split);
                         }
                     }
@@ -1413,7 +1582,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .back_reference, .back_reference_i, .backward_back_reference, .backward_back_reference_i => {
-                    const n = try st.getU8(safety);
+                    const n = if (comptime safety == .trusted) st.takeU8(.trusted) else try st.takeU8(.checked);
                     const pc1 = st.pc;
                     try st.ensurePc(safety, st.pc, n);
                     st.pc += @as(usize, n);
@@ -1472,7 +1641,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .range, .range_i => {
-                    const n = try st.getU16(safety);
+                    const n = if (comptime safety == .trusted) st.takeU16(.trusted) else try st.takeU16(.checked);
                     if (n == 0) return error.BytecodeCorrupt;
                     try st.ensurePc(safety, st.pc, @as(usize, n) * 4);
                     range_match: {
@@ -1505,7 +1674,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .range32, .range32_i => {
-                    const n = try st.getU16(safety);
+                    const n = if (comptime safety == .trusted) st.takeU16(.trusted) else try st.takeU16(.checked);
                     if (n == 0) return error.BytecodeCorrupt;
                     try st.ensurePc(safety, st.pc, @as(usize, n) * 8);
                     range32_match: {
@@ -1545,10 +1714,22 @@ fn lreExecBacktrack(
             continue :main;
         }
 
+        if (try st.applyGreedyPending(safety, cbuf_type)) {
+            try st.s.pollTimeout();
+            continue :main;
+        }
+
         while (true) {
             if (st.bt_len == 0) return false;
             const frame = try st.popFrameRestore(safety);
-            if (try ExecState.frameType(safety, frame) != .lookahead) break;
+            const typ = try ExecState.frameType(safety, frame);
+            if (typ == .lookahead) continue;
+            if (typ == .greedy_shrink and st.cptr > frame.min_cptr) {
+                if (st.greedyStepBack(safety, cbuf_type, st.cptr, frame.min_cptr)) |prev| {
+                    try st.pushGreedyShrink(safety, st.pc, prev, frame.min_cptr, st.undo_len);
+                }
+            }
+            break;
         }
         try st.s.pollTimeout();
         continue :main;

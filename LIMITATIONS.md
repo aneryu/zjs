@@ -88,6 +88,12 @@ are supported within the local validation boundary. CommonJS `require`,
 `node_modules` resolution, package exports/import maps, and hybrid Node-style
 module loading are not supported.
 
+## Regular Expressions
+
+Match-array captures are still eager copies (QuickJS `js_sub_string`), not
+zero-copy views. Short latin1 slices (length 2..32) may be interned and
+reused; longer slices and UTF-16 still allocate a fresh copy.
+
 ## Proper Tail Calls
 
 - Proper tail calls are **strict-mode only** (per ES2015 14.6) and cover

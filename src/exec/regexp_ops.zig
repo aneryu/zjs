@@ -2,7 +2,7 @@
 //!
 //! Receiver and argument values are borrowed; returned JSValues are owned, and
 //! temporary source/flag strings plus compiled buffers are released locally.
-//! The matching engine remains in `libs/regexp.zig`; VM/string observable
+//! The matching engine is `libs/regexp.zig`; VM/string observable
 //! integration stays behind `regexp_fastpath.zig` and `string_ops.zig` rather
 //! than being folded into these builtin bodies. QuickJS mappings include the
 //! constructor at quickjs.c:47728, flags access at quickjs.c:47943, and
@@ -649,8 +649,6 @@ test "constructCompiled roots string source while creating regexp object" {
     source_value.free(rt);
 }
 
-/// Pattern/flags early-error validation lives in `libs/regexp.zig`
-/// (QuickJS: `js_compile_regexp` flag parsing plus `lre_compile`).
 pub const compilePatternAndFlags = regexp_lib.compilePatternAndFlags;
 
 fn invalidUnicodeEscape(pattern: []const u8, index: *usize, in_class: bool) bool {
@@ -982,7 +980,7 @@ fn regexpObjectFromValue(value: core.JSValue) ?*core.Object {
 }
 
 /// QuickJS source map: selected RegExp.prototype methods currently covered by
-/// smoke and parser lowering. Matching is still owned by libs/regexp.zig.
+/// smoke and parser lowering. Matching is owned by libs/regexp.zig.
 pub fn methodCall(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, arg: ?core.JSValue) !core.JSValue {
     _ = arg;
     const object = try expectRegExpObject(object_value);

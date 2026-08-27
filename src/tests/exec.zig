@@ -6552,6 +6552,27 @@ test "proxy revocation target is internal" {
     try std.testing.expectEqualStrings("false\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\ndone\n", stream.buffered());
 }
 
+test "nested greedy class8 captures last inner run" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var t32 = /^(([a-z]+)*[a-z]\.)+[a-z]{2,}$/.exec("www.netscape.com");
+        \\print(t32[0] + "|" + t32[1] + "|" + t32[2]);
+        \\var t33 = /^(([a-z]+)*([a-z])\.)+[a-z]{2,}$/.exec("www.netscape.com");
+        \\print(t33[0] + "|" + t33[1] + "|" + t33[2] + "|" + t33[3]);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "www.netscape.com|netscape.|netscap\nwww.netscape.com|netscape.|netscap|e\n",
+        stream.buffered(),
+    );
+}
+
 test "regexp accessor realm TypeError constructor is internal" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -11661,6 +11682,27 @@ test "flagless RegExp flags accessor reuses the runtime empty string" {
     try std.testing.expectEqual(allocations, rt.memory.allocation_count);
 }
 
+test "stringSliceValue reuses interned latin1 captures" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const parent = try core.string.String.createLatin1(rt, "xxaaa");
+    defer parent.value().free(rt);
+
+    const first = try engine.exec.string_ops.stringSliceValue(rt, parent.value(), 2, 3);
+    defer first.free(rt);
+    try std.testing.expect(first.asStringBody().?.eqlBytes("aaa"));
+    const allocations = rt.memory.allocation_count;
+    const second = try engine.exec.string_ops.stringSliceValue(rt, parent.value(), 2, 3);
+    defer second.free(rt);
+    try std.testing.expectEqual(first.asStringBody().?, second.asStringBody().?);
+    try std.testing.expectEqual(allocations, rt.memory.allocation_count);
+
+    const whole = try engine.exec.string_ops.stringSliceValue(rt, parent.value(), 0, 5);
+    defer whole.free(rt);
+    try std.testing.expectEqual(parent, whole.asStringBody().?);
+}
+
 test "RegExp exec result template preserves metadata groups and indices" {
     try helpers.expectPrints(
         \\var plain = /a/.exec("ba");
@@ -11669,6 +11711,48 @@ test "RegExp exec result template preserves metadata groups and indices" {
         \\print([named.length, named[0], named[1], named.index, named.input, named.groups.word,
         \\       named.indices[0][0], named.indices[0][1], named.indices.groups.word[0], named.indices.groups.word[1]].join("|"));
     , "1|a|1|ba|true\n2|a|a|1|ba|a|1|2|1|2\n");
+}
+
+test "RegExp dot matches UTF-16 subjects above Latin-1" {
+    try helpers.expectPrints(
+        \\var pair = "\uD834\uDF06";
+        \\var unit = /./.exec(pair);
+        \\print(unit[0].length, unit[0].charCodeAt(0).toString(16));
+        \\var point = /./u.exec(pair);
+        \\print(point[0].length, point.index, point[0].charCodeAt(0).toString(16), point[0].charCodeAt(1).toString(16));
+        \\var han = /./.exec("\u4E2D");
+        \\print(han[0], han[0].length);
+        \\print(/./u.exec("a")[0]);
+    , "1 d834\n" ++
+        "2 0 d834 df06\n" ++
+        "中 1\n" ++
+        "a\n");
+}
+
+test "RegExp exec reuses interpreter state across repeated matches" {
+    try helpers.expectPrints(
+        \\var re = /a+/;
+        \\var n = 0;
+        \\for (var i = 0; i < 256; i++) {
+        \\  var hit = re.exec("xxaaa");
+        \\  if (hit && hit[0] === "aaa" && hit.index === 2) n++;
+        \\  re.lastIndex = 0;
+        \\  if (re.exec("xyz")) n = -1;
+        \\  re.lastIndex = 0;
+        \\}
+        \\print(n, /a+/.exec("") === null, /(?:)/.exec("")[0] === "");
+    , "256 true true\n");
+}
+
+test "RegExp exec reuses capture strings across repeated URL matches" {
+    try helpers.expectPrints(
+        \\var re = /(((\w+):\/\/)([^\/:]*)(:(\d+))?)?([^#?]*)(\?([^#]*))?(#(.*))?/;
+        \\var s = "http://www.google.com/search?q=zjs#frag";
+        \\var a = re.exec(s);
+        \\var b = re.exec(s);
+        \\print([a[0], a[3], a[4], a[7], a[9], a[11], a[5] === undefined].join("|"));
+        \\print(a[4] === b[4] && a[7] === b[7] && a[11] === b[11]);
+    , "http://www.google.com/search?q=zjs#frag|http|www.google.com|/search|q=zjs|frag|true\ntrue\n");
 }
 
 test "RegExp compiler stack overflow is a catchable SyntaxError" {

@@ -808,6 +808,8 @@ test "public API surface snapshot matches the checked-in name lists" {
     // JSRuntime is likewise a public type with a deliberately broad internal
     // surface. Pin its declaration count so additions and removals require an
     // explicit contract update instead of passing silently.
+    // 168 -> 169 on 2026-08-25: `recentLatin1Slice`, the short-latin1 intern
+    // used by `stringSliceValue` for repeated RegExp match-array captures.
     const jsruntime_decl_count = @typeInfo(zjs.JSRuntime).@"struct".decls.len;
-    try std.testing.expectEqual(@as(usize, 168), jsruntime_decl_count);
+    try std.testing.expectEqual(@as(usize, 169), jsruntime_decl_count);
 }

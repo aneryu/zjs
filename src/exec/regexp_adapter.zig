@@ -6,18 +6,18 @@
 
 const core = @import("../core/root.zig");
 const regexp_lib = @import("../libs/regexp.zig");
-const regexp_bytecode = regexp_lib;
 const std = @import("std");
 
-pub const max_captures = regexp_bytecode.max_captures;
-pub const max_exec_slots = regexp_bytecode.max_exec_slots;
-pub const small_exec_slots = regexp_bytecode.small_exec_slots;
-pub const flag_bits = regexp_bytecode.flags;
-pub const Capture = regexp_bytecode.Capture;
-pub const Match = regexp_bytecode.Match;
-pub const ExecStatus = regexp_bytecode.ExecStatus;
-pub const ExecResult = regexp_bytecode.ExecResult;
+pub const max_captures = regexp_lib.max_captures;
+pub const max_exec_slots = regexp_lib.max_exec_slots;
+pub const small_exec_slots = regexp_lib.small_exec_slots;
+pub const flag_bits = regexp_lib.flags;
+pub const Capture = regexp_lib.Capture;
+pub const Match = regexp_lib.Match;
+pub const ExecStatus = regexp_lib.ExecStatus;
+pub const ExecResult = regexp_lib.ExecResult;
 pub const ExecError = error{ OutOfMemory, BytecodeCorrupt, Timeout };
+pub const Header = regexp_lib.Header;
 
 pub const Compiled = regexp_lib.Compiled;
 
@@ -51,17 +51,17 @@ pub fn execCaptureSlotsOnResolvedStringFromIndex(
 ) ExecError!ExecResult {
     const options = execOptions(rt);
     return switch (string_data) {
-        .latin1 => |bytes| try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, capture),
-        .utf16 => |units| try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, capture),
+        .latin1 => |bytes| try regexp_lib.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, capture),
+        .utf16 => |units| try regexp_lib.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, capture),
     };
 }
 
 pub fn captureSlotValue(value: usize) ?usize {
-    return regexp_bytecode.captureSlotValue(value);
+    return regexp_lib.captureSlotValue(value);
 }
 
 pub fn groupName(bytecode: []const u8, one_based_capture_index: usize) ?[]const u8 {
-    return regexp_bytecode.groupName(bytecode, one_based_capture_index);
+    return regexp_lib.groupName(bytecode, one_based_capture_index);
 }
 
 pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!?bool {
@@ -70,12 +70,12 @@ pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_val
 
     const options = execOptions(rt);
     return switch (string_object.resolveData()) {
-        .latin1 => |bytes| try regexp_bytecode.testMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options),
-        .utf16 => |units| try regexp_bytecode.testMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options),
+        .latin1 => |bytes| try regexp_lib.testMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options),
+        .utf16 => |units| try regexp_lib.testMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options),
     };
 }
 
-fn execOptions(rt: *core.JSRuntime) regexp_bytecode.ExecOptions {
+fn execOptions(rt: *core.JSRuntime) regexp_lib.ExecOptions {
     if (!rt.hasInterruptHandler()) return .{};
     return .{
         .@"opaque" = rt,
@@ -89,22 +89,22 @@ fn checkRuntimeTimeout(context: ?*anyopaque) bool {
 }
 
 pub fn flagBitsFromBytecode(bytecode: []const u8) u16 {
-    return regexp_bytecode.getFlags(bytecode);
+    return regexp_lib.getFlags(bytecode);
 }
 
 pub fn appendCanonicalFlagsFromBits(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), bits: u16) !void {
     const order = [_]struct { byte: u8, bit: u16 }{
-        .{ .byte = 'd', .bit = regexp_bytecode.flags.indices },
-        .{ .byte = 'g', .bit = regexp_bytecode.flags.global },
-        .{ .byte = 'i', .bit = regexp_bytecode.flags.ignore_case },
-        .{ .byte = 'm', .bit = regexp_bytecode.flags.multiline },
-        .{ .byte = 's', .bit = regexp_bytecode.flags.dot_all },
-        .{ .byte = 'u', .bit = regexp_bytecode.flags.unicode },
-        .{ .byte = 'v', .bit = regexp_bytecode.flags.unicode_sets },
-        .{ .byte = 'y', .bit = regexp_bytecode.flags.sticky },
+        .{ .byte = 'd', .bit = regexp_lib.flags.indices },
+        .{ .byte = 'g', .bit = regexp_lib.flags.global },
+        .{ .byte = 'i', .bit = regexp_lib.flags.ignore_case },
+        .{ .byte = 'm', .bit = regexp_lib.flags.multiline },
+        .{ .byte = 's', .bit = regexp_lib.flags.dot_all },
+        .{ .byte = 'u', .bit = regexp_lib.flags.unicode },
+        .{ .byte = 'v', .bit = regexp_lib.flags.unicode_sets },
+        .{ .byte = 'y', .bit = regexp_lib.flags.sticky },
     };
     for (order) |entry| {
-        if (entry.byte == 'u' and (bits & regexp_bytecode.flags.unicode_sets) != 0) continue;
+        if (entry.byte == 'u' and (bits & regexp_lib.flags.unicode_sets) != 0) continue;
         if ((bits & entry.bit) != 0) try buffer.append(allocator, entry.byte);
     }
 }
@@ -119,7 +119,7 @@ pub fn flagsStringValueFromBytecode(rt: *core.JSRuntime, bytecode: []const u8) !
 test "JavaScript RegExp adapter compilation and execution" {
     var compiled = try compile(std.testing.allocator, "abc", "i");
     defer compiled.deinit(std.testing.allocator);
-    const status = try regexp_bytecode.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxAbCy" }, 0);
+    const status = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxAbCy" }, 0);
     try std.testing.expect(status.result == .match);
     try std.testing.expectEqual(@as(usize, 2), status.match.start);
     try std.testing.expectEqual(@as(usize, 5), status.match.end);
@@ -129,7 +129,7 @@ test "JavaScript RegExp adapter preserves multiple named capture groups" {
     var compiled = try compile(std.testing.allocator, "(?<a>.)(?<b>.)(?<c>.)(?<d>.)", "");
     defer compiled.deinit(std.testing.allocator);
 
-    const status = try regexp_bytecode.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "wxyz" }, 0);
+    const status = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "wxyz" }, 0);
     try std.testing.expect(status.result == .match);
     try std.testing.expectEqual(@as(usize, 4), status.match.capture_count);
 
@@ -138,5 +138,148 @@ test "JavaScript RegExp adapter preserves multiple named capture groups" {
         try std.testing.expectEqual(i, status.match.captures[i].start.?);
         try std.testing.expectEqual(i + 1, status.match.captures[i].end.?);
         try std.testing.expectEqualStrings(name, status.match.captures[i].name.?);
+    }
+}
+
+test "JavaScript RegExp adapter is repeatable across matches" {
+    var compiled = try compile(std.testing.allocator, "a+", "");
+    defer compiled.deinit(std.testing.allocator);
+
+    var i: usize = 0;
+    while (i < 256) : (i += 1) {
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxaaa" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 2), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 5), hit.match.end);
+
+        const miss = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xyz" }, 0);
+        try std.testing.expect(miss.result == .no_match);
+    }
+
+    const empty = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "" }, 0);
+    try std.testing.expect(empty.result == .no_match);
+}
+
+test "JavaScript RegExp adapter greedy class8 loop backtracks" {
+    {
+        var compiled = try compile(std.testing.allocator, "[a-z]+a", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "bbba" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.end);
+
+        const miss = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "bbb" }, 0);
+        try std.testing.expect(miss.result == .no_match);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "[aeiou]*", "");
+        defer compiled.deinit(std.testing.allocator);
+        const empty = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xyz" }, 0);
+        try std.testing.expect(empty.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), empty.match.start);
+        try std.testing.expectEqual(@as(usize, 0), empty.match.end);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "[^#?]*x", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "abcx" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.end);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "[^a]+\u{1F600}", "u");
+        defer compiled.deinit(std.testing.allocator);
+        const input = [_]u16{ 'x', 0xd83d, 0xde00 };
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .utf16 = &input }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 3), hit.match.end);
+    }
+}
+
+test "JavaScript RegExp adapter nested greedy class8 captures last inner run" {
+    // test262 S15.10.2.8_A3_T32 / T33: the first in-place class8 shrink must
+    // park the rest of the chain and clear pending, or a later `*` consumes
+    // given-back letters and group 2 collapses to a single character.
+    {
+        var compiled = try compile(std.testing.allocator, "^(([a-z]+)*[a-z]\\.)+[a-z]{2,}$", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "www.netscape.com" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 16), hit.match.end);
+        try std.testing.expectEqual(@as(usize, 2), hit.match.capture_count);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.captures[0].start.?);
+        try std.testing.expectEqual(@as(usize, 13), hit.match.captures[0].end.?);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.captures[1].start.?);
+        try std.testing.expectEqual(@as(usize, 11), hit.match.captures[1].end.?);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "^(([a-z]+)*([a-z])\\.)+[a-z]{2,}$", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "www.netscape.com" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 16), hit.match.end);
+        try std.testing.expectEqual(@as(usize, 3), hit.match.capture_count);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.captures[0].start.?);
+        try std.testing.expectEqual(@as(usize, 13), hit.match.captures[0].end.?);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.captures[1].start.?);
+        try std.testing.expectEqual(@as(usize, 11), hit.match.captures[1].end.?);
+        try std.testing.expectEqual(@as(usize, 11), hit.match.captures[2].start.?);
+        try std.testing.expectEqual(@as(usize, 12), hit.match.captures[2].end.?);
+    }
+}
+
+test "JavaScript RegExp adapter matches latin1 literals and quantified chars" {
+    {
+        var compiled = try compile(std.testing.allocator, "://", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "http://x" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 7), hit.match.end);
+
+        const units = [_]u16{ 'h', 't', 't', 'p', ':', '/', '/', 'x' };
+        const wide = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .utf16 = &units }, 0);
+        try std.testing.expect(wide.result == .match);
+        try std.testing.expectEqual(@as(usize, 4), wide.match.start);
+        try std.testing.expectEqual(@as(usize, 7), wide.match.end);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "ab+c", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "abbbc" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 5), hit.match.end);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "hello", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "say hello!" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 9), hit.match.end);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "abc", "i");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxAbCy" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 2), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 5), hit.match.end);
+    }
+    {
+        var compiled = try compile(std.testing.allocator, "a+b", "");
+        defer compiled.deinit(std.testing.allocator);
+        const hit = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "aaab" }, 0);
+        try std.testing.expect(hit.result == .match);
+        try std.testing.expectEqual(@as(usize, 0), hit.match.start);
+        try std.testing.expectEqual(@as(usize, 4), hit.match.end);
+        const miss = try regexp_lib.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "aaa" }, 0);
+        try std.testing.expect(miss.result == .no_match);
     }
 }

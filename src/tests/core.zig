@@ -1829,6 +1829,33 @@ test "ASCII suffix concatenation preserves source width with one result allocati
     try std.testing.expectEqual(wide_allocations + 1, rt.memory.allocation_count);
 }
 
+test "short latin1 slices intern across repeated copies" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    try std.testing.expect((try rt.recentLatin1Slice("x")) == null);
+    try std.testing.expect((try rt.recentLatin1Slice("x" ** 33)) == null);
+
+    const first = (try rt.recentLatin1Slice("www.google.com")).?;
+    first.retain();
+    defer first.value().free(rt);
+    try std.testing.expect(first.eqlBytes("www.google.com"));
+    const allocations = rt.memory.allocation_count;
+    const second = (try rt.recentLatin1Slice("www.google.com")).?;
+    try std.testing.expectEqual(first, second);
+    try std.testing.expectEqual(allocations, rt.memory.allocation_count);
+
+    var i: u32 = 0;
+    while (i < rt.recent_latin1_slices.len) : (i += 1) {
+        var buf: [8]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "s{d:0>4}", .{i}) catch unreachable;
+        _ = (try rt.recentLatin1Slice(text)).?;
+    }
+    const revived = (try rt.recentLatin1Slice("www.google.com")).?;
+    try std.testing.expect(revived != first);
+    try std.testing.expect(revived.eqlBytes("www.google.com"));
+}
+
 test "flat strings store characters inline in a single fixed-size allocation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

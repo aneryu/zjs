@@ -2851,7 +2851,44 @@ fn regExpResultPropertyTemplate(rt: *core.JSRuntime, global: *core.Object) !*cor
     return initRegExpResultPropertyTemplate(rt, global);
 }
 
-pub noinline fn createRegExpMatchArrayFromValue(
+pub fn createRegExpMatchArrayFromValue(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    input_value: core.JSValue,
+    found: *const RegExpMatch,
+    input_len: usize,
+    has_indices: bool,
+) !core.JSValue {
+    if (!has_indices and !found.has_named_captures and found.capture_count == 0) {
+        return createRegExpMatchArrayGroup0(rt, global, input_value, found, input_len);
+    }
+    return createRegExpMatchArrayFromValueSlow(rt, global, input_value, found, input_len, has_indices);
+}
+
+/// Group-0 match arrays skip the named-groups object and the capture loop.
+fn createRegExpMatchArrayGroup0(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    input_value: core.JSValue,
+    found: *const RegExpMatch,
+    input_len: usize,
+) !core.JSValue {
+    const template = try regExpResultPropertyTemplate(rt, global);
+    const out = try core.Object.createRegExpMatchArrayFromShape(rt, template, @intCast(found.index), input_value, core.JSValue.undefinedValue());
+    errdefer core.Object.destroyFromHeader(rt, &out.header);
+
+    const matched = try stringSliceValue(rt, input_value, found.index, found.len);
+    errdefer matched.free(rt);
+    const elements = try rt.memory.alloc(core.JSValue, 1);
+    elements[0] = matched;
+    out.adoptDenseArrayElementsAssumingEmpty(elements);
+    out.flags.may_have_indexed_properties = true;
+
+    try updateRegExpLegacyStaticsForMatch(rt, global, input_value, found, input_len);
+    return out.value();
+}
+
+noinline fn createRegExpMatchArrayFromValueSlow(
     rt: *core.JSRuntime,
     global: *core.Object,
     input_value: core.JSValue,
@@ -3105,6 +3142,12 @@ pub fn stringSliceValue(rt: *core.JSRuntime, value: core.JSValue, start: usize, 
         const unit = string_value.codeUnitAt(slice_start);
         if (unit <= 0x7f) {
             const cached = (try rt.singleByteString(@intCast(unit))) orelse unreachable;
+            return cached.value().dup();
+        }
+    }
+    if (string_value.borrowLatin1()) |latin1| {
+        const bytes = latin1[slice_start..][0..slice_len];
+        if (try rt.recentLatin1Slice(bytes)) |cached| {
             return cached.value().dup();
         }
     }
