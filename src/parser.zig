@@ -5303,7 +5303,7 @@ pub const parser_core = struct {
             };
             try s.advance();
             try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted, .yield_forbidden = true });
-            try Emitter.opAt(s, opcode.op.plus, operator_source.line_num, operator_source.col_num);
+            try Emitter.opAt(s, opcode.op.to_number, operator_source.line_num, operator_source.col_num);
             return;
         }
         if (k == @as(tok.TokenKind, @intCast('-'))) {

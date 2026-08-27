@@ -1566,7 +1566,7 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     // The marker lands on the instruction boundary just past the 5-byte
     // push_atom_value; the source-loc entry contract rejects mid-instruction pcs.
     try b.addSourceMarker(8, 5);
-    try b.emitOp(op.plus);
+    try b.emitOp(op.to_number);
     try b.emitOp(op.drop);
     try b.emitOpU16(op.get_var, 0);
     try b.emitOp(op.drop);
@@ -1640,7 +1640,7 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     try std.testing.expectEqual(@as(usize, 11), fb.byteCode().len);
     try std.testing.expectEqual(@as(i32, 11), fb.byte_code_len);
     try std.testing.expectEqual(op.push_atom_value, fb.byteCode()[0]);
-    try std.testing.expectEqual(op.plus, fb.byteCode()[5]);
+    try std.testing.expectEqual(op.to_number, fb.byteCode()[5]);
     try std.testing.expectEqual(op.drop, fb.byteCode()[6]);
     try std.testing.expectEqual(op.get_var, fb.byteCode()[7]);
     try std.testing.expectEqual(op.return_undef, fb.byteCode()[10]);

@@ -239,7 +239,10 @@ pub const opcode = struct {
         pub const async_yield_star: u8 = 136;
         pub const await: u8 = 137;
         pub const neg: u8 = 138;
-        pub const plus: u8 = 139;
+        /// ToNumber（一元 `+`）。QuickJS 叫 `OP_plus`；改名是因为那个名字
+        /// 在 2026-08-27 的跨引擎审计里直接导致了一次误判——按名字比对时
+        /// 「三家都没有 plus」，按语义读实现才发现三家的 `ToNumber` 就是它。
+        pub const to_number: u8 = 139;
         pub const dec: u8 = 140;
         pub const inc: u8 = 141;
         pub const post_dec: u8 = 142;
@@ -653,7 +656,7 @@ pub const opcode = struct {
         .{ .name = "async_yield_star", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [136] id 136
         .{ .name = "await", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [137] id 137
         .{ .name = "neg", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [138] id 138
-        .{ .name = "plus", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [139] id 139
+        .{ .name = "to_number", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [139] id 139
         .{ .name = "dec", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [140] id 140
         .{ .name = "inc", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [141] id 141
         .{ .name = "post_dec", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [142] id 142

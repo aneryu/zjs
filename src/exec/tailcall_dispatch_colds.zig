@@ -308,7 +308,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // the same indirect cold_table dispatch the compare fast handlers always used
     // (direct routing would perturb the int32 fast-path codegen).
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = dispatch.opCompareCold(o);
-    inline for ([_]u8{ op.neg, op.plus, op.inc, op.dec }) |o| t[o] = h_unary;
+    inline for ([_]u8{ op.neg, op.to_number, op.inc, op.dec }) |o| t[o] = h_unary;
     t[op.in] = h(struct {
         fn b(vm: *Vm) HostError!void {
             _ = try vm_property_field.inOrInstanceof(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, undefined);

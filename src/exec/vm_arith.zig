@@ -263,7 +263,7 @@ pub fn unary(
     const result: core.JSValue = blk: {
         if (value.asInt32()) |int_value| {
             switch (opcode_id) {
-                op.plus => break :blk value,
+                op.to_number => break :blk value,
                 op.neg => break :blk value_ops.numberToValue(-@as(f64, @floatFromInt(int_value))),
                 op.inc => break :blk value_ops.numberToValue(@as(f64, @floatFromInt(int_value)) + 1),
                 op.dec => break :blk value_ops.numberToValue(@as(f64, @floatFromInt(int_value)) - 1),
@@ -273,7 +273,7 @@ pub fn unary(
         if (value.asShortBigInt()) |bigint_value| {
             if (value_ops.shortBigIntUnary(opcode_id, bigint_value)) |fast| break :blk fast;
         }
-        if (opcode_id == op.neg or opcode_id == op.plus or opcode_id == op.inc or opcode_id == op.dec) {
+        if (opcode_id == op.neg or opcode_id == op.to_number or opcode_id == op.inc or opcode_id == op.dec) {
             const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
             defer primitive.free(ctx.runtime);
             if (primitive.isSymbol()) return error.TypeError;

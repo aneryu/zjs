@@ -252,7 +252,7 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
     if (value.asFloat64()) |float_value| {
         const out = switch (op) {
             bytecode.opcode.op.neg => -float_value,
-            bytecode.opcode.op.plus => float_value,
+            bytecode.opcode.op.to_number => float_value,
             bytecode.opcode.op.dec, bytecode.opcode.op.post_dec => float_value - 1,
             bytecode.opcode.op.inc, bytecode.opcode.op.post_inc => float_value + 1,
             else => unreachable,
@@ -260,7 +260,7 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
         return numberToValue(out);
     }
     if (value.isBigInt()) {
-        if (op == bytecode.opcode.op.plus) return error.TypeError;
+        if (op == bytecode.opcode.op.to_number) return error.TypeError;
         if (value.asShortBigInt()) |short| {
             if (shortBigIntUnary(op, short)) |out| return out;
         }
@@ -291,7 +291,7 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
         }
         return createBigIntValue(rt, out);
     }
-    if (op == bytecode.opcode.op.neg or op == bytecode.opcode.op.plus or
+    if (op == bytecode.opcode.op.neg or op == bytecode.opcode.op.to_number or
         op == bytecode.opcode.op.dec or op == bytecode.opcode.op.post_dec or
         op == bytecode.opcode.op.inc or op == bytecode.opcode.op.post_inc)
     {
@@ -300,7 +300,7 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
         const number = numberValue(number_value) orelse return error.TypeError;
         const out = switch (op) {
             bytecode.opcode.op.neg => -number,
-            bytecode.opcode.op.plus => number,
+            bytecode.opcode.op.to_number => number,
             bytecode.opcode.op.dec, bytecode.opcode.op.post_dec => number - 1,
             bytecode.opcode.op.inc, bytecode.opcode.op.post_inc => number + 1,
             else => unreachable,
@@ -310,7 +310,7 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
     const n = try toInt32(rt, value);
     const out = switch (op) {
         bytecode.opcode.op.neg => return numberToValue(-@as(f64, @floatFromInt(n))),
-        bytecode.opcode.op.plus => n,
+        bytecode.opcode.op.to_number => n,
         bytecode.opcode.op.not => ~n,
         bytecode.opcode.op.dec, bytecode.opcode.op.post_dec => n - 1,
         bytecode.opcode.op.inc, bytecode.opcode.op.post_inc => n + 1,

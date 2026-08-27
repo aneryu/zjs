@@ -2012,7 +2012,7 @@ test "F4: unary +/-/~/! lower to plus/neg/not/lnot" {
 
     var pos_bc = try parseExpr(&env, "+x");
     defer pos_bc.deinit(env.rt);
-    try std.testing.expectEqual(op.plus, pos_bc.code[pos_bc.code.len - 1]);
+    try std.testing.expectEqual(op.to_number, pos_bc.code[pos_bc.code.len - 1]);
 
     var neg_bc = try parseExpr(&env, "-x");
     defer neg_bc.deinit(env.rt);
@@ -4055,7 +4055,7 @@ test "W5: numeric discarded immediates respect statement and completion boundari
     var plus_root = try parseStatementWithTopLevelChildren(&env, "function numericPlus(){ (+1); }");
     defer plus_root.deinit(env.rt);
     const plus = findFunctionConstantNamed(&plus_root, env.rt, "numericPlus") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqualSlices(u8, &.{ op.push_1, op.plus, op.return_undef }, plus.byteCode());
+    try std.testing.expectEqualSlices(u8, &.{ op.push_1, op.to_number, op.return_undef }, plus.byteCode());
 
     var control_root = try parseStatementWithTopLevelChildren(&env, "function numericControl(x){ if (x) (1); return x; }");
     defer control_root.deinit(env.rt);
