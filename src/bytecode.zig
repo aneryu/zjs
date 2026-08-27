@@ -82,6 +82,13 @@ pub const opcode = struct {
 
     comptime {
         if (@sizeOf(CompactInfo) != 4) @compileError("CompactInfo must mirror production QuickJS JSOpCode");
+        // Force `physical` to be analyzed here. Zig analyses nested
+        // containers lazily, so its assertions would otherwise fire only in
+        // builds that happen to reference it -- verified: without this line
+        // an id/name mismatch injected into the table compiles clean under
+        // `zig build zjs` and is caught only by `zig build test`. An
+        // assertion that runs in one build configuration is not a guard.
+        _ = physical.ledger;
     }
 
     /// Flags byte (operand offset 9) of `dyn_env_probe`, the single opcode
@@ -1008,6 +1015,145 @@ pub const opcode = struct {
     /// Stack push count in phase-1 streams.
     pub fn nPushOfPhase1(op_id: u8) u8 {
         return if (phase1Info(op_id)) |info| info.n_push else 0;
+    }
+
+    /// F0a0 (§11.7 D9): the physical half of the declaration source — a
+    /// derived mirror of the id space, a mechanically generated ledger, and
+    /// comptime assertions that both agree with `opcode_info`.
+    ///
+    /// **Scope boundary, and it is checkable**: everything here must stay
+    /// expressible in the vocabulary the table already has. The moment this
+    /// needs a `LogicalOpcode` it has crossed into F0a1, which is blocked on
+    /// the §10.8 freeze. `PhysicalSlotState` from the design carries a
+    /// `LogicalOpcode` payload for exactly that reason and is deliberately
+    /// NOT used here.
+    ///
+    /// The ledger exists because the id budget was previously a number
+    /// people re-derived by hand and quoted from memory. It is now a single
+    /// derived fact that cannot drift from the table without failing to
+    /// compile.
+    pub const physical = struct {
+        /// Slot classification in today's terms only.
+        pub const SlotState = enum {
+            /// A final-form opcode claims this id and the row names it.
+            claimed,
+            /// The row survives as `unused_<id>` so table indices do not
+            /// shift, but the id itself has been reclaimed and is available.
+            reclaimed,
+            /// No row at all: the id is past `op_count`.
+            no_row,
+        };
+
+        const unused_prefix = "unused_";
+
+        fn isReclaimedName(name: []const u8) bool {
+            return name.len > unused_prefix.len and
+                std.mem.eql(u8, name[0..unused_prefix.len], unused_prefix);
+        }
+
+        pub fn stateOf(op_id: u8) SlotState {
+            const info = finalInfo(op_id) orelse return .no_row;
+            return if (isReclaimedName(info.name)) .reclaimed else .claimed;
+        }
+
+        pub const Ledger = struct {
+            /// Ids a final-form opcode still claims.
+            claimed: u16,
+            /// Reclaimed ids that keep an `unused_<id>` row.
+            reclaimed: u16,
+            /// Ids with no row at all (past `op_count`).
+            no_row: u16,
+
+            /// What the roadmap calls "free": reclaimed plus never-claimed.
+            pub fn free(self: Ledger) u16 {
+                return self.reclaimed + self.no_row;
+            }
+
+            pub fn total(self: Ledger) u16 {
+                return self.claimed + self.reclaimed + self.no_row;
+            }
+        };
+
+        pub const ledger: Ledger = blk: {
+            @setEvalBranchQuota(4000);
+            var acc = Ledger{ .claimed = 0, .reclaimed = 0, .no_row = 0 };
+            for (0..256) |raw| {
+                switch (stateOf(@intCast(raw))) {
+                    .claimed => acc.claimed += 1,
+                    .reclaimed => acc.reclaimed += 1,
+                    .no_row => acc.no_row += 1,
+                }
+            }
+            break :blk acc;
+        };
+
+        comptime {
+            @setEvalBranchQuota(20000);
+            // Every id classifies, exactly once.
+            if (ledger.total() != 256)
+                @compileError("physical ledger does not cover the 8-bit id space");
+
+            // A row exists iff the id is below op_count.
+            for (0..256) |raw| {
+                const id: u8 = @intCast(raw);
+                const has_row = finalInfo(id) != null;
+                if (has_row != (id < op.op_count))
+                    @compileError("row presence disagrees with op_count");
+            }
+
+            // A reclaimed row must name its own id. Renaming a row to
+            // `unused_N` with the wrong N is a silent way to lose track of
+            // which id was actually freed, and nothing else would catch it.
+            for (0..op.op_count) |raw| {
+                const id: u8 = @intCast(raw);
+                const info = finalInfo(id).?;
+                if (!isReclaimedName(info.name)) continue;
+                const digits = info.name[unused_prefix.len..];
+                var parsed: u16 = 0;
+                for (digits) |c| {
+                    if (c < '0' or c > '9')
+                        @compileError("reclaimed row name is not `unused_<decimal>`");
+                    parsed = parsed * 10 + (c - '0');
+                }
+                if (parsed != id)
+                    @compileError("reclaimed row names an id other than its own");
+
+                // A reclaimed row must also carry the canonical dead shape.
+                // Without this, renaming a live opcode's row to `unused_<its
+                // own id>` is self-consistent and compiles clean, silently
+                // marking an id free while its handler and emit sites are
+                // still there. The shape is the only physical-layer signal
+                // available at F0a0 scope -- whether an opcode is still
+                // emitted is logical-layer knowledge (F0a1).
+                if (info.size != 1 or info.n_pop != 0 or info.n_push != 0 or info.fmt != .none)
+                    @compileError("reclaimed row does not carry the canonical dead shape (size 1, 0/0, fmt none)");
+            }
+
+            // The temp/short overlap is the structure that makes a naive
+            // "count the rows" wrong, so pin it: in that range the phase-1
+            // view and the final view must resolve to different rows.
+            for (op.op_temp_start..op.op_temp_end) |raw| {
+                const id: u8 = @intCast(raw);
+                if (phase1Info(id).? == finalInfo(id).?)
+                    @compileError("temp/short overlap range does not actually overlap");
+            }
+        }
+    };
+
+    test "physical ledger is derived, not asserted by hand" {
+        // The three facts the roadmap and the design documents quote. They are
+        // pinned here so a reclaim lands as one declaration edit and the
+        // budget follows, instead of being restated in prose.
+        try std.testing.expectEqual(@as(u16, 245), physical.ledger.claimed);
+        try std.testing.expectEqual(@as(u16, 9), physical.ledger.reclaimed);
+        try std.testing.expectEqual(@as(u16, 2), physical.ledger.no_row);
+        try std.testing.expectEqual(@as(u16, 11), physical.ledger.free());
+        try std.testing.expectEqual(@as(u16, 256), physical.ledger.total());
+
+        // Spot-check the classification against ids verified by hand.
+        try std.testing.expectEqual(physical.SlotState.claimed, physical.stateOf(op.dyn_env_probe));
+        try std.testing.expectEqual(physical.SlotState.reclaimed, physical.stateOf(114));
+        try std.testing.expectEqual(physical.SlotState.no_row, physical.stateOf(255));
     }
 
     test "dyn_env_probe flags round-trip and reject undefined encodings" {
