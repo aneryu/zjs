@@ -971,6 +971,13 @@ ECMA-262/test262 为准。
 
 **(3) 按 opcode 身份匹配的扫描器。← 最隐蔽，因为它不会让测试变红**
 
+> **✅ 已于 F0b 结构性消灭（2026-08-27）。**两张手写名单
+> （`scanSmallInlineEligible` 的拒绝表、`isForwardForbiddenOp`）都已改为
+> 消费声明里的 `inline_policy` / `forward_policy`；冷平面居民各自声明自己
+> 的 policy，载体被问的是**它的居民**而不是被特判。删名单前先用 comptime
+> 断言证明「派生集合与手写名单逐条相同」，三条注入验证该断言会开火。
+> **以下保留为该缺陷的病历，不再是待办。**
+
 `bytecode.zig` 的 `scanSmallInlineEligible` 走一遍字节码，**按 opcode
 身份**拒绝含某些指令的函数参与小函数内联，`put_super_value` 在那张拒绝
 表里。一旦它被降级成 `{using, sub}`，身份匹配就看不见它了——含
