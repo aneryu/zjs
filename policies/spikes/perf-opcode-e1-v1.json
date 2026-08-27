@@ -14,26 +14,28 @@
   ],
   "question": "What share of suite cycles is spent inside the handlers that a register machine would not execute at all?",
   "scope": {
-    "measured_set": "the 58 handlers a register machine would not execute: 48 slot moves (get/put/set x loc/arg/var_ref x {0,1,2,3,8,wide}), 9 stack shuffles (dup/swap/nip/nip_catch/insert2/insert3/perm3/perm4/rot3l) and drop. Verified against src/bytecode.zig on 2026-08-27; together they are about a third of dynamic instructions -- 34.1% on the zoo census and 37.6% when reproduced on the bench_v8 driver harness, which skips zlib. The spread is why this policy's thresholds are set at 10/20% rather than near the measured value: the quantity being bounded is harness-dependent to within a few points.",
-    "reference_set": "all other hot-island handlers, reported alongside so the share is a share of something",
-    "excluded": "nothing is excluded a priori. The earlier draft excluded cold-shell handlers on the assumption that they share function bodies; that was checked on 2026-08-27 and is false -- each coldStd(body) instantiation is comptime-distinct. What is real is the 15 shared-entry groups in method.resolution_measured, none of which straddles the measured/reference boundary."
+    "measured_set": "TIER 1 (counts toward the verdict) -- 68 handlers a register machine would not execute at all: 48 slot moves (get/put/set x loc/arg/var_ref x {0,1,2,3,8,wide}; loc 18 + arg 15 + var_ref 15), 9 stack shuffles (dup/swap/nip/nip_catch/insert2/insert3/perm3/perm4/rot3l), drop, and 10 fusion opcodes whose PREFIX HALF is a pure slot move (get_loc0_field, get_loc2_field, get_loc2_field2, get_loc8_push_1, get_loc8_push_2, get_loc8_push_i8, get_var_ref0_get_loc8, put_loc8_get_loc8, push_this_put_loc0, put_loc0_get_loc0). The fusion ten are in Tier 1 because a fusion opcode is a PREFIX SUBSTITUTION (opcode-design.md 10.2b): it owns one byte, does the first half, and tail-calls the untouched following instruction. Its recorded executions therefore ARE executions of the first half, and for these ten the first half is a slot move. Together Tier 1 is 34.1% + 9.3% = ~43% of the zoo census.",
+    "reference_set": "all other handlers, reported alongside so the Tier 1 share is a share of something",
+    "excluded": "nothing is excluded a priori. The earlier draft excluded cold-shell handlers on the assumption that they share function bodies; that was checked on 2026-08-27 and is false -- each coldStd(body) instantiation is comptime-distinct. What is real is the 15 shared-entry groups in method.resolution_measured, none of which straddles the measured/reference boundary.",
+    "third_bucket": "TIER 2 (reported, does NOT count toward the verdict) -- constant materialisation: the four fusion opcodes whose prefix half pushes a constant (push_0_or 9.00%, push_2_sar 1.12%, push_0_shr 0.95%, push_i8_add 0.26%) plus the bare push_* short forms. 11.3% on the zoo census. These MOSTLY disappear under a register model -- JSC's Fits maps constants into the register index range (16..127 narrow) so `x | 0` needs no push, and V8 ships 12 Smi-immediate binary ops for the same reason -- but how much survives depends on register pressure and on whether the constant is loop-invariant. Reported separately so the verdict rests only on what is certain, while the upside is visible."
   },
   "target_workloads": {
     "primary": "the 15 zoo benchmarks that produced the 41.9e9-execution census (richards, deltablue, crypto, raytrace, navier-stokes, earley-boyer, regexp, splay, pdfjs, typescript, box2d, code-load, gbemu, mandreel, zlib)",
     "reporting": "per-benchmark breakdown is MANDATORY, not just a geomean. Rationale: the census corpus is synchronous, CPU-bound, old-style JS and fun is a runtime (opcode-design.md §4.7 limit four). A share that is carried by two benchmarks is a different fact from one that is uniform.",
     "controls": "none required -- there is no candidate arm"
   },
-  "primary_metric": "fraction of total suite cycles attributed to the measured set, computed per benchmark and reported as a distribution (min / median / max across benchmarks), with instructions reported in the same run",
+  "primary_metric": "fraction of total suite cycles attributed to Tier 1, computed per benchmark and reported as a distribution (min / p10 / median / p90 / max across benchmarks), with Tier 2 reported alongside and instructions recorded in the same run",
   "interpretation_bound": {
     "statement": "The primary metric is an UPPER BOUND on the interpreter-side prize of option B, not an estimate of it.",
     "why_upper": "A measured handler's cycles include work that survives the model change (the slot read becomes an operand fetch folded into the consumer). A register machine removes the dispatch, the stack round trip and the refcount pair, not necessarily all of the handler body.",
     "why_not_lower": "It excludes second-order effects that could go either way -- I-cache footprint from fewer handlers, and the register machine's own added costs (liveness map for the exception path, opcode-design.md §9.3)."
   },
   "minimum_effect": {
-    "continue": ">= 20% of suite cycles in the measured set, at the median benchmark -> K4's third precondition is met on the dispatch/operand-traffic axis; proceed to E1.5, and E2 becomes justifiable",
-    "kill": "< 10% of suite cycles at the median benchmark -> the interpreter-side prize of option B cannot support a 6721-line dispatch rewrite plus a compiler operand-allocation rewrite; option B drops to `later` and effort goes to option A in full",
-    "ambiguous": "10-20% -> do E1.5 (TOS caching) first; it isolates the stack-round-trip component and is a deliverable of option A either way",
-    "basis": "proposed -- owner approval required before the run, per roadmap §0.2 clause 5"
+    "continue": ">= 20% of suite cycles in Tier 1 at the median benchmark -> K4's third precondition is met on the dispatch/operand-traffic axis; proceed to E1.5, and E2 becomes justifiable",
+    "kill": "median < 10% AND p90 < 20% -> the interpreter-side prize cannot support a 6721-line dispatch rewrite plus a compiler operand-allocation rewrite; option B drops to `later`",
+    "ambiguous": "anything else, including a split distribution (median < 10% but p90 >= 20%) -> do E1.5 first; a split means the prize is real on some workload shapes and absent on others, which is a scheduling question, not a kill",
+    "why_not_set_near_the_measured_share": "Tier 1 is ~43% of INSTRUCTIONS. The thresholds are about CYCLES, and the two are not interchangeable -- the registered instruction-phantom law is that removing instructions need not remove cycles (hand-written asm cut 16% of instructions for 0.0% of the time on the same dispatch skeletons). 10/20% therefore sit far below the instruction share on purpose: they ask whether the cycles are there at all, not whether they match the instruction count.",
+    "basis": "proposed -- owner approval required before the run, per roadmap 0.2 clause 5"
   },
   "maximum_regression": {
     "not_applicable": "no candidate arm exists; nothing can regress",
@@ -58,14 +60,15 @@
   },
   "sample_protocol": "measurement contract (tools/compare/measurement_policy.json); >= 8 samples per benchmark, pinned big core, insn+cycles same run",
   "verdicts": {
-    "continue": "median >= 20% -> record as K4 third-precondition evidence; E1.5 authorized; decision 2 (the E2 spike) becomes ripe for re-deliberation with a sharper residual question",
-    "ambiguous": "median 10-20% -> E1.5 first; re-read this policy after E1.5 with the stack-round-trip component subtracted",
-    "kill": "median < 10% -> option B goes to `later` on interpreter-benefit grounds. NOTE: this kills option B's INTERPRETER argument only. It does not touch the FNABI three-address island (opcode-design.md §9.2), which needs slot-operand encoding regardless, nor does it revive the id-shortage argument (already dissolved in §9.1)."
+    "continue": "median >= 20% -> record as K4 third-precondition evidence; E1.5 authorized; the parked E2 spike becomes ripe for re-deliberation with a sharper residual question",
+    "ambiguous": "median 10-20%, or any split distribution -> E1.5 first, then re-read this policy with the stack-round-trip component subtracted",
+    "kill": "median < 10% AND p90 < 20% -> option B goes to `later` on interpreter-benefit grounds. This kills option B's INTERPRETER argument only. It does not touch the FNABI three-address island (opcode-design.md 9.2), which needs slot-operand encoding regardless, nor does it revive the id-shortage argument (already dissolved in 9.1).",
+    "distribution_clause": "A median verdict may not be issued over a split distribution. If p90/median > 2, the per-benchmark table goes to owner review before any verdict is recorded -- a suite where integer loops show 25% and property-dense code shows 5% is a scheduling fact, not an average."
   },
   "preregistration_note": "Thresholds are fixed BEFORE the run precisely because both directions have strong post-hoc rationalisation pull: option B is architecturally attractive, and option A is the safe incumbent. Registered prior art for why this matters: PERF-T-SPIKE was written up as FAIL on 2026-08-26 and withdrawn on 2026-08-27 after the first-round workload was shown to hide the mechanism entirely.",
   "method": {
     "status": "verified end-to-end on the shipping binary, 2026-08-27, before the run",
-    "why_not_symbol_names": "The hottest measured handlers are not named after their opcode. the get_loc* family is 33.57% of dynamic instructions and its handler is emitted by the comptime factory opLoc(kind, idx_src), which returns an anonymous struct method; nm shows it as exec.tailcall_dispatch.opLoc__struct_108206.h. The symbols exist and no two share an address (no ICF merging), but the name does not say which opcode it serves. Attributing by symbol name would have silently mis-assigned exactly the set this policy exists to measure.",
+    "why_not_symbol_names": "The hottest measured handlers are not named after their opcode. the 48-opcode slot-move family is about a third of dynamic instructions and get_loc* is its largest branch and its handler is emitted by the comptime factory opLoc(kind, idx_src), which returns an anonymous struct method; nm shows it as exec.tailcall_dispatch.opLoc__struct_108206.h. The symbols exist and no two share an address (no ICF merging), but the name does not say which opcode it serves. Attributing by symbol name would have silently mis-assigned exactly the set this policy exists to measure.",
     "steps": [
       "1. Locate the dispatch table in the binary: scan 8-byte-aligned windows for a run of 256 pointers into .text.zjs.op_handlers (vma 0x1070000, size 0x284a0 in the 2026-08-27 build).",
       "2. SELF-CHECK, mandatory: cross-check the candidate table against the handlers that DO have op_<name> symbols. Measured: offset 0x3cb088 matches 72 of 73; the one difference is id 14 pointing at op_drop_fast rather than op_drop, which is the specialization the hot table is supposed to use. A candidate that does not clear this check is not the table.",
