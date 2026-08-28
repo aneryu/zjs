@@ -272,6 +272,14 @@ inline fn opId(form: Form) u8 {
     return @intCast(@intFromEnum(form));
 }
 
+/// The seam's inverse: emission helpers still take physical ids (F0c
+/// completes when they take forms), and in the final domain the id is the
+/// form's value. Guarded because a reclaimed id has no tag (invariant 5).
+inline fn formOf(op_id: u8) Form {
+    std.debug.assert(opcode.physical.stateOf(op_id) == .claimed);
+    return @enumFromInt(op_id);
+}
+
 fn isJumpOp(form: Form) bool {
     return form == .if_false or form == .if_true or form == .goto or
         form == .@"catch" or form == .gosub;
@@ -1728,6 +1736,32 @@ const Resolver = struct {
         }
     }
 
+    // The hand-written ladder below is now the BASELINE for the decode
+    // layer's declaration-derived selection; this proves the two agree on
+    // every family and across every branch boundary of the idx domain
+    // before the writer switches to the derived one. The probe values
+    // cover both sides of each threshold the ladder tests.
+    comptime {
+        @setEvalBranchQuota(100000);
+        const wides = [_]Form{
+            .get_loc, .put_loc,  .set_loc,
+            .get_arg, .put_arg,  .set_arg,
+            .get_var_ref, .put_var_ref, .set_var_ref,
+            .call, .put_loc_check, .get_loc_check, .get_field, .push_i32,
+        };
+        const probes = [_]u16{ 0, 1, 2, 3, 4, 5, 255, 256, 257, 65535 };
+        for (wides) |wide| {
+            for (probes) |idx| {
+                const hand = shortSlotOp(opId(wide), idx);
+                const derived = opcode.decode.selectSlotShortForm(wide, idx);
+                const derived_id: ?u8 = if (derived) |form| opId(form) else null;
+                if (!std.meta.eql(hand, derived_id))
+                    @compileError("short selection diverges for " ++ @tagName(wide) ++
+                        " at idx " ++ std.fmt.comptimePrint("{d}", .{idx}));
+            }
+        }
+    }
+
     fn shortSlotOp(op_id: u8, idx: u16) ?u8 {
         if (idx < 4) {
             const base: ?u8 = switch (op_id) {
@@ -1757,16 +1791,15 @@ const Resolver = struct {
     }
 
     fn putShortCodeSize(comptime layout: LayoutMode, op_id: u8, idx: u16) u32 {
+        // Contract 3: capacity and emission consume the same selector, and
+        // the selected form's size comes from its row -- there is no second
+        // ladder here to fall out of step with `putShortCode`.
         if (layout == .short) {
-            if (shortSlotOp(op_id, idx)) |short_op| {
-                return if (short_op == op.get_loc8 or short_op == op.put_loc8 or
-                    short_op == op.set_loc8)
-                    2
-                else
-                    1;
+            if (opcode.decode.selectSlotShortForm(formOf(op_id), idx)) |short_form| {
+                return opcode.decode.form_row[@intFromEnum(short_form)].size;
             }
         }
-        return 3;
+        return opcode.decode.form_row[op_id].size;
     }
 
     fn specialObjectSize(comptime layout: LayoutMode, slot: i32) Error!u32 {
@@ -1829,7 +1862,8 @@ const Resolver = struct {
         idx: u16,
     ) Error!void {
         if (layout == .short) {
-            if (shortSlotOp(op_id, idx)) |short_op| {
+            if (opcode.decode.selectSlotShortForm(formOf(op_id), idx)) |short_form| {
+                const short_op = opId(short_form);
                 const pc = self.output_len;
                 if (comptime layout == .short) {
                     if (short_op == op.get_loc8 or short_op == op.put_loc0 or
@@ -1843,9 +1877,10 @@ const Resolver = struct {
                         short_op == op.get_loc8 or short_op == op.get_var_ref0)
                         self.noteFusionA(short_op, pc);
                 }
-                if (short_op == op.get_loc8 or short_op == op.put_loc8 or
-                    short_op == op.set_loc8)
-                {
+                // The byte-payload variants carry the index; whether the
+                // selected form has a payload is the row's fact, not a
+                // second identity list.
+                if (opcode.decode.form_row[@intFromEnum(short_form)].size == 2) {
                     try self.appendByte(@intCast(idx));
                 }
                 return;
@@ -1866,8 +1901,8 @@ const Resolver = struct {
             try self.appendI32(value);
             return;
         }
-        if (value >= -1 and value <= 7) {
-            const short_op: u8 = @intCast(@as(i32, op.push_0) + value);
+        if (opcode.decode.selectPushIntForm(value)) |short_form| {
+            const short_op: u8 = opId(short_form);
             if (comptime layout == .short) {
                 if (short_op == op.push_0 or short_op == op.push_2 or
                     short_op == op.push_1)

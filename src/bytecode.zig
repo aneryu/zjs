@@ -1925,6 +1925,106 @@ pub const opcode = struct {
             return .{ .form = @enumFromInt(row.form_index), .instruction_pc = pc, .size = row.size, .flags = row.flags };
         }
 
+        /// Contract 3, stage A for the slot/argc families: which SHORTER
+        /// form encodes `wide` with operand value `idx`, or null to stay
+        /// wide. Derived at comptime from the declaration's two axes -- the
+        /// semantic family (get_loc0/get_loc8/get_loc are one family) and
+        /// the burned-in operand values (legacy_embedded) -- so the
+        /// shortening table cannot drift from the forms it selects among.
+        /// The hand-written `shortSlotOp` arithmetic this replaces adds idx
+        /// to a base id; that is exactly the id-derived semantics P0-2
+        /// exists to remove from the compiler.
+        pub const ShortSelection = struct {
+            /// burned[i] is the form whose sole operand is burned in as i.
+            burned: [4]?logical.LogicalOpcode,
+            /// The u8-payload variant, if the family has one.
+            byte: ?logical.LogicalOpcode,
+        };
+
+        pub fn shortSelectionOf(comptime wide: logical.LogicalOpcode) ShortSelection {
+            comptime {
+                @setEvalBranchQuota(200000);
+                var sel = ShortSelection{ .burned = .{ null, null, null, null }, .byte = null };
+                const fam = logical.familyOf(wide);
+                for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                    const form: logical.LogicalOpcode = @enumFromInt(f.value);
+                    if (form == wide or logical.familyOf(form) != fam) continue;
+                    if (f.value >= 300) continue; // final forms only
+                    const lay = layout_table[f.value] orelse continue;
+                    if (lay.len != 1) continue;
+                    const slot = lay.slots[0];
+                    if (slot.offset == null) {
+                        // burned variant
+                        if (slot.fixed >= 0 and slot.fixed < 4)
+                            sel.burned[@intCast(slot.fixed)] = form;
+                    } else if (slot.width == .u8) {
+                        if (sel.byte != null)
+                            @compileError("two byte-wide variants in family " ++ @tagName(fam));
+                        sel.byte = form;
+                    }
+                }
+                return sel;
+            }
+        }
+
+        /// Stage-A selection for small integer pushes: the form whose
+        /// burned-in immediate IS the value, derived from the push_int
+        /// family's declarations. Replaces the writer's `push_0 + value`
+        /// id arithmetic -- the same P0-2 id-derived semantics the slot
+        /// shortener carried.
+        pub const push_int_selection: [9]?logical.LogicalOpcode = blk: {
+            @setEvalBranchQuota(200000);
+            var t = [_]?logical.LogicalOpcode{null} ** 9;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                if (f.value >= 300) continue;
+                const form: logical.LogicalOpcode = @enumFromInt(f.value);
+                if (logical.familyOf(form) != .push_int) continue;
+                const lay = layout_table[f.value] orelse continue;
+                if (lay.len != 1 or lay.slots[0].offset != null) continue;
+                const v = lay.slots[0].fixed;
+                if (v >= -1 and v <= 7) t[@intCast(v + 1)] = form;
+            }
+            break :blk t;
+        };
+
+        pub inline fn selectPushIntForm(value: i32) ?logical.LogicalOpcode {
+            if (value < -1 or value > 7) return null;
+            return push_int_selection[@intCast(value + 1)];
+        }
+
+        /// The same selection, table-driven for callers whose wide form is
+        /// a runtime value (the writer helpers take the op to emit as a
+        /// parameter). One row per form, built from `shortSelectionOf`.
+        pub const short_selection_table: [layout_table_len]ShortSelection = blk: {
+            @setEvalBranchQuota(400000);
+            var t = [_]ShortSelection{.{ .burned = .{ null, null, null, null }, .byte = null }} ** layout_table_len;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                const form: logical.LogicalOpcode = @enumFromInt(f.value);
+                t[f.value] = shortSelectionOf(form);
+            }
+            break :blk t;
+        };
+
+        /// Stage-A selection as one call: the burned variant if the value
+        /// fits, else the byte variant, else null (stay wide). `size` of
+        /// the selected form comes from `form_row`, which is what makes the
+        /// capacity precomputation and the writer consume the same plan
+        /// (contract 3: encodedSize and emitInstruction may not each keep
+        /// their own conditional ladder).
+        pub inline fn selectSlotShortForm(
+            wide: logical.LogicalOpcode,
+            idx: u16,
+        ) ?logical.LogicalOpcode {
+            const sel = short_selection_table[@intFromEnum(wide)];
+            if (idx < 4) {
+                if (sel.burned[@intCast(idx)]) |short_form| return short_form;
+            }
+            if (idx < 256) {
+                if (sel.byte) |byte_form| return byte_form;
+            }
+            return null;
+        }
+
         /// The instruction's total size for a statically-known form.
         /// Runtime matchers use it for their `next_pc` arithmetic so the
         /// increment cannot drift from the declaration.
