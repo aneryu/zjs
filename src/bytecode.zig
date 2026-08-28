@@ -1055,9 +1055,26 @@ pub const opcode = struct {
                 std.mem.eql(u8, name[0..unused_prefix.len], unused_prefix);
         }
 
-        pub fn stateOf(op_id: u8) SlotState {
-            const info = finalInfo(op_id) orelse return .no_row;
-            return if (isReclaimedName(info.name)) .reclaimed else .claimed;
+        /// Comptime table, not a per-call classification. The naming
+        /// convention is the declaration, but reading it at run time meant a
+        /// seven-byte compare for every instruction the decoder touched --
+        /// measured as -4.08% on CodeLoad, the benchmark that exercises the
+        /// compile path. Classify once.
+        const state_table: [256]SlotState = blk: {
+            @setEvalBranchQuota(8000);
+            var t: [256]SlotState = undefined;
+            for (&t, 0..) |*slot, raw| {
+                const info = finalInfo(@intCast(raw));
+                slot.* = if (info) |row|
+                    (if (isReclaimedName(row.name)) .reclaimed else .claimed)
+                else
+                    .no_row;
+            }
+            break :blk t;
+        };
+
+        pub inline fn stateOf(op_id: u8) SlotState {
+            return state_table[op_id];
         }
 
         pub const Ledger = struct {
@@ -1484,6 +1501,22 @@ pub const opcode = struct {
         pub const OperandLayout = struct {
             len: u8,
             slots: [max_operands]OperandSlot,
+
+            /// Precomputed answers to the two questions the final-artifact
+            /// validator asks of every instruction it walks.
+            ///
+            /// Without them the validator loops over slots once per
+            /// instruction. That loop -- not the checks inside it -- was the
+            /// entire cost of the F0b migration: profiling the CodeLoad
+            /// compile path on 2026-08-28 put the migrated validator at 72M
+            /// instructions where the unmigrated one had been inlined into
+            /// the walk and cost nothing measurable, which is the whole of
+            /// the +69M regression. The unmigrated validator asked two
+            /// questions of a format byte; asking the same two questions of
+            /// a slot list means iterating it. So the answers move to
+            /// comptime, and the questions stay form-keyed.
+            atom_slot: ?u8,
+            var_ref_slot: ?u8,
         };
 
         const layout_table_len = blk: {
@@ -1509,7 +1542,7 @@ pub const opcode = struct {
                 const form: logical.LogicalOpcode = @enumFromInt(f.value);
                 const fmt: logical.Format = @enumFromInt(@intFromEnum(info.fmt));
                 const operands = logical.operandsOf(form, fmt);
-                var layout = OperandLayout{ .len = @intCast(operands.len), .slots = undefined };
+                var layout = OperandLayout{ .len = @intCast(operands.len), .slots = undefined, .atom_slot = null, .var_ref_slot = null };
                 var offset: u8 = 0;
                 for (operands, 0..) |operand, i| {
                     switch (operand.source) {
@@ -1570,6 +1603,13 @@ pub const opcode = struct {
                 while (j < max_operands) : (j += 1) {
                     layout.slots[j] = .{ .kind = .imm, .flow = null, .offset = null, .width = null, .fixed = 0 };
                 }
+                for (0..layout.len) |i| {
+                    switch (layout.slots[i].kind) {
+                        .atom => layout.atom_slot = @intCast(i),
+                        .var_ref_slot => layout.var_ref_slot = @intCast(i),
+                        else => {},
+                    }
+                }
                 table[f.value] = layout;
             }
             break :blk table;
@@ -1596,69 +1636,168 @@ pub const opcode = struct {
             return null;
         }
 
+        /// One row per form, four bytes, one load per question.
+        ///
+        /// The F0b migration cost 3.68% of the CodeLoad score, and this is
+        /// where nearly all of it was: the byte-oriented code it replaced
+        /// took ONE table -- it read `size`, `n_pop` and `n_push` off a
+        /// single compact row -- while the migrated path took four, two in
+        /// `headerAt` (`finalCompactInfo`, `stateOf`) and two more in
+        /// `stackEffect` (`dynamic_by_form`, `finalCompactInfo` again). The
+        /// second of those is the worst: `dynamic_by_form` is an array of
+        /// optional tagged unions sized for the widest shape, so the common
+        /// case paid a wide load to learn it had nothing to do.
+        ///
+        /// Nothing about F0b required that. The key stays the form; only
+        /// the number of tables changes.
+        pub const FormRow = extern struct {
+            size: u8,
+            pop: u8,
+            push: u8,
+            flags: u8,
+
+            pub const claimed_bit: u8 = 1;
+            pub const dynamic_bit: u8 = 2;
+
+            pub inline fn isClaimed(self: FormRow) bool {
+                return self.flags & claimed_bit != 0;
+            }
+            pub inline fn isDynamic(self: FormRow) bool {
+                return self.flags & dynamic_bit != 0;
+            }
+        };
+
+        pub const form_row: [layout_table_len]FormRow = blk: {
+            @setEvalBranchQuota(60000);
+            var t = [_]FormRow{.{ .size = 0, .pop = 0, .push = 0, .flags = 0 }} ** layout_table_len;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                if (f.value >= 400) continue; // carrier residents: F0c
+                const id: u8 = if (f.value >= 300)
+                    op.op_temp_start + @as(u8, @intCast(f.value - 300))
+                else
+                    @intCast(f.value);
+                const info = if (f.value >= 300) phase1Info(id).? else finalCompactInfo(id).?;
+                var flags: u8 = 0;
+                if (f.value >= 300 or physical.stateOf(id) == .claimed)
+                    flags |= FormRow.claimed_bit;
+                if (dynamic_by_form[f.value] != null) flags |= FormRow.dynamic_bit;
+                t[f.value] = .{
+                    .size = info.size,
+                    .pop = info.n_pop,
+                    .push = info.n_push,
+                    .flags = flags,
+                };
+            }
+            break :blk t;
+        };
+
         pub fn layoutOf(form: logical.LogicalOpcode) *const OperandLayout {
             return &(layout_table[@intFromEnum(form)].?);
         }
 
+        /// Eight bytes, and that is the whole design constraint.
+        ///
+        /// Contract 2 lists domain, encoding, canonical, payload_pc, next_pc
+        /// and layout as header fields. They are a comptime parameter and
+        /// accessors instead, because a struct that size stays live across a
+        /// decode loop body and the compiler spills it: `perf annotate` on
+        /// the migrated stack pass showed `str x9, [sp, #32]` and
+        /// `ldr x2, [sp, #40]` among its hottest instructions, where the
+        /// unmigrated pass had none -- it kept one byte and one pointer live.
+        /// Everything dropped here is derivable in a single arithmetic op,
+        /// so nothing is lost but the spill.
         pub const Header = struct {
-            domain: Domain,
             form: logical.LogicalOpcode,
-            family: logical.SemanticFamily,
-            encoding: Encoding,
-            /// False when an alias was hit. Aliases are never emitted, so a
-            /// consumer that cares about provenance can tell them apart.
-            canonical: bool,
             instruction_pc: u32,
-            payload_pc: u32,
-            next_pc: u32,
             size: u8,
-            layout: *const OperandLayout,
+
+            pub inline fn payload_pc(self: Header) u32 {
+                return self.instruction_pc + 1;
+            }
+
+            pub inline fn next_pc(self: Header) u32 {
+                return self.instruction_pc + self.size;
+            }
+
+            /// Aliases are never emitted, so today this is always true; it
+            /// becomes real when F0c introduces them.
+            pub inline fn canonical(self: Header) bool {
+                _ = self;
+                return true;
+            }
+
+            /// Contract 2 lists `family` and `layout` as header fields. They
+            /// are accessors instead, because building them eagerly is what
+            /// a decode costs: `familyOf` is a 263-arm switch and the layout
+            /// is a ~50-byte struct, and the compile path now decodes every
+            /// instruction about three times (stack pass, artifact
+            /// validator, inline scanner). Measured, not assumed.
+            pub inline fn family(self: Header) logical.SemanticFamily {
+                return logical.familyOf(self.form);
+            }
+
+            pub inline fn layout(self: Header) *const OperandLayout {
+                return layoutOf(self.form);
+            }
         };
 
         pub const Error = error{ InvalidOpcode, BytecodeOverflow };
 
-        pub fn headerAt(domain: Domain, code: []const u8, pc: u32) Error!Header {
+        // A reclaimed slot keeps a row -- the canonical dead shape, which
+        // the ledger asserts -- so "the row table has an entry" does NOT
+        // mean "the slot is claimed"; it only means `id < op_count`. Ten
+        // slots are reclaimed today, and `headerAt`'s `stateOf` call is the
+        // only thing that rejects them. Recorded because the reverse was
+        // assumed once, and the assertion that tested the assumption is
+        // what disproved it.
+        comptime {
+            @setEvalBranchQuota(20000);
+            var reclaimed_with_row: usize = 0;
+            for (0..op.op_count) |i| {
+                const id: u8 = @intCast(i);
+                if (finalCompactInfo(id) != null and physical.stateOf(id) != .claimed)
+                    reclaimed_with_row += 1;
+            }
+            if (reclaimed_with_row != physical.ledger.reclaimed)
+                @compileError("a reclaimed slot lost its canonical dead row");
+        }
+
+        pub fn headerAt(comptime domain: Domain, code: []const u8, pc: u32) Error!Header {
             if (pc >= code.len) return error.BytecodeOverflow;
             const id = code[pc];
-            const info = switch (domain) {
-                .final => finalInfo(id) orelse return error.InvalidOpcode,
-                .lowered => phase1Info(id) orelse return error.InvalidOpcode,
-            };
-            if (physical.stateOf(id) != .claimed) return error.InvalidOpcode;
-            const size = info.size;
-            const next = @as(usize, pc) + size;
-            if (next > code.len) return error.BytecodeOverflow;
-
+            if (id >= op.op_count) return error.InvalidOpcode;
+            // The index is computed as a number and the row is consulted
+            // BEFORE `@enumFromInt`. A reclaimed id has no tag in
+            // `LogicalOpcode`, so converting first and validating after
+            // would be illegal behaviour on exactly the inputs invariant 5
+            // exists to reject -- which is how the unit suite caught it.
+            //
             // Carrier members are F0c: the sub space has no layout yet, so a
             // carrier decodes as itself and the tag is read as its operand.
-            const form: logical.LogicalOpcode = switch (domain) {
-                .final => @enumFromInt(id),
+            const index: u16 = switch (domain) {
+                .final => id,
                 .lowered => if (id >= op.op_temp_start and id < op.op_temp_end)
-                    @enumFromInt(@as(u16, 300) + (id - op.op_temp_start))
+                    @as(u16, 300) + (id - op.op_temp_start)
                 else
-                    @enumFromInt(id),
+                    id,
             };
-            return .{
-                .domain = domain,
-                .form = form,
-                .family = logical.familyOf(form),
-                .encoding = .{ .direct = id },
-                .canonical = true,
-                .instruction_pc = pc,
-                .payload_pc = pc + 1,
-                .next_pc = @intCast(next),
-                .size = size,
-                .layout = layoutOf(form),
-            };
+            // One row, one load: size and the claimed test come off the same
+            // four bytes. See `FormRow` for why that is the whole point.
+            const row = form_row[index];
+            if (!row.isClaimed()) return error.InvalidOpcode;
+            const form: logical.LogicalOpcode = @enumFromInt(index);
+            const next = @as(usize, pc) + row.size;
+            if (next > code.len) return error.BytecodeOverflow;
+            return .{ .form = form, .instruction_pc = pc, .size = row.size };
         }
 
         /// Burned-in operands are restored to their declared value, so a
         /// consumer never has to know which forms carry payload bytes.
         pub fn operandAt(h: Header, code: []const u8, index: usize, comptime T: type) Error!T {
-            if (index >= h.layout.len) return error.InvalidOpcode;
-            const slot = h.layout.slots[index];
+            if (index >= h.layout().len) return error.InvalidOpcode;
+            const slot = h.layout().slots[index];
             const offset = slot.offset orelse return @intCast(slot.fixed);
-            const at = h.payload_pc + offset;
+            const at = h.payload_pc() + offset;
             return switch (slot.width.?) {
                 .u8 => @intCast(code[at]),
                 .i8 => @intCast(@as(i8, @bitCast(code[at]))),
@@ -1676,10 +1815,24 @@ pub const opcode = struct {
         /// mirrors the physical row, which is the sanctioned migration path
         /// (invariant 5: at G0 the mirror goes away and a form without a
         /// declared effect stops compiling).
+        /// Comptime index, not a scan. The declaration is a list because
+        /// that is how it reads; consulting it per instruction is not.
+        const dynamic_by_form: [512]?logical.DynamicStack.Shape = blk: {
+            @setEvalBranchQuota(20000);
+            var t = [_]?logical.DynamicStack.Shape{null} ** 512;
+            for (logical.dynamic_stack) |d| t[@intFromEnum(d.form)] = d.shape;
+            break :blk t;
+        };
+
+        /// No domain parameter: the form already carries it, because the
+        /// lowered-only opcodes live at 300+ and the row table is keyed by
+        /// form. That the parameter became dead is a small confirmation
+        /// that form, not the physical id, is the right key.
         pub fn stackEffect(h: Header, code: []const u8) Error!StackEffect {
-            for (logical.dynamic_stack) |d| {
-                if (d.form != h.form) continue;
-                switch (d.shape) {
+            const row = form_row[@intFromEnum(h.form)];
+            if (!row.isDynamic()) return .{ .pop = row.pop, .push = row.push };
+            if (dynamic_by_form[@intFromEnum(h.form)]) |shape| {
+                switch (shape) {
                     .affine => |expr| switch (expr) {
                         .affine => |a| {
                             const v = try operandAt(h, code, a.operand_index, i64);
@@ -1695,32 +1848,28 @@ pub const opcode = struct {
                         const raw = try operandAt(h, code, t.operand_index, u8);
                         return switch (h.form) {
                             .using => .{ .pop = using_sub.stackPop(raw), .push = using_sub.stackPush(raw) },
-                            .dyn_env_probe => blk: {
+                            .dyn_env_probe => blk2: {
                                 const flags = dyn_env.decode(raw) orelse return error.InvalidOpcode;
-                                break :blk .{ .pop = flags.stackPop(), .push = flags.stackPush() };
+                                break :blk2 .{ .pop = flags.stackPop(), .push = flags.stackPush() };
                             },
                             else => error.InvalidOpcode,
                         };
                     },
                 }
             }
-            const info = switch (h.domain) {
-                .final => finalInfo(@intCast(@intFromEnum(h.form))) orelse return error.InvalidOpcode,
-                .lowered => phase1Info(@intCast(@intFromEnum(h.form))) orelse return error.InvalidOpcode,
-            };
-            return .{ .pop = info.n_pop, .push = info.n_push };
+            return .{ .pop = row.pop, .push = row.push };
         }
 
         /// A jump target is a decoded value, not an offset the consumer
         /// recomputes. The base is the label operand's own address, which is
         /// exactly the arithmetic every hand-rolled site had to repeat.
         pub fn targetOfLabel(h: Header, code: []const u8, index: usize) Error!u32 {
-            if (index >= h.layout.len) return error.InvalidOpcode;
-            const slot = h.layout.slots[index];
+            if (index >= h.layout().len) return error.InvalidOpcode;
+            const slot = h.layout().slots[index];
             if (slot.kind != .label) return error.InvalidOpcode;
             const offset = slot.offset orelse return error.InvalidOpcode;
             const diff = try operandAt(h, code, index, i64);
-            const base: i64 = @as(i64, h.payload_pc) + offset;
+            const base: i64 = @as(i64, h.payload_pc()) + offset;
             const target = base + diff;
             if (target < 0 or target > code.len) return error.BytecodeOverflow;
             return @intCast(target);
@@ -1778,15 +1927,15 @@ pub const opcode = struct {
                 // Distinguishable payload so an off-by-one offset shows up.
                 for (1..info.size) |i| buf[i] = @intCast(0x10 + i);
                 const h = try opcode.decode.headerAt(.final, buf[0..info.size], 0);
-                try std.testing.expectEqual(@as(u32, info.size), h.next_pc);
-                try std.testing.expectEqual(@as(u32, 1), h.payload_pc);
-                try std.testing.expect(h.canonical);
+                try std.testing.expectEqual(@as(u32, info.size), h.next_pc());
+                try std.testing.expectEqual(@as(u32, 1), h.payload_pc());
+                try std.testing.expect(h.canonical());
                 try std.testing.expectEqual(f.value, @intFromEnum(h.form));
 
                 // Every payload operand must read back exactly what a raw
                 // read at the same offset would give.
-                for (0..h.layout.len) |i| {
-                    const slot = h.layout.slots[i];
+                for (0..h.layout().len) |i| {
+                    const slot = h.layout().slots[i];
                     const offset = slot.offset orelse continue;
                     const at = 1 + @as(usize, offset);
                     const expected: i64 = switch (slot.width.?) {
@@ -1812,8 +1961,8 @@ pub const opcode = struct {
         buf[0] = op.get_loc2;
         var h = try opcode.decode.headerAt(.final, buf[0..1], 0);
         try std.testing.expectEqual(@as(u16, 2), try opcode.decode.operandAt(h, buf[0..1], 0, u16));
-        try std.testing.expectEqual(logical.OperandKind.local_slot, h.layout.slots[0].kind);
-        try std.testing.expectEqual(logical.Flow.read_write, h.layout.slots[0].flow.?);
+        try std.testing.expectEqual(logical.OperandKind.local_slot, h.layout().slots[0].kind);
+        try std.testing.expectEqual(logical.Flow.read_write, h.layout().slots[0].flow.?);
 
         buf[0] = op.push_3;
         h = try opcode.decode.headerAt(.final, buf[0..1], 0);
@@ -8748,7 +8897,11 @@ pub const pipeline_stack_size = struct {
         /// deriving a semantic operand from the physical id. That derivation
         /// loses its definition the moment an id is aliased or moved behind a
         /// carrier, which is exactly what this work does to ids.
-        fn validateKnownInstruction(
+        /// `inline` is load-bearing, not a hint. The unmigrated validator was
+        /// small enough that LLVM inlined it into both walkers; the migrated
+        /// one is not, and the per-instruction call was measured at 72M
+        /// instructions on the CodeLoad compile path (2026-08-28).
+        inline fn validateKnownInstruction(
             self: *FinalArtifactValidator,
             bytecode: []const u8,
             h: opcode.decode.Header,
@@ -8757,25 +8910,21 @@ pub const pipeline_stack_size = struct {
             if (size == 0 or size > bytecode.len - self.pc)
                 return error.InvalidFinalArtifact;
 
-            for (0..h.layout.len) |i| {
-                switch (h.layout.slots[i].kind) {
-                    .atom => {
-                        if (self.owner_index >= self.config.atom_owners.len)
-                            return error.InvalidFinalArtifact;
-                        const encoded = opcode.decode.operandAt(h, bytecode, i, u32) catch
-                            return error.InvalidFinalArtifact;
-                        if (encoded != self.config.atom_owners[self.owner_index])
-                            return error.InvalidFinalArtifact;
-                        self.owner_index += 1;
-                    },
-                    .var_ref_slot => {
-                        const idx = opcode.decode.operandAt(h, bytecode, i, u32) catch
-                            return error.InvalidFinalArtifact;
-                        if (idx >= self.config.closure_var_count)
-                            return error.InvalidFinalArtifact;
-                    },
-                    else => {},
-                }
+            const lay = h.layout();
+            if (lay.atom_slot) |i| {
+                if (self.owner_index >= self.config.atom_owners.len)
+                    return error.InvalidFinalArtifact;
+                const encoded = opcode.decode.operandAt(h, bytecode, i, u32) catch
+                    return error.InvalidFinalArtifact;
+                if (encoded != self.config.atom_owners[self.owner_index])
+                    return error.InvalidFinalArtifact;
+                self.owner_index += 1;
+            }
+            if (lay.var_ref_slot) |i| {
+                const idx = opcode.decode.operandAt(h, bytecode, i, u32) catch
+                    return error.InvalidFinalArtifact;
+                if (idx >= self.config.closure_var_count)
+                    return error.InvalidFinalArtifact;
             }
             self.pc += size;
         }
@@ -8881,7 +9030,7 @@ pub const pipeline_stack_size = struct {
             if (h.form == .invalid) return error.InvalidOpcode;
             // Both proofs now share the one decoded header instead of a
             // separately looked-up metadata row.
-            const pos_next = h.next_pc;
+            const pos_next = h.next_pc();
 
             // Effects come from the declaration, not from a format switch
             // here. `npop`, `npop_u16` and `npopx` (call0..3, whose count is
@@ -11167,7 +11316,7 @@ const function_mod = struct {
                 const resident = opcode.logical.subForm(sub) orelse return false;
                 if (opcode.logical.traitsOf(resident).inline_policy == .forbidden) return false;
             }
-            pc = h.next_pc;
+            pc = h.next_pc();
         }
         return true;
     }
