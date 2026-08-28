@@ -2141,6 +2141,19 @@ tag；热路径（matcher、lookahead、stack walker）只用 `DecodedHeader` +
 > **代价局限在编译路**：运行时重的基准已回到持平。CodeLoad 是全套里编译
 > 最密集的一个，所以这 1.64% 是最坏情形而非典型值。
 >
+> **实现回报（F0b resolve_labels 之后，2026-08-28）：parser 域的签名
+> 装不进本合同。** CFG 迁移摸底发现，parser 域消费的是**混合流**——
+> Builder 阶段的 temp id 范围（178–196）里可以合法地混着已选定的 final
+> short opcode，现行 `cfg.tempInstruction` 靠 **atom-ledger 比对**消歧
+> （temp 解释的操作数与账本游标处的 atom 相等 ⇒ temp，否则 final）。
+> 因此 parser 域的 decode 需要 `(code, atoms_ledger, pc, atom_index)`
+> 四个输入，`decodeHeaderAt(domain, code, pc)` 的统一签名对它不成立——
+> **消歧所需的外部状态是域定义的一部分，不是实现细节**。CFG/
+> resolve_variables 迁移（F0b 剩余）动工前，需先把 parser 域入口的形状
+> 定进本合同：建议 `headerAtParser(code, ledger, pc, atom_index)` 单列，
+> 且两张私有表（`temp_decode_info`/`phase1_decode_info`，现从
+> `sizeOf`/`formatOf` 生成）改由声明派生。
+>
 > 归因过程中的两条附带记录：
 >
 > - 我假设「有解码行 ⇒ 槽已认领」并写断言去验，**断言把假设证伪了**：
