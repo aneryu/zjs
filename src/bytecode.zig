@@ -11766,157 +11766,93 @@ pub const dump = struct {
         try writer.print("constants   : {d}\n", .{constant_count});
         try writer.print("--- instructions ---\n", .{});
 
+        // Decode-first with a raw fallback: a disassembler must render a
+        // CORRUPT stream too, so a failed decode falls back to one raw byte
+        // and keeps going where the decoder would (correctly) refuse. On the
+        // decoded path the operands come from the layout, which prints
+        // strictly more than the format switch it replaced could: burned-in
+        // operands (`get_loc0`'s slot) have no bytes for a format-driven
+        // printer to read, but the declaration knows their values.
         var pc: usize = 0;
         while (pc < code.len) {
-            const op_id = code[pc];
-            const reported_size = opcode.sizeOf(op_id);
-            const size: usize = if (reported_size == 0) 1 else @intCast(reported_size);
-            const end = @min(pc + size, code.len);
-
             if (opts.show_offsets) {
                 try writer.print("{d:>5}: ", .{pc});
             }
 
-            const op_name = opcode.nameOf(op_id);
-            if (op_name.len == 0) {
-                try writer.print("?<{d}>", .{op_id});
-            } else {
-                try writer.print("{s}", .{op_name});
-            }
+            const h = opcode.decode.headerAt(.final, code, @intCast(pc)) catch {
+                const op_id = code[pc];
+                const op_name = opcode.nameOf(op_id);
+                if (op_name.len == 0) {
+                    try writer.print("?<{d}>", .{op_id});
+                } else {
+                    try writer.print("{s}", .{op_name});
+                }
+                if (opts.show_raw_bytes) {
+                    try writer.print("    ; raw={x:0>2} ", .{code[pc]});
+                }
+                try writer.print("\n", .{});
+                pc += 1;
+                continue;
+            };
+            const end: usize = h.next_pc();
 
-            const fmt = opcode.formatOf(op_id);
-            try printOperands(writer, atoms, fmt, code[pc..end]);
+            try writer.print("{s}", .{opcode.nameOf(code[pc])});
+            try printOperandsFromLayout(writer, atoms, h, code);
 
             if (opts.show_raw_bytes) {
                 try writer.print("    ; raw=", .{});
                 for (code[pc..end]) |b| try writer.print("{x:0>2} ", .{b});
             }
             try writer.print("\n", .{});
-
-            if (size == 0) break; // safety
-            pc += size;
+            pc = end;
         }
 
         try writer.print("--- end ---\n", .{});
     }
 
-    fn printOperands(
+    fn printOperandsFromLayout(
         writer: *std.Io.Writer,
         atoms: *atom.AtomTable,
-        fmt: opcode.Format,
-        body: []const u8,
+        h: opcode.decode.Header,
+        code: []const u8,
     ) !void {
-        switch (fmt) {
-            .none, .none_int, .none_loc, .none_arg, .none_var_ref => {},
-
-            .u8, .npopx => {
-                if (body.len >= 2) try writer.print(" {d}", .{body[1]});
-            },
-            .i8, .label8 => {
-                if (body.len >= 2) try writer.print(" {d}", .{@as(i8, @bitCast(body[1]))});
-            },
-            .loc8, .const8 => {
-                if (body.len >= 2) try writer.print(" {d}", .{body[1]});
-            },
-
-            .u16, .loc, .arg, .var_ref, .npop, .label16 => {
-                if (body.len >= 3) {
-                    const v = std.mem.readInt(u16, body[1..][0..2], .little);
-                    try writer.print(" {d}", .{v});
-                }
-            },
-            .i16 => {
-                if (body.len >= 3) {
-                    const v = std.mem.readInt(i16, body[1..][0..2], .little);
-                    try writer.print(" {d}", .{v});
-                }
-            },
-            .npop_u16 => {
-                if (body.len >= 5) {
-                    const a = std.mem.readInt(u16, body[1..][0..2], .little);
-                    const b = std.mem.readInt(u16, body[3..][0..2], .little);
-                    try writer.print(" {d},{d}", .{ a, b });
-                }
-            },
-
-            .u32, .label, .@"const" => {
-                if (body.len >= 5) {
-                    const v = std.mem.readInt(u32, body[1..][0..4], .little);
-                    try writer.print(" {d}", .{v});
-                }
-            },
-            .i32 => {
-                if (body.len >= 5) {
-                    const v = std.mem.readInt(i32, body[1..][0..4], .little);
-                    try writer.print(" {d}", .{v});
-                }
-            },
-            .atom => {
-                try writeAtomOperand(writer, atoms, body);
-            },
-            .atom_u8 => {
-                try writeAtomOperand(writer, atoms, body);
-                if (body.len >= 6) try writer.print(", {d}", .{body[5]});
-            },
-            .atom_u16 => {
-                try writeAtomOperand(writer, atoms, body);
-                if (body.len >= 7) {
-                    const v = std.mem.readInt(u16, body[5..][0..2], .little);
-                    try writer.print(", {d}", .{v});
-                }
-            },
-            .atom_label_u8 => {
-                try writeAtomOperand(writer, atoms, body);
-                if (body.len >= 10) {
-                    const lbl = std.mem.readInt(u32, body[5..][0..4], .little);
-                    if (body[0] == opcode.op.dyn_env_probe) {
-                        if (opcode.dyn_env.decode(body[9])) |flags| {
-                            try writer.print(", L{d}, {s}{s}", .{
-                                lbl,
+        const lay = h.layout();
+        for (0..lay.len) |i| {
+            const slot = lay.slots[i];
+            try writer.writeAll(if (i == 0) " " else ", ");
+            const value: i64 = if (slot.offset == null)
+                @intCast(slot.fixed)
+            else
+                opcode.decode.operandAt(h, code, i, i64) catch {
+                    try writer.print("<trunc>", .{});
+                    return;
+                };
+            switch (slot.kind) {
+                .atom => {
+                    const a: u32 = @intCast(value);
+                    if (atoms.name(a)) |name_str| {
+                        try writer.print("\"{s}\"", .{name_str});
+                    } else {
+                        try writer.print("atom#{d}", .{a});
+                    }
+                },
+                .label => try writer.print("L{d}", .{value}),
+                .sub_opcode => {
+                    // dyn_env_probe's kind byte decodes to a probe shape;
+                    // showing it beats showing the raw flag byte.
+                    if (h.form == .dyn_env_probe) {
+                        if (opcode.dyn_env.decode(@intCast(value))) |flags| {
+                            try writer.print("{s}{s}", .{
                                 @tagName(flags.kind),
                                 if (flags.is_with) ",with" else "",
                             });
-                            return;
+                            continue;
                         }
                     }
-                    try writer.print(", L{d}, {d}", .{ lbl, body[9] });
-                }
-            },
-            .atom_label_u16 => {
-                try writeAtomOperand(writer, atoms, body);
-                if (body.len >= 11) {
-                    const lbl = std.mem.readInt(u32, body[5..][0..4], .little);
-                    const v = std.mem.readInt(u16, body[9..][0..2], .little);
-                    try writer.print(", L{d}, {d}", .{ lbl, v });
-                }
-            },
-            .label_u16 => {
-                if (body.len >= 7) {
-                    const lbl = std.mem.readInt(u32, body[1..][0..4], .little);
-                    const v = std.mem.readInt(u16, body[5..][0..2], .little);
-                    try writer.print(" L{d}, {d}", .{ lbl, v });
-                }
-            },
-        }
-    }
-
-    fn writeAtomOperand(
-        writer: *std.Io.Writer,
-        atoms: *atom.AtomTable,
-        body: []const u8,
-    ) !void {
-        // The atom is the 4-byte operand at `body[1..5]` in every atom format;
-        // read it inline rather than from a side array (the finalized FB no
-        // longer keeps one).
-        if (body.len < 5) {
-            try writer.print(" <atom?>", .{});
-            return;
-        }
-        const a = std.mem.readInt(u32, body[1..][0..4], .little);
-        if (atoms.name(a)) |s| {
-            try writer.print(" \"{s}\"", .{s});
-        } else {
-            try writer.print(" <atom#{d}>", .{a});
+                    try writer.print("{d}", .{value});
+                },
+                else => try writer.print("{d}", .{value}),
+            }
         }
     }
 };
