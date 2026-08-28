@@ -19,6 +19,11 @@ pub const OpcodeProfile = struct {
     pub const opcode_count = max_opcode_count;
 
     count: [max_opcode_count]u64 = @splat(0),
+    /// D12 / 11.5 clause 3: a carrier's residents may not be aggregated
+    /// into one row. The `using` cold plane is the shipping carrier -- 19
+    /// residents behind one physical id -- so its dispatches are counted
+    /// per sub tag as well as in `count[using]`.
+    using_sub_count: [256]u64 = @splat(0),
     nanos: [max_opcode_count]u64 = @splat(0),
     slow_count: [max_opcode_count]u64 = @splat(0),
     ic_hit: [max_opcode_count]u64 = @splat(0),
@@ -50,6 +55,10 @@ pub const OpcodeProfile = struct {
     /// `always_tail`). Nanos stay 0; leftover-ladder work needs counts.
     pub fn noteDispatch(self: *OpcodeProfile, opcode: u8) void {
         self.count[opcode] +|= 1;
+    }
+
+    pub fn noteCarrierSub(self: *OpcodeProfile, sub: u8) void {
+        self.using_sub_count[sub] +|= 1;
     }
 
     /// Close the final open interval; must run before any dump or detach.

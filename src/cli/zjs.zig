@@ -856,6 +856,38 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         }
     }
 
+    // D12: the carrier's residents, one row per sub, named from the
+    // declaration. Aggregating them into the one `using` row above is
+    // exactly what 11.5 clause 3 forbids -- the cold plane's population
+    // is the fact a reclaim decision needs.
+    var sub_total: u64 = 0;
+    for (profile.using_sub_count) |c| sub_total +|= c;
+    if (sub_total != 0) {
+        try output.print("\nUSING SUB               COUNT\n", .{});
+        for (profile.using_sub_count, 0..) |c, sub| {
+            if (c == 0) continue;
+            const resident = engine.bytecode.opcode.logical.subForm(@intCast(sub));
+            const name = if (resident) |form| @tagName(form) else "<range>";
+            try output.print("{s:<20} {d:>9}  (sub {d})\n", .{ name, c, sub });
+        }
+    }
+
+    // D12's family rollup: a GENERATED aggregation view over the form
+    // counts, never a substitute for per-form rows.
+    var family_counts = std.enums.EnumArray(engine.bytecode.opcode.logical.SemanticFamily, u64).initFill(0);
+    for (profile.count, 0..) |c, id| {
+        if (c == 0 or id >= engine.bytecode.opcode.op.op_count) continue;
+        if (engine.bytecode.opcode.physical.stateOf(@intCast(id)) != .claimed) continue;
+        const form: engine.bytecode.opcode.logical.LogicalOpcode = @enumFromInt(id);
+        family_counts.getPtr(engine.bytecode.opcode.logical.familyOf(form)).* +|= c;
+    }
+    try output.print("\nFAMILY (rollup)         COUNT\n", .{});
+    var fam_it = family_counts.iterator();
+    while (fam_it.next()) |entry| {
+        if (entry.value.* == 0) continue;
+        try output.print("{s:<20} {d:>9}\n", .{ @tagName(entry.key), entry.value.* });
+    }
+
     try dumpHostDispatchStats(output);
 }
 

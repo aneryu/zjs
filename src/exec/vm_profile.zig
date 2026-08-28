@@ -14,8 +14,14 @@ const core = @import("../core/root.zig");
 
 pub const enabled = build_options.zjs_enable_opcode_profile;
 
-pub inline fn noteDispatch(rt: *core.JSRuntime, opcode: u8) void {
+pub inline fn noteDispatch(rt: *core.JSRuntime, pc: [*]const u8) void {
     if (comptime !enabled) return;
     const profile = rt.opcode_profile orelse return;
+    const opcode = pc[0];
     profile.noteDispatch(opcode);
+    // Memory-only, no syscall: safe on the musttail path (the crash
+    // precedent in the header was clock_gettime's frame, not a store).
+    const bc = @import("../bytecode.zig");
+    if (opcode == comptime @intFromEnum(bc.opcode.logical.LogicalOpcode.using))
+        profile.noteCarrierSub(pc[1]);
 }

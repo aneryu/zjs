@@ -314,7 +314,7 @@ inline fn residentTailHandler(vm: *const Vm, comptime slot: ResidentTailSlot) Ha
 fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     if (comptime builtin.mode == .Debug)
         std.debug.assert(@intFromPtr(pc) < @intFromPtr(vm.function.byteCode().ptr + vm.function.byteCode().len));
-    if (comptime vm_profile.enabled) vm_profile.noteDispatch(vm.ctx.runtime, pc[0]);
+    if (comptime vm_profile.enabled) vm_profile.noteDispatch(vm.ctx.runtime, pc);
     return @call(.always_tail, vm.active_dispatch_tbl[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
@@ -2687,7 +2687,7 @@ fn op_add_strings(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
 /// additionally Debug-asserts `pc < code_end` and remains the driver/jump entry
 /// point.
 inline fn cont(npc: [*]const u8, nsp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
-    if (comptime vm_profile.enabled) vm_profile.noteDispatch(vm.ctx.runtime, npc[0]);
+    if (comptime vm_profile.enabled) vm_profile.noteDispatch(vm.ctx.runtime, npc);
     return @call(.always_tail, dispatch_table[npc[0]], .{ npc, nsp, var_buf, vm });
 }
 
