@@ -2921,6 +2921,30 @@ CV 1.44% 且呈双峰（36k/34.9k 两模式，前已录得同一二进制一分�
 分配器布局敏感），停止线永久改由周期账承载**：F0b −1.64% + rl −0.12%
 + F0c −0.30% ≈ **累计 −1.2~−1.5%，线内**。
 
+###### F0d 关账（2026-08-28，`edcd70f8`）——**F0 系列全部闭合**
+
+三项交付：runtime lookahead 已在 F0b 内落地（见上）；另两项——
+
+**logical profiler（D12）**：抓到并修复一个现行违规——`using` 平面的
+19 个居民在 profile 里被糊成一行，正是 §11.5 第 3 条禁止的聚合；现在
+按 sub tag 分行计数（居民名由 `subForm` 从声明取），并加 family rollup
+作为**生成的聚合视图**、永不替代 per-form 行。musttail 路径上只做内存
+写（前科是 clock_gettime 的栈帧，不是 store）。发布构建编译剔除，
+handler island 逐字节不变。
+
+**raw-access CI gate**（§10.5 四规则的机器可执行形态，
+`tools/lint/raw_access_gate.py`）：**状态扫描不是 diff 扫描**（diff 门
+会漏掉违规搬进新文件）。六个流消费文件、三类模式（raw emit /
+物理身份比较 / `code[pc+N]` 读），解释器 handler 本体按设计不在
+扫描集（执行 `pc[0]` 是它的本职）。**374 处既有访问冻结进 allowlist，
+每项带原因与移除阶段**（F0c encoder / generated matcher / 合同 4 /
+decoder 永久），增即红、减提示收紧。注入验证：cfg.zig 加一处
+`code[0] == op.goto` 即 23 > 22 红。
+
+**至此 F0a0 / F0a1 / F0b / F0c（现役范围）/ F0d 全部关账。** C0 的
+F0 前置除 carrier 专属件（registry/fixture/encoder carrier 臂，与
+demand 证据同步）外均已就位。
+
 迁移本身的两条附带产出：`FormRow` 新增 atom/label/index-width 三类
 声明派生位（`label_bit` 让 validateProductCode 拒绝「未获准的整类带
 label form」而非手维护格式黑名单）；语义收紧——旧 reader 接受任何有
