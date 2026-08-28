@@ -82,6 +82,6 @@
       "interpretation": "The same A/B moved EarleyBoyer +1.09%, SplayLatency +1.46%, Typescript +0.77% and PdfJS +0.65% in the other direction, with no mechanism either. Mixed signs, no mechanism, cancelling to zero at the composite is the handler-island layout signature that 11.5 clause 10 exists to keep out of carrier judgements: the first half of the campaign deletes or merges handlers (nip1 retired, set_proto demoted, five ids reclaimed, with_* 5->1, R0), and every deletion shifts the address of every other handler."
     }
   },
-  "verdict": "informational for the line as a whole (parity); the CodeLoad row is the evidence behind the 11.5 clause 11 item recorded as NOT passed for F0b",
-  "owner_decision": null
+  "verdict": "informational for the line as a whole (parity); the CodeLoad row was ruled on 2026-08-28: clause 11 cost ACCEPTED with conditions, see owner_decision",
+  "owner_decision": "2026-08-28: accepted. The real price is the compile path's worst case at -1.3~-1.6% with runtime at zero; the composite-parity cancellation is layout noise and was not used as grounds. Acceptance covers F0b parts 1-4 only. Conditions: (1) each remaining consumer migration gates on fixed-work cycles + L1i misses (not instruction count) against an A/A band; (2) cumulative stop-line CodeLoad -2.5% vs b1ab5200, hitting it stops at the previous consumer; (3) the runtime-lookahead migration additionally requires P1-1's disassembly fixture (direct targets stay one byte compare)."
 }
