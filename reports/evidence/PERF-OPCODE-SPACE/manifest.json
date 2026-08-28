@@ -1,0 +1,87 @@
+{
+  "manifest_version": 1,
+  "work_item": "PERF-OPCODE-SPACE",
+  "date": "2026-08-28",
+  "commits": {
+    "zjs_baseline": {
+      "commit": "b1ab5200",
+      "dirty": false,
+      "ref": "78d77089^",
+      "note": "the commit before the opcode line's first code change; every code-touching commit in b1ab5200..94063da6 is opcode work, verified with git log -- src/ tools/"
+    },
+    "zjs_candidate": {
+      "commit": "94063da6",
+      "dirty": false,
+      "ref": "main",
+      "note": "F0b attribution; binary rebuilt from the clean checkout and sha256-matched to the measured one"
+    },
+    "suite": {
+      "commit": "vendored",
+      "dirty": false,
+      "note": "Octane 2.0 / bench-v8 version 9, tools/perf/bench_v8/suite, unmodified vendor drop"
+    }
+  },
+  "binary_sha256": {
+    "baseline": {
+      "path": "/tmp/opc-base-zjs",
+      "sha256": "8299c419c4ee60db2db45fb52146c8e1f6985b15b4a2ea8ab216930199c63754",
+      "recipe": "zig build zjs (ReleaseFast) in a worktree at b1ab5200"
+    },
+    "candidate": {
+      "path": "/tmp/opc-head-zjs",
+      "sha256": "22ab732581c0c412d0158b0655033c5c37ef9cbfc9d14f8431580f9a6512636b",
+      "recipe": "zig build zjs (ReleaseFast) at 94063da6; rebuilt after commit and hash-compared"
+    }
+  },
+  "toolchain": {
+    "zig": "0.16.0"
+  },
+  "policy_sha256": {},
+  "host": {
+    "cpu": "core 18 (big core, pmuv3_1)",
+    "protocol": "serial, one process at a time",
+    "note": "core 19 and core 17 were each fully occupied by other agents at different points; per-core idle was checked with mpstat before the run, not load average. A core-19 collision earlier the same day produced a sign-reversed reading."
+  },
+  "command": [
+    "taskset -c 18 python3 tools/perf/bench_v8/run_benchv8_compare.py --zjs /tmp/opc-head-zjs --baseline /tmp/opc-base-zjs --samples 8 --cpu 18 --output /tmp/opc-ab.json",
+    "taskset -c 18 python3 tools/perf/bench_v8/run_benchv8_compare.py --zjs /tmp/opc-base-copy-zjs --baseline /tmp/opc-base-zjs --samples 8 --cpu 18 --output /tmp/opc-aa.json",
+    "three-arm DeltaBlue/RegExp run, n=20 per arm, base / f0b-parent(ef7fc62a) / candidate, see deltablue-regexp-split.txt"
+  ],
+  "raw_artifacts": [
+    {
+      "path": "reports/evidence/PERF-OPCODE-SPACE/benchv8-ab.json",
+      "sha256": "d30b0da0bd8b7ef74d4819c1b0e9632e658fedbc870d591298fb4492fc8b6653",
+      "note": "candidate vs pre-campaign baseline, 8 samples per engine, ABBA"
+    },
+    {
+      "path": "reports/evidence/PERF-OPCODE-SPACE/benchv8-aa.json",
+      "sha256": "f1415f5211afbeaf1a96cef2a32ab1cb854ba5e6c84e72d87f136d2ff07fd10f",
+      "note": "A/A on the baseline binary against a byte-identical copy; this is the noise band the A/B is judged against (11.5 clause 6)"
+    },
+    {
+      "path": "reports/evidence/PERF-OPCODE-SPACE/deltablue-regexp-aa.txt",
+      "sha256": "0fd5a5f23d103bf7de462ac6900b799738e0a197aa8cf2e0fe1889e9cdd857cb",
+      "note": "dedicated three-arm run with an in-run A/A control"
+    },
+    {
+      "path": "reports/evidence/PERF-OPCODE-SPACE/deltablue-regexp-split.txt",
+      "sha256": "bae022e9cb4038b9df2cce6f03cee619b479251b3fe62aa058b10af1c43ec835",
+      "note": "same two benchmarks split across the campaign's two halves at ef7fc62a"
+    }
+  ],
+  "result": {
+    "headline": "composite Score (version 9) ratio candidate/baseline = 0.9996",
+    "noise_band": "A/A on the same instrument gave composite 0.9986, i.e. a band of +-0.14%; the A/B deviation of -0.04% is inside it",
+    "verdict_on_the_whole_line": "parity -- the opcode line as a whole shows no regression",
+    "outside_band_and_explained": {
+      "CodeLoad": "0.9866 against a per-benchmark A/A band of +-0.49%. Real, and the mechanism is known and documented (11.5 F0b accounting): the F0b decode layer costs compile-path work. This is the clause 11 item that does not pass on its own terms."
+    },
+    "outside_band_without_a_mechanism": {
+      "DeltaBlue": "0.9879 in the suite run; a dedicated n=20 run with an in-run A/A control (A/A -0.07%) put it at -0.54%, and splitting the campaign at ef7fc62a attributes -0.34% to the FIRST half (id reclaim, with_* merge, R0, F0a) and -0.03% to F0b.",
+      "RegExp": "0.9873 in the suite run, but NOT reliably measurable at this effect size: two independent dedicated runs gave -0.89% and -1.66%, and the split reading was +1.88% then -3.47%. Recorded as unresolved rather than as a number.",
+      "interpretation": "The same A/B moved EarleyBoyer +1.09%, SplayLatency +1.46%, Typescript +0.77% and PdfJS +0.65% in the other direction, with no mechanism either. Mixed signs, no mechanism, cancelling to zero at the composite is the handler-island layout signature that 11.5 clause 10 exists to keep out of carrier judgements: the first half of the campaign deletes or merges handlers (nip1 retired, set_proto demoted, five ids reclaimed, with_* 5->1, R0), and every deletion shifts the address of every other handler."
+    }
+  },
+  "verdict": "informational for the line as a whole (parity); the CodeLoad row is the evidence behind the 11.5 clause 11 item recorded as NOT passed for F0b",
+  "owner_decision": null
+}
