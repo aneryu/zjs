@@ -1967,6 +1967,64 @@ pub const opcode = struct {
             }
         }
 
+        /// Stage-A selection for jump relaxation: the same jump at a
+        /// narrower label width, derived from the family + the label
+        /// slot's declared width. goto has both rungs (goto8/goto16);
+        /// the conditionals have only the byte rung.
+        pub const JumpSelection = struct {
+            narrow: ?logical.LogicalOpcode, // 1-byte label
+            medium: ?logical.LogicalOpcode, // 2-byte label
+        };
+
+        pub const jump_selection_table: [layout_table_len]JumpSelection = blk: {
+            @setEvalBranchQuota(400000);
+            var t = [_]JumpSelection{.{ .narrow = null, .medium = null }} ** layout_table_len;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |wf| {
+                if (wf.value >= 300) continue;
+                const wide: logical.LogicalOpcode = @enumFromInt(wf.value);
+                const wlay = layout_table[wf.value] orelse continue;
+                // The wide rung is the family key: a four-byte label
+                // operand. Declared as i32 (the S4 relative offset); an
+                // equality test against u32 here was the assertion's first
+                // catch -- it left the whole table empty.
+                var wide_has_label = false;
+                for (0..wlay.len) |i| {
+                    const w = wlay.slots[i].width orelse continue;
+                    if (wlay.slots[i].kind == .label and (w == .i32 or w == .u32))
+                        wide_has_label = true;
+                }
+                if (!wide_has_label) continue;
+                const fam = logical.familyOf(wide);
+                for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                    if (f.value >= 300 or f.value == wf.value) continue;
+                    const form: logical.LogicalOpcode = @enumFromInt(f.value);
+                    if (logical.familyOf(form) != fam) continue;
+                    const lay = layout_table[f.value] orelse continue;
+                    for (0..lay.len) |i| {
+                        const slot = lay.slots[i];
+                        if (slot.kind != .label) continue;
+                        switch (slot.width orelse continue) {
+                            .i8 => t[wf.value].narrow = form,
+                            .i16 => t[wf.value].medium = form,
+                            else => {},
+                        }
+                    }
+                }
+            }
+            break :blk t;
+        };
+
+        pub inline fn selectJumpForm(
+            wide: logical.LogicalOpcode,
+            rung: enum { narrow, medium },
+        ) ?logical.LogicalOpcode {
+            const sel = jump_selection_table[@intFromEnum(wide)];
+            return switch (rung) {
+                .narrow => sel.narrow,
+                .medium => sel.medium,
+            };
+        }
+
         /// Stage-A selection for small integer pushes: the form whose
         /// burned-in immediate IS the value, derived from the push_int
         /// family's declarations. Replaces the writer's `push_0 + value`

@@ -1996,13 +1996,29 @@ const Resolver = struct {
             try self.emitSpecialObject(layout, special.var_object, fd.arg_var_object_idx);
     }
 
-    fn shortJumpOp(op_id: u8) Error!u8 {
-        return switch (op_id) {
-            op.if_false => op.if_false8,
-            op.if_true => op.if_true8,
-            op.goto => op.goto8,
-            else => error.InvalidBytecode,
+    // Baseline for the derived jump selection, kept as the assertion's
+    // reference; the writer consumes the declaration-derived table.
+    comptime {
+        const cases = [_][2]Form{
+            .{ .if_false, .if_false8 },
+            .{ .if_true, .if_true8 },
+            .{ .goto, .goto8 },
         };
+        for (cases) |case| {
+            if (opcode.decode.selectJumpForm(case[0], .narrow) != case[1])
+                @compileError("narrow jump selection diverges for " ++ @tagName(case[0]));
+        }
+        if (opcode.decode.selectJumpForm(.goto, .medium) != Form.goto16)
+            @compileError("medium jump selection diverges for goto");
+        if (opcode.decode.selectJumpForm(.if_false, .medium) != null or
+            opcode.decode.selectJumpForm(.if_true, .medium) != null)
+            @compileError("the conditionals must not gain a 16-bit rung silently");
+    }
+
+    fn shortJumpOp(op_id: u8) Error!u8 {
+        const narrow = opcode.decode.selectJumpForm(formOf(op_id), .narrow) orelse
+            return error.InvalidBytecode;
+        return opId(narrow);
     }
 
     fn emitHasLabel(
@@ -3152,8 +3168,11 @@ const Resolver = struct {
             var new_op = jump.op;
             if (diff >= -128 and diff <= 127 + @as(i64, delta)) {
                 new_size = 1;
+                // goto16 is itself a rung of the goto family; its narrow
+                // selection is the same goto8 the wide form's is.
                 new_op = if (jump.op == op.goto16)
-                    op.goto8
+                    opId(opcode.decode.selectJumpForm(.goto, .narrow) orelse
+                        return error.InvalidBytecode)
                 else
                     try shortJumpOp(jump.op);
             } else if (jump.op == op.goto and
@@ -3161,7 +3180,8 @@ const Resolver = struct {
             {
                 new_size = 2;
                 delta = 2;
-                new_op = op.goto16;
+                new_op = opId(opcode.decode.selectJumpForm(.goto, .medium) orelse
+                    return error.InvalidBytecode);
             }
 
             const compact_size = new_size orelse continue;
