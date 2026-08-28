@@ -634,14 +634,19 @@ fn emitSlice(out: *Rewrite, bytes: []const u8) bool {
 }
 
 fn emitLocOp(out: *Rewrite, get: bool, slot: u16) bool {
-    const base: u8 = if (get) op.get_loc0 else op.put_loc0;
-    if (slot <= 3) return emitByte(out, base + @as(u8, @intCast(slot)));
-    if (slot <= 255) {
-        const opc: u8 = if (get) op.get_loc8 else op.put_loc8;
-        return emitByte(out, opc) and emitByte(out, @intCast(slot));
+    // Same selector as resolve_labels' putShortCode (contract 3): the
+    // shortened form comes from the declaration, not from `base + slot`
+    // id arithmetic, and payload presence is the selected row's fact.
+    const decode = bytecode.opcode.decode;
+    const wide: bytecode.opcode.logical.LogicalOpcode = if (get) .get_loc else .put_loc;
+    if (decode.selectSlotShortForm(wide, slot)) |short_form| {
+        const opc: u8 = @intCast(@intFromEnum(short_form));
+        if (!emitByte(out, opc)) return false;
+        if (decode.form_row[@intFromEnum(short_form)].size == 2)
+            return emitByte(out, @intCast(slot));
+        return true;
     }
-    const opc: u8 = if (get) op.get_loc else op.put_loc;
-    if (!emitByte(out, opc)) return false;
+    if (!emitByte(out, @intCast(@intFromEnum(wide)))) return false;
     var buf: [2]u8 = undefined;
     std.mem.writeInt(u16, &buf, slot, .little);
     return emitSlice(out, &buf);
