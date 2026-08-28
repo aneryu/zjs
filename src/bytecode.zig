@@ -1925,6 +1925,35 @@ pub const opcode = struct {
             return .{ .form = @enumFromInt(row.form_index), .instruction_pc = pc, .size = row.size, .flags = row.flags };
         }
 
+        /// The instruction's total size for a statically-known form.
+        /// Runtime matchers use it for their `next_pc` arithmetic so the
+        /// increment cannot drift from the declaration.
+        pub inline fn sizeOfForm(comptime form: logical.LogicalOpcode) u8 {
+            const size = comptime form_row[@intFromEnum(form)].size;
+            comptime if (size == 0) @compileError("no size for " ++ @tagName(form));
+            return size;
+        }
+
+        /// The declared value of a burned-in operand (`get_loc0`'s slot is
+        /// 0, `push_2` is 2). Runtime matchers previously hard-coded these;
+        /// the numbers were correct, but nothing connected them to the
+        /// declaration that defines them.
+        pub inline fn burnedOperandOf(
+            comptime form: logical.LogicalOpcode,
+            comptime index: usize,
+        ) comptime_int {
+            comptime {
+                const lay = layout_table[@intFromEnum(form)] orelse
+                    @compileError("no layout for " ++ @tagName(form));
+                if (index >= lay.len)
+                    @compileError("operand index out of range for " ++ @tagName(form));
+                const slot = lay.slots[index];
+                if (slot.offset != null)
+                    @compileError("operand of " ++ @tagName(form) ++ " is in the payload, not burned in");
+                return slot.fixed;
+            }
+        }
+
         /// Byte offset of operand `index` within the instruction (i.e.
         /// relative to the opcode byte), resolved at comptime for call
         /// sites that just matched the form and therefore know it
