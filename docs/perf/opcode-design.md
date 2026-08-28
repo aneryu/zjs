@@ -2881,6 +2881,46 @@ CFG 的身份谓词（isUnconditionalTerminal 等）仍收物理 id——它们�
 是控制流 op（最不可能降级的集合），form 化留作 F0c 生成 matcher 的
 输入，不作为 F0b 未完成项。
 
+###### F0c parts 1–3 关账（2026-08-28，`7de7943b`/`21296aa6`/`b41de758`）
+
+合同 3 的阶段 A 对**全部现役发射决策**落地，三张声明派生的选择表：
+
+1. **槽位短化**（`shortSelectionOf`/`short_selection_table`）：wide form
+   → burned 变体（0-3）/byte 变体，由族轴 + 烧入值派生。替换掉的
+   `shortSlotOp` 是 `base + idx` 的 **id 算术**——P0-2 要消灭的正是它：
+   重分配 run 里一个 id，算术就静默发出另一个族的 opcode。
+   `putShortCodeSize` 与 `putShortCode` 从此消费**同一个** selector，
+   size 取自选中行——合同 3「容量与发射不得各自维护条件分支」按构造
+   成立。发射器里「是否带 byte payload」的身份名单换成
+   `form_row[selected].size == 2`。
+2. **小整数 push**（`selectPushIntForm`）：替换 `push_0 + value` id
+   算术；i8/i16/i32 宽度阶梯保持显式（那是语言整数极限，不是声明事实）。
+3. **跳转 relaxation**（`jump_selection_table`）：族 + label 槽声明宽度
+   派生三档（wide=4 字节 label、medium=i16、narrow=i8）。基线断言除
+   等价外还钉住**负空间**——条件跳转不得静默获得 16 位档。
+   ⭐ 断言首用即抓真错：wide 判定写成 `width == .u32` 而声明是 **.i32**
+   （S4 相对偏移），整张表为空——运行时将全部 relaxation 报
+   InvalidBytecode，comptime 则是一条指名的消息。
+4. **small_inline.emitLocOp**（`shortSlotOp` 的双胞胎 id 算术）接同一
+   selector——编译器与内联重写器从此不可能对短化各执一词。
+
+三片门全过：part1 cyc −0.07%（带内）、part2 cyc **−0.23%**（带外方向
+为好）、part3 运行时逐分不动。每片 2371/0 + test262 0/49778。
+
+**F0c 余量**（等 C 包授权同步）：`planPhysicalEncoding` 的 carrier 臂、
+carrier registry 与 43 synthetic fixture、`CopyDisposition` 正式化、
+relaxJumps 里 lt/eq→cmp_if_false8 融合回写的 writer 自查。direct-only
+现状下 planPhysicalEncoding 是平凡的（id=form 值、layout=row），提前
+搭 carrier 架子没有验收对象。
+
+**挂账更新（CodeLoad 分数停止线）**：第三次复测（安静场，A/A 偏差仅
++0.06%）读出 **+3.53%**，与下午的 −2.65%/−3.14% 方向相反；基线臂自身
+CV 1.44% 且呈双峰（36k/34.9k 两模式，前已录得同一二进制一分钟内
+36103→34906）。三轮复测方向不一致而同窗周期计数恒 CV<0.35% ⇒
+**判定：本机 CodeLoad 分数对 1% 级效应不是合格仪器（进程级双峰，疑
+分配器布局敏感），停止线永久改由周期账承载**：F0b −1.64% + rl −0.12%
++ F0c −0.30% ≈ **累计 −1.2~−1.5%，线内**。
+
 迁移本身的两条附带产出：`FormRow` 新增 atom/label/index-width 三类
 声明派生位（`label_bit` 让 validateProductCode 拒绝「未获准的整类带
 label form」而非手维护格式黑名单）；语义收紧——旧 reader 接受任何有
