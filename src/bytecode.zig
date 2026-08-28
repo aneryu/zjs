@@ -1721,7 +1721,22 @@ pub const opcode = struct {
                     else => {},
                 }
                 switch (info.fmt) {
-                    .label, .label8, .label16, .label_u16, .atom_label_u8, .atom_label_u16 => flags |= FormRow.label_bit,
+                    .label, .label8, .label16, .label_u16, .atom_label_u8, .atom_label_u16 => {
+                        flags |= FormRow.label_bit;
+                        // Consumers derive the label's offset as
+                        // 1 + (hasAtom ? 4 : 0); prove the layout agrees.
+                        const lay = layout_table[f.value].?;
+                        var found = false;
+                        for (0..lay.len) |slot_i| {
+                            if (lay.slots[slot_i].kind == .label) {
+                                const want: u8 = if (flags & FormRow.atom_bit != 0) 4 else 0;
+                                if (lay.slots[slot_i].offset != want)
+                                    @compileError("label operand offset breaks the 1+4*atom rule for " ++ f.name);
+                                found = true;
+                            }
+                        }
+                        if (!found) @compileError("label format without a label slot for " ++ f.name);
+                    },
                     else => {},
                 }
                 const index_width: u8 = switch (info.fmt) {
@@ -1747,6 +1762,168 @@ pub const opcode = struct {
             }
             break :blk t;
         };
+
+        /// Domain rows for the two full-stream compiler walks, indexed by
+        /// the PHYSICAL id so a decode is one load. The remapping (temp
+        /// range -> 300+), the side-table rejections (label/line_num) and
+        /// the claimed test are baked into the row at comptime -- this is
+        /// the same lesson the F0b regression taught at the final domain:
+        /// the hand table these replace was fast precisely because those
+        /// decisions were baked, and expanding them into per-instruction
+        /// arithmetic measured +29M instructions in resolve_variables.run.
+        /// Size zero is the reject sentinel (unclaimed, reclaimed, or a
+        /// side-table entity in this domain).
+        pub const DomainRow = extern struct {
+            size: u8,
+            flags: u8,
+            form_index: u16,
+        };
+
+        fn domainRowFor(index: u16, reject: bool) DomainRow {
+            const row = form_row[index];
+            const ok = !reject and row.isClaimed() and row.size != 0;
+            return .{
+                .size = if (ok) row.size else 0,
+                .flags = row.flags,
+                .form_index = index,
+            };
+        }
+
+        pub const phase1_row: [256]DomainRow = blk: {
+            @setEvalBranchQuota(20000);
+            var t: [256]DomainRow = undefined;
+            for (0..256) |i| {
+                const id: u8 = @intCast(i);
+                if (id >= op.op_count) {
+                    t[i] = .{ .size = 0, .flags = 0, .form_index = 0 };
+                    continue;
+                }
+                const index: u16 = if (id >= op.op_temp_start and id < op.op_temp_end)
+                    @as(u16, 300) + (id - op.op_temp_start)
+                else
+                    id;
+                // Compare by value: a reclaimed id has no enum tag, so the
+                // conversion is illegal exactly on the inputs the sentinel
+                // exists to reject (invariant 5, comptime edition).
+                const side_table = index == @intFromEnum(logical.LogicalOpcode.label) or
+                    index == @intFromEnum(logical.LogicalOpcode.line_num);
+                t[i] = domainRowFor(index, side_table);
+            }
+            break :blk t;
+        };
+
+        /// Parser-domain candidate rows: the temp interpretation of the
+        /// overlap range, with atom-less temps marked forced. Everything
+        /// else falls back to `final_parser_row`.
+        pub const parser_temp_row: [256]DomainRow = blk: {
+            @setEvalBranchQuota(20000);
+            var t: [256]DomainRow = undefined;
+            for (0..256) |i| {
+                const id: u8 = @intCast(i);
+                if (id < op.op_temp_start or id >= op.op_temp_end) {
+                    t[i] = .{ .size = 0, .flags = 0, .form_index = 0 };
+                    continue;
+                }
+                const index: u16 = @as(u16, 300) + (id - op.op_temp_start);
+                const side_table = index == @intFromEnum(logical.LogicalOpcode.label) or
+                    index == @intFromEnum(logical.LogicalOpcode.line_num);
+                t[i] = domainRowFor(index, side_table);
+            }
+            break :blk t;
+        };
+
+        pub const final_parser_row: [256]DomainRow = blk: {
+            @setEvalBranchQuota(20000);
+            var t: [256]DomainRow = undefined;
+            for (0..256) |i| {
+                const id: u8 = @intCast(i);
+                if (id >= op.op_count) {
+                    t[i] = .{ .size = 0, .flags = 0, .form_index = 0 };
+                    continue;
+                }
+                t[i] = domainRowFor(id, false);
+            }
+            break :blk t;
+        };
+
+        /// Parser-domain decode, for the MIXED Builder stream (contract 2,
+        /// 2026-08-28 revision). In that stream an id in the temp range may
+        /// be either the temp instruction or an already-selected final
+        /// short opcode, and the only thing that can tell them apart is the
+        /// atom ledger: the temp interpretation of an atom-carrying temp id
+        /// must find its own atom at the ledger cursor. The ledger is
+        /// therefore an INPUT of this domain, not state a caller threads
+        /// around the decoder -- which is why this entry does not share
+        /// `headerAt`'s signature.
+        ///
+        /// Classification is derived from the declaration, not listed:
+        /// a temp form with an atom operand is a candidate (disambiguate),
+        /// `label`/`line_num` are rejected (side-table entities in the v2
+        /// Builder), and every other temp form IS the temp interpretation.
+        /// The retired hand-written tables in cfg.zig enumerated the same
+        /// three classes by id; a comptime assertion there proved the
+        /// derived view identical before they were deleted.
+        pub inline fn headerAtParser(
+            code: []const u8,
+            atoms_ledger: []const u32,
+            pc: u32,
+            atom_index: u32,
+        ) Error!Header {
+            if (pc >= code.len) return error.BytecodeOverflow;
+            const id = code[pc];
+            const trow = parser_temp_row[id];
+            if (trow.size != 0) {
+                const form: logical.LogicalOpcode = @enumFromInt(trow.form_index);
+                if (trow.flags & FormRow.atom_bit != 0) {
+                    // Candidate: the temp interpretation must find its own
+                    // atom at the ledger cursor; otherwise fall through to
+                    // the final interpretation of the same byte.
+                    const end = @as(usize, pc) + trow.size;
+                    if (end <= code.len and atom_index < atoms_ledger.len) {
+                        const operand = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+                        if (operand == atoms_ledger[atom_index])
+                            return .{ .form = form, .instruction_pc = pc, .size = trow.size, .flags = trow.flags };
+                    }
+                } else {
+                    const end = @as(usize, pc) + trow.size;
+                    if (end > code.len) return error.BytecodeOverflow;
+                    return .{ .form = form, .instruction_pc = pc, .size = trow.size, .flags = trow.flags };
+                }
+            } else if (id >= op.op_temp_start and id < op.op_temp_end) {
+                // A temp-range id with a zero temp row is a side-table
+                // entity (label/line_num): corruption in this stream.
+                return error.InvalidOpcode;
+            }
+            const row = final_parser_row[id];
+            if (row.size == 0) return error.InvalidOpcode;
+            const next = @as(usize, pc) + row.size;
+            if (next > code.len) return error.BytecodeOverflow;
+            return .{ .form = @enumFromInt(row.form_index), .instruction_pc = pc, .size = row.size, .flags = row.flags };
+        }
+
+        /// Strict phase-1 decode: temp-range ids are ALWAYS the temp
+        /// interpretation (no mixing), and an atom-carrying instruction is
+        /// only valid if its operand matches the ledger cursor -- the check
+        /// both validates the stream and authorizes the caller to consume
+        /// the ledger entry without re-reading the operand.
+        pub inline fn headerAtPhase1(
+            code: []const u8,
+            atoms_ledger: []const u32,
+            pc: u32,
+            atom_index: u32,
+        ) Error!Header {
+            if (pc >= code.len) return error.BytecodeOverflow;
+            const row = phase1_row[code[pc]];
+            if (row.size == 0 or row.size > code.len - pc)
+                return error.InvalidOpcode;
+            if (row.flags & FormRow.atom_bit != 0) {
+                if (row.size < 5 or atom_index >= atoms_ledger.len)
+                    return error.InvalidOpcode;
+                const operand = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+                if (operand != atoms_ledger[atom_index]) return error.InvalidOpcode;
+            }
+            return .{ .form = @enumFromInt(row.form_index), .instruction_pc = pc, .size = row.size, .flags = row.flags };
+        }
 
         /// Byte offset of operand `index` within the instruction (i.e.
         /// relative to the opcode byte), resolved at comptime for call
@@ -1814,6 +1991,12 @@ pub const opcode = struct {
             }
             pub inline fn hasLabel(self: Header) bool {
                 return self.flags & FormRow.label_bit != 0;
+            }
+            /// True for compiler-only (phase-1 / temp) forms. The form
+            /// value ranges are the declaration's plane encoding: final
+            /// forms sit at their physical id, lowered-only forms at 300+.
+            pub inline fn isLowered(self: Header) bool {
+                return @intFromEnum(self.form) >= 300;
             }
             /// 0, 1 or 2 -- see `FormRow.index_width_shift`.
             pub inline fn indexWidth(self: Header) u8 {

@@ -2071,6 +2071,11 @@ const DecodedHeader = struct {
 };
 
 fn decodeHeaderAt(domain: Domain, code: []const u8, pc: u32) !DecodedHeader;
+// parser 域单列（2026-08-28 修订，见下方实现回报）：混合流的 temp/final
+// 消歧需要 atom ledger 作为输入，域所需的外部状态是签名的一部分。
+// 严格 phase-1 视图（lowered + label/line_num 拒绝 + atom 验证）同座。
+fn headerAtParser(code: []const u8, atoms: []const Atom, pc: u32, atom_index: u32) !DecodedHeader;
+fn headerAtPhase1(code: []const u8, atoms: []const Atom, pc: u32, atom_index: u32) !DecodedHeader;
 /// burned-in（OperandSource.fixed）与被 tag 吸收的 operand 均由此还原。
 fn decodeOperand(h: DecodedHeader, comptime index: usize, comptime T: type) !T;
 

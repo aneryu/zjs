@@ -715,8 +715,18 @@ pub const TempInstruction = packed struct(u16) {
     size: u8,
     is_temp: bool = false,
     has_atom: bool = false,
-    reserved: u6 = 0,
+    has_label: bool = false,
+    reserved: u5 = 0,
 };
+
+fn tempFromHeader(h: opcode.decode.Header) TempInstruction {
+    return .{
+        .size = h.size,
+        .is_temp = h.isLowered(),
+        .has_atom = h.hasAtom(),
+        .has_label = h.hasLabel(),
+    };
+}
 
 fn tempAtomInstructionSize(op_id: u8) ?u8 {
     return switch (op_id) {
@@ -842,9 +852,63 @@ const phase1_decode_info: [256]Phase1DecodeInfo = blk: {
     break :blk table;
 };
 
-fn instructionHasAtom(op_id: u8, is_temp: bool) bool {
-    const info = temp_decode_info[op_id];
-    return if (is_temp) info.temp_has_atom else info.fallback_has_atom;
+fn formRowIndex(op_id: u8, is_temp: bool) u16 {
+    return if (is_temp)
+        @as(u16, 300) + (op_id - op.op_temp_start)
+    else
+        op_id;
+}
+
+// The two hand-written tables above are now MIRRORS of the decode layer's
+// declaration-derived classification; this proves them identical id by id
+// before the shells below stop reading them. Known, deliberate divergences:
+// the decode layer REJECTS the ten reclaimed ids (their rows are the
+// canonical dead shape, size 1) and ids past op_count, where the old tables
+// accepted whatever sizeOf returned. Streams containing retired opcodes are
+// corruption, so tighter is correct -- the unit and conformance suites hold
+// the proof that no legitimate stream contained them.
+comptime {
+    @setEvalBranchQuota(60_000);
+    for (0..256) |index| {
+        const op_id: u8 = @intCast(index);
+        const row = temp_decode_info[op_id];
+        const p1 = phase1_decode_info[op_id];
+        const in_temp = op_id >= op.op_temp_start and op_id < op.op_temp_end;
+        if (in_temp) {
+            const temp_index: u16 = @as(u16, 300) + (op_id - op.op_temp_start);
+            const trow = opcode.decode.form_row[temp_index];
+            const form: opcode.logical.LogicalOpcode = @enumFromInt(temp_index);
+            const is_side_table = form == .label or form == .line_num;
+            const derived_kind: TempDecodeKind = if (is_side_table)
+                .invalid
+            else if (trow.hasAtom())
+                .atom_candidate
+            else
+                .forced_temp;
+            if (row.kind != derived_kind)
+                @compileError("temp kind diverges from the declaration at id " ++
+                    std.fmt.comptimePrint("{d}", .{index}));
+            if (!is_side_table) {
+                if (row.temp_size != trow.size or row.temp_has_atom != trow.hasAtom())
+                    @compileError("temp row diverges from the declaration at id " ++
+                        std.fmt.comptimePrint("{d}", .{index}));
+                if (p1.size != trow.size or p1.has_atom != trow.hasAtom() or !p1.is_temp)
+                    @compileError("phase1 row diverges from the declaration at id " ++
+                        std.fmt.comptimePrint("{d}", .{index}));
+            }
+        }
+        // Final interpretation: only claimed slots must agree; the old
+        // tables carried dead-shape rows for reclaimed ids.
+        if (op_id < op.op_count and opcode.physical.stateOf(op_id) == .claimed) {
+            const frow = opcode.decode.form_row[op_id];
+            if (row.fallback_size != frow.size or row.fallback_has_atom != frow.hasAtom())
+                @compileError("final fallback diverges from the declaration at id " ++
+                    std.fmt.comptimePrint("{d}", .{index}));
+            if (!in_temp and (p1.size != frow.size or p1.has_atom != frow.hasAtom()))
+                @compileError("phase1 final row diverges from the declaration at id " ++
+                    std.fmt.comptimePrint("{d}", .{index}));
+        }
+    }
 }
 
 /// Shared phase-aware decoder for the compact v2 temporary stream. The atom
@@ -856,43 +920,9 @@ pub fn tempInstruction(
     pc: u32,
     atom_index: u32,
 ) Error!TempInstruction {
-    const pc_index: usize = @intCast(pc);
-    if (pc_index >= code.len) return error.InvalidBytecode;
-    const op_id = code[pc_index];
-    const info = temp_decode_info[op_id];
-
-    if (info.kind == .atom_candidate) {
-        const end = std.math.add(usize, pc_index, info.temp_size) catch
-            return error.InvalidBytecode;
-        if (end <= code.len and atom_index < atoms_ledger.len) {
-            const operand = std.mem.readInt(u32, code[pc_index + 1 ..][0..4], .little);
-            if (operand == atoms_ledger[atom_index]) {
-                return .{
-                    .size = info.temp_size,
-                    .is_temp = true,
-                    .has_atom = info.temp_has_atom,
-                };
-            }
-        }
-    }
-
-    const instruction: TempInstruction = switch (info.kind) {
-        .invalid => return error.InvalidBytecode,
-        .forced_temp => .{
-            .size = info.temp_size,
-            .is_temp = true,
-            .has_atom = info.temp_has_atom,
-        },
-        .final, .atom_candidate => .{
-            .size = info.fallback_size,
-            .has_atom = info.fallback_has_atom,
-        },
-    };
-    if (instruction.size == 0) return error.InvalidBytecode;
-    const end = std.math.add(usize, pc_index, instruction.size) catch
+    const h = opcode.decode.headerAtParser(code, atoms_ledger, pc, atom_index) catch
         return error.InvalidBytecode;
-    if (end > code.len) return error.InvalidBytecode;
-    return instruction;
+    return tempFromHeader(h);
 }
 
 /// Decode and validate one instruction from the parser-owned phase-1 Builder.
@@ -906,25 +936,9 @@ pub inline fn phase1Instruction(
     pc: u32,
     atom_index: u32,
 ) Error!TempInstruction {
-    const pc_index: usize = @intCast(pc);
-    if (pc_index >= code.len) return error.InvalidBytecode;
-    const info = phase1_decode_info[code[pc_index]];
-    // A zero width is the invalid-opcode sentinel.  `valid` used to encode
-    // exactly the same predicate, so checking both spent another branch per
-    // instruction without proving anything additional.
-    if (info.size == 0 or info.size > code.len - pc_index)
+    const h = opcode.decode.headerAtPhase1(code, atoms_ledger, pc, atom_index) catch
         return error.InvalidBytecode;
-    if (info.has_atom) {
-        if (info.size < 5 or atom_index >= atoms_ledger.len)
-            return error.InvalidBytecode;
-        const operand = std.mem.readInt(u32, code[pc_index + 1 ..][0..4], .little);
-        if (operand != atoms_ledger[atom_index]) return error.InvalidBytecode;
-    }
-    return .{
-        .size = info.size,
-        .is_temp = info.is_temp,
-        .has_atom = info.has_atom,
-    };
+    return tempFromHeader(h);
 }
 
 pub fn isUnconditionalTerminal(op_id: u8) bool {
@@ -962,18 +976,11 @@ fn isContinuationOp(op_id: u8) bool {
     };
 }
 
-fn labelOperandOffset(op_id: u8, instruction: TempInstruction) ?u32 {
-    return switch (op_id) {
-        op.if_false, op.if_true, op.goto, op.@"catch", op.gosub => 1,
-        op.scope_make_ref => if (instruction.is_temp) 5 else null,
-        else => switch (if (instruction.is_temp)
-            opcode.formatOfPhase1(op_id)
-        else
-            opcode.formatOf(op_id)) {
-            .atom_label_u8, .atom_label_u16 => 5,
-            else => null,
-        },
-    };
+fn labelOperandOffset(instruction: TempInstruction) ?u32 {
+    // Backed by the decode layer's build-time proof that every label
+    // operand sits at 1 + (hasAtom ? 4 : 0) -- see form_row's label_bit.
+    if (!instruction.has_label) return null;
+    return if (instruction.has_atom) 5 else 1;
 }
 
 fn validateAndAdvanceAtom(
@@ -1460,7 +1467,7 @@ pub fn build(
             const op_id = input.code[pc];
             if (op_id == op.eval or op_id == op.apply_eval)
                 graph.has_eval_instruction = true;
-            if (labelOperandOffset(op_id, instruction)) |operand_offset| {
+            if (labelOperandOffset(instruction)) |operand_offset| {
                 if (label_reference_count == std.math.maxInt(u32))
                     return error.InvalidBytecode;
                 label_reference_count += 1;
@@ -1587,16 +1594,21 @@ pub fn auditInstructionOwnership(
         const current = worklist[worklist_index];
         if (current == input.code_len) continue;
         const node = nodes[current];
+        // Rebuilding from the cached node: the flag bits must come from the
+        // same row the decoder used, or a bit added to TempInstruction is
+        // silently false here (has_label was, briefly, exactly that).
+        const rebuilt_row = opcode.decode.form_row[formRowIndex(input.code[current], node.is_temp)];
         const instruction: TempInstruction = .{
             .size = node.size,
             .is_temp = node.is_temp,
-            .has_atom = instructionHasAtom(input.code[current], node.is_temp),
+            .has_atom = rebuilt_row.hasAtom(),
+            .has_label = rebuilt_row.hasLabel(),
         };
         const next = std.math.add(u32, current, node.size) catch
             return error.InvalidBytecode;
         const op_id = input.code[current];
 
-        if (labelOperandOffset(op_id, instruction)) |operand_offset| {
+        if (labelOperandOffset(instruction)) |operand_offset| {
             const label_index = try readLabelIndex(input, current, instruction, operand_offset);
             const target_offset = try labelTargetOffset(input, label_index);
             if (!isEmptyGosub(input, op_id, target_offset)) {
@@ -3098,7 +3110,7 @@ pub fn auditBoundaryUniqueness(
                     accounting.ownership_release += 1;
             }
         }
-        if (labelOperandOffset(op_id, instruction)) |operand_offset| {
+        if (labelOperandOffset(instruction)) |operand_offset| {
             if (label_reference_count == std.math.maxInt(u32))
                 return error.InvalidBytecode;
             label_reference_count += 1;
