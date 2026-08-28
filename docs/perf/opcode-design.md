@@ -2852,6 +2852,35 @@ insn +0.35%（Header→TempInstruction 接缝的真实成本）、L1i +5.63% 出
 两张手写表按「删除前证明」规矩处理：comptime 断言逐 id 证明派生视图与
 手写表相同（注入两类故障均开火），表降级为断言的对照基线，G0 时撤。
 
+###### 反汇编器与运行时 lookahead 关账（2026-08-28，`d1df1cf8`/`1ef2c53b`）——**F0b 消费者清单至此闭合**
+
+**反汇编器**：decode-first + 单字节容错回退（反汇编器必须能渲染损坏流，
+回退恰好在 decoder 正确拒绝处继续走）。fmt 巨 switch（约 110 行 20 个
+格式）换成 layout 逐槽循环，且**打得更多**——烧入操作数（`get_loc0` 的
+slot 0）从前没有字节可读，现在从声明打出。冷路径无性能门；`.text`
+净 −4KB。
+
+**运行时 lookahead**（P1-1 硬门）：全部集中在 `vm_property.zig`。
+**形状分毫未动**——direct 匹配保持一次 byte compare，结构化 decode
+不进这些路径。改变的是数字的出处：**72 处手写魔数**（烧入 idx、next_pc
+步长、边界 size、consume 宽度）改为 comptime 从声明派生
+（`sizeOfForm`/`burnedOperandOf`）。数字全都是对的，但从前没有任何东西
+把它们连到定义它们的声明上——重编码一个 form 会把每个 matcher 变成
+静默错解码器；现在变成编译错误。两个注释级假设升格为构建断言
+（序列匹配的 pc+1 步进依赖六个 form 恒 1 字节；`decodeFieldAtom` 步长
+依赖 get_field 族恒 atom 尺寸）。
+
+P1-1 证据（裁决要求生成代码核对，合同文本不算）：
+**`.text.zjs.op_handlers` 逐字节相同（164448 == 164448）**、定工作量
+指令 −0.005%（统计零）、周期 +0.29% 在指令零 + handler island 不变下
+判为布局（.text 因 dump 重写移动了 4KB）。
+
+**F0b 消费者清单闭合**：栈遍历、验证器、内联扫描器、resolve_labels、
+CFG、resolve_variables、反汇编器、运行时 lookahead 全部就位。余项一条：
+CFG 的身份谓词（isUnconditionalTerminal 等）仍收物理 id——它们匹配的
+是控制流 op（最不可能降级的集合），form 化留作 F0c 生成 matcher 的
+输入，不作为 F0b 未完成项。
+
 迁移本身的两条附带产出：`FormRow` 新增 atom/label/index-width 三类
 声明派生位（`label_bit` 让 validateProductCode 拒绝「未获准的整类带
 label form」而非手维护格式黑名单）；语义收紧——旧 reader 接受任何有
