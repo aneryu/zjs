@@ -1658,12 +1658,39 @@ pub const opcode = struct {
 
             pub const claimed_bit: u8 = 1;
             pub const dynamic_bit: u8 = 2;
+            /// The form carries an atom operand. Every atom slot sits at
+            /// payload offset 0 (asserted below at table-build time), so a
+            /// consumer holding this bit may read the atom at pc+1 without
+            /// consulting the wide layout. Replaces the five-way format
+            /// comparison `hasAtomFormat` that reader passes carried.
+            pub const atom_bit: u8 = 4;
+            /// The form carries a label operand (any width). Lets a
+            /// validator reject the whole class of label-bearing forms it
+            /// did not explicitly admit, instead of maintaining a rejection
+            /// list of formats that must be extended by hand when a form is
+            /// added.
+            pub const label_bit: u8 = 32;
+            /// Bits 3-4: width in bytes (0, 1 or 2) of the leading index
+            /// operand -- the slot/argc/const-pool immediates the shortening
+            /// matchers compare. Derived from the same format whitelist the
+            /// readers previously switched on, so the mapping lives in ONE
+            /// comptime place instead of per consumer.
+            pub const index_width_shift: u3 = 3;
 
             pub inline fn isClaimed(self: FormRow) bool {
                 return self.flags & claimed_bit != 0;
             }
             pub inline fn isDynamic(self: FormRow) bool {
                 return self.flags & dynamic_bit != 0;
+            }
+            pub inline fn hasAtom(self: FormRow) bool {
+                return self.flags & atom_bit != 0;
+            }
+            pub inline fn hasLabel(self: FormRow) bool {
+                return self.flags & label_bit != 0;
+            }
+            pub inline fn indexWidth(self: FormRow) u8 {
+                return (self.flags >> index_width_shift) & 3;
             }
         };
 
@@ -1681,6 +1708,36 @@ pub const opcode = struct {
                 if (f.value >= 300 or physical.stateOf(id) == .claimed)
                     flags |= FormRow.claimed_bit;
                 if (dynamic_by_form[f.value] != null) flags |= FormRow.dynamic_bit;
+                switch (info.fmt) {
+                    .atom, .atom_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => {
+                        flags |= FormRow.atom_bit;
+                        // The atom_bit contract: pc+1 is the atom. Check it
+                        // against the layout rather than assuming it.
+                        const lay = layout_table[f.value].?;
+                        if (lay.atom_slot == null or
+                            lay.slots[lay.atom_slot.?].offset != 0)
+                            @compileError("atom operand not at payload offset 0 for " ++ f.name);
+                    },
+                    else => {},
+                }
+                switch (info.fmt) {
+                    .label, .label8, .label16, .label_u16, .atom_label_u8, .atom_label_u16 => flags |= FormRow.label_bit,
+                    else => {},
+                }
+                const index_width: u8 = switch (info.fmt) {
+                    .u8, .i8, .loc8, .const8 => 1,
+                    .u16, .npop, .loc, .arg, .var_ref => 2,
+                    else => 0,
+                };
+                if (index_width != 0) {
+                    // The indexWidth contract mirrors atom_bit's: the index
+                    // operand is the LEADING operand, so holders of a nonzero
+                    // width may read at pc+1 without the wide layout.
+                    const lay = layout_table[f.value].?;
+                    if (lay.len == 0 or lay.slots[0].offset != 0)
+                        @compileError("index operand not at payload offset 0 for " ++ f.name);
+                }
+                flags |= index_width << FormRow.index_width_shift;
                 t[f.value] = .{
                     .size = info.size,
                     .pop = info.n_pop,
@@ -1690,6 +1747,42 @@ pub const opcode = struct {
             }
             break :blk t;
         };
+
+        /// Byte offset of operand `index` within the instruction (i.e.
+        /// relative to the opcode byte), resolved at comptime for call
+        /// sites that just matched the form and therefore know it
+        /// statically. `T` is checked against the declared width, so a
+        /// caller cannot silently read four bytes out of a two-byte slot.
+        ///
+        /// This is how a reader pass satisfies contract 2's "offsets come
+        /// from the declaration" without paying for it: the generated code
+        /// is identical to the hand-written `position + 1` / `position + 5`
+        /// it replaces -- the magic number is simply derived instead of
+        /// asserted-by-comment.
+        pub inline fn operandOffsetOf(
+            comptime form: logical.LogicalOpcode,
+            comptime index: usize,
+            comptime T: type,
+        ) u8 {
+            comptime {
+                const lay = layout_table[@intFromEnum(form)] orelse
+                    @compileError("no layout for " ++ @tagName(form));
+                if (index >= lay.len)
+                    @compileError("operand index out of range for " ++ @tagName(form));
+                const slot = lay.slots[index];
+                const offset = slot.offset orelse
+                    @compileError("operand of " ++ @tagName(form) ++ " is burned into the id, not in the payload");
+                const width: usize = switch (slot.width orelse
+                    @compileError("operand of " ++ @tagName(form) ++ " has no payload width")) {
+                    .u8, .i8 => 1,
+                    .u16, .i16 => 2,
+                    .u32, .i32 => 4,
+                };
+                if (width != @sizeOf(T))
+                    @compileError("width mismatch reading operand of " ++ @tagName(form));
+                return 1 + offset;
+            }
+        }
 
         pub fn layoutOf(form: logical.LogicalOpcode) *const OperandLayout {
             return &(layout_table[@intFromEnum(form)].?);
@@ -1710,6 +1803,22 @@ pub const opcode = struct {
             form: logical.LogicalOpcode,
             instruction_pc: u32,
             size: u8,
+            /// The row's flag byte, carried because it fills the byte the
+            /// struct was already padding to eight: `headerAt` has the row
+            /// in hand, so this costs neither a field's worth of size nor a
+            /// second table load at the consumer.
+            flags: u8,
+
+            pub inline fn hasAtom(self: Header) bool {
+                return self.flags & FormRow.atom_bit != 0;
+            }
+            pub inline fn hasLabel(self: Header) bool {
+                return self.flags & FormRow.label_bit != 0;
+            }
+            /// 0, 1 or 2 -- see `FormRow.index_width_shift`.
+            pub inline fn indexWidth(self: Header) u8 {
+                return (self.flags >> FormRow.index_width_shift) & 3;
+            }
 
             pub inline fn payload_pc(self: Header) u32 {
                 return self.instruction_pc + 1;
@@ -1788,7 +1897,7 @@ pub const opcode = struct {
             const form: logical.LogicalOpcode = @enumFromInt(index);
             const next = @as(usize, pc) + row.size;
             if (next > code.len) return error.BytecodeOverflow;
-            return .{ .form = form, .instruction_pc = pc, .size = row.size };
+            return .{ .form = form, .instruction_pc = pc, .size = row.size, .flags = row.flags };
         }
 
         /// Burned-in operands are restored to their declared value, so a
