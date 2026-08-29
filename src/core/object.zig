@@ -88,7 +88,7 @@ threadlocal var finalizing_shape_storage = FinalizingShapeStorage{};
 /// in default `rc` so production `.text` is unchanged. Hits are Stage 6
 /// candidates, not a failure.
 inline fn auditWrite(comptime kind: anytype, comptime site: anytype) void {
-    if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+    if (comptime builtin.is_test) {
         @import("gc_write_audit.zig").hit(kind, site);
     }
 }
@@ -1250,7 +1250,7 @@ pub const Object = extern struct {
             .prop_values = property_storage.ptr,
         };
         std.debug.assert(!self.isWeakReferenceHolderClass());
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.memcpy_bulk, .object_prop_values_memcpy);
             @memcpy(self.propertyStorageEntries(entries.len), entries);
         } else {
@@ -1351,7 +1351,7 @@ pub const Object = extern struct {
         switch (entry_ownership) {
             .borrowed => {
                 const props = shape_ref.props();
-                if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+                if (comptime builtin.is_test) {
                     auditWrite(.fam_slice, .object_prop_slot);
                     for (entries, 0..) |entry, index| {
                         const entry_flags = property.Flags.fromBits(props[index].flags);
@@ -1365,7 +1365,7 @@ pub const Object = extern struct {
                 }
             },
             .owned => {
-                if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+                if (comptime builtin.is_test) {
                     auditWrite(.memcpy_bulk, .object_prop_values_memcpy);
                     @memcpy(self.propertyStorageEntries(entries.len), entries);
                 } else {
@@ -1552,7 +1552,7 @@ pub const Object = extern struct {
         };
         if (property_template) |template| {
             const props = template.shape_ref.props();
-            if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+            if (comptime builtin.is_test) {
                 auditWrite(.fam_slice, .object_prop_slot);
                 for (template.entries, 0..) |entry, index| {
                     const entry_flags = property.Flags.fromBits(props[index].flags);
@@ -1878,7 +1878,7 @@ pub const Object = extern struct {
             while (next_capacity < len + 1) : (next_capacity *= 2) {}
             const next = try rt.allocRuntime(runtime_mod.CachedIteratorNextEntry, next_capacity);
             errdefer rt.memory.free(runtime_mod.CachedIteratorNextEntry, next);
-            if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+            if (comptime builtin.is_test) {
                 auditWrite(.memcpy_bulk, .object_iterator_cache_memcpy);
                 @memcpy(next[0..len], rt.cached_iterator_next_entries);
             } else {
@@ -3252,7 +3252,7 @@ pub const Object = extern struct {
 
         const next = try rt.allocRuntime(CollectionEntry, next_capacity);
         errdefer rt.memory.free(CollectionEntry, next);
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.memcpy_bulk, .object_collection_memcpy);
             @memcpy(next[0..entries_slot.*.len], entries_slot.*);
         } else {
@@ -3276,7 +3276,7 @@ pub const Object = extern struct {
         const refreshed_entries = self.collectionEntriesSlot();
         refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
         errdefer refreshed_entries.* = refreshed_entries.*[0..index];
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_collection_store);
             refreshed_entries.*[index] = entry;
         } else {
@@ -3322,7 +3322,7 @@ pub const Object = extern struct {
 
         const next = try rt.allocRuntime(WeakCollectionEntry, next_capacity);
         errdefer rt.memory.free(WeakCollectionEntry, next);
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.memcpy_bulk, .object_weak_collection_memcpy);
             @memcpy(next[0..entries_slot.*.len], entries_slot.*);
         } else {
@@ -3417,7 +3417,7 @@ pub const Object = extern struct {
 
         const next = try rt.allocRuntime(FinalizationRegistryCell, next_capacity);
         errdefer rt.memory.free(FinalizationRegistryCell, next);
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.memcpy_bulk, .object_finalization_memcpy);
             @memcpy(next[0..payload.cells.len], payload.cells);
         } else {
@@ -3552,7 +3552,7 @@ pub const Object = extern struct {
             const next = try rt.allocRuntime(DisposableResource, new_capacity);
             errdefer rt.memory.free(DisposableResource, next);
             if (payload.resources.len != 0) {
-                if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+                if (comptime builtin.is_test) {
                     auditWrite(.memcpy_bulk, .object_disposable_memcpy);
                     @memcpy(next[0..payload.resources.len], payload.resources);
                 } else {
@@ -4454,7 +4454,7 @@ pub const Object = extern struct {
         if (!self.isFastArrayIndexInBounds(index)) return false;
         const slot = &self.u.array.values[@intCast(index)];
         const old = slot.*;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             slot.* = new_value.dup();
         } else {
@@ -4470,7 +4470,7 @@ pub const Object = extern struct {
     /// caller. Mirrors QuickJS `set_value` for OP_put_array_el.
     pub fn setFastArrayElementOwned(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
         if (!self.isFastArrayIndexInBounds(index)) return false;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             replaceOwnedValue(rt, &self.u.array.values[@intCast(index)], new_value);
         } else {
@@ -4488,7 +4488,7 @@ pub const Object = extern struct {
         if (!self.isFastArrayIndexInBounds(index)) return false;
         const slot = &self.u.array.values[@intCast(index)];
         const old_value = slot.*;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             slot.* = new_value;
         } else {
@@ -4658,7 +4658,7 @@ pub const Object = extern struct {
         errdefer rt.memory.free(JSValue, next);
         if (self.flags.fast_array and self.u.array.count != 0) {
             const count: usize = @intCast(self.u.array.count);
-            if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+            if (comptime builtin.is_test) {
                 auditWrite(.memcpy_bulk, .object_dense_memcpy);
                 @memcpy(next[0..count], self.u.array.values[0..count]);
             } else {
@@ -5990,8 +5990,7 @@ pub const Object = extern struct {
         // in between promotes the instance and leaves this an old-to-young
         // payload store with no funnel to catch it. `setErrorStack` next to it
         // needs nothing: its value is a string, and strings are not registered
-        // with the collector under this build (`gc.string_registry_enabled` is
-        // shadow-only), so they are never condemned.
+        // with the collector at all, so they are never condemned.
         rt.gc.generationalBarrier(&self.header, next_value.cycleMarkHeader());
         if (old_stack) |stored| stored.free(rt);
         if (old_sites) |stored| stored.free(rt);
@@ -8341,7 +8340,7 @@ pub const Object = extern struct {
         const old_flags = self.propFlagsAt(index);
         const old_slot = self.propertyEntry(index).*.slot;
         if (!self.isGlobal()) {
-            if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+            if (comptime builtin.is_test) {
                 auditWrite(.union_arm, .object_prop_slot);
                 self.propertyEntry(index).*.slot = .{ .data = materialized };
             } else {
@@ -8366,7 +8365,7 @@ pub const Object = extern struct {
         cell.is_lexical = false;
         cell.varRefIsConstSlot().* = !old_flags.writable;
         cell.varRefIsDeletableSlot().* = old_flags.configurable;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.union_arm, .object_prop_slot);
             self.propertyEntry(index).*.slot = .{ .var_ref = cell };
         } else {
@@ -8381,7 +8380,7 @@ pub const Object = extern struct {
     fn commitAutoInitVarRef(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, cell: *var_ref_mod.VarRef) JSValue {
         const old_flags = self.propFlagsAt(index);
         const old_slot = self.propertyEntry(index).*.slot;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.union_arm, .object_prop_slot);
             self.propertyEntry(index).*.slot = .{ .var_ref = cell.dupCell() };
         } else {
@@ -9025,7 +9024,7 @@ pub const Object = extern struct {
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
-            if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+            if (comptime builtin.is_test) {
                 auditWrite(.union_arm, .object_prop_slot);
                 entry.slot = .{ .data = next_value };
             } else {
@@ -9326,7 +9325,7 @@ pub const Object = extern struct {
         errdefer next_value.free(rt);
         try self.ensureUniqueShapeForMutation(rt);
         const old_slot = self.propertyEntry(index).*.slot;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.union_arm, .object_prop_slot);
             self.propertyEntry(index).*.slot = .{ .data = next_value };
         } else {
@@ -9603,7 +9602,7 @@ pub const Object = extern struct {
         if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
 
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             element_slot.* = if (take_ownership) new_value else new_value.dup();
         } else {
@@ -9638,7 +9637,7 @@ pub const Object = extern struct {
 
         try self.ensureArrayElementCapacity(rt, @intCast(limit));
         var element_index: usize = @intCast(start);
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             for (values) |item| {
                 self.u.array.values[element_index] = item.dup();
@@ -9667,7 +9666,7 @@ pub const Object = extern struct {
             try self.ensureArrayElementCapacity(rt, new_len);
         }
         var element_index: usize = @intCast(self.u.array.count);
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             for (values) |item| {
                 self.u.array.values[element_index] = item.dup();
@@ -9696,7 +9695,7 @@ pub const Object = extern struct {
         std.debug.assert(self.arrayElementsCapacity() == 0);
 
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             element_slot.* = new_value.dup();
         } else {
@@ -9732,7 +9731,7 @@ pub const Object = extern struct {
         if (self.shape_ref.prop_count != 0 and self.findPropertyIndexTrusted(atom_id) != null) return false;
 
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             element_slot.* = if (take_ownership) new_value else new_value.dup();
         } else {
@@ -9752,7 +9751,7 @@ pub const Object = extern struct {
         try self.ensureArrayElementCapacity(rt, values.len);
         self.setFastArrayCountAssumeCapacity(@intCast(values.len));
         self.u.array.length = @intCast(values.len);
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             for (values, 0..) |item, index| {
                 const element_slot = &self.u.array.values[index];
@@ -9789,7 +9788,7 @@ pub const Object = extern struct {
         try self.ensureArrayElementCapacity(rt, values.len);
         self.setFastArrayCountAssumeCapacity(@intCast(values.len));
         self.u.array.length = @intCast(values.len);
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.memcpy_bulk, .object_dense_memcpy);
             @memcpy(self.u.array.values[0..values.len], values);
         } else {
@@ -9814,7 +9813,7 @@ pub const Object = extern struct {
         self.markIndexedProperties(rt);
 
         var index = start_index;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             while (index < limit_index) : (index += 1) {
                 self.u.array.values[index] = JSValue.int32(@intCast(index));
@@ -9851,7 +9850,7 @@ pub const Object = extern struct {
         self.markIndexedProperties(rt);
 
         var offset: u32 = 0;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             while (offset < count) : (offset += 1) {
                 const index = start_element + @as(usize, @intCast(offset));
@@ -9894,7 +9893,7 @@ pub const Object = extern struct {
         self.markIndexedProperties(rt);
 
         var index = start_element;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             while (index < limit_element) : (index += 1) {
                 const product_exact = @as(i128, @intCast(index)) * @as(i128, multiplier);
@@ -9931,7 +9930,7 @@ pub const Object = extern struct {
         }
 
         var value_index = start;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             while (value_index < limit) : (value_index += 1) {
                 const element_index: usize = @intCast(value_index & mask);
@@ -9983,7 +9982,7 @@ pub const Object = extern struct {
         errdefer next_value.free(rt);
         const element_slot = &self.u.array.values[element_index];
         const old = if (appended) JSValue.undefinedValue() else element_slot.*;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             element_slot.* = next_value;
         } else {
@@ -10065,7 +10064,7 @@ pub const Object = extern struct {
         errdefer next_value.free(rt);
         const element_slot = &self.u.array.values[element_index];
         const old = if (appended) JSValue.undefinedValue() else element_slot.*;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             element_slot.* = next_value;
         } else {
@@ -10133,7 +10132,7 @@ pub const Object = extern struct {
             errdefer next_value.free(rt);
             if (entry_flags.kind == .data) {
                 const old_slot = entry.slot;
-                if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+                if (comptime builtin.is_test) {
                     auditWrite(.union_arm, .object_prop_slot);
                     entry.slot = .{ .data = next_value };
                 } else {
@@ -10215,7 +10214,7 @@ pub const Object = extern struct {
 
         const stored = &entry.slot.data;
         if (atom_id != atom.ids.Private_brand and !stored.requiresRefCount() and !new_value.requiresRefCount()) {
-            if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+            if (comptime builtin.is_test) {
                 auditWrite(.union_arm, .object_prop_slot);
                 stored.* = new_value;
             } else {
@@ -10226,7 +10225,7 @@ pub const Object = extern struct {
         const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
         errdefer next_value.free(rt);
         const old_slot = entry.slot;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.union_arm, .object_prop_slot);
             entry.slot = .{ .data = next_value };
         } else {
@@ -10275,7 +10274,7 @@ pub const Object = extern struct {
                     .data => {
                         const stored = &entry.slot.data;
                         if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
-                            if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+                            if (comptime builtin.is_test) {
                                 auditWrite(.union_arm, .object_prop_slot);
                                 stored.* = new_value;
                             } else {
@@ -10312,7 +10311,7 @@ pub const Object = extern struct {
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
-            if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+            if (comptime builtin.is_test) {
                 auditWrite(.union_arm, .object_prop_slot);
                 entry.slot = .{ .data = next_value };
             } else {
@@ -10470,7 +10469,7 @@ pub const Object = extern struct {
                 // slot, free the old value. The owned store consumes new_value.
                 .data => {
                     const old_slot = entry.slot;
-                    if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+                    if (comptime builtin.is_test) {
                         auditWrite(.union_arm, .object_prop_slot);
                         entry.slot = .{ .data = new_value };
                     } else {
@@ -10633,7 +10632,7 @@ pub const Object = extern struct {
         const entry = self.propertyEntry(index);
         const old_slot = entry.slot;
         // `deleted` is a flag bit, not a kind/arm: keep a harmless data cell.
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.union_arm, .object_prop_slot);
             entry.slot = .{ .data = JSValue.undefinedValue() };
         } else {
@@ -11254,7 +11253,7 @@ pub const Object = extern struct {
             // 0, no storage yet): skip the memcpy-runtime call for the empty
             // copy instead of paying a zero-length `bl memcpy` per literal.
             if (old_len != 0) {
-                if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+                if (comptime builtin.is_test) {
                     auditWrite(.memcpy_bulk, .object_prop_values_memcpy);
                     @memcpy(next[0..old_len], self.propertyStorageEntries(old_len));
                 } else {
@@ -11273,7 +11272,7 @@ pub const Object = extern struct {
         // triggered by the shape allocation skips it. Tracing keeps the value
         // through the mutation-window ValueRootFrame (§4.6). Trial deletion
         // keeps it because the untraced RC is an external root.
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_prop_slot);
             self.propertyEntry(old_len).* = .{ .slot = slot };
         } else {
@@ -11397,7 +11396,7 @@ pub const Object = extern struct {
         const next = try rt.allocRuntime(property.Entry, next_capacity);
         errdefer rt.memory.free(property.Entry, next);
         const used = self.shape_ref.prop_count;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.memcpy_bulk, .object_prop_values_memcpy);
             @memcpy(next[0..used], self.propertyEntries());
         } else {
@@ -11506,7 +11505,7 @@ pub const Object = extern struct {
             cell.is_const = false;
             old_value.free(rt);
         }
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.shape_slot, .object_set_entry_kind_and_slot);
             self.propertyEntry(index).* = .{ .slot = next_slot };
         } else {
@@ -11564,7 +11563,7 @@ pub const Object = extern struct {
         const flags = property.Flags.fromBits(prop.flags);
         std.debug.assert(!flags.deleted and flags.kind == .data);
         const old_slot = self.propertyEntry(index).*.slot;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.union_arm, .object_prop_slot);
             self.propertyEntry(index).*.slot = .{ .data = new_value };
         } else {
@@ -11631,7 +11630,7 @@ pub const Object = extern struct {
         cell.varRefIsConstSlot().* = !next_flags.writable;
         cell.varRefIsDeletableSlot().* = next_flags.configurable;
 
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.union_arm, .object_prop_slot);
             self.propertyEntry(index).*.slot = .{ .var_ref = cell.dupCell() };
         } else {
@@ -11661,7 +11660,7 @@ pub const Object = extern struct {
     ) void {
         const old_flags = self.propFlagsAt(index);
         const old_slot = self.propertyEntry(index).*.slot;
-        if (comptime builtin.is_test or gc.shadow_tracer_enabled) {
+        if (comptime builtin.is_test) {
             auditWrite(.shape_slot, .object_set_entry_kind_and_slot);
             self.propertyEntry(index).*.slot = next_slot;
         } else {

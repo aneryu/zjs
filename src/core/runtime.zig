@@ -491,16 +491,14 @@ pub const HeaderRootValue = struct {
     header: *gc.Header,
 };
 
-/// Precise ValueRootFrame linking. Default `rc` production keeps this false
-/// so activate/deactivate erase at comptime (identity). Tests keep all-on
-/// because there is no conservative scanner yet. Shadow/STW CLI
-/// (`-Dzjs_gc=shadow`/`trace_stw` and not `is_test`) links only
-/// container/window frames (design §7.1).
-pub const value_root_frames_enabled = builtin.is_test or gc.shadow_tracer_enabled or gc.trace_stw_enabled;
+/// Precise ValueRootFrame linking. Tests keep all-on because they have no
+/// conservative scanner; the tracing CLI links only container/window frames
+/// (design §7.1).
+pub const value_root_frames_enabled = builtin.is_test or gc.trace_stw_enabled;
 
-/// Shadow/STW production (non-test) does not list-link scalar Zig locals; those
+/// Production tracing (non-test) does not list-link scalar Zig locals; those
 /// wait for conservative stack/register capture. Tests link every activate.
-pub const value_root_link_containers_only = (gc.shadow_tracer_enabled or gc.trace_stw_enabled) and !builtin.is_test;
+pub const value_root_link_containers_only = gc.trace_stw_enabled and !builtin.is_test;
 
 /// Scalar scope helpers exist only when scalar frames can actually be linked.
 /// In production tracing builds the policy above rejects them, so keeping their

@@ -11,7 +11,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 
-pub const enabled = builtin.is_test or std.mem.eql(u8, build_options.zjs_gc, "shadow");
+pub const enabled = builtin.is_test;
 
 /// Bypass class named by design §5.2. `plugin_opaque` is reserved: host DSO
 /// stores into class payload are outside the engine ABI and stay

@@ -20,9 +20,9 @@ const block_heap_mod = @import("gc_block_heap.zig");
 pub const enabled = gc.address_registry_enabled;
 /// Registry mutation counters are observation only: production trace does not
 /// expose them through `--gc-stats`, and no allocation/collection policy reads
-/// them. Tests keep the accounting assertions; shadow keeps its observer
-/// report. Conservative-lookup counters stay with that path's owning lane.
-pub const mutation_stats_enabled = builtin.is_test or gc.shadow_tracer_enabled;
+/// them. Tests keep the accounting assertions. Conservative-lookup counters
+/// stay with that path's owning lane.
+pub const mutation_stats_enabled = builtin.is_test;
 
 pub const page_shift: u6 = 12;
 pub const page_size: usize = 1 << page_shift;
@@ -386,7 +386,7 @@ pub const Table = struct {
                 if (matches != 1) return error.AddressIndexDuplicatePageEntry;
             }
         }
-        // The counters are a test/shadow observation mirror, not index state.
+        // The counters are a test-only observation mirror, not index state.
         // ReleaseFast tracing deliberately erases their mutation-side writes;
         // an opt-in arena audit must keep validating the structural maps
         // without comparing them to an absent mirror.
@@ -710,7 +710,7 @@ pub const Table = struct {
         var hits: usize = self.forEachGcObjectInArena(addr, context, visit);
         // The occupant table now holds only what the arena geometry cannot
         // reach: standalone-prefix allocations (over the slab's 512-byte class
-        // ceiling or over-aligned) and, in shadow builds, strings and ropes.
+        // ceiling or over-aligned).
         const bucket = self.pages.getPtr(addr >> page_shift) orelse {
             return hits;
         };

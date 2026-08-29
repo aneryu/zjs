@@ -131,7 +131,6 @@ pub const Report = struct {
     committed_bytes: usize = 0,
     block_live_bytes: usize = 0,
     committed_live_milli: usize = 0,
-    string_live: usize = 0,
     drained_sweep_debt: usize = 0,
 
     pub fn format(self: Report, writer: anytype) !void {
@@ -701,9 +700,6 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
         last_report.block_live_bytes = rt.gc.block_heap.liveBytes();
         last_report.committed_live_milli = rt.gc.block_heap.committedLiveMilli();
     }
-    if (comptime gc.string_registry_enabled) {
-        last_report.string_live = rt.gc.address_registry.stats.string_live;
-    }
     return swept;
 }
 
@@ -1264,7 +1260,7 @@ const doomed_phase_kinds = [_]gc.GcKind{ .object, .realm_context, .module, .func
 
 /// Destroy up to `budget_ns` of the morgue. Returns true when it is empty.
 ///
-/// Runs under `.remove_cycles` so every struct free parks on
+/// Runs under `.tracer_destroy` so every struct free parks on
 /// `cycle_deferred_frees`; the drain happens ONCE, after the last slice, which
 /// is what keeps a destructor in a later slice reading a sibling from an
 /// earlier one as stripped-but-allocated memory instead of freed memory --

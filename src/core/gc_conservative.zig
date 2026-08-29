@@ -1,8 +1,7 @@
-//! Conservative native-root scanner for the shadow tracer (design §7.2).
-//!
-//! Compiled only when `-Dzjs_gc=shadow` (imported from `gc_shadow.zig`).
-//! Default `rc` never sees this file. AArch64 Linux (AAPCS64) is implemented;
-//! every other ABI is an explicit unimplemented branch.
+//! Conservative native-root scanner (design §7.2). Written for the Stage 1
+//! shadow observer and inherited by the reclaiming tracer, which is now its
+//! only caller. AArch64 Linux (AAPCS64) is implemented; every other ABI is an
+//! explicit unimplemented branch.
 //!
 //! Candidates are never dereferenced. A machine word is a root only if the
 //! live address registry maps it to a published allocation (header, metadata

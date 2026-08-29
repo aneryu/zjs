@@ -21,7 +21,7 @@ const runtime_mod = @import("runtime.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 
-pub const stats_enabled = builtin.is_test or gc.shadow_tracer_enabled;
+pub const stats_enabled = builtin.is_test;
 
 pub const Stats = struct {
     set_calls: usize = 0,

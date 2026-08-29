@@ -58,9 +58,6 @@ pub const RuntimeOptions = struct {
     leak_check: bool = false,
     include_paths: [max_include_paths][]const u8 = @splat(""),
     include_count: usize = 0,
-    /// Shadow-only. Void in default `rc` so this struct's layout is unchanged.
-    gc_shadow_check: if (engine.core.gc.shadow_tracer_enabled) bool else void =
-        if (engine.core.gc.shadow_tracer_enabled) false else {},
 
     fn addInclude(self: *RuntimeOptions, path: []const u8) !void {
         if (self.include_count == self.include_paths.len) return error.TooManyIncludes;
@@ -111,13 +108,6 @@ pub fn parseArgs(args: []const []const u8) CliError!Command {
             engine.core.gc_trace_stw.detailed_reports = true;
             rest = rest[1..];
             continue;
-        }
-        if (comptime engine.core.gc.shadow_tracer_enabled) {
-            if (std.mem.eql(u8, rest[0], "--gc-shadow-check")) {
-                options.gc_shadow_check = true;
-                rest = rest[1..];
-                continue;
-            }
         }
         if (std.mem.eql(u8, rest[0], "--profile-opcodes")) {
             options.profile_opcodes = true;
@@ -337,23 +327,14 @@ pub fn main(init: std.process.Init) !void {
         if (runtime.context.hasException()) {
             try stdout_writer.interface.flush();
             try printEvaluationError(io, &runtime, err);
-            if (comptime engine.core.gc.shadow_tracer_enabled) {
-                exitAfterOptionalShadowCheck(&stdout_writer.interface, runtime.runtime, runtime_options, 1);
-            }
             std.process.exit(1);
         }
         if (err == error.TypeError) {
             try stdout_writer.interface.flush();
             try printTypeErrorNotFunction(io, command);
-            if (comptime engine.core.gc.shadow_tracer_enabled) {
-                exitAfterOptionalShadowCheck(&stdout_writer.interface, runtime.runtime, runtime_options, 1);
-            }
             std.process.exit(1);
         }
         try printEvaluationError(io, &runtime, err);
-        if (comptime engine.core.gc.shadow_tracer_enabled) {
-            exitAfterOptionalShadowCheck(&stdout_writer.interface, runtime.runtime, runtime_options, 1);
-        }
         std.process.exit(1);
     };
     eval_ns = platform_clock.elapsedNanosSince(eval_start);
@@ -361,9 +342,6 @@ pub fn main(init: std.process.Init) !void {
 
     if (value.isException()) {
         try cli_process.printError(io, "zjs: uncaught exception\n", .{});
-        if (comptime engine.core.gc.shadow_tracer_enabled) {
-            exitAfterOptionalShadowCheck(&stdout_writer.interface, runtime.runtime, runtime_options, 1);
-        }
         std.process.exit(1);
     }
 
@@ -387,9 +365,6 @@ pub fn main(init: std.process.Init) !void {
             try printUnhandledRejectionTo(stderr, &runtime, exception);
             exception.free(runtime.runtime);
             if (!runtime.context.hasUnhandledRejection()) break;
-        }
-        if (comptime engine.core.gc.shadow_tracer_enabled) {
-            exitAfterOptionalShadowCheck(&stdout_writer.interface, runtime.runtime, runtime_options, 1);
         }
         std.process.exit(1);
     }
@@ -434,11 +409,6 @@ pub fn main(init: std.process.Init) !void {
         }
         try stdout_writer.interface.flush();
     }
-    if (comptime engine.core.gc.shadow_tracer_enabled) {
-        if (commandRuntimeOptions(command).gc_shadow_check) {
-            try runGcShadowCheck(&stdout_writer.interface, runtime.runtime);
-        }
-    }
     if (commandRuntimeOptions(command).perf_json) {
         opcode_profile.flushPendingDispatch();
         const active_profile: ?*const zjs.OpcodeProfile =
@@ -475,41 +445,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn printUsage(io: std.Io) !void {
-    if (comptime engine.core.gc.shadow_tracer_enabled) {
-        try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-shadow-check] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-shadow-check] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
-        return;
-    }
     try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
-}
-
-fn runGcShadowCheck(out: *std.Io.Writer, rt: *zjs.JSRuntime) !void {
-    if (comptime !engine.core.gc.shadow_tracer_enabled) return;
-    engine.core.gc_shadow.quiesce(rt);
-    const report = engine.core.gc_shadow.run(rt) catch |err| {
-        try out.print("zjs: gc-shadow-check failed: {s}\n", .{@errorName(err)});
-        try out.flush();
-        std.process.exit(1);
-    };
-    try report.format(out);
-    if (comptime engine.core.gc.shadow_tracer_enabled) {
-        try engine.core.gc_write_audit.format(out);
-    }
-    try out.flush();
-    if (report.unexplained != 0) std.process.exit(1);
-}
-
-fn exitAfterOptionalShadowCheck(
-    out: *std.Io.Writer,
-    rt: *zjs.JSRuntime,
-    options: RuntimeOptions,
-    exit_code: u8,
-) noreturn {
-    if (comptime engine.core.gc.shadow_tracer_enabled) {
-        if (options.gc_shadow_check) {
-            runGcShadowCheck(out, rt) catch std.process.exit(1);
-        }
-    }
-    std.process.exit(exit_code);
 }
 
 /// Standalone query flag: it takes no script and constructs no runtime, so it
@@ -1535,14 +1471,10 @@ test "zjs args accept include preload files" {
     try std.testing.expectEqualStrings("setup.mjs", command.file.options.includes()[1]);
 }
 
-test "zjs args accept gc-shadow-check only in shadow builds" {
-    if (comptime engine.core.gc.shadow_tracer_enabled) {
-        const command = try parseArgs(&.{ "--gc-shadow-check", "-e", "1" });
-        try std.testing.expect(command == .eval);
-        try std.testing.expect(command.eval.options.gc_shadow_check);
-    } else {
-        try std.testing.expectError(error.Usage, parseArgs(&.{ "--gc-shadow-check", "-e", "1" }));
-    }
+test "zjs args reject the retired gc-shadow-check flag" {
+    // The shadow observer went with the rc collector (2026-08-29); the flag it
+    // gated must now be an error rather than a silently ignored word.
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "--gc-shadow-check", "-e", "1" }));
 }
 
 test "zjs args accept memory dump flag" {

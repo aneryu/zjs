@@ -42,14 +42,12 @@ pub const oom_coverage_enabled: bool = build_options.zjs_oom_coverage;
 /// Does a collector in this build need to find an arena from an interior
 /// pointer?
 ///
-/// Only the tracing and shadow collectors scan conservatively, and only they
-/// resolve a stack word against the heap. Refcounting never asks, so it should
-/// not pay: self-aligned arenas, the `magic` word in the arena header, the
-/// lifetime observer, and the class-byte stamps all exist for that one query.
-/// Mirrors `gc.address_registry_enabled`, which cannot be imported here --
-/// `gc.zig` depends on this module, not the other way round.
+/// The tracing collector scans conservatively and resolves a stack word
+/// against the heap: self-aligned arenas, the `magic` word in the arena
+/// header, the lifetime observer, and the class-byte stamps all exist for that
+/// one query. Mirrors `gc.address_registry_enabled`, which cannot be imported
+/// here -- `gc.zig` depends on this module, not the other way round.
 pub const arena_addressable: bool = std.mem.eql(u8, build_options.zjs_gc, "trace_stw") or
-    std.mem.eql(u8, build_options.zjs_gc, "shadow") or
     builtin.is_test;
 const trace_stw_enabled: bool = std.mem.eql(u8, build_options.zjs_gc, "trace_stw");
 pub const force_gc_on_allocation_enabled: bool = build_options.zjs_force_gc;

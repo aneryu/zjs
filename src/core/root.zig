@@ -20,7 +20,7 @@ pub const list = @import("list.zig");
 pub const gc = @import("gc.zig");
 /// Slot-under-RC protocol. Default `rc` erases the module so production
 /// `.text` does not grow a unused Slot Implementation.
-pub const gc_slot = if (builtin.is_test or gc.shadow_tracer_enabled)
+pub const gc_slot = if (builtin.is_test)
     @import("gc_slot.zig")
 else
     struct {
@@ -28,7 +28,7 @@ else
     };
 /// Shadow write audit of Slot-bypassing heap stores. Default `rc` erases the
 /// module so production `.text` does not grow observer symbols.
-pub const gc_write_audit = if (builtin.is_test or gc.shadow_tracer_enabled)
+pub const gc_write_audit = if (builtin.is_test)
     @import("gc_write_audit.zig")
 else
     struct {
@@ -76,11 +76,6 @@ pub const context = @import("context.zig");
 pub const exception = @import("exception.zig");
 pub const memory = @import("memory.zig");
 pub const profile = @import("profile.zig");
-/// Imported only when `-Dzjs_gc=shadow`. Default `rc` builds see an empty
-/// namespace so the observer is not part of the production compile.
-pub const gc_shadow = if (gc.shadow_tracer_enabled) @import("gc_shadow.zig") else struct {
-    pub const enabled = false;
-};
 /// Live page-radix address registry. Default production `rc` erases the
 /// module so the allocation hot path does not grow a registry Implementation.
 pub const gc_address_registry = if (gc.address_registry_enabled)

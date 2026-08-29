@@ -72,7 +72,7 @@ pub const SuspendedStackStorage = struct {
         }
         const next = try rt.memory.alloc(JSValue, next_capacity);
         errdefer rt.memory.free(JSValue, next);
-        if (comptime builtin.is_test or std.mem.eql(u8, @import("build_options").zjs_gc, "shadow")) {
+        if (comptime builtin.is_test) {
             @import("gc_write_audit.zig").hit(.memcpy_bulk, .generator_values_memcpy);
         }
         @memcpy(next[0..self.values.len], self.values);

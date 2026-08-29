@@ -23,14 +23,6 @@ const JSValue = @import("value.zig").JSValue;
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 
-/// The Stage 1 non-reclaiming shadow observer. It enumerated the RC heap
-/// through the cycle-list census and compared it against a mark from the
-/// roots; with the RC heap gone there is nothing for it to observe, so it was
-/// removed together with the collector it shadowed (2026-08-29). The constant
-/// survives at `false` only while the last `shadow_tracer_enabled` readers are
-/// being retired batch by batch.
-pub const shadow_tracer_enabled: bool = false;
-
 /// The stop-the-world reclaiming tracer in `gc_trace_stw.zig` is now the only
 /// collector, so this is a comptime `true`. The name is kept because roughly
 /// 270 `if (comptime gc.trace_stw_enabled)` gates across the tree read it;
@@ -53,13 +45,10 @@ pub const sticky_major_enabled: bool =
 pub const corpse_census_enabled: bool =
     trace_stw_enabled and build_options.zjs_experimental_gc_corpse_census;
 /// Live page-radix address registry for conservative candidate validation.
-/// On in tests (so the map can be unit-tested on default `rc` tests) and in
-/// shadow/STW builds. Default production `rc` keeps this false so Registry
-/// layout and the allocation hot path stay the original body.
-pub const address_registry_enabled: bool = shadow_tracer_enabled or trace_stw_enabled or builtin.is_test;
+pub const address_registry_enabled: bool = trace_stw_enabled or builtin.is_test;
 
 /// Publication-size histogram and measured size-class table (§4.2 / §4.3).
-/// Same compile gate as the address registry: tests/shadow/STW only.
+/// Same compile gate as the address registry.
 pub const space_model_enabled: bool = address_registry_enabled;
 
 /// Logical 64 KiB window sweep state machine and four scheduling quantities
@@ -72,25 +61,10 @@ pub const sweep_model_enabled: bool = address_registry_enabled;
 /// per-publication result is overwritten by `endSweepModelSweep` before the
 /// report reads it. So the per-object hash insert is instrumentation and
 /// carries an instrument's gate, matching `gc_slot.stats_enabled`.
-pub const sweep_model_stats_enabled: bool =
-    sweep_model_enabled and (builtin.is_test or shadow_tracer_enabled);
+pub const sweep_model_stats_enabled: bool = sweep_model_enabled and builtin.is_test;
 
-/// 64 KiB block heap. STW only so default `rc` keeps the existing allocator.
+/// 64 KiB block heap.
 pub const block_heap_enabled: bool = trace_stw_enabled;
-
-/// String/rope intervals in the address registry. Shadow/STW only: default
-/// `rc` tests keep `stats.live` as the cycle-list census.
-/// Shadow only. The reclaiming tracer does not consume string intervals:
-/// `gc_conservative.scanWords` discards every `.string`/`.rope` hit,
-/// `traceHeader` treats strings as leaves, and `JSValue.cycleMarkHeader` can
-/// never yield a string header, so under `trace_stw` every flat string and
-/// rope node was paying a `by_header` insert plus a page-bucket append per
-/// spanned page on allocation, and a per-page linear scan on free, to produce
-/// a fact nothing reads. Strings stay refcount-owned under both collectors, so
-/// a native frame holding one holds a count; conservative retention of strings
-/// covers nothing (§7.2). Dropping them also shortens exactly the occupant
-/// lists the candidate scan walks.
-pub const string_registry_enabled: bool = shadow_tracer_enabled;
 
 const BlockHeapMod = @import("gc_block_heap.zig");
 
@@ -4306,37 +4280,11 @@ pub const Registry = struct {
         }
     }
 
-    pub fn registerLiveStringRange(
-        self: *Registry,
-        is_rope: bool,
-        base: []const u8,
-        identity: usize,
-    ) void {
-        if (comptime string_registry_enabled) {
-            const Kind = @import("gc_address_registry.zig").Kind;
-            self.address_registry.insertRange(
-                addressRegistryAllocator(),
-                if (is_rope) Kind.rope else Kind.string,
-                @intFromPtr(base.ptr),
-                base.len,
-                identity,
-            ) catch {
-                self.address_registry.noteFailedInsert();
-            };
-        }
-    }
-
-    pub fn unregisterLiveStringRange(self: *Registry, identity: usize) void {
-        if (comptime string_registry_enabled) {
-            self.address_registry.removePtr(addressRegistryAllocator(), identity);
-        }
-    }
-
     /// Histogram and sweep-window observation for a first-time publication.
     /// Restores do not call this (the object was already counted / windowed).
     inline fn observeNewPublication(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
         if (comptime space_model_enabled) {
-            if (comptime builtin.is_test or shadow_tracer_enabled) {
+            if (comptime builtin.is_test) {
                 self.space_histogram.record(bytes);
             } else if (gc_trace_stw_reports.detailed_reports) {
                 @branchHint(.unlikely);
