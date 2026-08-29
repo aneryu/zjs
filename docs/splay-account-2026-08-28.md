@@ -592,3 +592,25 @@ prepareFreshTarget 移交项、splay class-3 空块记分口径项。
 - rc 中立:`.text`/`.data`/`.bss` **三段字节数完全相同**,全二进制指令总数相同
   (880,040),逐函数直方图仅两处差异且都在无关模块(§5.1 布局彩票);
   trace 侧六基准 ABBA×4 指令 ±0.05%、cycles geomean **1.00031**。
+
+## main@b329a9cc 三维性能快照(2026-08-29,rc 退役后首测)
+
+**吞吐**(官方配对协议,ABBA×5 vs 冻结 rc,rc-spread 0.8–2.4%):
+deltablue 0.965 / regexp 1.047* / pdfjs 1.012 / raytrace 1.040 / EB 1.034 /
+splay **1.195** → geomean **1.0466**(margin 1.05 达标;*regexp 在其 ±3~4%
+布局彩票带内,rc 退役 −3170 行不可避免重洗了布局)。
+
+**内存**(fixed-work maxrss,n=1 指示性):splay 284/150MB=**1.89x**、
+regexp 1.71x、EB 1.61x、deltablue 1.61x、pdfjs 1.57x、raytrace 1.51x——
+与 growth 2.0 定步的 peak/live≈2 构造一致。
+
+**停顿**(--gc-stats STW 分段):deltablue 最大段 0.43ms / regexp 0.61ms /
+raytrace 0.45ms / pdfjs 单片 cycle 3.8ms / EB 最大段 1.47ms(cycle 累计 max
+4.1ms)/ **splay 最大段 18.5ms(finish 段,22 cycle 均值 12.5ms)**,minor
+p99 0.99ms。
+
+⚠️**如实修正**:采纳时引用的「splay major pause p99 ~1ms」出自 GC-GAP 时代
+lazy-sweep 测量;当前 tip 上 growth 2.0(堆更大、22 个 major)+ finish 段
+未切片使 splay 的 finish 段到 18.5ms——仍优于 rc 同负载的 42.4ms max,但
+~1ms 已不描述现状。**follow-up:finish 段切片化**(增量/销毁段都已 ≤1.05ms,
+finish 是唯一未预算化的段)。
