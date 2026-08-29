@@ -1029,6 +1029,66 @@ comptime {
     std.debug.assert(@intFromEnum(GcKind.string) == 6 and @intFromEnum(GcKind.big_int) == 7);
 }
 
+/// The two owner facts that let a generational write barrier do nothing, as
+/// bit positions inside the eight-byte `Metadata` prefix read as one word.
+///
+///   * `flags.young` (byte 3): a minor traces the whole reachable young set,
+///     so an old-to-young edge out of a young owner needs no record.
+///   * `lifetime.trace.object_shape_summary` bit7 (byte 6): the remembered-set
+///     membership cache of audit §10. Set implies present in the map (the
+///     direction `verifyPublishedHeaderRepresentation`'s
+///     `RememberedCacheWithoutOwner` enforces at every collection boundary),
+///     and a remembered owner is re-traced by the minor in full -- so this
+///     edge, whatever its target, is already covered.
+///
+/// Both live in ONE eight-byte, eight-aligned prefix, which is what makes the
+/// JSC-shaped fast path possible: `load` the owner's state word, `and` it with
+/// a phase-owned gate, branch. JSC packs generation and colour into one
+/// `cellState` byte and compares against `m_barrierThreshold`
+/// (AssemblyHelpers.h:1438-1445, Heap.cpp:3382-3386); zjs's two facts are not
+/// adjacent bits, so the "threshold" is a mask instead of a magnitude -- the
+/// same one ALU op and one branch.
+///
+/// The constant is produced by a comptime probe rather than hand-computed
+/// shifts: that makes it endian-agnostic AND makes a future field move a
+/// compile error in `barrierSkipBitsAreExactlyTheTwoFacts` below instead of a
+/// silently wrong mask.
+pub const barrier_young_bit: u64 = blk: {
+    var probe: Metadata = .{};
+    probe.flags.young = true;
+    break :blk @bitCast(probe);
+};
+
+pub const barrier_remembered_bit: u64 = blk: {
+    var probe: Metadata = .{};
+    probe.lifetime.trace.object_shape_summary = trace_remembered_mask;
+    break :blk @bitCast(probe);
+};
+
+pub const barrier_skip_bits: u64 = barrier_young_bit | barrier_remembered_bit;
+
+comptime {
+    // barrierSkipBitsAreExactlyTheTwoFacts. A bit that MOVES is fine by
+    // construction -- the probe follows it -- so what these catch is the rest:
+    // a fact that stops being a single bit, the two facts colliding, and any
+    // prefix default that would make a brand-new header skip its barriers.
+    // (Verified by injection: defaulting `BlockFlags.young` to true trips the
+    // second assert, because the remembered probe then carries two bits.)
+    std.debug.assert(@popCount(barrier_young_bit) == 1);
+    std.debug.assert(@popCount(barrier_remembered_bit) == 1);
+    std.debug.assert(barrier_young_bit != barrier_remembered_bit);
+    // A zero prefix must read as "the barrier has work to do": an unpublished
+    // header is old and unremembered, which is what the pre-fold code
+    // classified it as too (audit §10.6).
+    std.debug.assert(@as(u64, @bitCast(Metadata{})) & barrier_skip_bits == 0);
+}
+
+/// The owner state word of the fast path. One aligned eight-byte load of the
+/// prefix the caller is about to write through anyway.
+pub inline fn barrierOwnerWord(header: *const Header) u64 {
+    return @bitCast(header.metaConst().*);
+}
+
 /// Trace-only compact carrier header.
 ///
 /// The compatibility allocator metadata remains immediately before the
@@ -1807,6 +1867,20 @@ pub const Registry = struct {
     /// imm-offset ldrb in the runtime's front cache lines.
     phase: Phase align(64) = .none,
 
+    /// Write-barrier gate: the phase-owned mask the fast path ANDs against the
+    /// owner's state word (`barrierOwnerWord`). `barrier_skip_bits` in the
+    /// steady state, zero whenever some richer arm must run -- major marking
+    /// (exact-target shading) or `--gc-stats` (call accounting). Rewriting one
+    /// word at a phase boundary is JSC's `m_barrierThreshold` protocol
+    /// (Heap.cpp:3382-3386), and it is what takes both of those global loads
+    /// OFF the barrier's hot path.
+    ///
+    /// Deliberately adjacent to `phase` so it rides the Registry's pinned
+    /// front cache line (see K4 above) rather than a cold tail line.
+    /// `refreshBarrierGate` is the only writer; `initLists` seeds it.
+    barrier_gate: if (generation_enabled) u64 else void =
+        if (generation_enabled) barrier_skip_bits else {},
+
     memory: *memory.MemoryAccount,
     policy: Policy = .{},
 
@@ -2018,6 +2092,7 @@ pub const Registry = struct {
     /// (qjs `init_list_head` on `JSRuntime` fields). Must run before any
     /// header is published.
     pub fn initLists(self: *Registry) void {
+        self.refreshBarrierGate();
         listInit(&self.gc_obj_list);
         listInit(&self.tmp_obj_list);
         listInit(&self.zero_ref_list);
@@ -3661,7 +3736,7 @@ pub const Registry = struct {
         if (comptime !concurrent_enabled) return;
         self.abortCycleEnvelope();
         if (!self.concurrent.markingActive()) return;
-        self.concurrent.major_marking_active.store(false, .monotonic);
+        self.setMajorMarkingActive(false, .monotonic);
         self.concurrent_mark_queue.reset();
         self.mark_stack.len = 0;
         // The trace already promoted whatever it reached; the young
@@ -3883,6 +3958,12 @@ pub const Registry = struct {
     /// rescans every marked object. Worse pause, never a lost object.
     pub inline fn rememberOwnerForBulkWrite(self: *Registry, owner: *GCObjectHeader) void {
         if (comptime !generation_enabled) return;
+        if (self.barrierOwnerSkips(owner)) return;
+        self.rememberOwnerForBulkWriteSlow(owner);
+    }
+
+    fn rememberOwnerForBulkWriteSlow(self: *Registry, owner: *GCObjectHeader) void {
+        @branchHint(.cold);
         if (comptime concurrent_enabled) {
             if (self.concurrent.markingActive()) {
                 // Same publication rule as the value barrier: an unpublished
@@ -3893,8 +3974,91 @@ pub const Registry = struct {
                 return;
             }
         }
+        // The gate proves the owner old and unremembered -- EXCEPT when
+        // `detailed_reports` closed the gate for accounting reasons, in which
+        // case nothing has been proven and the young test still has to run.
         if (self.generation.isYoung(owner)) return;
         self.rememberGenerationalOwner(owner);
+    }
+
+    /// The gate value the current phase demands.
+    ///
+    /// One definition, two consumers: `refreshBarrierGate` publishes it, and
+    /// the fast path's safety check re-derives it to prove the published copy
+    /// is not stale. Keeping them the same expression is the point -- a gate
+    /// computed one way and checked another checks nothing.
+    inline fn expectedBarrierGate(self: *const Registry) u64 {
+        if (comptime !generation_enabled) return 0;
+        if (comptime concurrent_enabled) {
+            // Marking wants the exact-target shading arm on every store, so no
+            // owner state may buy an exit.
+            if (self.concurrent.markingActive()) return 0;
+        }
+        // `--gc-stats` wants every call counted, including the ones the gate
+        // would have retired for free. Closing the gate is how the counter
+        // block stays exact without a second global load on the hot path.
+        if (gc_trace_stw_reports.detailed_reports) return 0;
+        return barrier_skip_bits;
+    }
+
+    /// Republish the barrier gate after either of its two inputs changed.
+    ///
+    /// Marking transitions go through `setMajorMarkingActive`. A
+    /// `detailed_reports` flip against a LIVE Registry must call this
+    /// explicitly; forgetting to is a panic in every safety build rather than
+    /// a silently wrong statistics row, because the fast path re-derives the
+    /// expected gate on every barrier (see `barrierOwnerSkips`).
+    pub fn refreshBarrierGate(self: *Registry) void {
+        if (comptime !generation_enabled) return;
+        self.barrier_gate = self.expectedBarrierGate();
+    }
+
+    /// The only writer of the marking phase flag.
+    ///
+    /// Publishing the flag and republishing the derived gate is ONE
+    /// transaction. A bare `major_marking_active.store` would leave the
+    /// barrier taking steady-state exits while a major is marking -- i.e.
+    /// dropping shades -- so the raw store must not be spelled anywhere else.
+    ///
+    /// What ENFORCES that is `barrierOwnerSkips`'s C1 assert, not review: a
+    /// bare store leaves the gate stale and the next barrier call panics.
+    /// Injection-verified at `beginIncrementalCycle`'s publication, which is
+    /// the one whose window really contains mutator stores. Note the other
+    /// direction of that experiment: a bare store at `collectConcurrentMajor`'s
+    /// publication is NOT caught, because no barrier runs between it and the
+    /// matching close in today's stop-the-world harness -- the site is reached
+    /// (probe-verified), the window is simply empty of mutator writes.
+    pub fn setMajorMarkingActive(self: *Registry, active: bool, comptime order: std.builtin.AtomicOrder) void {
+        if (comptime !concurrent_enabled) return;
+        self.concurrent.major_marking_active.store(active, order);
+        self.refreshBarrierGate();
+    }
+
+    /// JSC's two-step barrier fast path (AssemblyHelpers.h:1438-1445): load the
+    /// owner's state, test it against the phase-owned gate, done. True means
+    /// this store owes the collector nothing.
+    ///
+    /// The owner word load is the one the pre-fold path already paid for
+    /// `isYoung(owner)`; what disappears is the atomic marking load, the
+    /// `detailed_reports` load, and -- for an owner already in the remembered
+    /// set -- the SECOND object header the old-target classification used to
+    /// touch.
+    pub inline fn barrierOwnerSkips(self: *const Registry, owner: *const GCObjectHeader) bool {
+        if (comptime !generation_enabled) return true;
+        if (comptime std.debug.runtime_safety) {
+            // C1. A stale gate is the one way this fold can go silently wrong,
+            // and it is invisible from the slow path: a gate that wrongly
+            // permits a skip never reaches it. So check it here, on every
+            // barrier call, in every safety build.
+            std.debug.assert(self.barrier_gate == self.expectedBarrierGate());
+            // C2. The gate reads byte 6 bit7 as the remembered lease, which is
+            // only that for eligible kinds: `.string` has no `Metadata` prefix
+            // at all, and `.big_int` aliases the byte onto its live refcount.
+            // Audit §10.3 walked every barrier call site and found neither
+            // kind; this turns that survey into a machine check.
+            std.debug.assert(traceRememberedCacheEligible(owner.metaConst().flags.kind));
+        }
+        return barrierOwnerWord(owner) & self.barrier_gate != 0;
     }
 
     /// Target-bearing callers reach the bit only after old-owner/young-target
@@ -3996,9 +4160,25 @@ pub const Registry = struct {
         self.rememberGenerationalOwner(owner);
     }
 
+    /// Header-shaped write barrier. The whole steady-state decision is
+    /// `barrierOwnerSkips`; everything below it is a phase the gate has
+    /// already announced by being zero.
     pub inline fn generationalBarrier(self: *Registry, owner: *GCObjectHeader, child: ?*GCObjectHeader) void {
         if (comptime !generation_enabled) return;
         const target = child orelse return;
+        if (self.barrierOwnerSkips(owner)) return;
+        self.generationalBarrierSlow(owner, target);
+    }
+
+    /// Everything the folded fast path stopped doing inline.
+    ///
+    /// The exact-target shading arm stays a real arm rather than being folded
+    /// into the gate: §8.4's tearing premise is what makes owner-only records
+    /// unsound under a real concurrent marker, and JSC's 8-byte atomic escape
+    /// hatch does not exist for a 16-byte JSValue. The gate carries the PHASE
+    /// decision; the arm carries the semantics.
+    fn generationalBarrierSlow(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void {
+        @branchHint(.cold);
         // §8.4: while a major is marking, every strong write shades its exact
         // new target instead of taking the generational path. The two are
         // alternatives, not a sequence -- a shaded object is reachable for
@@ -4013,43 +4193,32 @@ pub const Registry = struct {
         // unconditional RMWs on a path that runs tens of millions of times
         // per benchmark. JSC's barrier fast path carries zero counters
         // (`m_barriersExecuted` lives in the slow path only). Same rule here:
-        // pay for numbers when someone asked for them.
+        // pay for numbers when someone asked for them -- and when they do ask,
+        // the gate closes so the count stays complete.
         if (gc_trace_stw_reports.detailed_reports) {
             self.generationalBarrierDetailed(owner, target);
             return;
         }
-        if (self.generation.isYoung(owner)) return;
+        // Reached with an open gate only when the owner is old AND not yet
+        // remembered, so the owner classification the pre-fold code repeated
+        // here is exactly what the gate just did.
         if (!self.generation.isYoung(target)) return;
         self.rememberGenerationalOwner(owner);
     }
 
-    /// JSValue-shaped write barrier. Keep the child raw until an old owner
-    /// actually needs its target classified: young owners account for the vast
+    /// JSValue-shaped write barrier. Keep the child raw until the gate says
+    /// this store is somebody's business: young owners account for the vast
     /// majority of property writes and a minor scans them regardless.
     ///
-    /// Active major marking is the exception. Its insertion barrier shades the
-    /// exact target for this cycle, even when the owner is young, so classify
-    /// before calling `shadeForConcurrentMark`. Detailed reports likewise keep
-    /// the header-shaped barrier's ordering so their edge-only counters remain
-    /// comparable with earlier runs.
+    /// Marking and detailed reports both need the target decoded even for a
+    /// young owner, and both announce themselves by zeroing the gate -- so the
+    /// gate-first shape decodes exactly when the pre-fold three-way ordering
+    /// did, and the edge-only counters stay comparable with earlier runs.
     pub inline fn generationalBarrierValue(self: *Registry, owner: *GCObjectHeader, child: JSValue) void {
         if (comptime !generation_enabled) return;
-        if (comptime concurrent_enabled) {
-            if (self.concurrent.markingActive()) {
-                const target = child.cycleMarkHeader() orelse return;
-                self.shadeForConcurrentMark(owner, target);
-                return;
-            }
-        }
-        if (gc_trace_stw_reports.detailed_reports) {
-            const target = child.cycleMarkHeader() orelse return;
-            self.generationalBarrierDetailed(owner, target);
-            return;
-        }
-        if (self.generation.isYoung(owner)) return;
+        if (self.barrierOwnerSkips(owner)) return;
         const target = child.cycleMarkHeader() orelse return;
-        if (!self.generation.isYoung(target)) return;
-        self.rememberGenerationalOwner(owner);
+        self.generationalBarrierSlow(owner, target);
     }
 
     /// The barrier queue's ring shares the registry's allocator for the same

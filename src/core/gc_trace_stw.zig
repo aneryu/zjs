@@ -375,8 +375,8 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReach
     // production queue it is auditing. The mutator is stopped here; suppress
     // the barrier mode for the diagnostic and restore it before returning.
     const marking_was_active = rt.gc.concurrent.markingActive();
-    if (marking_was_active) rt.gc.concurrent.major_marking_active.store(false, .monotonic);
-    defer if (marking_was_active) rt.gc.concurrent.major_marking_active.store(true, .monotonic);
+    if (marking_was_active) rt.gc.setMajorMarkingActive(false, .monotonic);
+    defer if (marking_was_active) rt.gc.setMajorMarkingActive(true, .monotonic);
 
     var saved: std.ArrayList(*gc.Header) = .empty;
     defer saved.deinit(allocator);
@@ -857,7 +857,7 @@ pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // Publish that marking is live before resuming: from here every strong
     // write shades its target GREY -- marked and queued -- instead of taking
     // the generational path.
-    rt.gc.concurrent.major_marking_active.store(true, .release);
+    rt.gc.setMajorMarkingActive(true, .release);
 
     // Concurrent phase. The mutator is logically running here; the barrier is
     // what keeps its writes visible to this drain, and what it queued is part
@@ -881,7 +881,7 @@ pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
 
     // Marking is over before anything is freed: a mutator that resumes mid
     // sweep must not still be shading into a set being torn down.
-    rt.gc.concurrent.major_marking_active.store(false, .release);
+    rt.gc.setMajorMarkingActive(false, .release);
 
     collector.processWeak();
     const swept = collector.sweepUnmarked();
@@ -1026,7 +1026,7 @@ pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.Va
     rt.gc.concurrent.stats.phase_retired_remembered_sets +|=
         rt.gc.generation.stats.remembered_clears -| remembered_clears_before;
 
-    rt.gc.concurrent.major_marking_active.store(true, .monotonic);
+    rt.gc.setMajorMarkingActive(true, .monotonic);
 }
 
 /// Drain up to `budget_ns` of the grey frontier. Returns true when the
@@ -1136,7 +1136,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     }
 
     // Marking is over before anything is freed (§8.6 step 12 before 13).
-    rt.gc.concurrent.major_marking_active.store(false, .monotonic);
+    rt.gc.setMajorMarkingActive(false, .monotonic);
 
     const t_weak = profile.nowNanos();
     collector.processWeak();
