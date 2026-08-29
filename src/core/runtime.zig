@@ -1648,7 +1648,6 @@ pub const JSRuntime = struct {
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         self.clearPendingFinalizationJobs();
-        Object.releaseCallbackOwnedFunctionBytecodeCycles(self);
         _ = self.runObjectCycleRemoval();
         self.gc.host_quiescent = false;
         self.drainDeferredWeakValueFrees();
@@ -3024,28 +3023,16 @@ pub const JSRuntime = struct {
         const start_ns = profile.nowNanos();
 
         self.gc.beginMajorCycle(self.gc.activeMajorReason() orelse .manual);
-        const freed = if (comptime gc.trace_stw_enabled)
-            @import("gc_trace_stw.zig").collectCycles(self, roots, scan) catch |err| {
-                const mapped: gc.CollectionError = switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.PayloadMarkFailed => error.PayloadMarkFailed,
-                };
-                self.gc.recordFailure(mapped);
-                self.gc.abortMajorCycle();
-                self.gc.requestGC(.collection_failed, .soon);
-                return mapped;
-            }
-        else
-            Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
-                const mapped: gc.CollectionError = switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.PayloadMarkFailed => error.PayloadMarkFailed,
-                };
-                self.gc.recordFailure(mapped);
-                self.gc.abortMajorCycle();
-                self.gc.requestGC(.collection_failed, .soon);
-                return mapped;
+        const freed = @import("gc_trace_stw.zig").collectCycles(self, roots, scan) catch |err| {
+            const mapped: gc.CollectionError = switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.PayloadMarkFailed => error.PayloadMarkFailed,
             };
+            self.gc.recordFailure(mapped);
+            self.gc.abortMajorCycle();
+            self.gc.requestGC(.collection_failed, .soon);
+            return mapped;
+        };
         self.gc.setMajorPhase(.sweep);
 
         const end_ns = profile.nowNanos();
@@ -3054,10 +3041,7 @@ pub const JSRuntime = struct {
         // walks run inside this region and are enabled by the same
         // `--gc-stats` that prints the distribution, so leaving them in makes
         // the only pause instrument inflate its own subject by ~40%.
-        const census = if (comptime gc.trace_stw_enabled)
-            @import("gc_trace_stw.zig").last_census_ns
-        else
-            0;
+        const census = @import("gc_trace_stw.zig").last_census_ns;
         const result = gc.CollectionResult{
             .freed_objects = freed,
             .duration_ns = elapsed -| census,

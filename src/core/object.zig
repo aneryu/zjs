@@ -6786,11 +6786,8 @@ pub const Object = extern struct {
     }
 
     // ===== visit* / cycle GC =====
-    pub const destroyRuntimeCycles = object_gc.destroyRuntimeCycles;
-    pub const destroyRuntimeCyclesWithValueRoots = object_gc.destroyRuntimeCyclesWithValueRoots;
     pub const drainCycleDeferredFrees = object_gc.drainCycleDeferredFrees;
     pub const drainCycleDeferredFreesBudgeted = object_gc.drainCycleDeferredFreesBudgeted;
-    pub const releaseCallbackOwnedFunctionBytecodeCycles = object_gc.releaseCallbackOwnedFunctionBytecodeCycles;
     pub const CycleMarkPathForTest = object_gc.CycleMarkPathForTest;
     pub const collectCycleMarkChildHeadersForTest = object_gc.collectCycleMarkChildHeadersForTest;
 
