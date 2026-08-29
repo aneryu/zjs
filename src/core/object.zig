@@ -56,16 +56,10 @@ const FinalizingShapeStorage = extern struct {
     metadata: gc.Metadata = .{
         .alloc_info = .{ .standalone = true },
         .flags = .{ .kind = .shape, .is_pinned = true },
-        .lifetime = if (gc.trace_stw_enabled)
-            .{ .trace = .{} }
-        else
-            .{ .rc = std.math.maxInt(i32) / 2 },
+        .lifetime = .{ .trace = .{} },
     },
     value: shape.Shape = .{
-        .ownership = if (gc.trace_stw_enabled)
-            .{ .trace_ref_count = std.math.maxInt(i32) / 2 }
-        else
-            .{},
+        .ownership = .{ .trace_ref_count = std.math.maxInt(i32) / 2 },
         .prop_hash_mask = shape.initial_hash_size - 1,
         .prop_size = shape.initial_prop_size,
     },
@@ -433,7 +427,7 @@ pub const Object = extern struct {
         std.debug.assert(@offsetOf(@This(), "header") == 0);
         // qjs JSObject is 64B: 16B GC header + 8B metadata + shape/prop
         // pointers + the 24B class-specific union.
-        std.debug.assert(@sizeOf(@This()) == if (gc.trace_stw_enabled) 56 else 64);
+        std.debug.assert(@sizeOf(@This()) == 56);
         std.debug.assert(@sizeOf(ObjectFlags) == 2);
         std.debug.assert(@sizeOf(ObjectStorage) == 24);
         const header_bytes = @sizeOf(gc.GCObjectHeader);
@@ -446,10 +440,10 @@ pub const Object = extern struct {
         std.debug.assert(trailing_property_allocation_bit & weakref_count_mask == 0);
         if (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall) {
             std.debug.assert(trailing_property_bytes == 32);
-            std.debug.assert(@sizeOf(@This()) + trailing_property_bytes == if (gc.trace_stw_enabled) 88 else 96);
+            std.debug.assert(@sizeOf(@This()) + trailing_property_bytes == 88);
         } else {
             std.debug.assert(trailing_property_bytes == 48);
-            std.debug.assert(@sizeOf(@This()) + trailing_property_bytes == if (gc.trace_stw_enabled) 104 else 112);
+            std.debug.assert(@sizeOf(@This()) + trailing_property_bytes == 104);
         }
     }
     header: gc.GCObjectHeader,
@@ -503,7 +497,6 @@ pub const Object = extern struct {
     }
 
     pub inline fn traceShapeSummary(self: *const Object) u8 {
-        std.debug.assert(gc.trace_stw_enabled);
         return self.header.metaConst().lifetime.trace.object_shape_summary & trace_shape_summary_storage_mask;
     }
 
@@ -559,12 +552,10 @@ pub const Object = extern struct {
     /// Property append/update paths below maintain the same byte incrementally
     /// so raytrace does not pay a Shape reread after every transition.
     pub inline fn refreshTraceShapeSummary(self: *Object) void {
-        if (comptime !gc.trace_stw_enabled) return;
         self.storeTraceShapeSummary(shapeSummaryFor(self.shape_ref));
     }
 
     pub fn traceShapeSummaryMatches(self: *const Object) bool {
-        if (comptime !gc.trace_stw_enabled) return true;
         const stored_summary = self.header.metaConst().lifetime.trace.object_shape_summary &
             trace_shape_summary_storage_mask;
         const expected_summary = shapeSummaryFor(self.shape_ref);
@@ -578,7 +569,6 @@ pub const Object = extern struct {
     }
 
     inline fn commitTraceShapeAppend(self: *Object, old_len: usize, flags: property.Flags) void {
-        if (comptime !gc.trace_stw_enabled) return;
         const state = &self.header.meta().lifetime.trace;
         if (old_len >= trailing_property_capacity) {
             if (old_len == trailing_property_capacity)
@@ -615,7 +605,6 @@ pub const Object = extern struct {
     }
 
     inline fn syncTraceShapePropertyFlags(self: *Object, index: usize, flags: property.Flags) void {
-        if (comptime !gc.trace_stw_enabled) return;
         const previous = self.traceShapeSummary();
         if (!traceShapeSummaryIsExact(previous)) return;
         std.debug.assert(index < traceShapeSummaryCount(previous));
@@ -755,8 +744,7 @@ pub const Object = extern struct {
         self.shape_ref = final_shape;
         rt.gc.removeConstructionRoot(&self.header);
         rt.registerObjectWithBytes(self, @sizeOf(Object)) catch |err| {
-            if (comptime gc.trace_stw_enabled)
-                self.header.meta().lifetime.trace.object_shape_summary = 0;
+            self.header.meta().lifetime.trace.object_shape_summary = 0;
             rt.gc.addConstructionRoot(&self.header);
             self.shape_ref = undefined;
             rt.shapes.release(final_shape);
@@ -914,18 +902,13 @@ pub const Object = extern struct {
     /// unpublished across that callback would let the nested constructor
     /// observe an impossible half-state. The local header root protects both
     /// a newly published Shape and a pre-existing hash hit from collection.
-    /// Default `rc` keeps the original collect-only body.
     fn collectBeforeObjectAllocationPublishingShape(rt: *JSRuntime, shape_ref: *shape.Shape, alloc_size: usize) void {
-        if (comptime gc.trace_stw_enabled) {
-            if (!shape_ref.header.meta().alloc_info.heap_accounted) rt.shapes.publish(shape_ref);
-            if (comptime !runtime_mod.value_root_link_containers_only) {
-                var header_roots = [_]runtime_mod.HeaderRootValue{.{ .header = &shape_ref.header }};
-                var frame = runtime_mod.ValueRootFrame{ .headers = &header_roots };
-                frame.activate(rt);
-                defer frame.deactivate(rt);
-            }
-            rt.collectBeforeObjectAllocation(alloc_size);
-            return;
+        if (!shape_ref.header.meta().alloc_info.heap_accounted) rt.shapes.publish(shape_ref);
+        if (comptime !runtime_mod.value_root_link_containers_only) {
+            var header_roots = [_]runtime_mod.HeaderRootValue{.{ .header = &shape_ref.header }};
+            var frame = runtime_mod.ValueRootFrame{ .headers = &header_roots };
+            frame.activate(rt);
+            defer frame.deactivate(rt);
         }
         rt.collectBeforeObjectAllocation(alloc_size);
     }
@@ -955,18 +938,12 @@ pub const Object = extern struct {
             std.debug.assert(!payloadKindAllocates(definition.payload_kind));
             std.debug.assert(!classHasExoticMethods(class.ids.object, definition.has_exotic));
         }
-        const shape_ref = if (comptime gc.trace_stw_enabled)
-            try rt.shapes.createObjectRootReserved(prototype)
-        else
-            try rt.shapes.createObjectRoot(prototype);
+        const shape_ref = try rt.shapes.createObjectRootReserved(prototype);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
 
         const alloc_size = @sizeOf(Object);
-        if (comptime gc.trace_stw_enabled)
-            collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size)
-        else
-            rt.collectBeforeObjectAllocation(alloc_size);
+        collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size);
         const self = try rt.memory.createNoTrigger(Object);
         var initialized = false;
         errdefer if (initialized)
@@ -1014,7 +991,7 @@ pub const Object = extern struct {
             std.debug.assert(!payloadKindAllocates(definition.payload_kind));
             std.debug.assert(!classHasExoticMethods(class.ids.object, definition.has_exotic));
         }
-        const shape_ref = if (comptime gc.trace_stw_enabled) blk: {
+        const shape_ref = blk: {
             // The direct-slot Shape capacity is qjs's ordinary root capacity
             // (`initial_prop_size == 2`), so take the same root lookup as `{}`
             // and constructor instances. The old exact-capacity entry point
@@ -1035,19 +1012,13 @@ pub const Object = extern struct {
                 prototype,
                 trailing_property_capacity,
             );
-        } else try rt.shapes.createObjectRootWithPropertyCapacity(
-            prototype,
-            trailing_property_capacity,
-        );
+        };
         std.debug.assert(shape_ref.prop_size == trailing_property_capacity);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
 
         const alloc_size = @sizeOf(Object) + trailing_property_bytes;
-        if (comptime gc.trace_stw_enabled)
-            collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size)
-        else
-            rt.collectBeforeObjectAllocation(alloc_size);
+        collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size);
         const self = try rt.memory.createWithFamNoTrigger(Object, trailing_property_bytes);
         var initialized = false;
         errdefer if (initialized)
@@ -1431,15 +1402,10 @@ pub const Object = extern struct {
             std.debug.assert(template.entries.len == template.shape_ref.prop_count);
             template.shape_ref.retain();
             break :blk template.shape_ref;
-        } else if (comptime gc.trace_stw_enabled) blk: {
-            break :blk if (property_capacity == 0)
-                try rt.shapes.createObjectRootReserved(prototype)
-            else
-                try rt.shapes.createObjectRootWithPropertyCapacityReserved(prototype, property_capacity);
         } else if (property_capacity == 0)
-            try rt.shapes.createObjectRoot(prototype)
+            try rt.shapes.createObjectRootReserved(prototype)
         else
-            try rt.shapes.createObjectRootWithPropertyCapacity(prototype, property_capacity);
+            try rt.shapes.createObjectRootWithPropertyCapacityReserved(prototype, property_capacity);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
         var property_storage: []property.Entry = &.{};
@@ -1491,10 +1457,7 @@ pub const Object = extern struct {
         // initialization, ownership transfers and no-fail publication after it.
         // The helper publishes a reserved cache-miss Shape before entering the
         // reentrant boundary, then roots it exactly like a published hash hit.
-        if (comptime gc.trace_stw_enabled)
-            collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size)
-        else
-            rt.collectBeforeObjectAllocation(alloc_size);
+        collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size);
         const self = if (inline_layout) |layout| blk: {
             // The object-level threshold/force-GC hook just ran above. Enter
             // MemoryAccount directly so this same allocation does not request
@@ -2510,26 +2473,24 @@ pub const Object = extern struct {
         // sprinkle took the share of whole-run-clean blocks from ~97% to 0.
         // The trailing two-slot allocation remains a physical property of the
         // object and is handled exactly as in the generic arm.
-        if (comptime gc.trace_stw_enabled) {
-            if (passBFastArmEligible(rt, class_id)) {
-                if (comptime std.debug.runtime_safety) {
-                    const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
-                    std.debug.assert(definition.inline_payload_size == 0);
-                    // Load-bearing for the FAM accounting below: the debit must
-                    // be `@sizeOf(Object) + trailing_property_bytes`, and that
-                    // constant is only the right trailing size for the class-1
-                    // property layout (`verifyObjectPropertyStorageLayouts`
-                    // enforces the same rule from the arena checker side).
-                    std.debug.assert(!self.hasTrailingPropertyAllocation() or
-                        class_id == class.ids.object);
-                }
-                if (self.flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
-                if (self.hasTrailingPropertyAllocation()) {
-                    return rt.memory.destroyWithFam(Object, self, trailing_property_bytes);
-                }
-                rt.memory.destroy(Object, self);
-                return;
+        if (passBFastArmEligible(rt, class_id)) {
+            if (comptime std.debug.runtime_safety) {
+                const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
+                std.debug.assert(definition.inline_payload_size == 0);
+                // Load-bearing for the FAM accounting below: the debit must
+                // be `@sizeOf(Object) + trailing_property_bytes`, and that
+                // constant is only the right trailing size for the class-1
+                // property layout (`verifyObjectPropertyStorageLayouts`
+                // enforces the same rule from the arena checker side).
+                std.debug.assert(!self.hasTrailingPropertyAllocation() or
+                    class_id == class.ids.object);
             }
+            if (self.flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
+            if (self.hasTrailingPropertyAllocation()) {
+                return rt.memory.destroyWithFam(Object, self, trailing_property_bytes);
+            }
+            rt.memory.destroy(Object, self);
+            return;
         }
         const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
         // The flag test belongs here, not behind the call. Almost no object
@@ -4364,7 +4325,7 @@ pub const Object = extern struct {
         }
         const target = rt.liveObjectFromWeakIdentity(identity) orelse return JSValue.undefinedValue();
         const retained = target.value().dup();
-        if (comptime gc.trace_stw_enabled) rt.keepAliveWeakRefTarget(retained);
+        rt.keepAliveWeakRefTarget(retained);
         return retained;
     }
 
@@ -7027,10 +6988,7 @@ pub const Object = extern struct {
         // FAM walk. Keep the census identical to the actual trace branch.
         const shape_address = @intFromPtr(self.shape_ref) - gc.metadata_prefix_size;
         const shape_allocated = gc.metadata_prefix_size + self.shape_ref.allocationSize();
-        const summary_exact = if (comptime gc.trace_stw_enabled)
-            traceShapeSummaryIsExact(self.traceShapeSummary())
-        else
-            false;
+        const summary_exact = traceShapeSummaryIsExact(self.traceShapeSummary());
         const shape_touched = @sizeOf(shape.Shape) + if (summary_exact)
             0
         else
@@ -7226,28 +7184,26 @@ pub const Object = extern struct {
     }
 
     inline fn tracePropertyEdgesFallible(self: *Object, visitor: anytype) !void {
-        if (comptime gc.trace_stw_enabled) {
-            // A mutator barrier may publish remembered bit7 between open
-            // incremental/concurrent mark slices. The semantic accessor masks
-            // that independent membership cache; begin-time clearing alone is
-            // not a sufficient phase invariant for a raw marker read.
-            const summary = self.traceShapeSummary();
-            // Canonical summary values 0, 1, and 2 mean exactly that many live
-            // data slots. This is the splay/raytrace dominant form: one byte
-            // load + compare, with no per-slot shift/mask or Shape descriptor
-            // read. Only unusual/deleted slots decode the upper six bits.
-            if (summary <= trailing_property_capacity) {
-                @branchHint(.likely);
-                return self.traceDataPropertyEntriesFallible(visitor, @intCast(summary));
-            }
-            if (traceShapeSummaryIsExact(summary)) {
-                return self.tracePropertyEntriesFallible(
-                    visitor,
-                    traceShapeSummaryCount(summary),
-                    true,
-                    summary,
-                );
-            }
+        // A mutator barrier may publish remembered bit7 between open
+        // incremental/concurrent mark slices. The semantic accessor masks
+        // that independent membership cache; begin-time clearing alone is
+        // not a sufficient phase invariant for a raw marker read.
+        const summary = self.traceShapeSummary();
+        // Canonical summary values 0, 1, and 2 mean exactly that many live
+        // data slots. This is the splay/raytrace dominant form: one byte
+        // load + compare, with no per-slot shift/mask or Shape descriptor
+        // read. Only unusual/deleted slots decode the upper six bits.
+        if (summary <= trailing_property_capacity) {
+            @branchHint(.likely);
+            return self.traceDataPropertyEntriesFallible(visitor, @intCast(summary));
+        }
+        if (traceShapeSummaryIsExact(summary)) {
+            return self.tracePropertyEntriesFallible(
+                visitor,
+                traceShapeSummaryCount(summary),
+                true,
+                summary,
+            );
         }
         return self.tracePropertyEntriesFallible(visitor, self.shape_ref.prop_count, false, 0);
     }
@@ -7663,306 +7619,12 @@ pub const Object = extern struct {
         return @fieldParentPtr("header", header);
     }
 
-    fn collectInternalFunctionBytecodes(
-        rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        internal_bytecodes: *ObjectVisitSet,
-    ) ObjectGraphError!void {
-        // This is an RC last-owner reconstruction helper. The tracer owns
-        // FunctionBytecode lifetime and has no count from which to infer an
-        // internal-only subgraph.
-        if (comptime gc.trace_stw_enabled) return;
-        try collectFunctionBytecodeCandidates(rt, visited, internal_bytecodes);
-        try pruneNonInternalFunctionBytecodes(rt, visited, internal_bytecodes);
-    }
-
-    fn collectFunctionBytecodeCandidates(
-        rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        candidates: *ObjectVisitSet,
-    ) ObjectGraphError!void {
-        var changed = true;
-        while (changed) {
-            changed = false;
-            var gc_iter = rt.gc.objectIterator();
-            while (gc_iter.next()) |header| {
-                const function_bytecode = functionBytecodeFromGcHeader(header) orelse {
-                    continue;
-                };
-                const address = @intFromPtr(function_bytecode);
-                if (candidates.contains(address)) {
-                    continue;
-                }
-
-                const internal_refs =
-                    (try countFunctionBytecodeRefsFromVisitedObjects(rt, function_bytecode, visited)) +
-                    countFunctionBytecodeRefsFromVisitedRealms(rt, function_bytecode, visited) +
-                    countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, candidates);
-                if (internal_refs == 0) {
-                    continue;
-                }
-
-                try candidates.put(address, {});
-                changed = true;
-            }
-        }
-    }
-
-    fn pruneNonInternalFunctionBytecodes(
-        rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        internal_bytecodes: *ObjectVisitSet,
-    ) ObjectGraphError!void {
-        while (true) {
-            var removed = false;
-            var iterator = internal_bytecodes.keyIterator();
-            while (iterator.next()) |address| {
-                const function_bytecode: *const FunctionBytecode = @ptrFromInt(address.*);
-                const internal_refs =
-                    (try countFunctionBytecodeRefsFromVisitedObjects(rt, function_bytecode, visited)) +
-                    countFunctionBytecodeRefsFromVisitedRealms(rt, function_bytecode, visited) +
-                    countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, internal_bytecodes);
-                const ref_count: usize = @intCast(gc.headerRefCount(&function_bytecode.header));
-                if (internal_refs == ref_count) continue;
-
-                _ = internal_bytecodes.remove(address.*);
-                removed = true;
-                break;
-            }
-            if (!removed) return;
-        }
-    }
-
-    fn functionBytecodeFromGcHeader(header: *gc.GCObjectHeader) ?*const FunctionBytecode {
-        if (header.meta().flags.kind != .function_bytecode) return null;
-        return @alignCast(@fieldParentPtr("header", header));
-    }
-
-    fn countFunctionBytecodeRefsFromVisitedObjects(
-        rt: *JSRuntime,
-        function_bytecode: *const FunctionBytecode,
-        visited: *const ObjectVisitSet,
-    ) ObjectGraphError!usize {
-        var count: usize = 0;
-        var iterator = visited.keyIterator();
-        while (iterator.next()) |address| {
-            const current: *Object = @ptrFromInt(address.*);
-            count += try current.countDirectFunctionBytecodeRefs(rt, function_bytecode);
-        }
-        return count;
-    }
-
-    /// Realm-owned values used to live in the global object's payload and were
-    /// therefore counted by `countDirectFunctionBytecodeRefs`. Preserve that
-    /// ownership accounting after moving them onto RealmContext, but only for
-    /// realms whose global participates in the visited internal graph.
-    fn countFunctionBytecodeRefsFromVisitedRealms(
-        rt: *JSRuntime,
-        function_bytecode: *const FunctionBytecode,
-        visited: *const ObjectVisitSet,
-    ) usize {
-        var count: usize = 0;
-        var current = rt.firstContext();
-        while (current) |ctx| : (current = ctx.runtime_next) {
-            const global = ctx.global orelse continue;
-            if (!visited.contains(@intFromPtr(global))) continue;
-
-            count += countFunctionBytecodeValueRef(ctx.eval_function, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(ctx.preallocated_oom_error, function_bytecode);
-            for (ctx.class_prototypes) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-            for (ctx.cached_values) |stored| count += countOptionalFunctionBytecodeRef(stored, function_bytecode);
-            if (ctx.regexp_legacy_statics) |legacy| {
-                count += countOptionalFunctionBytecodeRef(legacy.input, function_bytecode);
-                count += countOptionalFunctionBytecodeRef(legacy.last_match, function_bytecode);
-                count += countOptionalFunctionBytecodeRef(legacy.last_paren, function_bytecode);
-                count += countOptionalFunctionBytecodeRef(legacy.left_context, function_bytecode);
-                count += countOptionalFunctionBytecodeRef(legacy.right_context, function_bytecode);
-                for (legacy.captures) |stored| count += countOptionalFunctionBytecodeRef(stored, function_bytecode);
-            }
-            for (ctx.unhandled_rejections) |entry| {
-                count += countFunctionBytecodeValueRef(entry.promise, function_bytecode);
-                count += countFunctionBytecodeValueRef(entry.reason, function_bytecode);
-            }
-            for (ctx.runtime.job_queue.jobs) |job| {
-                if (job.realm.borrow() != ctx) continue;
-                switch (job.payload) {
-                    .generic => |payload| for (payload.argv[0..payload.argc]) |stored| {
-                        count += countFunctionBytecodeValueRef(stored, function_bytecode);
-                    },
-                    .promise => |payload| count += countFunctionBytecodeValueRef(payload.value, function_bytecode),
-                    .promise_reaction => |payload| {
-                        count += countFunctionBytecodeValueRef(payload.reaction, function_bytecode);
-                        count += countFunctionBytecodeValueRef(payload.value, function_bytecode);
-                    },
-                    .promise_thenable => |payload| {
-                        count += countFunctionBytecodeValueRef(payload.target, function_bytecode);
-                        count += countFunctionBytecodeValueRef(payload.thenable, function_bytecode);
-                        count += countFunctionBytecodeValueRef(payload.then_function, function_bytecode);
-                        count += countFunctionBytecodeValueRef(payload.resolving_resolve, function_bytecode);
-                        count += countFunctionBytecodeValueRef(payload.resolving_reject, function_bytecode);
-                        count += countFunctionBytecodeValueRef(payload.completion, function_bytecode);
-                    },
-                    .promise_settlement => |payload| {
-                        count += countFunctionBytecodeValueRef(payload.target, function_bytecode);
-                        count += countFunctionBytecodeValueRef(payload.completion, function_bytecode);
-                    },
-                    .dynamic_import => |payload| {
-                        count += countFunctionBytecodeValueRef(payload.resolve, function_bytecode);
-                        count += countFunctionBytecodeValueRef(payload.reject, function_bytecode);
-                        count += countFunctionBytecodeValueRef(payload.basename, function_bytecode);
-                        count += countFunctionBytecodeValueRef(payload.specifier, function_bytecode);
-                        count += countFunctionBytecodeValueRef(payload.attributes, function_bytecode);
-                    },
-                    .atomics_waiter => |payload| {
-                        count += countFunctionBytecodeValueRef(payload.promise, function_bytecode);
-                    },
-                    .finalization => |payload| {
-                        count += countFunctionBytecodeValueRef(payload.callback, function_bytecode);
-                        count += countFunctionBytecodeValueRef(payload.held_value, function_bytecode);
-                    },
-                }
-            }
-        }
-        return count;
-    }
-
-    fn countFunctionBytecodeRefsFromFunctionBytecodes(
-        function_bytecode: *const FunctionBytecode,
-        owners: *const ObjectVisitSet,
-    ) usize {
-        var count: usize = 0;
-        var iterator = owners.keyIterator();
-        while (iterator.next()) |address| {
-            const owner: *const FunctionBytecode = @ptrFromInt(address.*);
-            count += countFunctionBytecodeChildRefs(owner, function_bytecode);
-        }
-        return count;
-    }
-
     fn countFunctionBytecodeChildRefs(
         owner: *const FunctionBytecode,
         function_bytecode: *const FunctionBytecode,
     ) usize {
         var count: usize = 0;
         for (owner.cpoolSlice()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        return count;
-    }
-
-    fn countDirectFunctionBytecodeRefs(
-        self: *Object,
-        rt: *JSRuntime,
-        function_bytecode: *const FunctionBytecode,
-    ) ObjectGraphError!usize {
-        var count: usize = 0;
-        count += countOptionalFunctionBytecodeRef(self.cachedIteratorNext(rt), function_bytecode);
-        // Clamp to the shape's prop_count: a mid-append over-hang entry has no
-        // shape prop yet (no derivable kind) and is a freshly-created value, so
-        // it cannot reference this bytecode anyway.
-        const counted = self.shape_ref.prop_count;
-        for (self.propertyStorageEntries(counted), 0..) |entry, index| count += countSlotFunctionBytecodeRefs(self.propFlagsAt(index), entry.slot, function_bytecode);
-        if (self.ordinaryPayloadConst()) |payload| {
-            count += countOptionalFunctionBytecodeRef(payload.callsite_file, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.callsite_function, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.promise_reaction_on_fulfilled, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.promise_reaction_on_rejected, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.promise_reaction_resolve, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.promise_reaction_reject, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.promise_capability_resolve, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.promise_capability_reject, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.promise_combinator_resolve, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.promise_combinator_reject, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.promise_combinator_values, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.promise_combinator_keys, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.error_stack, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.error_stack_sites, function_bytecode);
-        }
-        for (self.arrayElements()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.typedArrayBuffer(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.objectData(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionSource(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.boundTarget(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.boundThis(), function_bytecode);
-        for (self.boundArgs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        for (self.collectionEntries()) |entry| {
-            count += countFunctionBytecodeValueRef(entry.key, function_bytecode);
-            count += countFunctionBytecodeValueRef(entry.value, function_bytecode);
-        }
-        for (self.weakCollectionEntries()) |entry| count += countFunctionBytecodeValueRef(entry.value, function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.finalizationRegistryCleanupCallback(), function_bytecode);
-        for (self.finalizationRegistryCells()) |entry| {
-            if (!entry.keepsHeldValuesAlive()) continue;
-            count += countFunctionBytecodeValueRef(entry.held_value, function_bytecode);
-        }
-        if (self.disposableStackPayloadConst()) |payload| {
-            for (payload.resources) |resource| {
-                count += countFunctionBytecodeValueRef(resource.value, function_bytecode);
-                count += countFunctionBytecodeValueRef(resource.method, function_bytecode);
-            }
-            count += countOptionalFunctionBytecodeRef(payload.async_dispose_resolve, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.async_dispose_reject, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.async_dispose_error, function_bytecode);
-        }
-        count += countOptionalFunctionBytecodeRef(self.iteratorTarget(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.iteratorData(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.iteratorNext(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.iteratorCallback(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.iteratorInnerNext(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.iteratorZipNexts(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.iteratorZipPads(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.iteratorZipKeys(), function_bytecode);
-        // Count owned edges, not the generator functionBytecode() derived view:
-        // a generator owns current_function, and that function owns its FB.
-        if (class.isBytecodeFunctionClass(self.class_id)) {
-            if (self.u.bytecode_function.function_bytecode == function_bytecode) count += 1;
-        }
-        if (class.isBytecodeFunctionClass(self.class_id)) {
-            for (self.u.bytecode_function.captureSlots()) |maybe_cell| {
-                const cell = maybe_cell orelse continue;
-                count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
-            }
-        }
-        count += countOptionalFunctionBytecodeRef(self.functionRealmGlobal(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionProxyRevokeTarget(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionPromiseCapabilitySlot(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionPromiseResolvingTarget(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionPromiseResolvingState(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionPromiseCombinatorState(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionPromiseFinallyPayload(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionPromiseFinallyCallback(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionPromiseFinallyConstructor(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionAsyncDisposeStack(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionAsyncContinuation(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.generatorThis(), function_bytecode);
-        if (self.generatorPayloadConst()) |payload| {
-            if (payload.execution) |execution| {
-                if (!execution.suspended.running_aliases) {
-                    for (execution.suspended.storage.stack.values) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-                    for (execution.suspended.storage.frame.locals) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-                    for (execution.suspended.storage.frame.args) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-                    for (execution.suspended.storage.frame.var_refs) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
-                    for (execution.suspended.storage.frame.open_var_refs) |maybe_cell| {
-                        if (maybe_cell) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
-                    }
-                }
-            }
-        }
-        count += countOptionalFunctionBytecodeRef(self.generatorCurrentFunction(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.generatorYieldStarIterator(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.generatorAsyncPromise(), function_bytecode);
-        if (self.varRefPayloadConst()) |payload| {
-            if (payload.value) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        }
-        for (self.argumentsVarRefs()) |maybe_cell| {
-            const cell = maybe_cell orelse continue;
-            count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
-        }
-        count += countOptionalFunctionBytecodeRef(self.proxyTarget(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.proxyHandler(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.promiseResult(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.promiseReactionCallback(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.promiseReactionArg(), function_bytecode);
-        for (self.promiseReactions()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        count += self.countClassPayloadFunctionBytecodeRefs(rt, function_bytecode);
         return count;
     }
 
@@ -7988,10 +7650,6 @@ pub const Object = extern struct {
                 countFunctionBytecodeValueRef(slot.accessor.setterValue(), function_bytecode),
             .var_ref, .auto_init => 0,
         };
-    }
-
-    fn countOptionalFunctionBytecodeRef(maybe_value: ?JSValue, function_bytecode: *const FunctionBytecode) usize {
-        return if (maybe_value) |stored| countFunctionBytecodeValueRef(stored, function_bytecode) else 0;
     }
 
     fn countFunctionBytecodeValueRef(stored: JSValue, function_bytecode: *const FunctionBytecode) usize {

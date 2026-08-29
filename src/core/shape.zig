@@ -67,27 +67,18 @@ fn famRegionBytes(prop_capacity: usize, bucket_count: usize) usize {
     return @sizeOf(Property) * prop_capacity + @sizeOf(u32) * bucket_count;
 }
 
-/// Reuses Shape's historical `is_hashed + 3B padding` word. Trace keeps its
-/// true ownership count as a native aligned i32: retain/release are property
+/// Reuses Shape's historical `is_hashed + 3B padding` word to hold the true
+/// ownership count as a native aligned i32: retain/release are property
 /// transition hot paths and must not unpack a bitfield for every operation.
-/// Default RC keeps the historical hash flag here and its count in Metadata.
-pub const ShapeOwnership = if (gc.trace_stw_enabled)
-    extern struct {
-        trace_ref_count: i32 = 1,
-    }
-else
-    packed struct(u32) {
-        is_hashed: bool = false,
-        reserved: u31 = 0,
-    };
+pub const ShapeOwnership = extern struct {
+    trace_ref_count: i32 = 1,
+};
 
-/// Trace-only arbitrary-unlink acceleration for the main GC list. Header
-/// pointers are at least two-byte aligned, so the otherwise-unused low bit can
-/// carry Shape's cold hash-registry membership without taxing the hot
-/// deleted-property count. Default RC keeps both facts in their historical
-/// locations and compiles this field away.
-pub const ShapeTraceListState = if (gc.trace_stw_enabled)
-    extern struct {
+/// Arbitrary-unlink acceleration for the main GC list. Header pointers are at
+/// least two-byte aligned, so the otherwise-unused low bit can carry Shape's
+/// cold hash-registry membership without taxing the hot deleted-property
+/// count.
+pub const ShapeTraceListState = extern struct {
         tagged_previous: usize = 0,
 
         const is_hashed_mask: usize = 1;
@@ -116,9 +107,7 @@ pub const ShapeTraceListState = if (gc.trace_stw_enabled)
             self.tagged_previous = (self.tagged_previous & ~is_hashed_mask) |
                 @as(usize, @intFromBool(value));
         }
-    }
-else
-    void;
+};
 
 /// Deleted-property count participates in every property-append capacity
 /// decision. Keep it as a native u32 in both configurations: packing the cold
@@ -128,15 +117,12 @@ pub const ShapeColdState = extern struct {
 };
 
 inline fn initialOwnership(is_hashed: bool) ShapeOwnership {
-    if (comptime gc.trace_stw_enabled) {
-        return .{};
-    }
-    return .{ .is_hashed = is_hashed };
+    _ = is_hashed;
+    return .{};
 }
 
 inline fn initialTraceListState(is_hashed: bool) ShapeTraceListState {
-    if (comptime gc.trace_stw_enabled) return .init(is_hashed);
-    return {};
+    return .init(is_hashed);
 }
 
 inline fn initialColdState(deleted_prop_count: u32) ShapeColdState {
@@ -160,8 +146,8 @@ pub const Shape = extern struct {
         std.debug.assert(@sizeOf(@This()) == 56);
         std.debug.assert(@alignOf(@This()) == 8);
         const header_bytes = @sizeOf(gc.GCObjectHeader);
-        const list_previous_bytes = if (gc.trace_stw_enabled) @sizeOf(?*gc.Header) else 0;
-        if (gc.trace_stw_enabled) std.debug.assert(@offsetOf(@This(), "trace_list_previous") == header_bytes);
+        const list_previous_bytes = @sizeOf(?*gc.Header);
+        std.debug.assert(@offsetOf(@This(), "trace_list_previous") == header_bytes);
         std.debug.assert(@offsetOf(@This(), "ownership") == header_bytes + list_previous_bytes);
         std.debug.assert(@offsetOf(@This(), "hash") == header_bytes + list_previous_bytes + 4);
         std.debug.assert(@offsetOf(@This(), "prop_hash_mask") == header_bytes + list_previous_bytes + 8);
@@ -172,7 +158,7 @@ pub const Shape = extern struct {
         std.debug.assert(@offsetOf(@This(), "proto") == header_bytes + list_previous_bytes + 32);
         std.debug.assert(@sizeOf(ShapeOwnership) == 4);
         std.debug.assert(@sizeOf(ShapeColdState) == 4);
-        if (gc.trace_stw_enabled) {
+        {
             std.debug.assert(@sizeOf(ShapeTraceListState) == @sizeOf(?*gc.Header));
             std.debug.assert(@alignOf(ShapeTraceListState) == @alignOf(?*gc.Header));
             std.debug.assert(@offsetOf(ShapeTraceListState, "tagged_previous") == 0);
@@ -253,32 +239,21 @@ pub const Shape = extern struct {
     }
 
     pub inline fn retain(self: *Shape) void {
-        if (comptime gc.trace_stw_enabled) {
-            const old = self.ownership.trace_ref_count;
-            std.debug.assert(old > 0 and old < std.math.maxInt(i32));
-            self.ownership.trace_ref_count = old + 1;
-            return;
-        }
-        gc.retain(&self.header);
+        const old = self.ownership.trace_ref_count;
+        std.debug.assert(old > 0 and old < std.math.maxInt(i32));
+        self.ownership.trace_ref_count = old + 1;
     }
 
     pub inline fn refCount(self: *const Shape) usize {
-        if (comptime gc.trace_stw_enabled)
-            return @intCast(self.ownership.trace_ref_count);
-        return @intCast(gc.headerRefCount(&self.header));
+        return @intCast(self.ownership.trace_ref_count);
     }
 
     pub inline fn isHashed(self: *const Shape) bool {
-        if (comptime gc.trace_stw_enabled) return self.trace_list_previous.isHashed();
-        return self.ownership.is_hashed;
+        return self.trace_list_previous.isHashed();
     }
 
     pub inline fn setHashed(self: *Shape, value: bool) void {
-        if (comptime gc.trace_stw_enabled) {
-            self.trace_list_previous.setHashed(value);
-        } else {
-            self.ownership.is_hashed = value;
-        }
+        self.trace_list_previous.setHashed(value);
     }
 
     pub inline fn deletedPropCount(self: *const Shape) u32 {
@@ -1065,12 +1040,10 @@ pub const Registry = struct {
     }
 
     pub fn release(self: *Registry, shape: *Shape) void {
-        if (comptime gc.trace_stw_enabled) {
-            const old = shape.ownership.trace_ref_count;
-            std.debug.assert(old > 0);
-            shape.ownership.trace_ref_count = old - 1;
-            if (old != 1) return;
-        } else if (gc.decrementHeaderRefCount(&shape.header) != 0) return;
+        const old = shape.ownership.trace_ref_count;
+        std.debug.assert(old > 0);
+        shape.ownership.trace_ref_count = old - 1;
+        if (old != 1) return;
 
         // During runtime teardown, shapes are destroyed in a single dedicated
         // pass by `gc.Registry.deinit` (which walks the GC object list). If we

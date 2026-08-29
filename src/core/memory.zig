@@ -49,7 +49,6 @@ pub const oom_coverage_enabled: bool = build_options.zjs_oom_coverage;
 /// here -- `gc.zig` depends on this module, not the other way round.
 pub const arena_addressable: bool = std.mem.eql(u8, build_options.zjs_gc, "trace_stw") or
     builtin.is_test;
-const trace_stw_enabled: bool = std.mem.eql(u8, build_options.zjs_gc, "trace_stw");
 pub const force_gc_on_allocation_enabled: bool = build_options.zjs_force_gc;
 
 /// Issue the next slab pop's block-header fetch one allocation early.
@@ -73,7 +72,7 @@ pub const force_gc_on_allocation_enabled: bool = build_options.zjs_force_gc;
 ///
 /// Measurements, and the two heavier designs this was chosen over, are in
 /// `docs/slab-reuse-2026-08-29.md`.
-const slab_alloc_prefetch: bool = trace_stw_enabled;
+const slab_alloc_prefetch: bool = true;
 
 /// Compile in the slab free-list locality audit (`slab_locality_audit.zig`).
 ///
@@ -1117,10 +1116,7 @@ pub const MemoryAccount = struct {
         // LLVM sank it to memory and the function got *longer* than the version
         // that recomputed. The sentinel keeps it in one register.
         //
-        // Kept behind the tracing build so the default RC `.text` stays
-        // byte-identical to the branch point; this is a tracing-gap knife, not
-        // a shared-allocator change.
-        const ptr = if (comptime trace_stw_enabled) blk: {
+        const ptr = blk: {
             // The sentinel must be outside the class index domain, otherwise a
             // real class would be mistaken for "not slab-backed".
             comptime std.debug.assert(
@@ -1138,12 +1134,6 @@ pub const MemoryAccount = struct {
             }
             break :blk self.backing_allocator.rawAlloc(byte_count, alignment, @returnAddress()) orelse
                 return error.OutOfMemory;
-        } else blk: {
-            const slab_class = if (self.small_slab_enabled) SmallObjectSlab.classIndex(byte_count, alignment) else null;
-            const accounted = accountedMallocSize(byte_count, slab_class);
-            next_allocated_bytes = std.math.add(usize, self.allocated_bytes, accounted) catch
-                return error.OutOfMemory;
-            break :blk try self.rawAlloc(byte_count, alignment);
         };
         self.allocated_bytes = next_allocated_bytes;
         self.noteCyclePeak();
@@ -1283,7 +1273,7 @@ pub const MemoryAccount = struct {
         if (slab_class) |index| std.debug.assert(index <= alloc_info_class_mask);
         const info: u8 = if (slab_class) |index| @intCast(index) else alloc_info_standalone;
         std.mem.writeInt(u16, meta[2..4], @as(u16, info) | (@as(u16, T.gc_kind_tag) << 8), .little);
-        const initial_lifetime_word: u32 = if (trace_stw_enabled and T.gc_kind_tag != 7) 0 else 1;
+        const initial_lifetime_word: u32 = if (T.gc_kind_tag != 7) 0 else 1;
         @as(*align(4) u32, @ptrCast(@alignCast(meta + 4))).* = initial_lifetime_word;
     }
 
@@ -1838,9 +1828,9 @@ test "small slab GC allocation reuses allocator header for metadata" {
     const expected_class = SmallObjectSlab.classIndex(@sizeOf(TestGc), MemoryAccount.gcAlignment(TestGc)).?;
     try std.testing.expectEqual(expected_class, second_meta[2]);
     try std.testing.expectEqual(TestGc.gc_kind_tag, second_meta[3] & 0x7);
-    // Offset 4 is configuration-owned: RC starts at one; trace carriers must
-    // be born with epoch/state zero so publication cannot read them marked.
-    const expected_lifetime: u32 = if (trace_stw_enabled) 0 else 1;
+    // Offset 4: trace carriers must be born with epoch/state zero so
+    // publication cannot read them marked.
+    const expected_lifetime: u32 = 0;
     try std.testing.expectEqual(expected_lifetime, @as(*align(4) const u32, @ptrFromInt(@intFromPtr(second) - 4)).*);
 
     // Free a non-zero-index block, then prove its allocator index survived GC

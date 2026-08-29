@@ -1102,7 +1102,7 @@ test "Object.groupBy new group define failure releases group once" {
     var roots = core.runtime.rootObjects(.{ &kept_global, &kept_out });
     roots.activate(rt);
     defer roots.deactivate(rt);
-    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
+    _ = rt.runObjectCycleRemoval();
     // RealmContext and Shapes are GC objects: global and out share one live
     // empty root shape, alongside their owning context.
     try std.testing.expectEqual(@as(usize, 4), rt.gc.liveCount());

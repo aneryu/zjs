@@ -4836,7 +4836,7 @@ test "private brand atom is released with home object" {
     // object is torn down; under the tracer that is a collection rather than
     // the last release. Nothing here needs rooting -- `home` is the thing that
     // must die.
-    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(brand_atom) == null);
 }
 

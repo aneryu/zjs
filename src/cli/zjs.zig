@@ -399,11 +399,9 @@ pub fn main(init: std.process.Init) !void {
         if (comptime engine.core.gc.generation_enabled) {
             try dumpGcGenerationStats(&stdout_writer.interface, &runtime.runtime.gc);
         }
-        if (comptime engine.core.gc.trace_stw_enabled) {
-            try stdout_writer.interface.print("gc: terminal doomed_pending {s}\n", .{
-                if (runtime.runtime.gc.doomed_pending) "true" else "false",
-            });
-        }
+        try stdout_writer.interface.print("gc: terminal doomed_pending {s}\n", .{
+            if (runtime.runtime.gc.doomed_pending) "true" else "false",
+        });
         if (comptime engine.core.gc.corpse_census_enabled) {
             try engine.core.gc_corpse_census.report(&stdout_writer.interface);
         }
@@ -1039,97 +1037,91 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
 }
 
 fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
-    if (comptime engine.core.gc.trace_stw_enabled) {
-        const ph = registry.concurrent.stats;
-        try writer.print(
-            "gc: incremental subphase ns totals begin-clear {d}, begin-precise-seed {d}, begin-conservative-seed {d}, begin-retire {d}, finish-remark-total {d}, finish-conservative-seed-subset {d}, finish-weak {d}, finish-condemn {d}\n",
-            .{
-                ph.phase_begin_clear_ns,
-                ph.phase_begin_precise_seed_ns,
-                ph.phase_begin_conservative_seed_ns,
-                ph.phase_begin_retire_ns,
-                ph.phase_finish_remark_ns,
-                ph.phase_finish_conservative_seed_ns,
-                ph.phase_finish_weak_ns,
-                ph.phase_finish_condemn_ns,
-            },
-        );
-        try writer.print(
-            "gc: incremental subphase work totals retired non-block headers {d}, retired young blocks {d}, retired remembered sets {d}, clearMarks non-block headers {d}\n",
-            .{ ph.phase_retired_nonblock_headers, ph.phase_retired_young_blocks, ph.phase_retired_remembered_sets, ph.phase_cleared_nonblock_headers },
-        );
-    }
+    const ph = registry.concurrent.stats;
+    try writer.print(
+        "gc: incremental subphase ns totals begin-clear {d}, begin-precise-seed {d}, begin-conservative-seed {d}, begin-retire {d}, finish-remark-total {d}, finish-conservative-seed-subset {d}, finish-weak {d}, finish-condemn {d}\n",
+        .{
+            ph.phase_begin_clear_ns,
+            ph.phase_begin_precise_seed_ns,
+            ph.phase_begin_conservative_seed_ns,
+            ph.phase_begin_retire_ns,
+            ph.phase_finish_remark_ns,
+            ph.phase_finish_conservative_seed_ns,
+            ph.phase_finish_weak_ns,
+            ph.phase_finish_condemn_ns,
+        },
+    );
+    try writer.print(
+        "gc: incremental subphase work totals retired non-block headers {d}, retired young blocks {d}, retired remembered sets {d}, clearMarks non-block headers {d}\n",
+        .{ ph.phase_retired_nonblock_headers, ph.phase_retired_young_blocks, ph.phase_retired_remembered_sets, ph.phase_cleared_nonblock_headers },
+    );
 }
 
 fn dumpGcParallelStats(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime) !void {
-    if (comptime engine.core.gc.trace_stw_enabled) {
-        const ps = rt.gc_mark_pool.stats;
-        if (ps.parallel_slices == 0 and rt.gc_mark_pool.count == 0) return;
-        try writer.print(
-            "gc: parallel mark claims workers {d}, slices {d}, owner successful {d}, helpers successful {d}\n",
-            .{ rt.gc_mark_pool.count, ps.parallel_slices, ps.owner_marked, ps.worker_marked },
-        );
-    }
+    const ps = rt.gc_mark_pool.stats;
+    if (ps.parallel_slices == 0 and rt.gc_mark_pool.count == 0) return;
+    try writer.print(
+        "gc: parallel mark claims workers {d}, slices {d}, owner successful {d}, helpers successful {d}\n",
+        .{ rt.gc_mark_pool.count, ps.parallel_slices, ps.owner_marked, ps.worker_marked },
+    );
 }
 
 fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime) !void {
-    if (comptime engine.core.gc.trace_stw_enabled) {
-        const fp = rt.gc_mark_pool.footprint;
+    const fp = rt.gc_mark_pool.footprint;
+    try writer.print(
+        "gc: marked-set census majors {d}, headers {d}, block headers {d}, refcount-removed headers {d}\n",
+        .{ fp.major_censuses, fp.marked_headers, fp.block_headers, fp.refcount_removed_headers },
+    );
+    try writer.print(
+        "gc: marked-set kinds object {d}, function-bytecode {d}, var-ref {d}, realm-context {d}, module {d}, shape {d}\n",
+        .{
+            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.object)],
+            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.function_bytecode)],
+            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.var_ref)],
+            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.realm_context)],
+            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.module)],
+            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.shape)],
+        },
+    );
+    try writer.print(
+        "gc: marked-set trace classes ordinary-object {d}, fast-array {d}, bytecode-function {d}, exotic-object {d}, non-object {d}\n",
+        .{
+            fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.ordinary_object)],
+            fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.fast_array)],
+            fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.bytecode_function)],
+            fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.exotic_object)],
+            fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.non_object)],
+        },
+    );
+    inline for (std.meta.tags(engine.core.gc_trace_stw.MarkStorageComponent)) |component| {
+        const aggregate = fp.storage[@intFromEnum(component)];
         try writer.print(
-            "gc: marked-set census majors {d}, headers {d}, block headers {d}, refcount-removed headers {d}\n",
-            .{ fp.major_censuses, fp.marked_headers, fp.block_headers, fp.refcount_removed_headers },
+            "gc: mark storage {s} allocation-touches {d}, allocated-bytes {d}, touched-cache-lines {d}\n",
+            .{ @tagName(component), aggregate.allocation_touches, aggregate.allocated_bytes, aggregate.touched_cache_lines },
         );
+    }
+    inline for (std.meta.tags(engine.core.gc_trace_stw.MarkTraceClass)) |trace_class| {
+        const aggregate = fp.storage_by_trace_class[@intFromEnum(trace_class)];
         try writer.print(
-            "gc: marked-set kinds object {d}, function-bytecode {d}, var-ref {d}, realm-context {d}, module {d}, shape {d}\n",
-            .{
-                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.object)],
-                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.function_bytecode)],
-                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.var_ref)],
-                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.realm_context)],
-                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.module)],
-                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.shape)],
-            },
+            "gc: mark trace class storage {s} allocation-touches {d}, allocated-bytes {d}, touched-cache-lines {d}\n",
+            .{ @tagName(trace_class), aggregate.allocation_touches, aggregate.allocated_bytes, aggregate.touched_cache_lines },
         );
+    }
+    inline for (engine.core.gc_trace_stw.MarkFootprint.inline_limits, 0..) |limit, index| {
+        const plain_external = fp.inline_eligible_objects[index] -
+            fp.inline_direct_objects[index] -
+            fp.inline_tail_grown_external_objects[index];
         try writer.print(
-            "gc: marked-set trace classes ordinary-object {d}, fast-array {d}, bytecode-function {d}, exotic-object {d}, non-object {d}\n",
-            .{
-                fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.ordinary_object)],
-                fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.fast_array)],
-                fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.bytecode_function)],
-                fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.exotic_object)],
-                fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.non_object)],
-            },
+            "gc: inline property upper slots {d}, eligible-objects {d}, direct-inline {d}, tail-grown-external {d}, plain-external {d}, external-allocated-bytes {d}, external-touched-cache-lines {d}\n",
+            .{ limit, fp.inline_eligible_objects[index], fp.inline_direct_objects[index], fp.inline_tail_grown_external_objects[index], plain_external, fp.inline_property_bytes[index], fp.inline_property_cache_lines[index] },
         );
-        inline for (std.meta.tags(engine.core.gc_trace_stw.MarkStorageComponent)) |component| {
-            const aggregate = fp.storage[@intFromEnum(component)];
-            try writer.print(
-                "gc: mark storage {s} allocation-touches {d}, allocated-bytes {d}, touched-cache-lines {d}\n",
-                .{ @tagName(component), aggregate.allocation_touches, aggregate.allocated_bytes, aggregate.touched_cache_lines },
-            );
-        }
-        inline for (std.meta.tags(engine.core.gc_trace_stw.MarkTraceClass)) |trace_class| {
-            const aggregate = fp.storage_by_trace_class[@intFromEnum(trace_class)];
-            try writer.print(
-                "gc: mark trace class storage {s} allocation-touches {d}, allocated-bytes {d}, touched-cache-lines {d}\n",
-                .{ @tagName(trace_class), aggregate.allocation_touches, aggregate.allocated_bytes, aggregate.touched_cache_lines },
-            );
-        }
-        inline for (engine.core.gc_trace_stw.MarkFootprint.inline_limits, 0..) |limit, index| {
-            const plain_external = fp.inline_eligible_objects[index] -
-                fp.inline_direct_objects[index] -
-                fp.inline_tail_grown_external_objects[index];
-            try writer.print(
-                "gc: inline property upper slots {d}, eligible-objects {d}, direct-inline {d}, tail-grown-external {d}, plain-external {d}, external-allocated-bytes {d}, external-touched-cache-lines {d}\n",
-                .{ limit, fp.inline_eligible_objects[index], fp.inline_direct_objects[index], fp.inline_tail_grown_external_objects[index], plain_external, fp.inline_property_bytes[index], fp.inline_property_cache_lines[index] },
-            );
-            const ordinary_plain_external = fp.inline_ordinary_eligible_objects[index] -
-                fp.inline_ordinary_direct_objects[index] -
-                fp.inline_ordinary_tail_grown_external_objects[index];
-            try writer.print(
-                "gc: inline ordinary property upper slots {d}, eligible-objects {d}, direct-inline {d}, tail-grown-external {d}, plain-external {d}, external-allocated-bytes {d}, external-touched-cache-lines {d}\n",
-                .{ limit, fp.inline_ordinary_eligible_objects[index], fp.inline_ordinary_direct_objects[index], fp.inline_ordinary_tail_grown_external_objects[index], ordinary_plain_external, fp.inline_ordinary_property_bytes[index], fp.inline_ordinary_property_cache_lines[index] },
-            );
-        }
+        const ordinary_plain_external = fp.inline_ordinary_eligible_objects[index] -
+            fp.inline_ordinary_direct_objects[index] -
+            fp.inline_ordinary_tail_grown_external_objects[index];
+        try writer.print(
+            "gc: inline ordinary property upper slots {d}, eligible-objects {d}, direct-inline {d}, tail-grown-external {d}, plain-external {d}, external-allocated-bytes {d}, external-touched-cache-lines {d}\n",
+            .{ limit, fp.inline_ordinary_eligible_objects[index], fp.inline_ordinary_direct_objects[index], fp.inline_ordinary_tail_grown_external_objects[index], ordinary_plain_external, fp.inline_ordinary_property_bytes[index], fp.inline_ordinary_property_cache_lines[index] },
+        );
     }
 }
 

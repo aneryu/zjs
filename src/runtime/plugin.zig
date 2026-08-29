@@ -1940,13 +1940,10 @@ test "runtime Plugin failed raw CallFrame calls do not free borrowed result valu
     defer retained_sentinel.free(rt);
     defer sentinel_value.free(rt);
 
-    const before_rc = if (comptime core.gc.trace_stw_enabled) 0 else core.gc.headerRefCount(&sentinel.header);
     var args = [_]core.JSValue{sentinel_value};
     try std.testing.expectError(error.JSException, exec.call.callValue(ctx.core, null, fail_value, &args));
     try std.testing.expect(ctx.hasException());
     ctx.clearException();
-    if (comptime !core.gc.trace_stw_enabled)
-        try std.testing.expectEqual(before_rc, core.gc.headerRefCount(&sentinel.header));
 }
 
 test "runtime Plugin maps unknown status values to generic errors" {
@@ -2647,7 +2644,7 @@ test "runtime Plugin finalizer reentry mutates, allocates, and does not nest GC"
     defer roots.deactivate(rt);
 
     wrapper.free(rt);
-    if (comptime core.gc.trace_stw_enabled) _ = try rt.forceMajorGC(null);
+    _ = try rt.forceMajorGC(null);
 
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
@@ -2776,7 +2773,7 @@ test "runtime Plugin deferred opaque wrapper finalizers keep traced payload root
     // Under tracing, the collection that reaches the unrooted wrapper must
     // detach a deferred finalizer job without first reclaiming the payload's
     // declared child roots.
-    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
     try std.testing.expect(state.slot.isObject());
@@ -2884,7 +2881,7 @@ test "runtime Plugin closes only after deferred wrapper callbacks release the cl
     // the tracer the collection that reaches the now-unrooted wrapper does.
     // In both modes the plugin remains open until the deferred callback drops
     // the payload's owner and exact class-generation pin.
-    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
+    _ = rt.runObjectCycleRemoval();
 
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
@@ -2897,11 +2894,7 @@ test "runtime Plugin closes only after deferred wrapper callbacks release the cl
     try std.testing.expectEqual(@as(usize, 1), state.close_count);
     try std.testing.expect(state.finalizer_order < state.close_order);
     try std.testing.expectEqual(@as(usize, 0), state.callbacks_after_close);
-    if (comptime core.gc.trace_stw_enabled) {
-        try std.testing.expect(state.trace_calls > 0);
-    } else {
-        try std.testing.expectEqual(@as(usize, 0), state.trace_calls);
-    }
+    try std.testing.expect(state.trace_calls > 0);
     try std.testing.expect(state.close_saw_drained_pins);
     try std.testing.expect(state.close_saw_class_removed);
     try std.testing.expect(state.close_saw_slot_cleared);
@@ -3056,7 +3049,7 @@ test "runtime Plugin runtime destroy drains opaque wrapper finalizers exactly on
     var target_slot: ?*core.Object = target;
     var target_roots = core.runtime.rootObjects(.{&target_slot});
     target_roots.activate(rt);
-    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
+    _ = rt.runObjectCycleRemoval();
     target_roots.deactivate(rt);
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);

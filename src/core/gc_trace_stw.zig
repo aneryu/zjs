@@ -1524,7 +1524,6 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
 /// collections and teardown call this: destruction is irreversible, so unlike
 /// an open marking cycle it cannot be aborted, only finished.
 pub fn finishPendingDestruction(rt: *JSRuntime) void {
-    if (comptime !gc.trace_stw_enabled) return;
     while (rt.gc.doomed_pending) {
         _ = destroyDoomedSlice(rt, std.math.maxInt(u64));
         // Payload jobs may retain JSValues into this condemnation. Their

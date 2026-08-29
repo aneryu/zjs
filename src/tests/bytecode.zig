@@ -412,7 +412,7 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
             .has_extension = case.extension,
         });
         try std.testing.expectEqual(
-            @as(usize, if (core.gc.trace_stw_enabled) 88 else 96),
+            @as(usize, 88),
             @sizeOf(bytecode.FunctionBytecode),
         );
         try std.testing.expectEqual(@as(usize, 8), @alignOf(bytecode.FunctionBytecode));
@@ -515,7 +515,7 @@ test "FunctionLayout matches the QJS-order core pack" {
     // code end, so the totals are pinned relative to `byte_code_end` instead of
     // re-hardcoding the extension's own (zjs-owned) width.
     const hot_bytes = @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
-    const trace_layout_delta: usize = if (core.gc.trace_stw_enabled) 8 else 0;
+    const trace_layout_delta: usize = 8;
     switch (value_size) {
         16 => {
             try std.testing.expectEqual(@as(usize, 0x80) - trace_layout_delta, layout.cpool_off);
@@ -824,7 +824,7 @@ test "packed FunctionBytecode zero-count pointers stay null beside non-empty seg
     );
     try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), fb.callFacts());
     const hot_bytes = @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
-    const expected_code_end: usize = if (core.gc.trace_stw_enabled) 0x74 else 0x7c;
+    const expected_code_end: usize = 0x74;
     try std.testing.expectEqual(expected_code_end, layout.byte_code_end);
     try std.testing.expectEqual(@as(?usize, expected_code_end), layout.hot_off);
     try std.testing.expectEqual(expected_code_end + hot_bytes, layout.total_size);
@@ -1977,7 +1977,7 @@ test "legacy execution adapter delegates synthetic var-ref name mirrors" {
     try std.testing.expectEqual(@as(u16, 1), execution_function.openVarRefCount());
     try std.testing.expect(execution_function.callFacts().execution.has_mapped_arguments);
     try std.testing.expectEqual(
-        @as(usize, if (core.gc.trace_stw_enabled) 160 else 168),
+        @as(usize, 160),
         @sizeOf(bytecode.LegacyExecutionAdapter),
     );
     // The negative sentinel deliberately keeps this borrowed stack bridge out

@@ -100,7 +100,6 @@ pub fn runMutableVm(vm: *engine.exec.Vm, function: *const engine.bytecode.Byteco
 /// deterministic, and it is what turns a missing root into a test failure
 /// rather than into a conservative-scan accident.
 pub fn reclaimNow(rt: *core.JSRuntime) void {
-    if (comptime !core.gc.trace_stw_enabled) return;
     _ = rt.runObjectCycleRemoval();
 }
 
@@ -113,9 +112,7 @@ pub fn reclaimNow(rt: *core.JSRuntime) void {
 /// ropes, BigInt, and also shapes and realms, which keep their counts for
 /// copy-on-write and host-handle reasons) are checked in both builds.
 pub fn expectRefCount(expected: i32, header: *const core.gc.Header) !void {
-    if (comptime core.gc.trace_stw_enabled) {
-        if (core.gc.refCountRemoved(header.metaConst().flags.kind)) return;
-    }
+    if (core.gc.refCountRemoved(header.metaConst().flags.kind)) return;
     try std.testing.expectEqual(expected, core.gc.headerRefCount(header));
 }
 
@@ -123,9 +120,7 @@ pub fn expectRefCount(expected: i32, header: *const core.gc.Header) !void {
 /// expectRefCount. Tracer-owned kinds deliberately have no count; return their
 /// historical birth value only so the skipped arithmetic remains well-typed.
 pub fn refCountSnapshot(header: *const core.gc.Header) i32 {
-    if (comptime core.gc.trace_stw_enabled) {
-        if (core.gc.refCountRemoved(header.metaConst().flags.kind)) return 1;
-    }
+    if (core.gc.refCountRemoved(header.metaConst().flags.kind)) return 1;
     return core.gc.headerRefCount(header);
 }
 
@@ -978,7 +973,6 @@ pub fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, 
 /// tests that assert on freed counts after a crossing call this to reach the
 /// poll where the result lands.
 pub fn finishGcCycles(rt: anytype) void {
-    if (comptime !zjs.core.gc.trace_stw_enabled) return;
     var polls: usize = 0;
     while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         std.debug.assert(polls < 100_000);

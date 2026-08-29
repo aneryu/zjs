@@ -111,19 +111,7 @@ else
 /// Pass-B corpse census. Measurement-only namespace; erased unless
 /// `-Dzjs_experimental_gc_corpse_census=true`.
 pub const gc_corpse_census = @import("gc_corpse_census.zig");
-/// Imported only when `-Dzjs_experimental_gc=trace_stw`. Default `rc` builds see an empty
-/// namespace so the reclaiming tracer is not part of the production compile.
-pub const gc_trace_stw = if (gc.trace_stw_enabled) @import("gc_trace_stw.zig") else struct {
-    pub const enabled = false;
-    pub const Report = struct {
-        ephemeron_values_shaded: usize = 0,
-        census_ns: u64 = 0,
-    };
-    pub var last_report: Report = .{};
-    /// Present so callers need no `comptime` guard; the `rc` build has no
-    /// whole-heap census to switch off.
-    pub var detailed_reports: bool = false;
-};
+pub const gc_trace_stw = @import("gc_trace_stw.zig");
 
 pub const JSValue = value.JSValue;
 pub const JSString = JSValue.String;

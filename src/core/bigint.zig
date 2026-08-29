@@ -66,7 +66,7 @@ pub const BigInt = struct {
         // The embedded-value shape was 56 bytes. The explicit fields must not
         // grow it, or every external wrapper could cross into a larger slab
         // class for no benefit.
-        std.debug.assert(@sizeOf(BigInt) == if (gc.trace_stw_enabled) 48 else 56);
+        std.debug.assert(@sizeOf(BigInt) == 48);
         std.debug.assert(@alignOf(BigInt) == 8);
         const header_bytes = @sizeOf(gc.Header);
         std.debug.assert(@offsetOf(BigInt, "limbs_ptr") == header_bytes);

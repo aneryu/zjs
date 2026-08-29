@@ -377,12 +377,12 @@ pub const JSContext = struct {
         std.debug.assert(@offsetOf(@This(), "header") == 0);
         std.debug.assert(@sizeOf(@This()) == 2176);
         std.debug.assert(@alignOf(@This()) == 16);
-        std.debug.assert(@offsetOf(@This(), "runtime") == if (gc.trace_stw_enabled) 1472 else 1480);
-        std.debug.assert(@offsetOf(@This(), "modules") == if (gc.trace_stw_enabled) 1424 else 1432);
-        std.debug.assert(@offsetOf(@This(), "publication_state") == if (gc.trace_stw_enabled) 2160 else 2168);
-        std.debug.assert(@offsetOf(@This(), "global") == if (gc.trace_stw_enabled) 288 else 296);
-        // Trace-only lifetime state occupies the compact layout's existing
-        // 15-byte tail hole. No declared field may perturb default RC layout.
+        std.debug.assert(@offsetOf(@This(), "runtime") == 1472);
+        std.debug.assert(@offsetOf(@This(), "modules") == 1424);
+        std.debug.assert(@offsetOf(@This(), "publication_state") == 2160);
+        std.debug.assert(@offsetOf(@This(), "global") == 288);
+        // Lifetime state occupies the compact layout's existing 15-byte tail
+        // hole; no declared field may perturb it.
         std.debug.assert(trace_ref_count_offset == 2164);
         std.debug.assert(trace_list_previous_offset == 2168);
         std.debug.assert(trace_list_previous_offset + @sizeOf(?*gc.Header) == @sizeOf(@This()));
@@ -464,24 +464,20 @@ pub const JSContext = struct {
     /// bit-for-bit unchanged. The offsets above are pinned against the compact
     /// layout's last real field and total size.
     pub inline fn traceRefCountPtr(self: *JSContext) *i32 {
-        if (comptime !gc.trace_stw_enabled) unreachable;
         return @ptrFromInt(@intFromPtr(self) + trace_ref_count_offset);
     }
 
     pub inline fn traceRefCountPtrConst(self: *const JSContext) *const i32 {
-        if (comptime !gc.trace_stw_enabled) unreachable;
         return @ptrFromInt(@intFromPtr(self) + trace_ref_count_offset);
     }
 
     /// O(1) predecessor for the only trace list carrier besides Shape that
     /// retains mutator RC; also stored wholly inside the existing tail hole.
     pub inline fn traceListPreviousPtr(self: *JSContext) *?*gc.Header {
-        if (comptime !gc.trace_stw_enabled) unreachable;
         return @ptrFromInt(@intFromPtr(self) + trace_list_previous_offset);
     }
 
     pub inline fn traceListPreviousPtrConst(self: *const JSContext) *const ?*gc.Header {
-        if (comptime !gc.trace_stw_enabled) unreachable;
         return @ptrFromInt(@intFromPtr(self) + trace_list_previous_offset);
     }
 
@@ -525,10 +521,8 @@ pub const JSContext = struct {
             .modules = module.Registry.init(&rt.memory, &rt.atoms, &rt.gc),
             .random_state = runtime_mod.newRealmRandomSeed(),
         };
-        if (comptime gc.trace_stw_enabled) {
-            self.traceRefCountPtr().* = 1;
-            self.traceListPreviousPtr().* = null;
-        }
+        self.traceRefCountPtr().* = 1;
+        self.traceListPreviousPtr().* = null;
         const initial_len = rt.classes.records.len;
         if (initial_len <= self.class_prototypes_inline.len) {
             self.class_prototypes = self.class_prototypes_inline[0..initial_len];

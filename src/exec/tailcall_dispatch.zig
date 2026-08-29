@@ -4368,16 +4368,10 @@ fn op_get_length_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVa
 // sp from the published stack — no state was mutated here, so the fall-through is
 // clean). No pc/sp publish, no coldNext round-trip.
 pub fn op_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    if (comptime core.gc.trace_stw_enabled) {
-        vm.syncSp(sp);
-        const value = vm_literal.newPlainObjectValue(vm.ctx, vm.global) catch
-            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        sp[0] = value;
-        return cont(pc + 1, sp + 1, var_buf, vm);
-    }
+    vm.syncSp(sp);
     const value = vm_literal.newPlainObjectValue(vm.ctx, vm.global) catch
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    sp[0] = value; // owned
+    sp[0] = value;
     return cont(pc + 1, sp + 1, var_buf, vm);
 }
 
@@ -4386,13 +4380,7 @@ pub fn op_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) 
 // the matching two-entry trailing property region up front; computed/spread or
 // larger literals never reach this opcode.
 pub fn op_object_slots2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    if (comptime core.gc.trace_stw_enabled) {
-        vm.syncSp(sp);
-        const value = vm_literal.newPlainObjectReserved2Value(vm.ctx, vm.global) catch
-            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        sp[0] = value;
-        return cont(pc + 1, sp + 1, var_buf, vm);
-    }
+    vm.syncSp(sp);
     const value = vm_literal.newPlainObjectReserved2Value(vm.ctx, vm.global) catch
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = value;
@@ -4413,22 +4401,11 @@ pub fn op_object_slots2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
 // the u32 atom operand — this handler left frame.pc untouched, so the decode matches).
 // 5-byte op (u32 atom).
 pub fn op_define_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    if (comptime core.gc.trace_stw_enabled) {
-        vm.syncSp(sp);
-        const value = (sp - 1)[0];
-        const obj = (sp - 2)[0];
-        const atom_id = readInt(u32, pc + 1);
-        if (vm_literal.defineFieldFast(vm.ctx.runtime, obj, atom_id, value)) {
-            return cont(pc + 5, sp - 1, var_buf, vm);
-        }
-        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    }
+    vm.syncSp(sp);
     const value = (sp - 1)[0];
     const obj = (sp - 2)[0];
     const atom_id = readInt(u32, pc + 1);
     if (vm_literal.defineFieldFast(vm.ctx.runtime, obj, atom_id, value)) {
-        // value consumed into the property slot; obj stays on the stack as the
-        // literal's running receiver (qjs leaves sp[-2] in place, only sp--).
         return cont(pc + 5, sp - 1, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -4453,21 +4430,14 @@ pub fn op_array_from(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     const values = (sp - argc)[0..argc];
     const initial_shape = vm.ctx.array_shape orelse
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    if (comptime core.gc.trace_stw_enabled) {
-        // Frameless dispatch keeps `sp` in a register; STW liveValues() reads
-        // `stack.top_ptr`. Publish before the literal allocation so already-
-        // evaluated elements below argc stay marked (RC used operand refcounts).
-        vm.syncSp(sp);
-        const array = core.array.constructLiteralOwnedDenseFromShape(rt, values, initial_shape) catch
-            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        const nsp = sp - argc;
-        nsp[0] = array;
-        return cont(pc + 3, nsp + 1, var_buf, vm);
-    }
+    // Frameless dispatch keeps `sp` in a register; the collector's
+    // `liveValues()` reads `stack.top_ptr`. Publish before the literal
+    // allocation so already-evaluated elements below argc stay marked.
+    vm.syncSp(sp);
     const array = core.array.constructLiteralOwnedDenseFromShape(rt, values, initial_shape) catch
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const nsp = sp - argc;
-    nsp[0] = array; // owned; the argc originals were consumed by the move
+    nsp[0] = array;
     return cont(pc + 3, nsp + 1, var_buf, vm);
 }
 
@@ -5838,11 +5808,9 @@ pub fn op_put_loc8_get_loc8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
     const idx: u16 = pc[1];
     const old = var_buf[idx];
     if (old.requiresRefCount()) {
-        if (comptime core.gc.trace_stw_enabled) {
-            if (old.isTracerOwned()) {
-                var_buf[idx] = (sp - 1)[0];
-                return @call(.always_tail, opLoc(.get, .byte), .{ pc + 2, sp - 1, var_buf, vm });
-            }
+        if (old.isTracerOwned()) {
+            var_buf[idx] = (sp - 1)[0];
+            return @call(.always_tail, opLoc(.get, .byte), .{ pc + 2, sp - 1, var_buf, vm });
         }
         if (old.refCountHeader()) |header| {
             if (core.gc.headerRefCount(header) == 1)
@@ -5877,12 +5845,10 @@ pub fn op_put_loc8_get_loc8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
 pub fn op_push_this_put_loc0(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
     const old = var_buf[0];
     if (old.requiresRefCount()) {
-        if (comptime core.gc.trace_stw_enabled) {
-            if (old.isTracerOwned()) {
-                if (!storeThisInLoc0(var_buf, vm))
-                    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                return cont(pc + 2, sp, var_buf, vm);
-            }
+        if (old.isTracerOwned()) {
+            if (!storeThisInLoc0(var_buf, vm))
+                return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            return cont(pc + 2, sp, var_buf, vm);
         }
         if (old.refCountHeader()) |header| {
             if (core.gc.headerRefCount(header) == 1)
@@ -5933,11 +5899,9 @@ pub fn op_push_this_put_loc0_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]J
 pub fn op_put_loc0_get_loc0(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
     const old = var_buf[0];
     if (old.requiresRefCount()) {
-        if (comptime core.gc.trace_stw_enabled) {
-            if (old.isTracerOwned()) {
-                var_buf[0] = (sp - 1)[0];
-                return @call(.always_tail, opLoc(.get, .c0), .{ pc + 1, sp - 1, var_buf, vm });
-            }
+        if (old.isTracerOwned()) {
+            var_buf[0] = (sp - 1)[0];
+            return @call(.always_tail, opLoc(.get, .c0), .{ pc + 1, sp - 1, var_buf, vm });
         }
         if (old.refCountHeader()) |header| {
             if (core.gc.headerRefCount(header) == 1)

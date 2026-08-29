@@ -8,16 +8,11 @@ const helpers = @import("helpers.zig");
 const gc_representation = @import("../gc_representation.zig");
 
 test "GC representation snapshot matches the committed baseline" {
-    const baseline = if (core.gc.trace_stw_enabled)
-        @embedFile("../gc-representation-trace-snapshot.txt")
-    else
-        @embedFile("../gc-representation-snapshot.txt");
+    const baseline = @embedFile("../gc-representation-trace-snapshot.txt");
     try std.testing.expectEqualStrings(baseline, gc_representation.snapshot_text);
 }
 
 test "gc invariant negative: representation snapshot rejects silent layout drift" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     const changed = try std.testing.allocator.dupe(u8, gc_representation.snapshot_text);
     defer std.testing.allocator.free(changed);
     changed[0] ^= 1;
@@ -410,14 +405,11 @@ test "proven object release preserves generic JSValue ownership semantics" {
     // (`gc.refCountRemoved`), so what survives here is the part that is still
     // a claim about ownership: dropping both references, and only both, must
     // make the object collectable.
-    if (comptime !core.gc.trace_stw_enabled) {
-        try helpers.expectRefCount(2, &object.header);
-    }
 
     retained.freeObjectAssumeObject(rt);
-    if (comptime !core.gc.trace_stw_enabled) {
-        try helpers.expectRefCount(1, &object.header);
-    } else {
+    {
+        // The root frame is scoped: it must be gone before the second release,
+        // or the object stays reachable and the last assertion is vacuous.
         var kept: ?*core.Object = object;
         var roots = core.runtime.rootObjects(.{&kept});
         roots.activate(rt);
@@ -3013,24 +3005,16 @@ test "weak husk keeps its class definition after one synchronous finalizer" {
     }
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    if (comptime !core.gc.trace_stw_enabled) {
-        // Refcounting leaves the stripped object allocated as a husk, because a
-        // WeakRef still names it, and the class definition must stay valid for
-        // as long as that husk can be reached.
-        try std.testing.expect(rt.classes.isRegistered(class_id));
-        try std.testing.expect(rt.classes.unregisterPending(class_id));
-    } else {
-        // The tracer clears weak identities in `processWeak`, which runs before
-        // the sweep that destroys the target, so no husk is ever formed and
-        // there is nothing left for the definition to stay valid for. The
-        // property the pin exists to protect -- a definition outlives every
-        // object observable under it, and not one step longer -- holds by the
-        // definition being released here rather than one WeakRef death later.
-        // This is JSC's shape too: weak handles are cleared inside the sweep of
-        // the block that owns the cell (MarkedBlock.cpp `m_weakSet.sweep()`).
-        try std.testing.expect(!rt.classes.isRegistered(class_id));
-        try std.testing.expect(!rt.classes.unregisterPending(class_id));
-    }
+    // The tracer clears weak identities in `processWeak`, which runs before
+    // the sweep that destroys the target, so no husk is ever formed and
+    // there is nothing left for the definition to stay valid for. The
+    // property the pin exists to protect -- a definition outlives every
+    // object observable under it, and not one step longer -- holds by the
+    // definition being released here rather than one WeakRef death later.
+    // This is JSC's shape too: weak handles are cleared inside the sweep of
+    // the block that owns the cell (MarkedBlock.cpp `m_weakSet.sweep()`).
+    try std.testing.expect(!rt.classes.isRegistered(class_id));
+    try std.testing.expect(!rt.classes.unregisterPending(class_id));
     try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
 
     weak_ref.value().free(rt);
@@ -5083,8 +5067,6 @@ test "ordinary object additions reuse transition shapes" {
 }
 
 test "trace object shape summary follows append kind delete and compaction" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -5203,8 +5185,6 @@ test "trace object shape summary follows append kind delete and compaction" {
 }
 
 test "trace object shape summary base-5 payload decodes all two-slot states" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     for (0..5) |slot0_state| {
         for (0..5) |slot1_state| {
             const payload: u8 = @intCast(slot0_state + 5 * slot1_state);
@@ -5695,8 +5675,6 @@ test "definePlainDataPropertyKnownFast refcounted append and duplicate-key repla
 }
 
 test "definePlainDataPropertyKnownFast barriers follow committed slot and shape writes" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -6953,7 +6931,6 @@ test "gc heap accounting verifier catches pinned header flag drift" {
 }
 
 test "gc invariant negative: block candidate index audit rejects bloom and exact-set drift" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
@@ -6983,7 +6960,6 @@ test "gc invariant negative: block candidate index audit rejects bloom and exact
 }
 
 test "gc invariant negative: block heap rejects geometry free-chain and doomed-list corruption" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
@@ -7052,7 +7028,6 @@ test "gc invariant negative: block heap rejects geometry free-chain and doomed-l
 }
 
 test "gc invariant negative: block cell publication audit rejects hidden allocations" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -7087,8 +7062,6 @@ test "gc invariant negative: block cell publication audit rejects hidden allocat
 }
 
 test "gc invariant negative: metadata semantics reject kind carrier and field misuse" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     var published = core.gc.Metadata{
         .size_class = 64,
         .alloc_info = .{ .heap_accounted = true, .standalone = true },
@@ -7174,8 +7147,6 @@ test "gc invariant negative: metadata semantics reject kind carrier and field mi
 }
 
 test "compact trace retained-RC backlinks are authoritative and audited" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -7225,8 +7196,6 @@ test "compact trace retained-RC backlinks are authoritative and audited" {
 // tests pin the writers against the auditor so a regression fails at the
 // mechanism instead of somewhere downstream.
 test "trace shape summary: incremental writers track the Shape projection" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -7326,7 +7295,6 @@ test "trace shape summary: incremental writers track the Shape projection" {
 }
 
 test "trace shape summary: appends preserve the leased remembered bit" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -7389,7 +7357,6 @@ test "trace shape summary: appends preserve the leased remembered bit" {
 }
 
 test "gc invariant negative: representation audit rejects physical carrier and cell index drift" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -7668,8 +7635,6 @@ test "forget fuses the remembered map removal with its own cache bit" {
 }
 
 test "gc invariant negative: construction root audit rejects published shell state" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const shell = try core.Object.createGeneratorShell(rt, core.class.ids.generator);
@@ -7716,7 +7681,6 @@ test "gc invariant negative: construction root audit rejects published shell sta
 }
 
 test "gc invariant negative: arena audit rejects an accounted free slab block" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -7757,8 +7721,6 @@ test "gc invariant negative: arena audit rejects an accounted free slab block" {
 }
 
 test "gc invariant negative: address index audit rejects canonical page drift" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const StandaloneProbe = extern struct {
@@ -7793,8 +7755,6 @@ test "gc invariant negative: address index audit rejects canonical page drift" {
 }
 
 test "gc invariant negative: auxiliary intrusive-list audit rejects deferred count drift" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     try rt.gc.verifyIntrusiveList();
@@ -7809,8 +7769,6 @@ test "gc invariant negative: auxiliary intrusive-list audit rejects deferred cou
 }
 
 test "deferred run topology proof invalidates only for an audit producer sequence" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     const saved_audit = core.gc.arena_audit;
     defer core.gc.arena_audit = saved_audit;
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -7827,8 +7785,6 @@ test "deferred run topology proof invalidates only for an audit producer sequenc
 }
 
 test "gc invariant negative: heap accounting audit rejects a pin without an entry" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const obj = try core.Object.createPlainObject(rt, null);
@@ -7844,7 +7800,6 @@ test "gc invariant negative: heap accounting audit rejects a pin without an entr
 }
 
 test "gc invariant negative: generation audit rejects census and stale remembered drift" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -7875,7 +7830,6 @@ test "gc invariant negative: generation audit rejects census and stale remembere
 }
 
 test "gc invariant negative: retirement audit rejects a marked young survivor" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -8006,28 +7960,15 @@ test "gc object release paths do not allocate" {
     const obj = try core.Object.create(rt, core.class.ids.object, null);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    if (comptime core.gc.trace_stw_enabled) {
-        // Tracer-owned values have no last-ref transition: release is a no-op,
-        // must not allocate, and must leave reclamation to the next trace.
-        const alloc_calls = rt.memory.alloc_calls;
-        obj.value().free(rt);
-        try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
-        try std.testing.expect(rt.gc.containsHeader(&obj.header));
-        rt.setMemoryLimit(null);
-        _ = rt.runObjectCycleRemoval();
-        try std.testing.expect(!rt.gc.containsHeader(&obj.header));
-        return;
-    }
-
-    const did_release = rt.gc.releaseObjectForTest(&obj.header);
+    // Tracer-owned values have no last-ref transition: release is a no-op,
+    // must not allocate, and must leave reclamation to the next trace.
+    const alloc_calls = rt.memory.alloc_calls;
+    obj.value().free(rt);
+    try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
+    try std.testing.expect(rt.gc.containsHeader(&obj.header));
     rt.setMemoryLimit(null);
-
-    try std.testing.expect(did_release);
-    try helpers.expectRefCount(0, &obj.header);
-    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
-
-    // Clean up manually since we released/unlinked it
-    core.Object.destroyFromHeader(rt, &obj.header);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.gc.containsHeader(&obj.header));
 }
 
 const deep_gc_chain_length: usize = 20_000;
@@ -8770,7 +8711,6 @@ test "object property and dense writes hit the write audit" {
 }
 
 test "trace_stw collects a closed property cycle" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -8788,7 +8728,6 @@ test "trace_stw collects a closed property cycle" {
 }
 
 test "trace_stw ephemeron keeps value only when table and key are live" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -8824,7 +8763,6 @@ test "trace_stw ephemeron keeps value only when table and key are live" {
 }
 
 test "trace_stw ephemeron value does not keep its key alive" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -8855,7 +8793,6 @@ test "trace_stw ephemeron value does not keep its key alive" {
 }
 
 test "trace_stw WeakRef deref keep-alive lasts until job end" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -8887,7 +8824,6 @@ test "trace_stw WeakRef deref keep-alive lasts until job end" {
 }
 
 test "trace_stw survivor classes on a known graph" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -9248,7 +9184,6 @@ test "sweep window state machine and four debts" {
 }
 
 test "trace_stw sweep model reaches sweep_debt zero after collect" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.sweep_model_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -9384,8 +9319,6 @@ test "block heap mark epoch lazily clears the mark bitmap" {
 }
 
 test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -9602,7 +9535,6 @@ test "process heap trim fires only when a contraction crosses its threshold" {
 }
 
 test "trace_stw sweep debt is drained before a new collection begins" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     rt.gc.sweep_model.debt.sweep_debt = 77;
@@ -9706,9 +9638,6 @@ test "object allocation keeps a threshold request while prospective bytes remain
     // which is what drives those later polls.
     helpers.finishGcCycles(rt);
     try std.testing.expectEqual(collections_before + 1, rt.gc.stats.collections);
-    if (comptime !core.gc.trace_stw_enabled) {
-        try std.testing.expect(!rt.gcPendingForTest());
-    }
 }
 
 test "stale threshold request cannot mask explicit or pressure major requests" {
@@ -9772,9 +9701,6 @@ test "an unrequested threshold crossing is still serviced at the object boundary
     rt.collectBeforeObjectAllocation(object_bytes);
     helpers.finishGcCycles(rt);
     try std.testing.expectEqual(collections_before + 1, rt.gc.stats.collections);
-    if (comptime !core.gc.trace_stw_enabled) {
-        try std.testing.expect(!rt.gcPendingForTest());
-    }
 }
 
 test "an unrequested threshold crossing is still serviced at a scheduler poll" {
@@ -9798,13 +9724,11 @@ test "an unrequested threshold crossing is still serviced at a scheduler poll" {
     // completion counter moves at that last poll, not the first.
     const collections_before = rt.gc.stats.collections;
     _ = try rt.pollGC(null, .safepoint);
-    if (comptime core.gc.trace_stw_enabled) {
-        try std.testing.expect(rt.gc.concurrent.markingActive());
-        var polls: usize = 0;
-        while (rt.gc.concurrent.markingActive()) : (polls += 1) {
-            try std.testing.expect(polls < 10_000);
-            _ = try rt.pollGC(null, .safepoint);
-        }
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
     }
     try std.testing.expectEqual(collections_before + 1, rt.gc.stats.collections);
 }
@@ -9985,15 +9909,8 @@ test "weak persistent value clears object cycle target during gc" {
 
     try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
     try std.testing.expect(weak.get().isUndefined());
-    if (comptime core.gc.trace_stw_enabled) {
-        // STW processWeak notifies in the same collection that unmarks the
-        // target. Trial deletion defers the callback to the next round.
-        try std.testing.expectEqual(@as(usize, 1), clear_count);
-    } else {
-        try std.testing.expectEqual(@as(usize, 0), clear_count);
-        _ = rt.runObjectCycleRemoval();
-        try std.testing.expectEqual(@as(usize, 1), clear_count);
-    }
+    // `processWeak` notifies in the same collection that unmarks the target.
+    try std.testing.expectEqual(@as(usize, 1), clear_count);
 }
 
 test "weak persistent value clears unrooted symbol target during gc" {
@@ -10444,11 +10361,6 @@ test "class payload function bytecode constant object cycle is released by runti
     captured.value().free(rt);
 
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
-    if (comptime !core.gc.trace_stw_enabled) {
-        // Trial deletion visits doomed cycle candidates; STW only marks
-        // reachable objects, so an unrooted cycle is swept without payload_mark.
-        try std.testing.expect(payload_mark_calls > 0);
-    }
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(1));
@@ -11054,13 +10966,9 @@ test "ordinary last-ref values do not schedule irrelevant borrowed cleanup" {
     rt.beginBorrowedWeakCleanup();
     defer rt.endBorrowedWeakCleanup();
     const candidate = rt.prepareBorrowedWeakCleanupForLastRefValue(ordinary.value());
-    if (comptime core.gc.trace_stw_enabled) {
-        // Tracer-owned values have no last-ref transition. Condemnation owns
-        // their borrowed-identity cleanup instead.
-        try std.testing.expect(candidate == null);
-    } else {
-        try std.testing.expect(candidate != null);
-    }
+    // Tracer-owned values have no last-ref transition. Condemnation owns their
+    // borrowed-identity cleanup instead.
+    try std.testing.expect(candidate == null);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowedWeakCleanupIdentityCount());
 }
 
@@ -12491,39 +12399,21 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
         // after its Shape is owned but before the triggering JSObject body is
         // charged. The body is a slab class (usable+MALLOC_OVERHEAD), not the
         // request length (quickjs.c:2168/1795).
-        const object_request = survivor.allocationSize(rt);
-        const object_charge = core.memory.MemoryAccount.accountedSizeForRequest(object_request, .@"8");
-        const boundary_bytes = rt.memory.allocated_bytes - object_charge;
-        // ...and, under the tracing collector, never tighter than one nursery
-        // above the live set. A threshold below that is one the young
-        // generation can never reach, since it is tested before a minor is
-        // offered, so every collection would be a major (`gc.zig`
-        // `nursery_headroom_bytes`). `rc` has no young generation and the
-        // headroom is zero there, which leaves the qjs rule exactly.
-        // The tracer grows by 1.75x (see `resetGCThreshold`: a whole-heap
-        // trace prices a collection by what survives, and §1.3 caps
-        // cycle peak/live at 1.8, which the growth factor equals at steady
-        // state); rc keeps qjs's 1.5x verbatim.
+        // The threshold is never tighter than one nursery above the live set.
+        // A threshold below that is one the young generation can never reach,
+        // since it is tested before a minor is offered, so every collection
+        // would be a major (`gc.zig` `nursery_headroom_bytes`).
         //
-        // The tracer also moves the reset's TIMING: qjs resets at the
-        // pre-object boundary; an incremental cycle resets at the poll whose
-        // increment empties the frontier, from the post-sweep account of that
-        // moment. So under the tracer, drive the cycle to completion and
-        // compute the expectation from the account it actually reset from.
-        if (comptime core.gc.trace_stw_enabled) {
-            helpers.finishGcCycles(rt);
-            const settled = rt.memory.allocated_bytes;
-            const grown = settled + (settled >> 1) + (settled >> 2);
-            const expected = @max(grown, settled + core.gc.nursery_headroom_bytes);
-            try std.testing.expectEqual(expected, rt.gcThreshold());
-        } else {
-            const grown = boundary_bytes + (boundary_bytes >> 1);
-            const expected = @max(
-                grown,
-                boundary_bytes + core.gc.nursery_headroom_bytes,
-            );
-            try std.testing.expectEqual(expected, rt.gcThreshold());
-        }
+        // The tracer also moves the reset's TIMING relative to qjs: qjs resets
+        // at the pre-object boundary; an incremental cycle resets at the poll
+        // whose increment empties the frontier, from the post-sweep account of
+        // that moment. So drive the cycle to completion and compute the
+        // expectation from the account it actually reset from.
+        helpers.finishGcCycles(rt);
+        const settled = rt.memory.allocated_bytes;
+        const grown = settled + (settled >> 1) + (settled >> 2);
+        const expected = @max(grown, settled + core.gc.nursery_headroom_bytes);
+        try std.testing.expectEqual(expected, rt.gcThreshold());
     }
 }
 
@@ -12533,7 +12423,6 @@ test "gc growth percent override replaces the compiled tracer growth factor" {
     // so the pricing curve measured through it has to be reproducible. Without
     // this test nothing in the suite ever executes the override arm, and the
     // assertion guarding its arithmetic sits on dead code.
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -12979,28 +12868,20 @@ test "module finalizer self-unlinks a still-linked realm registry node" {
     // pattern; it verifies ModuleRecord.destroyFromHeader splices itself before
     // Realm teardown later sees the now-empty registry.
     record.release(rt);
-    if (comptime !core.gc.trace_stw_enabled) {
-        try std.testing.expect(ctx.modules.head == null);
-        try std.testing.expect(ctx.modules.tail == null);
-        try std.testing.expectEqual(@as(usize, 0), ctx.modules.count);
-        try std.testing.expect(ctx.modules.find(module_name) == null);
-        try std.testing.expectEqual(owner_atom_refs, rt.atoms.refCount(module_name).?);
-    } else {
-        // The state this probes cannot be built under the tracer, and that is
-        // the guarantee rather than a gap: registry membership is a strong
-        // traced edge from the live Realm (`Collector.visitModule` via
-        // `JSContext.traceChildEdges`), so consuming the base ref cannot leave
-        // a linked node condemned. A collection here proves the record is
-        // still reached through the Realm, which is why the self-unlink in
-        // `ModuleRecord.destroyFromHeader` is unreachable: a condemned Realm is
-        // destroyed before the module pass in `destroyCondemned`, and
-        // `JSContext.destroyFromHeader` unlinks every record on its way out.
-        helpers.reclaimNow(rt);
-        try std.testing.expect(ctx.modules.head != null);
-        try std.testing.expectEqual(@as(usize, 1), ctx.modules.count);
-        try std.testing.expect(ctx.modules.find(module_name) != null);
-        try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
-    }
+    // The state this probes cannot be built under the tracer, and that is
+    // the guarantee rather than a gap: registry membership is a strong
+    // traced edge from the live Realm (`Collector.visitModule` via
+    // `JSContext.traceChildEdges`), so consuming the base ref cannot leave
+    // a linked node condemned. A collection here proves the record is
+    // still reached through the Realm, which is why the self-unlink in
+    // `ModuleRecord.destroyFromHeader` is unreachable: a condemned Realm is
+    // destroyed before the module pass in `destroyCondemned`, and
+    // `JSContext.destroyFromHeader` unlinks every record on its way out.
+    helpers.reclaimNow(rt);
+    try std.testing.expect(ctx.modules.head != null);
+    try std.testing.expectEqual(@as(usize, 1), ctx.modules.count);
+    try std.testing.expect(ctx.modules.find(module_name) != null);
+    try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
     try rt.gc.verifyHeapAccounting(rt);
 }
 
@@ -15539,8 +15420,6 @@ test "non-object remembered owners use the byte-6 cache and re-arm across consec
 }
 
 test "minor full-trace verifier owns its reachability set per runtime" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     const saved_verify = core.gc.verify_minor;
     core.gc.verify_minor = true;
     defer core.gc.verify_minor = saved_verify;
@@ -15809,7 +15688,6 @@ test "the generational barrier ignores edges a minor would find anyway" {
 }
 
 test "candidate validation rejects the tear shapes the litmus measured" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -16006,7 +15884,6 @@ test "mark queue wraps without losing entries" {
 }
 
 test "an abandoned retirement transaction closes minors until a major repairs it" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -16043,7 +15920,6 @@ test "an abandoned retirement transaction closes minors until a major repairs it
 }
 
 test "a major retires every block-cell survivor it traces" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -16068,7 +15944,6 @@ test "a major retires every block-cell survivor it traces" {
 }
 
 test "incremental begin preserves list-young suffix until finish retirement" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -16122,7 +15997,6 @@ test "incremental begin preserves list-young suffix until finish retirement" {
 }
 
 test "representation audit guards block-cell marker direct dispatch" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -16293,8 +16167,6 @@ test "snapshot capture bails out rather than spinning against a busy writer" {
 }
 
 test "independent runtimes collect without touching each other" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
-
     // §3.1's first invariants: every GC object belongs to exactly one runtime
     // and no heap pointer crosses between them. A collector that violated
     // either would show up here as one runtime's collection disturbing
@@ -16341,7 +16213,6 @@ test "independent runtimes collect without touching each other" {
 }
 
 test "a crossed whole-heap threshold is answered by a major, never by a minor" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -16386,7 +16257,6 @@ test "a crossed whole-heap threshold is answered by a major, never by a minor" {
 }
 
 test "a minor does not move the major's threshold" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -16419,7 +16289,6 @@ test "a minor does not move the major's threshold" {
 }
 
 test "minor detailed stats decompose the outer STW envelope" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -16484,7 +16353,6 @@ test "cell resolution stops at the block header and at unallocated cells" {
 }
 
 test "a minor that keeps reclaiming nothing stops being offered" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -16609,7 +16477,6 @@ test "barrier queue overflow downgrades to a rescan, not to lost children" {
 }
 
 test "an incremental cycle frees threshold garbage across bounded polls" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const untouched = try core.JSRuntime.create(std.testing.allocator);
@@ -16679,7 +16546,6 @@ test "an incremental cycle frees threshold garbage across bounded polls" {
 }
 
 test "incremental cycle envelope keeps one exact MemoryAccount S T P domain" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     const reports_before = core.gc_trace_stw.detailed_reports;
     core.gc_trace_stw.detailed_reports = true;
@@ -16730,7 +16596,6 @@ test "incremental cycle envelope keeps one exact MemoryAccount S T P domain" {
 }
 
 test "synchronous incremental destruction drains more than one parked-free budget" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
@@ -16764,7 +16629,6 @@ test "synchronous incremental destruction drains more than one parked-free budge
 }
 
 test "pending class finalizer keeps the incremental morgue open" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
@@ -16821,7 +16685,6 @@ test "pending class finalizer keeps the incremental morgue open" {
 }
 
 test "incremental block finalizer observes its object without sweep publication" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -16860,7 +16723,6 @@ test "incremental block finalizer observes its object without sweep publication"
 }
 
 test "a store during an incremental cycle keeps the stored subgraph alive to the remark" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -16909,7 +16771,6 @@ test "a store during an incremental cycle keeps the stored subgraph alive to the
 }
 
 test "an explicit collection supersedes an open incremental cycle with full precision" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -16943,7 +16804,6 @@ test "an explicit collection supersedes an open incremental cycle with full prec
 }
 
 test "an urgent poll aborts the open cycle and collects fully" {
-    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);

@@ -2882,15 +2882,6 @@ pub const Registry = struct {
         h.retain();
     }
 
-    pub fn releaseObjectForTest(self: *Registry, h: *GCObjectHeader) bool {
-        if (!builtin.is_test) @compileError("test-only helper");
-        if (decrementHeaderRefCount(h) == 0) {
-            self.unlinkObject(h);
-            return true;
-        }
-        return false;
-    }
-
     fn ensureExternalTokenCapacity(self: *Registry, required: usize) !void {
         if (required <= self.external_tokens_capacity) return;
         var new_capacity = if (self.external_tokens_capacity == 0) @as(usize, 8) else self.external_tokens_capacity * 2;

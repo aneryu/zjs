@@ -856,14 +856,10 @@ test "promiseSettleValue handles result self-assignment" {
 
     try promise.setPromiseResult(rt, result.value().dup());
     result.value().free(rt);
-    if (comptime !core.gc.trace_stw_enabled)
-        try std.testing.expectEqual(@as(i32, 1), core.gc.headerRefCount(&result.header));
 
     const current = promise.promiseResult().?;
     try promiseSettleValue(ctx, global, promise, current, false);
 
-    if (comptime !core.gc.trace_stw_enabled)
-        try std.testing.expectEqual(@as(i32, 1), core.gc.headerRefCount(&result.header));
     try std.testing.expectEqual(&result.header, promise.promiseResult().?.refHeader().?);
 }
 
@@ -3860,7 +3856,7 @@ pub fn drainOnePendingJob(
     var active_job_root: core.runtime.ActiveJobRoot = .{};
     active_job_root.activate(ctx.runtime, &entry);
     defer active_job_root.deactivate(ctx.runtime);
-    defer if (comptime core.gc.trace_stw_enabled) ctx.runtime.clearWeakRefKeptAlive();
+    defer ctx.runtime.clearWeakRefKeptAlive();
     const job_ctx = entry.realm.borrow() orelse unreachable;
     const job_global = job_ctx.global orelse return error.InvalidBuiltinRegistry;
     var result: ?core.JSValue = null;

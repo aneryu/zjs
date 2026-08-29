@@ -2020,7 +2020,7 @@ pub const function_bytecode = struct {
         closure_var_count: i32,
 
         comptime {
-            std.debug.assert(@sizeOf(@This()) == if (gc.trace_stw_enabled) 88 else 96);
+            std.debug.assert(@sizeOf(@This()) == 88);
             std.debug.assert(@alignOf(@This()) == 8);
             std.debug.assert(@offsetOf(@This(), "header") == 0x00);
             const header_bytes = @sizeOf(gc.GCObjectHeader);
@@ -10203,7 +10203,7 @@ const function_mod = struct {
         comptime {
             std.debug.assert(@offsetOf(@This(), "hot_extension") == @sizeOf(FunctionBytecode));
             std.debug.assert(@offsetOf(@This(), "legacy_bytecode_adapter") == @sizeOf(FunctionBytecode) + @sizeOf(function_bytecode_mod.FunctionBytecodeHotExtension));
-            std.debug.assert(@sizeOf(@This()) == if (gc.trace_stw_enabled) 160 else 168);
+            std.debug.assert(@sizeOf(@This()) == 160);
             std.debug.assert(@alignOf(@This()) == 8);
         }
 

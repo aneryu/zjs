@@ -27,8 +27,8 @@ comptime {
     // build time instead. The shadow tracer is exempt because it never
     // reclaims -- there a missing root is a census discrepancy, which is
     // exactly what the shadow build exists to report.
-    if (gc.trace_stw_enabled and !target_supported) {
-        @compileError("-Dzjs_experimental_gc=trace_stw needs a conservative stack scanner for this target; " ++
+    if (!target_supported) {
+        @compileError("the tracing collector needs a conservative stack scanner for this target; " ++
             "see `missing_abis` below. Reclaiming without one frees natively-held objects.");
     }
 }

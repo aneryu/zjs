@@ -359,14 +359,14 @@ pub const ModuleRecord = struct {
         std.debug.assert(@offsetOf(@This(), "header") == 0);
         std.debug.assert(@sizeOf(@This()) == 272);
         std.debug.assert(@alignOf(@This()) == 16);
-        std.debug.assert(@offsetOf(@This(), "registry_prev") == if (gc.trace_stw_enabled) 136 else 144);
-        std.debug.assert(@offsetOf(@This(), "registry") == if (gc.trace_stw_enabled) 32 else 40);
-        std.debug.assert(@offsetOf(@This(), "memory") == if (gc.trace_stw_enabled) 40 else 48);
-        std.debug.assert(@offsetOf(@This(), "module_name") == if (gc.trace_stw_enabled) 244 else 252);
-        std.debug.assert(@offsetOf(@This(), "requests") == if (gc.trace_stw_enabled) 104 else 112);
-        std.debug.assert(@offsetOf(@This(), "func_obj") == if (gc.trace_stw_enabled) 192 else 200);
-        std.debug.assert(@offsetOf(@This(), "module_ns") == if (gc.trace_stw_enabled) 208 else 216);
-        std.debug.assert(@offsetOf(@This(), "status") == if (gc.trace_stw_enabled) 256 else 264);
+        std.debug.assert(@offsetOf(@This(), "registry_prev") == 136);
+        std.debug.assert(@offsetOf(@This(), "registry") == 32);
+        std.debug.assert(@offsetOf(@This(), "memory") == 40);
+        std.debug.assert(@offsetOf(@This(), "module_name") == 244);
+        std.debug.assert(@offsetOf(@This(), "requests") == 104);
+        std.debug.assert(@offsetOf(@This(), "func_obj") == 192);
+        std.debug.assert(@offsetOf(@This(), "module_ns") == 208);
+        std.debug.assert(@offsetOf(@This(), "status") == 256);
     }
 
     header: gc.GCObjectHeader align(16) = .{},

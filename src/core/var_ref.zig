@@ -35,7 +35,7 @@ pub const VarRef = struct {
 
     comptime {
         std.debug.assert(@offsetOf(VarRef, "header") == 0);
-        std.debug.assert(@sizeOf(VarRef) == if (gc.trace_stw_enabled) 40 else 48);
+        std.debug.assert(@sizeOf(VarRef) == 40);
         std.debug.assert(@alignOf(VarRef) == 8);
         const header_bytes = @sizeOf(gc.Header);
         std.debug.assert(@offsetOf(VarRef, "value") == header_bytes);
@@ -77,25 +77,25 @@ pub const VarRef = struct {
     /// `gc.destroyVarRefNow`; this typed entry is the function-finalizer loop
     /// shape (`js_bytecode_function_finalizer` qjs:6253-6256).
     ///
-    /// Phase gates stay those of `JSValue.object(&header).free` +
-    /// `gc.destroyZeroRef` for `kind == var_ref`: deinit skips before rc--
-    /// (runtime teardown parks cells on `held_var_refs`); finalizing /
-    /// remove_cycles skip the synchronous tail so the cycle batch remains the
-    /// sole destroy point. RC teardown itself is unchanged.
+    /// It is deliberately a no-op, and it is deliberately still here.
+    ///
+    /// The tracer owns cells outright: `destroyCondemned` frees them in the
+    /// same ordered pass as everything else, so the count is not maintained
+    /// and a release must not touch it -- a function object dying in the sweep
+    /// releases captures whose cells are already condemned, which would
+    /// underflow a word nothing reads. The refcounting body this used to have
+    /// (rc--, phase gates, unlink, destroy) went with the rc collector.
+    ///
+    /// What survives is the SHAPE: `retain`/`release` is the ownership
+    /// protocol the binding-identity owners are written against, and
+    /// `destroyOptionalVarRefCellSlice` keeps qjs's finalizer loop
+    /// (`js_bytecode_function_finalizer`, quickjs.c:6253-6256). An empty
+    /// release costs nothing after inlining, whereas deleting one half of a
+    /// retain/release pair leaves an asymmetry every future owner has to
+    /// rediscover.
     pub fn freeVarRef(rt: anytype, var_ref: ?*VarRef) void {
-        const cell = var_ref orelse return;
-        if (rt.gc.phase == .deinit) return;
-        // The tracer owns cells now (`destroyCondemned` frees them in the same
-        // ordered pass as everything else), so the count is not maintained and
-        // a release must not touch it: a function object dying in the sweep
-        // releases captures whose cells are already condemned, which underflows
-        // a word nothing reads.
-        if (comptime gc.trace_stw_enabled) return;
-        if (gc.decrementHeaderRefCount(&cell.header) != 0) return;
-        if (cell.header.meta().flags.finalizing) return;
-        if (gc.phaseIsTwoPassTeardown(rt.gc.phase)) return;
-        rt.gc.unlinkObjectWithBytes(&cell.header, comptime @sizeOf(VarRef));
-        destroyFromHeader(rt, &cell.header);
+        _ = rt;
+        _ = var_ref;
     }
 
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {

@@ -494,12 +494,10 @@ pub const JSValue = extern struct {
 
     pub inline fn dup(self: JSValue) JSValue {
         if (!self.requiresRefCount()) return self;
-        // Under the tracer this payload-4 word is mark/husk state, not a
+        // For a traced carrier this payload-4 word is mark/husk state, not a
         // refcount. Every raw retain/release must stop here before treating it
         // as `RefCountHeader`; liveness is decided by the trace.
-        if (comptime gc.trace_stw_enabled) {
-            if (self.isTracerOwned()) return self;
-        }
+        if (self.isTracerOwned()) return self;
         gc.retain(self.refCountWordAssumeRefCounted());
         return self;
     }
@@ -548,19 +546,14 @@ pub const JSValue = extern struct {
     /// owner release: it preserves deinit/profile/zero-ref behavior while
     /// avoiding the generic JSValue refcount-range and tag dispatch on the
     /// common non-zero arm.
+    /// An Object is always tracer-owned, so the release is nothing but the
+    /// tag assertion: the trace decides liveness and the payload-4 word is
+    /// mark state. The refcount body went with the rc collector. The entry
+    /// point stays because it is the typed half of the value-ownership
+    /// protocol the VM handlers are written against.
     pub inline fn freeObjectAssumeObject(self: JSValue, rt: anytype) void {
         std.debug.assert(self.tagOf() == Tag.object);
-        if (rt.gc.phase == .deinit) return;
-        if (comptime gc.trace_stw_enabled) return;
-        if (comptime value_free_profile) {
-            if (rt.opcode_profile) |prof| prof.recordValueFree();
-        }
-        const hdr = self.refCountWordAssumeRefCounted();
-        std.debug.assert(hdr.rc > 0);
-        hdr.rc -= 1;
-        if (hdr.rc == 0) {
-            gc.destroyZeroRef(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
-        }
+        _ = rt;
     }
 
     /// Active-bytecode twin of `freeObjectAssumeObject`. Runtime teardown is
@@ -571,41 +564,28 @@ pub const JSValue = extern struct {
         std.debug.assert(self.tagOf() == Tag.object);
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
-        if (comptime gc.trace_stw_enabled) return;
-        if (comptime value_free_profile) {
-            if (rt.opcode_profile) |prof| prof.recordValueFree();
-        }
-        const hdr = self.refCountWordAssumeRefCounted();
-        std.debug.assert(hdr.rc > 0);
-        hdr.rc -= 1;
-        if (hdr.rc == 0) {
-            gc.destroyZeroRef(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
-        }
     }
 
     /// Property-slot release from `Object.destroyPlainObjectFast`.
     ///
-    /// The caller has already proved `gc.phase` is neither `.deinit` nor
-    /// `.remove_cycles` (the fast-arm gate in `destroyFromHeader`). That
+    /// The caller has already proved `gc.phase` is not `.deinit` (the fast-arm
+    /// gate in `destroyFromHeader`). That
     /// matches `free_property` → `JS_FreeValueRT` (quickjs.c:6111 / 697-704):
     /// the decrement does not reload phase. An object last-ref goes straight
     /// to the zero-ref queue (`__JS_FreeValueRT` 6471-6483) instead of hopping
     /// through `JSValue.destroyZeroRef` + `gc.destroyZeroRef`.
     pub inline fn freeFromPlainObjectDestroy(self: JSValue, rt: anytype) void {
         if (!self.requiresRefCount()) return;
-        if (comptime gc.trace_stw_enabled) {
-            if (self.isTracerOwned()) return;
-        }
+        if (self.isTracerOwned()) return;
+        // Everything past the tracer-owned gate is a string, symbol, rope or
+        // BigInt: still refcounted, never on `gc_obj_list`, so the zero-ref
+        // queue hop the rc collector needed for the Object case is gone with
+        // the case itself.
+        std.debug.assert(self.tagOf() != Tag.object);
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         hdr.rc -= 1;
         if (hdr.rc != 0) return;
-        if (self.tagOf() == Tag.object) {
-            @call(.never_inline, gc.Registry.enqueueZeroRef, .{
-                &rt.gc, rt, self.refHeaderAssumeObject(),
-            });
-            return;
-        }
         self.destroyZeroRef(rt);
     }
 
@@ -642,15 +622,9 @@ pub const JSValue = extern struct {
     /// complete the release exactly once (e.g. `value.free(rt)`).
     pub inline fn releaseObjectAssumeObjectNeedsDestroy(self: JSValue, rt: anytype) bool {
         std.debug.assert(self.tagOf() == Tag.object);
-        if (rt.gc.phase == .deinit) return false;
-        if (comptime gc.trace_stw_enabled) return false;
-        const hdr = self.refCountWordAssumeRefCounted();
-        std.debug.assert(hdr.rc > 0);
-        if (hdr.rc == 1) return true;
-        if (comptime value_free_profile) {
-            if (rt.opcode_profile) |prof| prof.recordValueFree();
-        }
-        hdr.rc -= 1;
+        _ = rt;
+        // Always false: an Object is tracer-owned, so no release of one can
+        // ever be the last. The refcount body went with the rc collector.
         return false;
     }
 
@@ -665,9 +639,7 @@ pub const JSValue = extern struct {
     /// complete the release exactly once (e.g. `value.free(rt)`).
     pub inline fn releaseRefCountedNeedsDestroy(self: JSValue, rt: anytype) bool {
         if (!self.requiresRefCount()) return false;
-        if (comptime gc.trace_stw_enabled) {
-            if (self.isTracerOwned()) return false;
-        }
+        if (self.isTracerOwned()) return false;
         const tag = self.tagOf();
         if (rt.gc.phase == .deinit and tag >= Tag.module and tag <= Tag.object) return false;
         const hdr = self.refCountWordAssumeRefCounted();
@@ -688,14 +660,6 @@ pub const JSValue = extern struct {
         std.debug.assert(self.tagOf() == Tag.object);
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
-        if (comptime gc.trace_stw_enabled) return false;
-        const hdr = self.refCountWordAssumeRefCounted();
-        std.debug.assert(hdr.rc > 0);
-        if (hdr.rc == 1) return true;
-        if (comptime value_free_profile) {
-            if (rt.opcode_profile) |prof| prof.recordValueFree();
-        }
-        hdr.rc -= 1;
         return false;
     }
 
@@ -705,9 +669,7 @@ pub const JSValue = extern struct {
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
         if (!self.requiresRefCount()) return false;
-        if (comptime gc.trace_stw_enabled) {
-            if (self.isTracerOwned()) return false;
-        }
+        if (self.isTracerOwned()) return false;
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         if (hdr.rc == 1) return true;
@@ -724,9 +686,7 @@ pub const JSValue = extern struct {
     }
 
     inline fn releaseCommonRefCount(self: JSValue, rt: anytype) void {
-        if (comptime gc.trace_stw_enabled) {
-            if (self.isTracerOwned()) return;
-        }
+        if (self.isTracerOwned()) return;
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         hdr.rc -= 1;

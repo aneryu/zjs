@@ -281,15 +281,9 @@ test "gc stress finalization registry dead target queues pending job" {
 
     const collected = try rt.tryRunObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 2), collected.freed_objects);
-    if (comptime core.gc.trace_stw_enabled) {
-        // STW processWeak enqueues the cleanup in the same collection that
-        // unreaches the target. Trial deletion defers enqueue to the next round.
-        try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
-    } else {
-        try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
-        _ = try rt.tryRunObjectCycleRemoval();
-        try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
-    }
+    // `processWeak` enqueues the cleanup in the same collection that unreaches
+    // the target.
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
     // cleanup + registry + held object + construction realm, plus the shared root shape and the
     // held object's one-property transition shape.

@@ -51,14 +51,8 @@ fn varRefLayout() []const u8 {
 }
 
 fn realmLayout() []const u8 {
-    if (gc.trace_stw_enabled) {
-        return std.fmt.comptimePrint(
-            "realm_context size={d} align={d} header={d} runtime={d} publication_state={d} modules={d} global={d} trace_rc=2164 list_prev=2168\n",
-            .{ @sizeOf(core.JSContext), @alignOf(core.JSContext), @offsetOf(core.JSContext, "header"), @offsetOf(core.JSContext, "runtime"), @offsetOf(core.JSContext, "publication_state"), @offsetOf(core.JSContext, "modules"), @offsetOf(core.JSContext, "global") },
-        );
-    }
     return std.fmt.comptimePrint(
-        "realm_context size={d} align={d} header={d} runtime={d} publication_state={d} modules={d} global={d}\n",
+        "realm_context size={d} align={d} header={d} runtime={d} publication_state={d} modules={d} global={d} trace_rc=2164 list_prev=2168\n",
         .{ @sizeOf(core.JSContext), @alignOf(core.JSContext), @offsetOf(core.JSContext, "header"), @offsetOf(core.JSContext, "runtime"), @offsetOf(core.JSContext, "publication_state"), @offsetOf(core.JSContext, "modules"), @offsetOf(core.JSContext, "global") },
     );
 }
@@ -71,15 +65,9 @@ fn moduleLayout() []const u8 {
 }
 
 fn shapeLayout() []const u8 {
-    if (gc.trace_stw_enabled) {
-        return std.fmt.comptimePrint(
-            "shape size={d} align={d} header={d} list_prev={d} ownership={d} hash={d} prop_hash_mask={d} prop_size={d} prop_count={d} registry_hash_next={d} proto={d} fam={d}\n",
-            .{ @sizeOf(core.Shape), @alignOf(core.Shape), @offsetOf(core.Shape, "header"), @offsetOf(core.Shape, "trace_list_previous"), @offsetOf(core.Shape, "ownership"), @offsetOf(core.Shape, "hash"), @offsetOf(core.Shape, "prop_hash_mask"), @offsetOf(core.Shape, "prop_size"), @offsetOf(core.Shape, "prop_count"), @offsetOf(core.Shape, "registry_hash_next"), @offsetOf(core.Shape, "proto"), @sizeOf(core.Shape) },
-        );
-    }
     return std.fmt.comptimePrint(
-        "shape size={d} align={d} header={d} is_hashed={d} hash={d} prop_hash_mask={d} prop_size={d} prop_count={d} registry_hash_next={d} proto={d} fam={d}\n",
-        .{ @sizeOf(core.Shape), @alignOf(core.Shape), @offsetOf(core.Shape, "header"), @offsetOf(core.Shape, "ownership"), @offsetOf(core.Shape, "hash"), @offsetOf(core.Shape, "prop_hash_mask"), @offsetOf(core.Shape, "prop_size"), @offsetOf(core.Shape, "prop_count"), @offsetOf(core.Shape, "registry_hash_next"), @offsetOf(core.Shape, "proto"), @sizeOf(core.Shape) },
+        "shape size={d} align={d} header={d} list_prev={d} ownership={d} hash={d} prop_hash_mask={d} prop_size={d} prop_count={d} registry_hash_next={d} proto={d} fam={d}\n",
+        .{ @sizeOf(core.Shape), @alignOf(core.Shape), @offsetOf(core.Shape, "header"), @offsetOf(core.Shape, "trace_list_previous"), @offsetOf(core.Shape, "ownership"), @offsetOf(core.Shape, "hash"), @offsetOf(core.Shape, "prop_hash_mask"), @offsetOf(core.Shape, "prop_size"), @offsetOf(core.Shape, "prop_count"), @offsetOf(core.Shape, "registry_hash_next"), @offsetOf(core.Shape, "proto"), @sizeOf(core.Shape) },
     );
 }
 
@@ -104,10 +92,7 @@ fn bigIntLayout() []const u8 {
 
 fn metadataLayout() []const u8 {
     return std.fmt.comptimePrint(
-        if (gc.trace_stw_enabled)
-            "Metadata size={d} align={d} size_class={d} alloc_info={d} flags={d} lifetime={d}\n"
-        else
-            "Metadata size={d} align={d} size_class={d} alloc_info={d} flags={d} rc={d}\n",
+        "Metadata size={d} align={d} size_class={d} alloc_info={d} flags={d} lifetime={d}\n",
         .{
             @sizeOf(gc.Metadata),
             @alignOf(gc.Metadata),
@@ -120,23 +105,14 @@ fn metadataLayout() []const u8 {
 }
 
 fn activeHeaderLayout() []const u8 {
-    if (gc.trace_stw_enabled) {
-        return std.fmt.comptimePrint(
-            "TraceHeader size={d} align={d} next={d}\n",
-            .{ @sizeOf(gc.TraceHeader), @alignOf(gc.TraceHeader), @offsetOf(gc.TraceHeader, "next") },
-        );
-    }
     return std.fmt.comptimePrint(
-        "BlockHeader size={d} align={d} prev={d} next={d}\n",
-        .{ @sizeOf(gc.BlockHeader), @alignOf(gc.BlockHeader), @offsetOf(gc.BlockHeader, "prev"), @offsetOf(gc.BlockHeader, "next") },
+        "TraceHeader size={d} align={d} next={d}\n",
+        .{ @sizeOf(gc.TraceHeader), @alignOf(gc.TraceHeader), @offsetOf(gc.TraceHeader, "next") },
     );
 }
 
 fn lifetimeSemantics() []const u8 {
-    if (gc.trace_stw_enabled) {
-        return "lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+husk/reserved:u8 for trace carriers; Shape/Realm RC lives in body; BigInt keeps i32 rc\n";
-    }
-    return "rc trace-removed kinds remain construction value 1; retained kinds keep live refcount semantics\n";
+    return "lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+husk/reserved:u8 for trace carriers; Shape/Realm RC lives in body; BigInt keeps i32 rc\n";
 }
 
 pub const snapshot_text =
