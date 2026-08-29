@@ -1315,9 +1315,64 @@ pub const Registry = struct {
     /// both rebuild same-shaped objects in loops and both failed exactly
     /// there. Delisting at condemn time closes the window; the struct stays
     /// for the destructor, which tolerates an already-empty bucket.
+    ///
+    /// That contract is `unlink`'s, so this IS `unlink` -- it used to be an
+    /// unconditional `removeShapeHashEverywhere`, which is the whole table per
+    /// condemned shape, i.e. quadratic in the number of shapes a major
+    /// condemns. And it paid it twice: leaving `is_hashed` set meant the
+    /// destructor's own `unlink` re-ran, missed the bucket the delist had
+    /// already emptied, and fell back to a SECOND full scan. Routing both
+    /// through `unlink` gives the delist the O(1) single-bucket path (full
+    /// scan still reachable as the stale-hash fallback) and turns the
+    /// destructor's call into the no-op it always meant to be.
+    ///
+    /// Clearing `is_hashed` and debiting `shape_hash_count` here is not a side
+    /// effect to tolerate, it is the point: the shape is out of the table the
+    /// instant this returns, so the flag and the count are simply telling the
+    /// truth earlier than they used to. Nothing between condemnation and
+    /// destruction may consult a condemned shape -- the trace proved it
+    /// unreachable and the morgue gates collections -- and the one engine-wide
+    /// structure the mutator does consult is the table this leaves.
     pub fn delistCondemnedShape(self: *Registry, header: *gc.Header) void {
         const shape: *Shape = @alignCast(@fieldParentPtr("header", header));
-        self.removeShapeHashEverywhere(shape);
+        self.unlink(shape);
+        std.debug.assert(!shape.isHashed());
+    }
+
+    /// `is_hashed` is exactly "this shape is linked in a bucket", and the
+    /// count is exactly how many are.
+    ///
+    /// The delist above now trusts the flag: `!isHashed()` is taken as "not in
+    /// the table" and it walks nothing. That is the same class of assumption
+    /// that the arena audit exists for -- an invariant maintained by scattered
+    /// stores in half a dozen link/unlink/relocate paths, with no single owner,
+    /// where a forgotten store is invisible until a corpse gets served out of
+    /// a bucket. So check it rather than assume it: a linked shape with the
+    /// flag clear is precisely the corruption that would make the delist skip
+    /// a shape it must remove.
+    /// Two distinct errors, because the two halves break for different reasons
+    /// and an audit that says only "corrupt" sends the reader to the wrong
+    /// half. `LinkedButUnflagged` is the one that makes the delist skip a
+    /// shape; `CountMismatch` is a stale debit, which is how the delist looked
+    /// before it became an unlink.
+    pub const HashIndexError = error{
+        ShapeHashLinkedButUnflagged,
+        ShapeHashCountMismatch,
+    };
+
+    pub fn verifyHashIndex(self: *const Registry) HashIndexError!void {
+        var linked: usize = 0;
+        for (self.shape_hash_buckets) |bucket| {
+            var cursor = bucket;
+            while (cursor) |shape| : (cursor = shape.registry_hash_next) {
+                if (!shape.isHashed()) return error.ShapeHashLinkedButUnflagged;
+                linked += 1;
+                // Also the loop bound: a bucket chain that closed on itself
+                // would otherwise walk forever inside an audit.
+                if (linked > self.shape_hash_count) return error.ShapeHashCountMismatch;
+            }
+        }
+        if (linked != self.shape_hash_count) return error.ShapeHashCountMismatch;
     }
 
     fn removeShapeHashEverywhere(self: *Registry, shape: *Shape) void {

@@ -578,6 +578,14 @@ fn verifyCollectorInvariants(
         std.debug.print("gc: ADDRESS INDEX AUDIT: {s}\n", .{@errorName(err)});
         @panic("address index invariant violated");
     };
+    // The shape table is the one engine-global structure the MUTATOR consults
+    // while a morgue is open, and condemnation's delist is what keeps corpses
+    // out of it. That delist reads `is_hashed` as "linked in a bucket", so the
+    // biconditional it reads is an invariant with no owner -- check it.
+    rt.shapes.verifyHashIndex() catch |err| {
+        std.debug.print("gc: SHAPE HASH INDEX AUDIT: {s}\n", .{@errorName(err)});
+        @panic("shape hash index invariant violated");
+    };
     // Validate construction pins before BlockHeap consults them as the
     // sole exception to the publication rule. A corrupt exception authority
     // must never turn arbitrary unpublished cells into accepted state.

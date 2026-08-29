@@ -16569,6 +16569,77 @@ fn driveOneIncrementalMajorForCensusTest(rt: *core.JSRuntime, garbage: usize) !u
     return rt.gc.concurrent.stats.total_segments_by_kind[finish_index] - finishes_before;
 }
 
+test "condemning many shapes leaves the transition table exactly consistent" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    // One survivor, and a population of dead shapes big enough that a delist
+    // which walks the whole table per corpse is doing quadratic work. Distinct
+    // property names mean distinct shapes rather than one shared transition.
+    const keeper_key = try rt.internAtom("delist-keeper");
+    defer rt.atoms.free(keeper_key);
+    const keeper = try core.Object.create(rt, core.class.ids.object, null);
+    defer keeper.value().free(rt);
+    try keeper.definePlainDataPropertyKnownFast(rt, keeper_key, core.JSValue.int32(1));
+    const keeper_shape = keeper.shape_ref;
+    try rt.gc.pinHeader(&keeper.header);
+    defer rt.gc.unpinHeader(&keeper.header);
+    try std.testing.expect(keeper_shape.isHashed());
+
+    var name_buffer: [64]u8 = undefined;
+    var index: usize = 0;
+    while (index < 192) : (index += 1) {
+        const name = try std.fmt.bufPrint(&name_buffer, "delist-dead-{d}", .{index});
+        const key = try rt.internAtom(name);
+        defer rt.atoms.free(key);
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        try dead.definePlainDataPropertyKnownFast(rt, key, core.JSValue.int32(@intCast(index)));
+        dead.value().free(rt);
+    }
+    const hashed_before = rt.shapes.shape_hash_count;
+    try rt.shapes.verifyHashIndex();
+
+    // Drive to the finish and stop there, with the morgue open. This is the
+    // window the delist exists for: condemned, not yet destroyed, mutator
+    // about to run again.
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    var polls: usize = 0;
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    try std.testing.expect(rt.gc.doomed_pending);
+
+    // The delist is an unlink, so the flag and the count are already correct
+    // here -- not at the destructor. When the delist only spliced buckets, the
+    // count stayed high for the whole morgue window and this failed.
+    try rt.shapes.verifyHashIndex();
+    const hashed_condemned = rt.shapes.shape_hash_count;
+    try std.testing.expect(hashed_condemned < hashed_before);
+    // The survivor is still hashed and still the shape the same transition
+    // resolves to: delisting corpses must not delist their live neighbours.
+    try std.testing.expect(keeper_shape.isHashed());
+    const twin = try core.Object.create(rt, core.class.ids.object, null);
+    defer twin.value().free(rt);
+    try twin.definePlainDataPropertyKnownFast(rt, keeper_key, core.JSValue.int32(2));
+    try std.testing.expectEqual(keeper_shape, twin.shape_ref);
+
+    // Destruction has nothing left to unlink, so it must not move the count.
+    while (rt.gc.doomed_pending) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    try rt.shapes.verifyHashIndex();
+    try std.testing.expectEqual(hashed_condemned, rt.shapes.shape_hash_count);
+    try std.testing.expect(keeper_shape.isHashed());
+}
+
 test "the marked-set census is its own opt-in, not a rider on the stats panel" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     // `--gc-stats` is the only instrument for the pause distribution, and the
