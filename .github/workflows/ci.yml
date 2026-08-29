@@ -41,6 +41,9 @@ jobs:
       # signal available. It runs on the primary development platform only:
       # results are architecture-independent, and a second copy would buy noise.
       - run: zig build test262-check --summary all
+      # The rc collector is the supported rollback since the Stage 7 default
+      # flip; keep it compiling and smoking so the rollback path cannot rot.
+      - run: zig build smoke -Dzjs_gc=rc --summary all
 
   linux-x86_64:
     runs-on: ubuntu-24.04

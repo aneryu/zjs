@@ -1,26 +1,27 @@
-# Experimental Tracing GC And RC Rollback
+# Tracing GC Default And RC Rollback
 
-Status: 2026-08-28. This is the build/release control required before Stage 7;
-it is not approval to start the production-default transition. RC remains the
-shipped default.
+Status: 2026-08-29. **Stage 7 promotion executed**: the tracing collector is
+the production default on `main`. The gate basis: gc_heavy_six fixed-work
+geomean 1.0419 vs the frozen rc baseline (margin 1.05 met), splay major pause
+p99 ~1ms vs rc 42.4ms, dual-variant unit suites green, trace-build test262
+0/49778 (docs/splay-account-2026-08-28.md holds the full ledger). This
+document keeps the rollback contract that Stage 7 required.
 
 ## Build Contract
 
-Tracing is reachable only through an option whose name says that it is
-experimental:
-
 ```sh
-# Production/default: RC. The explicit form is preferred in release jobs.
-zig build zjs -Dzjs_gc=rc -Dzjs_experimental_gc=off
+# Production/default: stop-the-world tracing collector.
+zig build zjs
 
-# Separately labelled experimental artifact: stop-the-world tracing.
-zig build zjs -Dzjs_experimental_gc=trace_stw
+# Rollback: refcounting collector. The explicit two-option form pins both
+# halves of the decision for release automation.
+zig build zjs -Dzjs_gc=rc -Dzjs_experimental_gc=off
 ```
 
-Omitting both options resolves to RC. `-Dzjs_gc=shadow` remains the
-non-reclaiming observer. The old peer-looking selection
-`-Dzjs_gc=trace_stw` is a hard build error with a pointer to the experimental
-option, and `shadow` cannot be combined with the reclaiming tracer.
+`-Dzjs_experimental_gc=trace_stw` remains accepted as a compat alias from the
+experimental phase (now redundant with the default), so existing gate scripts
+keep working. `-Dzjs_gc=shadow` remains the non-reclaiming observer and cannot
+be combined with the reclaiming tracer.
 
 This is a compile-time collector selection, not a runtime flag. One process
 cannot change an existing heap from tracing to RC or back. The internal

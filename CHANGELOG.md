@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **GC: the tracing collector is the production default** (2026-08-29).
+  The `gc/tracing` campaign is squashed into main and Stage 7 is executed:
+  stop-the-world tracing with generational minors, block heap, parallel STW
+  marking, budgeted lazy destruction, and conservative stack scanning
+  replaces refcounting as the default collector. Refcounting remains fully
+  supported as the rollback (`-Dzjs_gc=rc`) and is exercised in CI.
+  Gate basis: gc_heavy_six fixed-work geomean 1.0419 vs the frozen rc
+  baseline (margin 1.05), splay major pause p99 ~1ms vs rc 42.4ms,
+  test262 0/49778 on the trace build. Memory pacing uses growth factor 2.0
+  (JSC parity); expect higher transient peak RSS than rc on GC-heavy
+  workloads (about +10-13% vs the 1.75 pacing on the six-benchmark corpus).
+
 Target **0.2.0-dev** (unpublished). Maintainability campaign (2026-08-18):
 breaking public-API cleanup is approved for this cycle; hot-path structural
 refactors are deferred to `docs/backlog.md` and land only under the

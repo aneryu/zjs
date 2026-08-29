@@ -2186,14 +2186,12 @@ default switch.
 
 ### Stage 7 preparation status: explicit experiment and rollback ready; default refused
 
-The two prerequisites that are independent of the performance verdict are now
-in place. Tracing is reachable only through
-`-Dzjs_experimental_gc=trace_stw`; the old `-Dzjs_gc=trace_stw` selection is a
-hard error. RC remains the shipped default, and
+The two prerequisites that are independent of the performance verdict are in
+place. 2026-08-29 update: **the Stage 7 promotion is executed** -- the tracer
+is the shipped default, RC is the supported rollback (`-Dzjs_gc=rc`), and
 [`tracing-gc-experimental-rollout.md`](tracing-gc-experimental-rollout.md)
-defines the artifact/restart rollback and is the authoritative current
-preflight table. Landing those controls does not start or clear the
-production-default transition.
+holds the rollback contract and the gate basis (gc_heavy_six geomean 1.0419
+vs the frozen rc baseline, margin 1.05 met; trace test262 0/49778).
 
 The following historical mechanism corpora named by Stage 7 have been run;
 they remain useful evidence, but must be refreshed together on the exact clean

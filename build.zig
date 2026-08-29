@@ -47,28 +47,25 @@ pub fn build(b: *std.Build) void {
     // `zig build test -Dzjs_ownership_audit=true`; see
     // docs/borrowed_atom_audit.md §6.
     const zjs_ownership_audit = b.option(bool, "zjs_ownership_audit", "Quarantine one just-freed atom slot so borrowed-atom use-after-free trips an assertion instead of being masked by slot reuse (audit tier; never ReleaseFast)") orelse false;
-    // Collector implementation. `zjs_gc` contains only the shipped RC mode
-    // and the non-reclaiming shadow observer; selecting a reclaiming tracer is
-    // deliberately NOT a peer value. Stage 7 requires an option whose name
-    // makes the experimental status unavoidable at every build/release call
-    // site. `off` is accepted explicitly so rollback automation can pin both
-    // halves of the decision instead of relying on an omitted option.
-    const zjs_gc_base = b.option([]const u8, "zjs_gc", "collector: rc (default) or shadow (non-reclaiming observer); tracing requires -Dzjs_experimental_gc=trace_stw") orelse "rc";
-    if (std.mem.eql(u8, zjs_gc_base, "trace_stw")) {
-        std.debug.print("error: -Dzjs_gc=trace_stw is not a supported tracing entry; use the explicit -Dzjs_experimental_gc=trace_stw build/config option\n", .{});
+    // Collector implementation. Stage 7 promotion (2026-08-29): the tracing
+    // collector is the production default. `rc` is the supported rollback,
+    // `shadow` the non-reclaiming observer. The former experimental entry
+    // `-Dzjs_experimental_gc=trace_stw` stays accepted so existing gate
+    // scripts and release automation keep working; it is now redundant with
+    // the default. Rollback automation pins `-Dzjs_gc=rc
+    // -Dzjs_experimental_gc=off` to fix both halves of the decision.
+    const zjs_gc_base = b.option([]const u8, "zjs_gc", "collector: trace_stw (default), rc (rollback), or shadow (non-reclaiming observer)") orelse "trace_stw";
+    if (!std.mem.eql(u8, zjs_gc_base, "rc") and !std.mem.eql(u8, zjs_gc_base, "shadow") and !std.mem.eql(u8, zjs_gc_base, "trace_stw")) {
+        std.debug.print("error: invalid -Dzjs_gc value '{s}': expected trace_stw, rc, or shadow\n", .{zjs_gc_base});
         std.process.exit(1);
     }
-    if (!std.mem.eql(u8, zjs_gc_base, "rc") and !std.mem.eql(u8, zjs_gc_base, "shadow")) {
-        std.debug.print("error: invalid -Dzjs_gc value '{s}': expected rc or shadow\n", .{zjs_gc_base});
-        std.process.exit(1);
-    }
-    const zjs_experimental_gc = b.option([]const u8, "zjs_experimental_gc", "EXPERIMENTAL collector: off (default) or trace_stw; experimental artifacts must be labeled and must not replace the production default") orelse "off";
+    const zjs_experimental_gc = b.option([]const u8, "zjs_experimental_gc", "compat alias from the experimental phase: off (no override) or trace_stw (force the tracer); the tracer is the default since the Stage 7 promotion") orelse "off";
     if (!std.mem.eql(u8, zjs_experimental_gc, "off") and !std.mem.eql(u8, zjs_experimental_gc, "trace_stw")) {
         std.debug.print("error: invalid -Dzjs_experimental_gc value '{s}': expected off or trace_stw\n", .{zjs_experimental_gc});
         std.process.exit(1);
     }
-    if (std.mem.eql(u8, zjs_experimental_gc, "trace_stw") and !std.mem.eql(u8, zjs_gc_base, "rc")) {
-        std.debug.print("error: -Dzjs_experimental_gc=trace_stw conflicts with -Dzjs_gc={s}; tracing replaces rc and cannot be combined with the shadow observer\n", .{zjs_gc_base});
+    if (std.mem.eql(u8, zjs_experimental_gc, "trace_stw") and std.mem.eql(u8, zjs_gc_base, "shadow")) {
+        std.debug.print("error: -Dzjs_experimental_gc=trace_stw conflicts with -Dzjs_gc=shadow; the reclaiming tracer cannot be combined with the shadow observer\n", .{});
         std.process.exit(1);
     }
     const zjs_gc = if (std.mem.eql(u8, zjs_experimental_gc, "trace_stw")) "trace_stw" else zjs_gc_base;
@@ -79,7 +76,7 @@ pub fn build(b: *std.Build) void {
     );
     const experimental_sticky_major = experimental_sticky_major_option orelse false;
     if (experimental_sticky_major_option != null and !std.mem.eql(u8, zjs_gc, "trace_stw")) {
-        std.debug.print("error: -Dzjs_experimental_gc_sticky_major is valid only with -Dzjs_experimental_gc=trace_stw\n", .{});
+        std.debug.print("error: -Dzjs_experimental_gc_sticky_major is valid only in trace_stw builds\n", .{});
         std.process.exit(1);
     }
     // Pass-B corpse census. Pure measurement: it classifies every parked
@@ -94,7 +91,7 @@ pub fn build(b: *std.Build) void {
     );
     const experimental_corpse_census = experimental_corpse_census_option orelse false;
     if (experimental_corpse_census_option != null and !std.mem.eql(u8, zjs_gc, "trace_stw")) {
-        std.debug.print("error: -Dzjs_experimental_gc_corpse_census is valid only with -Dzjs_experimental_gc=trace_stw\n", .{});
+        std.debug.print("error: -Dzjs_experimental_gc_corpse_census is valid only in trace_stw builds\n", .{});
         std.process.exit(1);
     }
 
