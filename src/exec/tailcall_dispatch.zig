@@ -666,7 +666,7 @@ fn applyForwardCallMethod(
     if (live_bytes < total * @sizeOf(JSValue)) return .threw;
     const region_start = sp - total;
     vm.frame.pc += 2;
-    vm.stack.setTopPtr(region_start);
+    vm.stack.retreatToCallRegion(region_start);
     const receiver = region_start[0];
     const method = region_start[1];
     const method_obj = object_ops.objectFromValue(method) orelse return .threw;
@@ -1525,7 +1525,7 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                 const region_start = sp - total;
                 const func = region_start[0];
                 if (inline_calls.resolveInlineFunction(vm.global, func)) |resolved| {
-                    vm.stack.setTopPtr(region_start);
+                    vm.stack.retreatToCallRegion(region_start);
                     const execution = resolved.call_facts.execution;
                     if (argc == 0 and execution.simple_inline_empty_leaf) {
                         if (comptime argc_source == .zero) {
@@ -1745,7 +1745,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             if (method_obj.class_id == core.class.ids.bytecode_function) {
                 if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_obj)) |resolved| {
                     vm.frame.pc += 2;
-                    vm.stack.setTopPtr(region_start);
+                    vm.stack.retreatToCallRegion(region_start);
                     const execution = resolved.call_facts.execution;
                     // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
                     // published leaf skips InlineTarget freight and the three-deep
@@ -1844,7 +1844,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                 // boundary, stack limit) changes nothing — restore the
                 // operand top and take the authoritative path below.
                 if (argc <= 1 and target.call_facts.execution.simple_inline_empty_leaf and this_arg.isUndefined()) {
-                    vm.stack.setTopPtr(region_start);
+                    vm.stack.retreatToCallRegion(region_start);
                     if (vm.machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, vm.global, vm.stack, target.fb, target.call_facts, region_start)) |entry| {
                         vm.frame.pc += 2;
                         return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
@@ -1908,7 +1908,7 @@ noinline fn pushDerivedConstructorEntry(
     region_start[0] = constructor_this;
     displaced_func.free(vm.rt);
     const target = candidate.resolved.bind(constructor_this, func);
-    vm.stack.setTopPtr(region_start);
+    vm.stack.retreatToCallRegion(region_start);
     const entry = vm.machine.pushDerivedConstructorCall(
         vm.global,
         vm.stack,
@@ -1949,7 +1949,7 @@ noinline fn pushSpreadDerivedConstructorEntry(
     region_start[0] = constructor_this;
     region_start[1] = constructor_func;
     const target = candidate.resolved.bind(constructor_this, func);
-    vm.stack.setTopPtr(region_start);
+    vm.stack.retreatToCallRegion(region_start);
     const entry = vm.machine.pushDerivedConstructorCall(
         vm.global,
         vm.stack,
@@ -2025,7 +2025,7 @@ fn enterSameMachineSpreadConstructor(
             region_start[0] = instance;
             region_start[1] = constructor_func;
             const target = candidate.resolved.bind(instance, func);
-            vm.stack.setTopPtr(region_start);
+            vm.stack.retreatToCallRegion(region_start);
             const entry = vm.machine.pushConstructorCall(
                 vm.global,
                 vm.stack,
@@ -2200,7 +2200,7 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                     region_start[0] = instance;
                     displaced_func.free(vm.rt);
                     const target = candidate.resolved.bind(instance, func);
-                    vm.stack.setTopPtr(region_start);
+                    vm.stack.retreatToCallRegion(region_start);
                     const entry = vm.machine.pushConstructorCall(
                         vm.global,
                         vm.stack,
@@ -2894,6 +2894,10 @@ pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
             std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
             const cell = vm.var_refs_base[idx];
             value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
+            // The cell is the owner of this slot, and it long outlives the
+            // frame doing the store; `VarRef.setVarRefValue` takes the same
+            // barrier, but these handlers write `cell.pvalue` directly.
+            vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
             return cont(pc + advance, sp - 1, var_buf, vm);
         }
     }.h;
@@ -2929,6 +2933,8 @@ pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
     // operand slot — so no stack shrink is required before free (same GC-window
     // reasoning as opPutVarRef; contrast op_drop_fast, which frees the slot).
     value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
+    // See the barrier in the opPutVarRef family: the cell owns this slot.
+    vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
     return cont(pc + 3, sp - 1, var_buf, vm);
 }
 
@@ -2960,6 +2966,10 @@ pub fn opSetVarRef(comptime idx_src: VarRefIdx) Handler {
             std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
             const cell = vm.var_refs_base[idx];
             value_slot.replaceBorrowed(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
+            // The cell is the owner of this slot, and it long outlives the
+            // frame doing the store; `VarRef.setVarRefValue` takes the same
+            // barrier, but these handlers write `cell.pvalue` directly.
+            vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
             return cont(pc + advance, sp, var_buf, vm);
         }
     }.h;
@@ -3618,6 +3628,12 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
                         const slot = object.fastArraySlotAssumeCapacity(index);
                         const old_value = loadValueAsIntPair(slot);
                         storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
+                        // This arm writes the dense slot itself rather than
+                        // going through `setFastArrayElement*`, so it needs its
+                        // own barrier: `a[i] = obj` on a long-lived array is an
+                        // old-to-young edge, and the minor's sticky marks stop
+                        // the trace at the array.
+                        rt.gc.generationalBarrier(&object.header, (sp - 1)[0].cycleMarkHeader());
                         if (old_value.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {
                             // Park the dying element in the now-dead value
                             // slot so the tail completes both releases off
@@ -3644,6 +3660,7 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
                         {
                             const slot = object.fastArraySlotAssumeCapacity(index);
                             storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
+                            vm.ctx.runtime.gc.generationalBarrier(&object.header, (sp - 1)[0].cycleMarkHeader());
                             object.u.array.count = new_count;
                             if (new_count > object.u.array.length)
                                 object.u.array.length = new_count;
@@ -3808,6 +3825,21 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         const old_value = loadValueAsIntPair(slot);
         const value = loadValueAsIntPair(&(sp - 1)[0]);
         storeValueAsIntPair(slot, value); // consumes the stack's ref on value
+        // This arm writes the property slot itself rather than going through
+        // any of the `setOrDefineOwnDataProperty*` funnels, so it needs its own
+        // barrier: `node.left = child` on a long-lived object is an old-to-young
+        // edge, and the minor's sticky marks stop the trace at the owner.
+        // (`op_put_array_el`'s dense arm above carries the same barrier for the
+        // same reason.) Receivers reaching this arm already have the property,
+        // so they are established objects and this is the old-to-young
+        // direction routinely -- every large object-graph benchmark failed
+        // without it. Comptime-gated so the refcounting build emits nothing,
+        // not even the receiver re-extraction.
+        if (comptime core.gc.generation_enabled) {
+            if (object_ops.objectFromValueTrustedExpression(receiver)) |owner| {
+                rt.gc.generationalBarrierValue(&owner.header, (sp - 1)[0]);
+            }
+        }
         if (old_value.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {
             // Park the dying old value (rc == 1) in the now-dead value slot;
             // the tail completes both releases off the still-intact operands.
@@ -3932,7 +3964,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
     // read, so normal return/throw resumes at the correct instruction.
     if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, getter)) |target| {
         const region_start = sp - 2;
-        vm.stack.setTopPtr(region_start);
+        vm.stack.retreatToCallRegion(region_start);
         return pushAndEnter(var_buf, vm, &target, region_start, 0, .method);
     }
     vm.stack.setTopPtr(sp);
@@ -4336,9 +4368,34 @@ fn op_get_length_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVa
 // sp from the published stack — no state was mutated here, so the fall-through is
 // clean). No pc/sp publish, no coldNext round-trip.
 pub fn op_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    if (comptime core.gc.trace_stw_enabled) {
+        vm.syncSp(sp);
+        const value = vm_literal.newPlainObjectValue(vm.ctx, vm.global) catch
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        sp[0] = value;
+        return cont(pc + 1, sp + 1, var_buf, vm);
+    }
     const value = vm_literal.newPlainObjectValue(vm.ctx, vm.global) catch
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = value; // owned
+    return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
+// Same frameless literal-create contract as OP_object, but the parser proved
+// that the final Shape has one or two unique static named properties. Allocate
+// the matching two-entry trailing property region up front; computed/spread or
+// larger literals never reach this opcode.
+pub fn op_object_slots2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    if (comptime core.gc.trace_stw_enabled) {
+        vm.syncSp(sp);
+        const value = vm_literal.newPlainObjectReserved2Value(vm.ctx, vm.global) catch
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        sp[0] = value;
+        return cont(pc + 1, sp + 1, var_buf, vm);
+    }
+    const value = vm_literal.newPlainObjectReserved2Value(vm.ctx, vm.global) catch
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    sp[0] = value;
     return cont(pc + 1, sp + 1, var_buf, vm);
 }
 
@@ -4356,6 +4413,16 @@ pub fn op_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) 
 // the u32 atom operand — this handler left frame.pc untouched, so the decode matches).
 // 5-byte op (u32 atom).
 pub fn op_define_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    if (comptime core.gc.trace_stw_enabled) {
+        vm.syncSp(sp);
+        const value = (sp - 1)[0];
+        const obj = (sp - 2)[0];
+        const atom_id = readInt(u32, pc + 1);
+        if (vm_literal.defineFieldFast(vm.ctx.runtime, obj, atom_id, value)) {
+            return cont(pc + 5, sp - 1, var_buf, vm);
+        }
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    }
     const value = (sp - 1)[0];
     const obj = (sp - 2)[0];
     const atom_id = readInt(u32, pc + 1);
@@ -4386,6 +4453,17 @@ pub fn op_array_from(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     const values = (sp - argc)[0..argc];
     const initial_shape = vm.ctx.array_shape orelse
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    if (comptime core.gc.trace_stw_enabled) {
+        // Frameless dispatch keeps `sp` in a register; STW liveValues() reads
+        // `stack.top_ptr`. Publish before the literal allocation so already-
+        // evaluated elements below argc stay marked (RC used operand refcounts).
+        vm.syncSp(sp);
+        const array = core.array.constructLiteralOwnedDenseFromShape(rt, values, initial_shape) catch
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        const nsp = sp - argc;
+        nsp[0] = array;
+        return cont(pc + 3, nsp + 1, var_buf, vm);
+    }
     const array = core.array.constructLiteralOwnedDenseFromShape(rt, values, initial_shape) catch
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const nsp = sp - argc;
@@ -5056,7 +5134,7 @@ fn internalMethodRemainderHandler(
             if (object_ops.objectFromValue(method)) |method_object| {
                 if (method_object.class_id == core.class.ids.bytecode_function) {
                     if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_object)) |resolved| {
-                        stack.setTopPtr(region_start);
+                        stack.retreatToCallRegion(region_start);
                         const execution = resolved.call_facts.execution;
                         const leaf_kind = execution.exact_args_leaf_kind;
                         if (leaf_kind != .none and argc == resolved.fb.arg_count) {
@@ -5760,11 +5838,17 @@ pub fn op_put_loc8_get_loc8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
     const idx: u16 = pc[1];
     const old = var_buf[idx];
     if (old.requiresRefCount()) {
+        if (comptime core.gc.trace_stw_enabled) {
+            if (old.isTracerOwned()) {
+                var_buf[idx] = (sp - 1)[0];
+                return @call(.always_tail, opLoc(.get, .byte), .{ pc + 2, sp - 1, var_buf, vm });
+            }
+        }
         if (old.refCountHeader()) |header| {
-            if (header.metaConst().rc == 1)
+            if (core.gc.headerRefCount(header) == 1)
                 return @call(.always_tail, op_put_loc8_get_loc8_cold, .{ pc, sp, var_buf, vm });
             var_buf[idx] = (sp - 1)[0];
-            header.meta().rc -= 1;
+            _ = core.gc.decrementHeaderRefCount(header);
         } else if (old.stringHeader()) |header| {
             if (header.rc == 1)
                 return @call(.always_tail, op_put_loc8_get_loc8_cold, .{ pc, sp, var_buf, vm });
@@ -5793,12 +5877,19 @@ pub fn op_put_loc8_get_loc8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
 pub fn op_push_this_put_loc0(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
     const old = var_buf[0];
     if (old.requiresRefCount()) {
+        if (comptime core.gc.trace_stw_enabled) {
+            if (old.isTracerOwned()) {
+                if (!storeThisInLoc0(var_buf, vm))
+                    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                return cont(pc + 2, sp, var_buf, vm);
+            }
+        }
         if (old.refCountHeader()) |header| {
-            if (header.metaConst().rc == 1)
+            if (core.gc.headerRefCount(header) == 1)
                 return @call(.always_tail, op_push_this_put_loc0_cold, .{ pc, sp, var_buf, vm });
             if (!storeThisInLoc0(var_buf, vm))
                 return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-            header.meta().rc -= 1;
+            _ = core.gc.decrementHeaderRefCount(header);
         } else if (old.stringHeader()) |header| {
             if (header.rc == 1)
                 return @call(.always_tail, op_push_this_put_loc0_cold, .{ pc, sp, var_buf, vm });
@@ -5842,11 +5933,17 @@ pub fn op_push_this_put_loc0_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]J
 pub fn op_put_loc0_get_loc0(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
     const old = var_buf[0];
     if (old.requiresRefCount()) {
+        if (comptime core.gc.trace_stw_enabled) {
+            if (old.isTracerOwned()) {
+                var_buf[0] = (sp - 1)[0];
+                return @call(.always_tail, opLoc(.get, .c0), .{ pc + 1, sp - 1, var_buf, vm });
+            }
+        }
         if (old.refCountHeader()) |header| {
-            if (header.metaConst().rc == 1)
+            if (core.gc.headerRefCount(header) == 1)
                 return @call(.always_tail, op_put_loc0_get_loc0_cold, .{ pc, sp, var_buf, vm });
             var_buf[0] = (sp - 1)[0];
-            header.meta().rc -= 1;
+            _ = core.gc.decrementHeaderRefCount(header);
         } else if (old.stringHeader()) |header| {
             if (header.rc == 1)
                 return @call(.always_tail, op_put_loc0_get_loc0_cold, .{ pc, sp, var_buf, vm });
@@ -6041,7 +6138,7 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
                     if (prop_index >= props.len) continue;
                     if (prop.atom_id == cv.var_name and (prop.flags & 0b100000) == 0) {
                         if ((prop.flags & 0b011000) == 0) {
-                            sp[0] = global.prop_values[prop_index].slot.data.dup();
+                            sp[0] = global.propertyEntry(prop_index).*.slot.data.dup();
                             return cont(pc + 3, sp + 1, var_buf, vm);
                         }
                         break; // found, but not a plain data slot → cold waterfall

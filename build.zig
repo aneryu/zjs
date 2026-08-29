@@ -47,6 +47,56 @@ pub fn build(b: *std.Build) void {
     // `zig build test -Dzjs_ownership_audit=true`; see
     // docs/borrowed_atom_audit.md §6.
     const zjs_ownership_audit = b.option(bool, "zjs_ownership_audit", "Quarantine one just-freed atom slot so borrowed-atom use-after-free trips an assertion instead of being masked by slot reuse (audit tier; never ReleaseFast)") orelse false;
+    // Collector implementation. `zjs_gc` contains only the shipped RC mode
+    // and the non-reclaiming shadow observer; selecting a reclaiming tracer is
+    // deliberately NOT a peer value. Stage 7 requires an option whose name
+    // makes the experimental status unavoidable at every build/release call
+    // site. `off` is accepted explicitly so rollback automation can pin both
+    // halves of the decision instead of relying on an omitted option.
+    const zjs_gc_base = b.option([]const u8, "zjs_gc", "collector: rc (default) or shadow (non-reclaiming observer); tracing requires -Dzjs_experimental_gc=trace_stw") orelse "rc";
+    if (std.mem.eql(u8, zjs_gc_base, "trace_stw")) {
+        std.debug.print("error: -Dzjs_gc=trace_stw is not a supported tracing entry; use the explicit -Dzjs_experimental_gc=trace_stw build/config option\n", .{});
+        std.process.exit(1);
+    }
+    if (!std.mem.eql(u8, zjs_gc_base, "rc") and !std.mem.eql(u8, zjs_gc_base, "shadow")) {
+        std.debug.print("error: invalid -Dzjs_gc value '{s}': expected rc or shadow\n", .{zjs_gc_base});
+        std.process.exit(1);
+    }
+    const zjs_experimental_gc = b.option([]const u8, "zjs_experimental_gc", "EXPERIMENTAL collector: off (default) or trace_stw; experimental artifacts must be labeled and must not replace the production default") orelse "off";
+    if (!std.mem.eql(u8, zjs_experimental_gc, "off") and !std.mem.eql(u8, zjs_experimental_gc, "trace_stw")) {
+        std.debug.print("error: invalid -Dzjs_experimental_gc value '{s}': expected off or trace_stw\n", .{zjs_experimental_gc});
+        std.process.exit(1);
+    }
+    if (std.mem.eql(u8, zjs_experimental_gc, "trace_stw") and !std.mem.eql(u8, zjs_gc_base, "rc")) {
+        std.debug.print("error: -Dzjs_experimental_gc=trace_stw conflicts with -Dzjs_gc={s}; tracing replaces rc and cannot be combined with the shadow observer\n", .{zjs_gc_base});
+        std.process.exit(1);
+    }
+    const zjs_gc = if (std.mem.eql(u8, zjs_experimental_gc, "trace_stw")) "trace_stw" else zjs_gc_base;
+    const experimental_sticky_major_option = b.option(
+        bool,
+        "zjs_experimental_gc_sticky_major",
+        "EXPERIMENTAL trace_stw full-every-2 sticky-major arm (default off)",
+    );
+    const experimental_sticky_major = experimental_sticky_major_option orelse false;
+    if (experimental_sticky_major_option != null and !std.mem.eql(u8, zjs_gc, "trace_stw")) {
+        std.debug.print("error: -Dzjs_experimental_gc_sticky_major is valid only with -Dzjs_experimental_gc=trace_stw\n", .{});
+        std.process.exit(1);
+    }
+    // Pass-B corpse census. Pure measurement: it classifies every parked
+    // corpse so the block-drain design's stage-2/stage-3 conditions can be
+    // priced. Default off and comptime-erased when off, because the thing it
+    // measures IS the per-entry cost -- a runtime flag test inside the drain
+    // would be part of the quantity under measurement.
+    const experimental_corpse_census_option = b.option(
+        bool,
+        "zjs_experimental_gc_corpse_census",
+        "EXPERIMENTAL trace_stw Pass-B corpse census (measurement only, default off)",
+    );
+    const experimental_corpse_census = experimental_corpse_census_option orelse false;
+    if (experimental_corpse_census_option != null and !std.mem.eql(u8, zjs_gc, "trace_stw")) {
+        std.debug.print("error: -Dzjs_experimental_gc_corpse_census is valid only with -Dzjs_experimental_gc=trace_stw\n", .{});
+        std.process.exit(1);
+    }
 
     // ===== QCP-1 configuration signature =====
     // The defect class this closes is "a gate reports green about a
@@ -133,6 +183,9 @@ pub fn build(b: *std.Build) void {
         .force_gc = zjs_force_gc,
         .ownership_audit = zjs_ownership_audit,
         .dossier_layout_pad = zjs_dossier_layout_pad,
+        .zjs_gc = zjs_gc,
+        .experimental_gc_sticky_major = experimental_sticky_major,
+        .experimental_gc_corpse_census = experimental_corpse_census,
     };
     // Follows -Doptimize: the public engine module and the OOM corpus engine.
     const engine_options = config.addEngineOptions(b, engine_option_inputs);

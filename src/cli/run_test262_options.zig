@@ -15,7 +15,8 @@ pub const usage =
     "  --engine <path>          run prepared tests with an external qjs-compatible\n" ++
     "                           binary instead of the embedded zjs engine\n" ++
     "  --enable-feature <name> temporarily enable a config-skipped feature\n" ++
-    "  --skip-feature <name>   temporarily skip a config-enabled feature\n";
+    "  --skip-feature <name>   temporarily skip a config-enabled feature\n" ++
+    "  --gc-shadow-check       after each test, run the shadow census (no-op unless -Dzjs_gc=shadow)\n";
 
 pub const Error = error{
     Usage,
@@ -43,6 +44,9 @@ pub const Config = struct {
     stop_index: ?usize = null,
     files: BoundedList = .{},
     dirs: BoundedList = .{},
+    /// Shadow-only observer. Default `rc` builds parse the flag but never
+    /// census: `runEmbeddedEngine` comptime-erases the call.
+    gc_shadow_check: bool = false,
 
     pub fn selectedCount(self: Config) usize {
         return self.files.len + self.dirs.len + @as(usize, if (self.test_root != null) 1 else 0);
@@ -122,6 +126,8 @@ pub fn parse(args: []const []const u8) Error!Config {
             try config.feature_overrides.append(.enable, try nextValue(args, &i));
         } else if (std.mem.eql(u8, arg, "--skip-feature")) {
             try config.feature_overrides.append(.skip, try nextValue(args, &i));
+        } else if (std.mem.eql(u8, arg, "--gc-shadow-check")) {
+            config.gc_shadow_check = true;
         } else if (arg.len != 0 and arg[0] == '-') {
             return error.Usage;
         } else if (isDecimal(arg)) {

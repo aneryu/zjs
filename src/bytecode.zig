@@ -449,6 +449,10 @@ pub const opcode = struct {
         /// Emit-time fusion: `put_loc0` + `get_loc0`. Size/stack match
         /// `put_loc0`; the following `get_loc0` stays in the stream.
         pub const put_loc0_get_loc0: u8 = 253;
+        /// zjs-only object-literal capacity hint. The parser emits this only
+        /// when all keys are static and the final unique named-property count
+        /// is one or two, allowing a Shape-sized two-entry trailing allocation.
+        pub const object_slots2: u8 = 254;
 
         // Temporary opcodes (phase-1 emit, erased before resolve_labels).
         // Ids overlap the short opcodes above; phase-1 streams and final
@@ -479,7 +483,7 @@ pub const opcode = struct {
         pub const parser_label_tag: u32 = 0x8000_0000;
 
         /// Number of real (DEF) opcodes; ids 0..op_count-1 are claimed.
-        pub const op_count: u16 = 254;
+        pub const op_count: u16 = 255;
         /// First id of the temp/short overlap range (OP_nop + 1).
         pub const op_temp_start: u8 = 178;
         /// One past the last temp id (exclusive).
@@ -578,7 +582,7 @@ pub const opcode = struct {
         }
     };
 
-    pub const op_info_len: usize = 273;
+    pub const op_info_len: usize = 274;
 
     /// Merged metadata table in quickjs-opcode.h file order (see header
     /// comment for the index layout).
@@ -858,6 +862,7 @@ pub const opcode = struct {
         .{ .name = "put_loc8_get_loc8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .loc8 }, // [270] id 251
         .{ .name = "push_this_put_loc0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [271] id 252
         .{ .name = "put_loc0_get_loc0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [272] id 253
+        .{ .name = "object_slots2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [273] id 254
     };
 
     /// Name-free production view of `opcode_info`, matching QuickJS's
@@ -1904,7 +1909,8 @@ pub const function_bytecode = struct {
     /// four-byte ScriptOrModule offset.
     ///
     /// The total stays a multiple of eight: `LegacyExecutionAdapter` places its
-    /// aligned back-pointer at `base + 96 + @sizeOf(@This())`.
+    /// aligned back-pointer at `base + @sizeOf(FunctionBytecode) +
+    /// @sizeOf(@This())` in the active RC/trace representation.
     pub const FunctionBytecodeHotExtension = extern struct {
         call_facts: function_bytecode.CallFacts,
         /// Preserve ScriptOrModule's aligned offset without widening CallFacts
@@ -1926,8 +1932,9 @@ pub const function_bytecode = struct {
     };
 
     /// The only negative byte-code length. It discriminates the non-escaping
-    /// stack adapter whose extension is fixed at base+96 from every canonical
-    /// packed FunctionBytecode, whose checked layout always has len >= 0.
+    /// stack adapter whose extension immediately follows the active
+    /// FunctionBytecode body from every canonical packed FunctionBytecode,
+    /// whose checked layout always has len >= 0.
     pub const legacy_byte_code_len_sentinel: i32 = -1;
 
     /// Mirrors `JSFunctionBytecode` (`quickjs.c:768-804`).
@@ -2013,30 +2020,31 @@ pub const function_bytecode = struct {
         closure_var_count: i32,
 
         comptime {
-            std.debug.assert(@sizeOf(@This()) == 96);
+            std.debug.assert(@sizeOf(@This()) == if (gc.trace_stw_enabled) 88 else 96);
             std.debug.assert(@alignOf(@This()) == 8);
             std.debug.assert(@offsetOf(@This(), "header") == 0x00);
-            std.debug.assert(@offsetOf(@This(), "js_mode") == 0x10);
-            std.debug.assert(@offsetOf(@This(), "flag_byte17") == 0x11);
-            std.debug.assert(@offsetOf(@This(), "flag_byte18") == 0x12);
-            std.debug.assert(@offsetOf(@This(), "_flag_padding0") == 0x13);
-            std.debug.assert(@offsetOf(@This(), "call_facts_mirror") == 0x14);
-            std.debug.assert(@offsetOf(@This(), "_flag_padding") == 0x16);
-            std.debug.assert(@offsetOf(@This(), "byte_code") == 0x18);
-            std.debug.assert(@offsetOf(@This(), "byte_code_len") == 0x20);
-            std.debug.assert(@offsetOf(@This(), "func_name") == 0x24);
-            std.debug.assert(@offsetOf(@This(), "vardefs") == 0x28);
-            std.debug.assert(@offsetOf(@This(), "closure_var") == 0x30);
-            std.debug.assert(@offsetOf(@This(), "arg_count") == 0x38);
-            std.debug.assert(@offsetOf(@This(), "var_count") == 0x3a);
-            std.debug.assert(@offsetOf(@This(), "defined_arg_count") == 0x3c);
-            std.debug.assert(@offsetOf(@This(), "stack_size") == 0x3e);
-            std.debug.assert(@offsetOf(@This(), "var_ref_count") == 0x40);
-            std.debug.assert(@offsetOf(@This(), "_realm_padding") == 0x42);
-            std.debug.assert(@offsetOf(@This(), "realm") == 0x48);
-            std.debug.assert(@offsetOf(@This(), "cpool") == 0x50);
-            std.debug.assert(@offsetOf(@This(), "cpool_count") == 0x58);
-            std.debug.assert(@offsetOf(@This(), "closure_var_count") == 0x5c);
+            const header_bytes = @sizeOf(gc.GCObjectHeader);
+            std.debug.assert(@offsetOf(@This(), "js_mode") == header_bytes);
+            std.debug.assert(@offsetOf(@This(), "flag_byte17") == header_bytes + 1);
+            std.debug.assert(@offsetOf(@This(), "flag_byte18") == header_bytes + 2);
+            std.debug.assert(@offsetOf(@This(), "_flag_padding0") == header_bytes + 3);
+            std.debug.assert(@offsetOf(@This(), "call_facts_mirror") == header_bytes + 4);
+            std.debug.assert(@offsetOf(@This(), "_flag_padding") == header_bytes + 6);
+            std.debug.assert(@offsetOf(@This(), "byte_code") == header_bytes + 8);
+            std.debug.assert(@offsetOf(@This(), "byte_code_len") == header_bytes + 16);
+            std.debug.assert(@offsetOf(@This(), "func_name") == header_bytes + 20);
+            std.debug.assert(@offsetOf(@This(), "vardefs") == header_bytes + 24);
+            std.debug.assert(@offsetOf(@This(), "closure_var") == header_bytes + 32);
+            std.debug.assert(@offsetOf(@This(), "arg_count") == header_bytes + 40);
+            std.debug.assert(@offsetOf(@This(), "var_count") == header_bytes + 42);
+            std.debug.assert(@offsetOf(@This(), "defined_arg_count") == header_bytes + 44);
+            std.debug.assert(@offsetOf(@This(), "stack_size") == header_bytes + 46);
+            std.debug.assert(@offsetOf(@This(), "var_ref_count") == header_bytes + 48);
+            std.debug.assert(@offsetOf(@This(), "_realm_padding") == header_bytes + 50);
+            std.debug.assert(@offsetOf(@This(), "realm") == header_bytes + 56);
+            std.debug.assert(@offsetOf(@This(), "cpool") == header_bytes + 64);
+            std.debug.assert(@offsetOf(@This(), "cpool_count") == header_bytes + 72);
+            std.debug.assert(@offsetOf(@This(), "closure_var_count") == header_bytes + 76);
             std.debug.assert(@sizeOf(?[*]BytecodeVarDef) == @sizeOf(usize));
             std.debug.assert(@sizeOf(?[*]BytecodeClosureVar) == @sizeOf(usize));
             std.debug.assert(@sizeOf(?[*]JSValue) == @sizeOf(usize));
@@ -2237,8 +2245,8 @@ pub const function_bytecode = struct {
         pub inline fn legacyBytecodeAdapter(self: *const FunctionBytecodeImpl) ?*const function_mod.BytecodeImpl {
             // The negative length is the complete representation
             // discriminator: checked canonical layouts can never publish it.
-            // Only that stack adapter has the fixed pointer immediately after
-            // its base+96 hot extension; canonical FBs have no pointer side.
+            // Only that stack adapter has the pointer immediately after its
+            // body-relative hot extension; canonical FBs have no pointer side.
             if (self.byte_code_len != function_bytecode.legacy_byte_code_len_sentinel) return null;
             std.debug.assert(self.hasExtension());
             const bytes: [*]const u8 = @ptrCast(self);
@@ -9518,6 +9526,7 @@ const function_mod = struct {
     const atom = @import("core/atom.zig");
     const context = @import("core/context.zig");
     const function_bytecode_mod = function_bytecode;
+    const gc = @import("core/gc.zig");
     const memory = @import("core/memory.zig");
     const JSValue = @import("core/value.zig").JSValue;
     const pc2line = pipeline_pc2line;
@@ -10194,7 +10203,7 @@ const function_mod = struct {
         comptime {
             std.debug.assert(@offsetOf(@This(), "hot_extension") == @sizeOf(FunctionBytecode));
             std.debug.assert(@offsetOf(@This(), "legacy_bytecode_adapter") == @sizeOf(FunctionBytecode) + @sizeOf(function_bytecode_mod.FunctionBytecodeHotExtension));
-            std.debug.assert(@sizeOf(@This()) == 168);
+            std.debug.assert(@sizeOf(@This()) == if (gc.trace_stw_enabled) 160 else 168);
             std.debug.assert(@alignOf(@This()) == 8);
         }
 
@@ -10209,8 +10218,8 @@ const function_mod = struct {
                 .normal;
             self.* = std.mem.zeroes(@This());
             // Mark this stack-only adapter before enabling the extension bit:
-            // applyFlags immediately locates and writes the fixed base+96
-            // hot extension; its legacy pointer slot begins at base+104.
+            // applyFlags locates the hot extension and legacy pointer from the
+            // active FunctionBytecode size rather than a default-RC constant.
             // Canonical records never expose that stack-only slot.
             self.function.byte_code_len = function_bytecode_mod.legacy_byte_code_len_sentinel;
             self.function.flag_byte18 |= FunctionBytecode.byte18_has_extension_mask;

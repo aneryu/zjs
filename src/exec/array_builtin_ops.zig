@@ -1171,6 +1171,24 @@ fn pop(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     return value;
 }
 
+fn rewriteReversedPair(
+    rt: *core.JSRuntime,
+    array: *core.Object,
+    lower_key: core.atom.Atom,
+    upper_key: core.atom.Atom,
+    lower_value: core.JSValue,
+    upper_value: core.JSValue,
+) !void {
+    _ = array.deleteProperty(rt, lower_key);
+    _ = array.deleteProperty(rt, upper_key);
+    if (!upper_value.isUndefined()) {
+        try array.defineOwnProperty(rt, lower_key, core.Descriptor.data(upper_value, true, true, true));
+    }
+    if (!lower_value.isUndefined()) {
+        try array.defineOwnProperty(rt, upper_key, core.Descriptor.data(lower_value, true, true, true));
+    }
+}
+
 /// Mirrors the indexed-property swap shape of QuickJS `js_array_reverse`
 /// (`quickjs.c:42497-42547`) for ordinary arrays.
 fn reverse(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
@@ -1190,13 +1208,17 @@ fn reverse(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
         const upper_value = try array.getProperty(upper_key);
         defer upper_value.free(rt);
 
-        _ = array.deleteProperty(rt, lower_key);
-        _ = array.deleteProperty(rt, upper_key);
-        if (!upper_value.isUndefined()) {
-            try array.defineOwnProperty(rt, lower_key, core.Descriptor.data(upper_value, true, true, true));
-        }
-        if (!lower_value.isUndefined()) {
-            try array.defineOwnProperty(rt, upper_key, core.Descriptor.data(lower_value, true, true, true));
+        if (comptime core.runtime.value_root_frames_enabled) {
+            // Delete drops the heap edges; CLI STW does not list-link scalar
+            // Zig locals, so the swapped values live in a native window.
+            var swap_slots = [_]core.JSValue{ lower_value, upper_value };
+            var swap_slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = swap_slots[0..] }};
+            var swap_frame = core.runtime.ValueRootFrame{ .slices = &swap_slices };
+            swap_frame.activate(rt);
+            defer swap_frame.deactivate(rt);
+            try rewriteReversedPair(rt, array, lower_key, upper_key, lower_value, upper_value);
+        } else {
+            try rewriteReversedPair(rt, array, lower_key, upper_key, lower_value, upper_value);
         }
     }
     return array_value.dup();
@@ -1255,14 +1277,42 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
         }
     }.lessThan);
 
-    index = 0;
+    // Delete drops every heap edge back to the elements. The ArrayList buffer
+    // is not a conservative scan root, so CLI STW needs a native window for
+    // the in-flight JSValues until they are redefined onto the array.
+    if (comptime core.runtime.value_root_frames_enabled) {
+        try rewriteSortedArrayRooted(rt, array, entries.items);
+        return array_value.dup();
+    }
+
+    try rewriteSortedArray(rt, array, entries.items);
+    return array_value.dup();
+}
+
+fn rewriteSortedArray(rt: *core.JSRuntime, array: *core.Object, entries: []const SortEntry) !void {
+    var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
         _ = array.deleteProperty(rt, core.atom.atomFromUInt32(index));
     }
-    for (entries.items, 0..) |entry, out_index| {
+    for (entries, 0..) |entry, out_index| {
         try array.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(out_index)), core.Descriptor.data(entry.value, true, true, true));
     }
-    return array_value.dup();
+}
+
+fn rewriteSortedArrayRooted(rt: *core.JSRuntime, array: *core.Object, entries: []const SortEntry) !void {
+    var rooted_values: []core.JSValue = &.{};
+    defer if (rooted_values.len != 0) rt.memory.free(core.JSValue, rooted_values);
+    var slices: [1]core.runtime.ValueRootSlice = undefined;
+    var entries_frame = core.runtime.ValueRootFrame{};
+    if (entries.len != 0) {
+        rooted_values = try rt.memory.alloc(core.JSValue, entries.len);
+        for (entries, 0..) |entry, i| rooted_values[i] = entry.value;
+        slices[0] = .{ .borrowed = rooted_values };
+        entries_frame.slices = &slices;
+        entries_frame.activate(rt);
+    }
+    defer entries_frame.deactivate(rt);
+    try rewriteSortedArray(rt, array, entries);
 }
 
 /// Mirrors the core shape of QuickJS `js_array_concat`

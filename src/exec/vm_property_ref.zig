@@ -217,8 +217,8 @@ pub fn makeVarRef(
                 const flags = env.propFlagsAt(index);
                 if (!flags.deleted) {
                     const is_uninitialized = switch (flags.kind) {
-                        .data => env.prop_values[index].slot.data.isUninitialized(),
-                        .var_ref => env.prop_values[index].slot.var_ref.varRefValue().isUninitialized(),
+                        .data => env.propertyEntry(index).*.slot.data.isUninitialized(),
+                        .var_ref => env.propertyEntry(index).*.slot.var_ref.varRefValue().isUninitialized(),
                         .accessor, .auto_init => return error.InvalidBytecode,
                     };
                     if (is_uninitialized) return exception_ops.throwTdzReferenceError(ctx);

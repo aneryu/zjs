@@ -5,6 +5,25 @@ const zjs = @import("zjs");
 const engine = zjs;
 const core = zjs.core;
 const helpers = @import("helpers.zig");
+const gc_representation = @import("../gc_representation.zig");
+
+test "GC representation snapshot matches the committed baseline" {
+    const baseline = if (core.gc.trace_stw_enabled)
+        @embedFile("../gc-representation-trace-snapshot.txt")
+    else
+        @embedFile("../gc-representation-snapshot.txt");
+    try std.testing.expectEqualStrings(baseline, gc_representation.snapshot_text);
+}
+
+test "gc invariant negative: representation snapshot rejects silent layout drift" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const changed = try std.testing.allocator.dupe(u8, gc_representation.snapshot_text);
+    defer std.testing.allocator.free(changed);
+    changed[0] ^= 1;
+    try std.testing.expect(!gc_representation.matchesBaseline(changed));
+    try std.testing.expect(gc_representation.matchesBaseline(gc_representation.snapshot_text));
+}
 
 test "host transports and core operation errors keep independent narrow sets" {
     const CallbackTransport = error{
@@ -185,7 +204,7 @@ test "QuickJS branch immediate range admits int bool null and undefined only" {
     }
 }
 
-test "refcounted JSValue payloads keep rc at the QuickJS minus-four offset" {
+test "refcounted JSValue payloads keep their lifetime word at minus four" {
     const RawWideValue = extern struct {
         payload: u64,
         tag: i64,
@@ -216,20 +235,20 @@ test "refcounted JSValue payloads keep rc at the QuickJS minus-four offset" {
     const cases = [_]struct {
         value: core.JSValue,
         body_address: usize,
-        rc_address: usize,
+        lifetime_address: usize,
     }{
-        .{ .value = core.JSValue.bigInt(gc_header), .body_address = @intFromPtr(gc_header), .rc_address = @intFromPtr(&gc_meta.rc) },
-        .{ .value = core.JSValue.symbol(flat_rc), .body_address = @intFromPtr(flat_body), .rc_address = @intFromPtr(flat_rc) },
-        .{ .value = core.JSValue.string(flat_rc), .body_address = @intFromPtr(flat_body), .rc_address = @intFromPtr(flat_rc) },
-        .{ .value = core.JSValue.stringRope(rope_rc), .body_address = @intFromPtr(rope_body), .rc_address = @intFromPtr(rope_rc) },
-        .{ .value = core.JSValue.module(gc_header), .body_address = @intFromPtr(gc_header), .rc_address = @intFromPtr(&gc_meta.rc) },
-        .{ .value = core.JSValue.functionBytecode(gc_header), .body_address = @intFromPtr(gc_header), .rc_address = @intFromPtr(&gc_meta.rc) },
-        .{ .value = core.JSValue.object(gc_header), .body_address = @intFromPtr(gc_header), .rc_address = @intFromPtr(&gc_meta.rc) },
+        .{ .value = core.JSValue.bigInt(gc_header), .body_address = @intFromPtr(gc_header), .lifetime_address = @intFromPtr(&gc_meta.lifetime) },
+        .{ .value = core.JSValue.symbol(flat_rc), .body_address = @intFromPtr(flat_body), .lifetime_address = @intFromPtr(flat_rc) },
+        .{ .value = core.JSValue.string(flat_rc), .body_address = @intFromPtr(flat_body), .lifetime_address = @intFromPtr(flat_rc) },
+        .{ .value = core.JSValue.stringRope(rope_rc), .body_address = @intFromPtr(rope_body), .lifetime_address = @intFromPtr(rope_rc) },
+        .{ .value = core.JSValue.module(gc_header), .body_address = @intFromPtr(gc_header), .lifetime_address = @intFromPtr(&gc_meta.lifetime) },
+        .{ .value = core.JSValue.functionBytecode(gc_header), .body_address = @intFromPtr(gc_header), .lifetime_address = @intFromPtr(&gc_meta.lifetime) },
+        .{ .value = core.JSValue.object(gc_header), .body_address = @intFromPtr(gc_header), .lifetime_address = @intFromPtr(&gc_meta.lifetime) },
     };
 
     for (cases) |case| {
         try std.testing.expectEqual(case.body_address, pointerPayload(case.value));
-        try std.testing.expectEqual(case.rc_address + @sizeOf(core.gc.StringHeader), pointerPayload(case.value));
+        try std.testing.expectEqual(case.lifetime_address + @sizeOf(core.gc.StringHeader), pointerPayload(case.value));
     }
 }
 
@@ -248,6 +267,7 @@ test "over-reserved property storage is freed by prop_size not prop_count" {
     try std.testing.expectEqual(@as(u32, 1), first.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 8), first.shape_ref.prop_size);
     first.value().free(rt);
+    helpers.reclaimNow(rt);
 
     // Shape hash may retain the resized root. The value buffer must not leak
     // across a second reserve/destroy cycle (free size = prop_size, not 1).
@@ -258,6 +278,7 @@ test "over-reserved property storage is freed by prop_size not prop_count" {
     try std.testing.expectEqual(@as(usize, 8), second.shape_ref.prop_size);
     try std.testing.expectEqual(@as(u32, 1), second.shape_ref.prop_count);
     second.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(mid, rt.memory.allocated_bytes);
 }
 
@@ -273,6 +294,84 @@ test "first named property allocates initial_prop_size slots" {
     try std.testing.expectEqual(@as(usize, core.shape.initial_prop_size), object.shape_ref.prop_size);
     try std.testing.expectEqual(@as(u32, 1), object.shape_ref.prop_count);
     object.value().free(rt);
+}
+
+test "shape-sized trailing property storage grows externally and compacts in place" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // Put a wider empty root at the head of the same hash chain. Tracing's
+    // Reserved2 fast lookup must reject it and repair to an exact-capacity
+    // Shape; adopting it would make Shape.prop_size exceed the two-slot tail.
+    const wider_root = try rt.shapes.createObjectRootWithPropertyCapacity(null, 4);
+    defer rt.shapes.release(wider_root);
+
+    const object = try core.Object.createPlainObjectReserved2(rt, null);
+    defer object.value().free(rt);
+    const object_address = @intFromPtr(object);
+    try std.testing.expectEqual(@as(u32, core.Object.trailing_property_capacity), object.shape_ref.prop_size);
+    try std.testing.expect(object.propertyStorageIsInline());
+    try std.testing.expect(object.hasTrailingPropertyAllocation());
+    try std.testing.expectEqual(@as(u32, 0), object.weakReferenceCount());
+    object.retainWeakReference();
+    try std.testing.expectEqual(@as(u32, 1), object.weakReferenceCount());
+    try std.testing.expect(object.hasTrailingPropertyAllocation());
+    object.releaseWeakReference();
+    try std.testing.expectEqual(@as(u32, 0), object.weakReferenceCount());
+    try std.testing.expect(object.hasTrailingPropertyAllocation());
+    try std.testing.expectEqual(
+        object_address + @sizeOf(core.Object),
+        @intFromPtr(object.propertyStorageBase()),
+    );
+    try std.testing.expectEqual(
+        @sizeOf(core.Object) + core.Object.trailing_property_bytes,
+        object.allocationSize(rt),
+    );
+
+    const names = [_][]const u8{
+        "tail_0", "tail_1", "tail_2", "tail_3", "tail_4",
+        "tail_5", "tail_6", "tail_7", "tail_8", "tail_9",
+    };
+    var atoms: [names.len]core.Atom = undefined;
+    for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
+    defer for (atoms) |name| rt.atoms.free(name);
+
+    for (atoms, 0..) |name, index| {
+        try object.defineOwnProperty(
+            rt,
+            name,
+            core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true),
+        );
+        try std.testing.expectEqual(object_address, @intFromPtr(object));
+    }
+    try std.testing.expect(!object.propertyStorageIsInline());
+    try std.testing.expect(object.hasTrailingPropertyAllocation());
+    try std.testing.expectEqual(
+        @sizeOf(core.Object) + core.Object.trailing_property_bytes,
+        object.allocationSize(rt),
+    );
+
+    // Eight tombstones meet the ordinary compaction trigger. The two live
+    // values fit the immutable tail, so compaction frees only the external
+    // buffer and retargets the descriptor; the Object never relocates.
+    for (atoms[0..8]) |name| try std.testing.expect(object.deleteProperty(rt, name));
+    try std.testing.expectEqual(object_address, @intFromPtr(object));
+    try std.testing.expect(object.propertyStorageIsInline());
+    try std.testing.expect(object.hasTrailingPropertyAllocation());
+    try std.testing.expectEqual(@as(u32, 2), object.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(u32, 2), object.shape_ref.prop_size);
+    try std.testing.expectEqual(@as(?i32, 8), (try object.getProperty(atoms[8])).asInt32());
+    try std.testing.expectEqual(@as(?i32, 9), (try object.getProperty(atoms[9])).asInt32());
+
+    try rt.gc.verifyObjectPropertyStorageLayouts(rt);
+    const valid_storage = object.prop_values;
+    object.prop_values = @ptrFromInt(@alignOf(core.property.Entry));
+    try std.testing.expectError(
+        error.MissingObjectPropertyStorage,
+        rt.gc.verifyObjectPropertyStorageLayouts(rt),
+    );
+    object.prop_values = valid_storage;
+    try rt.gc.verifyObjectPropertyStorageLayouts(rt);
 }
 
 test "plain object destroy slim frees two data slots and the value buffer" {
@@ -294,6 +393,7 @@ test "plain object destroy slim frees two data slots and the value buffer" {
     try std.testing.expectEqual(@as(u32, 0), pair.weakref_count);
 
     pair.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
 
@@ -305,11 +405,28 @@ test "proven object release preserves generic JSValue ownership semantics" {
     const object = try core.Object.create(rt, core.class.ids.object, null);
     const value = object.value();
     const retained = value.dup();
-    try std.testing.expectEqual(@as(i32, 2), object.header.meta().rc);
+    // The refcount steps are only meaningful where the count is the ownership
+    // record. Under the tracer an object's count is not maintained at all
+    // (`gc.refCountRemoved`), so what survives here is the part that is still
+    // a claim about ownership: dropping both references, and only both, must
+    // make the object collectable.
+    if (comptime !core.gc.trace_stw_enabled) {
+        try helpers.expectRefCount(2, &object.header);
+    }
 
     retained.freeObjectAssumeObject(rt);
-    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
+    if (comptime !core.gc.trace_stw_enabled) {
+        try helpers.expectRefCount(1, &object.header);
+    } else {
+        var kept: ?*core.Object = object;
+        var roots = core.runtime.rootObjects(.{&kept});
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        helpers.reclaimNow(rt);
+        try std.testing.expect(rt.gc.liveCount() > baseline_objects);
+    }
     value.freeObjectAssumeObject(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
 
@@ -325,8 +442,9 @@ test "active bytecode release preserves generic ownership" {
     const generic_value = generic_object.value();
     const generic_retained = generic_value.dup();
     generic_retained.freeDuringActiveBytecode(rt);
-    try std.testing.expectEqual(@as(i32, 1), generic_object.header.meta().rc);
+    try helpers.expectRefCount(1, &generic_object.header);
     generic_value.freeDuringActiveBytecode(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 
     core.JSValue.int32(1).freeDuringActiveBytecode(rt);
@@ -458,23 +576,34 @@ test "heap BigInt inline storage destroys by capacity across the slab boundary" 
     defer rt.destroy();
     const baseline = rt.memory.allocated_bytes;
 
-    // 56 wrapper bytes plus the FAM must stay under the slab's 504-byte payload
-    // ceiling, so capacity 56 is the last slab-backed size and 57 is the first
-    // standalone one. Both destroy paths have to release `capacity` limbs even
-    // when the published length is shorter.
-    const capacities = [_]usize{ 0, 1, 2, 4, 55, 56, 57, 64 };
-    // Assert the boundary rather than assume it, so a future `block_sizes` or
-    // wrapper-size change cannot silently turn this into a slab-only test.
     const slab = core.memory.SmallObjectSlab;
     const wrapper = @sizeOf(core.bigint.BigInt);
-    try std.testing.expect(slab.canUse(wrapper + 56 * @sizeOf(bigint.Limb), .@"8"));
-    try std.testing.expect(!slab.canUse(wrapper + 57 * @sizeOf(bigint.Limb), .@"8"));
+    const limb_bytes = @sizeOf(bigint.Limb);
+    const max_slab_payload = slab.max_size - slab.block_header_bytes;
+    const last_slab_capacity = (max_slab_payload - wrapper) / limb_bytes;
+    comptime std.debug.assert(last_slab_capacity > 4);
+    // Derive the boundary from the active representation: trace and RC keep
+    // different BigInt wrapper sizes, but this test must cross the allocator
+    // boundary in both configurations. Both destroy paths have to release
+    // `capacity` limbs even when the published length is shorter.
+    const capacities = [_]usize{
+        0,
+        1,
+        2,
+        4,
+        last_slab_capacity - 1,
+        last_slab_capacity,
+        last_slab_capacity + 1,
+        last_slab_capacity + 8,
+    };
+    try std.testing.expect(slab.canUse(wrapper + last_slab_capacity * limb_bytes, .@"8"));
+    try std.testing.expect(!slab.canUse(wrapper + (last_slab_capacity + 1) * limb_bytes, .@"8"));
 
     for (capacities) |capacity| {
         const big = try core.bigint.BigInt.createInlineUninitialized(rt, capacity);
         try std.testing.expectEqual(
-            slab.canUse(wrapper + capacity * @sizeOf(bigint.Limb), .@"8"),
-            capacity <= 56,
+            slab.canUse(wrapper + capacity * limb_bytes, .@"8"),
+            capacity <= last_slab_capacity,
         );
         try std.testing.expect(big.isInline());
         try std.testing.expect(!big.isExternal());
@@ -557,6 +686,12 @@ test "RealmContext is header-first and RealmRef owns independently of runtime li
     try std.testing.expectEqual(first, rt.firstContext().?);
 
     owner.deinit();
+    // No collection before this point: the host create-ref is what registers a
+    // Realm's root provider, so between `first.destroy()` and here `owner` is
+    // the only thing holding `first` and a `RealmRef` in a Zig local is not a
+    // declared root. Membership on `context_head` is deliberately not one
+    // either, which is exactly what the last assertion checks.
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -656,19 +791,26 @@ test "Runtime queues retain their originating Realm until owned jobs are release
     try rt.enqueueFinalizationJobForRealm(ctx, core.JSValue.int32(12), core.JSValue.int32(13));
 
     ctx.destroy();
+    // The host create-ref is gone, so from here on the queued jobs are the only
+    // thing keeping the Realm: each collection is asking the queue to prove its
+    // ownership, not asking `context_head` for membership.
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(ctx, rt.firstContext().?);
 
     var promise_job = rt.job_queue.takeFirst().?;
     promise_job.deinit();
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(ctx, rt.firstContext().?);
     var generic_job = rt.job_queue.takeFirst().?;
     const generic_result = generic_job.run();
     try std.testing.expect(!generic_result.isException());
     generic_result.free(rt);
     generic_job.deinit();
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(ctx, rt.firstContext().?);
     var finalization_job = rt.job_queue.takeFirst().?;
     finalization_job.deinit();
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -859,12 +1001,12 @@ test "process-global ClassId allocation is atomic across owner-thread Runtimes" 
 test "RealmContext participates in cycle collection through typed RealmRef edges" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.RealmContext.create(rt);
+    var ctx = try core.RealmContext.create(rt);
 
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
-    const realm_record = try core.Object.create(rt, core.class.ids.object, null);
+    var realm_record = try core.Object.create(rt, core.class.ids.object, null);
     var realm_owner = core.RealmRef.retain(ctx);
     try realm_record.installOwnedRealmRef(rt, &realm_owner);
     const record_key = try rt.internAtom("realmCycleRecord");
@@ -875,8 +1017,10 @@ test "RealmContext participates in cycle collection through typed RealmRef edges
         core.Descriptor.data(realm_record.value(), true, true, true),
     );
     realm_record.value().free(rt);
+    dropGcPtr(&realm_record);
 
     ctx.destroy();
+    dropGcPtr(&ctx);
     try std.testing.expect(rt.firstContext() != null);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.firstContext() == null);
@@ -982,12 +1126,16 @@ test "auto_init slot to another realm retains it across JSContext.destroy and cy
     defer rt.destroy();
     const ctx_a = try core.JSContext.create(rt);
     defer ctx_a.destroy();
-    const ctx_b = try core.JSContext.create(rt);
+    var ctx_b = try core.JSContext.create(rt);
 
-    const host_rc = ctx_b.header.meta().rc;
+    const host_rc = helpers.refCountSnapshot(&ctx_b.header);
     {
         const obj = try core.Object.create(rt, core.class.ids.object, null);
         defer obj.value().free(rt);
+        var obj_slot: ?*core.Object = obj;
+        var obj_roots = core.runtime.rootObjects(.{&obj_slot});
+        obj_roots.activate(rt);
+        defer obj_roots.deactivate(rt);
         try obj.defineFunctionPrototypeAutoInit(
             rt,
             ctx_b,
@@ -996,18 +1144,19 @@ test "auto_init slot to another realm retains it across JSContext.destroy and cy
         const proto_index = obj.findProperty(core.atom.ids.prototype) orelse
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(core.property.Kind.auto_init, obj.propFlagsAt(proto_index).kind);
-        const stored = obj.prop_values[proto_index].slot.auto_init.realm_and_id.realmHeader();
+        const stored = obj.propertyEntry(proto_index).*.slot.auto_init.realm_and_id.realmHeader();
         try std.testing.expectEqual(&ctx_b.header, stored.?);
-        try std.testing.expectEqual(host_rc + 1, ctx_b.header.meta().rc);
+        try helpers.expectRefCount(host_rc + 1, &ctx_b.header);
 
         ctx_b.destroy();
-        try std.testing.expectEqual(host_rc, ctx_b.header.meta().rc);
+        try helpers.expectRefCount(host_rc, &ctx_b.header);
         try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
         _ = rt.runObjectCycleRemoval();
         try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
-        try std.testing.expectEqual(&ctx_b.header, obj.prop_values[proto_index].slot.auto_init.realm_and_id.realmHeader().?);
+        try std.testing.expectEqual(&ctx_b.header, obj.propertyEntry(proto_index).*.slot.auto_init.realm_and_id.realmHeader().?);
     }
 
+    dropGcPtr(&ctx_b);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), liveRealmCount(rt));
     try std.testing.expectEqual(ctx_a, rt.firstContext().?);
@@ -1020,15 +1169,19 @@ test "FinalizationRegistry RealmRef retains and releases its construction realm 
     var ctx_alive = true;
     defer if (ctx_alive) ctx.destroy();
 
-    const base_ref_count = ctx.header.meta().rc;
+    const base_ref_count = helpers.refCountSnapshot(&ctx.header);
     const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
-    try std.testing.expectEqual(base_ref_count + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(base_ref_count + 1, &ctx.header);
     try std.testing.expectEqual(ctx, registry.finalizationRegistryRealmContext().?);
 
     registry.value().free(rt);
-    try std.testing.expectEqual(base_ref_count, ctx.header.meta().rc);
+    // The registry's realm ref is only given back when the registry itself is
+    // torn down; `ctx` survives this collection on its still-held create-ref.
+    helpers.reclaimNow(rt);
+    try helpers.expectRefCount(base_ref_count, &ctx.header);
     ctx.destroy();
     ctx_alive = false;
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -1294,6 +1447,7 @@ test "private brand property owns exactly one stored symbol value across replace
 
     object.value().free(rt);
     object_alive = false;
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.atoms.name(brand) == null);
 }
 
@@ -1631,6 +1785,15 @@ test "GC keeps dequeued finalization job function bytecode symbol constants unti
     var job_alive = true;
     defer if (job_alive) job.deinit();
 
+    // Dequeued job is a Zig local; RC kept the bytecode via the payload
+    // JSValue. Tracing needs the same ownership named as a root frame.
+    var job_roots = core.runtime.rootValues(.{
+        &job.payload.finalization.callback,
+        &job.payload.finalization.held_value,
+    });
+    job_roots.activate(rt);
+    defer job_roots.deactivate(rt);
+
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
@@ -1720,7 +1883,11 @@ test "GC keeps object-held and registered symbol atoms" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const object = try core.Object.create(rt, core.class.ids.object, null);
+    var object = try core.Object.create(rt, core.class.ids.object, null);
+    var obj_slot: ?*core.Object = object;
+    var obj_roots = core.runtime.rootObjects(.{&obj_slot});
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
     const key = try rt.internAtom("symbolValue");
     defer rt.atoms.free(key);
 
@@ -1732,6 +1899,8 @@ test "GC keeps object-held and registered symbol atoms" {
     try std.testing.expect(rt.atoms.name(object_symbol) != null);
 
     object.value().free(rt);
+    obj_slot = null;
+    dropGcPtr(&object);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(object_symbol) == null);
 
@@ -2228,11 +2397,20 @@ const ObjectConstructionOrderProbe = struct {
         const self: *@This() = @ptrCast(@alignCast(raw.?));
         if (size != @sizeOf(core.Object)) return;
         self.object_boundary_calls += 1;
-        self.shape_owned_at_object_boundary =
-            self.rt.gc.liveCountKind(.shape) == self.live_shape_count_before + 1 and
-            self.rt.shapes.shape_hash_count == self.shape_hash_count_before + 1 and
-            self.rt.gcStats().heap_live_bytes == self.heap_live_bytes_before + emptyRootShapeAllocationBytes() and
-            self.prototype.header.meta().rc == self.prototype_refs_before + 1;
+        // The Shape is fully initialized, hash-visible, and published before
+        // the reentrant object-allocation boundary. The boundary roots it
+        // until the Object takes ownership. Under the tracer the prototype
+        // ownership is the Shape's edge and leaves no count for a probe to
+        // read, so the retain is only observable in the build that counts.
+        const proto_owned_by_shape = if (comptime core.gc.refCountRemoved(.object))
+            true
+        else
+            helpers.refCountSnapshot(&self.prototype.header) == self.prototype_refs_before + 1;
+        const shape_reserved = self.rt.shapes.shape_hash_count == self.shape_hash_count_before + 1 and
+            proto_owned_by_shape;
+        const shape_published = self.rt.gc.liveCountKind(.shape) == self.live_shape_count_before + 1 and
+            self.rt.gcStats().heap_live_bytes == self.heap_live_bytes_before + emptyRootShapeAllocationBytes();
+        self.shape_owned_at_object_boundary = shape_reserved and shape_published;
     }
 };
 
@@ -2606,6 +2784,7 @@ test "class construction pins its definition across reentrant unregister" {
     try std.testing.expect(object.flags.has_exotic_methods);
 
     object.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expect(!rt.classes.isRegistered(class_id));
     try std.testing.expect(!rt.classes.unregisterPending(class_id));
 }
@@ -2673,6 +2852,7 @@ test "inline class finalizer reentry keeps definition pinned while growing the t
     try object.defineOwnProperty(rt, property_atom, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try std.testing.expect(object.hasPropertyStorage());
     object.value().free(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), InlineClassFinalizerReentry.calls);
     try std.testing.expect(InlineClassFinalizerReentry.definition_visible_after_unregister);
@@ -2699,6 +2879,12 @@ test "inline class finalizer observes the live object allocation until callback 
     // differ only by the target object's lifecycle publication.
     const shape_guard = try core.Object.create(rt, core.class.ids.object, null);
     defer shape_guard.value().free(rt);
+    // The guard has to outlive the collection that runs the finalizer, and a
+    // plain Zig local is not a root under the declared-only scan.
+    var rooted_shape_guard: ?*core.Object = shape_guard;
+    var roots = core.runtime.rootObjects(.{&rooted_shape_guard});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
 
     const class_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(class_id, .{
@@ -2713,6 +2899,7 @@ test "inline class finalizer observes the live object allocation until callback 
     InlineObjectLifecycleProbe.expected_heap_live_bytes = rt.gcStats().heap_live_bytes;
     InlineObjectLifecycleProbe.expected_allocated_bytes = rt.memory.allocated_bytes;
     object.value().free(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), InlineObjectLifecycleProbe.calls);
     try std.testing.expect(InlineObjectLifecycleProbe.identity_matches);
@@ -2756,6 +2943,7 @@ test "external class finalizers run synchronously with original object identity 
     second.value().free(rt);
 
     holder.value().free(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 2), ExternalObjectLifecycleProbe.calls);
     try std.testing.expectEqual([_]u8{ 0, 1 }, ExternalObjectLifecycleProbe.events);
@@ -2790,6 +2978,7 @@ test "array teardown releases its unique prototype before its unique dense eleme
     element.value().free(rt);
 
     array.value().free(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 2), ExternalObjectLifecycleProbe.calls);
     try std.testing.expectEqual([_]u8{ 0, 1 }, ExternalObjectLifecycleProbe.events);
@@ -2815,16 +3004,93 @@ test "weak husk keeps its class definition after one synchronous finalizer" {
     payload_finalizer_calls = 0;
     rt.classes.unregisterDynamic(class_id);
     target.value().free(rt);
+    {
+        var kept_weak: ?*core.Object = weak_ref;
+        var weak_roots = core.runtime.rootObjects(.{&kept_weak});
+        weak_roots.activate(rt);
+        defer weak_roots.deactivate(rt);
+        helpers.reclaimNow(rt);
+    }
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expect(rt.classes.isRegistered(class_id));
-    try std.testing.expect(rt.classes.unregisterPending(class_id));
+    if (comptime !core.gc.trace_stw_enabled) {
+        // Refcounting leaves the stripped object allocated as a husk, because a
+        // WeakRef still names it, and the class definition must stay valid for
+        // as long as that husk can be reached.
+        try std.testing.expect(rt.classes.isRegistered(class_id));
+        try std.testing.expect(rt.classes.unregisterPending(class_id));
+    } else {
+        // The tracer clears weak identities in `processWeak`, which runs before
+        // the sweep that destroys the target, so no husk is ever formed and
+        // there is nothing left for the definition to stay valid for. The
+        // property the pin exists to protect -- a definition outlives every
+        // object observable under it, and not one step longer -- holds by the
+        // definition being released here rather than one WeakRef death later.
+        // This is JSC's shape too: weak handles are cleared inside the sweep of
+        // the block that owns the cell (MarkedBlock.cpp `m_weakSet.sweep()`).
+        try std.testing.expect(!rt.classes.isRegistered(class_id));
+        try std.testing.expect(!rt.classes.unregisterPending(class_id));
+    }
     try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
 
     weak_ref.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expect(!rt.classes.isRegistered(class_id));
     try std.testing.expect(!rt.classes.unregisterPending(class_id));
+}
+
+test "cycle deferred drain detaches the weak husk it keeps" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // Stage the exact Pass-B survivor without involving the weak table: the
+    // remaining-weakref count is the qjs keep/free decision, while this test
+    // is about the intrusive links the deferred stack borrowed from the
+    // resource-stripped header.
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    target.weakref_count = 1;
+    const old_phase = rt.gc.phase;
+    rt.gc.phase = .remove_cycles;
+    defer rt.gc.phase = old_phase;
+    core.Object.destroyFromHeader(rt, &target.header);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.cycle_deferred_frees.count);
+
+    core.Object.drainCycleDeferredFrees(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
+    try std.testing.expect(target.header.next == null);
+    if (comptime !core.gc.trace_stw_enabled) try std.testing.expect(target.header.prev == null);
+    try std.testing.expect(!target.header.meta().flags.finalizing);
+
+    // The synthetic weak count has no WeakRef owner to release it later.
+    // Finish the ordinary Pass-B free explicitly so runtime teardown sees no
+    // leaked husk or class-definition pin.
+    target.weakref_count = 0;
+    core.Object.freeCycleDeferredStruct(rt, target);
+}
+
+test "cycle deferred drain settles its count once per budget" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const old_phase = rt.gc.phase;
+    rt.gc.phase = .remove_cycles;
+    defer rt.gc.phase = old_phase;
+
+    var objects: [5]*core.Object = undefined;
+    for (&objects) |*slot| {
+        slot.* = try core.Object.create(rt, core.class.ids.object, null);
+        core.Object.destroyFromHeader(rt, &slot.*.header);
+    }
+    try std.testing.expectEqual(@as(usize, objects.len), rt.gc.cycle_deferred_frees.count);
+
+    try std.testing.expect(!core.Object.drainCycleDeferredFreesBudgeted(rt, 2));
+    try std.testing.expectEqual(@as(usize, 3), rt.gc.cycle_deferred_frees.count);
+    try std.testing.expect(!core.Object.drainCycleDeferredFreesBudgeted(rt, 2));
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.cycle_deferred_frees.count);
+    try std.testing.expect(core.Object.drainCycleDeferredFreesBudgeted(rt, 2));
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
+    try rt.gc.verifyIntrusiveList();
 }
 
 test "class finalizers and context prototype slots are wired" {
@@ -2894,6 +3160,7 @@ test "object destruction runs class payload finalizers synchronously without all
     const payloadless_create_calls = rt.memory.create_calls;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     payloadless.value().free(rt);
+    helpers.reclaimNow(rt);
     rt.setMemoryLimit(null);
     try std.testing.expectEqual(payloadless_alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(payloadless_create_calls, rt.memory.create_calls);
@@ -2917,6 +3184,7 @@ test "object destruction runs class payload finalizers synchronously without all
     const external_create_calls = rt.memory.create_calls;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     external.value().free(rt);
+    helpers.reclaimNow(rt);
     rt.setMemoryLimit(null);
     try std.testing.expectEqual(external_alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(external_create_calls, rt.memory.create_calls);
@@ -2938,6 +3206,13 @@ test "strong collection clear publishes empty state before synchronous finalizer
 
     const map = try core.Object.create(rt, core.class.ids.map, null);
     defer map.value().free(rt);
+    // The finalizer reads the map back out of a global and the test asserts on
+    // it afterwards, so the receiver must be a declared root: nothing else
+    // makes a plain Zig local reachable to the collection below.
+    var map_slot: ?*core.Object = map;
+    var map_roots = core.runtime.rootObjects(.{&map_slot});
+    map_roots.activate(rt);
+    defer map_roots.deactivate(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     const set_result = try engine.exec.collection_ops.methodCall(rt, map.value(), 1, &.{ core.JSValue.int32(1), value.value() });
     set_result.free(rt);
@@ -2953,6 +3228,7 @@ test "strong collection clear publishes empty state before synchronous finalizer
 
     const clear_result = try engine.exec.collection_ops.methodCall(rt, map.value(), 5, &.{});
     defer clear_result.free(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expect(clear_result.isUndefined());
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
@@ -2973,6 +3249,13 @@ test "dense array delete publishes sparse state before synchronous finalizer ree
 
     const array = try core.Object.createArray(rt, null);
     defer array.value().free(rt);
+    // The finalizer reads the array back out of a global and the test asserts
+    // on its storage afterwards, so the receiver must be a declared root:
+    // nothing else makes a plain Zig local reachable to the collection below.
+    var array_slot: ?*core.Object = array;
+    var array_roots = core.runtime.rootObjects(.{&array_slot});
+    array_roots.activate(rt);
+    defer array_roots.deactivate(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     try std.testing.expect(try array.defineDenseArrayDataProperty(rt, 0, value.value()));
     value.value().free(rt);
@@ -2986,6 +3269,7 @@ test "dense array delete publishes sparse state before synchronous finalizer ree
     }
 
     try std.testing.expect(array.deleteProperty(rt, core.atom.atomFromUInt32(0)));
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_array_delete_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
@@ -3006,6 +3290,13 @@ test "ordinary property delete publishes absence before synchronous finalizer re
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
     defer object.value().free(rt);
+    // The finalizer reads the receiver back out of a global and the test reads
+    // the property back afterwards, so the receiver must be a declared root:
+    // nothing else makes a plain Zig local reachable to the collection below.
+    var object_slot: ?*core.Object = object;
+    var object_roots = core.runtime.rootObjects(.{&object_slot});
+    object_roots.activate(rt);
+    defer object_roots.deactivate(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     const key = try rt.internAtom("reentrant_property_delete");
     defer rt.atoms.free(key);
@@ -3023,6 +3314,7 @@ test "ordinary property delete publishes absence before synchronous finalizer re
     }
 
     try std.testing.expect(object.deleteProperty(rt, key));
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_property_delete_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
@@ -3050,7 +3342,7 @@ test "IC-R1: in-place delete mutates the shape Property word" {
     try std.testing.expect(shape_before.props()[index].atom_id == key);
     try std.testing.expect(word_before != 0);
 
-    const unique = shape_before.header.meta().rc == 1;
+    const unique = shape_before.refCount() == 1;
     try std.testing.expect(object.deleteProperty(rt, key));
     try std.testing.expect(object.findProperty(key) == null);
 
@@ -3081,6 +3373,13 @@ test "regexp lastIndex set publishes replacement before synchronous finalizer re
 
     const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
     defer regexp.value().free(rt);
+    // The finalizer reads the receiver back out of a global and the test reads
+    // lastIndex back afterwards, so the receiver must be a declared root:
+    // nothing else makes a plain Zig local reachable to the collection below.
+    var regexp_slot: ?*core.Object = regexp;
+    var regexp_roots = core.runtime.rootObjects(.{&regexp_slot});
+    regexp_roots.activate(rt);
+    defer regexp_roots.deactivate(rt);
     try regexp.initializeRegExpLastIndex(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     try regexp.setProperty(rt, core.atom.ids.lastIndex, value.value());
@@ -3095,6 +3394,7 @@ test "regexp lastIndex set publishes replacement before synchronous finalizer re
     }
 
     try regexp.setProperty(rt, core.atom.ids.lastIndex, core.JSValue.int32(7));
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_regexp_last_index_calls);
@@ -3114,6 +3414,13 @@ test "regexp lastIndex define publishes replacement before synchronous finalizer
 
     const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
     defer regexp.value().free(rt);
+    // The finalizer reads the receiver back out of a global and the test reads
+    // lastIndex back afterwards, so the receiver must be a declared root:
+    // nothing else makes a plain Zig local reachable to the collection below.
+    var regexp_slot: ?*core.Object = regexp;
+    var regexp_roots = core.runtime.rootObjects(.{&regexp_slot});
+    regexp_roots.activate(rt);
+    defer regexp_roots.deactivate(rt);
     try regexp.initializeRegExpLastIndex(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     try regexp.setProperty(rt, core.atom.ids.lastIndex, value.value());
@@ -3132,6 +3439,7 @@ test "regexp lastIndex define publishes replacement before synchronous finalizer
         core.atom.ids.lastIndex,
         core.Descriptor.data(core.JSValue.int32(7), true, false, false),
     );
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_regexp_last_index_calls);
@@ -3168,7 +3476,17 @@ test "mapped arguments binding update publishes value before synchronous finaliz
         reentrant_mapped_arguments_calls = 0;
     }
 
+    // The reentry rides on the mapped value's payload finalizer, which the
+    // tracer only reaches through a collection. `arguments` is what the
+    // finalizer reenters and what the assertions read, and the declared-only
+    // scan does not see a plain Zig local, so it has to be named here.
+    var arguments_slot: ?*core.Object = arguments;
+    var arguments_roots = core.runtime.rootObjects(.{&arguments_slot});
+    arguments_roots.activate(rt);
+    defer arguments_roots.deactivate(rt);
+
     try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
@@ -3205,7 +3523,16 @@ test "mapped arguments var-ref update publishes value before synchronous finaliz
         reentrant_mapped_arguments_calls = 0;
     }
 
+    // Rooting `arguments` also keeps `cell` alive: the var-ref is reachable
+    // only through the mapped-arguments ref table, and the declared-only scan
+    // ignores the Zig local holding it.
+    var arguments_slot: ?*core.Object = arguments;
+    var arguments_roots = core.runtime.rootObjects(.{&arguments_slot});
+    arguments_roots.activate(rt);
+    defer arguments_roots.deactivate(rt);
+
     try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
@@ -3244,7 +3571,17 @@ test "mapped arguments binding delete publishes disconnection before synchronous
         reentrant_mapped_arguments_calls = 0;
     }
 
+    // The delete disconnects the binding and drops the var-ref; the payload
+    // finalizer behind the reentry only runs once a collection reaches the
+    // mapped value. `arguments` survives that collection and the assertions
+    // read it back, so it must be a declared root.
+    var arguments_slot: ?*core.Object = arguments;
+    var arguments_roots = core.runtime.rootObjects(.{&arguments_slot});
+    arguments_roots.activate(rt);
+    defer arguments_roots.deactivate(rt);
+
     try std.testing.expect(arguments.deleteProperty(rt, key));
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
@@ -3279,7 +3616,17 @@ test "cached iterator next clear publishes null before synchronous finalizer ree
         reentrant_cached_iterator_next_calls = 0;
     }
 
+    // Clearing the cache drops the last reference to the cached value, but the
+    // finalizer that reenters only runs when a collection reaches it. `object`
+    // is the reentry target and the subject of the assertion, so the
+    // declared-only scan has to be told about it.
+    var object_slot: ?*core.Object = object;
+    var object_roots = core.runtime.rootObjects(.{&object_slot});
+    object_roots.activate(rt);
+    defer object_roots.deactivate(rt);
+
     object.clearCachedIteratorNext(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_cached_iterator_next_calls);
@@ -3309,7 +3656,10 @@ test "exception slot clear publishes empty state before synchronous finalizer re
         reentrant_exception_slot_calls = 0;
     }
 
+    // The slot held the only reference; nothing the test reads afterwards is a
+    // heap object, so the collection needs no root frame here.
     slot.clear(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_exception_slot_calls);
@@ -3346,8 +3696,20 @@ test "array iterator target clear publishes null before synchronous finalizer re
         reentrant_array_iterator_calls = 0;
     }
 
-    const result = try engine.exec.array_builtin_ops.methodCall(rt, iterator.value(), 20, &.{});
+    var result = try engine.exec.array_builtin_ops.methodCall(rt, iterator.value(), 20, &.{});
     defer result.free(rt);
+    // The call clears the target, but the held payload's finalizer only runs
+    // when a collection reaches it. `iterator` is the reentry target and the
+    // subject of the assertion, and `result` is still owned by this frame; the
+    // declared-only scan sees neither Zig local unless it is named.
+    var iterator_slot: ?*core.Object = iterator;
+    var iterator_roots = core.runtime.rootObjects(.{&iterator_slot});
+    iterator_roots.activate(rt);
+    defer iterator_roots.deactivate(rt);
+    var result_roots = core.runtime.rootValues(.{&result});
+    result_roots.activate(rt);
+    defer result_roots.deactivate(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_array_iterator_calls);
@@ -3371,8 +3733,8 @@ test "runtime cycle removal follows class payload mark hooks" {
         .payload_mark = markTestExternalPayload,
     });
 
-    const payloadless = try core.Object.create(rt, payloadless_id, null);
-    const external = try core.Object.create(rt, external_id, null);
+    var payloadless = try core.Object.create(rt, payloadless_id, null);
+    var external = try core.Object.create(rt, external_id, null);
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{ .value = payloadless.value().dup() };
     external.u.payload = @ptrCast(payload);
@@ -3383,15 +3745,26 @@ test "runtime cycle removal follows class payload mark hooks" {
 
     payload_finalizer_calls = 0;
     payload_mark_calls = 0;
+    var payloadless_slot: ?*core.Object = payloadless;
+    var external_slot: ?*core.Object = external;
+    var cycle_roots = core.runtime.rootObjects(.{ &payloadless_slot, &external_slot });
+    cycle_roots.activate(rt);
+    defer cycle_roots.deactivate(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    try std.testing.expect(payload_mark_calls > 0);
+
     external.value().free(rt);
     payloadless.value().free(rt);
+    dropGcPtr(&external);
+    dropGcPtr(&payloadless);
+    payloadless_slot = null;
+    external_slot = null;
     rt.classes.unregisterDynamic(payloadless_id);
     rt.classes.unregisterDynamic(external_id);
     try std.testing.expect(rt.classes.unregisterPending(payloadless_id));
     try std.testing.expect(rt.classes.unregisterPending(external_id));
 
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
-    try std.testing.expect(payload_mark_calls > 0);
     try std.testing.expectEqual(@as(usize, 2), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(2));
@@ -3424,6 +3797,10 @@ test "synchronous class payload finalizer drains payload-owned zero-ref children
     payload_mark_calls = 0;
 
     wrapper.value().free(rt);
+    // Nothing here outlives the collection: the wrapper is what is being
+    // reclaimed and `child_header` is only read as an address that must no
+    // longer be owned.
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), payload_mark_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
@@ -3457,6 +3834,7 @@ test "synchronous external payload callback pins its generation through reentran
     child.value().free(rt);
 
     wrapper.value().free(rt);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), ExternalClassFinalizerReentry.calls);
     try std.testing.expect(ExternalClassFinalizerReentry.identity_matches);
@@ -3485,8 +3863,8 @@ test "runtime cycle removal synchronously finalizes class payload object slots o
         .payload_mark = markTestExternalObjectPayload,
     });
 
-    const external = try core.Object.create(rt, external_id, null);
-    const child = try core.Object.create(rt, core.class.ids.object, null);
+    var external = try core.Object.create(rt, external_id, null);
+    var child = try core.Object.create(rt, core.class.ids.object, null);
     const payload = try rt.memory.create(TestExternalObjectPayload);
     payload.* = .{ .object = child };
     core.gc.retain(&child.header);
@@ -3498,11 +3876,22 @@ test "runtime cycle removal synchronously finalizes class payload object slots o
 
     payload_finalizer_calls = 0;
     payload_mark_calls = 0;
+    var external_slot: ?*core.Object = external;
+    var child_slot: ?*core.Object = child;
+    var cycle_roots = core.runtime.rootObjects(.{ &external_slot, &child_slot });
+    cycle_roots.activate(rt);
+    defer cycle_roots.deactivate(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    try std.testing.expect(payload_mark_calls > 0);
+
     external.value().free(rt);
     child.value().free(rt);
+    dropGcPtr(&external);
+    dropGcPtr(&child);
+    external_slot = null;
+    child_slot = null;
 
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
-    try std.testing.expect(payload_mark_calls > 0);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(1));
@@ -3695,15 +4084,120 @@ test "array buffer backing stores report external memory" {
     try std.testing.expectEqual(@as(usize, 0), rt.externalMemoryBytes());
 }
 
+test "ordinary array buffer backing overlaps account and external ledgers" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // Above BufferPayload.inline_storage_capacity, ordinary backing is owned
+    // by rt.memory. It therefore belongs to the whole MemoryAccount pacing
+    // domain AND to the separately reported buffer/external dimension.
+    const byte_length: usize = 4096;
+    const account_before = rt.memory.allocated_bytes;
+    const buffer_value = try engine.exec.buffer_ops.arrayBufferConstructLength(rt, byte_length, null, null);
+    try std.testing.expect(rt.memory.allocated_bytes >= account_before + byte_length);
+    try std.testing.expectEqual(byte_length, rt.externalMemoryBytes());
+    try std.testing.expectEqual(byte_length, rt.gcStats().external_token_bytes);
+
+    buffer_value.free(rt);
+    helpers.reclaimNow(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.externalMemoryBytes());
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_token_count);
+}
+
 test "shared buffer store reports external memory for its owner runtime" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const store = try core.object.SharedBufferStore.create(rt, 24);
-    try std.testing.expectEqual(@as(usize, 24), rt.externalMemoryBytes());
+    const byte_length: usize = 4096;
+    const account_before = rt.memory.allocated_bytes;
+    const store = try core.object.SharedBufferStore.create(rt, byte_length);
+    try std.testing.expectEqual(byte_length, rt.externalMemoryBytes());
+    // Shared bytes use the process page allocator, so unlike ordinary
+    // ArrayBuffer backing they are outside MemoryAccount and rely on the
+    // external-pressure path for major pacing. The token registry's small
+    // bookkeeping allocation still belongs to MemoryAccount; pin that it is
+    // metadata rather than another byte-for-byte backing charge.
+    try std.testing.expect(rt.memory.allocated_bytes < account_before + byte_length);
+    const debt_after_alloc = rt.allocationDebtBytes();
 
     store.release();
     try std.testing.expectEqual(@as(usize, 0), rt.externalMemoryBytes());
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_token_count);
+    // Debt is cumulative allocation work since the last major, not current
+    // live external bytes. The live ledger above is the symmetric one.
+    try std.testing.expectEqual(debt_after_alloc, rt.allocationDebtBytes());
+}
+
+test "large shared buffers request a major through external pressure" {
+    const buffer_bytes: usize = 1024 * 1024;
+    const buffer_count: usize = 8;
+
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        // Isolate the external trigger: wrapper allocations cannot cross the
+        // ordinary whole-account threshold in this probe.
+        .gc_threshold = std.math.maxInt(usize),
+    });
+    defer rt.deinit();
+
+    var buffers: [buffer_count]core.JSValue = @splat(core.JSValue.undefinedValue());
+    var buffer_slice: []core.JSValue = &buffers;
+    var root_slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &buffer_slice }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &root_slices };
+    roots.activate(&rt);
+    defer roots.deactivate(&rt);
+
+    var needs_cleanup = true;
+    defer if (needs_cleanup) {
+        for (&buffers) |*value| {
+            value.free(&rt);
+            value.* = core.JSValue.undefinedValue();
+        }
+        helpers.reclaimNow(&rt);
+    };
+
+    const threshold_before = rt.gcThreshold();
+    const majors_before = rt.gcStats().major_gc_count;
+    for (buffers[0 .. buffer_count - 1]) |*value| {
+        value.* = try engine.exec.buffer_ops.sharedArrayBufferConstructLength(&rt, buffer_bytes, null, null);
+    }
+    try std.testing.expect(!rt.gcPendingForTest());
+    try std.testing.expectEqual(
+        (buffer_count - 1) * buffer_bytes * rt.gc.policy.external_weight,
+        rt.allocationDebtBytes(),
+    );
+
+    buffers[buffer_count - 1] = try engine.exec.buffer_ops.sharedArrayBufferConstructLength(&rt, buffer_bytes, null, null);
+    const pressured = rt.gcStats();
+    try std.testing.expectEqual(buffer_count * buffer_bytes, pressured.external_bytes);
+    try std.testing.expectEqual(buffer_count, pressured.external_token_count);
+    try std.testing.expectEqual(buffer_count * buffer_bytes, pressured.external_token_bytes);
+    try std.testing.expectEqual(threshold_before, rt.gcThreshold());
+    try std.testing.expect(rt.gcPendingForTest());
+    try std.testing.expectEqual(
+        @as(?core.gc.RequestReason, core.gc.RequestReason.allocation_debt),
+        rt.gcLastRequestReasonForTest(),
+    );
+
+    // The external path queues a major independently; it does not rewrite the
+    // MemoryAccount threshold. Servicing the request pays the debt while all
+    // rooted stores stay live.
+    _ = try rt.pollGC(null, .normal);
+    try std.testing.expectEqual(majors_before + 1, rt.gcStats().major_gc_count);
+    try std.testing.expectEqual(@as(usize, 0), rt.allocationDebtBytes());
+    try std.testing.expectEqual(buffer_count * buffer_bytes, rt.externalMemoryBytes());
+    try std.testing.expect(!rt.gcPendingForTest());
+
+    for (&buffers) |*value| {
+        value.free(&rt);
+        value.* = core.JSValue.undefinedValue();
+    }
+    helpers.reclaimNow(&rt);
+    needs_cleanup = false;
+    const released = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 0), released.external_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.external_token_count);
+    try std.testing.expectEqual(buffer_count, released.external_free_count);
 }
 
 test "runtime root tracer visits async roots" {
@@ -4284,7 +4778,7 @@ test "true C functions own their construction realm while data functions do not"
     const ctx = try core.RealmContext.create(rt);
     const function_proto = try core.Object.create(rt, core.class.ids.object, null);
     ctx.cached_function_proto = function_proto;
-    const native = try engine.core.function.nativeFunction(ctx, "native", 0);
+    var native = try engine.core.function.nativeFunction(ctx, "native", 0);
     const data = try engine.core.function.nativeDataFunctionWithPrototype(rt, function_proto, "data", 1);
 
     const native_object: *core.Object = @fieldParentPtr("header", native.refHeader().?);
@@ -4315,8 +4809,16 @@ test "true C functions own their construction realm while data functions do not"
     // function's direct construction-realm ownership below.
     data.free(rt);
     ctx.destroy();
+    // The realm outliving this collection is evidence of the native function's
+    // ownership only while the native function is itself a root -- the
+    // declared-only scan does not see the Zig local.
+    var native_roots = core.runtime.rootValues(.{&native});
+    native_roots.activate(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(ctx, rt.firstContext().?);
+    native_roots.deactivate(rt);
     native.free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -4374,7 +4876,7 @@ test "module namespace uses shape-only live-binding storage" {
     try std.testing.expectEqual(core.class.PayloadKind.none, namespace.flags.class_payload_kind);
     try std.testing.expectEqual(@as(usize, 1), namespace.shape_ref.prop_count);
     try std.testing.expectEqual(core.property.Kind.var_ref, namespace.propKindAt(0));
-    try std.testing.expectEqual(cell, namespace.prop_values[0].slot.var_ref);
+    try std.testing.expectEqual(cell, namespace.propertyEntry(0).*.slot.var_ref);
 
     const desc = (try namespace.getOwnProperty(rt, export_name)).?;
     defer desc.destroy(rt);
@@ -4403,7 +4905,7 @@ test "shapes retain property atoms and compare transitions" {
     try rt.shapes.addProperty(&second, name_atom, 0b000011);
     rt.atoms.free(name_atom);
 
-    try std.testing.expect(first.is_hashed);
+    try std.testing.expect(first.isHashed());
     try std.testing.expectEqual(@as(usize, 1), first.prop_count);
     try std.testing.expect(first.sameTransition(second));
     try std.testing.expect(rt.atoms.name(first.props()[0].atom_id) != null);
@@ -4581,6 +5083,153 @@ test "ordinary object additions reuse transition shapes" {
     try std.testing.expectEqual(@as(?i32, 4), (try second.getProperty(b)).asInt32());
 }
 
+test "trace object shape summary follows append kind delete and compaction" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const object = try core.Object.create(rt, core.class.ids.object, null);
+    defer object.value().free(rt);
+
+    var atoms: [10]core.Atom = undefined;
+    for (&atoms, 0..) |*slot, index| {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "trace_summary_{d}", .{index});
+        slot.* = try rt.internAtom(name);
+    }
+    defer for (atoms) |name| rt.atoms.free(name);
+
+    try std.testing.expectEqual(@as(u8, 0), object.traceShapeSummary());
+    try std.testing.expect(object.traceShapeSummaryMatches());
+
+    try object.defineOwnProperty(
+        rt,
+        atoms[0],
+        core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+    );
+    var summary = object.traceShapeSummary();
+    try std.testing.expect(core.Object.traceShapeSummaryIsExact(summary));
+    try std.testing.expectEqual(@as(usize, 1), core.Object.traceShapeSummaryCount(summary));
+    try std.testing.expectEqual(core.property.Kind.data, core.Object.traceShapeSummaryFlagsAt(summary, 0).kind);
+
+    try object.defineOwnProperty(
+        rt,
+        atoms[0],
+        core.Descriptor.accessor(core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), true, true),
+    );
+    summary = object.traceShapeSummary();
+    try std.testing.expectEqual(core.property.Kind.accessor, core.Object.traceShapeSummaryFlagsAt(summary, 0).kind);
+
+    // Offset-6 bit7 belongs to the remembered-set fast check, not the Shape
+    // projection, and every later summary mutation must preserve it. This is
+    // deliberately only a writer test: the object is not in the authoritative
+    // map, so the full representation audit must not bless this artificial
+    // state. The coherence test below establishes its positive arm through a
+    // real aged-owner barrier.
+    object.header.meta().lifetime.trace.object_shape_summary |= core.gc.trace_remembered_mask;
+    defer object.header.meta().lifetime.trace.object_shape_summary &= ~core.gc.trace_remembered_mask;
+    try std.testing.expectEqual(
+        core.gc.trace_remembered_mask,
+        object.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask,
+    );
+    try std.testing.expect(object.traceShapeSummaryMatches());
+
+    try object.defineOwnProperty(
+        rt,
+        atoms[1],
+        core.Descriptor.data(core.JSValue.int32(2), true, true, true),
+    );
+    summary = object.traceShapeSummary();
+    try std.testing.expectEqual(@as(usize, 2), core.Object.traceShapeSummaryCount(summary));
+    // The live-data append uses a whole-byte +1 for the 1 -> 2 count update;
+    // prove that it does not carry into or overwrite the preceding unusual
+    // slot projection.
+    try std.testing.expectEqual(core.property.Kind.accessor, core.Object.traceShapeSummaryFlagsAt(summary, 0).kind);
+    try std.testing.expectEqual(
+        core.gc.trace_remembered_mask,
+        object.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask,
+    );
+
+    // Slot1 participates in the base-5 payload as the high digit. Exercise a
+    // non-zero second digit before returning it to data for the later delete
+    // and compaction sequence.
+    try object.defineOwnProperty(
+        rt,
+        atoms[1],
+        core.Descriptor.accessor(core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), true, true),
+    );
+    summary = object.traceShapeSummary();
+    try std.testing.expectEqual(core.property.Kind.accessor, core.Object.traceShapeSummaryFlagsAt(summary, 0).kind);
+    try std.testing.expectEqual(core.property.Kind.accessor, core.Object.traceShapeSummaryFlagsAt(summary, 1).kind);
+    try object.defineOwnProperty(
+        rt,
+        atoms[1],
+        core.Descriptor.data(core.JSValue.int32(2), true, true, true),
+    );
+    try std.testing.expect(object.deleteProperty(rt, atoms[0]));
+    summary = object.traceShapeSummary();
+    try std.testing.expect(core.Object.traceShapeSummaryFlagsAt(summary, 0).deleted);
+    try std.testing.expectEqual(
+        core.gc.trace_remembered_mask,
+        object.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask,
+    );
+
+    for (atoms[2..]) |name| {
+        try object.defineOwnProperty(
+            rt,
+            name,
+            core.Descriptor.data(core.JSValue.int32(3), true, true, true),
+        );
+    }
+    try std.testing.expect(!core.Object.traceShapeSummaryIsExact(object.traceShapeSummary()));
+    try std.testing.expect(object.traceShapeSummaryMatches());
+    try std.testing.expectEqual(
+        core.gc.trace_remembered_mask,
+        object.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask,
+    );
+
+    // Eight tombstones trigger compactProperties. Ten descriptors become two
+    // exact slots, exercising the whole-layout refresh; the loop's final delete
+    // then proves incremental tombstone sync still applies after compaction.
+    for (atoms[1..9]) |name| try std.testing.expect(object.deleteProperty(rt, name));
+    summary = object.traceShapeSummary();
+    try std.testing.expect(core.Object.traceShapeSummaryIsExact(summary));
+    try std.testing.expectEqual(@as(usize, 2), core.Object.traceShapeSummaryCount(summary));
+    try std.testing.expect(core.Object.traceShapeSummaryFlagsAt(summary, 0).deleted);
+    try std.testing.expect(object.traceShapeSummaryMatches());
+    try std.testing.expectEqual(
+        core.gc.trace_remembered_mask,
+        object.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask,
+    );
+}
+
+test "trace object shape summary base-5 payload decodes all two-slot states" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    for (0..5) |slot0_state| {
+        for (0..5) |slot1_state| {
+            const payload: u8 = @intCast(slot0_state + 5 * slot1_state);
+            const summary = core.gc.trace_remembered_mask |
+                @as(u8, 2) |
+                (payload << 2);
+            const slot0 = core.Object.traceShapeSummaryFlagsAt(summary, 0);
+            const slot1 = core.Object.traceShapeSummaryFlagsAt(summary, 1);
+            if (slot0_state == 4) {
+                try std.testing.expect(slot0.deleted);
+            } else {
+                try std.testing.expect(!slot0.deleted);
+                try std.testing.expectEqual(@as(core.property.Kind, @enumFromInt(slot0_state)), slot0.kind);
+            }
+            if (slot1_state == 4) {
+                try std.testing.expect(slot1.deleted);
+            } else {
+                try std.testing.expect(!slot1.deleted);
+                try std.testing.expectEqual(@as(core.property.Kind, @enumFromInt(slot1_state)), slot1.kind);
+            }
+        }
+    }
+}
+
 test "pure property value replacement preserves a shared shape until flags change" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -4730,12 +5379,12 @@ test "failed new property definition rolls back retained entry" {
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props().len);
 
-    const retained_refs = retained.header.meta().rc;
+    const retained_refs = helpers.refCountSnapshot(&retained.header);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, e, core.Descriptor.data(retained.value(), true, true, true)));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(retained_refs, retained.header.meta().rc);
+    try helpers.expectRefCount(retained_refs, &retained.header);
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expect(!object.hasOwnProperty(e));
 
@@ -4767,7 +5416,7 @@ test "unique shape append OOM rolls back shape and value storage together" {
 
     try std.testing.expectEqual(@as(u32, 4), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(u32, 4), object.shape_ref.prop_size);
-    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.deleted_prop_count);
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.deletedPropCount());
 
     // Permit the value-buffer grow and the old two-step implementation's first
     // (8 props / 8 buckets) shape relocation, but not its second (16 buckets).
@@ -4825,9 +5474,9 @@ test "property compaction removes tombstones without mutating shared sibling sha
     var peak_deleted: u32 = 0;
     var compacted = false;
     for (0..8) |index| {
-        const deleted_before = victim.shape_ref.deleted_prop_count;
+        const deleted_before = victim.shape_ref.deletedPropCount();
         try std.testing.expect(victim.deleteProperty(rt, atoms[index * 2]));
-        const deleted = victim.shape_ref.deleted_prop_count;
+        const deleted = victim.shape_ref.deletedPropCount();
         const live = victim.shape_ref.prop_count - deleted;
         try std.testing.expect(deleted < @max(@as(u32, 8), live + 1));
         peak_deleted = @max(peak_deleted, deleted);
@@ -4841,7 +5490,7 @@ test "property compaction removes tombstones without mutating shared sibling sha
     try std.testing.expectEqual(@as(u32, 7), peak_deleted);
     try std.testing.expect(victim.shape_ref != shared_shape);
     try std.testing.expectEqual(@as(u32, 8), victim.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(u32, 0), victim.shape_ref.deleted_prop_count);
+    try std.testing.expectEqual(@as(u32, 0), victim.shape_ref.deletedPropCount());
     try std.testing.expectEqual(@as(u32, 8), victim.shape_ref.prop_size);
     for (0..8) |index| {
         const source_index = index * 2 + 1;
@@ -4853,7 +5502,7 @@ test "property compaction removes tombstones without mutating shared sibling sha
 
     try std.testing.expectEqual(shared_shape, sibling.shape_ref);
     try std.testing.expectEqual(@as(u32, 16), sibling.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(u32, 0), sibling.shape_ref.deleted_prop_count);
+    try std.testing.expectEqual(@as(u32, 0), sibling.shape_ref.deletedPropCount());
     const sibling_value = try sibling.getProperty(atoms[0]);
     defer sibling_value.free(rt);
     try std.testing.expectEqual(@as(?i32, 0), sibling_value.asInt32());
@@ -4872,9 +5521,10 @@ test "context lexicals property alias releases context strong reference" {
     const env_key = try rt.internAtom("env");
     defer rt.atoms.free(env_key);
     try global.defineOwnProperty(rt, env_key, core.Descriptor.data(env.value(), true, true, true));
-    try std.testing.expectEqual(@as(i32, 2), env.header.meta().rc);
+    try helpers.expectRefCount(2, &env.header);
 
     ctx.destroy();
+    helpers.reclaimNow(rt);
     try expectNoLiveGc(rt);
 }
 
@@ -4984,14 +5634,14 @@ test "property replacement preserves references under memory cap" {
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
-    const old_refs = old_value.header.meta().rc;
-    const replacement_refs = replacement.header.meta().rc;
+    const old_refs = helpers.refCountSnapshot(&old_value.header);
+    const replacement_refs = helpers.refCountSnapshot(&replacement.header);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(replacement.value(), true, true, true));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(old_refs - 1, old_value.header.meta().rc);
-    try std.testing.expectEqual(replacement_refs + 1, replacement.header.meta().rc);
+    try helpers.expectRefCount(old_refs - 1, &old_value.header);
+    try helpers.expectRefCount(replacement_refs + 1, &replacement.header);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
@@ -5023,18 +5673,54 @@ test "definePlainDataPropertyKnownFast refcounted append and duplicate-key repla
     // Append leg: `first` is consumed into the slot (no residual caller ref).
     try holder.definePlainDataPropertyKnownFast(rt, key, first.value());
     try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.prop_count);
-    try std.testing.expectEqual(&first.header, holder.prop_values[0].slot.data.refHeader().?);
-    try std.testing.expectEqual(@as(i32, 1), first.header.meta().rc);
+    try std.testing.expectEqual(&first.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+    try helpers.expectRefCount(1, &first.header);
 
     // Duplicate-key replace leg (`({a:o1,a:o2})`): `second` is consumed, the
     // displaced `first` is destroyed — rc must balance (slot + probe only).
     try holder.definePlainDataPropertyKnownFast(rt, key, second.value());
     try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.prop_count);
-    try std.testing.expectEqual(&second.header, holder.prop_values[0].slot.data.refHeader().?);
-    try std.testing.expectEqual(@as(i32, 2), second.header.meta().rc);
+    try std.testing.expectEqual(&second.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+    try helpers.expectRefCount(2, &second.header);
+    // Exact mark does not treat Zig locals as roots, and `second` is only
+    // reachable through the slot, so `holder` has to be named for the count
+    // below to be about `first` rather than about missing roots.
+    var holder_slot: ?*core.Object = holder;
+    var obj_roots = core.runtime.rootObjects(.{&holder_slot});
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
+    helpers.reclaimNow(rt);
     // holder + second only: the replaced `first` must be gone (a leaked ref
     // from the pre-fix borrow/consume mismatch would keep it live).
     try std.testing.expectEqual(baseline_live + 2, rt.gc.liveCountKind(.object));
+}
+
+test "definePlainDataPropertyKnownFast barriers follow committed slot and shape writes" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const first = try core.Object.create(rt, core.class.ids.object, null);
+    const replacement = try core.Object.create(rt, core.class.ids.object, null);
+    const key = try rt.internAtom("literal-barrier-count");
+    defer rt.atoms.free(key);
+
+    const reports_before = core.gc_trace_stw.detailed_reports;
+    core.gc_trace_stw.detailed_reports = true;
+    defer core.gc_trace_stw.detailed_reports = reports_before;
+
+    var barriers_before = rt.gc.generation.stats.barrier_calls;
+    try holder.definePlainDataPropertyKnownFast(rt, key, first.value());
+    // One barrier publishes the data slot and one publishes the new Shape.
+    try std.testing.expectEqual(barriers_before + 2, rt.gc.generation.stats.barrier_calls);
+
+    barriers_before = rt.gc.generation.stats.barrier_calls;
+    try holder.definePlainDataPropertyKnownFast(rt, key, replacement.value());
+    // Replacing the existing data slot publishes only its new value.
+    try std.testing.expectEqual(barriers_before + 1, rt.gc.generation.stats.barrier_calls);
 }
 
 const DefineFieldForceGcProbe = struct {
@@ -5048,7 +5734,7 @@ const DefineFieldForceGcProbe = struct {
         // Full cycle removal before every allocation — the force-GC shape of
         // `-Dzjs_force_gc=true` — so the collection lands inside the append
         // over-hang and the replace-branch shape mutation.
-        _ = self.rt.runObjectCycleRemoval();
+        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
     }
 };
 
@@ -5062,18 +5748,28 @@ test "definePlainDataPropertyKnownFast refcounted define survives forced GC at e
     const key = try rt.internAtom("refcounted-literal-force-gc");
     defer rt.atoms.free(key);
 
-    // A two-object cycle whose ONLY external root is the value ref handed to
-    // the define: trial-deletion must treat the in-flight (unpublished /
-    // over-hang) ref as an external root and keep the pair alive mid-append.
-    const cyclic = try core.Object.create(rt, core.class.ids.object, null);
-    const partner = try core.Object.create(rt, core.class.ids.object, null);
+    // A two-object cycle whose only JS-heap root is the value handed to
+    // define. Trial deletion treats the live RC as an external root; tracing
+    // names the in-flight value through the mutation-window frame (§4.6).
+    var cyclic = try core.Object.create(rt, core.class.ids.object, null);
+    var partner = try core.Object.create(rt, core.class.ids.object, null);
     const partner_key = try rt.internAtom("refcounted-literal-partner");
     try cyclic.defineOwnProperty(rt, partner_key, core.Descriptor.data(partner.value(), true, true, true));
     try partner.defineOwnProperty(rt, partner_key, core.Descriptor.data(cyclic.value(), true, true, true));
     partner.value().free(rt);
+    dropGcPtr(&partner);
     rt.atoms.free(partner_key);
 
     const replacement = try core.Object.create(rt, core.class.ids.object, null);
+
+    // Exact mark does not treat Zig locals as roots. Name holder and
+    // replacement across the force-GC window; the in-flight define value is
+    // rooted by the mutation-window frame inside definePlainDataPropertyKnownFast.
+    var holder_slot: ?*core.Object = holder;
+    var replacement_slot: ?*core.Object = replacement;
+    var obj_roots = core.runtime.rootObjects(.{ &holder_slot, &replacement_slot });
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
 
     var probe = DefineFieldForceGcProbe{ .rt = rt };
     const saved_trigger = rt.memory.trigger_gc_fn;
@@ -5087,15 +5783,16 @@ test "definePlainDataPropertyKnownFast refcounted define survives forced GC at e
 
     // Append leg under forced GC: consumes the cycle's only external ref.
     try holder.definePlainDataPropertyKnownFast(rt, key, cyclic.value());
-    try std.testing.expectEqual(&cyclic.header, holder.prop_values[0].slot.data.refHeader().?);
+    try std.testing.expectEqual(&cyclic.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
     try std.testing.expectEqual(baseline_live + 4, rt.gc.liveCountKind(.object));
+    dropGcPtr(&cyclic);
 
     // Duplicate-key replace leg under forced GC: consumes `replacement`,
     // destroys the displaced cycle root; the now-unrooted pair must be
     // reclaimed by the next collection, not leaked.
     try holder.definePlainDataPropertyKnownFast(rt, key, replacement.value());
     try std.testing.expect(probe.fired > 0);
-    try std.testing.expectEqual(&replacement.header, holder.prop_values[0].slot.data.refHeader().?);
+    try std.testing.expectEqual(&replacement.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(baseline_live + 2, rt.gc.liveCountKind(.object));
 }
@@ -5132,14 +5829,14 @@ test "definePlainDataPropertyKnownFast OOM sweep leaves refcounted value owned b
             rt.setMemoryLimit(null);
             try std.testing.expectEqual(error.OutOfMemory, err);
             failures += 1;
-            try std.testing.expectEqual(@as(i32, 2), child.header.meta().rc);
+            try helpers.expectRefCount(2, &child.header);
             try std.testing.expectEqual(@as(usize, 0), holder.shape_ref.prop_count);
         }
     }
     try std.testing.expect(failures > 0);
     // Success consumed the caller's ref: slot + probe only.
-    try std.testing.expectEqual(@as(i32, 2), child.header.meta().rc);
-    try std.testing.expectEqual(&child.header, holder.prop_values[0].slot.data.refHeader().?);
+    try helpers.expectRefCount(2, &child.header);
+    try std.testing.expectEqual(&child.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
 
     // Same sweep over the duplicate-key replace leg: failures must not touch
     // the incumbent slot value nor consume the caller's replacement ref.
@@ -5158,14 +5855,14 @@ test "definePlainDataPropertyKnownFast OOM sweep leaves refcounted value owned b
             rt.setMemoryLimit(null);
             try std.testing.expectEqual(error.OutOfMemory, err);
             replace_failures += 1;
-            try std.testing.expectEqual(@as(i32, 2), replacement.header.meta().rc);
-            try std.testing.expectEqual(@as(i32, 2), child.header.meta().rc);
-            try std.testing.expectEqual(&child.header, holder.prop_values[0].slot.data.refHeader().?);
+            try helpers.expectRefCount(2, &replacement.header);
+            try helpers.expectRefCount(2, &child.header);
+            try std.testing.expectEqual(&child.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
         }
     }
-    try std.testing.expectEqual(@as(i32, 2), replacement.header.meta().rc);
-    try std.testing.expectEqual(@as(i32, 1), child.header.meta().rc);
-    try std.testing.expectEqual(&replacement.header, holder.prop_values[0].slot.data.refHeader().?);
+    try helpers.expectRefCount(2, &replacement.header);
+    try helpers.expectRefCount(1, &child.header);
+    try std.testing.expectEqual(&replacement.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
     try std.testing.expectEqual(baseline_live + 3, rt.gc.liveCountKind(.object));
 }
 
@@ -5181,22 +5878,22 @@ test "object data property self-assignment keeps stored object alive" {
 
     try holder.defineOwnProperty(rt, key, core.Descriptor.data(stored.value(), true, true, true));
     stored.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
+    try helpers.expectRefCount(1, &stored.header);
 
-    const own_value = holder.prop_values[0].slot.data;
+    const own_value = holder.propertyEntry(0).*.slot.data;
     try std.testing.expect(try holder.setOwnWritableDataProperty(rt, key, own_value));
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
-    try std.testing.expectEqual(&stored.header, holder.prop_values[0].slot.data.refHeader().?);
+    try helpers.expectRefCount(1, &stored.header);
+    try std.testing.expectEqual(&stored.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
 
-    const property_value = holder.prop_values[0].slot.data;
+    const property_value = holder.propertyEntry(0).*.slot.data;
     try holder.setProperty(rt, key, property_value);
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
-    try std.testing.expectEqual(&stored.header, holder.prop_values[0].slot.data.refHeader().?);
+    try helpers.expectRefCount(1, &stored.header);
+    try std.testing.expectEqual(&stored.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
 
-    const simple_value = holder.prop_values[0].slot.data;
+    const simple_value = holder.propertyEntry(0).*.slot.data;
     try std.testing.expect(try holder.setOrDefineOwnDataPropertyForSimpleSet(rt, key, simple_value));
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
-    try std.testing.expectEqual(&stored.header, holder.prop_values[0].slot.data.refHeader().?);
+    try helpers.expectRefCount(1, &stored.header);
+    try std.testing.expectEqual(&stored.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
 }
 
 test "json parse data property self-assignment keeps stored object alive" {
@@ -5211,13 +5908,13 @@ test "json parse data property self-assignment keeps stored object alive" {
 
     try holder.defineJsonParseDataProperty(rt, key, stored.value());
     stored.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
+    try helpers.expectRefCount(1, &stored.header);
 
-    const current = holder.prop_values[0].slot.data;
+    const current = holder.propertyEntry(0).*.slot.data;
     try holder.defineJsonParseDataProperty(rt, key, current);
 
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
-    try std.testing.expectEqual(&stored.header, holder.prop_values[0].slot.data.refHeader().?);
+    try helpers.expectRefCount(1, &stored.header);
+    try std.testing.expectEqual(&stored.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
 }
 
 test "dense array element self-assignment keeps stored object alive" {
@@ -5231,12 +5928,12 @@ test "dense array element self-assignment keeps stored object alive" {
 
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, index, stored.value()));
     stored.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
+    try helpers.expectRefCount(1, &stored.header);
 
     const current = array.arrayElements()[0];
     try array.setProperty(rt, index, current);
 
-    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
+    try helpers.expectRefCount(1, &stored.header);
     try std.testing.expectEqual(&stored.header, array.arrayElements()[0].refHeader().?);
 }
 
@@ -5252,20 +5949,20 @@ test "owned dense array writes consume values only on success" {
     const index_0 = core.atom.atomFromUInt32(0);
 
     try std.testing.expect(try array.appendDenseArrayIndexOwned(rt, 0, index_0, initial.value()));
-    try std.testing.expectEqual(@as(i32, 2), initial.header.meta().rc);
+    try helpers.expectRefCount(2, &initial.header);
 
     const replacement = try core.Object.create(rt, core.class.ids.object, null);
     const replacement_witness = replacement.value().dup();
     defer replacement_witness.free(rt);
     try std.testing.expect(array.setFastArrayElementOwned(rt, 0, replacement.value()));
-    try std.testing.expectEqual(@as(i32, 1), initial.header.meta().rc);
-    try std.testing.expectEqual(@as(i32, 2), replacement.header.meta().rc);
+    try helpers.expectRefCount(1, &initial.header);
+    try helpers.expectRefCount(2, &replacement.header);
     try std.testing.expectEqual(&replacement.header, array.arrayElements()[0].refHeader().?);
 
     const rejected = try core.Object.create(rt, core.class.ids.object, null);
     try std.testing.expect(!array.setFastArrayElementOwned(rt, 2, rejected.value()));
     try std.testing.expect(!try array.appendDenseArrayIndexOwned(rt, 3, core.atom.atomFromUInt32(3), rejected.value()));
-    try std.testing.expectEqual(@as(i32, 1), rejected.header.meta().rc);
+    try helpers.expectRefCount(1, &rejected.header);
     rejected.value().free(rt);
 }
 
@@ -5315,14 +6012,14 @@ test "failed prototype replacement preserves prototype and refcounts" {
     try std.testing.expectEqual(shared_shape, second.shape_ref);
     try std.testing.expect(first.getPrototype() == null);
 
-    const proto_refs = proto.header.meta().rc;
+    const proto_refs = helpers.refCountSnapshot(&proto.header);
     const shape_refs = shared_shape.refCount();
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, first.setPrototype(rt, proto));
     rt.setMemoryLimit(null);
 
     try std.testing.expect(first.getPrototype() == null);
-    try std.testing.expectEqual(proto_refs, proto.header.meta().rc);
+    try helpers.expectRefCount(proto_refs, &proto.header);
     try std.testing.expectEqual(shared_shape, first.shape_ref);
     try std.testing.expectEqual(shared_shape, second.shape_ref);
     try std.testing.expectEqual(shape_refs, shared_shape.refCount());
@@ -5379,6 +6076,9 @@ test "shape transition cache releases chained shapes" {
     const shared_shape = objects[0].shape_ref;
     for (objects[1..]) |obj| try std.testing.expectEqual(shared_shape, obj.shape_ref);
     for (objects) |obj| obj.value().free(rt);
+    // Nothing below reads `objects` again, so the chain is unreachable and the
+    // collection stands in for the release cascade that used to unhook it.
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
 }
@@ -5853,6 +6553,7 @@ test "function bytecode registration is old-space accounted" {
 
     value.free(&rt);
     value_alive = false;
+    helpers.reclaimNow(&rt);
     try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(baseline_allocations, rt.memory.allocation_count);
     try std.testing.expectEqual(baseline_create_calls + 1, rt.memory.create_calls);
@@ -5926,10 +6627,13 @@ test "gc live heap stats drop when object is released" {
     try std.testing.expectEqual(@as(usize, 0), allocated.large_object_bytes);
 
     object.value().free(rt);
+    helpers.reclaimNow(rt);
 
     const released = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 0), released.total_allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 0), released.peak_allocated_bytes);
+    // A high-water mark does not descend on release; the old assertion of
+    // zero pinned the field's former lie of echoing `live`.
+    try std.testing.expect(released.peak_allocated_bytes >= expected_gc_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.old_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.old_alloc_count);
     try std.testing.expectEqual(@as(usize, 0), released.heap_live_bytes);
@@ -6070,6 +6774,9 @@ test "std file object destruction defers native close cleanup" {
     file_owned_by_test = false;
 
     object.value().free(&rt);
+    // The deferred close is enqueued by the object's teardown, so the queue
+    // only fills once something actually reclaims it.
+    helpers.reclaimNow(&rt);
 
     var stats = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredNativeCleanupCountForTest());
@@ -6180,6 +6887,7 @@ test "gc registry debug verifier accepts linked and unlinked list states" {
     try rt.gc.verifyIntrusiveList();
 
     obj.value().free(rt);
+    helpers.reclaimNow(rt);
     try rt.gc.verifyIntrusiveList();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
@@ -6214,7 +6922,16 @@ test "gc heap accounting verifier catches missing allocation entries" {
     try rt.gc.verifyHeapAccounting(rt);
 
     obj.header.meta().alloc_info.heap_accounted = false;
-    try std.testing.expectError(error.MissingHeapAllocation, rt.gc.verifyHeapAccounting(rt));
+    // On the intrusive list an unaccounted header is an immediate
+    // MissingHeapAllocation. A block-served object is enumerated THROUGH its
+    // accounting -- clearing the bit removes it from the walk entirely, so
+    // the same corruption surfaces as the byte-total mismatch instead.
+    // Either way the verifier fires, which is the property under test.
+    if (comptime core.gc.block_heap_enabled) {
+        try std.testing.expectError(error.HeapLiveBytesMismatch, rt.gc.verifyHeapAccounting(rt));
+    } else {
+        try std.testing.expectError(error.MissingHeapAllocation, rt.gc.verifyHeapAccounting(rt));
+    }
     obj.header.meta().alloc_info.heap_accounted = true;
     try rt.gc.verifyHeapAccounting(rt);
 }
@@ -6234,6 +6951,953 @@ test "gc heap accounting verifier catches pinned header flag drift" {
     try std.testing.expectError(error.PinnedHeaderFlagMismatch, rt.gc.verifyHeapAccounting(rt));
     obj.header.setPinned(true);
     try rt.gc.verifyHeapAccounting(rt);
+}
+
+test "gc invariant negative: block candidate index audit rejects bloom and exact-set drift" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+
+    var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
+    defer heap.deinit();
+    const cell = (try heap.allocCell(64)) orelse return error.TestUnexpectedResult;
+    const block = heap.blockOf(cell.ptr) orelse return error.TestUnexpectedResult;
+    try heap.verify();
+
+    // The conservative resolver may dereference a masked candidate only
+    // after both the TinyBloom and the exact initialized-block set accept it.
+    // Corrupt each half independently so this proves the checker guards the
+    // acceleration structure, rather than merely existing beside it.
+    {
+        const saved_filter = heap.classed_block_filter;
+        defer heap.classed_block_filter = saved_filter;
+        heap.classed_block_filter = 0;
+        try std.testing.expectError(error.BlockScanFilterMismatch, heap.verify());
+    }
+    try heap.verify();
+    {
+        const block_base = @intFromPtr(block);
+        try std.testing.expect(heap.classed_blocks.remove(block_base));
+        try std.testing.expectError(error.BlockIndexMismatch, heap.verify());
+        try heap.classed_blocks.put(std.testing.allocator, block_base, {});
+    }
+    try heap.verify();
+}
+
+test "gc invariant negative: block heap rejects geometry free-chain and doomed-list corruption" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+
+    var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
+    defer heap.deinit();
+    const cell = (try heap.allocCell(64)) orelse return error.TestUnexpectedResult;
+    const block = heap.blockOf(cell.ptr) orelse return error.TestUnexpectedResult;
+    // `freeSmallCell` is the allocation-hook fast path: in production
+    // `Registry.serveObjectCells` stamps the index returned by `allocCell`
+    // before exposing the cell. This direct BlockHeap fixture must mirror that
+    // contract rather than read uninitialized prefix bytes.
+    std.mem.writeInt(u16, cell.ptr[0..2], @intCast(cell.index), .little);
+    try heap.verify();
+
+    // Physical blocks currently expose only stable active/swept states. A
+    // half-wired §8.7 state must be rejected by the arena-wide checker.
+    {
+        const saved_sweep_state = block.sweep_state;
+        defer block.sweep_state = saved_sweep_state;
+        block.sweep_state = .needs_sweep;
+        try std.testing.expectError(error.SweepStateInvariant, heap.verify());
+    }
+    try heap.verify();
+
+    // Geometry is derived from the size class. A self-consistent-looking but
+    // wrong cell count must fail before bitmap or cell pointer arithmetic.
+    {
+        const saved_cell_count = block.cell_count;
+        defer block.cell_count = saved_cell_count;
+        block.cell_count += 1;
+        try std.testing.expectError(error.BlockGeometryCorrupt, heap.verify());
+    }
+    try heap.verify();
+
+    // Put one real cell on the free chain, then corrupt its poison word. This
+    // is the historical low-word-link/high-word-poison failure shape; unlike
+    // the old arena-only audit, the corruption is present when verify runs.
+    // `freeSmallCell` is the Registry fast path and requires its caller to
+    // have stamped `cell.index` into the allocation prefix. This direct Heap
+    // test has not published a Registry allocation, so use the general free
+    // entry, which derives the index from block geometry.
+    heap.free(cell.ptr);
+    try heap.verify();
+    {
+        const free_word: *u32 = @ptrCast(@alignCast(cell.ptr));
+        const saved_free_word = free_word.*;
+        defer free_word.* = saved_free_word;
+        free_word.* ^= 0x0001_0000;
+        try std.testing.expectError(error.FreeCellPoisonMismatch, heap.verify());
+    }
+    try heap.verify();
+
+    // A chain can be locally well formed and still claim a block that has no
+    // doomed bits. Reverse membership is what catches that orphan node.
+    {
+        const saved_doomed_head = heap.doomed_blocks;
+        const saved_doomed_link = block.doomed_link;
+        defer {
+            heap.doomed_blocks = saved_doomed_head;
+            block.doomed_link = saved_doomed_link;
+        }
+        block.doomed_link = 1;
+        heap.doomed_blocks = block;
+        try std.testing.expectError(error.DoomedListMembershipMismatch, heap.verify());
+    }
+    try heap.verify();
+}
+
+test "gc invariant negative: block cell publication audit rejects hidden allocations" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const obj = try core.Object.createPlainObject(rt, null);
+    defer obj.value().free(rt);
+    const marker = core.gc.representation.block_cell_size_class;
+    const object_kind: u3 = @intCast(@intFromEnum(core.gc.GcKind.object));
+
+    try rt.gc.block_heap.verifyPublishedCells(marker, object_kind);
+    {
+        const saved_alloc_info = obj.header.meta().alloc_info;
+        defer obj.header.meta().alloc_info = saved_alloc_info;
+        obj.header.meta().alloc_info.heap_accounted = false;
+        try std.testing.expectError(
+            error.AllocatedCellUnpublished,
+            rt.gc.block_heap.verifyPublishedCells(marker, object_kind),
+        );
+    }
+    try rt.gc.block_heap.verifyPublishedCells(marker, object_kind);
+
+    {
+        const saved_index = obj.header.meta().size_class;
+        defer obj.header.meta().size_class = saved_index;
+        obj.header.meta().size_class +%= 1;
+        try std.testing.expectError(
+            error.CellIndexStampMismatch,
+            rt.gc.block_heap.verifyPublishedCells(marker, object_kind),
+        );
+    }
+    try rt.gc.block_heap.verifyPublishedCells(marker, object_kind);
+}
+
+test "gc invariant negative: metadata semantics reject kind carrier and field misuse" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    var published = core.gc.Metadata{
+        .size_class = 64,
+        .alloc_info = .{ .heap_accounted = true, .standalone = true },
+        .flags = .{ .kind = .var_ref, .young = true },
+        .lifetime = .{ .trace = .{} },
+    };
+    try core.gc.verifyMetadataSemantics(&published, .var_ref, .registry_published);
+
+    {
+        const saved = published.flags.kind;
+        defer published.flags.kind = saved;
+        published.flags.kind = .object;
+        try std.testing.expectError(
+            error.RepresentationKindMismatch,
+            core.gc.verifyMetadataSemantics(&published, .var_ref, .registry_published),
+        );
+    }
+    {
+        const saved = published.alloc_info;
+        defer published.alloc_info = saved;
+        published.alloc_info = .{
+            .block_size_idx = core.gc.representation.block_cell_size_class,
+            .heap_accounted = true,
+        };
+        try std.testing.expectError(
+            error.RepresentationAllocationCarrierMismatch,
+            core.gc.verifyMetadataSemantics(&published, .var_ref, .registry_published),
+        );
+    }
+    {
+        const saved = published.alloc_info;
+        defer published.alloc_info = saved;
+        // FAM-backed registry kinds may be logically large while their header
+        // remains slab-backed. The bit becomes invalid only when no registry
+        // heap accounting owns that logical footprint.
+        published.alloc_info.large = true;
+        published.alloc_info.standalone = false;
+        try core.gc.verifyMetadataSemantics(&published, .var_ref, .registry_published);
+        published.alloc_info.heap_accounted = false;
+        try std.testing.expectError(
+            error.RepresentationPrefixFieldMismatch,
+            core.gc.verifyMetadataSemantics(&published, .var_ref, .registry_published),
+        );
+    }
+    {
+        var string_meta = core.gc.Metadata{ .flags = .{ .kind = .string } };
+        try std.testing.expectError(
+            error.RepresentationPrefixModelMismatch,
+            core.gc.verifyMetadataSemantics(&string_meta, .string, .detached_leaf),
+        );
+    }
+    {
+        var big_int_meta = core.gc.Metadata{
+            .alloc_info = .{ .standalone = true },
+            .flags = .{ .kind = .big_int, .young = true },
+            .lifetime = .{ .rc = 1 },
+        };
+        try std.testing.expectError(
+            error.RepresentationPrefixFieldMismatch,
+            core.gc.verifyMetadataSemantics(&big_int_meta, .big_int, .detached_leaf),
+        );
+        big_int_meta.flags.young = false;
+        try core.gc.verifyMetadataSemantics(&big_int_meta, .big_int, .detached_leaf);
+    }
+    {
+        const saved = published.lifetime.trace.flags;
+        defer published.lifetime.trace.flags = saved;
+        published.lifetime.trace.flags.reserved = 1;
+        try std.testing.expectError(
+            error.RepresentationPrefixFieldMismatch,
+            core.gc.verifyMetadataSemantics(&published, .var_ref, .registry_published),
+        );
+    }
+    {
+        const saved = published.lifetime.trace.object_shape_summary;
+        defer published.lifetime.trace.object_shape_summary = saved;
+        published.lifetime.trace.object_shape_summary = 1;
+        try std.testing.expectError(
+            error.RepresentationPrefixFieldMismatch,
+            core.gc.verifyMetadataSemantics(&published, .var_ref, .registry_published),
+        );
+    }
+}
+
+test "compact trace retained-RC backlinks are authoritative and audited" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const shape = try rt.shapes.create(null);
+    defer rt.shapes.release(shape);
+
+    try rt.gc.verifyIntrusiveList();
+    {
+        // The trace-only backlink shares its otherwise-free low bit with the
+        // hash-membership flag. Each accessor must preserve the other fact.
+        var state = shape.trace_list_previous;
+        const previous = state.previous();
+        const was_hashed = state.isHashed();
+        state.setHashed(!was_hashed);
+        try std.testing.expectEqual(previous, state.previous());
+        state.setPrevious(null);
+        try std.testing.expectEqual(!was_hashed, state.isHashed());
+    }
+    {
+        const saved = shape.trace_list_previous;
+        defer shape.trace_list_previous = saved;
+        shape.trace_list_previous.setPrevious(null);
+        try std.testing.expectError(error.CorruptGcList, rt.gc.verifyIntrusiveList());
+    }
+    try rt.gc.verifyIntrusiveList();
+    {
+        const saved = ctx.traceListPreviousPtr().*;
+        defer ctx.traceListPreviousPtr().* = saved;
+        ctx.traceListPreviousPtr().* = null;
+        try std.testing.expectError(error.CorruptGcList, rt.gc.verifyIntrusiveList());
+    }
+    try rt.gc.verifyIntrusiveList();
+}
+
+// Metadata byte 6 carries two independent tenants: bits 0..6 are the
+// object-local projection of the Shape's first two property slots, and bit 7 is
+// the generational remembered-set membership cache. The projection has two
+// writers -- `commitTraceShapeAppend` on append and `syncTraceShapePropertyFlags`
+// on an in-place flag change -- but only one normative definition,
+// `traceShapeSummaryMatches`, which re-derives the byte from the Shape. Nothing
+// used to exercise the writers directly: lane-b's `f469ab96` regressed the
+// append writer into "store the overflow sentinel on every append", which the
+// marker tolerates (overflow just falls back to the Shape FAM walk) but which
+// silently deletes the entire fast path, and the only thing that noticed was an
+// `engine_production` eval test that happened to run a collection. These two
+// tests pin the writers against the auditor so a regression fails at the
+// mechanism instead of somewhere downstream.
+test "trace shape summary: incremental writers track the Shape projection" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const key_a = try rt.internAtom("trace-summary-a");
+    defer rt.atoms.free(key_a);
+    const key_b = try rt.internAtom("trace-summary-b");
+    defer rt.atoms.free(key_b);
+    const key_c = try rt.internAtom("trace-summary-c");
+    defer rt.atoms.free(key_c);
+
+    const undef = core.JSValue.undefinedValue();
+    const data_desc = core.Descriptor.data(undef, true, true, true);
+    const accessor_desc = core.Descriptor.accessor(undef, undef, true, true);
+
+    // Canonical all-live-data summaries are literally their own count. That is
+    // the property the marker's `summary <= trailing_property_capacity` fast
+    // arm reads, so assert the byte, not just auditor agreement.
+    const plain = try core.Object.createPlainObject(rt, null);
+    defer plain.value().free(rt);
+    try std.testing.expectEqual(@as(u8, 0), plain.traceShapeSummary());
+    try rt.gc.verifyRepresentationInvariants();
+
+    try plain.defineOwnProperty(rt, key_a, data_desc);
+    try std.testing.expectEqual(@as(u8, 1), plain.traceShapeSummary());
+    try rt.gc.verifyRepresentationInvariants();
+
+    try plain.defineOwnProperty(rt, key_b, data_desc);
+    try std.testing.expectEqual(@as(u8, 2), plain.traceShapeSummary());
+    try rt.gc.verifyRepresentationInvariants();
+
+    // The third append leaves the two inline slots; the projection can no
+    // longer describe the object and degrades to the sentinel.
+    try plain.defineOwnProperty(rt, key_c, data_desc);
+    try std.testing.expect(!core.Object.traceShapeSummaryIsExact(plain.traceShapeSummary()));
+    try rt.gc.verifyRepresentationInvariants();
+
+    // An unusual slot state cannot ride the increment shortcut: it has to go
+    // through the base-5 payload encoder, once with an empty predecessor
+    // (slot 0) and once with a non-empty one (slot 1).
+    const unusual = try core.Object.createPlainObject(rt, null);
+    defer unusual.value().free(rt);
+
+    try unusual.defineOwnProperty(rt, key_a, accessor_desc);
+    {
+        const summary = unusual.traceShapeSummary();
+        try std.testing.expect(core.Object.traceShapeSummaryIsExact(summary));
+        try std.testing.expectEqual(@as(usize, 1), core.Object.traceShapeSummaryCount(summary));
+        try std.testing.expectEqual(
+            core.property.Kind.accessor,
+            core.Object.traceShapeSummaryFlagsAt(summary, 0).kind,
+        );
+    }
+    try rt.gc.verifyRepresentationInvariants();
+
+    try unusual.defineOwnProperty(rt, key_b, data_desc);
+    {
+        const summary = unusual.traceShapeSummary();
+        try std.testing.expectEqual(@as(usize, 2), core.Object.traceShapeSummaryCount(summary));
+        try std.testing.expectEqual(
+            core.property.Kind.accessor,
+            core.Object.traceShapeSummaryFlagsAt(summary, 0).kind,
+        );
+        try std.testing.expectEqual(
+            core.property.Kind.data,
+            core.Object.traceShapeSummaryFlagsAt(summary, 1).kind,
+        );
+    }
+    try rt.gc.verifyRepresentationInvariants();
+
+    // In-place flag change: the second writer must rewrite one base-5 digit
+    // without disturbing the other one or the count.
+    try unusual.defineOwnProperty(rt, key_b, accessor_desc);
+    {
+        const summary = unusual.traceShapeSummary();
+        try std.testing.expectEqual(@as(usize, 2), core.Object.traceShapeSummaryCount(summary));
+        try std.testing.expectEqual(
+            core.property.Kind.accessor,
+            core.Object.traceShapeSummaryFlagsAt(summary, 0).kind,
+        );
+        try std.testing.expectEqual(
+            core.property.Kind.accessor,
+            core.Object.traceShapeSummaryFlagsAt(summary, 1).kind,
+        );
+    }
+    try rt.gc.verifyRepresentationInvariants();
+
+    // A delete tombstones the slot instead of shrinking the count, and the
+    // marker must learn to skip it from the summary alone.
+    try std.testing.expect(unusual.deleteProperty(rt, key_a));
+    {
+        const summary = unusual.traceShapeSummary();
+        if (core.Object.traceShapeSummaryIsExact(summary)) {
+            try std.testing.expect(core.Object.traceShapeSummaryFlagsAt(summary, 0).deleted);
+        }
+    }
+    try rt.gc.verifyRepresentationInvariants();
+}
+
+test "trace shape summary: appends preserve the leased remembered bit" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const key_a = try rt.internAtom("trace-summary-bit7-a");
+    defer rt.atoms.free(key_a);
+    const key_b = try rt.internAtom("trace-summary-bit7-b");
+    defer rt.atoms.free(key_b);
+    const key_c = try rt.internAtom("trace-summary-bit7-c");
+    defer rt.atoms.free(key_c);
+
+    const owner = try core.Object.createPlainObject(rt, null);
+    defer owner.value().free(rt);
+    var owner_slot: ?*core.Object = owner;
+    var roots = core.runtime.rootObjects(.{&owner_slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    // Age the owner so the next old-to-young store goes through the real
+    // barrier and sets bit 7 with a matching authoritative map entry.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expectEqual(@as(u8, 0), owner.traceShapeSummary());
+
+    const Local = struct {
+        fn storeYoungChild(runtime: *core.JSRuntime, target: *core.Object, key: anytype) !void {
+            const child = try core.Object.createPlainObject(runtime, null);
+            defer child.value().free(runtime);
+            try target.defineOwnProperty(
+                runtime,
+                key,
+                core.Descriptor.data(child.value(), true, true, true),
+            );
+        }
+    };
+
+    try Local.storeYoungChild(rt, owner, key_a);
+    const bit = core.gc.trace_remembered_mask;
+    try std.testing.expect(owner.header.metaConst().lifetime.trace.object_shape_summary & bit != 0);
+    try std.testing.expectEqual(@as(u8, 1), owner.traceShapeSummary());
+    try rt.gc.verifyRepresentationInvariants();
+
+    // Second append: the increment shortcut runs on the raw byte with bit 7
+    // already set, so it must not carry out of the projection.
+    try Local.storeYoungChild(rt, owner, key_b);
+    try std.testing.expect(owner.header.metaConst().lifetime.trace.object_shape_summary & bit != 0);
+    try std.testing.expectEqual(@as(u8, 2), owner.traceShapeSummary());
+    try rt.gc.verifyRepresentationInvariants();
+
+    // Third append: `exact 2 -> overflow` is also an increment of the raw
+    // byte. This is the one transition where a payload-carrying summary sits
+    // closest to bit 7, and the comptime bound in object.zig exists for it.
+    try Local.storeYoungChild(rt, owner, key_c);
+    try std.testing.expect(owner.header.metaConst().lifetime.trace.object_shape_summary & bit != 0);
+    try std.testing.expect(!core.Object.traceShapeSummaryIsExact(owner.traceShapeSummary()));
+    try rt.gc.verifyRepresentationInvariants();
+}
+
+test "gc invariant negative: representation audit rejects physical carrier and cell index drift" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const obj = try core.Object.createPlainObject(rt, null);
+    defer obj.value().free(rt);
+    try std.testing.expectEqual(
+        core.gc.representation.block_cell_size_class,
+        obj.header.metaConst().alloc_info.block_size_idx,
+    );
+    try rt.gc.verifyRepresentationInvariants();
+
+    {
+        const saved_summary = obj.header.meta().lifetime.trace.object_shape_summary;
+        defer obj.header.meta().lifetime.trace.object_shape_summary = saved_summary;
+        obj.header.meta().lifetime.trace.object_shape_summary |= 1;
+        try std.testing.expectError(
+            error.ObjectShapeSummaryMismatch,
+            rt.gc.verifyRepresentationInvariants(),
+        );
+    }
+    try rt.gc.verifyRepresentationInvariants();
+
+    {
+        const saved_class = obj.header.meta().alloc_info.block_size_idx;
+        defer obj.header.meta().alloc_info.block_size_idx = saved_class;
+        obj.header.meta().alloc_info.block_size_idx = 0;
+        try std.testing.expectError(
+            error.RepresentationAllocationCarrierMismatch,
+            rt.gc.verifyRepresentationInvariants(),
+        );
+    }
+    try rt.gc.verifyRepresentationInvariants();
+
+    {
+        const saved_index = obj.header.meta().size_class;
+        defer obj.header.meta().size_class = saved_index;
+        obj.header.meta().size_class +%= 1;
+        try std.testing.expectError(
+            error.RepresentationCellIndexMismatch,
+            rt.gc.verifyRepresentationInvariants(),
+        );
+    }
+    try rt.gc.verifyRepresentationInvariants();
+
+    const slab_cell = try core.VarRef.createClosed(rt, core.JSValue.undefinedValue());
+    defer slab_cell.valueRef().free(rt);
+    try std.testing.expect(
+        slab_cell.header.metaConst().alloc_info.block_size_idx != core.gc.representation.block_cell_size_class,
+    );
+    {
+        const saved_class = slab_cell.header.meta().alloc_info.block_size_idx;
+        defer slab_cell.header.meta().alloc_info.block_size_idx = saved_class;
+        slab_cell.header.meta().alloc_info.block_size_idx = core.gc.representation.block_cell_size_class;
+        try std.testing.expectError(
+            error.RepresentationAllocationCarrierMismatch,
+            rt.gc.verifyRepresentationInvariants(),
+        );
+    }
+    try rt.gc.verifyRepresentationInvariants();
+}
+
+test "representation audit cross-checks the remembered object cache and map" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const edge_key = try rt.internAtom("remembered-representation-audit");
+    defer rt.atoms.free(edge_key);
+    const owner = try core.Object.createPlainObject(rt, null);
+    defer owner.value().free(rt);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    var owner_slot: ?*core.Object = owner;
+    var roots = core.runtime.rootObjects(.{&owner_slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    const child = try core.Object.createPlainObject(rt, null);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(child.value(), true, true, true));
+    child.value().free(rt);
+
+    // Establish the legal state through the real barrier. This is also the
+    // Shape-summary mask positive arm: bit 7 is live GC state, not a low-seven
+    // Shape mismatch.
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    try std.testing.expect(owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask != 0);
+    try rt.gc.verifyRepresentationInvariants();
+
+    // The Shape projection is checked before cache coherence. Corrupting its
+    // low seven bits in an otherwise legal map+bit state must still identify
+    // the representation owner precisely.
+    owner.header.meta().lifetime.trace.object_shape_summary ^= 0b0000_0100;
+    try std.testing.expectError(
+        error.ObjectShapeSummaryMismatch,
+        rt.gc.verifyRepresentationInvariants(),
+    );
+    owner.header.meta().lifetime.trace.object_shape_summary ^= 0b0000_0100;
+    try rt.gc.verifyRepresentationInvariants();
+
+    // bit=1/map=0 would make the next write return early and omit the owner.
+    rt.gc.generation.forget(&owner.header);
+    try std.testing.expectError(
+        error.RememberedCacheWithoutOwner,
+        rt.gc.verifyRepresentationInvariants(),
+    );
+
+    // Rebuild through the production barrier, then corrupt the opposite
+    // direction: map=1/bit=0 must be diagnosed independently.
+    owner.header.meta().lifetime.trace.object_shape_summary &= ~core.gc.trace_remembered_mask;
+    rt.gc.generationalBarrier(&owner.header, &child.header);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    owner.header.meta().lifetime.trace.object_shape_summary &= ~core.gc.trace_remembered_mask;
+    try std.testing.expectError(
+        error.RememberedOwnerMissingCache,
+        rt.gc.verifyRepresentationInvariants(),
+    );
+    owner.header.meta().lifetime.trace.object_shape_summary |= core.gc.trace_remembered_mask;
+    try rt.gc.verifyRepresentationInvariants();
+}
+
+test "representation audit cross-checks the remembered cache on a non-object carrier" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    // Audit §10 widened the byte-6 lease from `.object` to every
+    // `traceRememberedCacheEligible` carrier. §8.3 called the two-directional
+    // auditor the strongest admission evidence for the skip; that claim only
+    // transfers to the new carriers if the auditors actually see THEM, so
+    // drive both directions with a VarRef -- which, unlike `.object`, really
+    // is what pays the detach traffic on earley-boyer (§9.5/§9.7).
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.undefinedValue());
+    var cell_root = cell.valueRef();
+    var roots = core.runtime.rootValues(.{&cell_root});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    // Age the cell so the barrier classifies it as an old owner.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!rt.gc.generation.isYoung(&cell.header));
+
+    const child = try core.Object.createPlainObject(rt, null);
+    cell.setVarRefValue(rt, child.value());
+    child.value().free(rt);
+
+    const bit = core.gc.trace_remembered_mask;
+    const summary = &cell.header.meta().lifetime.trace.object_shape_summary;
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    // Only bit7: the low seven bits are Object's Shape projection, and the
+    // published-representation checker still requires them zero here.
+    try std.testing.expectEqual(bit, summary.*);
+    try rt.gc.verifyRepresentationInvariants();
+
+    // bit=1/map=0. Before the widening this state was invisible on a VarRef.
+    rt.gc.generation.forget(&cell.header);
+    try std.testing.expectError(
+        error.RememberedCacheWithoutOwner,
+        rt.gc.verifyRepresentationInvariants(),
+    );
+
+    // map=1/bit=0 -- the direction that licenses the forget-side skip, and so
+    // the one whose absence would strand a dangling address.
+    summary.* &= ~bit;
+    rt.gc.generationalBarrier(&cell.header, &child.header);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    summary.* &= ~bit;
+    try std.testing.expectError(
+        error.RememberedOwnerMissingCache,
+        rt.gc.verifyRepresentationInvariants(),
+    );
+    summary.* |= bit;
+    try rt.gc.verifyRepresentationInvariants();
+
+    // The low seven bits stay reserved on a non-Object carrier: a Shape
+    // summary there is a representation error, not a second cache bit.
+    summary.* |= 0b0000_0100;
+    try std.testing.expectError(
+        error.RepresentationPrefixFieldMismatch,
+        rt.gc.verifyRepresentationInvariants(),
+    );
+    // The list walker keeps its own copy of that rule; both had to be relaxed
+    // to bit7-only, so both need an arm proving the relaxation did not become
+    // "byte 6 is now unchecked on non-Object carriers".
+    try std.testing.expectError(
+        error.InvalidHeaderState,
+        rt.gc.verifyIntrusiveList(),
+    );
+    summary.* &= ~@as(u8, 0b0000_0100);
+    try rt.gc.verifyRepresentationInvariants();
+    try rt.gc.verifyIntrusiveList();
+
+    // Fused detach works the same on this carrier: one call, both gone.
+    rt.gc.forgetGenerationalOwnerForTest(&cell.header);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.rememberedOwnerCount());
+    try std.testing.expectEqual(@as(u8, 0), summary.*);
+    try rt.gc.verifyRepresentationInvariants();
+
+    // Restore the edge; teardown's minor would otherwise condemn a live child.
+    rt.gc.generationalBarrier(&cell.header, &child.header);
+    try rt.gc.verifyRepresentationInvariants();
+}
+
+test "forget fuses the remembered map removal with its own cache bit" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const edge_key = try rt.internAtom("remembered-forget-fusion");
+    defer rt.atoms.free(edge_key);
+    const owner = try core.Object.createPlainObject(rt, null);
+    defer owner.value().free(rt);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    var owner_slot: ?*core.Object = owner;
+    var roots = core.runtime.rootObjects(.{&owner_slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    const child = try core.Object.createPlainObject(rt, null);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(child.value(), true, true, true));
+    child.value().free(rt);
+
+    const bit = core.gc.trace_remembered_mask;
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    try std.testing.expect(owner.header.metaConst().lifetime.trace.object_shape_summary & bit != 0);
+
+    // The detach path reads the membership bit, removes the map entry and
+    // clears the bit as ONE step. An implementation that clears first and then
+    // consults the bit reads back its own zero, takes the skip unconditionally
+    // and leaves the address in the map -- dangling as soon as the object is
+    // freed. Both representations must be gone after a single forget.
+    rt.gc.forgetGenerationalOwnerForTest(&owner.header);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.rememberedOwnerCount());
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        owner.header.metaConst().lifetime.trace.object_shape_summary & bit,
+    );
+    try rt.gc.verifyRepresentationInvariants();
+
+    // Restore the edge through the production barrier: leaving the owner
+    // unremembered would let teardown's minor condemn a live child.
+    rt.gc.generationalBarrier(&owner.header, &child.header);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    try rt.gc.verifyRepresentationInvariants();
+
+    // Audit §8.4: the skip wraps the map removal ONLY. A forget that returns
+    // early on a clear bit would stop decrementing the young census, and the
+    // generation auditor's YoungCountMismatch is the next thing that fires.
+    const fresh = try core.Object.createPlainObject(rt, null);
+    try std.testing.expect(fresh.header.metaConst().flags.young);
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        fresh.header.metaConst().lifetime.trace.object_shape_summary & bit,
+    );
+    const young_before = rt.gc.generation.stats.young_count;
+    rt.gc.forgetGenerationalOwnerForTest(&fresh.header);
+    try std.testing.expectEqual(young_before - 1, rt.gc.generation.stats.young_count);
+    // `fresh` is still linked and still young; its real detach below will
+    // decrement again, so hand the census back before releasing it.
+    rt.gc.generation.stats.young_count = young_before;
+    fresh.value().free(rt);
+    try rt.gc.verifyGenerationInvariants();
+}
+
+test "gc invariant negative: construction root audit rejects published shell state" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const shell = try core.Object.createGeneratorShell(rt, core.class.ids.generator);
+    defer shell.destroyGeneratorShell(rt);
+
+    try rt.gc.verifyConstructionRoots();
+    try core.gc.verifyMetadataSemantics(
+        shell.header.metaConst(),
+        .object,
+        .construction_block_object,
+    );
+    {
+        var corrupted = shell.header.metaConst().*;
+        corrupted.flags.is_pinned = false;
+        try std.testing.expectError(
+            error.RepresentationPrefixFieldMismatch,
+            core.gc.verifyMetadataSemantics(&corrupted, .object, .construction_block_object),
+        );
+    }
+    {
+        var corrupted = shell.header.metaConst().*;
+        corrupted.alloc_info.block_size_idx = 0;
+        try std.testing.expectError(
+            error.RepresentationPrefixFieldMismatch,
+            core.gc.verifyMetadataSemantics(&corrupted, .object, .construction_block_object),
+        );
+    }
+    {
+        const saved_alloc_info = shell.header.meta().alloc_info;
+        defer shell.header.meta().alloc_info = saved_alloc_info;
+        shell.header.meta().alloc_info.heap_accounted = true;
+        try std.testing.expectError(
+            error.ConstructionRootStateMismatch,
+            rt.gc.verifyConstructionRoots(),
+        );
+    }
+    try rt.gc.verifyConstructionRoots();
+
+    // The construction-root exception is collector-owned, not merely a pin
+    // ledger entry accepted by the audit: a real collection must mark the shell's
+    // block cell so bitmap condemnation and the publication audit both agree.
+    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active);
+    try rt.gc.verifyConstructionRoots();
+}
+
+test "gc invariant negative: arena audit rejects an accounted free slab block" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    // Block-served objects do not touch the small-object slab. A short flat
+    // string does, and leaves free neighbours in the same arena for the
+    // corruption injection below.
+    const arena_tenant = try core.string.String.createAscii(rt, "arena-negative-probe");
+    defer arena_tenant.value().free(rt);
+    const Probe = struct {
+        free_meta: ?*core.gc.Metadata = null,
+
+        fn visitArena(context: *anyopaque, base: usize) void {
+            core.memory.SmallObjectSlab.forEachArenaBlock(base, context, visitBlock);
+        }
+
+        fn visitBlock(context: *anyopaque, user: [*]u8, is_free: bool) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!is_free or self.free_meta != null) return;
+            const header: *core.gc.Header = @ptrCast(@alignCast(user));
+            self.free_meta = header.meta();
+        }
+    };
+
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.address_registry.auditArenas());
+    var probe = Probe{};
+    rt.memory.small_slab.forEachArena(&probe, Probe.visitArena);
+    const meta = probe.free_meta orelse return error.TestUnexpectedResult;
+    {
+        const saved = meta.*;
+        defer meta.* = saved;
+        meta.alloc_info.heap_accounted = true;
+        meta.flags = .{ .kind = .object };
+        meta.lifetime.trace = .{};
+        try std.testing.expectEqual(@as(usize, 1), rt.gc.address_registry.auditArenas());
+    }
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.address_registry.auditArenas());
+}
+
+test "gc invariant negative: address index audit rejects canonical page drift" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const StandaloneProbe = extern struct {
+        pub const gc_kind_tag: u8 = @intFromEnum(core.gc.GcKind.object);
+
+        header: core.gc.Header = .{},
+        payload: [1024]u8 = @splat(0),
+    };
+    const probe = try rt.memory.create(StandaloneProbe);
+    probe.* = .{};
+    try rt.gc.addWithSize(&probe.header, @sizeOf(StandaloneProbe));
+    defer {
+        rt.gc.unlinkObjectWithBytes(&probe.header, @sizeOf(StandaloneProbe));
+        rt.memory.destroy(StandaloneProbe, probe);
+    }
+    try std.testing.expect(probe.header.metaConst().alloc_info.standalone);
+
+    try rt.gc.address_registry.verifyIndex(false);
+    const identity = @intFromPtr(&probe.header);
+    const occupant = rt.gc.address_registry.by_header.getPtr(identity) orelse
+        return error.TestUnexpectedResult;
+    {
+        const saved_kind = occupant.kind;
+        defer occupant.kind = saved_kind;
+        occupant.kind = .rope;
+        try std.testing.expectError(
+            error.AddressIndexMissingPage,
+            rt.gc.address_registry.verifyIndex(false),
+        );
+    }
+    try rt.gc.address_registry.verifyIndex(false);
+}
+
+test "gc invariant negative: auxiliary intrusive-list audit rejects deferred count drift" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    try rt.gc.verifyIntrusiveList();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
+    {
+        const saved_count = rt.gc.cycle_deferred_frees.count;
+        defer rt.gc.cycle_deferred_frees.count = saved_count;
+        rt.gc.cycle_deferred_frees.count = 1;
+        try std.testing.expectError(error.CorruptDeferredFreeStack, rt.gc.verifyIntrusiveList());
+    }
+    try rt.gc.verifyIntrusiveList();
+}
+
+test "deferred run topology proof invalidates only for an audit producer sequence" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const saved_audit = core.gc.arena_audit;
+    defer core.gc.arena_audit = saved_audit;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    rt.gc.deferred_run_topology_verified = true;
+    core.gc.arena_audit = false;
+    rt.gc.beginDeferredFreeProducerSequence();
+    try std.testing.expect(rt.gc.deferred_run_topology_verified);
+
+    core.gc.arena_audit = true;
+    rt.gc.beginDeferredFreeProducerSequence();
+    try std.testing.expect(!rt.gc.deferred_run_topology_verified);
+}
+
+test "gc invariant negative: heap accounting audit rejects a pin without an entry" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const obj = try core.Object.createPlainObject(rt, null);
+    defer obj.value().free(rt);
+    try rt.gc.verifyHeapAccounting(rt);
+
+    {
+        defer obj.header.setPinned(false);
+        obj.header.setPinned(true);
+        try std.testing.expectError(error.PinnedHeaderMissingEntry, rt.gc.verifyHeapAccounting(rt));
+    }
+    try rt.gc.verifyHeapAccounting(rt);
+}
+
+test "gc invariant negative: generation audit rejects census and stale remembered drift" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const obj = try core.Object.createPlainObject(rt, null);
+    defer obj.value().free(rt);
+    try rt.gc.verifyGenerationInvariants();
+
+    {
+        const saved_young_count = rt.gc.generation.stats.young_count;
+        defer rt.gc.generation.stats.young_count = saved_young_count;
+        rt.gc.generation.stats.young_count += 1;
+        try std.testing.expectError(error.YoungCountMismatch, rt.gc.verifyGenerationInvariants());
+    }
+    try rt.gc.verifyGenerationInvariants();
+
+    const stale_owner: usize = 0xdead_0000;
+    try rt.gc.generation.remembered.put(std.heap.smp_allocator, stale_owner, {});
+    {
+        defer {
+            _ = rt.gc.generation.remembered.remove(stale_owner);
+            rt.gc.generation.stats.remembered_owners = rt.gc.generation.remembered.count();
+        }
+        rt.gc.generation.stats.remembered_owners = rt.gc.generation.remembered.count();
+        try std.testing.expectError(error.RememberedOwnerNotLive, rt.gc.verifyGenerationInvariants());
+    }
+    try rt.gc.verifyGenerationInvariants();
+}
+
+test "gc invariant negative: retirement audit rejects a marked young survivor" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const obj = try core.Object.createPlainObject(rt, null);
+    defer obj.value().free(rt);
+    var obj_slot: ?*core.Object = obj;
+    var roots = core.runtime.rootObjects(.{&obj_slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    _ = rt.runObjectCycleRemoval();
+    try rt.gc.verifyMajorRetirementCommit();
+    try std.testing.expect(rt.gc.headerMarked(&obj.header));
+    try std.testing.expect(!obj.header.metaConst().flags.young);
+    {
+        defer obj.header.meta().flags.young = false;
+        obj.header.meta().flags.young = true;
+        try std.testing.expectError(error.RetirementYoungSurvivor, rt.gc.verifyMajorRetirementCommit());
+    }
+    try rt.gc.verifyMajorRetirementCommit();
 }
 
 test "object traceChildEdgesFallible propagates visitor errors" {
@@ -6265,6 +7929,10 @@ test "ordinary object trace visits data slots and TMASK accessor edges" {
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     defer obj.value().free(rt);
+    var obj_slot: ?*core.Object = obj;
+    var obj_roots = core.runtime.rootObjects(.{&obj_slot});
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
     const data_child = try core.Object.create(rt, core.class.ids.object, null);
     defer data_child.value().free(rt);
     const getter = try core.Object.create(rt, core.class.ids.object, null);
@@ -6296,8 +7964,8 @@ test "ordinary object trace visits data slots and TMASK accessor edges" {
     try std.testing.expectEqual(@as(usize, 1), visitor.getter_hits);
 
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(data_child.header.meta().rc > 0);
-    try std.testing.expect(getter.header.meta().rc > 0);
+    try std.testing.expect(rt.gc.containsHeader(&data_child.header));
+    try std.testing.expect(rt.gc.containsHeader(&getter.header));
 }
 
 test "object traceChildEdgesFallible propagates class payload visitor errors" {
@@ -6332,18 +8000,31 @@ test "object traceChildEdgesFallible propagates class payload visitor errors" {
     try std.testing.expectError(error.OutOfMemory, obj.traceChildEdgesFallible(rt, &visitor));
 }
 
-test "gc object release does not allocate after refcount reaches zero" {
+test "gc object release paths do not allocate" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
+    if (comptime core.gc.trace_stw_enabled) {
+        // Tracer-owned values have no last-ref transition: release is a no-op,
+        // must not allocate, and must leave reclamation to the next trace.
+        const alloc_calls = rt.memory.alloc_calls;
+        obj.value().free(rt);
+        try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
+        try std.testing.expect(rt.gc.containsHeader(&obj.header));
+        rt.setMemoryLimit(null);
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expect(!rt.gc.containsHeader(&obj.header));
+        return;
+    }
+
     const did_release = rt.gc.releaseObjectForTest(&obj.header);
     rt.setMemoryLimit(null);
 
     try std.testing.expect(did_release);
-    try std.testing.expectEqual(@as(i32, 0), obj.header.meta().rc);
+    try helpers.expectRefCount(0, &obj.header);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
 
     // Clean up manually since we released/unlinked it
@@ -6387,6 +8068,7 @@ test "zero-ref release drains a deep acyclic object chain iteratively" {
     const head = try createDeepOwnedPropertyChain(rt, key, deep_gc_chain_length);
 
     head.value().free(rt);
+    helpers.reclaimNow(rt);
     try expectNoLiveGc(rt);
 }
 
@@ -6398,7 +8080,11 @@ test "cycle scan preserves a deeply rooted object chain without recursion" {
 
     const key = try rt.internAtom("deep-cycle-scan-next");
     defer rt.atoms.free(key);
-    _ = try createDeepOwnedPropertyChain(rt, key, deep_gc_chain_length);
+    const head = try createDeepOwnedPropertyChain(rt, key, deep_gc_chain_length);
+    var head_slot: ?*core.Object = head;
+    var obj_roots = core.runtime.rootObjects(.{&head_slot});
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
 
     const before = rt.gc.liveCount();
     const result = try rt.tryRunObjectCycleRemoval();
@@ -6422,6 +8108,12 @@ fn expectCycleReclaimedIncludingShapes(rt: *core.JSRuntime, expected: usize, act
     try expectNoLiveGc(rt);
 }
 
+/// Zero a Zig pointer local that no longer holds a GC object, so a
+/// conservative scan cannot treat leftover stack bits as a root (§7.2).
+fn dropGcPtr(ptr: anytype) void {
+    @memset(std.mem.asBytes(ptr), 0);
+}
+
 fn expectClosedPropertyCycleReclaimed(rt: *core.JSRuntime, freed: usize) !void {
     // Shape is a GC object. This graph collects the two JS objects plus the two
     // one-property transition shapes; the shared empty root shape is released
@@ -6434,8 +8126,8 @@ test "closed object property cycle is released by runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const left = try core.Object.create(rt, core.class.ids.object, null);
-    const right = try core.Object.create(rt, core.class.ids.object, null);
+    var left = try core.Object.create(rt, core.class.ids.object, null);
+    var right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("left");
     defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("right");
@@ -6446,6 +8138,8 @@ test "closed object property cycle is released by runtime cycle removal" {
 
     left.value().free(rt);
     right.value().free(rt);
+    dropGcPtr(&left);
+    dropGcPtr(&right);
     try expectClosedPropertyCycleReclaimed(rt, rt.runObjectCycleRemoval());
 }
 
@@ -6453,9 +8147,9 @@ test "fast array iterator-next cache cycle is released by runtime cycle removal"
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const it = try core.Object.createArray(rt, null);
+    var it = try core.Object.createArray(rt, null);
     std.debug.assert(it.flags.fast_array);
-    const next_obj = try core.Object.create(rt, core.class.ids.object, null);
+    var next_obj = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("iterator");
     defer rt.atoms.free(key);
 
@@ -6465,6 +8159,8 @@ test "fast array iterator-next cache cycle is released by runtime cycle removal"
 
     it.value().free(rt);
     next_obj.value().free(rt);
+    dropGcPtr(&it);
+    dropGcPtr(&next_obj);
     try expectClosedPropertyCycleReclaimed(rt, rt.runObjectCycleRemoval());
 }
 
@@ -6977,12 +8673,1178 @@ test "fallible GC API reports reclaimed objects and no failure" {
     try std.testing.expectEqual(core.gc.FailureKind.none, rt.gc.stats.last_failure);
 }
 
-test "pollGC runs pending collection and clears pending flag" {
+test "shadow tracer never frees and classifies a Zig-local object as unexplained" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try core.JSContext.create(rt);
+        defer ctx.destroy();
+
+        const orphan = try core.Object.create(rt, core.class.ids.object, null);
+        const live_before = rt.gc.liveCount();
+        core.gc_shadow.quiesce(rt);
+        try std.testing.expectEqual(live_before, rt.gc.liveCount());
+
+        const report = try core.gc_shadow.run(rt);
+        try std.testing.expectEqual(live_before, rt.gc.liveCount());
+        try std.testing.expect(report.allocated >= 1);
+        try std.testing.expect(report.reachable >= 1);
+        try std.testing.expectEqual(@as(usize, 0), report.unexplained);
+        try std.testing.expect(report.conservative.supported);
+        try std.testing.expect(report.conservative.retained_only_conservatively >= 1);
+        try std.testing.expect(report.conservative_inclusive >= report.exact_reachable);
+
+        var saw_orphan_unexplained = false;
+        for (report.sample()) |item| {
+            if (item.header == &orphan.header) saw_orphan_unexplained = true;
+        }
+        try std.testing.expect(!saw_orphan_unexplained);
+
+        var rooted = orphan.value();
+        var root_values = [_]core.runtime.ValueRootValue{.{ .value = &rooted }};
+        var frame = core.runtime.ValueRootFrame{ .values = &root_values };
+        frame.activate(rt);
+        defer frame.deactivate(rt);
+
+        const rooted_report = try core.gc_shadow.run(rt);
+        try std.testing.expectEqual(live_before, rt.gc.liveCount());
+        var still_unexplained = false;
+        for (rooted_report.sample()) |item| {
+            if (item.header == &orphan.header) still_unexplained = true;
+        }
+        try std.testing.expect(!still_unexplained);
+
+        std.debug.print(
+            \\
+            \\shadow report after quiesce (Zig-local object conservative):
+            \\  allocated={d} exact={d} inclusive={d} unexplained={d} conservative_only={d}
+            \\  candidates={d} hits={d} direct_bytes={d} transitive_bytes={d}
+            \\
+        , .{
+            report.allocated,
+            report.exact_reachable,
+            report.conservative_inclusive,
+            report.unexplained,
+            report.conservative.retained_only_conservatively,
+            report.conservative.candidates,
+            report.conservative.validated_hits,
+            report.conservative.direct_bytes,
+            report.conservative.transitive_bytes,
+        });
+    }
+}
+
+test "container ValueRootFrame explains heap JSValue windows; scalar skip does not" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try core.JSContext.create(rt);
+        defer ctx.destroy();
+
+        const a = try core.Object.create(rt, core.class.ids.object, null);
+        const b = try core.Object.create(rt, core.class.ids.object, null);
+        const source = [_]core.JSValue{ a.value(), b.value() };
+        var buffer = try core.runtime.ValueRootBuffer.initCopy(rt, &source);
+        defer buffer.deinit(rt);
+        source[0].free(rt);
+        source[1].free(rt);
+
+        const live = rt.gc.liveCount();
+        const before = try core.gc_shadow.run(rt);
+        try std.testing.expectEqual(live, rt.gc.liveCount());
+        try std.testing.expectEqual(@as(usize, 0), before.unexplained);
+        try std.testing.expect(before.conservative.retained_only_conservatively >= 2);
+
+        var slices = [_]core.runtime.ValueRootSlice{buffer.slice()};
+        var container = core.runtime.ValueRootFrame{ .slices = &slices };
+        container.activate(rt);
+
+        const after = try core.gc_shadow.run(rt);
+        try std.testing.expectEqual(live, rt.gc.liveCount());
+        var still_unexplained: usize = 0;
+        for (after.sample()) |item| {
+            if (item.header == &a.header or item.header == &b.header) still_unexplained += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 0), still_unexplained);
+        try std.testing.expectEqual(@as(usize, 0), after.unexplained);
+
+        std.debug.print(
+            \\
+            \\container window: unexplained {d} -> {d} (liveCount={d})
+            \\
+        , .{ before.unexplained, after.unexplained, live });
+        container.deactivate(rt);
+
+        const orphan = try core.Object.create(rt, core.class.ids.object, null);
+        var rooted = orphan.value();
+        var root_values = [_]core.runtime.ValueRootValue{.{ .value = &rooted }};
+        var scalar = core.runtime.ValueRootFrame{ .values = &root_values };
+        core.runtime.value_root_frame_stats.reset();
+        scalar.activateContainersOnly(rt);
+        try std.testing.expectEqual(@as(usize, 1), core.runtime.value_root_frame_stats.scalar_skipped);
+        const scalar_skip = try core.gc_shadow.run(rt);
+        var orphan_unexplained = false;
+        for (scalar_skip.sample()) |item| {
+            if (item.header == &orphan.header) orphan_unexplained = true;
+        }
+        try std.testing.expect(!orphan_unexplained);
+        try std.testing.expectEqual(@as(usize, 0), scalar_skip.unexplained);
+        rooted.free(rt);
+    }
+}
+
+test "ValueRootFrame link splice cost and eval mix" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+
+        const iterations: usize = 200_000;
+        var empty: []core.JSValue = &.{};
+        var slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &empty }};
+        var container = core.runtime.ValueRootFrame{ .slices = &slices };
+        const container_start = zjs.platform_clock.monotonicNanos();
+        var i: usize = 0;
+        while (i < iterations) : (i += 1) {
+            container.activate(rt);
+            container.deactivate(rt);
+        }
+        const container_ns = zjs.platform_clock.elapsedNanosSince(container_start);
+
+        var slot = core.JSValue.undefinedValue();
+        var root_values = [_]core.runtime.ValueRootValue{.{ .value = &slot }};
+        var scalar = core.runtime.ValueRootFrame{ .values = &root_values };
+        const scalar_start = zjs.platform_clock.monotonicNanos();
+        i = 0;
+        while (i < iterations) : (i += 1) {
+            scalar.activate(rt);
+            scalar.deactivate(rt);
+        }
+        const scalar_ns = zjs.platform_clock.elapsedNanosSince(scalar_start);
+
+        var harness = try helpers.TestEngine.init(std.testing.allocator);
+        defer harness.deinit();
+        core.runtime.value_root_frame_stats.reset();
+        const result = try harness.eval("JSON.parse('[1,2,3,{\"a\":[4,5]}]'); new Array(1,2,3,4,5); [1,2,3].concat([4,5,6]);");
+        result.free(harness.runtime);
+        const mix = core.runtime.value_root_frame_stats;
+
+        std.debug.print(
+            \\
+            \\root-frame link cost ({d} iters): container={d} ns/op scalar={d} ns/op
+            \\eval mix: calls={d} linked={d} container={d} scalar={d} skipped={d}
+            \\
+        , .{
+            iterations,
+            container_ns / iterations,
+            scalar_ns / iterations,
+            mix.activate_calls,
+            mix.linked,
+            mix.container_linked,
+            mix.scalar_linked,
+            mix.scalar_skipped,
+        });
+        try std.testing.expect(mix.activate_calls > 0);
+        try std.testing.expect(mix.linked == mix.container_linked + mix.scalar_linked);
+    }
+}
+
+test "shadow tracer reports a live realm as reachable" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try core.JSContext.create(rt);
+        defer ctx.destroy();
+
+        core.gc_shadow.quiesce(rt);
+        const report = try core.gc_shadow.run(rt);
+        try std.testing.expect(report.allocated_by_kind.realm_context >= 1);
+        try std.testing.expect(report.reachable_by_kind.realm_context >= 1);
+        try std.testing.expectEqual(@as(usize, 0), report.allocated_by_kind.string);
+        try std.testing.expectEqual(@as(usize, 0), report.allocated_by_kind.big_int);
+
+        var buf: [2048]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try report.format(&w);
+        std.debug.print("\n{s}\n", .{w.buffered()});
+    }
+}
+
+test "HeapValueSlot setOptionalOwned retains new then releases old" {
+    if (comptime !core.gc_slot.stats_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const first = try core.Object.create(rt, core.class.ids.object, null);
+    const second = try core.Object.create(rt, core.class.ids.object, null);
+    const first_header = &first.header;
+    var slot: ?core.JSValue = first.value();
+    core.gc_slot.stats.reset();
+    core.gc_slot.HeapValueSlot.setOptionalOwned(rt, &slot, second.value());
+    try std.testing.expectEqual(@as(usize, 1), core.gc_slot.stats.set_calls);
+    try std.testing.expectEqual(@as(usize, 1), core.gc_slot.stats.retains);
+    try std.testing.expectEqual(@as(usize, 1), core.gc_slot.stats.publishes);
+    try std.testing.expectEqual(@as(usize, 1), core.gc_slot.stats.releases);
+    try std.testing.expect(slot != null);
+    // The slot's new occupant lives only in a Zig local from the exact scan's
+    // point of view; name it so the collection can only condemn `first`.
+    var second_slot: ?*core.Object = second;
+    var obj_roots = core.runtime.rootObjects(.{&second_slot});
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
+    helpers.reclaimNow(rt);
+    try std.testing.expect(!rt.gc.containsHeader(first_header));
+    if (slot) |stored| stored.free(rt);
+}
+
+test "GcBuffer copyOwned moveOwned resize preserve live prefix" {
+    if (comptime !core.gc_slot.stats_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const a = try core.Object.create(rt, core.class.ids.object, null);
+    const b = try core.Object.create(rt, core.class.ids.object, null);
+    var src = [_]core.JSValue{ a.value(), b.value() };
+    const dst = try rt.memory.alloc(core.JSValue, 2);
+    core.gc_slot.stats.reset();
+    core.gc_slot.GcBuffer.copyOwned(dst, &src);
+    try std.testing.expect(core.gc_slot.stats.bulk_calls >= 1);
+    src[0].free(rt);
+    src[1].free(rt);
+
+    const moved = try rt.memory.alloc(core.JSValue, 2);
+    core.gc_slot.GcBuffer.moveOwned(moved, dst);
+    try std.testing.expect(dst[0].isUndefined());
+    rt.memory.free(core.JSValue, dst);
+
+    var slice: []core.JSValue = moved;
+    var cap: usize = 2;
+    try core.gc_slot.GcBuffer.resize(rt, &slice, &cap, 3);
+    try std.testing.expectEqual(@as(usize, 3), slice.len);
+    try core.gc_slot.GcBuffer.resize(rt, &slice, &cap, 0);
+    try std.testing.expectEqual(@as(usize, 0), slice.len);
+}
+
+test "write audit records FAM memcpy union and shape-slot bypasses without failing" {
+    if (comptime !core.gc_write_audit.enabled) return error.SkipZigTest;
+    core.gc_write_audit.reset();
+    core.gc_write_audit.hit(.memcpy_bulk, .object_prop_values_memcpy);
+    core.gc_write_audit.hitN(.fam_slice, .object_dense_store, 3);
+    core.gc_write_audit.hit(.union_arm, .object_prop_slot);
+    core.gc_write_audit.hit(.shape_slot, .object_set_entry_kind_and_slot);
+    core.gc_write_audit.noteSlot();
+    const snap = core.gc_write_audit.snapshot();
+    try std.testing.expectEqual(@as(usize, 6), snap.hits());
+    try std.testing.expectEqual(@as(usize, 1), snap.kindCount(.memcpy_bulk));
+    try std.testing.expectEqual(@as(usize, 3), snap.kindCount(.fam_slice));
+    try std.testing.expectEqual(@as(usize, 1), snap.kindCount(.union_arm));
+    try std.testing.expectEqual(@as(usize, 1), snap.kindCount(.shape_slot));
+    try std.testing.expectEqual(@as(usize, 0), snap.kindCount(.plugin_opaque));
+    try std.testing.expectEqual(@as(usize, 1), snap.slot_writes);
+    core.gc_write_audit.reset();
+    try std.testing.expectEqual(@as(usize, 0), core.gc_write_audit.snapshot().hits());
+}
+
+test "object property and dense writes hit the write audit" {
+    if (comptime !core.gc_write_audit.enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    core.gc_write_audit.reset();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    const child = try core.Object.create(rt, core.class.ids.object, null);
+    defer child.value().free(rt);
+    const key = try rt.internAtom("x");
+    defer rt.atoms.free(key);
+    try obj.defineOwnProperty(rt, key, core.Descriptor.data(child.value(), true, true, true));
+
+    const arr = try core.Object.createArray(rt, null);
+    defer arr.value().free(rt);
+    try std.testing.expect(try arr.defineDenseArrayDataProperty(rt, 0, child.value()));
+
+    const snap = core.gc_write_audit.snapshot();
+    try std.testing.expect(snap.hits() > 0);
+    try std.testing.expect(snap.siteCount(.object_prop_slot) + snap.siteCount(.object_prop_values_memcpy) > 0);
+    try std.testing.expect(snap.siteCount(.object_dense_store) + snap.siteCount(.object_dense_memcpy) > 0);
+}
+
+test "trace_stw collects a closed property cycle" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const left = try core.Object.create(rt, core.class.ids.object, null);
     const right = try core.Object.create(rt, core.class.ids.object, null);
+    const left_key = try rt.internAtom("left");
+    defer rt.atoms.free(left_key);
+    const right_key = try rt.internAtom("right");
+    defer rt.atoms.free(right_key);
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    left.value().free(rt);
+    right.value().free(rt);
+    try expectClosedPropertyCycleReclaimed(rt, rt.runObjectCycleRemoval());
+}
+
+test "trace_stw ephemeron keeps value only when table and key are live" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+
+    const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
+    const key = try core.Object.create(rt, core.class.ids.object, null);
+    const value = try core.Object.create(rt, core.class.ids.object, null);
+    try appendWeakCollectionEntry(rt, weakmap, key, value.value());
+    value.value().free(rt);
+
+    const map_atom = try rt.internAtom("wm");
+    defer rt.atoms.free(map_atom);
+    const key_atom = try rt.internAtom("wk");
+    defer rt.atoms.free(key_atom);
+    try global.defineOwnProperty(rt, map_atom, core.Descriptor.data(weakmap.value(), true, true, true));
+    try global.defineOwnProperty(rt, key_atom, core.Descriptor.data(key.value(), true, true, true));
+    weakmap.value().free(rt);
+    key.value().free(rt);
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), weakmap.weakCollectionEntries().len);
+    try std.testing.expect(rt.gc.containsHeader(&value.header));
+    try std.testing.expect(core.gc_trace_stw.last_report.ephemeron_values_shaded >= 1);
+
+    try std.testing.expect(global.deleteProperty(rt, key_atom));
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
+    try std.testing.expect(!rt.gc.containsHeader(&value.header));
+}
+
+test "trace_stw ephemeron value does not keep its key alive" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+
+    const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
+    var key = try core.Object.create(rt, core.class.ids.object, null);
+    const value = try core.Object.create(rt, core.class.ids.object, null);
+    try appendWeakCollectionEntry(rt, weakmap, key, value.value());
+
+    const map_atom = try rt.internAtom("wm");
+    defer rt.atoms.free(map_atom);
+    try global.defineOwnProperty(rt, map_atom, core.Descriptor.data(weakmap.value(), true, true, true));
+    weakmap.value().free(rt);
+    value.value().free(rt);
+
+    const back = try rt.internAtom("key");
+    defer rt.atoms.free(back);
+    try value.defineOwnProperty(rt, back, core.Descriptor.data(key.value(), true, true, true));
+    key.value().free(rt);
+    dropGcPtr(&key);
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
+}
+
+test "trace_stw WeakRef deref keep-alive lasts until job end" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+
+    var weak_ref = try core.Object.create(rt, core.class.ids.weak_ref, null);
+    var target = try core.Object.create(rt, core.class.ids.object, null);
+    const target_header = &target.header;
+    try weak_ref.setWeakRefTarget(rt, target.value());
+    const wr_atom = try rt.internAtom("wr");
+    defer rt.atoms.free(wr_atom);
+    try global.defineOwnProperty(rt, wr_atom, core.Descriptor.data(weak_ref.value(), true, true, true));
+    weak_ref.value().free(rt);
+
+    const held = weak_ref.weakRefDeref(rt);
+    target.value().free(rt);
+    dropGcPtr(&target);
+    held.free(rt);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.gc.containsHeader(target_header));
+
+    rt.clearWeakRefKeptAlive();
+    dropGcPtr(&weak_ref);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.gc.containsHeader(target_header));
+}
+
+test "trace_stw survivor classes on a known graph" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // Matching kept: a named root keeps the object under both RC and STW.
+    var live = try core.Object.create(rt, core.class.ids.object, null);
+    var live_slot: ?*core.Object = live;
+    var live_roots = core.runtime.rootObjects(.{&live_slot});
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
+
+    // Matching collected: dropped create-refs on a closed cycle. Exact mark
+    // and trial deletion both reclaim it; leftover stack bits would be
+    // floating garbage under conservative scan (§7.2), so they are nulled.
+    var left = try core.Object.create(rt, core.class.ids.object, null);
+    var right = try core.Object.create(rt, core.class.ids.object, null);
+    const left_key = try rt.internAtom("surv-left");
+    defer rt.atoms.free(left_key);
+    const right_key = try rt.internAtom("surv-right");
+    defer rt.atoms.free(right_key);
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    left.value().free(rt);
+    right.value().free(rt);
+    dropGcPtr(&left);
+    dropGcPtr(&right);
+
+    const live_header = &live.header;
+    // `marked_conservative_extra` is one of the census fields the collector
+    // only computes when asked, and the default is off because that is what a
+    // shipped binary runs. Asking here rather than leaving it to the build
+    // means this assertion tests a number instead of testing zero.
+    const census_before = core.gc_trace_stw.detailed_reports;
+    core.gc_trace_stw.detailed_reports = true;
+    defer core.gc_trace_stw.detailed_reports = census_before;
+    const swept = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(closed_property_cycle_reclaimed_count, swept);
+    try std.testing.expect(rt.gc.containsHeader(live_header));
+    try std.testing.expectEqual(@as(usize, 0), core.gc_trace_stw.last_report.marked_conservative_extra);
+
+    live.value().free(rt);
+    live_slot = null;
+    dropGcPtr(&live);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.gc.containsHeader(live_header));
+}
+
+test "address registry tracks published objects and interior pointers" {
+    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // `stats.live` counts occupant-table entries, and a slab-backed object no
+    // longer makes one: it is resolved from its arena's geometry instead. The
+    // invariant worth asserting is not the table's size but that every live
+    // object still resolves, which this test does object by object below.
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.address_registry.stats.failed_inserts);
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    // Plain objects are served from the collector's block heap now, so the
+    // structure this creation must populate is a block cell, not an arena.
+    if (comptime core.gc.block_heap_enabled) {
+        try std.testing.expect(rt.gc.block_heap.liveSmall().count > 0);
+    } else {
+        try std.testing.expect(rt.gc.address_registry.stats.arenas_live > 0);
+    }
+    const header = &obj.header;
+    const bytes = obj.allocationSize(rt);
+    const occupant = core.gc_address_registry.Table.occupantFor(header, bytes);
+
+    try std.testing.expect(rt.gc.address_registry.containsHeader(header));
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(@intFromPtr(header)));
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(occupant.lo));
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(occupant.hi - 1));
+    if (bytes > 1) {
+        try std.testing.expectEqual(header, rt.gc.address_registry.resolve(@intFromPtr(header) + bytes / 2));
+    }
+    // NOT asserted: that `occupant.hi` resolves to nothing. Arena resolution
+    // accepts any address inside the owning block, including the slack between
+    // the object's end and its size-class boundary, so an address just past
+    // the object can still name it. That is wider than the interval the
+    // occupant table recorded and wider in the retaining direction, which is
+    // the only direction a conservative scanner may err in.
+    try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(0x10));
+
+    var iterator = rt.gc.objectIterator();
+    while (iterator.next()) |live| {
+        try std.testing.expectEqual(live, rt.gc.address_registry.resolve(@intFromPtr(live)));
+        try std.testing.expect(rt.gc.address_registry.containsHeader(live));
+    }
+}
+
+test "address registry page radix covers a multi-page allocation" {
+    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, 2048);
+    defer obj.value().free(rt);
+    const header = &obj.header;
+    const bytes = obj.allocationSize(rt);
+    const occupant = core.gc_address_registry.Table.occupantFor(header, bytes);
+    const pages = (occupant.hi - 1) / core.gc_address_registry.page_size - occupant.lo / core.gc_address_registry.page_size + 1;
+    try std.testing.expect(pages >= 1);
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(occupant.lo));
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(@intFromPtr(header)));
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(occupant.hi - 1));
+    if (pages >= 2) {
+        const mid_page = ((occupant.lo >> 12) + 1) << 12;
+        try std.testing.expectEqual(header, rt.gc.address_registry.resolve(mid_page));
+    }
+}
+
+test "address registry lookup cost stays with page occupants not live N" {
+    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const count: usize = 2048;
+    var objects: [count]*core.Object = undefined;
+    var created: usize = 0;
+    defer {
+        var i: usize = 0;
+        while (i < created) : (i += 1) objects[i].value().free(rt);
+    }
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const register_start = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds();
+    while (created < count) : (created += 1) {
+        objects[created] = try core.Object.create(rt, core.class.ids.object, null);
+    }
+    const register_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds() - register_start;
+
+    // See the note in the test above: publication no longer writes a table
+    // entry for a slab-backed object, so the census to check is that all 2048
+    // resolve, which the lookup loop below asserts exactly.
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.address_registry.stats.failed_inserts);
+
+    const lookups: usize = 50_000;
+    const lookup_start = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds();
+    var hits: usize = 0;
+    var index: usize = 0;
+    while (index < lookups) : (index += 1) {
+        const obj = objects[index % count];
+        const addr = @intFromPtr(&obj.header) + (index % 8);
+        if (rt.gc.address_registry.resolve(addr) == &obj.header) hits += 1;
+    }
+    const lookup_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds() - lookup_start;
+    try std.testing.expectEqual(lookups, hits);
+
+    const miss_start = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds();
+    var misses: usize = 0;
+    index = 0;
+    while (index < lookups) : (index += 1) {
+        if (rt.gc.address_registry.resolve(0x1000 + index * 64) == null) misses += 1;
+    }
+    const miss_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds() - miss_start;
+    try std.testing.expectEqual(lookups, misses);
+
+    const register_u = @as(u64, @intCast(register_ns));
+    const lookup_u = @as(u64, @intCast(lookup_ns));
+    const miss_u = @as(u64, @intCast(miss_ns));
+    std.debug.print(
+        \\
+        \\address registry (2048 objects, 50000 lookups):
+        \\  arenas={d} live={d} pages={d} register_ns={d} hit_ns={d} miss_ns={d}
+        \\  per-register ~{d}ns  per-hit ~{d}ns  per-miss ~{d}ns
+        \\
+    , .{
+        rt.gc.address_registry.stats.arenas_live,
+        rt.gc.address_registry.stats.live,
+        rt.gc.address_registry.stats.pages,
+        register_u,
+        lookup_u,
+        miss_u,
+        register_u / count,
+        lookup_u / lookups,
+        miss_u / lookups,
+    });
+}
+
+test "size-class table follows §4.2 rules and is not a 4KiB hard-code" {
+    if (comptime !core.gc.space_model_enabled) return error.SkipZigTest;
+    const space = core.gc_space;
+    try std.testing.expect(space.class_count >= 8);
+    try std.testing.expectEqual(@as(usize, 16), space.classes[0]);
+    try std.testing.expectEqual(space.linear_limit_bytes, space.classes[7]);
+    var i: usize = 1;
+    while (i < 8) : (i += 1) {
+        try std.testing.expectEqual(space.classes[i - 1] + space.linear_step_bytes, space.classes[i]);
+    }
+    i = 8;
+    while (i < space.classes.len) : (i += 1) {
+        const prev = space.classes[i - 1];
+        const next = space.classes[i];
+        try std.testing.expect(next > prev);
+        try std.testing.expectEqual(@as(usize, 0), next % space.linear_step_bytes);
+        const ratio_num = next * space.geometric_den;
+        const ratio_den = prev * space.geometric_num;
+        // ~1.25, allowing the 16-byte snap (next is in [prev*5/4, prev*5/4 + 16]).
+        try std.testing.expect(ratio_num + space.linear_step_bytes * space.geometric_den >= ratio_den);
+        try std.testing.expect(ratio_num <= (prev + space.linear_step_bytes) * space.geometric_num);
+    }
+    for (space.classes) |payload| {
+        try std.testing.expect(space.payloadFitsSmallRule(payload));
+        try std.testing.expect(space.cellsPerFutureBlock(payload) >= space.min_cells_per_block);
+    }
+    try std.testing.expectEqual(space.measured_max_small_payload, space.max_small_payload);
+    try std.testing.expectEqual(space.linear_limit_bytes, space.max_small_payload);
+    try std.testing.expect(space.max_small_payload < 4096);
+    var fitting: [48]usize = undefined;
+    const all_fitting = space.generateAllFittingClasses(&fitting);
+    try std.testing.expect(all_fitting > space.class_count);
+    try std.testing.expectEqual(@as(usize, 160), fitting[8]);
+    try std.testing.expectEqual(@as(usize, 192), fitting[9]);
+    try std.testing.expectEqual(@as(usize, 240), fitting[10]);
+    try std.testing.expect(fitting[all_fitting - 1] < 4096);
+    try std.testing.expect(fitting[all_fitting - 1] > space.max_small_payload);
+    try std.testing.expectEqual(space.Space.small, space.classifyPayload(16));
+    try std.testing.expectEqual(space.Space.small, space.classifyPayload(space.max_small_payload));
+    if (space.max_small_payload + 1 < space.large_min_bytes) {
+        try std.testing.expectEqual(space.Space.medium, space.classifyPayload(space.max_small_payload + 1));
+        try std.testing.expectEqual(space.Space.medium, space.classifyPayload(space.large_min_bytes - 1));
+    }
+    try std.testing.expectEqual(space.Space.large, space.classifyPayload(space.large_min_bytes));
+    try std.testing.expectEqual(space.Space.large, space.classifyPayload(space.large_min_bytes * 2));
+}
+
+test "size-class table matches measured publication histogram" {
+    if (comptime !core.gc.space_model_enabled) return error.SkipZigTest;
+
+    var harness = try helpers.TestEngine.init(std.testing.allocator);
+    defer harness.deinit();
+
+    const mix =
+        \\function work() {
+        \\  const objs = [];
+        \\  for (let i = 0; i < 2000; i++) objs.push({ i: i, k: i & 7 });
+        \\  const arrs = [];
+        \\  for (let i = 0; i < 200; i++) arrs.push(new Array(i % 64).fill(i));
+        \\  const fns = [];
+        \\  for (let i = 0; i < 100; i++) fns.push(function (x) { return x + i; });
+        \\  const nested = JSON.parse('{"a":[1,2,{"b":3}],"c":{"d":[4,5,6]}}');
+        \\  const t = new Uint8Array(1024);
+        \\  const big = new Array(1024);
+        \\  for (let i = 0; i < 1024; i++) big[i] = { i: i };
+        \\  const m = new Map();
+        \\  for (let i = 0; i < 200; i++) m.set(i, { v: i });
+        \\  const s = new Set(objs.slice(0, 100));
+        \\  class C { constructor(n) { this.n = n; this.xs = [n, n + 1]; } m() { return this.n; } }
+        \\  const cs = [];
+        \\  for (let i = 0; i < 50; i++) cs.push(new C(i));
+        \\  return objs.length + arrs.length + fns.length + t.length + big.length + m.size + s.size + cs.length + nested.a.length;
+        \\}
+        \\work();
+    ;
+    const result = try harness.eval(mix);
+    result.free(harness.runtime);
+
+    const large_obj = try core.Object.createWithOwnPropertyCapacity(
+        harness.runtime,
+        core.class.ids.object,
+        null,
+        2048,
+    );
+    defer large_obj.value().free(harness.runtime);
+
+    const hist = harness.runtime.gc.space_histogram;
+    const space = core.gc_space;
+    const derived = space.cutoffForCoverage(hist, space.coverage_hundredths);
+    const p50 = hist.percentilePayloadBelowLarge(50);
+    const p95 = hist.percentilePayloadBelowLarge(95);
+    const p99 = hist.percentilePayloadBelowLarge(99);
+    const covered = hist.coveredByMaxSmall();
+    const pop = hist.belowLarge();
+
+    std.debug.print(
+        \\
+        \\size histogram (TestEngine bootstrap + JS mix):
+        \\  total={d} bytes={d} large={d} over_fine={d}
+        \\  p50={d} p95={d} p99={d} derived_cutoff={d} frozen={d}
+        \\  covered {d}/{d} classes={any}
+        \\
+    , .{
+        hist.total,
+        hist.bytes_total,
+        hist.large,
+        hist.over_fine,
+        p50,
+        p95,
+        p99,
+        derived,
+        space.measured_max_small_payload,
+        covered,
+        pop,
+        space.classes,
+    });
+
+    try std.testing.expect(hist.total >= 1000);
+    try std.testing.expect(pop > 0);
+    try std.testing.expect(covered * 100 >= pop * space.coverage_hundredths);
+    try std.testing.expectEqual(space.measured_max_small_payload, derived);
+    try std.testing.expect(space.classifyPayload(space.max_small_payload + 1) == .medium);
+}
+
+test "sweep window state machine and four debts" {
+    if (comptime !core.gc.sweep_model_enabled) return error.SkipZigTest;
+    const sweep = core.gc_sweep_model;
+    var model: sweep.Model = .{};
+    defer model.deinit(std.heap.page_allocator);
+
+    model.noteAllocated(std.heap.page_allocator, 0x1000);
+    model.noteAllocated(std.heap.page_allocator, 0x1000 + sweep.window_bytes);
+    try std.testing.expectEqual(@as(usize, 2), model.active);
+    try std.testing.expectEqual(@as(usize, 2), model.trans_fresh_to_active);
+    try std.testing.expectEqual(@as(usize, 0), model.fresh);
+
+    model.refreshHeadroom(1000, 4000, 50);
+    try std.testing.expectEqual(@as(usize, 3000), model.debt.soft_headroom);
+    try std.testing.expectEqual(@as(usize, 3050), model.debt.hard_headroom);
+
+    model.beginMark(1000);
+    try std.testing.expectEqual(@as(usize, 1000), model.debt.mark_debt);
+    model.endMark(200);
+    try std.testing.expectEqual(@as(usize, 0), model.debt.mark_debt);
+    try std.testing.expectEqual(@as(usize, 200), model.debt.sweep_debt);
+    try std.testing.expectEqual(@as(usize, 2), model.needs_sweep);
+    try std.testing.expectEqual(@as(usize, 2), model.trans_active_to_needs_sweep);
+
+    model.refreshHeadroom(800, 4000, 50);
+    try std.testing.expectEqual(@as(usize, 3200), model.debt.soft_headroom);
+    try std.testing.expectEqual(@as(usize, 3450), model.debt.hard_headroom);
+
+    model.beginSweep();
+    try std.testing.expectEqual(@as(usize, 2), model.sweeping);
+    try std.testing.expectEqual(@as(usize, 2), model.trans_needs_sweep_to_sweeping);
+    model.endSweep();
+    try std.testing.expectEqual(@as(usize, 0), model.debt.sweep_debt);
+    try std.testing.expectEqual(@as(usize, 2), model.active);
+    try std.testing.expectEqual(@as(usize, 2), model.trans_sweeping_to_swept);
+    try std.testing.expectEqual(@as(usize, 2), model.trans_swept_to_active);
+
+    model.noteAllocated(std.heap.page_allocator, 0x1000);
+    try std.testing.expectEqual(@as(usize, 2), model.active);
+    try model.verify();
+
+    // One checker owns the whole graph. Corrupt its history ledger rather
+    // than adding one test per state/edge.
+    model.invalid_transitions = 1;
+    try std.testing.expectError(error.IllegalTransition, model.verify());
+    model.invalid_transitions = 0;
+    try model.verify();
+}
+
+test "trace_stw sweep model reaches sweep_debt zero after collect" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.sweep_model_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var left = try core.Object.create(rt, core.class.ids.object, null);
+    var right = try core.Object.create(rt, core.class.ids.object, null);
+    const left_key = try rt.internAtom("sweep-left");
+    defer rt.atoms.free(left_key);
+    const right_key = try rt.internAtom("sweep-right");
+    defer rt.atoms.free(right_key);
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    left.value().free(rt);
+    right.value().free(rt);
+    dropGcPtr(&left);
+    dropGcPtr(&right);
+
+    try std.testing.expect(rt.gc.sweep_model.active >= 1);
+    const trans_before = rt.gc.sweep_model.trans_active_to_needs_sweep;
+    const swept = rt.runObjectCycleRemoval();
+    try std.testing.expect(swept >= 2);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.sweep_model.debt.mark_debt);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.sweep_model.debt.sweep_debt);
+    try std.testing.expectEqual(@as(usize, 0), core.gc_trace_stw.last_report.sweep_debt);
+    try std.testing.expect(rt.gc.sweep_model.trans_active_to_needs_sweep > trans_before);
+    try std.testing.expect(rt.gc.sweep_model.trans_needs_sweep_to_sweeping >= 1);
+    try std.testing.expect(rt.gc.sweep_model.trans_sweeping_to_swept >= 1);
+    try std.testing.expect(rt.gc.sweep_model.trans_swept_to_active >= 1);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.sweep_model.needs_sweep);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.sweep_model.sweeping);
+}
+
+test "block heap splits a 2MiB superblock into 64KiB classed blocks" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const heap_mod = core.gc_block_heap;
+    var heap = heap_mod.Heap.init(std.testing.allocator);
+    defer heap.deinit();
+
+    const first = try heap.alloc(32);
+    try std.testing.expectEqual(@as(usize, 1), heap.stats.superblocks);
+    try std.testing.expectEqual(heap_mod.superblock_bytes, heap.stats.committed_bytes);
+    try std.testing.expectEqual(heap_mod.blocks_per_superblock, @as(usize, 32));
+    try std.testing.expect(heap.owns(first.ptr));
+    const block = heap.blockOf(first.ptr).?;
+    try std.testing.expectEqual(heap_mod.block_magic, block.magic);
+    try std.testing.expect(block.cell_count >= core.gc_space.min_cells_per_block);
+    try std.testing.expectEqual(core.gc_sweep_model.SweepState.active, block.sweep_state);
+
+    var n: usize = 1;
+    while (n < 40) : (n += 1) _ = try heap.alloc(32);
+    try std.testing.expectEqual(@as(usize, 1), heap.stats.superblocks);
+
+    const medium = try heap.alloc(200);
+    try std.testing.expect(medium.len == 200);
+    try std.testing.expect(heap.stats.medium_allocs >= 1);
+    heap.free(medium.ptr);
+
+    const large = try heap.alloc(core.gc_space.large_min_bytes);
+    try std.testing.expect(heap.stats.large_maps == 1);
+    heap.free(large.ptr);
+    try std.testing.expectEqual(@as(usize, 0), heap.stats.large_maps);
+
+    std.debug.print(
+        \\
+        \\block heap envelope: committed={d} live={d} milli={d} superblocks={d}
+        \\
+    , .{
+        heap.stats.committed_bytes,
+        heap.stats.live_bytes,
+        heap.committedLiveMilli(),
+        heap.stats.superblocks,
+    });
+    try std.testing.expect(heap.committedLiveMilli() >= 1000);
+}
+
+test "block heap reserve OOM is visible and not swallowed" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    var tiny: [128]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&tiny);
+    var heap = core.gc_block_heap.Heap.init(fba.allocator());
+    defer heap.deinit();
+    try std.testing.expectError(error.OutOfMemory, heap.alloc(32));
+    try std.testing.expect(heap.stats.failed_reserves >= 1);
+    try std.testing.expectError(error.OutOfMemory, heap.alloc(core.gc_space.large_min_bytes));
+}
+
+test "block heap rolls a superblock back when its exact index cannot reserve" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+
+    // First allocation reserves the 2 MiB mapping, second grows the
+    // superblock list, third reserves the exact block-set capacity. Fail that
+    // third operation to exercise the transaction after the mapping exists.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    var heap = core.gc_block_heap.Heap.init(failing.allocator());
+    defer heap.deinit();
+
+    try std.testing.expectError(error.OutOfMemory, heap.alloc(32));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), heap.superblocks.items.len);
+    try std.testing.expectEqual(@as(usize, 0), heap.classed_blocks.count());
+    try std.testing.expectEqual(@as(usize, 0), heap.classed_block_filter);
+    try std.testing.expectEqual(@as(usize, 0), heap.stats.superblocks);
+    try std.testing.expectEqual(@as(usize, 0), heap.stats.committed_bytes);
+    try std.testing.expectEqual(@as(usize, 1), heap.stats.failed_reserves);
+
+    // The failed transaction leaves the heap reusable, not merely
+    // destructible.
+    failing.fail_index = std.math.maxInt(usize);
+    const cell = try heap.alloc(32);
+    try std.testing.expect(heap.blockOf(cell.ptr) != null);
+    try heap.verify();
+}
+
+test "block heap mark epoch lazily clears the mark bitmap" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
+    defer heap.deinit();
+    const cell = try heap.alloc(16);
+    const block = heap.blockOf(cell.ptr).?;
+    const index = block.cellIndex(@intFromPtr(cell.ptr)).?;
+    heap.beginMajor();
+    try std.testing.expectEqual(@as(u64, 2), heap.mark_epoch);
+    try std.testing.expect(!block.isMarked(index, heap.mark_epoch));
+    block.setMark(index, heap.mark_epoch);
+    try std.testing.expect(block.isMarked(index, heap.mark_epoch));
+    heap.beginMajor();
+    try std.testing.expectEqual(@as(u64, 4), heap.mark_epoch);
+    try std.testing.expect(!block.isMarked(index, heap.mark_epoch));
+    block.ensureMarkEpoch(heap.mark_epoch);
+    try std.testing.expectEqual(heap.mark_epoch, block.mark_epoch);
+    try std.testing.expect(!block.isMarked(index, heap.mark_epoch));
+}
+
+test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    const header = &obj.shape_ref.header;
+    const shape_refs = core.gc.headerRefCount(header);
+    obj.shape_ref.retain();
+    defer rt.shapes.release(obj.shape_ref);
+    try std.testing.expectEqual(shape_refs + 1, core.gc.headerRefCount(header));
+
+    rt.gc.setHeaderUnmarked(header);
+    try std.testing.expect(!rt.gc.headerMarked(header));
+    rt.gc.setHeaderMarked(header);
+    try std.testing.expect(rt.gc.headerMarked(header));
+    rt.gc.advanceHeaderMarkEpoch();
+    try std.testing.expect(!rt.gc.headerMarked(header));
+
+    const fresh_ctx = try core.JSContext.create(rt);
+    defer fresh_ctx.destroy();
+    const realm_refs = core.gc.headerRefCount(&fresh_ctx.header);
+    var retained_realm = core.RealmRef.retain(fresh_ctx);
+    defer retained_realm.deinit();
+    try std.testing.expectEqual(realm_refs + 1, core.gc.headerRefCount(&fresh_ctx.header));
+    try std.testing.expect(!rt.gc.headerMarked(&fresh_ctx.header));
+    rt.gc.header_mark_epoch = std.math.maxInt(u16);
+    rt.gc.setHeaderMarked(header);
+    rt.gc.setHeaderMarked(&fresh_ctx.header);
+
+    // The wrap path scrubs every list-carrier epoch before reusing 1.
+    rt.gc.advanceHeaderMarkEpoch();
+    try std.testing.expect(!rt.gc.headerMarked(header));
+    try std.testing.expect(!rt.gc.headerMarked(&fresh_ctx.header));
+    try std.testing.expectEqual(shape_refs + 1, core.gc.headerRefCount(header));
+    try std.testing.expectEqual(realm_refs + 1, core.gc.headerRefCount(&fresh_ctx.header));
+    try rt.gc.verifyIntrusiveList();
+
+    rt.gc.setHeaderMarked(header);
+    try std.testing.expect(rt.gc.headerMarked(header));
+}
+
+test "block heap nonempty index follows zero-one population transitions" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const heap_mod = core.gc_block_heap;
+    var heap = heap_mod.Heap.init(std.testing.allocator);
+    defer heap.deinit();
+
+    const first = try heap.alloc(32);
+    try heap.verify();
+    var census = heap.census();
+    try std.testing.expectEqual(@as(usize, 1), census.classed_superblocks);
+    try std.testing.expectEqual(@as(usize, 1), census.initialized_blocks);
+    try std.testing.expectEqual(heap_mod.blocks_per_superblock - 1, census.reserved_uninitialized_blocks);
+    try std.testing.expectEqual(@as(usize, 1), census.nonempty_blocks);
+    try std.testing.expectEqual(@as(usize, 1), census.partially_full_blocks);
+    try std.testing.expectEqual(@as(usize, 32), census.live_cell_bytes);
+    heap.free(first.ptr);
+    try heap.verify();
+    census = heap.census();
+    try std.testing.expectEqual(@as(usize, 0), census.nonempty_blocks);
+    try std.testing.expectEqual(@as(usize, 1), census.empty_active_blocks);
+    try std.testing.expectEqual(@as(usize, 1), census.wholly_empty_superblocks);
+
+    // The active block is reused directly after becoming empty; this covers
+    // both index transitions without opening or resetting another block.
+    const reused = try heap.alloc(32);
+    try heap.verify();
+    heap.free(reused.ptr);
+    try heap.verify();
+}
+
+test "block heap reopens a swept partial block before reserving a fresh block" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
+    defer heap.deinit();
+
+    const first_cell = try heap.alloc(64);
+    const first_block = heap.blockOf(first_cell.ptr).?;
+    const cells_per_block = first_block.cell_count;
+    var allocated: u32 = 1;
+    while (allocated < cells_per_block) : (allocated += 1) _ = try heap.alloc(64);
+
+    // Opening the second block retires `first_block` as the class's active
+    // allocation source.  Free more than JSC's 10% can-allocate threshold,
+    // but keep survivors in the block.
+    const second_cell = try heap.alloc(64);
+    const second_block = heap.blockOf(second_cell.ptr).?;
+    try std.testing.expect(second_block != first_block);
+    const freed = (cells_per_block + 9) / 10;
+    for (0..freed) |index| {
+        heap.free(@ptrFromInt(first_block.cellBase(@intCast(index))));
+    }
+    const second_gap = freed + 2;
+    try std.testing.expect(second_gap < cells_per_block);
+    heap.free(@ptrFromInt(first_block.cellBase(second_gap)));
+    // Raw Heap clients model the collector's post-destruction publication
+    // event explicitly. Ordinary `freeSmall` never places a partial block
+    // into the global allocation stream cell by cell.
+    heap.publishCompletedHotBlocks(1);
+    try std.testing.expect(heap.hot_blocks[first_block.size_class] == null);
+    heap.publishCompletedHotBlocks(0);
+    try std.testing.expectEqual(first_block, heap.hot_blocks[first_block.size_class].?);
+
+    // A new major withdraws stale can-allocate membership. Final remark may
+    // republish this block only after current-epoch marks prove that it has no
+    // newly doomed cells.
+    heap.beginMajor();
+    try std.testing.expect(heap.hot_blocks[first_block.size_class] == null);
+    for ([_]*core.gc_block_heap.Block{ first_block, second_block }) |block| {
+        for (0..block.cell_count) |index| {
+            const cell_index: u32 = @intCast(index);
+            if (block.cellAllocated(cell_index)) block.setMark(cell_index, heap.mark_epoch);
+        }
+    }
+    const snapshot = heap.snapshotAllDoomed(heap.mark_epoch);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.count);
+    try std.testing.expectEqual(first_block, heap.hot_blocks[first_block.size_class].?);
+    try heap.verify();
+
+    // Consume the second block.  The desired block-granular policy reopens
+    // the completed swept block here instead of initializing a third one.
+    // Publication itself is unprepared: only this acquisition rebuilds the
+    // interval table, so corrupt that table after reopening rather than
+    // treating the prior ordinary free chain as a promised interval layout.
+    allocated = 1;
+    while (allocated < cells_per_block) : (allocated += 1) _ = try heap.alloc(64);
+    const reopened = try heap.alloc(64);
+    try std.testing.expectEqual(first_block, heap.blockOf(reopened.ptr).?);
+    try std.testing.expectEqual(@as(u32, 0), first_block.cellIndex(@intFromPtr(reopened.ptr)).?);
+    const interval_head = first_block.free_list;
+    try std.testing.expect(interval_head != core.gc_block_heap.free_nil);
+    {
+        const interval_word: *u32 = @ptrFromInt(first_block.cellBase(interval_head));
+        const saved = interval_word.*;
+        defer interval_word.* = saved;
+        interval_word.* ^= 0x0001_0000;
+        try std.testing.expectError(error.FreeCellPoisonMismatch, heap.verify());
+    }
+    try heap.verify();
+    const next = try heap.alloc(64);
+    try std.testing.expectEqual(@as(u32, 1), first_block.cellIndex(@intFromPtr(next.ptr)).?);
+    var expected_index: u32 = 2;
+    while (expected_index < freed) : (expected_index += 1) {
+        const from_interval = try heap.alloc(64);
+        try std.testing.expectEqual(
+            expected_index,
+            first_block.cellIndex(@intFromPtr(from_interval.ptr)).?,
+        );
+    }
+    const across_gap = try heap.alloc(64);
+    try std.testing.expectEqual(second_gap, first_block.cellIndex(@intFromPtr(across_gap.ptr)).?);
+}
+
+test "block heap aged decommit reports scans release and recommit" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const heap_mod = core.gc_block_heap;
+    var heap = heap_mod.Heap.init(std.testing.allocator);
+    defer heap.deinit();
+
+    const first = try heap.alloc(32);
+    const first_block = heap.blockOf(first.ptr).?;
+    const cells_per_block = first_block.cell_count;
+
+    // Fill the first block and open a second one so the first is no longer
+    // active. Only a non-active empty block is eligible for the free list.
+    var allocated: u32 = 1;
+    while (allocated <= cells_per_block) : (allocated += 1) _ = try heap.alloc(32);
+    try std.testing.expect(heap.blockOf((try heap.alloc(32)).ptr).? != first_block);
+    for (0..cells_per_block) |index| {
+        heap.free(@ptrFromInt(first_block.cellBase(@intCast(index))));
+    }
+
+    const committed_before = heap.stats.committed_bytes;
+    try std.testing.expectEqual(@as(usize, 0), heap.releaseFreeBlockPages(heap_mod.Heap.decommit_period_ns));
+    try std.testing.expectEqual(@as(usize, 1), heap.stats.decommit_checks);
+    try std.testing.expectEqual(@as(usize, 0), heap.stats.decommitted_bytes);
+
+    // The period gate suppresses a second scan, independently of idle age.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        heap.releaseFreeBlockPages(heap_mod.Heap.decommit_period_ns + heap_mod.Heap.decommit_period_ns / 2),
+    );
+    try std.testing.expectEqual(@as(usize, 1), heap.stats.decommit_checks);
+
+    const cell_pages = heap_mod.block_bytes - heap_mod.page_bytes;
+    try std.testing.expectEqual(
+        cell_pages,
+        heap.releaseFreeBlockPages(heap_mod.Heap.decommit_period_ns + heap_mod.Heap.decommit_min_idle_ns),
+    );
+    try std.testing.expectEqual(@as(usize, 2), heap.stats.decommit_checks);
+    try std.testing.expectEqual(cell_pages, heap.stats.currentDecommittedBytes());
+    try std.testing.expectEqual(cell_pages, heap.stats.decommit_max_batch_bytes);
+    try std.testing.expectEqual(@as(usize, 0), heap.stats.malloc_trim_attempts);
+    try std.testing.expectEqual(committed_before - cell_pages, heap.stats.committed_bytes);
+
+    // Fill the active block. The next allocation reopens the decommitted
+    // free block, accounts the recommit, and preserves fresh bump order.
+    var fill_active: u32 = 0;
+    while (fill_active < cells_per_block) : (fill_active += 1) _ = try heap.alloc(32);
+    try std.testing.expectEqual(cell_pages, heap.stats.recommitted_bytes);
+    try std.testing.expectEqual(@as(usize, 0), heap.stats.currentDecommittedBytes());
+    try std.testing.expectEqual(committed_before, heap.stats.committed_bytes);
+}
+
+test "process heap trim fires only when a contraction crosses its threshold" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const heap_mod = core.gc_block_heap;
+    const threshold = heap_mod.Heap.process_trim_min_decommitted_bytes;
+
+    try std.testing.expect(!heap_mod.processHeapTrimNeeded(threshold - 1, threshold - 1));
+    try std.testing.expect(!heap_mod.processHeapTrimNeeded(threshold, 0));
+    try std.testing.expect(heap_mod.processHeapTrimNeeded(threshold, 1));
+    try std.testing.expect(heap_mod.processHeapTrimNeeded(threshold * 2, threshold + 1));
+    try std.testing.expect(!heap_mod.processHeapTrimNeeded(threshold * 2, threshold));
+}
+
+test "string registry resolves interior pointers without changing the 4-byte prefix" {
+    if (comptime !core.gc.string_registry_enabled) return error.SkipZigTest;
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(core.gc.StringHeader));
+    try std.testing.expectEqual(@as(usize, 4), core.gc.string_rc_prefix_size);
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const s = try core.string.String.createAscii(rt, "block-heap-string");
+    defer s.value().free(rt);
+    const header = s.header();
+    const identity = @intFromPtr(header);
+    const hit = rt.gc.address_registry.resolveAny(identity).?;
+    try std.testing.expect(hit == .string);
+    try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(identity));
+    try std.testing.expect(rt.gc.address_registry.resolveAny(identity + 8) != null);
+    const rope = try core.string.String.createRopeOwned(
+        rt,
+        (try core.string.String.createAscii(rt, "left")).value(),
+        (try core.string.String.createAscii(rt, "right")).value(),
+    );
+    defer rope.value().free(rt);
+    const rope_hit = rt.gc.address_registry.resolveAny(@intFromPtr(rope.header())).?;
+    try std.testing.expect(rope_hit == .rope);
+}
+
+test "trace_stw sweep debt is drained before a new collection begins" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.gc.sweep_model.debt.sweep_debt = 77;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 77), core.gc_trace_stw.last_report.drained_sweep_debt);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.sweep_model.debt.sweep_debt);
+    try std.testing.expectEqual(@as(usize, 0), core.gc_trace_stw.last_report.sweep_debt);
+}
+
+test "pollGC runs pending collection and clears pending flag" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    var left = try core.Object.create(rt, core.class.ids.object, null);
+    var right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("poll-left");
     defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("poll-right");
@@ -6992,6 +9854,8 @@ test "pollGC runs pending collection and clears pending flag" {
     try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
     left.value().free(rt);
     right.value().free(rt);
+    dropGcPtr(&left);
+    dropGcPtr(&right);
 
     rt.requestGCForTest();
     try std.testing.expectEqual(@as(?core.gc.RequestReason, core.gc.RequestReason.manual), rt.gcLastRequestReasonForTest());
@@ -7062,8 +9926,15 @@ test "object allocation keeps a threshold request while prospective bytes remain
 
     const collections_before = rt.gc.stats.collections;
     rt.collectBeforeObjectAllocation(object_bytes);
+    // Under the tracer the boundary's answer is an incremental cycle: begun
+    // here, completed at the poll that empties the frontier. The boundary
+    // keeps re-recording the threshold request while the account stays over,
+    // which is what drives those later polls.
+    helpers.finishGcCycles(rt);
     try std.testing.expectEqual(collections_before + 1, rt.gc.stats.collections);
-    try std.testing.expect(!rt.gcPendingForTest());
+    if (comptime !core.gc.trace_stw_enabled) {
+        try std.testing.expect(!rt.gcPendingForTest());
+    }
 }
 
 test "stale threshold request cannot mask explicit or pressure major requests" {
@@ -7125,8 +9996,11 @@ test "an unrequested threshold crossing is still serviced at the object boundary
 
     const collections_before = rt.gc.stats.collections;
     rt.collectBeforeObjectAllocation(object_bytes);
+    helpers.finishGcCycles(rt);
     try std.testing.expectEqual(collections_before + 1, rt.gc.stats.collections);
-    try std.testing.expect(!rt.gcPendingForTest());
+    if (comptime !core.gc.trace_stw_enabled) {
+        try std.testing.expect(!rt.gcPendingForTest());
+    }
 }
 
 test "an unrequested threshold crossing is still serviced at a scheduler poll" {
@@ -7143,9 +10017,21 @@ test "an unrequested threshold crossing is still serviced at a scheduler poll" {
     try std.testing.expect(rt.memory.allocated_bytes > rt.gcThreshold());
 
     // `shouldRunMajorAt` takes `over_threshold` recomputed by `pollGC`, so even
-    // the weakest scheduler points collect without a recorded request.
+    // the weakest scheduler points answer without a recorded request. Under
+    // the tracer the answer is now an incremental cycle: the first poll opens
+    // it, subsequent polls run bounded increments, and the poll whose
+    // increment empties the frontier performs the remark and sweep. The
+    // completion counter moves at that last poll, not the first.
     const collections_before = rt.gc.stats.collections;
     _ = try rt.pollGC(null, .safepoint);
+    if (comptime core.gc.trace_stw_enabled) {
+        try std.testing.expect(rt.gc.concurrent.markingActive());
+        var polls: usize = 0;
+        while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+            try std.testing.expect(polls < 10_000);
+            _ = try rt.pollGC(null, .safepoint);
+        }
+    }
     try std.testing.expectEqual(collections_before + 1, rt.gc.stats.collections);
 }
 
@@ -7239,19 +10125,22 @@ test "native pin retains direct object and counts nested pins" {
 
     try std.testing.expect(object.header.pinned());
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
-    try std.testing.expectEqual(@as(i32, 3), object.header.meta().rc);
+    try helpers.expectRefCount(3, &object.header);
 
     value.free(rt);
-    try std.testing.expectEqual(@as(i32, 2), object.header.meta().rc);
+    try helpers.expectRefCount(2, &object.header);
     try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
 
     first_pin.deinit();
     try std.testing.expect(object.header.pinned());
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
-    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
+    try helpers.expectRefCount(1, &object.header);
 
     second_pin.deinit();
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().pinned_cell_count);
+    // Unpinned and unreferenced: the last pin drop is what makes the object
+    // condemnable, so the collection belongs here and not earlier.
+    helpers.reclaimNow(rt);
     try expectNoLiveGc(rt);
 }
 
@@ -7289,11 +10178,14 @@ test "weak persistent value does not retain direct object target" {
     }
 
     target.value().free(rt);
+    // Dropping the last strong reference must not deliver the callback: it is
+    // a collection-time notification, and nothing has collected yet.
+    try std.testing.expectEqual(@as(usize, 0), clear_count);
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
     try std.testing.expect(!weak.isAlive());
     try std.testing.expect(weak.get().isUndefined());
-    try std.testing.expectEqual(@as(usize, 0), clear_count);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), clear_count);
 
@@ -7319,9 +10211,15 @@ test "weak persistent value clears object cycle target during gc" {
 
     try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
     try std.testing.expect(weak.get().isUndefined());
-    try std.testing.expectEqual(@as(usize, 0), clear_count);
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 1), clear_count);
+    if (comptime core.gc.trace_stw_enabled) {
+        // STW processWeak notifies in the same collection that unmarks the
+        // target. Trial deletion defers the callback to the next round.
+        try std.testing.expectEqual(@as(usize, 1), clear_count);
+    } else {
+        try std.testing.expectEqual(@as(usize, 0), clear_count);
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expectEqual(@as(usize, 1), clear_count);
+    }
 }
 
 test "weak persistent value clears unrooted symbol target during gc" {
@@ -7772,7 +10670,11 @@ test "class payload function bytecode constant object cycle is released by runti
     captured.value().free(rt);
 
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
-    try std.testing.expect(payload_mark_calls > 0);
+    if (comptime !core.gc.trace_stw_enabled) {
+        // Trial deletion visits doomed cycle candidates; STW only marks
+        // reachable objects, so an unrooted cycle is swept without payload_mark.
+        try std.testing.expect(payload_mark_calls > 0);
+    }
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(1));
@@ -7798,14 +10700,17 @@ test "realm context owns cached prototype references" {
     try function_proto.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
     try promise_proto.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
 
-    try std.testing.expectEqual(@as(i32, 3), global.header.meta().rc);
-    try std.testing.expectEqual(@as(i32, 2), function_proto.header.meta().rc);
-    try std.testing.expectEqual(@as(i32, 2), promise_proto.header.meta().rc);
+    try helpers.expectRefCount(3, &global.header);
+    try helpers.expectRefCount(2, &function_proto.header);
+    try helpers.expectRefCount(2, &promise_proto.header);
 
     ctx.destroy();
     function_proto.value().free(rt);
     promise_proto.value().free(rt);
+    helpers.reclaimNow(rt);
 
+    // Nothing may be left for a second pass: the cached protos and the global
+    // they point back at must already have gone with the context.
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
@@ -7832,7 +10737,7 @@ test "auto-init slot owns its Realm until the property is deleted" {
         0,
     );
 
-    const slot = holder.prop_values[0].slot.auto_init;
+    const slot = holder.propertyEntry(0).*.slot.auto_init;
     try std.testing.expectEqual(core.property.AutoInitId.prop, slot.realm_and_id.id());
     try std.testing.expectEqual(&ctx.header, slot.realm_and_id.realmHeader().?);
 
@@ -7840,9 +10745,20 @@ test "auto-init slot owns its Realm until the property is deleted" {
     try std.testing.expectEqual(ctx, rt.firstContext().?);
 
     try std.testing.expect(holder.deleteProperty(rt, lazy_key));
-    try std.testing.expectEqual(@as(?*core.RealmContext, null), rt.firstContext());
+    {
+        // The delete drops the slot's Realm edge; reclamation of the Realm is
+        // what that edge being the last one means. `holder` outlives the
+        // collection and no other edge reaches it, so it must be named.
+        var holder_slot: ?*core.Object = holder;
+        var holder_roots = core.runtime.rootObjects(.{&holder_slot});
+        holder_roots.activate(rt);
+        defer holder_roots.deactivate(rt);
+        helpers.reclaimNow(rt);
+        try std.testing.expectEqual(@as(?*core.RealmContext, null), rt.firstContext());
+    }
 
     holder.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
 }
 
@@ -7867,7 +10783,7 @@ test "typed MODULE_NS auto-init publishes a normal value or the same VarRef cell
         .result = .{ .value = core.JSValue.int32(41) },
     };
     try value_holder.defineModuleAutoInitPropertyForFixture(rt, value_key, flags, ctx, &value_fixture.owner);
-    try std.testing.expectEqual(core.property.AutoInitId.module_ns, value_holder.prop_values[0].slot.auto_init.realm_and_id.id());
+    try std.testing.expectEqual(core.property.AutoInitId.module_ns, value_holder.propertyEntry(0).*.slot.auto_init.realm_and_id.id());
     const namespace_value = try value_holder.getProperty(value_key);
     defer namespace_value.free(rt);
     try std.testing.expectEqual(@as(?i32, 41), namespace_value.asInt32());
@@ -7886,7 +10802,7 @@ test "typed MODULE_NS auto-init publishes a normal value or the same VarRef cell
     try std.testing.expectEqual(@as(?i32, 7), first_cell_value.asInt32());
     try std.testing.expectEqual(@as(usize, 1), cell_fixture.calls);
     try std.testing.expectEqual(core.property.Kind.var_ref, cell_holder.propKindAt(0));
-    try std.testing.expectEqual(cell, cell_holder.prop_values[0].slot.var_ref);
+    try std.testing.expectEqual(cell, cell_holder.propertyEntry(0).*.slot.var_ref);
 
     cell.setVarRefValue(rt, core.JSValue.int32(9));
     const updated_cell_value = try cell_holder.getProperty(cell_key);
@@ -7905,26 +10821,26 @@ test "MODULE_NS auto-init failure retains its slot Realm and retries once per re
     defer holder.value().free(rt);
     const key = try rt.internAtom("module_namespace_retry");
     defer rt.atoms.free(key);
-    const baseline_realm_refs = ctx.header.meta().rc;
+    const baseline_realm_refs = helpers.refCountSnapshot(&ctx.header);
     var fixture = ModuleAutoInitFixture{
         .expected_realm = &ctx.header,
         .result = .{ .fail_once = core.JSValue.int32(88) },
     };
 
     try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(true, false, true), ctx, &fixture.owner);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
     try std.testing.expectError(error.OutOfMemory, holder.getProperty(key));
     try std.testing.expectEqual(@as(usize, 1), fixture.calls);
     try std.testing.expectEqual(core.property.Kind.auto_init, holder.propKindAt(0));
-    try std.testing.expectEqual(&ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try std.testing.expectEqual(&ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     const retried = try holder.getProperty(key);
     defer retried.free(rt);
     try std.testing.expectEqual(@as(?i32, 88), retried.asInt32());
     try std.testing.expectEqual(@as(usize, 2), fixture.calls);
     try std.testing.expectEqual(core.property.Kind.data, holder.propKindAt(0));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 }
 
 test "MODULE_NS auto-init reentry cannot overwrite the replacement property" {
@@ -7972,16 +10888,16 @@ test "auto-init slot clone and destroy retain and release the typed Realm edge e
         .expected_realm = &ctx.header,
         .result = .{ .value = core.JSValue.int32(1) },
     };
-    const baseline_realm_refs = ctx.header.meta().rc;
+    const baseline_realm_refs = helpers.refCountSnapshot(&ctx.header);
 
     try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(true, false, true), ctx, &fixture.owner);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
-    var clone = holder.prop_values[0].slot.auto_init.clone();
-    try std.testing.expectEqual(baseline_realm_refs + 2, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
+    var clone = holder.propertyEntry(0).*.slot.auto_init.clone();
+    try helpers.expectRefCount(baseline_realm_refs + 2, &ctx.header);
     clone.deinit(rt);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
     try std.testing.expect(holder.deleteProperty(rt, key));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 }
 
 test "unmaterialized MODULE_NS slot participates in Realm cycle marking" {
@@ -8259,6 +11175,16 @@ test "weak reference holders use a lifetime intrusive list" {
     const first = try core.Object.create(rt, core.class.ids.weakmap, null);
     const middle = try core.Object.create(rt, core.class.ids.weak_ref, null);
     const last = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+    // Each holder leaves the list when it is destroyed, so every step below
+    // needs a collection to stand where the last release used to. The holders
+    // that must still be readable across a given collection are named here;
+    // a slot is cleared exactly when its object is meant to become garbage.
+    var strong_map_slot: ?*core.Object = strong_map;
+    var first_slot: ?*core.Object = first;
+    var last_slot: ?*core.Object = last;
+    var live_roots = core.runtime.rootObjects(.{ &strong_map_slot, &first_slot, &last_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     // QuickJS registers every weak-capable holder for its full payload
     // lifetime, including an empty WeakMap / FinalizationRegistry. Strong
@@ -8273,14 +11199,19 @@ test "weak reference holders use a lifetime intrusive list" {
     try std.testing.expectEqual(@as(?*core.Object, null), last.weakReferenceHolderNext());
 
     middle.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(?*core.Object, last), first.weakReferenceHolderNext());
     try std.testing.expectEqual(@as(?*core.Object, first), last.weakReferenceHolderPrevious());
 
     first.value().free(rt);
+    first_slot = null;
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(last, rt.weak_reference_holder_head.?);
     try std.testing.expectEqual(last, rt.weak_reference_holder_tail.?);
 
     last.value().free(rt);
+    last_slot = null;
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(?*core.Object, null), rt.weak_reference_holder_head);
     try std.testing.expectEqual(@as(?*core.Object, null), rt.weak_reference_holder_tail);
     strong_map.value().free(rt);
@@ -8302,6 +11233,17 @@ test "weak collection borrowed holder cache supports reverse teardown" {
             key.* = null;
         }
     }
+    // The teardown loop collects after every release, and both arrays are read
+    // by the deferred cleanup afterwards. A holder slot is cleared at the point
+    // the loop means it to die; the keys stay named for the whole test.
+    var live_roots = core.runtime.rootObjects(.{
+        &holders[0], &holders[1], &holders[2], &holders[3],
+        &holders[4], &holders[5], &holders[6], &holders[7],
+        &keys[0],    &keys[1],    &keys[2],    &keys[3],
+        &keys[4],    &keys[5],    &keys[6],    &keys[7],
+    });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     for (&holders, &keys, 0..) |*holder_slot, *key_slot, index| {
         const holder = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -8323,6 +11265,7 @@ test "weak collection borrowed holder cache supports reverse teardown" {
         const holder = holders[remaining].?;
         holder.value().free(rt);
         holders[remaining] = null;
+        helpers.reclaimNow(rt);
         try std.testing.expectEqual(remaining, rt.borrowed_reference_holders.len);
     }
 }
@@ -8336,7 +11279,14 @@ test "ordinary last-ref values do not schedule irrelevant borrowed cleanup" {
 
     rt.beginBorrowedWeakCleanup();
     defer rt.endBorrowedWeakCleanup();
-    try std.testing.expect(rt.prepareBorrowedWeakCleanupForLastRefValue(ordinary.value()) != null);
+    const candidate = rt.prepareBorrowedWeakCleanupForLastRefValue(ordinary.value());
+    if (comptime core.gc.trace_stw_enabled) {
+        // Tracer-owned values have no last-ref transition. Condemnation owns
+        // their borrowed-identity cleanup instead.
+        try std.testing.expect(candidate == null);
+    } else {
+        try std.testing.expect(candidate != null);
+    }
     try std.testing.expectEqual(@as(usize, 0), rt.borrowedWeakCleanupIdentityCount());
 }
 
@@ -8423,7 +11373,7 @@ test "data to auto-init replacement stays traceable across allocation GC" {
     try std.testing.expect(probe.calls > 0);
     try std.testing.expect(!probe.collection_failed);
     try std.testing.expectEqual(core.property.Kind.auto_init, holder.propFlagsAt(0).kind);
-    try std.testing.expectEqual(&ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(&ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
 }
 
 test "data to auto-init replacement rolls back descriptor OOM and retries in same runtime" {
@@ -8453,7 +11403,7 @@ test "data to auto-init replacement rolls back descriptor OOM and retries in sam
     try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.refCount());
 
     const original_flags = holder.propFlagsAt(0);
-    const baseline_realm_refs = ctx.header.meta().rc;
+    const baseline_realm_refs = helpers.refCountSnapshot(&ctx.header);
     const baseline_allocated_bytes = rt.memory.allocated_bytes;
     rt.setMemoryLimit(baseline_allocated_bytes);
     defer rt.setMemoryLimit(null);
@@ -8466,14 +11416,14 @@ test "data to auto-init replacement rolls back descriptor OOM and retries in sam
     try std.testing.expectEqual(core.property.Kind.data, holder.propFlagsAt(0).kind);
     try std.testing.expectEqual(original_flags.bits(), holder.propFlagsAt(0).bits());
     try std.testing.expectEqual(@as(?i32, 1), (try holder.getProperty(key)).asInt32());
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
     try std.testing.expectEqual(baseline_allocated_bytes, rt.memory.allocated_bytes);
 
     try holder.defineEmptyArrayAutoInitProperty(rt, key, flags, global);
     try std.testing.expectEqual(core.property.Kind.auto_init, holder.propFlagsAt(0).kind);
     try std.testing.expectEqual(flags.withKind(.auto_init).bits(), holder.propFlagsAt(0).bits());
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
-    try std.testing.expectEqual(&ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
+    try std.testing.expectEqual(&ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
 
     const materialized = try holder.getProperty(key);
     defer materialized.free(rt);
@@ -8481,7 +11431,7 @@ test "data to auto-init replacement rolls back descriptor OOM and retries in sam
     try std.testing.expectEqual(@as(u32, 0), materialized_array.arrayLength());
     try std.testing.expectEqual(core.property.Kind.data, holder.propFlagsAt(0).kind);
     try std.testing.expectEqual(flags.bits(), holder.propFlagsAt(0).bits());
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 }
 
 test "replacing auto-init transfers the owned Realm edge" {
@@ -8512,7 +11462,7 @@ test "replacing auto-init transfers the owned Realm edge" {
         first_global,
         0,
     );
-    try std.testing.expectEqual(&first_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(&first_ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
 
     try holder.replaceAutoInitPropertyWithRealmAndNative(
         rt,
@@ -8524,7 +11474,7 @@ test "replacing auto-init transfers the owned Realm edge" {
         0,
     );
 
-    try std.testing.expectEqual(&second_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(&second_ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
 }
 
 test "replacing auto-init rolls back descriptor OOM and retries in same runtime" {
@@ -8561,8 +11511,8 @@ test "replacing auto-init rolls back descriptor OOM and retries in same runtime"
     try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.refCount());
 
     const original_flags = holder.propFlagsAt(0);
-    const first_realm_refs = first_ctx.header.meta().rc;
-    const second_realm_refs = second_ctx.header.meta().rc;
+    const first_realm_refs = helpers.refCountSnapshot(&first_ctx.header);
+    const second_realm_refs = helpers.refCountSnapshot(&second_ctx.header);
     const baseline_allocated_bytes = rt.memory.allocated_bytes;
     const next_flags = core.property.Flags.data(false, true, true);
     rt.setMemoryLimit(baseline_allocated_bytes);
@@ -8574,16 +11524,16 @@ test "replacing auto-init rolls back descriptor OOM and retries in same runtime"
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(original_flags.bits(), holder.propFlagsAt(0).bits());
-    try std.testing.expectEqual(&first_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
-    try std.testing.expectEqual(first_realm_refs, first_ctx.header.meta().rc);
-    try std.testing.expectEqual(second_realm_refs, second_ctx.header.meta().rc);
+    try std.testing.expectEqual(&first_ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
+    try helpers.expectRefCount(first_realm_refs, &first_ctx.header);
+    try helpers.expectRefCount(second_realm_refs, &second_ctx.header);
     try std.testing.expectEqual(baseline_allocated_bytes, rt.memory.allocated_bytes);
 
     try holder.replaceAutoInitPropertyWithRealmAndNative(rt, key, "oom-replace-realm-next", 0, next_flags, second_global, 0);
     try std.testing.expectEqual(next_flags.withKind(.auto_init).bits(), holder.propFlagsAt(0).bits());
-    try std.testing.expectEqual(&second_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
-    try std.testing.expectEqual(first_realm_refs - 1, first_ctx.header.meta().rc);
-    try std.testing.expectEqual(second_realm_refs + 1, second_ctx.header.meta().rc);
+    try std.testing.expectEqual(&second_ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
+    try helpers.expectRefCount(first_realm_refs - 1, &first_ctx.header);
+    try helpers.expectRefCount(second_realm_refs + 1, &second_ctx.header);
 }
 
 test "deleting auto-init releases its owned Realm edge" {
@@ -8600,12 +11550,12 @@ test "deleting auto-init releases its owned Realm edge" {
     const key = try rt.internAtom("lazy_delete_realm");
     defer rt.atoms.free(key);
 
-    const baseline_realm_refs = ctx.header.meta().rc;
+    const baseline_realm_refs = helpers.refCountSnapshot(&ctx.header);
     try holder.definePerformanceAutoInitProperty(rt, key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     try std.testing.expect(holder.deleteProperty(rt, key));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 }
 
 test "ordinary auto-init replacement releases each owned Realm edge" {
@@ -8621,6 +11571,14 @@ test "ordinary auto-init replacement releases each owned Realm edge" {
     object_proto_slot.* = global.value().dup();
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     defer holder.value().free(rt);
+    // Each replacement below materializes the lazy value first, and that
+    // short-lived object carries the Realm edge the assertions are counting.
+    // Collecting it is what returns the count; `holder` is reachable from
+    // nothing else, so it has to be named across every collection.
+    var holder_slot: ?*core.Object = holder;
+    var holder_roots = core.runtime.rootObjects(.{&holder_slot});
+    holder_roots.activate(rt);
+    defer holder_roots.deactivate(rt);
     const define_key = try rt.internAtom("lazy_define_realm");
     defer rt.atoms.free(define_key);
     const set_key = try rt.internAtom("lazy_set_realm");
@@ -8630,30 +11588,34 @@ test "ordinary auto-init replacement releases each owned Realm edge" {
     const simple_set_key = try rt.internAtom("lazy_simple_set_realm");
     defer rt.atoms.free(simple_set_key);
 
-    const baseline_realm_refs = ctx.header.meta().rc;
+    const baseline_realm_refs = helpers.refCountSnapshot(&ctx.header);
     try holder.definePerformanceAutoInitProperty(rt, define_key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     try holder.defineOwnProperty(rt, define_key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    helpers.reclaimNow(rt);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 
     try holder.definePerformanceAutoInitProperty(rt, set_key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     try holder.setProperty(rt, set_key, core.JSValue.int32(2));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    helpers.reclaimNow(rt);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 
     try holder.definePerformanceAutoInitProperty(rt, own_set_key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     try std.testing.expect(try holder.setOwnWritableDataProperty(rt, own_set_key, core.JSValue.int32(3)));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    helpers.reclaimNow(rt);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 
     try holder.definePerformanceAutoInitProperty(rt, simple_set_key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     try std.testing.expect(try holder.setOrDefineOwnDataPropertyForSimpleSet(rt, simple_set_key, core.JSValue.int32(4)));
-    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    helpers.reclaimNow(rt);
+    try helpers.expectRefCount(baseline_realm_refs, &ctx.header);
 }
 
 test "specialized auto-init producers retain the same typed Realm owner" {
@@ -8704,11 +11666,11 @@ test "specialized auto-init producers retain the same typed Realm owner" {
         replace_holder,
     };
     for (holders) |holder| {
-        const slot = holder.prop_values[0].slot.auto_init;
+        const slot = holder.propertyEntry(0).*.slot.auto_init;
         try std.testing.expectEqual(core.property.AutoInitId.prop, slot.realm_and_id.id());
         try std.testing.expectEqual(&ctx.header, slot.realm_and_id.realmHeader().?);
     }
-    try std.testing.expectEqual(@as(i32, 1 + holders.len), ctx.header.meta().rc);
+    try helpers.expectRefCount(@intCast(1 + holders.len), &ctx.header);
 }
 
 test "auto-init descriptor interning reuses value-identical metadata" {
@@ -8773,6 +11735,7 @@ test "materialized auto-init true C function owns its construction realm" {
 
     function_value.free(rt);
     holder.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -8782,17 +11745,25 @@ test "dead weak collection key entry is swept when target is destroyed" {
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
     defer weakmap.value().free(rt);
-    const key = try core.Object.create(rt, core.class.ids.object, null);
+    var key = try core.Object.create(rt, core.class.ids.object, null);
     const value = try core.Object.create(rt, core.class.ids.object, null);
+    var weakmap_slot: ?*core.Object = weakmap;
+    var value_slot: ?*core.Object = value;
+    var live_roots = core.runtime.rootObjects(.{ &weakmap_slot, &value_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     try appendWeakCollectionEntry(rt, weakmap, key, value.value());
 
     key.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    dropGcPtr(&key);
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(i32, 1), value.header.meta().rc);
+    try helpers.expectRefCount(1, &value.header);
 
     value.value().free(rt);
+    value_slot = null;
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
@@ -8804,17 +11775,23 @@ test "dead weak collection key entry is swept without freeing live value" {
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
     defer weakmap.value().free(rt);
-    const key = try core.Object.create(rt, core.class.ids.object, null);
+    var key = try core.Object.create(rt, core.class.ids.object, null);
     const value = try core.Object.create(rt, core.class.ids.object, null);
     defer value.value().free(rt);
+    var weakmap_slot: ?*core.Object = weakmap;
+    var value_slot: ?*core.Object = value;
+    var live_roots = core.runtime.rootObjects(.{ &weakmap_slot, &value_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     try appendWeakCollectionEntry(rt, weakmap, key, value.value());
 
     key.value().free(rt);
+    dropGcPtr(&key);
 
-    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(i32, 1), value.header.meta().rc);
+    try helpers.expectRefCount(1, &value.header);
 }
 
 test "live weak collection key preserves stored value" {
@@ -8823,7 +11800,12 @@ test "live weak collection key preserves stored value" {
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
     const key = try core.Object.create(rt, core.class.ids.object, null);
-    const value = try core.Object.create(rt, core.class.ids.object, null);
+    var value = try core.Object.create(rt, core.class.ids.object, null);
+    var weakmap_slot: ?*core.Object = weakmap;
+    var key_slot: ?*core.Object = key;
+    var live_roots = core.runtime.rootObjects(.{ &weakmap_slot, &key_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     try appendWeakCollectionEntry(rt, weakmap, key, value.value());
     value.value().free(rt);
@@ -8831,9 +11813,12 @@ test "live weak collection key preserves stored value" {
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 1), weakmap.weakCollectionEntries().len);
     try std.testing.expectEqual(&value.header, weakmap.weakCollectionEntries()[0].value.refHeader().?);
+    dropGcPtr(&value);
 
     weakmap.value().free(rt);
+    weakmap_slot = null;
     key.value().free(rt);
+    key_slot = null;
 }
 
 test "weak ref target identity does not retain object target" {
@@ -8842,7 +11827,11 @@ test "weak ref target identity does not retain object target" {
 
     const weak_ref = try core.Object.create(rt, core.class.ids.weak_ref, null);
     defer weak_ref.value().free(rt);
-    const target = try core.Object.create(rt, core.class.ids.object, null);
+    var target = try core.Object.create(rt, core.class.ids.object, null);
+    var weak_ref_slot: ?*core.Object = weak_ref;
+    var live_roots = core.runtime.rootObjects(.{&weak_ref_slot});
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     try weak_ref.setWeakRefTarget(rt, target.value());
 
@@ -8851,8 +11840,13 @@ test "weak ref target identity does not retain object target" {
         defer live.free(rt);
         try std.testing.expectEqual(&target.header, live.refHeader().?);
     }
+    // Job-scoped [[KeptAlive]] from the deref above must not keep the target
+    // past the next collection (tracing-gc-design.md §9.2).
+    rt.clearWeakRefKeptAlive();
 
     target.value().free(rt);
+    dropGcPtr(&target);
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
 }
 
@@ -8987,6 +11981,36 @@ test "finalization registry append failure rolls back borrowed holder registrati
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
 }
 
+test "finalization registry job-queue reserve OOM rolls back the cell" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+    defer registry.value().free(rt);
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    defer target.value().free(rt);
+
+    // Cell storage is already reserved so the injected failure lands on
+    // job_queue.reserveEntries (the §9.3 slot promised at registration).
+    try registry.ensureFinalizationRegistryCellCapacity(rt, 1);
+    try rt.job_queue.ensureCapacity(4);
+    try rt.job_queue.reserveEntries(4);
+    defer rt.job_queue.releaseReservedEntries(rt.job_queue.reserved_entries);
+
+    const old_holder_count = rt.borrowed_reference_holders.len;
+    const reserved_before = rt.job_queue.reserved_entries;
+    rt.setMemoryLimit(rt.memory.allocated_bytes + borrowedHolderInitialAllocationBytes());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        appendFinalizationRegistryCell(rt, registry, target.value(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue()),
+    );
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(reserved_before, rt.job_queue.reserved_entries);
+    try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
+}
+
 test "finalization registry capacity reservation keeps empty holder unregistered" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -9082,10 +12106,14 @@ test "finalization registry dead target cleanup tolerates held value reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+    var registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
     defer registry.value().free(rt);
-    const first_target = try core.Object.create(rt, core.class.ids.object, null);
-    const held_and_second_target = try core.Object.create(rt, core.class.ids.object, null);
+    var registry_slot: ?*core.Object = registry;
+    var registry_roots = core.runtime.rootObjects(.{&registry_slot});
+    registry_roots.activate(rt);
+    defer registry_roots.deactivate(rt);
+    var first_target = try core.Object.create(rt, core.class.ids.object, null);
+    var held_and_second_target = try core.Object.create(rt, core.class.ids.object, null);
 
     try appendFinalizationRegistryCell(
         rt,
@@ -9102,9 +12130,17 @@ test "finalization registry dead target cleanup tolerates held value reentry" {
         core.JSValue.undefinedValue(),
     );
     held_and_second_target.value().free(rt);
+    dropGcPtr(&held_and_second_target);
 
     first_target.value().free(rt);
+    dropGcPtr(&first_target);
     _ = rt.runObjectCycleRemoval();
+    // The first cell's held value is the second cell's target, and a held
+    // value is a strong edge: the second target is still reachable while the
+    // first cell exists, so it can only be cleaned by a later collection --
+    // one per link in the chain. Refcounting unwinds the whole chain inside
+    // the first release instead.
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
@@ -9161,7 +12197,11 @@ test "weak map deep value chain releases without recursive destruction" {
 
     const map = try core.Object.create(rt, core.class.ids.weakmap, null);
     defer map.value().free(rt);
-    const head = try core.Object.create(rt, core.class.ids.object, null);
+    var map_slot: ?*core.Object = map;
+    var live_roots = core.runtime.rootObjects(.{&map_slot});
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
+    var head = try core.Object.create(rt, core.class.ids.object, null);
 
     var key = head;
     for (0..5_000) |_| {
@@ -9172,6 +12212,8 @@ test "weak map deep value chain releases without recursive destruction" {
     }
 
     head.value().free(rt);
+    dropGcPtr(&head);
+    dropGcPtr(&key);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), map.weakCollectionEntries().len);
     try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
@@ -9187,7 +12229,16 @@ test "weak map cycle sweep clears index after removing dead keys" {
     const self_key = try rt.internAtom("self");
     defer rt.atoms.free(self_key);
 
-    var keys: [8]*core.Object = undefined;
+    var keys: [8]?*core.Object = @splat(null);
+    var key_roots: [8]core.runtime.ObjectRootValue = undefined;
+    for (&key_roots, &keys) |*root, *slot| root.* = .{ .object = slot };
+    var map_slot: ?*core.Object = map;
+    var map_roots = core.runtime.rootObjects(.{&map_slot});
+    map_roots.activate(rt);
+    defer map_roots.deactivate(rt);
+    var key_frame = core.runtime.ValueRootFrame{ .objects = &key_roots };
+    key_frame.activate(rt);
+    defer key_frame.deactivate(rt);
     var key_count: usize = 0;
     var first_key_released = false;
     defer {
@@ -9195,7 +12246,8 @@ test "weak map cycle sweep clears index after removing dead keys" {
         while (index != 0) {
             index -= 1;
             if (index == 0 and first_key_released) continue;
-            keys[index].value().free(rt);
+            if (keys[index]) |key| key.value().free(rt);
+            keys[index] = null;
         }
     }
 
@@ -9213,7 +12265,8 @@ test "weak map cycle sweep clears index after removing dead keys" {
     try std.testing.expectEqual(@as(usize, 8), rt.gcStats().weak_ref_count);
     try std.testing.expect(map.collectionBucketHeads().len != 0);
 
-    keys[0].value().free(rt);
+    keys[0].?.value().free(rt);
+    keys[0] = null;
     first_key_released = true;
     try std.testing.expectEqual(@as(usize, single_object_self_cycle_reclaimed_count), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
@@ -9223,7 +12276,7 @@ test "weak map cycle sweep clears index after removing dead keys" {
 
     var index: usize = 1;
     while (index < key_count) : (index += 1) {
-        const value = try engine.exec.collection_ops.methodCall(rt, map.value(), 2, &.{keys[index].value()});
+        const value = try engine.exec.collection_ops.methodCall(rt, map.value(), 2, &.{keys[index].?.value()});
         defer value.free(rt);
         try std.testing.expectEqual(@as(?i32, @intCast(index)), value.asInt32());
     }
@@ -9235,17 +12288,25 @@ test "finalization registry dead target releases held value when target is destr
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
     defer registry.value().free(rt);
-    const target = try core.Object.create(rt, core.class.ids.object, null);
+    var target = try core.Object.create(rt, core.class.ids.object, null);
     const held = try core.Object.create(rt, core.class.ids.object, null);
+    var registry_slot: ?*core.Object = registry;
+    var held_slot: ?*core.Object = held;
+    var live_roots = core.runtime.rootObjects(.{ &registry_slot, &held_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     try appendFinalizationRegistryCell(rt, registry, target.value(), held.value(), core.JSValue.undefinedValue());
 
     target.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    dropGcPtr(&target);
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(@as(i32, 1), held.header.meta().rc);
+    try helpers.expectRefCount(1, &held.header);
 
     held.value().free(rt);
+    held_slot = null;
+    helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
@@ -9257,7 +12318,12 @@ test "finalization registry live target preserves held value" {
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
     const target = try core.Object.create(rt, core.class.ids.object, null);
-    const held = try core.Object.create(rt, core.class.ids.object, null);
+    var held = try core.Object.create(rt, core.class.ids.object, null);
+    var registry_slot: ?*core.Object = registry;
+    var target_slot: ?*core.Object = target;
+    var live_roots = core.runtime.rootObjects(.{ &registry_slot, &target_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     try appendFinalizationRegistryCell(rt, registry, target.value(), held.value(), core.JSValue.undefinedValue());
     held.value().free(rt);
@@ -9266,9 +12332,13 @@ test "finalization registry live target preserves held value" {
     try std.testing.expectEqual(@as(usize, 1), registry.finalizationRegistryCells().len);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().weak_ref_count);
     try std.testing.expectEqual(&held.header, registry.finalizationRegistryCells()[0].held_value.refHeader().?);
+    dropGcPtr(&held);
 
     registry.value().free(rt);
+    registry_slot = null;
     target.value().free(rt);
+    target_slot = null;
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().weak_ref_count);
 }
 
@@ -9286,8 +12356,18 @@ test "finalization registry unregister cannot remove queued cleanup cell" {
     defer registry_value.free(rt);
     const token = try core.Object.create(rt, core.class.ids.object, null);
     defer token.value().free(rt);
+    var registry_slot: ?*core.Object = registry;
+    var cleanup_slot: ?*core.Object = cleanup;
+    var token_slot: ?*core.Object = token;
+    var live_roots = core.runtime.rootObjects(.{ &registry_slot, &cleanup_slot, &token_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
-    const target = try core.Object.create(rt, core.class.ids.object, null);
+    var target = try core.Object.create(rt, core.class.ids.object, null);
+    var target_slot: ?*core.Object = target;
+    var target_roots = core.runtime.rootObjects(.{&target_slot});
+    target_roots.activate(rt);
+    defer target_roots.deactivate(rt);
     var target_value = target.value();
     const self_key = try rt.internAtom("gc-finalization-unregister-pending-self");
     defer rt.atoms.free(self_key);
@@ -9302,6 +12382,8 @@ test "finalization registry unregister cannot remove queued cleanup cell" {
     _ = try rt.tryRunObjectCycleRemoval();
     target_value.free(rt);
     target_value = core.JSValue.undefinedValue();
+    target_slot = null;
+    dropGcPtr(&target);
 
     const collected = try rt.tryRunObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, single_object_self_cycle_reclaimed_count), collected.freed_objects);
@@ -9317,7 +12399,7 @@ test "finalization registry unregister cannot remove queued cleanup cell" {
     rt.clearPendingFinalizationJobs();
 }
 
-test "finalization registry enqueue OOM retains stable pending cells for same-runtime retry" {
+test "finalization registry cleanup enqueue does not allocate after registration" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -9325,14 +12407,21 @@ test "finalization registry enqueue OOM retains stable pending cells for same-ru
 
     const cleanup = try core.Object.create(rt, core.class.ids.object, null);
     defer cleanup.value().free(rt);
-    const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
+    var registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
     defer registry.value().free(rt);
+    var registry_slot: ?*core.Object = registry;
+    var cleanup_slot: ?*core.Object = cleanup;
+    var live_roots = core.runtime.rootObjects(.{ &registry_slot, &cleanup_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
     registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value().dup();
 
     var targets: [3]*core.Object = undefined;
+    var target_slots: [3]?*core.Object = .{ null, null, null };
     for (&targets, 0..) |*slot, index| {
         const target = try core.Object.create(rt, core.class.ids.object, null);
         slot.* = target;
+        target_slots[index] = target;
         try registry.appendFinalizationRegistryCell(
             rt,
             target.value(),
@@ -9340,25 +12429,30 @@ test "finalization registry enqueue OOM retains stable pending cells for same-ru
             core.JSValue.undefinedValue(),
         );
     }
+    var target_roots = core.runtime.rootObjects(.{
+        &target_slots[0],
+        &target_slots[1],
+        &target_slots[2],
+    });
+    target_roots.activate(rt);
+    defer target_roots.deactivate(rt);
 
-    // Warm the collector while all targets are live so the injected failure is
-    // specifically the first unified-FIFO publication allocation.
     _ = try rt.tryRunObjectCycleRemoval();
-    for (targets) |target| target.value().free(rt);
+    for (&targets, &target_slots) |*target, *held| {
+        target.*.value().free(rt);
+        dropGcPtr(target);
+        held.* = null;
+    }
 
+    // §9.3: the job slot was reserved at register, so a tight memory limit
+    // during sweep still publishes the three cleanup jobs.
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     defer rt.setMemoryLimit(null);
     _ = try rt.tryRunObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
-    try std.testing.expectEqual(@as(usize, 3), registry.pendingFinalizationCellCountForTest());
-    try std.testing.expectEqual(@as(usize, 3), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(ctx, registry.finalizationRegistryRealmContext().?);
-
-    rt.setMemoryLimit(null);
-    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 3), rt.pendingFinalizationJobCountForTest());
     try std.testing.expectEqual(@as(usize, 0), registry.pendingFinalizationCellCountForTest());
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(@as(usize, 3), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(ctx, registry.finalizationRegistryRealmContext().?);
 
     for (rt.job_queue.jobs[0..3], 0..) |job, index| {
         try std.testing.expectEqual(ctx, job.realm.borrow().?);
@@ -9378,9 +12472,10 @@ test "finalization registry enqueue OOM retains stable pending cells for same-ru
 test "object allocation threshold triggers runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
 
-    const left = try core.Object.create(rt, core.class.ids.object, null);
-    const right = try core.Object.create(rt, core.class.ids.object, null);
+    var left = try core.Object.create(rt, core.class.ids.object, null);
+    var right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("left");
     defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("right");
@@ -9390,11 +12485,20 @@ test "object allocation threshold triggers runtime cycle removal" {
     try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
     left.value().free(rt);
     right.value().free(rt);
+    dropGcPtr(&left);
+    dropGcPtr(&right);
 
     rt.setGCThreshold(0);
     const survivor = try core.Object.create(rt, core.class.ids.object, null);
     defer survivor.value().free(rt);
+    var survivor_slot: ?*core.Object = survivor;
+    var survivor_roots = core.runtime.rootObjects(.{&survivor_slot});
+    survivor_roots.activate(rt);
+    defer survivor_roots.deactivate(rt);
 
+    // The create's boundary opened an incremental cycle; the count below is a
+    // post-collection assertion, so reach the poll where it completes.
+    helpers.finishGcCycles(rt);
     try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
 }
@@ -9404,6 +12508,7 @@ test "object allocation collects reclaimable cycles before memory-limit rejectio
         .gc_threshold = 256 * 1024 * 1024,
     });
     defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
 
     // Keep the shared null-prototype root Shape alive. QuickJS acquires that
     // owned Shape before JS_NewObjectFromShape's object-allocation GC boundary;
@@ -9411,12 +12516,17 @@ test "object allocation collects reclaimable cycles before memory-limit rejectio
     const shape_guard = try core.Object.create(rt, core.class.ids.object, null);
     var shape_guard_owned = true;
     defer if (shape_guard_owned) shape_guard.value().free(rt);
+    var shape_guard_slot: ?*core.Object = shape_guard;
+    var shape_guard_roots = core.runtime.rootObjects(.{&shape_guard_slot});
+    shape_guard_roots.activate(rt);
+    defer shape_guard_roots.deactivate(rt);
 
-    const object = try core.Object.create(rt, core.class.ids.object, null);
+    var object = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("gc-before-limit-self");
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(object.value(), true, true, true));
     object.value().free(rt);
+    dropGcPtr(&object);
 
     // Exactly the current logical heap leaves no room for a replacement object
     // unless the pending threshold collection runs before MemoryAccount checks
@@ -9425,10 +12535,13 @@ test "object allocation collects reclaimable cycles before memory-limit rejectio
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     defer rt.setMemoryLimit(null);
 
-    const replacement = try core.Object.create(rt, core.class.ids.object, null);
+    var replacement = try core.Object.create(rt, core.class.ids.object, null);
     replacement.value().free(rt);
+    dropGcPtr(&replacement);
     shape_guard.value().free(rt);
+    shape_guard_slot = null;
     shape_guard_owned = false;
+    helpers.reclaimNow(rt);
     try expectNoLiveGc(rt);
 }
 
@@ -9437,6 +12550,7 @@ test "cache-miss root shape is owned before the object allocation GC boundary" {
         .gc_threshold = 256 * 1024 * 1024,
     });
     defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
 
     // Warm the shape-hash buckets while keeping this prototype unique: creating
     // the replacement below must allocate a new root Shape for `prototype`.
@@ -9482,6 +12596,13 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
 
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
     defer prototype.value().free(rt);
+    // The retry's teardown is measured against the pre-construction counts, so
+    // a collection has to stand where the retry's release used to. `prototype`
+    // is read after it and is reachable from nothing on the heap.
+    var prototype_slot: ?*core.Object = prototype;
+    var prototype_roots = core.runtime.rootObjects(.{&prototype_slot});
+    prototype_roots.activate(rt);
+    defer prototype_roots.deactivate(rt);
     const class_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(class_id, .{ .class_name = "PostShapeObjectOom" });
 
@@ -9491,7 +12612,7 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
     const shape_hash_count_before = rt.shapes.shape_hash_count;
     const heap_live_bytes_before = rt.gcStats().heap_live_bytes;
     const allocated_bytes_before = rt.memory.allocated_bytes;
-    const prototype_refs_before = prototype.header.meta().rc;
+    const prototype_refs_before = helpers.refCountSnapshot(&prototype.header);
 
     var probe = ObjectConstructionOrderProbe{
         .rt = rt,
@@ -9511,7 +12632,8 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
     }
 
     // Permit exactly the cache-miss root Shape. The following Object allocation
-    // must fail after that Shape has been retained, registered and accounted.
+    // must fail after that fully initialized Shape has been published and
+    // rooted across the reentrant allocation boundary.
     rt.setMemoryLimit(allocated_bytes_before + root_shape_bytes);
     try std.testing.expectError(error.OutOfMemory, core.Object.create(rt, class_id, prototype));
     rt.setMemoryLimit(null);
@@ -9522,7 +12644,7 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
     try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
     try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
     try std.testing.expectEqual(allocated_bytes_before, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(prototype_refs_before, prototype.header.meta().rc);
+    try helpers.expectRefCount(prototype_refs_before, &prototype.header);
 
     // A failed construction must release its dynamic definition pin completely.
     rt.classes.unregisterDynamic(class_id);
@@ -9538,12 +12660,42 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
     try std.testing.expect(probe.shape_owned_at_object_boundary);
     try std.testing.expectEqual(prototype, retry.getPrototype());
     retry.value().free(rt);
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(live_shape_count_before, rt.gc.liveCountKind(.shape));
     try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
     try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
     try std.testing.expectEqual(retry_allocated_bytes_before, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(prototype_refs_before, prototype.header.meta().rc);
+    try helpers.expectRefCount(prototype_refs_before, &prototype.header);
     rt.classes.unregisterDynamic(class_id);
+}
+
+test "shape reserve OOM does not publish or retain proto" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer prototype.value().free(rt);
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{ .class_name = "ShapeReserveOom" });
+    defer rt.classes.unregisterDynamic(class_id);
+
+    const live_shape_count_before = rt.gc.liveCountKind(.shape);
+    const shape_hash_count_before = rt.shapes.shape_hash_count;
+    const heap_live_bytes_before = rt.gcStats().heap_live_bytes;
+    const allocated_bytes_before = rt.memory.allocated_bytes;
+    const prototype_refs_before = helpers.refCountSnapshot(&prototype.header);
+
+    // Unique proto: cache miss, so createShapeReserved / createShape is the
+    // first allocation. Fail that reserve before publish.
+    rt.setMemoryLimit(allocated_bytes_before);
+    try std.testing.expectError(error.OutOfMemory, core.Object.create(rt, class_id, prototype));
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(live_shape_count_before, rt.gc.liveCountKind(.shape));
+    try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
+    try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
+    try std.testing.expectEqual(allocated_bytes_before, rt.memory.allocated_bytes);
+    try helpers.expectRefCount(prototype_refs_before, &prototype.header);
 }
 
 test "gc threshold API resets after scheduled collection and survives force-GC instrumentation" {
@@ -9568,9 +12720,93 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
         const object_request = survivor.allocationSize(rt);
         const object_charge = core.memory.MemoryAccount.accountedSizeForRequest(object_request, .@"8");
         const boundary_bytes = rt.memory.allocated_bytes - object_charge;
-        const expected = boundary_bytes + (boundary_bytes >> 1);
-        try std.testing.expectEqual(expected, rt.gcThreshold());
+        // ...and, under the tracing collector, never tighter than one nursery
+        // above the live set. A threshold below that is one the young
+        // generation can never reach, since it is tested before a minor is
+        // offered, so every collection would be a major (`gc.zig`
+        // `nursery_headroom_bytes`). `rc` has no young generation and the
+        // headroom is zero there, which leaves the qjs rule exactly.
+        // The tracer grows by 1.75x (see `resetGCThreshold`: a whole-heap
+        // trace prices a collection by what survives, and §1.3 caps
+        // cycle peak/live at 1.8, which the growth factor equals at steady
+        // state); rc keeps qjs's 1.5x verbatim.
+        //
+        // The tracer also moves the reset's TIMING: qjs resets at the
+        // pre-object boundary; an incremental cycle resets at the poll whose
+        // increment empties the frontier, from the post-sweep account of that
+        // moment. So under the tracer, drive the cycle to completion and
+        // compute the expectation from the account it actually reset from.
+        if (comptime core.gc.trace_stw_enabled) {
+            helpers.finishGcCycles(rt);
+            const settled = rt.memory.allocated_bytes;
+            const grown = settled + (settled >> 1) + (settled >> 2);
+            const expected = @max(grown, settled + core.gc.nursery_headroom_bytes);
+            try std.testing.expectEqual(expected, rt.gcThreshold());
+        } else {
+            const grown = boundary_bytes + (boundary_bytes >> 1);
+            const expected = @max(
+                grown,
+                boundary_bytes + core.gc.nursery_headroom_bytes,
+            );
+            try std.testing.expectEqual(expected, rt.gcThreshold());
+        }
     }
+}
+
+test "gc growth percent override replaces the compiled tracer growth factor" {
+    // The diagnostic override is the only lever that moves the slab's
+    // free-block pool (docs/slab-reuse-2026-08-29.md "population governance"),
+    // so the pricing curve measured through it has to be reproducible. Without
+    // this test nothing in the suite ever executes the override arm, and the
+    // assertion guarding its arithmetic sits on dead code.
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const saved = core.gc.growth_percent_override;
+    defer core.gc.growth_percent_override = saved;
+
+    const survivor = try core.Object.create(rt, core.class.ids.object, null);
+    defer survivor.value().free(rt);
+
+    const Probe = struct {
+        fn thresholdAfterCollection(runtime: *core.JSRuntime) !struct { settled: usize, threshold: usize } {
+            _ = try runtime.forceGC(null);
+            helpers.finishGcCycles(runtime);
+            return .{ .settled = runtime.memory.allocated_bytes, .threshold = runtime.gcThreshold() };
+        }
+    };
+
+    // The compiled rule, restated from the settled account the reset used.
+    core.gc.growth_percent_override = 0;
+    const base = try Probe.thresholdAfterCollection(rt);
+    try std.testing.expectEqual(
+        @max(
+            base.settled + (base.settled >> 1) + (base.settled >> 2),
+            base.settled + core.gc.nursery_headroom_bytes,
+        ),
+        base.threshold,
+    );
+
+    // 300% must produce a strictly looser threshold than the compiled 175%.
+    core.gc.growth_percent_override = 300;
+    const wide = try Probe.thresholdAfterCollection(rt);
+    try std.testing.expectEqual(
+        @max(
+            wide.settled + wide.settled / 100 * 200,
+            wide.settled + core.gc.nursery_headroom_bytes,
+        ),
+        wide.threshold,
+    );
+
+    // 100% asks for no growth at all; the nursery floor is the only thing
+    // still holding the threshold above the live set, which is exactly what
+    // the assertion in `resetGCThreshold` states.
+    core.gc.growth_percent_override = 100;
+    const tight = try Probe.thresholdAfterCollection(rt);
+    try std.testing.expectEqual(tight.settled + core.gc.nursery_headroom_bytes, tight.threshold);
+    try std.testing.expect(tight.threshold >= tight.settled);
 }
 
 test "proxy target handler cycle is released by runtime cycle removal" {
@@ -9595,9 +12831,13 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const left = try core.Object.create(rt, core.class.ids.object, null);
-    const right = try core.Object.create(rt, core.class.ids.object, null);
-    const external = try core.Object.create(rt, core.class.ids.object, null);
+    var left = try core.Object.create(rt, core.class.ids.object, null);
+    var right = try core.Object.create(rt, core.class.ids.object, null);
+    var external = try core.Object.create(rt, core.class.ids.object, null);
+    var ext_slot: ?*core.Object = external;
+    var ext_roots = core.runtime.rootObjects(.{&ext_slot});
+    ext_roots.activate(rt);
+    defer ext_roots.deactivate(rt);
     const left_key = try rt.internAtom("left");
     defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("right");
@@ -9611,9 +12851,14 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
 
     left.value().free(rt);
     right.value().free(rt);
+    dropGcPtr(&left);
+    dropGcPtr(&right);
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
-    try std.testing.expectEqual(@as(i32, 1), external.header.meta().rc);
+    try helpers.expectRefCount(1, &external.header);
     external.value().free(rt);
+    ext_slot = null;
+    dropGcPtr(&external);
+    helpers.reclaimNow(rt);
     try expectNoLiveGc(rt);
 }
 
@@ -9932,14 +13177,14 @@ test "module registry ownership is one-way and does not retain its realm" {
 
     const module_name = try rt.internAtom("no-module-realm-backref.mjs");
     defer rt.atoms.free(module_name);
-    const realm_refs = ctx.header.meta().rc;
+    const realm_refs = helpers.refCountSnapshot(&ctx.header);
     const record = try publishEmptyModule(rt, &ctx.modules, module_name);
-    try std.testing.expectEqual(realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(realm_refs, &ctx.header);
 
     record.retain();
-    try std.testing.expectEqual(realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(realm_refs, &ctx.header);
     record.release(rt);
-    try std.testing.expectEqual(realm_refs, ctx.header.meta().rc);
+    try helpers.expectRefCount(realm_refs, &ctx.header);
 }
 
 test "module finalizer self-unlinks a still-linked realm registry node" {
@@ -9960,11 +13205,28 @@ test "module finalizer self-unlinks a still-linked realm registry node" {
     // pattern; it verifies ModuleRecord.destroyFromHeader splices itself before
     // Realm teardown later sees the now-empty registry.
     record.release(rt);
-    try std.testing.expect(ctx.modules.head == null);
-    try std.testing.expect(ctx.modules.tail == null);
-    try std.testing.expectEqual(@as(usize, 0), ctx.modules.count);
-    try std.testing.expect(ctx.modules.find(module_name) == null);
-    try std.testing.expectEqual(owner_atom_refs, rt.atoms.refCount(module_name).?);
+    if (comptime !core.gc.trace_stw_enabled) {
+        try std.testing.expect(ctx.modules.head == null);
+        try std.testing.expect(ctx.modules.tail == null);
+        try std.testing.expectEqual(@as(usize, 0), ctx.modules.count);
+        try std.testing.expect(ctx.modules.find(module_name) == null);
+        try std.testing.expectEqual(owner_atom_refs, rt.atoms.refCount(module_name).?);
+    } else {
+        // The state this probes cannot be built under the tracer, and that is
+        // the guarantee rather than a gap: registry membership is a strong
+        // traced edge from the live Realm (`Collector.visitModule` via
+        // `JSContext.traceChildEdges`), so consuming the base ref cannot leave
+        // a linked node condemned. A collection here proves the record is
+        // still reached through the Realm, which is why the self-unlink in
+        // `ModuleRecord.destroyFromHeader` is unreachable: a condemned Realm is
+        // destroyed before the module pass in `destroyCondemned`, and
+        // `JSContext.destroyFromHeader` unlinks every record on its way out.
+        helpers.reclaimNow(rt);
+        try std.testing.expect(ctx.modules.head != null);
+        try std.testing.expectEqual(@as(usize, 1), ctx.modules.count);
+        try std.testing.expect(ctx.modules.find(module_name) != null);
+        try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
+    }
     try rt.gc.verifyHeapAccounting(rt);
 }
 
@@ -9985,17 +13247,21 @@ test "externally retained module outlives realm registry teardown" {
     record_retained = true;
 
     try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
-    try std.testing.expectEqual(@as(i32, 2), record.header.meta().rc);
+    try helpers.expectRefCount(2, &record.header);
 
     ctx.destroy();
     ctx_alive = false;
     try std.testing.expect(rt.firstContext() == null);
     try std.testing.expect(record.registry == null);
-    try std.testing.expectEqual(@as(i32, 1), record.header.meta().rc);
+    try helpers.expectRefCount(1, &record.header);
     try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
 
     record.release(rt);
     record_retained = false;
+    // The name Atom is owned by the record, not by this handle, so it comes
+    // back when the record is torn down. The realm registry has already let
+    // go and no root frame names the record, so the collection reaches it.
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(owner_atom_refs, rt.atoms.refCount(module_name).?);
 }
 
@@ -10016,7 +13282,7 @@ test "module namespace strong edge participates in realm object cycle collection
     var realm_owner = core.RealmRef.retain(ctx);
     defer realm_owner.deinit();
     try realm_record.installOwnedRealmRef(rt, &realm_owner);
-    record.publishModuleNamespaceNoFail(realm_record.value());
+    record.publishModuleNamespaceNoFail(rt, realm_record.value());
     object_transferred = true;
 
     ctx.destroy();
@@ -10106,6 +13372,10 @@ test "runtime memory usage counts linked and realm-unlinked retained modules" {
 
     record.release(rt);
     record_retained = false;
+    // The realm registry unlinked at `ctx.destroy`, so this drops the last
+    // handle to a record nothing else names; its module bytes are returned by
+    // the collection that stands where refcounting's destroy stood.
+    helpers.reclaimNow(rt);
     const released = rt.memoryUsage();
     try std.testing.expectEqual(@as(usize, 0), released.module_count);
     try std.testing.expectEqual(@as(usize, 0), released.module_bytes);
@@ -10154,7 +13424,7 @@ test "module publication retains indexed metadata and all strong value edges" {
     record.setRequestModuleNoFail(request_index, dependency);
 
     const namespace_owner = try core.Object.create(rt, core.class.ids.module_ns, null);
-    record.publishModuleNamespaceNoFail(namespace_owner.value());
+    record.publishModuleNamespaceNoFail(rt, namespace_owner.value());
     const retained_cell = try core.VarRef.createClosed(rt, core.JSValue.int32(41));
     record.publishRetainedExportCellNoFail(0, retained_cell.valueRef());
     const import_meta_owner = try core.Object.create(rt, core.class.ids.object, null);
@@ -11056,6 +14326,13 @@ test "finalization registry pending jobs preserve callback and held symbols" {
     registry.finalizationRegistryCleanupCallbackSlot().* = cleanup_val.dup();
     var registry_val = registry.value();
     defer registry_val.free(rt);
+    var registry_slot: ?*core.Object = registry;
+    var obj_roots = core.runtime.rootObjects(.{&registry_slot});
+    obj_roots.activate(rt);
+    defer obj_roots.deactivate(rt);
+    var val_roots = core.runtime.rootValues(.{&target_val});
+    val_roots.activate(rt);
+    defer val_roots.deactivate(rt);
 
     try registry.appendFinalizationRegistryCell(rt, target_val, held_val, core.JSValue.undefinedValue());
     cleanup_val.free(rt);
@@ -11077,6 +14354,10 @@ test "finalization registry pending jobs preserve callback and held symbols" {
 
     registry_val.free(rt);
     registry_val = core.JSValue.undefinedValue();
+    // The root frame is the last thing naming the registry once its value is
+    // dropped, and the cleanup-callback and held-value Symbols are only
+    // released by the registry's own teardown.
+    registry_slot = null;
 
     rt.clearPendingFinalizationJobs();
 
@@ -11205,15 +14486,19 @@ test "inline FAM multiplication matches the external kernel limb for limb" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const baseline = rt.memory.allocated_bytes;
+    const slab = core.memory.SmallObjectSlab;
+    const max_slab_payload = slab.max_size - slab.block_header_bytes;
+    const last_slab_capacity =
+        (max_slab_payload - @sizeOf(core.bigint.BigInt)) / @sizeOf(bigint.Limb);
 
     // Ordered shapes: the basecase loop takes the shorter operand as its outer
     // row, so AxB and BxA exercise different nestings.
     const shapes = [_][2]usize{
-        .{ 1, 2 },   .{ 2, 1 },   .{ 2, 2 },   .{ 1, 8 }, .{ 8, 1 },
-        .{ 3, 5 },   .{ 5, 3 },   .{ 4, 4 },   .{ 8, 8 }, .{ 16, 16 },
-        // The allocator boundary P6-03b pinned: capacity 56 is the last
-        // slab-eligible FAM, 57 the first standalone one.
-        .{ 28, 28 }, .{ 28, 29 }, .{ 29, 29 },
+        .{ 1, 2 },                                                                .{ 2, 1 },                                                                    .{ 2, 2 },                                                                              .{ 1, 8 }, .{ 8, 1 },
+        .{ 3, 5 },                                                                .{ 5, 3 },                                                                    .{ 4, 4 },                                                                              .{ 8, 8 }, .{ 16, 16 },
+        // Pin the allocator boundary for the active RC/trace representation:
+        // one last slab FAM followed by two standalone FAM capacities.
+        .{ last_slab_capacity / 2, last_slab_capacity - last_slab_capacity / 2 }, .{ last_slab_capacity / 2, last_slab_capacity + 1 - last_slab_capacity / 2 }, .{ last_slab_capacity / 2 + 1, last_slab_capacity + 2 - (last_slab_capacity / 2 + 1) },
     };
 
     var prng = std.Random.DefaultPrng.init(0x6D03C);
@@ -11353,14 +14638,12 @@ test "heap multiplication costs one allocation and one block" {
     try std.testing.expectEqual(count_before + 1, rt.memory.allocation_count);
 
     const payload = @sizeOf(core.bigint.BigInt) + 4 * @sizeOf(bigint.Limb);
-    try std.testing.expectEqual(@as(usize, 88), payload);
     try std.testing.expectEqual(
         bytes_before + core.memory.MemoryAccount.accountedSizeForRequest(payload, .@"8"),
         rt.memory.allocated_bytes,
     );
-    // 88 bytes plus an 8-byte block header lands in the 96-byte slab class; the
-    // two-allocation shape used the 64- and 40-byte blocks, 104 bytes of block
-    // for the same 88 bytes of payload.
+    // The fused wrapper+limbs payload remains slab-backed in both the RC and
+    // compact trace representations.
     try std.testing.expect(core.memory.SmallObjectSlab.canUse(payload, .@"8"));
 
     product.valueRef().free(rt);
@@ -11373,9 +14656,18 @@ test "heap multiplication crosses the slab boundary into standalone blocks" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    // capacity 56 is the last slab-eligible FAM and 57 the first standalone
-    // one; both must allocate once and release cleanly.
-    const cases = [_][2]usize{ .{ 28, 28 }, .{ 28, 29 }, .{ 29, 29 } };
+    const slab = core.memory.SmallObjectSlab;
+    const max_slab_payload = slab.max_size - slab.block_header_bytes;
+    const last_slab_capacity =
+        (max_slab_payload - @sizeOf(core.bigint.BigInt)) / @sizeOf(bigint.Limb);
+    const half = last_slab_capacity / 2;
+    // Cross the allocator boundary of the active RC/trace representation;
+    // all three products must allocate once and release cleanly.
+    const cases = [_][2]usize{
+        .{ half, last_slab_capacity - half },
+        .{ half, last_slab_capacity + 1 - half },
+        .{ half + 1, last_slab_capacity + 2 - (half + 1) },
+    };
     for (cases) |shape| {
         const lhs_limbs = try std.testing.allocator.alloc(bigint.Limb, shape[0]);
         defer std.testing.allocator.free(lhs_limbs);
@@ -11396,8 +14688,8 @@ test "heap multiplication crosses the slab boundary into standalone blocks" {
         const payload = @sizeOf(core.bigint.BigInt) + (shape[0] + shape[1]) * @sizeOf(bigint.Limb);
         try std.testing.expectEqual(count_before + 1, rt.memory.allocation_count);
         try std.testing.expectEqual(
-            core.memory.SmallObjectSlab.canUse(payload, .@"8"),
-            shape[0] + shape[1] <= 56,
+            slab.canUse(payload, .@"8"),
+            shape[0] + shape[1] <= last_slab_capacity,
         );
 
         product.valueRef().free(rt);
@@ -12095,4 +15387,1809 @@ test "fused multiply-subtract matches the reference limb for limb" {
         try std.testing.expectEqual(want, got);
         try std.testing.expectEqualSlices(Limb, reference, under_test);
     }
+}
+
+test "minor collection reclaims young garbage and promotes survivors" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const kept = try core.Object.createPlainObject(rt, null);
+    defer kept.value().free(rt);
+    var roots = core.runtime.rootValues(.{});
+    _ = &roots;
+
+    const young_before = rt.gc.generation.stats.young_count;
+    try std.testing.expect(young_before > 0);
+
+    const reclaimed = (try core.gc_trace_stw.collectMinor(rt, null, .declared_only)).?;
+    // Survivors leave the young set; the set is rebuilt by later allocation.
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.stats.young_count);
+    try std.testing.expect(rt.gc.generation.stats.minor_collections >= 1);
+    try std.testing.expect(reclaimed <= young_before);
+    // The rooted object must have survived.
+    try std.testing.expect(rt.gc.liveCount() > 0);
+}
+
+test "the minor reclaims young cycles and parks no deferred frees" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const left_key = try rt.internAtom("minor-drain-left");
+    defer rt.atoms.free(left_key);
+    const right_key = try rt.internAtom("minor-drain-right");
+    defer rt.atoms.free(right_key);
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    const bytes_before = rt.memory.allocated_bytes;
+
+    // Build young cyclic garbage: each half keeps the other's count above
+    // zero, so refcount alone cannot reclaim it. Today that is trial
+    // deletion's job on the major path, not the minor's.
+    var pairs: usize = 0;
+    while (pairs < 500) : (pairs += 1) {
+        const left = try core.Object.create(rt, core.class.ids.object, null);
+        const right = try core.Object.create(rt, core.class.ids.object, null);
+        try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
+        try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+        left.value().free(rt);
+        right.value().free(rt);
+    }
+    try std.testing.expect(rt.memory.allocated_bytes > bytes_before);
+
+    const reclaimed = (try core.gc_trace_stw.collectMinor(rt, null, .declared_only)).?;
+
+    // Invariant the 2026-08-25 fix restores: the minor destroys under
+    // `.remove_cycles`, which parks every struct free on
+    // `cycle_deferred_frees`. The major sweep drained that queue; the minor
+    // returned without draining, so anything it condemned kept its memory.
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
+
+    // The minor is now the young-cycle collector: the trace is the liveness
+    // authority, so both halves of an unreachable cycle are condemned even
+    // though each holds the other's count above zero. A pure tracer needs no
+    // cycle strategy at all -- JSC's `MarkedBlock::Handle::isLive` is just
+    // allocated-or-marked, and its heap carries no trial-deletion machinery.
+    try std.testing.expect(reclaimed >= 1000);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.stats.conservative_only_young);
+}
+
+test "minor pause distribution retains the complete diagnostic run" {
+    var generation = core.gc.generation.State{};
+    defer generation.deinit(std.testing.allocator);
+
+    // Deliberately unsorted, with enough samples to distinguish nearest-rank
+    // percentile indexing from an average or interpolation.
+    const samples = [_]u64{ 100, 10, 90, 20, 80, 30, 70, 40, 60, 50 };
+    for (samples) |sample| {
+        generation.recordMinorPause(std.testing.allocator, sample, true);
+    }
+    const distribution = generation.minorPauseDistribution().?;
+    try std.testing.expectEqual(samples.len, distribution.samples_total);
+    try std.testing.expectEqual(samples.len, distribution.samples_retained);
+    try std.testing.expectEqual(@as(u64, 50), distribution.p50_ns);
+    try std.testing.expectEqual(@as(u64, 100), distribution.p95_ns);
+    try std.testing.expectEqual(@as(u64, 100), distribution.p99_ns);
+    try std.testing.expectEqual(@as(u64, 100), distribution.max_ns);
+    try std.testing.expectEqual(@as(u64, 550), generation.stats.pause_ns_total);
+
+    // The shipped path keeps only the existing total/max scalars.
+    generation.recordMinorPause(std.testing.allocator, 110, false);
+    try std.testing.expectEqual(samples.len, generation.minor_pause_samples.items.len);
+    try std.testing.expectEqual(@as(u64, 660), generation.stats.pause_ns_total);
+    try std.testing.expectEqual(@as(u64, 110), generation.stats.pause_ns_max);
+}
+
+test "the young-suffix guard rejects a stranded anchor" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    // Plain objects are block cells now and never enter the suffix, so this
+    // construction has no cheap handle on a suffix member (the non-block
+    // populations -- shapes, bytecode -- are created only as side effects).
+    // The guard itself still protects the non-block suffix; the construction
+    // just cannot be staged from plain objects any more.
+    if (comptime core.gc.block_heap_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // Clear the suffix, then rebuild it so the anchor and at least one
+    // successor are unambiguous.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    const kept = try core.Object.createPlainObject(rt, null);
+    defer kept.value().free(rt);
+    const also = try core.Object.createPlainObject(rt, null);
+    defer also.value().free(rt);
+
+    const anchor = rt.gc.young_head orelse return error.TestUnexpectedResult;
+    const successor = anchor.next orelse return error.TestUnexpectedResult;
+    if (successor == &rt.gc.gc_obj_list) return error.TestUnexpectedResult;
+    try rt.gc.verifyIntrusiveList();
+
+    // Strand the anchor exactly as the pre-2026-08-25 `unlinkObjectWithBytes`
+    // did: the node it names leaves the suffix while still carrying the young
+    // bit. Membership alone would not catch this once a recycled slab put a
+    // live node back at the old address, so the guard checks the suffix shape.
+    rt.gc.young_head = successor;
+    try std.testing.expectError(error.DanglingYoungHead, rt.gc.verifyIntrusiveList());
+
+    rt.gc.young_head = anchor;
+    try rt.gc.verifyIntrusiveList();
+}
+
+test "old-to-young edge survives a minor only because the barrier remembered it" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const edge_key = try rt.internAtom("stage5-old-to-young-edge");
+    defer rt.atoms.free(edge_key);
+
+    // Create the slot while the owner is young. The deletion mutant below must
+    // isolate the VALUE barrier: adding a brand-new property to an old object
+    // also changes its Shape, whose independent barrier remembers the same
+    // owner and would mask a missing value-store barrier.
+    const owner = try core.Object.createPlainObject(rt, null);
+    defer owner.value().free(rt);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+
+    // Age an owner: after one minor everything that survived counts as old.
+    // The trace is the liveness authority now, so a Zig-local owner has to be
+    // declared or the minor will (correctly) condemn it.
+    var owner_slot: ?*core.Object = owner;
+    var owner_roots = core.runtime.rootObjects(.{&owner_slot});
+    owner_roots.activate(rt);
+    defer owner_roots.deactivate(rt);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!rt.gc.generation.isYoung(&owner.header));
+
+    // Active deletion probe: remove the final `rememberOwner` call from
+    // `gc.Registry.generationalBarrier`, and the first `ownsObject(child)`
+    // assertion below must fail. Keeping this mutation recipe beside the test
+    // distinguishes a proved red/green barrier dependency from a test that
+    // merely happened to pass with the barrier enabled.
+    //
+    // A young child reachable only through that old owner. Exercise the real
+    // define funnel, drop the local strong reference, and make the minor prove
+    // the remembered edge rather than merely prove a hash-map insertion.
+    const child = try core.Object.createPlainObject(rt, null);
+    try std.testing.expect(rt.gc.generation.isYoung(&child.header));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(child.value(), true, true, true));
+    child.value().free(rt);
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(rt.ownsObject(child));
+    const kept = (try owner.getOwnProperty(rt, edge_key)).?;
+    defer kept.destroy(rt);
+    try std.testing.expectEqual(&child.header, kept.value.refHeader().?);
+
+    // A stale remembered OWNER is not itself a root for an edge that was
+    // deleted before the minor. Re-tracing the owner must observe the current
+    // slot and reclaim the now-unreachable young child.
+    const removed_child = try core.Object.createPlainObject(rt, null);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(removed_child.value(), true, true, true));
+    removed_child.value().free(rt);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!rt.ownsObject(removed_child));
+}
+
+test "object remembered bit is consumed and rebuilt across consecutive minors" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const saved_audit = core.gc.minor_audit;
+    core.gc.minor_audit = true;
+    defer core.gc.minor_audit = saved_audit;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const edge_key = try rt.internAtom("remembered-bit-two-minors");
+    defer rt.atoms.free(edge_key);
+    const owner = try core.Object.createPlainObject(rt, null);
+    defer owner.value().free(rt);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    var owner_slot: ?*core.Object = owner;
+    var roots = core.runtime.rootObjects(.{&owner_slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!rt.gc.generation.isYoung(&owner.header));
+
+    var round: usize = 0;
+    while (round < 2) : (round += 1) {
+        // Two writes in one generation prove that the bit is a duplicate
+        // cache while the map remains one authoritative owner. The first
+        // child becomes young garbage; the replacement is live only through
+        // the old owner when the minor starts.
+        const first = try core.Object.createPlainObject(rt, null);
+        try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(first.value(), true, true, true));
+        first.value().free(rt);
+        const replacement = try core.Object.createPlainObject(rt, null);
+        try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(replacement.value(), true, true, true));
+        replacement.value().free(rt);
+
+        try std.testing.expect(owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask != 0);
+        try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+        _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+
+        try std.testing.expect(!rt.ownsObject(first));
+        try std.testing.expect(rt.ownsObject(replacement));
+        try std.testing.expectEqual(@as(u8, 0), owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask);
+        try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.rememberedOwnerCount());
+        const kept = (try owner.getOwnProperty(rt, edge_key)).?;
+        defer kept.destroy(rt);
+        try std.testing.expectEqual(&replacement.header, kept.value.refHeader().?);
+    }
+}
+
+test "incremental retirement clears remembered cache before the next generation" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const saved_audit = core.gc.minor_audit;
+    core.gc.minor_audit = true;
+    defer core.gc.minor_audit = saved_audit;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const edge_key = try rt.internAtom("remembered-bit-cycle-retirement");
+    defer rt.atoms.free(edge_key);
+    const owner = try core.Object.createPlainObject(rt, null);
+    defer owner.value().free(rt);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    var owner_slot: ?*core.Object = owner;
+    var roots = core.runtime.rootObjects(.{&owner_slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!rt.gc.generation.isYoung(&owner.header));
+
+    const before_major = try core.Object.createPlainObject(rt, null);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(before_major.value(), true, true, true));
+    before_major.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    try std.testing.expect(owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask != 0);
+
+    // Allocate the future target before opening the cycle. Allocating it in
+    // the mutator window could itself poll and finish a small frontier before
+    // this test reaches the store; keeping it white until the active barrier
+    // also makes that barrier's liveness role observable.
+    const during_major = try core.Object.createPlainObject(rt, null);
+
+    // Incremental begin consumes the prior generation before the mutator can
+    // resume. Deleting the retire-side bit clear leaves bit=1/map=0 here, and
+    // the following generation would skip its first insertion.
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.rememberedOwnerCount());
+    try std.testing.expectEqual(@as(u8, 0), owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask);
+
+    // During an open major the Dijkstra arm shades the exact target and does
+    // not populate either generational representation. The marker masks bit7,
+    // so no active-only cache seam or second markingActive load is needed.
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(during_major.value(), true, true, true));
+    during_major.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.rememberedOwnerCount());
+    try std.testing.expectEqual(@as(u8, 0), owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask);
+
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    try std.testing.expect(rt.ownsObject(during_major));
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.rememberedOwnerCount());
+    try std.testing.expectEqual(@as(u8, 0), owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask);
+
+    const after_major = try core.Object.createPlainObject(rt, null);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(after_major.value(), true, true, true));
+    after_major.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    try std.testing.expect(owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask != 0);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(rt.ownsObject(after_major));
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.rememberedOwnerCount());
+    try std.testing.expectEqual(@as(u8, 0), owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask);
+    const kept = (try owner.getOwnProperty(rt, edge_key)).?;
+    defer kept.destroy(rt);
+    try std.testing.expectEqual(&after_major.header, kept.value.refHeader().?);
+}
+
+test "non-object remembered owners use the byte-6 cache and re-arm across consecutive minors" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const saved_audit = core.gc.minor_audit;
+    core.gc.minor_audit = true;
+    defer core.gc.minor_audit = saved_audit;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.undefinedValue());
+    var cell_root = cell.valueRef();
+    var roots = core.runtime.rootValues(.{&cell_root});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!rt.gc.generation.isYoung(&cell.header));
+    try std.testing.expectEqual(@as(u8, 0), cell.header.metaConst().lifetime.trace.object_shape_summary);
+
+    var round: usize = 0;
+    while (round < 2) : (round += 1) {
+        const child = try core.Object.createPlainObject(rt, null);
+        cell.setVarRefValue(rt, child.value());
+
+        // Audit §10 leased bit7 to every carrier, so a VarRef now publishes
+        // the same membership cache an Object does -- and only bit7: the low
+        // seven bits are Object's Shape projection and stay zero here.
+        try std.testing.expectEqual(
+            core.gc.trace_remembered_mask,
+            cell.header.metaConst().lifetime.trace.object_shape_summary,
+        );
+        try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+        _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+
+        try std.testing.expect(rt.ownsObject(child));
+        try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.rememberedOwnerCount());
+        // Retirement must clear the cache bit for non-Object carriers too. The
+        // second round is what proves it: a stale bit would make round 2's
+        // barrier return early, leave the map empty, and let the minor condemn
+        // `child` -- so `ownsObject` above is this clause's real assertion, and
+        // it fails loudly rather than reading a bit nobody consults.
+        try std.testing.expectEqual(
+            @as(u8, 0),
+            cell.header.metaConst().lifetime.trace.object_shape_summary,
+        );
+        try std.testing.expectEqual(&child.header, cell.varRefValue().refHeader().?);
+    }
+}
+
+test "minor full-trace verifier owns its reachability set per runtime" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    const saved_verify = core.gc.verify_minor;
+    core.gc.verify_minor = true;
+    defer core.gc.verify_minor = saved_verify;
+
+    // Run the verifier across sequential Runtime lifetimes. The original
+    // diagnostic kept one process-global hash map whose backing allocation
+    // belonged to the first Runtime allocator; a later Runtime then cleared
+    // and reused that stale capacity. Keeping the set inside collectMinor
+    // makes each pass free it before its Runtime can disappear.
+    var pass: usize = 0;
+    while (pass < 2) : (pass += 1) {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try core.JSContext.create(rt);
+        defer ctx.destroy();
+
+        const rooted = try core.Object.createPlainObject(rt, null);
+        defer rooted.value().free(rt);
+        var rooted_slot: ?*core.Object = rooted;
+        var roots = core.runtime.rootObjects(.{&rooted_slot});
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+
+        _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+        try std.testing.expect(rt.ownsObject(rooted));
+    }
+}
+
+test "sticky major alternates with full and its fresh oracle rejects a missing remembered owner" {
+    if (comptime !core.gc.sticky_major_enabled) return error.SkipZigTest;
+
+    const saved_verify = core.gc.verify_sticky_major;
+    core.gc.verify_sticky_major = true;
+    defer core.gc.verify_sticky_major = saved_verify;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const edge_key = try rt.internAtom("sticky-major-old-to-young-edge");
+    defer rt.atoms.free(edge_key);
+    const owner = try core.Object.createPlainObject(rt, null);
+    defer owner.value().free(rt);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    var owner_slot: ?*core.Object = owner;
+    var owner_roots = core.runtime.rootObjects(.{&owner_slot});
+    owner_roots.activate(rt);
+    defer owner_roots.deactivate(rt);
+
+    // Establish the last-full baseline and age the owner. Explicit/urgent
+    // collections remain full even in the experimental build.
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expect(!rt.gc.generation.isYoung(&owner.header));
+    const initial = rt.gc.stickyMajorStats();
+    try std.testing.expect(initial.full_cycles != 0);
+    const full_baseline = rt.gc.stickyMajorFullBaseline();
+    try std.testing.expectEqual(rt.memory.allocated_bytes, full_baseline.settled_bytes);
+    try std.testing.expect(full_baseline.pressure_threshold > rt.gcThreshold());
+
+    // Green arm: the ordinary old-to-young barrier remembers the owner. The
+    // next self-paced cycle is sticky, and the fresh trace agrees with every
+    // condemnation it proposes.
+    const green_child = try core.Object.createPlainObject(rt, null);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(green_child.value(), true, true, true));
+    green_child.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) {
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    try std.testing.expect(rt.ownsObject(green_child));
+    const after_green = rt.gc.stickyMajorStats();
+    try std.testing.expectEqual(initial.full_cycles, after_green.full_cycles);
+    try std.testing.expectEqual(@as(usize, 1), after_green.sticky_cycles);
+    try std.testing.expectEqual(@as(usize, 1), after_green.oracle_checks_sticky);
+    try std.testing.expectEqual(@as(usize, 0), after_green.oracle_violations_precise);
+    try std.testing.expectEqual(@as(usize, 0), after_green.oracle_violations_conservative);
+    try std.testing.expectEqualDeep(full_baseline, rt.gc.stickyMajorFullBaseline());
+
+    // The following self-paced cycle must be full. This establishes a fresh
+    // baseline from which another sticky cycle can be attempted.
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) {
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    const after_full = rt.gc.stickyMajorStats();
+    try std.testing.expectEqual(after_green.full_cycles + 1, after_full.full_cycles);
+
+    // Red arm: reproduce the exact missing-barrier state by deleting the
+    // remembered owner after the real property store. Production sticky marks
+    // would skip the old owner and condemn the child; the fresh oracle must
+    // reject the cycle before weak processing or condemnation mutates either.
+    const red_child = try core.Object.createPlainObject(rt, null);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(red_child.value(), true, true, true));
+    red_child.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    rt.gc.forgetGenerationalOwnerForTest(&owner.header);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.rememberedOwnerCount());
+    try std.testing.expectEqual(@as(u8, 0), owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask);
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    var rejected = false;
+    while (rt.gc.concurrent.markingActive()) {
+        _ = rt.pollGC(null, .safepoint) catch |err| {
+            try std.testing.expectEqual(error.PayloadMarkFailed, err);
+            rejected = true;
+            break;
+        };
+    }
+    try std.testing.expect(rejected);
+    try std.testing.expect(rt.ownsObject(red_child));
+    // Abort leaves a repair transaction, but its young representation must
+    // already be self-consistent so the repair full's Debug preflight can
+    // run. The first sticky implementation cleared the suffix anchor before
+    // fallible seeding and stranded young bits on this exact red arm.
+    try rt.gc.verifyIntrusiveList();
+    const after_red = rt.gc.stickyMajorStats();
+    try std.testing.expectEqual(after_green.oracle_checks_sticky + 1, after_red.oracle_checks_sticky);
+    try std.testing.expect(after_red.oracle_violations_precise != 0);
+}
+
+test "sticky major rejects an incomplete full as its baseline" {
+    if (comptime !core.gc.sticky_major_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    _ = try rt.tryRunObjectCycleRemoval();
+    const after_complete = rt.gc.stickyMajorStats();
+    try std.testing.expectEqual(@as(usize, 1), after_complete.full_cycles);
+    try std.testing.expectEqual(core.gc.IncrementalMajorScope.sticky, rt.gc.prepareIncrementalMajorScope());
+
+    // Reproduce the collector's fail-closed arena path without manufacturing
+    // an allocator failure: no recovery source means arenaSetWhole stays
+    // false, so the full trace marks but deliberately declines to sweep.
+    const saved_slab = rt.gc.arena_slab;
+    const saved_incomplete = rt.gc.address_registry.arenas_incomplete;
+    defer {
+        rt.gc.arena_slab = saved_slab;
+        rt.gc.address_registry.arenas_incomplete = saved_incomplete;
+        _ = rt.gc.clearMajorRequest();
+    }
+    rt.gc.arena_slab = null;
+    rt.gc.address_registry.arenas_incomplete = true;
+    _ = try rt.tryRunObjectCycleRemoval();
+
+    try std.testing.expect(core.gc_trace_stw.last_report.skipped_sweep_incomplete_arenas);
+    try std.testing.expectEqual(after_complete.full_cycles, rt.gc.stickyMajorStats().full_cycles);
+    try std.testing.expectEqual(core.gc.IncrementalMajorScope.full, rt.gc.prepareIncrementalMajorScope());
+}
+
+test "the sticky arm's runtime switch keeps one binary honest on both sides" {
+    if (comptime !core.gc.sticky_major_enabled) return error.SkipZigTest;
+
+    const saved_on = core.gc.sticky_major_on;
+    defer core.gc.sticky_major_on = saved_on;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    _ = try rt.tryRunObjectCycleRemoval();
+    // With the arm on this is the point where a sticky cycle becomes legal.
+    core.gc.sticky_major_on = true;
+    try std.testing.expectEqual(core.gc.IncrementalMajorScope.sticky, rt.gc.prepareIncrementalMajorScope());
+
+    // Off must be off in both directions: no sticky scope, and no second
+    // pressure trigger either. An "off" arm that still schedules collections
+    // the ordinary policy would not have run is not a usable A/B reference.
+    core.gc.sticky_major_on = false;
+    try std.testing.expectEqual(core.gc.IncrementalMajorScope.full, rt.gc.prepareIncrementalMajorScope());
+    const baseline = rt.gc.stickyMajorFullBaseline();
+    const saved_allocated = rt.memory.allocated_bytes;
+    defer rt.memory.allocated_bytes = saved_allocated;
+    rt.memory.allocated_bytes = baseline.pressure_threshold + 1;
+    try std.testing.expect(!rt.gc.stickyMajorFullPressureExceeded());
+    core.gc.sticky_major_on = true;
+    try std.testing.expect(rt.gc.stickyMajorFullPressureExceeded());
+}
+
+test "the sticky injection knob reproduces a lost barrier and the oracle refuses it" {
+    if (comptime !core.gc.sticky_major_enabled) return error.SkipZigTest;
+
+    const saved_verify = core.gc.verify_sticky_major;
+    const saved_skip = core.gc.sticky_inject_skip;
+    core.gc.verify_sticky_major = true;
+    defer {
+        core.gc.verify_sticky_major = saved_verify;
+        core.gc.sticky_inject_skip = saved_skip;
+    }
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const edge_key = try rt.internAtom("sticky-inject-old-to-young-edge");
+    defer rt.atoms.free(edge_key);
+    const owner = try core.Object.createPlainObject(rt, null);
+    defer owner.value().free(rt);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    var owner_slot: ?*core.Object = owner;
+    var owner_roots = core.runtime.rootObjects(.{&owner_slot});
+    owner_roots.activate(rt);
+    defer owner_roots.deactivate(rt);
+
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expect(!rt.gc.generation.isYoung(&owner.header));
+    const before = rt.gc.stickyMajorStats();
+
+    // The barrier does its job; the sticky expansion is told to skip the one
+    // owner it produced. Nothing else reaches the child, so the marks alone
+    // would condemn a live object -- the failure mode the oracle is for.
+    const child = try core.Object.createPlainObject(rt, null);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(child.value(), true, true, true));
+    child.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    core.gc.sticky_inject_skip = 1;
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    var rejected = false;
+    while (rt.gc.concurrent.markingActive()) {
+        _ = rt.pollGC(null, .safepoint) catch |err| {
+            try std.testing.expectEqual(error.PayloadMarkFailed, err);
+            rejected = true;
+            break;
+        };
+    }
+    try std.testing.expect(rejected);
+    try std.testing.expect(rt.ownsObject(child));
+    try rt.gc.verifyIntrusiveList();
+    const after = rt.gc.stickyMajorStats();
+    try std.testing.expectEqual(before.oracle_checks_sticky + 1, after.oracle_checks_sticky);
+    try std.testing.expect(after.oracle_violations_precise != 0);
+
+    // And the knob is not a one-way door: with it back at zero the same
+    // topology passes, so the red arm above accused the injection, not the
+    // mechanism.
+    core.gc.sticky_inject_skip = 0;
+}
+
+test "the generational barrier ignores edges a minor would find anyway" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const young_owner = try core.Object.createPlainObject(rt, null);
+    defer young_owner.value().free(rt);
+    const young_child = try core.Object.createPlainObject(rt, null);
+    defer young_child.value().free(rt);
+
+    // Young owner: a minor scans it regardless, so remembering it is waste.
+    const before = rt.gc.generation.stats.remembered_owners;
+    rt.gc.generationalBarrierValue(&young_owner.header, young_child.value());
+    try std.testing.expectEqual(before, rt.gc.generation.stats.remembered_owners);
+}
+
+test "candidate validation rejects the tear shapes the litmus measured" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const live = try core.Object.createPlainObject(rt, null);
+    defer live.value().free(rt);
+    const addr = @intFromPtr(&live.header);
+
+    var stats = core.gc.candidate_validation.Stats{};
+
+    // A well-formed candidate whose claimed kind agrees is accepted.
+    try std.testing.expect(core.gc.candidate_validation.validate(&rt.gc, addr, .object, &stats) != null);
+
+    // The tear the litmus measures: a reference tag carrying a payload from a
+    // different write. Here that is a real object address paired with a kind
+    // the object is not. It must be rejected before anything dereferences it.
+    try std.testing.expect(core.gc.candidate_validation.validate(&rt.gc, addr, .shape, &stats) == null);
+    try std.testing.expectEqual(@as(usize, 1), stats.rejected_kind);
+
+    // An immediate payload wearing a reference tag: plausible-looking bits
+    // that were never an allocation.
+    try std.testing.expect(core.gc.candidate_validation.validate(&rt.gc, 0xdead_0000, .object, &stats) == null);
+    try std.testing.expect(stats.rejected_unregistered >= 1);
+
+    // Sub-page and misaligned addresses are rejected without touching the
+    // registry at all.
+    try std.testing.expect(core.gc.candidate_validation.validate(&rt.gc, 8, .object, &stats) == null);
+    try std.testing.expect(core.gc.candidate_validation.validate(&rt.gc, addr + 1, .object, &stats) == null);
+    try std.testing.expectEqual(@as(usize, 1), stats.rejected_low);
+    try std.testing.expectEqual(@as(usize, 1), stats.rejected_misaligned);
+    try std.testing.expectEqual(@as(usize, 1), stats.accepted);
+}
+
+test "a critical scope defers safepoint acknowledgement so a store and its shading stay indivisible" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const Concurrent = core.gc.concurrent;
+
+    // Outside a scope a mutator may park immediately.
+    try std.testing.expect(rt.gc.concurrent.mayAcknowledgeSafepoint());
+
+    // Inside one it may not, however urgently the collector asks. This is the
+    // property final remark relies on: it cannot stop the mutator between a
+    // heap store and the shading of what was stored.
+    const scope = Concurrent.CriticalScope.begin(&rt.gc.concurrent);
+    rt.gc.concurrent.safepoint_requested.store(true, .release);
+    try std.testing.expect(!rt.gc.concurrent.mayAcknowledgeSafepoint());
+    try std.testing.expect(rt.gc.concurrent.stats.deferred_acks >= 1);
+
+    scope.end();
+    // Once the scope closes the request can be honoured.
+    try std.testing.expect(rt.gc.concurrent.mayAcknowledgeSafepoint());
+}
+
+test "the barrier shades exact targets while marking and remembers owners otherwise" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const owner = try core.Object.createPlainObject(rt, null);
+    defer owner.value().free(rt);
+    const child = try core.Object.createPlainObject(rt, null);
+    defer child.value().free(rt);
+
+    // Marking inactive: the generational path runs, nothing is shaded.
+    const shaded_before = rt.gc.concurrent.stats.shaded;
+    rt.gc.generationalBarrierValue(&owner.header, child.value());
+    try std.testing.expectEqual(shaded_before, rt.gc.concurrent.stats.shaded);
+
+    // Marking active: the same write shades its exact target instead.
+    rt.gc.setHeaderUnmarked(&child.header);
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    defer rt.gc.concurrent.major_marking_active.store(false, .release);
+    rt.gc.generationalBarrierValue(&owner.header, child.value());
+    try std.testing.expect(rt.gc.concurrent.stats.shaded > shaded_before);
+    try std.testing.expect(rt.gc.headerMarked(&child.header));
+}
+
+test "a concurrent major collects garbage and keeps what the barrier shaded" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const kept = try core.Object.createPlainObject(rt, null);
+    defer kept.value().free(rt);
+
+    const before = rt.gc.liveCount();
+    const swept = try core.gc_trace_stw.collectConcurrentMajor(rt, null, .declared_only);
+    // The rooted object survives; whatever was unreachable is gone.
+    try std.testing.expect(rt.gc.liveCount() <= before);
+    try std.testing.expect(swept <= before);
+    // Marking must be off once the collection returns: a mutator resuming
+    // into a swept heap must not still be shading into it.
+    try std.testing.expect(!rt.gc.concurrent.markingActive());
+}
+
+test "the barrier shades a target the marker had already passed" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // Held by this frame, so it stays allocated; the point under test is the
+    // colour the barrier gives it, not its lifetime.
+    const target = try core.Object.createPlainObject(rt, null);
+    defer target.value().free(rt);
+    rt.gc.setHeaderUnmarked(&target.header);
+
+    // The interleaving the barrier exists for: the mutator stores a reference
+    // after the marker already walked the owner, so nothing will re-trace it.
+    // Only the shading keeps the target in this cycle's live set.
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    const shaded_before = rt.gc.concurrent.stats.shaded;
+    rt.gc.shadeForConcurrentMark(&target.header, &target.header);
+    rt.gc.concurrent.major_marking_active.store(false, .release);
+
+    try std.testing.expect(rt.gc.headerMarked(&target.header));
+    try std.testing.expectEqual(shaded_before + 1, rt.gc.concurrent.stats.shaded);
+
+    // Shading twice is idempotent: an already-marked target costs a check,
+    // not a second queue entry.
+    rt.gc.shadeForConcurrentMark(&target.header, &target.header);
+    try std.testing.expectEqual(shaded_before + 1, rt.gc.concurrent.stats.shaded);
+    const barrier = rt.gc.concurrent.stats;
+    try std.testing.expectEqual(
+        barrier.barrier_calls,
+        barrier.barrier_marked_target + barrier.barrier_unpublished_owner +
+            barrier.barrier_unpublished_target + barrier.barrier_requeued_owner +
+            barrier.shaded,
+    );
+}
+
+test "mark queue overflow downgrades to rescan instead of dropping work" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const MarkQueue = core.gc.mark_queue;
+    var queue = MarkQueue.Queue{};
+    queue.ensureCapacity(std.testing.allocator);
+    defer queue.deinit(std.testing.allocator);
+
+    // A header-shaped address is all this test needs; the queue never
+    // dereferences what it carries.
+    var fake: [MarkQueue.capacity + 8]core.gc.Header = undefined;
+
+    var i: usize = 0;
+    while (i < MarkQueue.capacity) : (i += 1) {
+        try std.testing.expect(queue.push(&fake[i]));
+    }
+    try std.testing.expect(!queue.hasOverflowed());
+
+    // One past capacity: the push is refused and the overflow flag is raised.
+    // The design's rule is that this costs scanning, not discovery.
+    try std.testing.expect(!queue.push(&fake[MarkQueue.capacity]));
+    try std.testing.expect(queue.hasOverflowed());
+    try std.testing.expectEqual(@as(usize, 1), queue.stats().overflowed);
+
+    // Everything accepted is still retrievable in order; nothing the queue
+    // took was lost by the refusal.
+    var popped: usize = 0;
+    while (queue.pop()) |_| popped += 1;
+    try std.testing.expectEqual(MarkQueue.capacity, popped);
+
+    // The flag survives draining -- it is cleared by the rescan that answers
+    // it, not by the queue emptying.
+    try std.testing.expect(queue.hasOverflowed());
+    queue.clearOverflow();
+    try std.testing.expect(!queue.hasOverflowed());
+}
+
+test "mark queue wraps without losing entries" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const MarkQueue = core.gc.mark_queue;
+    var queue = MarkQueue.Queue{};
+    queue.ensureCapacity(std.testing.allocator);
+    defer queue.deinit(std.testing.allocator);
+    var fake: [16]core.gc.Header = undefined;
+
+    // Drive head and tail past the ring boundary several times over.
+    var round: usize = 0;
+    while (round < MarkQueue.capacity) : (round += 1) {
+        try std.testing.expect(queue.push(&fake[round % fake.len]));
+        try std.testing.expect(queue.pop() != null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), queue.len());
+    try std.testing.expect(!queue.hasOverflowed());
+    try std.testing.expectEqual(queue.stats().pushed, queue.stats().popped);
+}
+
+test "an abandoned retirement transaction closes minors until a major repairs it" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // Trace-coupled retirement promotes block cells as the trace reaches
+    // them, so a cycle that opens the window and leaves without committing
+    // has half-promoted the young population: the structures still call it
+    // young while some headers already read old. A minor must not be offered
+    // that state, and the only way out is a major that commits.
+    try std.testing.expect(rt.gc.generation.minorsAllowed());
+
+    rt.gc.generation.beginMajorRetirement();
+    try std.testing.expect(!rt.gc.generation.minorsAllowed());
+    try std.testing.expect(!rt.gc.shouldTryMinor());
+
+    rt.gc.generation.abandonMajorRetirement();
+    try std.testing.expectEqual(
+        core.gc.generation.MajorRetirement.needs_major,
+        rt.gc.generation.major_retirement,
+    );
+    try std.testing.expect(!rt.gc.shouldTryMinor());
+    // Not even the stress knob may step past it: an open transaction is a
+    // correctness condition, not a scheduling preference.
+    const saved_stress = core.gc.stress_collect;
+    core.gc.stress_collect = true;
+    defer core.gc.stress_collect = saved_stress;
+    rt.gc.generation.stats.young_count = 1;
+    try std.testing.expect(!rt.gc.shouldTryMinor());
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.gc.generation.minorsAllowed());
+    try std.testing.expect(rt.gc.generation.stats.retirement_commits != 0);
+}
+
+test "a major retires every block-cell survivor it traces" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // The invariant the bulk walk used to establish by construction: after a
+    // collection commits, nothing that survived it still reads young.
+    var held: [128]*core.Object = undefined;
+    for (&held) |*slot| slot.* = try core.Object.createPlainObject(rt, null);
+    defer for (held) |obj| obj.value().free(rt);
+
+    _ = rt.runObjectCycleRemoval();
+
+    var it = rt.gc.objectIterator();
+    var stragglers: usize = 0;
+    while (it.next()) |h| {
+        if (h.metaConst().flags.young and rt.gc.headerMarked(h)) stragglers += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), stragglers);
+    try rt.gc.block_heap.verify();
+}
+
+test "incremental begin preserves list-young suffix until finish retirement" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    rt.forcePreciseRootScanForTest();
+
+    // Realms, shapes and other carrier kinds stay on gc_obj_list even when
+    // plain objects use the block heap. Establish that this runtime actually
+    // has a list-young suffix.
+    var young_before: usize = 0;
+    var before = rt.gc.gc_obj_list.sentinel.next;
+    while (before) |header| {
+        if (header == &rt.gc.gc_obj_list.sentinel) break;
+        if (header.metaConst().flags.young) young_before += 1;
+        before = header.next;
+    }
+    try std.testing.expect(young_before != 0);
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+
+    // Epoch clear is O(1): begin leaves the exact suffix intact while minors
+    // are closed. The mandatory finish condemnation walk is the pass that
+    // retires survivors and detaches dead carriers.
+    try std.testing.expect(rt.gc.young_head != null);
+    var after_begin: usize = 0;
+    var after = rt.gc.gc_obj_list.sentinel.next;
+    while (after) |header| {
+        if (header == &rt.gc.gc_obj_list.sentinel) break;
+        if (header.metaConst().flags.young) after_begin += 1;
+        after = header.next;
+    }
+    try std.testing.expectEqual(young_before, after_begin);
+    try rt.gc.verifyIntrusiveList();
+
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    try std.testing.expect(rt.gc.young_head == null);
+    var committed = rt.gc.gc_obj_list.sentinel.next;
+    while (committed) |header| {
+        if (header == &rt.gc.gc_obj_list.sentinel) break;
+        try std.testing.expect(!header.metaConst().flags.young);
+        committed = header.next;
+    }
+    try rt.gc.verifyIntrusiveList();
+}
+
+test "representation audit guards block-cell marker direct dispatch" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const obj = try core.Object.createPlainObject(rt, null);
+    defer obj.value().free(rt);
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&obj.header));
+    try rt.gc.verifyRepresentationInvariants();
+
+    const saved_kind = obj.header.meta().flags.kind;
+    obj.header.meta().flags.kind = .shape;
+    defer obj.header.meta().flags.kind = saved_kind;
+    try std.testing.expectError(
+        error.RepresentationAllocationCarrierMismatch,
+        rt.gc.verifyRepresentationInvariants(),
+    );
+}
+
+test "the marker worker marks queued objects on its own thread" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // Objects held by this frame so the test owns their lifetime; what is
+    // under test is the colour the worker gives them.
+    var held: [64]*core.Object = undefined;
+    for (&held) |*slot| {
+        slot.* = try core.Object.createPlainObject(rt, null);
+        rt.gc.setHeaderUnmarked(&slot.*.header);
+    }
+    defer for (held) |obj| obj.value().free(rt);
+
+    var queue = core.gc.mark_queue.Queue{};
+    queue.ensureCapacity(std.testing.allocator);
+    defer queue.deinit(std.testing.allocator);
+    var worker = core.gc.marker.Worker{};
+    for (held) |obj| try std.testing.expect(queue.push(&obj.header));
+
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    try worker.start(&rt.gc, &queue);
+
+    // Drain-and-join is the owner's side of the handshake: after join every
+    // mark the worker made is visible here, which is what lets final remark
+    // rescan roots without racing the marker.
+    while (queue.len() != 0) std.Thread.yield() catch {};
+    worker.join();
+    rt.gc.concurrent.major_marking_active.store(false, .release);
+
+    for (held) |obj| try std.testing.expect(rt.gc.headerMarked(&obj.header));
+    try std.testing.expectEqual(@as(usize, held.len), worker.stats.marked);
+    try std.testing.expect(!worker.running.load(.acquire));
+}
+
+test "the marker worker and a mutator can shade concurrently without losing marks" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    var held: [256]*core.Object = undefined;
+    for (&held) |*slot| {
+        slot.* = try core.Object.createPlainObject(rt, null);
+        rt.gc.setHeaderUnmarked(&slot.*.header);
+    }
+    defer for (held) |obj| obj.value().free(rt);
+
+    var queue = core.gc.mark_queue.Queue{};
+    queue.ensureCapacity(std.testing.allocator);
+    defer queue.deinit(std.testing.allocator);
+    var worker = core.gc.marker.Worker{};
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    try worker.start(&rt.gc, &queue);
+
+    // The owner shades half directly (the barrier's path) while the worker
+    // drains the other half from the queue. Both routes set the same bit;
+    // neither may lose an object.
+    for (held, 0..) |obj, i| {
+        if (i % 2 == 0) {
+            rt.gc.shadeForConcurrentMark(&obj.header, &obj.header);
+        } else {
+            _ = queue.push(&obj.header);
+        }
+    }
+
+    while (queue.len() != 0) std.Thread.yield() catch {};
+    worker.join();
+    rt.gc.concurrent.major_marking_active.store(false, .release);
+
+    for (held) |obj| try std.testing.expect(rt.gc.headerMarked(&obj.header));
+}
+
+test "snapshot capture never returns a descriptor assembled across two publishes" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const Snap = core.gc.layout_snapshot;
+    var snap = Snap.Snapshot{};
+
+    // A writer thread republishes a self-consistent descriptor: every field
+    // carries the same generation number, so a torn capture is detectable by
+    // the fields disagreeing with each other.
+    var stop = std.atomic.Value(bool).init(false);
+    const Writer = struct {
+        fn run(s: *Snap.Snapshot, done: *std.atomic.Value(bool)) void {
+            var gen: usize = 1;
+            while (gen <= 200_000) : (gen += 1) {
+                s.publish(.{
+                    .backing = 0x1000 + gen,
+                    .length = gen,
+                    .capacity = gen,
+                    .kind = gen,
+                });
+            }
+            done.store(true, .release);
+        }
+    };
+    const writer = try std.Thread.spawn(.{}, Writer.run, .{ &snap, &stop });
+    defer writer.join();
+
+    var captures: usize = 0;
+    var torn: usize = 0;
+    var bailouts: usize = 0;
+    while (!stop.load(.acquire)) {
+        var desc: Snap.Descriptor = .{};
+        switch (snap.captureWithRetries(&desc)) {
+            .captured => {
+                captures += 1;
+                // The initial state is all zeros and predates the writer; only
+                // published descriptors carry the coherence invariant.
+                if (desc.length == 0) continue;
+                // The invariant under test: an accepted capture is coherent.
+                // Fields from different publishes would disagree here.
+                if (desc.length != desc.capacity or desc.kind != desc.length) torn += 1;
+                if (desc.backing != 0x1000 + desc.length) torn += 1;
+            },
+            .bailout => bailouts += 1,
+            .retry => unreachable,
+        }
+    }
+
+    try std.testing.expect(captures > 0);
+    // Not one accepted descriptor may be incoherent. Bailouts are fine -- they
+    // are the protocol declining rather than guessing.
+    try std.testing.expectEqual(@as(usize, 0), torn);
+    std.debug.print(
+        "\n[snapshot churn] captures={d} bailouts={d} retries={d}\n",
+        .{ captures, bailouts, snap.stats.retries },
+    );
+}
+
+test "snapshot capture bails out rather than spinning against a busy writer" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const Snap = core.gc.layout_snapshot;
+    var snap = Snap.Snapshot{};
+
+    // Leave the sequence odd: a writer is mid-publish and never finishes.
+    _ = snap.layout_seq.fetchAdd(1, .acq_rel);
+
+    var desc: Snap.Descriptor = .{};
+    // The marker must give up after a bounded number of attempts and hand the
+    // object to the owner thread, not spin.
+    try std.testing.expectEqual(Snap.Outcome.bailout, snap.captureWithRetries(&desc));
+    try std.testing.expect(snap.stats.bailouts >= 1);
+    try std.testing.expect(snap.stats.captures == 0);
+}
+
+test "independent runtimes collect without touching each other" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+
+    // §3.1's first invariants: every GC object belongs to exactly one runtime
+    // and no heap pointer crosses between them. A collector that violated
+    // either would show up here as one runtime's collection disturbing
+    // another's live count.
+    var runtimes: [8]*core.JSRuntime = undefined;
+    var contexts: [8]*core.JSContext = undefined;
+    for (&runtimes, &contexts) |*rt_slot, *ctx_slot| {
+        rt_slot.* = try core.JSRuntime.create(std.testing.allocator);
+        ctx_slot.* = try core.JSContext.create(rt_slot.*);
+    }
+    defer for (runtimes, contexts) |rt, ctx| {
+        ctx.destroy();
+        rt.destroy();
+    };
+
+    // Give each runtime its own garbage and its own retained object.
+    var retained: [8]*core.Object = undefined;
+    for (runtimes, &retained) |rt, *slot| {
+        slot.* = try core.Object.createPlainObject(rt, null);
+        var i: usize = 0;
+        while (i < 64) : (i += 1) {
+            const garbage = try core.Object.createPlainObject(rt, null);
+            garbage.value().free(rt);
+        }
+    }
+    defer for (runtimes, retained) |rt, obj| obj.value().free(rt);
+
+    // Collect in one runtime and check the others are untouched. Doing it for
+    // each in turn catches a collector that reaches a neighbour through any
+    // shared structure, not just the first one.
+    for (runtimes, 0..) |rt, index| {
+        var before: [8]usize = undefined;
+        for (runtimes, &before) |other, *slot| slot.* = other.gc.liveCount();
+
+        _ = try core.gc_trace_stw.collectCycles(rt, null, .declared_only);
+
+        for (runtimes, before, 0..) |other, prior, other_index| {
+            if (other_index == index) continue;
+            try std.testing.expectEqual(prior, other.gc.liveCount());
+        }
+        // The collecting runtime keeps what is rooted here.
+        try std.testing.expect(rt.gc.liveCount() > 0);
+    }
+}
+
+test "a crossed whole-heap threshold is answered by a major, never by a minor" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // `minor_young_threshold` is 16k objects, which no unit test builds, so the
+    // automatic-minor arm is unreachable from here without this. That is itself
+    // the reason this test did not exist: the branch whose ordering is the
+    // whole point of the fix cannot be entered at test heap sizes.
+    const stress_before = core.gc.stress_collect;
+    core.gc.stress_collect = true;
+    defer core.gc.stress_collect = stress_before;
+
+    var index: usize = 0;
+    while (index < 64) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        dead.value().free(rt);
+    }
+
+    const minors_before = rt.gc.generation.stats.minor_collections;
+    const collections_before = rt.gc.stats.collections;
+
+    // Put the heap over its whole-heap threshold. A minor cannot answer this:
+    // it does not look at the old generation, which is where a heap past its
+    // threshold has its garbage. Answering it with a minor and returning was
+    // the defect that let earley-boyer run 13,642 minors and zero majors.
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    // The threshold's answer is an incremental major cycle; drive it to its
+    // remark so the completion counter can move. What must NOT move, at any
+    // of these polls, is the minor counter.
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+
+    try std.testing.expectEqual(minors_before, rt.gc.generation.stats.minor_collections);
+    try std.testing.expect(rt.gc.stats.collections > collections_before);
+}
+
+test "a minor does not move the major's threshold" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const stress_before = core.gc.stress_collect;
+    core.gc.stress_collect = true;
+    defer core.gc.stress_collect = stress_before;
+
+    var index: usize = 0;
+    while (index < 64) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        dead.value().free(rt);
+    }
+
+    // Comfortably under the threshold, so the minor is the arm that runs.
+    rt.setGCThreshold(rt.memory.allocated_bytes * 4);
+    const threshold_before = rt.gcThreshold();
+    const minors_before = rt.gc.generation.stats.minor_collections;
+
+    _ = try rt.pollGC(null, .safepoint);
+
+    try std.testing.expect(rt.gc.generation.stats.minor_collections > minors_before);
+    // A minor that reset this would raise the major's bar to 1.5x a footprint
+    // that is mostly old garbage it never examined, and every minor would push
+    // the major further away.
+    try std.testing.expectEqual(threshold_before, rt.gcThreshold());
+}
+
+test "minor detailed stats decompose the outer STW envelope" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const stress_before = core.gc.stress_collect;
+    core.gc.stress_collect = true;
+    defer core.gc.stress_collect = stress_before;
+    const reports_before = core.gc_trace_stw.detailed_reports;
+    core.gc_trace_stw.detailed_reports = true;
+    defer core.gc_trace_stw.detailed_reports = reports_before;
+
+    var index: usize = 0;
+    while (index < 64) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        dead.value().free(rt);
+    }
+    rt.setGCThreshold(rt.memory.allocated_bytes * 4);
+
+    _ = try rt.pollGC(null, .safepoint);
+
+    const stats = rt.gc.generation.stats;
+    try std.testing.expect(stats.minor_collections >= 1);
+    try std.testing.expect(stats.pause_ns_total > 0);
+    try std.testing.expect(stats.minorPhaseNsTotal() > 0);
+    // Every young object the minor priced was either reclaimed or promoted;
+    // keep the benefit counters tied to the same population as the pause.
+    try std.testing.expectEqual(
+        stats.young_at_start_total,
+        stats.minor_reclaimed + stats.minor_promoted,
+    );
+    // The outer timer starts before collectMinor and ends after its defers, so
+    // it must cover every nested phase plus Collector init/deinit and timing
+    // overhead. A larger phase sum means the decomposition double-counted.
+    try std.testing.expect(stats.minorPhaseNsTotal() <= stats.pause_ns_total);
+}
+
+test "cell resolution stops at the block header and at unallocated cells" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    const header = &obj.header;
+
+    // Plain objects are block cells now; this is the block-arm analogue of
+    // the arena boundary test it replaced. The object resolves from its
+    // header and from an interior byte; the BLOCK's own header/bitmap region
+    // is not a cell and must not; a never-allocated cell index must not.
+    const block_bytes = core.gc_block_heap.block_bytes;
+    const base = @intFromPtr(header) & ~@as(usize, block_bytes - 1);
+    try std.testing.expect(rt.gc.block_heap.blockOf(@ptrFromInt(@intFromPtr(header))) != null);
+
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(@intFromPtr(header)));
+    try std.testing.expectEqual(header, rt.gc.address_registry.resolve(@intFromPtr(header) + 8));
+    try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(base));
+    try std.testing.expectEqual(@as(?*core.gc.Header, null), rt.gc.address_registry.resolve(base + 8));
+}
+
+test "a minor that keeps reclaiming nothing stops being offered" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const State = @TypeOf(rt.gc.generation);
+    try std.testing.expect(!rt.gc.generation.minorSuspended());
+
+    // Yield below the floor, repeated. The policy exists because a workload is
+    // allowed to disagree with the weak generational hypothesis -- splay links
+    // every fresh node straight into its live tree -- and a minor that learns
+    // this by paying a full root and conservative stack scan each time is the
+    // cost being removed. Measured 2026-08-25: splay is 1.26x faster once the
+    // minor stops being offered.
+    var round: usize = 0;
+    while (round < State.low_yield_limit) : (round += 1) {
+        rt.gc.generation.noteMinorYield(1000, 1);
+    }
+    try std.testing.expect(rt.gc.generation.minorSuspended());
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.stats.minor_suspensions);
+
+    // A major buys one probe, not a fresh run of unproductive minors, and the
+    // interval doubles each time the probe confirms the answer.
+    var majors: usize = 0;
+    while (majors < 64) : (majors += 1) rt.gc.generation.decayLowYieldStreak();
+    try std.testing.expect(!rt.gc.generation.minorSuspended());
+
+    // A productive minor puts it straight back into service.
+    while (round < State.low_yield_limit * 2) : (round += 1) {
+        rt.gc.generation.noteMinorYield(1000, 1);
+    }
+    try std.testing.expect(rt.gc.generation.minorSuspended());
+    rt.gc.generation.noteMinorYield(1000, 900);
+    try std.testing.expect(!rt.gc.generation.minorSuspended());
+}
+
+test "marking barrier shades grey, not black: the stored object's children survive the remark" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // B -> C, and the store target A. C's only strong path will run through
+    // the edge the mutator creates during marking.
+    const a = try core.Object.create(rt, core.class.ids.object, null);
+    defer a.value().free(rt);
+    const b = try core.Object.create(rt, core.class.ids.object, null);
+    defer b.value().free(rt);
+    const c = try core.Object.create(rt, core.class.ids.object, null);
+    const key = try rt.internAtom("edge");
+    defer rt.atoms.free(key);
+    try b.defineOwnProperty(rt, key, core.Descriptor.data(c.value(), true, true, true));
+    c.value().free(rt);
+
+    // The interleaving `collectConcurrentMajor` cannot express, constructed by
+    // hand: initial mark has traced A and blackened it; B and C were reachable
+    // through a path the mutator is about to erase, so the tracer never saw
+    // them. Then the mutator stores B into A. The write barrier is the only
+    // thing standing between C and the sweep.
+    rt.gc.setHeaderMarked(&a.header);
+    rt.gc.setHeaderUnmarked(&b.header);
+    rt.gc.setHeaderUnmarked(&c.header);
+    rt.gc.concurrent_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    defer rt.gc.concurrent.major_marking_active.store(false, .release);
+
+    rt.gc.generationalBarrier(&a.header, &b.header);
+
+    // B must be GREY: marked (so the sweep keeps it) AND queued (so its
+    // children get traced). The original barrier only marked, and a marked
+    // object is never re-entered by `shade()`, so C stayed white through the
+    // remark and was swept alive.
+    try std.testing.expect(rt.gc.headerMarked(&b.header));
+    const drained = try core.gc_trace_stw.remarkBarrierQueueForTest(rt);
+    try std.testing.expect(drained >= 1);
+    try std.testing.expect(rt.gc.headerMarked(&c.header));
+
+    // Cleanup: marks are collection-transient state in this simulated cycle.
+    rt.gc.setHeaderUnmarked(&a.header);
+    rt.gc.setHeaderUnmarked(&b.header);
+    rt.gc.setHeaderUnmarked(&c.header);
+}
+
+test "barrier queue overflow downgrades to a rescan, not to lost children" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const b = try core.Object.create(rt, core.class.ids.object, null);
+    defer b.value().free(rt);
+    const c = try core.Object.create(rt, core.class.ids.object, null);
+    const key = try rt.internAtom("edge");
+    defer rt.atoms.free(key);
+    try b.defineOwnProperty(rt, key, core.Descriptor.data(c.value(), true, true, true));
+    c.value().free(rt);
+
+    // No ring at all: every push reports overflow, which is the same state a
+    // full ring reaches. The shaded object keeps its mark, loses its queue
+    // slot, and must still be found by the remark's marked-object rescan.
+    rt.gc.setHeaderUnmarked(&b.header);
+    rt.gc.setHeaderUnmarked(&c.header);
+    rt.gc.concurrent.major_marking_active.store(true, .release);
+    defer rt.gc.concurrent.major_marking_active.store(false, .release);
+
+    const owner = try core.Object.create(rt, core.class.ids.object, null);
+    defer owner.value().free(rt);
+    rt.gc.setHeaderMarked(&owner.header);
+    rt.gc.generationalBarrier(&owner.header, &b.header);
+
+    try std.testing.expect(rt.gc.headerMarked(&b.header));
+    try std.testing.expect(rt.gc.concurrent_mark_queue.hasOverflowed());
+    _ = try core.gc_trace_stw.remarkBarrierQueueForTest(rt);
+    try std.testing.expect(rt.gc.headerMarked(&c.header));
+    try std.testing.expect(!rt.gc.concurrent_mark_queue.hasOverflowed());
+
+    rt.gc.setHeaderUnmarked(&b.header);
+    rt.gc.setHeaderUnmarked(&c.header);
+    rt.gc.setHeaderUnmarked(&owner.header);
+}
+
+test "an incremental cycle frees threshold garbage across bounded polls" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const untouched = try core.JSRuntime.create(std.testing.allocator);
+    defer untouched.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    // Precise scans: the dead batch below lingers in native registers, and a
+    // conservative pass would pin it and fail the count.
+    rt.forcePreciseRootScanForTest();
+
+    // A survivor -- pinned, because under precise scanning a Zig local is not
+    // a root -- and a batch of garbage the cycle must find dead.
+    const keeper = try core.Object.create(rt, core.class.ids.object, null);
+    defer keeper.value().free(rt);
+    try rt.gc.pinHeader(&keeper.header);
+    defer rt.gc.unpinHeader(&keeper.header);
+    var index: usize = 0;
+    while (index < 256) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        dead.value().free(rt);
+    }
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    const freed_before = rt.gc.stats.freed_objects;
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    try std.testing.expect(rt.gc.stats.freed_objects - freed_before >= 256);
+    try std.testing.expect(rt.gc.containsHeader(&keeper.header));
+    try std.testing.expect(rt.gc.concurrent.stats.cycles_completed >= 1);
+    try std.testing.expect(rt.gc.concurrent.stats.doomed_condemned_headers >= 256);
+    try std.testing.expect(rt.gc.concurrent.stats.doomed_destroyed_objects >= 256);
+    // The physical-free pass has two exits since stage 3: a block corpse whose
+    // release is exactly {alloc bit, allocated_count, MemoryAccount} settles in
+    // Pass A while its line is hot, everything else is parked and drained. The
+    // invariant the test owns is that the union covers every condemned object;
+    // splitting it into two separate lower bounds would just pin whichever
+    // route today's allocator happens to take.
+    const settled = rt.gc.block_heap.stats.passa_settled_cells;
+    const drained = rt.gc.concurrent.stats.doomed_parked_entries_drained;
+    try std.testing.expect(settled + drained >= 256);
+    // These 256 are plain class-1 Objects in private blocks, i.e. exactly the
+    // stage-3 population; if none of them settled, the Pass-A route is dead
+    // code and this test would silently stop covering it.
+    try std.testing.expect(settled >= 1);
+    try std.testing.expect(rt.gc.concurrent.stats.doomed_parked_drain_slices >= 1 or drained == 0);
+    // Compact trace epochs clear marks without walking the non-block list,
+    // and its young bits retire in the mandatory finish condemnation walk.
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.concurrent.stats.phase_retired_nonblock_headers);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.concurrent.stats.phase_cleared_nonblock_headers);
+    try std.testing.expectEqual(
+        rt.gc.concurrent.stats.last_cycle_stw_ns,
+        rt.gc.stats.last_collection_time_ns,
+    );
+    var attributed_stw: u64 = 0;
+    for (rt.gc.concurrent.stats.total_stw_by_kind) |ns| attributed_stw += ns;
+    try std.testing.expectEqual(rt.gc.concurrent.stats.last_cycle_stw_ns, attributed_stw);
+    const increment_index = @intFromEnum(core.gc.Registry.SliceKind.increment);
+    try std.testing.expect(rt.gc.concurrent.stats.total_segments_by_kind[increment_index] >= 1);
+    try std.testing.expectEqual(@as(u64, 0), untouched.gc.concurrent.stats.phase_begin_clear_ns);
+}
+
+test "incremental cycle envelope keeps one exact MemoryAccount S T P domain" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const reports_before = core.gc_trace_stw.detailed_reports;
+    core.gc_trace_stw.detailed_reports = true;
+    defer core.gc_trace_stw.detailed_reports = reports_before;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    // A completed synchronous major establishes the settled S and policy T
+    // consumed by the next automatic incremental cycle.
+    _ = try rt.tryRunObjectCycleRemoval();
+    const expected_start = rt.memory.allocated_bytes;
+    const expected_threshold = rt.gcThreshold();
+    try std.testing.expect(expected_threshold > expected_start);
+
+    const crossing_bytes = expected_threshold - expected_start + 1;
+    const crossing = try rt.memory.allocNoTrigger(u8, crossing_bytes);
+    defer rt.memory.free(u8, crossing);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+
+    // This credit happens after begin and must therefore move P. Sampling
+    // only collection boundaries would miss a grow-and-free sequence here.
+    const during = try rt.memory.allocNoTrigger(u8, 8192);
+    const observed_after_credit = rt.memory.allocated_bytes;
+    rt.memory.free(u8, during);
+
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+
+    const stats = rt.gc.concurrent.stats;
+    try std.testing.expectEqual(@as(usize, 1), stats.envelope_measured_cycles);
+    try std.testing.expectEqual(@as(usize, 0), stats.envelope_skipped_cycles);
+    try std.testing.expectEqual(expected_start, stats.envelope_max_start_bytes);
+    try std.testing.expectEqual(expected_threshold, stats.envelope_max_threshold_bytes);
+    try std.testing.expectEqual(expected_threshold + 1, stats.envelope_max_begin_bytes);
+    try std.testing.expect(stats.envelope_max_peak_bytes >= observed_after_credit);
+    try std.testing.expect(
+        @as(u128, stats.envelope_max_peak_bytes) * 35 <
+            @as(u128, stats.envelope_max_threshold_bytes) * 36,
+    );
+}
+
+test "synchronous incremental destruction drains more than one parked-free budget" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    rt.forcePreciseRootScanForTest();
+
+    // Keep allocation-boundary polling out of the construction. One complete
+    // morgue must hold more than the 4096-entry Pass-B slice so this exercises
+    // the synchronous finisher's contract rather than the ordinary bounded
+    // destruction path.
+    rt.setGCThreshold(std.math.maxInt(usize));
+    var index: usize = 0;
+    while (index < 5000) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        dead.value().free(rt);
+    }
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    try std.testing.expect(rt.gc.doomed_pending);
+
+    core.gc_trace_stw.finishPendingDestruction(rt);
+    try std.testing.expect(!rt.gc.doomed_pending);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
+    if (core.gc.arena_audit) try std.testing.expect(rt.gc.deferred_run_topology_verified);
+}
+
+test "pending class finalizer keeps the incremental morgue open" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    rt.forcePreciseRootScanForTest();
+
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{
+        .class_name = "DeferredMorgueFinalizer",
+        .payload_finalizer = countPayloadFinalizer,
+    });
+    const definition_owner = try core.Object.create(rt, class_id, null);
+    try rt.gc.pinHeader(&definition_owner.header);
+    defer {
+        rt.gc.unpinHeader(&definition_owner.header);
+        definition_owner.value().free(rt);
+    }
+    payload_finalizer_calls = 0;
+
+    rt.setGCThreshold(std.math.maxInt(usize));
+    var index: usize = 0;
+    while (index < 32) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        dead.value().free(rt);
+    }
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    try std.testing.expect(rt.gc.doomed_pending);
+
+    // Production plugin jobs are enqueued while destruction runs, after the
+    // cycle is already condemned. Inject at that same transaction boundary;
+    // injecting before the first poll is no longer representative because a
+    // safe collector entry drains pre-existing jobs before starting a mark.
+    try std.testing.expect(try rt.enqueueDeferredClassPayloadFinalizer(class_id, null, .none, 0));
+
+    _ = core.gc_trace_stw.destroyDoomedSlice(rt, std.math.maxInt(u64));
+    try std.testing.expect(rt.gc.doomed_pending);
+    try std.testing.expect(rt.gc.cycle_deferred_frees.count != 0);
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+
+    rt.drainDeferredClassPayloadFinalizers();
+    try std.testing.expect(rt.gc.doomed_pending);
+    try std.testing.expect(rt.gc.cycle_deferred_frees.count != 0);
+    core.gc_trace_stw.finishPendingDestruction(rt);
+    try std.testing.expect(!rt.gc.doomed_pending);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
+    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
+}
+
+test "incremental block finalizer observes its object without sweep publication" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    rt.forcePreciseRootScanForTest();
+
+    ExternalObjectLifecycleProbe.reset();
+    defer ExternalObjectLifecycleProbe.reset();
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{
+        .class_name = "IncrementalBlockLifecycleProbe",
+        .payload_finalizer = ExternalObjectLifecycleProbe.finalize,
+    });
+
+    rt.setGCThreshold(std.math.maxInt(usize));
+    const object = try createExternalObjectLifecycleProbe(rt, class_id, 0);
+    try std.testing.expect(rt.gc.block_heap.owns(@ptrCast(object)));
+    ExternalObjectLifecycleProbe.expected_objects[0] = object;
+    object.value().free(rt);
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    try std.testing.expect(rt.gc.doomed_pending);
+    core.gc_trace_stw.finishPendingDestruction(rt);
+
+    try std.testing.expectEqual(@as(usize, 1), ExternalObjectLifecycleProbe.calls);
+    try std.testing.expect(ExternalObjectLifecycleProbe.identity_matches[0]);
+    try std.testing.expect(ExternalObjectLifecycleProbe.owns_objects[0]);
+    rt.classes.unregisterDynamic(class_id);
+}
+
+test "a store during an incremental cycle keeps the stored subgraph alive to the remark" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const b = try core.Object.create(rt, core.class.ids.object, null);
+    const c = try core.Object.create(rt, core.class.ids.object, null);
+    const key = try rt.internAtom("edge");
+    defer rt.atoms.free(key);
+    try b.defineOwnProperty(rt, key, core.Descriptor.data(c.value(), true, true, true));
+    c.value().free(rt);
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+
+    // Keep the cycle open across the mutation window.
+    rt.setGCThreshold(std.math.maxInt(usize));
+
+    // Mid-cycle mutation, then retraction: B flows through a store and the
+    // store is undone, so by remark time B's ONLY claim to life is the grey
+    // shade the barrier gave it at the store. Surviving the cycle is the
+    // floating-garbage guarantee -- the strong form of barrier evidence,
+    // since a holder that still referenced B would keep it trivially.
+    try holder.defineOwnProperty(rt, key, core.Descriptor.data(b.value(), true, true, true));
+    b.value().free(rt);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try holder.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    try std.testing.expect(rt.gc.containsHeader(&b.header));
+    try std.testing.expect(rt.gc.containsHeader(&c.header));
+
+    // The float lasts one cycle: a fresh full collection frees both.
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.gc.containsHeader(&b.header));
+    try std.testing.expect(!rt.gc.containsHeader(&c.header));
+}
+
+test "an explicit collection supersedes an open incremental cycle with full precision" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    // Lift the threshold so allocation-boundary polls stop firing; otherwise
+    // a heap this small finishes its cycle inside the loop below, which is
+    // correct behaviour but not the interleaving this test needs to hold open.
+    rt.setGCThreshold(std.math.maxInt(usize));
+
+    // Garbage allocated DURING the cycle is black-published (§8.6): the
+    // cycle, finished, would keep it as floating garbage. "Collect
+    // everything" must not.
+    var index: usize = 0;
+    while (index < 64) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        try std.testing.expect(rt.gc.headerMarked(&dead.header));
+        dead.value().free(rt);
+    }
+
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    const freed_before = rt.gc.stats.freed_objects;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.stats.freed_objects - freed_before >= 64);
+    try std.testing.expect(rt.gc.concurrent.stats.cycles_aborted >= 1);
+}
+
+test "an urgent poll aborts the open cycle and collects fully" {
+    if (comptime !core.gc.trace_stw_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    rt.setGCThreshold(std.math.maxInt(usize));
+
+    var index: usize = 0;
+    while (index < 64) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        dead.value().free(rt);
+    }
+
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    const freed_before = rt.gc.stats.freed_objects;
+    _ = try rt.forceGC(null);
+    try std.testing.expect(!rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.stats.freed_objects - freed_before >= 64);
 }

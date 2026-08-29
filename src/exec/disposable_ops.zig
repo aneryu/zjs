@@ -513,6 +513,10 @@ pub fn asyncDisposableStackStoreCapability(stack: *core.Object, rt: *core.JSRunt
     resolve_owned = false;
     reject_slot.* = reject;
     reject_owned = false;
+    // Both slots live in the stack's payload; the capability functions are made
+    // right here while the stack itself is typically already old.
+    rt.gc.generationalBarrier(&stack.header, resolve.cycleMarkHeader());
+    rt.gc.generationalBarrier(&stack.header, reject.cycleMarkHeader());
 }
 
 pub fn asyncDisposableStackDisposeAsync(

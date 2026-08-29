@@ -2,6 +2,7 @@
 const std = @import("std");
 const zjs = @import("zjs");
 const public_zjs = @import("../root.zig");
+const helpers = @import("helpers.zig");
 const InterruptState = struct {
     hits: usize = 0,
 
@@ -529,6 +530,9 @@ test "production embedding can expose owned and shared byte stores" {
     var owned_live = true;
     defer if (owned_live) owned_value.free(rt);
     try std.testing.expectEqual(@as(usize, 0), owned_store.bytes.len);
+    try std.testing.expectEqual(@as(usize, 4), rt.gcStats().external_bytes);
+    try std.testing.expectEqual(@as(usize, 4), rt.gcStats().external_token_bytes);
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().external_token_count);
 
     const owned_view: zjs.JSBytes = try owned_value.asBytes(ctx);
     try std.testing.expect(!owned_view.isShared());
@@ -540,7 +544,15 @@ test "production embedding can expose owned and shared byte stores" {
 
     owned_value.free(rt);
     owned_live = false;
+    // Dropping the embedder's last reference is what ends the buffer's life
+    // under refcounting; under the tracer it is what makes it collectable, and
+    // the store's `deinit` runs when the collection reaches it. This is an
+    // API-visible timing change for embedders that attach OS resources to a
+    // byte store.
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), owned_state.calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_bytes);
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_token_count);
 
     var shared_state = BytesStoreState{ .allocator = std.testing.allocator };
     const shared_backing = try std.testing.allocator.alloc(u8, 3);
@@ -555,6 +567,9 @@ test "production embedding can expose owned and shared byte stores" {
     var shared_live = true;
     defer if (shared_live) shared_value.free(rt);
     try std.testing.expectEqual(@as(usize, 0), shared_store.bytes.len);
+    try std.testing.expectEqual(@as(usize, 3), rt.gcStats().external_bytes);
+    try std.testing.expectEqual(@as(usize, 3), rt.gcStats().external_token_bytes);
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().external_token_count);
 
     const shared_view: zjs.JSBytes = try shared_value.asBytes(ctx);
     try std.testing.expect(shared_view.isShared());
@@ -566,7 +581,10 @@ test "production embedding can expose owned and shared byte stores" {
 
     shared_value.free(rt);
     shared_live = false;
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), shared_state.calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_bytes);
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_token_count);
 }
 
 test "production runtime can detach array buffers through public runtime API" {
@@ -726,6 +744,16 @@ test "production embedding public API allocation failures keep host ownership in
 
     const persistent_before = rt.persistentRootCountForTest();
     const local_before = rt.localRootCountForTest();
+
+    // Collect first, THEN pin the limit to what is left.
+    //
+    // The limit is exactly the current footprint, so this test only observes a
+    // failing allocation if the emergency collection that runs at the limit
+    // (`collectBeforeLimitRejection`) has nothing to reclaim. Without this the
+    // test asserts "there happens to be no garbage right now", which is a
+    // property of whatever ran before it rather than of the API under test --
+    // and it duly broke when a collector change freed 480 bytes more here.
+    _ = rt.runObjectCycleRemoval();
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     defer rt.setMemoryLimit(null);

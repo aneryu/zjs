@@ -375,19 +375,30 @@ pub const JSContext = struct {
 
     comptime {
         std.debug.assert(@offsetOf(@This(), "header") == 0);
+        std.debug.assert(@sizeOf(@This()) == 2176);
+        std.debug.assert(@alignOf(@This()) == 16);
+        std.debug.assert(@offsetOf(@This(), "runtime") == if (gc.trace_stw_enabled) 1472 else 1480);
+        std.debug.assert(@offsetOf(@This(), "modules") == if (gc.trace_stw_enabled) 1424 else 1432);
+        std.debug.assert(@offsetOf(@This(), "publication_state") == if (gc.trace_stw_enabled) 2160 else 2168);
+        std.debug.assert(@offsetOf(@This(), "global") == if (gc.trace_stw_enabled) 288 else 296);
+        // Trace-only lifetime state occupies the compact layout's existing
+        // 15-byte tail hole. No declared field may perturb default RC layout.
+        std.debug.assert(trace_ref_count_offset == 2164);
+        std.debug.assert(trace_list_previous_offset == 2168);
+        std.debug.assert(trace_list_previous_offset + @sizeOf(?*gc.Header) == @sizeOf(@This()));
     }
 
     /// QuickJS `JSContext.header`: realm identity is itself a refcounted cycle
-    /// collector node.  Keep this first; `MemoryAccount` places the common RC
-    /// metadata immediately before it.
+    /// collector node. Keep this first; `MemoryAccount` places the common
+    /// lifetime metadata immediately before it.
     header: gc.GCObjectHeader align(16) = .{},
     runtime: *JSRuntime,
     /// Independent, non-owning membership in `JSRuntime.context_*`.  The GC
     /// header links above are reserved exclusively for the collector.
-    runtime_prev: ?*JSContext = null,
-    runtime_next: ?*JSContext = null,
-    construction_prev: ?*JSContext = null,
-    construction_next: ?*JSContext = null,
+    runtime_prev: ?*JSContext = null, // gc-slot: weak
+    runtime_next: ?*JSContext = null, // gc-slot: weak
+    construction_prev: ?*JSContext = null, // gc-slot: weak
+    construction_next: ?*JSContext = null, // gc-slot: weak
     publication_state: RealmPublicationState = .constructing,
     construction_complete: bool = false,
     /// Consumed by `destroy` / `tryDestroy` and by `RealmRef.takeOwned`.
@@ -446,6 +457,34 @@ pub const JSContext = struct {
     eval_function: JSValue = JSValue.nullValue(),
     host_event_loop: ?HostEventLoop = null,
 
+    const trace_ref_count_offset: usize = 2164;
+    const trace_list_previous_offset: usize = 2168;
+
+    /// Trace-only Realm RC lives in tail padding so default RC field layout is
+    /// bit-for-bit unchanged. The offsets above are pinned against the compact
+    /// layout's last real field and total size.
+    pub inline fn traceRefCountPtr(self: *JSContext) *i32 {
+        if (comptime !gc.trace_stw_enabled) unreachable;
+        return @ptrFromInt(@intFromPtr(self) + trace_ref_count_offset);
+    }
+
+    pub inline fn traceRefCountPtrConst(self: *const JSContext) *const i32 {
+        if (comptime !gc.trace_stw_enabled) unreachable;
+        return @ptrFromInt(@intFromPtr(self) + trace_ref_count_offset);
+    }
+
+    /// O(1) predecessor for the only trace list carrier besides Shape that
+    /// retains mutator RC; also stored wholly inside the existing tail hole.
+    pub inline fn traceListPreviousPtr(self: *JSContext) *?*gc.Header {
+        if (comptime !gc.trace_stw_enabled) unreachable;
+        return @ptrFromInt(@intFromPtr(self) + trace_list_previous_offset);
+    }
+
+    pub inline fn traceListPreviousPtrConst(self: *const JSContext) *const ?*gc.Header {
+        if (comptime !gc.trace_stw_enabled) unreachable;
+        return @ptrFromInt(@intFromPtr(self) + trace_list_previous_offset);
+    }
+
     /// Returns an owned context. Caller must release that host reference with
     /// `destroy` exactly once. `destroy` is not "tear down this realm": it is
     /// one `gc.release`, and `createRealm` transfers the child's create-ref
@@ -486,6 +525,10 @@ pub const JSContext = struct {
             .modules = module.Registry.init(&rt.memory, &rt.atoms, &rt.gc),
             .random_state = runtime_mod.newRealmRandomSeed(),
         };
+        if (comptime gc.trace_stw_enabled) {
+            self.traceRefCountPtr().* = 1;
+            self.traceListPreviousPtr().* = null;
+        }
         const initial_len = rt.classes.records.len;
         if (initial_len <= self.class_prototypes_inline.len) {
             self.class_prototypes = self.class_prototypes_inline[0..initial_len];
@@ -497,7 +540,16 @@ pub const JSContext = struct {
         }
         errdefer self.deinitClassPrototypeSlots();
         try rt.gc.addInitializedWithSize(&self.header, @sizeOf(JSContext));
+        // If a later step fails, createWithPublication still raw-frees via
+        // destroyRuntime (initialized=false). Unlink first so gc.deinit
+        // cannot destroyFromHeader the same cell.
+        errdefer rt.gc.unlinkObject(&self.header);
         rt.linkConstructingContext(self);
+        errdefer rt.unlinkConstructingContext(self);
+        // Host create-ref is a root (gc-invariants.md). Membership on
+        // `constructing_context_head` is not. Register the provider by
+        // ownership here; `publishLive` re-registers idempotently.
+        try rt.registerRootProvider(self.rootProvider());
     }
 
     pub fn publishLive(self: *JSContext) !void {
@@ -579,6 +631,18 @@ pub const JSContext = struct {
 
     noinline fn pollInterruptSlow(self: *JSContext) bool {
         self.interrupt_counter = interrupt_counter_reset;
+        // The young budget's safepoint: the interpreter's own cadence, between
+        // instructions. Safe only because the builtin dispatch funnel roots
+        // receivers and arguments -- without that a minor here reclaims
+        // objects a running builtin is still walking.
+        if (comptime gc.generation_enabled) {
+            if (self.runtime.gc.shouldTryMinor()) {
+                _ = self.runtime.pollGC(null, .safepoint) catch {};
+            }
+            // Stress mode wants the collection window everywhere, not once per
+            // 10k ticks; the cadence is the other half of the knob.
+            if (gc.stress_collect) self.interrupt_counter = gc.stress_cadence;
+        }
         return self.runtime.runInterruptHandler();
     }
 
@@ -659,6 +723,12 @@ pub const JSContext = struct {
         const slot = try self.ensureClassPrototypeSlot(class_id);
         const old = slot.*;
         slot.* = prototype.value().dup();
+        // A realm fills these lazily: `%ArrayIteratorPrototype%` is built the
+        // first time a `for...of` needs it, which can be arbitrarily long after
+        // the realm itself went old. Once the host create-ref is consumed the
+        // realm is a heap object, not a root, so the minor's sticky mark stops
+        // the trace at it and the fresh prototype is condemned.
+        self.runtime.gc.generationalBarrier(&self.header, &prototype.header);
         old.free(self.runtime);
     }
 
@@ -687,6 +757,7 @@ pub const JSContext = struct {
         const slot = &self.native_error_prototypes[@intFromEnum(kind)];
         const old = slot.*;
         slot.* = prototype.value().dup();
+        self.runtime.gc.generationalBarrier(&self.header, &prototype.header);
         old.free(self.runtime);
     }
 
@@ -755,7 +826,7 @@ pub const JSContext = struct {
     fn releaseInitialShape(self: *JSContext, slot: *?*shape.Shape) void {
         const owned = slot.* orelse return;
         slot.* = null;
-        if (self.runtime.gc.phase == .remove_cycles and owned.header.metaConst().flags.cycle_visited) return;
+        if (gc.phaseIsTwoPassTeardown(self.runtime.gc.phase) and owned.header.metaConst().flags.cycle_visited) return;
         self.runtime.shapes.release(owned);
     }
 
@@ -858,13 +929,23 @@ pub const JSContext = struct {
         // edges. ReleaseFast keeps the flag write so the layout matches.
         std.debug.assert(!self.host_api_release_consumed);
         self.host_api_release_consumed = true;
+        // Drop the host create-ref root. Heap RealmRef edges remain and are
+        // traced as child edges, not as membership on `context_head`.
+        self.dropHostRootProvider();
+    }
+
+    fn dropHostRootProvider(self: *JSContext) void {
+        switch (self.publication_state) {
+            .live, .constructing => self.runtime.unregisterRootProvider(self.rootProvider()),
+            .finalizing => {},
+        }
     }
 
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
         rt.assertOwnerThread();
         const self: *JSContext = @alignCast(@fieldParentPtr("header", header));
         self.deinitResources();
-        if (rt.gc.phase == .remove_cycles) {
+        if (gc.phaseIsTwoPassTeardown(rt.gc.phase)) {
             rt.gc.deferCycleStructFree(header);
             return;
         }
@@ -895,6 +976,13 @@ pub const JSContext = struct {
 
     pub fn traceRoots(self: *JSContext, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
         if (self.publication_state != .live) return;
+        // Cycle-collector child edges already include the module registry and
+        // the five initial Shapes. Mirror them on the root Interface only when
+        // tracing roots are live; default `rc` keeps this function's .text.
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            var module_iter = self.modules.iterator();
+            while (module_iter.next()) |record| try visitor.moduleRoot(record);
+        }
         for (self.unhandled_rejections) |*entry| {
             try visitor.value(&entry.promise);
             try visitor.value(&entry.reason);
@@ -912,6 +1000,13 @@ pub const JSContext = struct {
             var rooted: ?*Object = prototype;
             try visitor.optionalObject(&rooted);
             self.cached_promise_proto = rooted;
+        }
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            if (self.array_shape) |owned| try visitor.shapeRoot(owned);
+            if (self.arguments_shape) |owned| try visitor.shapeRoot(owned);
+            if (self.mapped_arguments_shape) |owned| try visitor.shapeRoot(owned);
+            if (self.regexp_shape) |owned| try visitor.shapeRoot(owned);
+            if (self.regexp_result_shape) |owned| try visitor.shapeRoot(owned);
         }
         for (&self.cached_values) |*slot| if (slot.*) |*value| try visitor.value(value);
         if (self.regexp_legacy_statics) |legacy| {
@@ -976,6 +1071,11 @@ pub const JSContext = struct {
 
     fn traceRootProvider(context: *anyopaque, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
         const self: *JSContext = @ptrCast(@alignCast(context));
+        // Membership on `context_head` is not a root (gc-invariants.md). This
+        // provider is the host create-ref; once that ref is consumed the
+        // realm stays alive only through heap RealmRef edges.
+        if (self.host_api_release_consumed) return;
+        try visitor.constHeader(&self.header);
         try self.traceRoots(visitor);
     }
 

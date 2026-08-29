@@ -1254,10 +1254,54 @@ pub fn atomicsWaitAsync(
 pub fn atomicsLinkAsyncWaiter(waiter: *AtomicsWaiter) void {
     const ctx = waiter.realm.borrow().?;
     ctx.runtime.assertOwnerThread();
+    if (comptime core.runtime.value_root_frames_enabled) installWaitAsyncRootAdapter();
     const io = atomicsWaiterIo();
     atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
     defer atomics_ops.atomics_waiter_mutex.unlock(io);
     atomicsLinkWaiter(waiter);
+}
+
+fn installWaitAsyncRootAdapter() void {
+    if (comptime !core.runtime.value_root_frames_enabled) return;
+    if (core.runtime.trace_atomics_wait_async != null) return;
+    core.runtime.trace_atomics_wait_async = traceWaitAsyncRoots;
+}
+
+fn traceWaitAsyncRoots(rt_opaque: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+    const rt: *core.JSRuntime = @ptrCast(@alignCast(rt_opaque));
+    const io = atomicsWaiterIo();
+    var storage: [16]core.JSValue = undefined;
+
+    atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
+    var count: usize = 0;
+    var cursor = atomics_ops.atomics_waiters;
+    while (cursor) |waiter| : (cursor = waiter.next) {
+        if (atomicsAsyncWaiterRuntime(waiter) == rt and waiter.promise != null) count += 1;
+    }
+    atomics_ops.atomics_waiter_mutex.unlock(io);
+    if (count == 0) return;
+
+    const extra: []core.JSValue = if (count > storage.len)
+        try rt.memory.alloc(core.JSValue, count)
+    else
+        &.{};
+    defer if (extra.len != 0) rt.memory.free(core.JSValue, extra);
+    const buf = if (extra.len != 0) extra else storage[0..count];
+
+    atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
+    var filled: usize = 0;
+    cursor = atomics_ops.atomics_waiters;
+    while (cursor) |waiter| : (cursor = waiter.next) {
+        if (atomicsAsyncWaiterRuntime(waiter) != rt) continue;
+        const promise = waiter.promise orelse continue;
+        if (filled == buf.len) break;
+        buf[filled] = promise.dup();
+        filled += 1;
+    }
+    atomics_ops.atomics_waiter_mutex.unlock(io);
+
+    defer for (buf[0..filled]) |promise| promise.free(rt);
+    for (buf[0..filled]) |*promise| try visitor.value(promise);
 }
 
 pub fn atomicsWaitAsyncResult(ctx: *core.JSContext, is_async: bool, value: core.JSValue) !core.JSValue {

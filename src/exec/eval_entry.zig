@@ -47,6 +47,10 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // interpreter — makes the guard correct even when the runtime was
     // constructed on a different thread's stack (test262 worker threads).
     if (ctx.runtime.hot.call_depth == 0) rt.updateNativeStackTop();
+    const outermost = ctx.runtime.hot.call_depth == 0;
+    defer if (comptime core.gc.trace_stw_enabled) {
+        if (outermost) rt.clearWeakRefKeptAlive();
+    };
     var module_name_buf: [64]u8 = undefined;
     const module_name: core.Atom = if (options.mode == .module) blk: {
         const module_name_bytes = if (std.mem.eql(u8, options.filename, "<eval>"))
@@ -218,6 +222,17 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // error exit (found by test-oom injection).
     errdefer result.free(rt);
 
+    // The VM invocation has been torn down, but the owned completion remains
+    // live across context/global lookup and the post-run Job drain. Publish
+    // that one native handoff value as a window: scalar ValueRootScopes are
+    // intentionally erased in production tracing builds, while `.slices` is
+    // the exact-root contract for native storage that crosses a safepoint.
+    var completion_values = [_]core.JSValue{result};
+    var completion_slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &completion_values }};
+    var completion_roots = core.runtime.ValueRootFrame{ .slices = &completion_slices };
+    completion_roots.activate(rt);
+    defer completion_roots.deactivate(rt);
+
     const global_object = try zjs_vm.contextGlobal(ctx);
     const jobs_start = platform_clock.monotonicNanos();
     try zjs_vm.drainPendingPromiseJobs(ctx, options.output, global_object);
@@ -226,6 +241,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     if (options.mode == .script and
         (options.discard_script_result or !options.return_completion))
     {
+        completion_values[0] = core.JSValue.undefinedValue();
         result.free(rt);
         return core.JSValue.undefinedValue();
     }

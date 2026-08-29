@@ -6,6 +6,7 @@ const var_ref_mod = @import("var_ref.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 const std = @import("std");
+const builtin = @import("builtin");
 
 const closeOpenVarRefCellSlots = payloads.closeOpenVarRefCellSlots;
 const callVisitValue = payloads.callVisitValue;
@@ -71,6 +72,9 @@ pub const SuspendedStackStorage = struct {
         }
         const next = try rt.memory.alloc(JSValue, next_capacity);
         errdefer rt.memory.free(JSValue, next);
+        if (comptime builtin.is_test or std.mem.eql(u8, @import("build_options").zjs_gc, "shadow")) {
+            @import("gc_write_audit.zig").hit(.memcpy_bulk, .generator_values_memcpy);
+        }
         @memcpy(next[0..self.values.len], self.values);
         const old_values = self.values;
         const old_capacity = self.capacity;
@@ -371,6 +375,15 @@ pub const GeneratorExecutionState = struct {
         const stack_bytes = @as(usize, self.combined_stack_slots) * @sizeOf(JSValue);
         const slots: [*]JSValue = @ptrCast(@alignCast(base + generator_execution_storage_offset + stack_bytes));
         return slots[0..frame_slot_count];
+    }
+
+    /// Full byte extent of this execution record's allocation, including the
+    /// optional resident stack/frame FAM. Used by the GC structural census;
+    /// ownership teardown computes the same expression below.
+    pub fn allocationSize(self: *const GeneratorExecutionState) usize {
+        const slots = @as(usize, self.combined_stack_slots) + self.combinedFrameSlotCount();
+        if (slots == 0) return @sizeOf(GeneratorExecutionState);
+        return generator_execution_storage_offset + slots * @sizeOf(JSValue);
     }
 
     pub fn stackUsesCombinedStorage(self: *GeneratorExecutionState) bool {

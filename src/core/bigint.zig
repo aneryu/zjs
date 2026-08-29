@@ -66,8 +66,14 @@ pub const BigInt = struct {
         // The embedded-value shape was 56 bytes. The explicit fields must not
         // grow it, or every external wrapper could cross into a larger slab
         // class for no benefit.
-        std.debug.assert(@sizeOf(BigInt) == 56);
+        std.debug.assert(@sizeOf(BigInt) == if (gc.trace_stw_enabled) 48 else 56);
         std.debug.assert(@alignOf(BigInt) == 8);
+        const header_bytes = @sizeOf(gc.Header);
+        std.debug.assert(@offsetOf(BigInt, "limbs_ptr") == header_bytes);
+        std.debug.assert(@offsetOf(BigInt, "allocator") == header_bytes + 8);
+        std.debug.assert(@offsetOf(BigInt, "len") == header_bytes + 24);
+        std.debug.assert(@offsetOf(BigInt, "capacity") == header_bytes + 28);
+        std.debug.assert(@offsetOf(BigInt, "flags") == header_bytes + 32);
         // The FAM tail begins at `@sizeOf(BigInt)`, so that offset must be
         // limb-aligned.
         std.debug.assert(@sizeOf(BigInt) % @alignOf(Limb) == 0);

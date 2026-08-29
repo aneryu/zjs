@@ -1764,7 +1764,20 @@ pub fn typedArrayMapFilter(
         defer constructor_value.free(ctx.runtime);
         const out_value = try typedArrayCreateWithLength(ctx, output, global, constructor_value, length, caller_function, caller_frame);
         errdefer out_value.free(ctx.runtime);
-        const out = objectFromValue(out_value) orelse return error.TypeError;
+        // The callback below is arbitrary user JS: it allocates, and until this
+        // function returns the result array is reachable from nothing but this
+        // frame. A scalar root frame would not do -- production skips those and
+        // leaves scalars to conservative capture
+        // (`value_root_link_containers_only`) -- so the result is held in a
+        // one-element window and rooted as a container, the same shape the
+        // filter path below already uses for its kept values.
+        var out_window = [_]core.JSValue{out_value};
+        var rooted_out: []core.JSValue = out_window[0..1];
+        var out_slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &rooted_out }};
+        var out_frame = core.runtime.ValueRootFrame{ .slices = &out_slices };
+        out_frame.activate(ctx.runtime);
+        defer out_frame.deactivate(ctx.runtime);
+        const out = objectFromValue(out_window[0]) orelse return error.TypeError;
         var index: usize = 0;
         while (index < length) : (index += 1) {
             const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
@@ -1773,7 +1786,7 @@ pub fn typedArrayMapFilter(
             defer mapped.free(ctx.runtime);
             _ = try core.typed_array.typedArraySetIndex(ctx.runtime, out, @intCast(index), mapped);
         }
-        return out_value;
+        return out_window[0];
     }
 
     const kept = try ctx.runtime.memory.alloc(core.JSValue, length);
@@ -2726,6 +2739,14 @@ fn fastDenseArraySplice(
     // original (already duplicated into `removed`) or the undefined filler
     // above, so no destructor can run here.
     if (insert_items.len > 0) {
+        // The dense-append choke point (`appendUninitializedFastArraySlot`)
+        // remembers the owner for every ordinary push; this path reaches the
+        // storage through `fastArrayValuesMut` instead and so misses it. The
+        // tail moves above need nothing -- they relocate references the array
+        // already owned -- but these inserts are new edges into an array that
+        // may be arbitrarily old, which is what makes `a.splice(i, 1, {..})`
+        // free its own fresh elements under a minor.
+        rt.gc.rememberOwnerForBulkWrite(&object.header);
         const values = object.fastArrayValuesMut();
         for (insert_items, 0..) |item, offset| {
             const slot = &values[actual_start + offset];
@@ -3443,6 +3464,12 @@ fn fastDenseArrayUnshift(
     // Overwrite the now-stale [0, insert_count) head with fresh duplicates of
     // the arguments. The previous bits there are aliases of values that now
     // live in their moved-up slots, so they must NOT be freed here.
+    //
+    // Same omission as the splice insert loop: this grows through
+    // `fastArrayEnsureCapacity` rather than the remembering
+    // `appendUninitializedFastArraySlot`, so the new head references are edges
+    // from a possibly-old array that the minor is never told about.
+    rt.gc.rememberOwnerForBulkWrite(&object.header);
     for (args, 0..) |item, index| {
         values[index] = item.dup();
     }
@@ -5011,6 +5038,33 @@ pub const ArraySortEntry = struct {
     }
 };
 
+/// `entries` is a malloc'd ArrayList of JSValues. Conservative scan sees the
+/// buffer pointer, not the values behind it, so CLI STW needs a native window
+/// from collection through comparator/writeback.
+const SortEntryRootWindow = struct {
+    rooted_values: []core.JSValue = &.{},
+    slices: [1]core.runtime.ValueRootSlice = undefined,
+    frame: core.runtime.ValueRootFrame = .{},
+
+    fn activate(self: *@This(), rt: *core.JSRuntime, entries: []const ArraySortEntry) !void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        if (entries.len == 0) return;
+        self.rooted_values = try rt.memory.alloc(core.JSValue, entries.len);
+        for (entries, 0..) |entry, i| self.rooted_values[i] = entry.value;
+        self.slices[0] = .{ .borrowed = self.rooted_values };
+        self.frame.slices = &self.slices;
+        self.frame.activate(rt);
+    }
+
+    fn deactivate(self: *@This(), rt: *core.JSRuntime) void {
+        self.frame.deactivate(rt);
+        if (self.rooted_values.len != 0) {
+            rt.memory.free(core.JSValue, self.rooted_values);
+            self.rooted_values = &.{};
+        }
+    }
+};
+
 pub fn arraySortCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -5074,6 +5128,10 @@ pub fn arraySortCall(
         try entries.append(ctx.runtime.memory.allocator, .{ .value = value, .order = index });
         value_owned = false;
     }
+
+    var sort_window: SortEntryRootWindow = .{};
+    try sort_window.activate(ctx.runtime, entries.items);
+    defer sort_window.deactivate(ctx.runtime);
 
     try stableArraySortEntries(ctx, output, global, is_typed_method, comparator, entries.items, caller_function, caller_frame);
 
@@ -5297,6 +5355,9 @@ pub fn arrayByCopyCall(
                 item_owned = false;
             }
         }
+        var sort_window: SortEntryRootWindow = .{};
+        try sort_window.activate(ctx.runtime, entries.items);
+        defer sort_window.deactivate(ctx.runtime);
         try stableArraySortEntries(ctx, output, global, false, comparator, entries.items, caller_function, caller_frame);
         for (entries.items, 0..) |entry, sorted_index| {
             try defineArrayByCopyElement(ctx.runtime, out, sorted_index, entry.value);

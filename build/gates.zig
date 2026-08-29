@@ -28,6 +28,28 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     const test262_check_step = b.step("test262-check", "Run the full test262 suite; any failed or newly-fixed case fails the step");
     test262_check_step.dependOn(&run_test262_exec.step);
 
+    // Macro-workload completion gate. test262 cases are small and short-lived,
+    // so almost none of them survive long enough to be promoted out of the
+    // young generation, which leaves the generational write barrier largely
+    // unexercised. A macro benchmark builds a large long-lived object graph and
+    // then keeps mutating it, which is exactly that shape. The gap this closes
+    // is not hypothetical: with the tracing collector at test262 0/49778 and
+    // both unit suites green, six of the nine vendored bench-v8 runs still
+    // failed outright -- five with `InvalidBuiltinRegistry`, one with a
+    // segfault -- every one of them a live object reclaimed by a minor.
+    //
+    // It asserts completion, not a score, so it is a correctness gate and
+    // belongs here rather than under `perf-*`.
+    const run_macro_check = b.addSystemCommand(&.{ "python3", "tools/perf/bench_v8/check_completes.py" });
+    // The macro workloads are where the arena invariant broke, and where a
+    // deleted block stamp is still caught today; unit tests never recycle an
+    // arena with dirty content. A no-op in the refcounting build, which never
+    // reads the variable.
+    run_macro_check.setEnvironmentVariable("ZJS_GC_ARENA_AUDIT", "1");
+    run_macro_check.addArtifactArg(zjs_exe);
+    const macro_check_step = b.step("macro-check", "Assert every vendored bench-v8 benchmark still completes on the built zjs");
+    macro_check_step.dependOn(&run_macro_check.step);
+
     const run_architecture_deps = b.addSystemCommand(&.{
         "node",
         "tools/architecture/check_deps.js",
@@ -50,6 +72,11 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     const run_architecture_borrowed_atoms = b.addSystemCommand(&.{
         "node",
         "tools/architecture/check_borrowed_atoms.js",
+    });
+
+    const run_architecture_gc_slots = b.addSystemCommand(&.{
+        "node",
+        "tools/architecture/check_gc_slots.js",
     });
 
     // Compiler-stage boundaries: the two explicit `noinline` stages that
@@ -98,6 +125,7 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     checkpoint_gate_step.dependOn(&run_architecture_deps.step);
     checkpoint_gate_step.dependOn(&run_architecture_oom_panics.step);
     checkpoint_gate_step.dependOn(&run_architecture_borrowed_atoms.step);
+    checkpoint_gate_step.dependOn(&run_architecture_gc_slots.step);
     checkpoint_gate_step.dependOn(&run_architecture_stage_source.step);
     // The public-API surface snapshot. It used to fire only on the production
     // gate, which is why four commits on 2026-08-20 grew `JSValue`'s public
@@ -114,6 +142,7 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     engine_production_gate_step.dependOn(&run_architecture_deps.step);
     engine_production_gate_step.dependOn(&run_architecture_oom_panics.step);
     engine_production_gate_step.dependOn(&run_architecture_borrowed_atoms.step);
+    engine_production_gate_step.dependOn(&run_architecture_gc_slots.step);
     engine_production_gate_step.dependOn(&run_architecture_stage_boundaries.step);
     engine_production_gate_step.dependOn(test262_check_step);
 }

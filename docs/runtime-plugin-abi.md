@@ -285,6 +285,18 @@ When a `.js` wrapper is collected, the deferred finalizer calls the descriptor
 finalizer and releases the plugin reference. When a `.host` wrapper is
 collected, only wrapper/runtime state and the plugin reference are released.
 
+Implementation status (2026-08-28): the deferred requirement is implemented
+for plugin `.js` wrappers. Construction reserves queue and temporary-root
+capacity before publishing the payload. Object teardown transfers the payload
+to `DeferredClassPayloadFinalizer` without allocation; the wrapper's tracer
+edges remain roots through the live-wrapper, queued-job, and active-job states.
+The callback runs after the collector phase returns to idle, with its exact
+class/DSO generation pinned. Allocation and mutation reentry are supported;
+an explicit nested GC request remains pending until the active callback and
+destruction morgue have exited. The ReleaseFast regression covers a child
+reachable only through the dead wrapper tracer, plus payload read/mutation and
+allocation from the finalizer.
+
 Tracers run synchronously during GC marking. They may only mark JavaScript
 values through the provided visitor. They must not allocate JavaScript objects,
 execute JavaScript, call plugin bindings, release native resources, modify the

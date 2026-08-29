@@ -111,6 +111,19 @@ pub const EngineOptionInputs = struct {
     force_gc: bool,
     ownership_audit: bool,
     dossier_layout_pad: usize,
+    /// Resolved collector implementation, after build.zig has enforced the
+    /// public selector boundary. `rc` is the production default and must not
+    /// change generated machine code. `shadow` additionally compiles the
+    /// non-reclaiming observer in `src/core/gc_shadow.zig`. `trace_stw` can be
+    /// resolved only from `-Dzjs_experimental_gc=trace_stw` and compiles the
+    /// experimental stop-the-world tracer in `gc_trace_stw.zig`.
+    zjs_gc: []const u8,
+    /// Full-every-2 sticky-major experiment. False in every default artifact;
+    /// trace-only validation builds opt in explicitly.
+    experimental_gc_sticky_major: bool,
+    /// Pass-B corpse census. Measurement-only, comptime-erased when false;
+    /// no default artifact enables it.
+    experimental_gc_corpse_census: bool,
 
     pub fn withExpect(self: EngineOptionInputs, expect_config: []const u8) EngineOptionInputs {
         var out = self;
@@ -128,6 +141,9 @@ pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.O
     options.addOption(bool, "zjs_force_gc", in.force_gc);
     options.addOption(bool, "zjs_ownership_audit", in.ownership_audit);
     options.addOption(usize, "zjs_dossier_layout_pad", in.dossier_layout_pad);
+    options.addOption([]const u8, "zjs_gc", in.zjs_gc);
+    options.addOption(bool, "zjs_experimental_gc_sticky_major", in.experimental_gc_sticky_major);
+    options.addOption(bool, "zjs_experimental_gc_corpse_census", in.experimental_gc_corpse_census);
     return options;
 }
 

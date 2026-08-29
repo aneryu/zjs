@@ -223,7 +223,13 @@ pub const EventLoop = struct {
             }
             var callback = timer.callback.dup();
             defer callback.free(rt);
-            var callback_root_frame = core.runtime.rootValues(.{&callback});
+            // A one-shot timer leaves the EventLoop RootProvider before call
+            // dispatch reaches its pre-invocation interrupt/GC poll. Publish
+            // the detached callback as a native window; scalar root scopes
+            // are intentionally erased in production tracing builds.
+            var callback_root_values = [_]core.JSValue{callback};
+            var callback_root_slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &callback_root_values }};
+            var callback_root_frame = core.runtime.ValueRootFrame{ .slices = &callback_root_slices };
             callback_root_frame.activate(rt);
             defer callback_root_frame.deactivate(rt);
             const timer_id = timer.id;
@@ -1003,4 +1009,75 @@ test "EventLoop roots one-shot function bytecode timer callback after dequeue" {
     callback_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+}
+
+const OneShotTimerShadowProbe = struct {
+    context: *core.JSContext,
+    loop: *EventLoop,
+    callback_header: *core.gc.Header,
+    poll_count: usize = 0,
+    observed_dequeued_poll: bool = false,
+    callback_exact: bool = false,
+
+    fn run(rt: *core.JSRuntime, userdata: ?*anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        self.poll_count += 1;
+        if (self.loop.timers.len != 0) {
+            self.context.interrupt_counter = 1;
+            return false;
+        }
+        if (!self.observed_dequeued_poll) {
+            self.observed_dequeued_poll = true;
+            self.callback_exact = core.gc_shadow.isExactReachable(
+                rt,
+                self.callback_header,
+            ) catch false;
+        }
+        return false;
+    }
+};
+
+test "shadow census sees one-shot timer callback at pre-invocation poll" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        const bytecode = @import("../bytecode.zig");
+
+        const rt = try zjs.JSRuntime.create(std.testing.allocator);
+        const ctx = try zjs.JSContext.create(rt);
+        const global = try ctx.globalObject();
+        defer {
+            ctx.destroy();
+            rt.destroy();
+        }
+
+        var loop = EventLoop.init(ctx, .{});
+        defer loop.deinit();
+
+        const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+            .realm = ctx.core,
+            .flags = .{ .func_kind = .generator },
+        });
+        var fb_published = false;
+        errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
+        fb.publishFixtureNoFail(rt);
+        fb_published = true;
+
+        const callback = zjs.JSValue.functionBytecode(&fb.header);
+        defer callback.free(rt);
+        try loop.enqueueTimer(ctx.core, 1, callback, 0, false);
+
+        var probe = OneShotTimerShadowProbe{
+            .context = ctx.core,
+            .loop = &loop,
+            .callback_header = &fb.header,
+        };
+        rt.setInterruptHandler(OneShotTimerShadowProbe.run, &probe);
+        defer rt.setInterruptHandler(null, null);
+        ctx.core.interrupt_counter = 1;
+
+        try std.testing.expect(try loop.runNextTimer(ctx.core, null, global));
+        try std.testing.expect(probe.poll_count != 0);
+        try std.testing.expect(probe.observed_dequeued_poll);
+        try std.testing.expect(probe.callback_exact);
+    }
 }

@@ -636,6 +636,11 @@ fn createOpaqueObjectValue(ctx: *core.JSContext, plugin: *InstalledPlugin, objec
     errdefer if (plugin_owner_pending) plugin.release();
     const host_class = hostClassForType(plugin, object.type_id) orelse return error.UnknownHostObjectType;
     const rt = ctx.runtimePtr();
+    const defer_user_finalizer = host_class.descriptor.owner == .js and
+        host_class.descriptor.finalizer != null;
+    if (defer_user_finalizer) try rt.reserveDeferredClassPayloadFinalizerSlot();
+    var finalizer_reservation_pending = defer_user_finalizer;
+    errdefer if (finalizer_reservation_pending) rt.releaseDeferredClassPayloadFinalizerSlot();
     const prototype = ctx.classPrototypeObject(host_class.class_id);
     const wrapper = try core.Object.create(rt, host_class.class_id, prototype);
     errdefer wrapper.value().free(rt);
@@ -648,6 +653,10 @@ fn createOpaqueObjectValue(ctx: *core.JSContext, plugin: *InstalledPlugin, objec
         .object = object,
     };
     wrapper.installExternalClassPayload(@ptrCast(payload));
+    if (defer_user_finalizer) {
+        rt.registerReservedDeferredClassPayloadRoot(wrapper);
+        finalizer_reservation_pending = false;
+    }
     plugin_owner_pending = false;
     return wrapper.value();
 }
@@ -683,10 +692,36 @@ fn isOpaqueHostObjectClass(rt: *core.JSRuntime, object: *const core.Object) bool
 }
 
 fn opaquePayloadFinalizer(runtime: *anyopaque, object: *anyopaque, class_payload: *core.class.Payload) void {
-    _ = object;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
     const payload = opaquePayload(class_payload) orelse return;
     const plugin = payload.plugin;
+    // A user callback is reentrant and cannot run from tracer_destroy. Every
+    // such wrapper reserved both queue and temporary-root capacity before its
+    // payload was published. Transfer the detached payload to that no-fail
+    // node; the queued job's copied mark hook takes over root ownership before
+    // the live-wrapper registry is removed.
+    if (payload.descriptor.owner == .js and payload.descriptor.finalizer != null and
+        !rt.isActiveDeferredClassPayloadFinalizerCallback(object))
+    {
+        const wrapper: *core.Object = @ptrCast(@alignCast(object));
+        const definition = rt.classes.destructionPlan(wrapper.class_id) orelse unreachable;
+        const queued = rt.enqueueReservedDeferredClassPayloadFinalizer(
+            wrapper.class_id,
+            definition.generation,
+            class_payload.*,
+            wrapper.flags.class_payload_kind,
+            @intFromPtr(wrapper),
+        );
+        rt.unregisterDeferredClassPayloadRoot(wrapper);
+        if (queued) {
+            class_payload.* = null;
+            return;
+        }
+        // The live object's generation pin makes failure unreachable. Keep a
+        // synchronous fallback for release builds so an impossible stale
+        // class record cannot leak the native payload.
+        std.debug.assert(false);
+    }
     // The payload owns a plugin reference, so unload cannot have started.
     // Pin the DSO separately because releasing that last owner below may begin
     // class unregistration while this callback is still returning through it.
@@ -1115,6 +1150,56 @@ test "runtime Plugin loads a dynamic library and installs its binding" {
     const result = try ctx.eval("native.add(20, 22)", .{});
     defer result.free(rt);
     try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "runtime Plugin fixture shadow census after install and eval" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        const fixture_path = try testFixturePath(std.testing.allocator, build_options.runtime_plugin_fixture_path);
+        defer std.testing.allocator.free(fixture_path);
+
+        var plugin = try Plugin.load(std.testing.allocator, fixture_path);
+        defer plugin.deinit();
+
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try zjs.JSContext.create(rt);
+        defer ctx.destroy();
+
+        const target = try core.Object.create(rt, core.class.ids.object, null);
+        const target_value = target.value();
+        defer target_value.free(rt);
+
+        try plugin.install(ctx.core, target_value, .{});
+
+        const global = try ctx.globalObject();
+        const native_atom = try rt.internAtom("native");
+        defer rt.atoms.free(native_atom);
+        try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
+
+        const result = try ctx.eval(
+            \\native.add(20, 22);
+            \\native.add(1, 2);
+            \\const add = native.add;
+            \\add(3, 4);
+        , .{});
+        defer result.free(rt);
+        try std.testing.expectEqual(@as(i32, 7), result.asInt32().?);
+
+        core.gc_shadow.quiesce(rt);
+        const report = try core.gc_shadow.run(rt);
+        var buf: [2048]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try report.format(&w);
+        std.debug.print(
+            \\
+            \\plugin DSO fixture (no host tracer; opaquePayloadMark no-op):
+            \\{s}
+            \\
+        , .{w.buffered()});
+        try std.testing.expectEqual(@as(usize, 0), report.unexplained);
+        try std.testing.expect(report.allocated >= 1);
+    }
 }
 
 test "runtime Plugin load owns a path copy independent from caller storage" {
@@ -1905,12 +1990,13 @@ test "runtime Plugin failed raw CallFrame calls do not free borrowed result valu
     defer retained_sentinel.free(rt);
     defer sentinel_value.free(rt);
 
-    const before_rc = sentinel.header.meta().rc;
+    const before_rc = if (comptime core.gc.trace_stw_enabled) 0 else core.gc.headerRefCount(&sentinel.header);
     var args = [_]core.JSValue{sentinel_value};
     try std.testing.expectError(error.JSException, exec.call.callValue(ctx.core, null, fail_value, &args));
     try std.testing.expect(ctx.hasException());
     ctx.clearException();
-    try std.testing.expectEqual(before_rc, sentinel.header.meta().rc);
+    if (comptime !core.gc.trace_stw_enabled)
+        try std.testing.expectEqual(before_rc, core.gc.headerRefCount(&sentinel.header));
 }
 
 test "runtime Plugin maps unknown status values to generic errors" {
@@ -2454,7 +2540,198 @@ test "runtime Plugin host services create and unwrap opaque host objects" {
     try std.testing.expectEqual(@as(usize, 1), Hooks.finalizer_calls);
 }
 
-test "runtime Plugin synchronous opaque wrapper finalizers release traced payload roots before free returns" {
+test "runtime Plugin finalizer reentry mutates, allocates, and does not nest GC" {
+    const State = struct {
+        rt: *core.JSRuntime,
+        live_target: *core.Object,
+        mutation_atom: core.Atom,
+        payload_read_atom: core.Atom,
+        payload_mutation_atom: core.Atom,
+        payload_child: core.JSValue = core.JSValue.undefinedValue(),
+        allocated: ?*core.Object = null,
+        finalizer_calls: usize = 0,
+        payload_read_succeeded: bool = false,
+        payload_mutation_succeeded: bool = false,
+        active_root_saw_payload: bool = false,
+        callback_observed_collector_idle: bool = false,
+        mutation_succeeded: bool = false,
+        allocation_succeeded: bool = false,
+        nested_collection_started: bool = false,
+        nested_collection_failed: bool = false,
+
+        const type_id = ffi.HostTypeId.named("test.RuntimeOpaqueFinalizerGcReentry");
+        var active: ?*@This() = null;
+
+        fn finalize(context: ?*anyopaque, object: ffi.OpaqueHostObject) callconv(.c) void {
+            _ = context;
+            _ = object;
+            const self = active orelse return;
+            self.finalizer_calls += 1;
+            self.callback_observed_collector_idle = self.rt.gc.phase == .none and !self.rt.gc_running;
+            defer {
+                self.payload_child.free(self.rt);
+                self.payload_child = core.JSValue.undefinedValue();
+            }
+
+            const payload_child = core.value_semantics.objectFromValue(self.payload_child) orelse return;
+            const Counter = struct {
+                expected: *core.gc.Header,
+                count: usize = 0,
+
+                fn visitValue(context_ptr: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+                    const counter: *@This() = @ptrCast(@alignCast(context_ptr));
+                    if (slot.cycleMarkHeader() == counter.expected) counter.count += 1;
+                }
+
+                fn visitObject(_: *anyopaque, _: *?*core.Object) core.runtime.RootTraceError!void {}
+            };
+            var counter = Counter{ .expected = &payload_child.header };
+            var visitor = core.runtime.RootVisitor{
+                .context = @ptrCast(&counter),
+                .visit_value = Counter.visitValue,
+                .visit_object = Counter.visitObject,
+            };
+            self.rt.traceActiveRoots(&visitor) catch return;
+            self.active_root_saw_payload = counter.count != 0;
+
+            const observed = payload_child.getProperty(self.payload_read_atom) catch return;
+            defer observed.free(self.rt);
+            self.payload_read_succeeded = observed.asInt32() == @as(?i32, 7);
+            payload_child.defineOwnProperty(
+                self.rt,
+                self.payload_mutation_atom,
+                core.Descriptor.data(core.JSValue.int32(9), true, true, true),
+            ) catch return;
+            self.payload_mutation_succeeded = true;
+
+            self.live_target.defineOwnProperty(
+                self.rt,
+                self.mutation_atom,
+                core.Descriptor.data(core.JSValue.int32(42), true, true, true),
+            ) catch return;
+            self.mutation_succeeded = true;
+
+            const allocated = core.Object.create(self.rt, core.class.ids.object, null) catch return;
+            self.allocated = allocated;
+            self.allocation_succeeded = true;
+
+            const collections_before = self.rt.gcStats().collections;
+            _ = self.rt.forceMajorGC(null) catch {
+                self.nested_collection_failed = true;
+                return;
+            };
+            self.nested_collection_started = self.rt.gcStats().collections != collections_before;
+        }
+
+        fn trace(context: ?*anyopaque, object: ffi.OpaqueHostObject, visitor: *ffi.HostTraceVisitor) callconv(.c) void {
+            _ = context;
+            _ = object;
+            const self = active orelse return;
+            visitor.value(&self.payload_child);
+        }
+
+        fn make(frame: *ffi.CallFrame) ffi.Status {
+            const services = (frame.services orelse return .unsupported).opaqueObjectServices() orelse return .unsupported;
+            const self = active orelse return .type_error;
+            return services.create(frame, ffi.OpaqueHostObject.from(@ptrCast(self), type_id), &frame.result);
+        }
+    };
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    const target_value = target.value();
+    defer target_value.free(rt);
+    const mutation_atom = try rt.internAtom("finalizerReentered");
+    defer rt.atoms.free(mutation_atom);
+    const payload_read_atom = try rt.internAtom("payloadRead");
+    defer rt.atoms.free(payload_read_atom);
+    const payload_mutation_atom = try rt.internAtom("payloadMutated");
+    defer rt.atoms.free(payload_mutation_atom);
+
+    const payload_child = try core.Object.create(rt, core.class.ids.object, null);
+    try payload_child.defineOwnProperty(
+        rt,
+        payload_read_atom,
+        core.Descriptor.data(core.JSValue.int32(7), true, true, true),
+    );
+    const payload_child_header = &payload_child.header;
+
+    var state = State{
+        .rt = rt,
+        .live_target = target,
+        .mutation_atom = mutation_atom,
+        .payload_read_atom = payload_read_atom,
+        .payload_mutation_atom = payload_mutation_atom,
+        .payload_child = payload_child.value().dup(),
+    };
+    payload_child.value().free(rt);
+    State.active = &state;
+    defer {
+        State.active = null;
+        state.payload_child.free(rt);
+    }
+
+    const TestPlugin = ffi.Plugin("runtime-opaque-finalizer-gc-reentry-test", .{
+        ffi.hostObject("RuntimeOpaqueFinalizerGcReentry", State.type_id, .{
+            .owner = .js,
+            .finalizer = State.finalize,
+            .tracer = State.trace,
+        }),
+        ffi.binding("make", State.make),
+    });
+    try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{});
+
+    const make_atom = try rt.internAtom("make");
+    defer rt.atoms.free(make_atom);
+    const make_value = try target.getProperty(make_atom);
+    defer make_value.free(rt);
+    const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
+
+    var target_slot: ?*core.Object = target;
+    var roots = core.runtime.rootObjects(.{ &target_slot, &state.allocated });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    wrapper.free(rt);
+    if (comptime core.gc.trace_stw_enabled) _ = try rt.forceMajorGC(null);
+
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
+    try std.testing.expect(rt.gc.containsHeader(payload_child_header));
+
+    // The first object allocation after the collector becomes idle is the
+    // production drain boundary. The callback itself allocates and requests a
+    // major; that request must stay pending until the active job/root exits,
+    // then the outer allocation boundary is allowed to service it.
+    const trigger = try core.Object.create(rt, core.class.ids.object, null);
+    trigger.value().free(rt);
+
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
+    try std.testing.expect(state.payload_read_succeeded);
+    try std.testing.expect(state.payload_mutation_succeeded);
+    try std.testing.expect(state.active_root_saw_payload);
+    try std.testing.expect(state.callback_observed_collector_idle);
+    try std.testing.expect(state.payload_child.isUndefined());
+    try std.testing.expect(state.mutation_succeeded);
+    try std.testing.expect(state.allocation_succeeded);
+    try std.testing.expect(!state.nested_collection_failed);
+    try std.testing.expect(!state.nested_collection_started);
+
+    const mutated = try target.getProperty(mutation_atom);
+    defer mutated.free(rt);
+    try std.testing.expectEqual(@as(?i32, 42), mutated.asInt32());
+    try std.testing.expect(state.allocated != null);
+    try std.testing.expect(rt.ownsObject(state.allocated.?));
+    state.allocated.?.value().free(rt);
+    state.allocated = null;
+}
+
+test "runtime Plugin deferred opaque wrapper finalizers keep traced payload roots alive" {
     const State = struct {
         rt: *core.JSRuntime,
         slot: core.JSValue = core.JSValue.undefinedValue(),
@@ -2522,21 +2799,174 @@ test "runtime Plugin synchronous opaque wrapper finalizers release traced payloa
     defer make_value.free(rt);
 
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
+    // `target` carries the installed plugin and owns `make_value`; both are
+    // held only by Zig locals, which the declared-roots scan does not see, so
+    // every collection here would sweep them and leave the frees below
+    // reading torn-down headers.
+    var target_slot: ?*core.Object = target;
+    var target_roots = core.runtime.rootObjects(.{&target_slot});
+    target_roots.activate(rt);
+    defer target_roots.deactivate(rt);
+    // The wrapper is held only by this Zig local; the declared-roots
+    // whole-heap collection below needs it named or the sweep finalizes it
+    // early. Deactivated before the release phase whose finalizer-count
+    // assertions are the behavior under test.
+    var wrapper_slot: ?*core.Object = core.value_semantics.objectFromValue(wrapper).?;
+    var wrapper_roots = core.runtime.rootObjects(.{&wrapper_slot});
+    wrapper_roots.activate(rt);
+    var wrapper_roots_active = true;
+    defer if (wrapper_roots_active) wrapper_roots.deactivate(rt);
     _ = try rt.forceMajorGC(null);
     try std.testing.expect(state.trace_calls > 0);
     try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
 
+    wrapper_roots.deactivate(rt);
+    wrapper_roots_active = false;
     wrapper.free(rt);
-    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
-    try std.testing.expect(state.slot.isUndefined());
-    try std.testing.expect(!rt.gc.containsHeader(child_header));
+    // Under tracing, the collection that reaches the unrooted wrapper must
+    // detach a deferred finalizer job without first reclaiming the payload's
+    // declared child roots.
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
+    try std.testing.expect(state.slot.isObject());
+    try std.testing.expect(rt.gc.containsHeader(child_header));
+    if (comptime core.gc.block_heap_enabled) {
+        // Contract with clustered doomed draining/hot-block publication: the
+        // payload child may share a block with dead neighbours, but its root
+        // must keep its own cell allocated and out of the doomed intervals
+        // that a publisher exposes for reuse.
+        const cell_addr = @intFromPtr(child_header) - core.gc.metadata_prefix_size;
+        const block = rt.gc.block_heap.blockOf(@ptrFromInt(cell_addr)) orelse unreachable;
+        const cell_index = block.cellIndex(cell_addr) orelse unreachable;
+        try std.testing.expect(block.cellAllocated(cell_index));
+        try std.testing.expect(!block.isDoomed(cell_index));
+        try rt.verifyDeferredClassPayloadRootLiveness();
+    }
 
     rt.drainDeferredClassPayloadFinalizers();
     try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
+    try std.testing.expect(state.slot.isUndefined());
 }
 
-test "runtime Plugin closes only after synchronous wrapper callbacks release the class generation" {
+test "runtime Plugin opaque tracer is a legacy mark hook during shadow census" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        const State = struct {
+            rt: *core.JSRuntime,
+            slot: core.JSValue = core.JSValue.undefinedValue(),
+            trace_calls: usize = 0,
+            finalizer_calls: usize = 0,
+
+            const type_id = ffi.HostTypeId.named("test.RuntimeOpaqueShadowTrace");
+            var active: ?*@This() = null;
+
+            fn finalize(context: ?*anyopaque, object: ffi.OpaqueHostObject) callconv(.c) void {
+                _ = context;
+                _ = object;
+                const self = active orelse return;
+                self.finalizer_calls += 1;
+                self.slot.free(self.rt);
+                self.slot = core.JSValue.undefinedValue();
+            }
+
+            fn trace(context: ?*anyopaque, object: ffi.OpaqueHostObject, visitor: *ffi.HostTraceVisitor) callconv(.c) void {
+                _ = context;
+                _ = object;
+                const self = active orelse return;
+                self.trace_calls += 1;
+                visitor.value(&self.slot);
+            }
+
+            fn make(frame: *ffi.CallFrame) ffi.Status {
+                const services = (frame.services orelse return .unsupported).opaqueObjectServices() orelse return .unsupported;
+                const self = active orelse return .type_error;
+                return services.create(frame, ffi.OpaqueHostObject.from(@ptrCast(self), type_id), &frame.result);
+            }
+        };
+
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try zjs.JSContext.create(rt);
+        const state = try std.testing.allocator.create(State);
+        state.* = .{ .rt = rt };
+        State.active = state;
+        defer {
+            State.active = null;
+            std.testing.allocator.destroy(state);
+        }
+        defer ctx.destroy();
+
+        const child = try core.Object.create(rt, core.class.ids.object, null);
+        const child_header = &child.header;
+        state.slot = child.value().dup();
+        child.value().free(rt);
+
+        const TestPlugin = ffi.Plugin("runtime-opaque-shadow-trace-test", .{
+            ffi.hostObject("RuntimeOpaqueShadowTrace", State.type_id, .{
+                .owner = .js,
+                .finalizer = State.finalize,
+                .tracer = State.trace,
+            }),
+            ffi.binding("make", State.make),
+        });
+
+        const target = try core.Object.create(rt, core.class.ids.object, null);
+        const target_value = target.value();
+        defer target_value.free(rt);
+        try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{});
+
+        const global = try ctx.globalObject();
+        const native_atom = try rt.internAtom("native");
+        defer rt.atoms.free(native_atom);
+        try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
+
+        const wrapper = try ctx.eval("native.make()", .{});
+        const wrapper_atom = try rt.internAtom("wrapper");
+        defer rt.atoms.free(wrapper_atom);
+        try global.defineOwnProperty(rt, wrapper_atom, core.Descriptor.data(wrapper, true, true, true));
+        wrapper.free(rt);
+
+        core.gc_shadow.quiesce(rt);
+        const after_quiesce = state.trace_calls;
+        const report = try core.gc_shadow.run(rt);
+        const shadow_trace_calls = state.trace_calls - after_quiesce;
+
+        var child_in_sample = false;
+        var child_class: ?core.gc_shadow.UnexplainedClass = null;
+        for (report.sample()) |item| {
+            if (item.header == child_header) {
+                child_in_sample = true;
+                child_class = item.class;
+            }
+        }
+
+        var buf: [2048]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try report.format(&w);
+        std.debug.print(
+            \\
+            \\plugin opaque tracer (legacy reentrant payload_mark):
+            \\  after_quiesce_trace_calls={d} shadow_trace_calls={d} child_in_sample={s} child_class={s}
+            \\{s}
+            \\
+        , .{
+            after_quiesce,
+            shadow_trace_calls,
+            if (child_in_sample) "yes" else "no",
+            if (child_class) |class| @tagName(class) else "reachable",
+            w.buffered(),
+        });
+
+        // Shadow currently walks markClassPayload, so this class is the §6.1
+        // disable: a legacy reentrant tracer, not an engine-managed root.
+        try std.testing.expect(shadow_trace_calls > 0);
+        try std.testing.expect(!child_in_sample);
+        try std.testing.expectEqual(@as(usize, 0), report.unexplained);
+    }
+}
+
+test "runtime Plugin closes only after deferred wrapper callbacks release the class generation" {
     const State = struct {
         rt: *core.JSRuntime,
         ctx: *core.JSContext,
@@ -2617,20 +3047,31 @@ test "runtime Plugin closes only after synchronous wrapper callbacks release the
     plugin.release();
     staging_owner_live = false;
     wrapper.free(rt);
+    // Releasing the last wrapper reference enqueues under refcounting; under
+    // the tracer the collection that reaches the now-unrooted wrapper does.
+    // In both modes the plugin remains open until the deferred callback drops
+    // the payload's owner and exact class-generation pin.
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
 
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), state.close_count);
+    try std.testing.expect(rt.classes.isRegistered(state.class_id));
+
+    rt.drainDeferredClassPayloadFinalizers();
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), state.close_count);
     try std.testing.expect(state.finalizer_order < state.close_order);
     try std.testing.expectEqual(@as(usize, 0), state.callbacks_after_close);
-    try std.testing.expectEqual(@as(usize, 0), state.trace_calls);
+    if (comptime core.gc.trace_stw_enabled) {
+        try std.testing.expect(state.trace_calls > 0);
+    } else {
+        try std.testing.expectEqual(@as(usize, 0), state.trace_calls);
+    }
     try std.testing.expect(state.close_saw_drained_pins);
     try std.testing.expect(state.close_saw_class_removed);
     try std.testing.expect(state.close_saw_slot_cleared);
-
-    rt.drainDeferredClassPayloadFinalizers();
-    try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 1), state.close_count);
 }
 
 test "runtime Plugin cycle finalizer skips condemned Realm and clears remaining class slots" {
@@ -2716,6 +3157,11 @@ test "runtime Plugin cycle finalizer skips condemned Realm and clears remaining 
     try std.testing.expectEqual(dead_core, rt.firstContext().?);
 
     try std.testing.expect(rt.runObjectCycleRemoval() > 0);
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), state.close_count);
+
+    rt.drainDeferredClassPayloadFinalizers();
     try std.testing.expectEqual(live.core, rt.firstContext().?);
     try std.testing.expect(live.core.classPrototypeObject(class_id) == null);
     try std.testing.expect(constructing.classPrototypeObject(class_id) == null);
@@ -2724,7 +3170,7 @@ test "runtime Plugin cycle finalizer skips condemned Realm and clears remaining 
     try std.testing.expect(!rt.classes.isRegistered(class_id));
 }
 
-test "runtime Plugin runtime destroy does not repeat synchronous opaque wrapper finalizers" {
+test "runtime Plugin runtime destroy drains opaque wrapper finalizers exactly once" {
     const State = struct {
         finalizer_calls: usize = 0,
 
@@ -2768,8 +3214,19 @@ test "runtime Plugin runtime destroy does not repeat synchronous opaque wrapper 
     const make_value = try target.getProperty(make_atom);
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
     wrapper.free(rt);
-    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
+    // The release enqueues under refcounting; under the tracer the collection
+    // that reaches the unrooted wrapper does. The point of the test is that
+    // runtime teardown drains that job once and does not repeat it. `target`
+    // owns the installed plugin and the `make` function and is held only by a
+    // Zig local, so the declared-roots scan needs it named or this collection
+    // sweeps it out from under the frees below.
+    var target_slot: ?*core.Object = target;
+    var target_roots = core.runtime.rootObjects(.{&target_slot});
+    target_roots.activate(rt);
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
+    target_roots.deactivate(rt);
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
 
     make_value.free(rt);
     rt.atoms.free(make_atom);
@@ -2837,10 +3294,18 @@ test "runtime Plugin host-owned opaque wrappers can trace without taking ownersh
     defer make_value.free(rt);
 
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
+    // Same declared-roots contract as the sibling finalizer test above.
+    var wrapper_slot: ?*core.Object = core.value_semantics.objectFromValue(wrapper).?;
+    var wrapper_roots = core.runtime.rootObjects(.{&wrapper_slot});
+    wrapper_roots.activate(rt);
+    var wrapper_roots_active = true;
+    defer if (wrapper_roots_active) wrapper_roots.deactivate(rt);
     _ = try rt.forceMajorGC(null);
     try std.testing.expect(state.trace_calls > 0);
     const live_trace_calls = state.trace_calls;
 
+    wrapper_roots.deactivate(rt);
+    wrapper_roots_active = false;
     wrapper.free(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
 

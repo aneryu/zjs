@@ -246,7 +246,7 @@ pub const object = struct {
         for (shape_props, 0..) |shape_prop, i| {
             const flags = zjs_core.property.Flags.fromBits(shape_prop.flags);
             if (flags.deleted or flags.isAccessor()) continue;
-            const stored = switch (core_obj.prop_values[i].slot) {
+            const stored = switch (core_obj.propertyEntry(i).*.slot) {
                 .data => |value_slot| value_slot,
                 else => continue,
             };

@@ -1304,7 +1304,13 @@ fn defineConstructor(
         constructorOwnPropertyCapacity(kind, static_methods.len),
     );
     errdefer constructor_value.free(rt);
-    const constructor = expectObjectAssumeBootstrap(constructor_value);
+    // Prototype/method intern can collect before `.prototype` and the global
+    // property exist. Exact-mark tests do not treat this Zig local as a root.
+    var live_constructor = constructor_value;
+    var constructor_roots = core.runtime.rootValues(.{&live_constructor});
+    constructor_roots.activate(rt);
+    defer constructor_roots.deactivate(rt);
+    const constructor = expectObjectAssumeBootstrap(live_constructor);
 
     if (kind != .proxy) {
         const prototype_capacity = prototypeOwnPropertyCapacity(kind, prototype_methods.len);
@@ -1371,9 +1377,9 @@ fn defineConstructor(
         // JS_SetConstructor2 appends the prototype back-reference only after
         // its own function-list fields have been installed.
         if (prototype.isArray())
-            try defineData(rt, prototype, "constructor", constructor_value, method_flags)
+            try defineData(rt, prototype, "constructor", live_constructor, method_flags)
         else
-            try defineDataAssumingNew(rt, prototype, "constructor", constructor_value, method_flags);
+            try defineDataAssumingNew(rt, prototype, "constructor", live_constructor, method_flags);
         // Constructor is freshly created above; "prototype" is unique among its
         // existing visible properties. For most constructors those are only
         // length/name; Number intentionally has its static fields first.
@@ -1386,8 +1392,8 @@ fn defineConstructor(
     // Other callers of `defineConstructor` are absent today (this entry
     // point is internal to bootstrap); add a duplicate-tolerant
     // wrapper here if that ever changes.
-    try defineDataAssumingNew(rt, global, name, constructor_value, global_flags);
-    return constructor_value;
+    try defineDataAssumingNew(rt, global, name, live_constructor, global_flags);
+    return live_constructor;
 }
 
 fn isErrorConstructorKind(kind: ConstructorKind) bool {
@@ -1656,7 +1662,11 @@ fn installStandardConstructors(
         prototypeOwnPropertyCapacity(.object, object_prototype.len),
     )).value();
     defer object_proto_value.free(rt);
-    const object_proto = expectObjectAssumeBootstrap(object_proto_value);
+    var live_object_proto = object_proto_value;
+    var object_proto_roots = core.runtime.rootValues(.{&live_object_proto});
+    object_proto_roots.activate(rt);
+    defer object_proto_roots.deactivate(rt);
+    const object_proto = expectObjectAssumeBootstrap(live_object_proto);
 
     const function_proto_value = try core.function.nativeFunctionWithPrototypeAndCapacity(
         realm,
@@ -1666,7 +1676,11 @@ fn installStandardConstructors(
         prototypeOwnPropertyCapacity(.function, function_prototype.len),
     );
     defer function_proto_value.free(rt);
-    const function_proto = expectObjectAssumeBootstrap(function_proto_value);
+    var live_function_proto = function_proto_value;
+    var function_proto_roots = core.runtime.rootValues(.{&live_function_proto});
+    function_proto_roots.activate(rt);
+    defer function_proto_roots.deactivate(rt);
+    const function_proto = expectObjectAssumeBootstrap(live_function_proto);
     try global.setCachedFunctionProto(rt, function_proto);
 
     try installStandardConstructorWithPrototype(rt, global, constructors, "Object", .object, 1, &object_static, &object_prototype, object_proto);
@@ -1729,6 +1743,13 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     configureRuntime(rt);
     rt.materialize_builtin_namespace_cb = materializeBuiltinNamespace;
     rt.internal_builtins = &internal_builtins.table;
+    // Constructing realms are not roots via `context_head`. Name the global
+    // for the bootstrap window so properties published onto it stay live
+    // under exact-mark (test-oom STW canary).
+    var global_holder: ?*core.Object = global;
+    var global_roots = core.runtime.rootObjects(.{&global_holder});
+    global_roots.activate(rt);
+    defer global_roots.deactivate(rt);
     try global.reserveOwnPropertyCapacityAssumingPlain(rt, standardGlobalOwnPropertyCapacity());
     var installed_constructors: [constructor_kind_count]?*core.Object = @splat(null);
     try installStandardConstructors(rt, global, &installed_constructors);
@@ -1955,7 +1976,7 @@ fn bindMaterializedNativeRecordByAtom(
 fn bindAutoInitNativeRecordByAtom(_: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, native_id: i32) bool {
     if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
-        const entry = &object.prop_values[property_index];
+        const entry = object.propertyEntry(property_index);
         switch (object.propKindAt(property_index)) {
             .auto_init => {
                 const info = core.property.autoInit(entry.slot.auto_init);
@@ -3748,7 +3769,7 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
         defer freeTemporaryStringAtom(rt, atom_id);
         const property_index = proto.findProperty(atom_id) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(core.property.Kind.accessor, proto.propKindAt(property_index));
-        const getter = proto.prop_values[property_index].slot.accessor.getterValue();
+        const getter = proto.propertyEntry(property_index).*.slot.accessor.getterValue();
         const getter_object = expectObjectAssumeBootstrap(getter);
         try std.testing.expectEqual(expected.owner_class, getter_object.collectionMethodOwnerClass());
         try std.testing.expectEqual(
@@ -3789,7 +3810,7 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
         defer freeTemporaryStringAtom(rt, disposed_atom);
         const property_index = proto.findProperty(disposed_atom) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(core.property.Kind.accessor, proto.propKindAt(property_index));
-        const getter = proto.prop_values[property_index].slot.accessor.getterValue();
+        const getter = proto.propertyEntry(property_index).*.slot.accessor.getterValue();
         if (expected.is_async) {
             try std.testing.expectEqual(@as(u8, 6), expectObjectAssumeBootstrap(getter).asyncDisposableStackMethod());
         } else {

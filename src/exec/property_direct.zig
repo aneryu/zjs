@@ -122,7 +122,7 @@ pub fn functionOwnNativeBuiltinRefForFastPath(
         if (prop_flags.isAccessor()) return null;
         switch (object.propKindAt(index)) {
             .data => {
-                return nativeBuiltinRefFromFunctionValue(object.prop_values[index].slot.data);
+                return nativeBuiltinRefFromFunctionValue(object.propertyEntry(index).*.slot.data);
             },
             .auto_init => {
                 const materialized = try object.getProperty(atom_id);
@@ -200,7 +200,7 @@ fn fastImmediatePrototypeDataPropertyLookupForObject(rt: *core.JSRuntime, object
 fn fastOwnOrdinaryDataPropertyLookupForObject(object: *core.Object, atom_id: core.Atom) FastOwnDataLookup {
     const index = object.findProperty(atom_id) orelse return .missing;
     return switch (object.propKindAt(index)) {
-        .data => .{ .value = .{ .index = index, .value = object.prop_values[index].slot.data } },
+        .data => .{ .value = .{ .index = index, .value = object.propertyEntry(index).*.slot.data } },
         .var_ref, .auto_init, .accessor => .slow,
     };
 }
@@ -297,7 +297,7 @@ const data_flags = core.property.Flags{ .kind = .data, .writable = true };
 fn fastOwnOrdinaryDataPropertyBorrowedValue(object: *core.Object, atom_id: core.Atom) FastOwnDataResult {
     const index = object.findProperty(atom_id) orelse return .missing;
     return switch (object.propKindAt(index)) {
-        .data => .{ .value = object.prop_values[index].slot.data },
+        .data => .{ .value = object.propertyEntry(index).*.slot.data },
         .var_ref, .auto_init, .accessor => .slow,
     };
 }
@@ -313,8 +313,8 @@ fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id:
         } else if (cursor.class_id != core.class.ids.object and !cursor.isGlobal()) return .slow;
         if (cursor.findProperty(atom_id)) |index| {
             return switch (cursor.propKindAt(index)) {
-                .data => .{ .value = cursor.prop_values[index].slot.data },
-                .accessor => .{ .getter = cursor.prop_values[index].slot.accessor.getterValue() },
+                .data => .{ .value = cursor.propertyEntry(index).*.slot.data },
+                .accessor => .{ .getter = cursor.propertyEntry(index).*.slot.accessor.getterValue() },
                 .var_ref, .auto_init => .slow,
             };
         } else {
@@ -368,7 +368,7 @@ fn globalOwnDataPropertyBorrowedLookup(global: *core.Object, atom_id: core.Atom)
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
         if (prop_flags.isAccessor()) return null;
         if (prop_flags.kind != .data) return null;
-        return .{ .index = index, .value = global.prop_values[index].slot.data };
+        return .{ .index = index, .value = global.propertyEntry(index).*.slot.data };
     }
     return null;
 }
@@ -550,6 +550,10 @@ fn setGlobalOwnWritableDataPropertyAt(rt: *core.JSRuntime, global: *core.Object,
     const next_value = core.object.dupPropertyDataValue(&rt.atoms, atom_id, new_value);
     const old_slot = slot.entry.slot;
     slot.entry.slot = .{ .data = next_value };
+    // Updating an existing global var is a heap store like any other: the
+    // global object is long-lived, so a fresh value stored into it is an
+    // old-to-young edge the minor cannot see without the remembered set.
+    rt.gc.generationalBarrier(&global.header, next_value.cycleMarkHeader());
     core.object.destroyPropertySlot(rt, atom_id, data_flags, old_slot);
     return true;
 }
@@ -558,6 +562,7 @@ fn setGlobalOwnWritableDataPropertyAtOwned(rt: *core.JSRuntime, global: *core.Ob
     const slot = writableDataSlotAt(global, index, atom_id) orelse return false;
     const old_slot = slot.entry.slot;
     slot.entry.slot = .{ .data = new_value };
+    rt.gc.generationalBarrier(&global.header, new_value.cycleMarkHeader());
     core.object.destroyPropertySlot(rt, atom_id, data_flags, old_slot);
     return true;
 }
@@ -578,7 +583,7 @@ fn dataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot 
     const prop = object.shapeProps()[index];
     const prop_flags = core.property.Flags.fromBits(prop.flags);
     if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return null;
-    const entry = &object.prop_values[index];
+    const entry = object.propertyEntry(index);
     return .{ .entry = entry, .value = &entry.slot.data };
 }
 

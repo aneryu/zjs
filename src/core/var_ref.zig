@@ -35,6 +35,13 @@ pub const VarRef = struct {
 
     comptime {
         std.debug.assert(@offsetOf(VarRef, "header") == 0);
+        std.debug.assert(@sizeOf(VarRef) == if (gc.trace_stw_enabled) 40 else 48);
+        std.debug.assert(@alignOf(VarRef) == 8);
+        const header_bytes = @sizeOf(gc.Header);
+        std.debug.assert(@offsetOf(VarRef, "value") == header_bytes);
+        std.debug.assert(@offsetOf(VarRef, "pvalue") == header_bytes + 16);
+        std.debug.assert(@offsetOf(VarRef, "is_const") == header_bytes + 24);
+        std.debug.assert(@offsetOf(VarRef, "is_open") == header_bytes + 28);
     }
 
     pub fn createClosed(rt: anytype, initial_value: JSValue) !*VarRef {
@@ -78,11 +85,15 @@ pub const VarRef = struct {
     pub fn freeVarRef(rt: anytype, var_ref: ?*VarRef) void {
         const cell = var_ref orelse return;
         if (rt.gc.phase == .deinit) return;
-        std.debug.assert(cell.header.meta().rc > 0);
-        cell.header.meta().rc -= 1;
-        if (cell.header.meta().rc != 0) return;
+        // The tracer owns cells now (`destroyCondemned` frees them in the same
+        // ordered pass as everything else), so the count is not maintained and
+        // a release must not touch it: a function object dying in the sweep
+        // releases captures whose cells are already condemned, which underflows
+        // a word nothing reads.
+        if (comptime gc.trace_stw_enabled) return;
+        if (gc.decrementHeaderRefCount(&cell.header) != 0) return;
         if (cell.header.meta().flags.finalizing) return;
-        if (rt.gc.phase == .remove_cycles) return;
+        if (gc.phaseIsTwoPassTeardown(rt.gc.phase)) return;
         rt.gc.unlinkObjectWithBytes(&cell.header, comptime @sizeOf(VarRef));
         destroyFromHeader(rt, &cell.header);
     }
@@ -95,7 +106,7 @@ pub const VarRef = struct {
         // Cycle removal: keep the struct alive for the Pass-B drain so a sibling
         // still decref-ing this var_ref does not read freed memory (qjs defers
         // non-value GC types to gc_zero_ref_count_list, quickjs.c:6790).
-        if (rt.gc.phase == .remove_cycles) {
+        if (gc.phaseIsTwoPassTeardown(rt.gc.phase)) {
             rt.gc.deferCycleStructFree(header);
             return;
         }
@@ -163,7 +174,7 @@ pub const VarRef = struct {
     /// object is retained here exactly once. This mirrors QuickJS get_var_ref's
     /// async_func retain and makes the open-cell edge `cell -> frame owner`,
     /// never the borrowed `cell -> *pvalue`.
-    pub fn attachOpenOwner(self: *VarRef, owner: JSValue) void {
+    pub fn attachOpenOwner(self: *VarRef, rt: anytype, owner: JSValue) void {
         std.debug.assert(self.is_open);
         std.debug.assert(owner.isObject());
         if (!self.value.isUndefined()) {
@@ -171,6 +182,9 @@ pub const VarRef = struct {
             return;
         }
         self.value = owner.dup();
+        // An open cell adopting its parked-frame owner is the same kind of
+        // store as `close`: a traced object gaining an edge.
+        rt.gc.generationalBarrier(&self.header, owner.cycleMarkHeader());
     }
 
     pub fn close(self: *VarRef, rt: anytype) void {
@@ -178,6 +192,11 @@ pub const VarRef = struct {
         const closed_value = self.pvalue.*.dup();
         const open_owner = self.value;
         self.value = closed_value;
+        // Closing copies the binding out of the dying frame and into the cell,
+        // which is a store into a traced object exactly like `setVarRefValue`
+        // -- and the cell is typically the older of the two, since it outlives
+        // the frame whose value it is capturing.
+        rt.gc.generationalBarrier(&self.header, closed_value.cycleMarkHeader());
         self.pvalue = &self.value;
         self.is_open = false;
         open_owner.free(rt);
@@ -196,6 +215,13 @@ pub const VarRef = struct {
         }
         const old_value = self.pvalue.*;
         self.pvalue.* = next_value;
+        // A closure cell is a traced object owning one value slot, so storing
+        // a fresh value into a long-lived cell is an old-to-young edge the
+        // minor cannot rediscover: its sticky marks stop the trace at the old
+        // cell. `pvalue` may alias a frame slot rather than `value`, but the
+        // owner recorded here is always the cell itself, which is what the
+        // remembered set re-traces.
+        rt.gc.generationalBarrier(&self.header, next_value.cycleMarkHeader());
         old_value.free(rt);
     }
 

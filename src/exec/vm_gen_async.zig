@@ -99,6 +99,13 @@ fn parkGeneratorExecutionState(
     catch_target_pc: u32,
     has_frame: bool,
 ) void {
+    // Parking copies a whole live frame -- operands, locals, args, cells, the
+    // current function -- into storage the generator owns. Naming every value
+    // individually would be a barrier per slot on a hot path and would have to
+    // be kept in step with the frame layout; remembering the owner once is the
+    // same guarantee, and is what the dense-array append choke point does for
+    // the same reason.
+    rt.gc.rememberOwnerForBulkWrite(&generator.header);
     // An open cell borrows pvalue from this frame. Once a published generator
     // is parked, retain that storage owner exactly once in the cell, matching
     // QuickJS's attached JSVarRef -> JSAsyncFunctionState edge. Initial
@@ -108,7 +115,7 @@ fn parkGeneratorExecutionState(
         const generator_value = generator.value();
         for (frame.open_var_refs) |maybe_cell| {
             const cell = maybe_cell orelse continue;
-            cell.attachOpenOwner(generator_value);
+            cell.attachOpenOwner(rt, generator_value);
         }
     }
 

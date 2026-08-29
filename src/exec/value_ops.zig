@@ -704,7 +704,7 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
         }
     }
 
-    if (op == bytecode.opcode.op.add and a.isBigInt() and a.refHeader() != null and a.refHeader().?.meta().rc == 1) {
+    if (op == bytecode.opcode.op.add and a.isBigInt() and a.refHeader() != null and core.gc.headerRefCount(a.refHeader().?) == 1) {
         const header = a.refHeader().?;
         const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
         const rhs = try bigIntFromValueBorrowed(rt, b);

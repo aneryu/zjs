@@ -87,6 +87,13 @@ fn pushRequest(rt: *core.JSRuntime, gen: *core.Object, req: AsyncGeneratorReques
     const slot = gen.asyncGeneratorQueueSlot();
     slot.*.ptr[slot.len] = req;
     slot.* = slot.*.ptr[0 .. slot.len + 1];
+    // The request's four values live in the generator's payload queue, so the
+    // generator owns them: a long-lived async generator queuing a freshly made
+    // promise and its resolving functions is an old-to-young edge.
+    rt.gc.generationalBarrier(&gen.header, req.result.cycleMarkHeader());
+    rt.gc.generationalBarrier(&gen.header, req.promise.cycleMarkHeader());
+    rt.gc.generationalBarrier(&gen.header, req.resolve.cycleMarkHeader());
+    rt.gc.generationalBarrier(&gen.header, req.reject.cycleMarkHeader());
 }
 
 /// Pop the queue head (mirrors list_del in js_async_generator_resolve_or_reject,

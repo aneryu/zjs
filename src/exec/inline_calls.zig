@@ -1025,9 +1025,19 @@ fn nativeBacktraceSnapshot(function_value: core.JSValue) core.ActiveBacktraceSna
 /// lifetime of one `runWithArgsState`. Runtime stores only an opaque borrowed
 /// pointer; callback routing must recover this type rather than deriving
 /// execution authority from the observable backtrace chain.
+///
+/// When tracing roots are live (`value_root_frames_enabled`), the first field
+/// is the core-known `ActiveInvocationTrace` prefix so `traceActiveRoots` can
+/// invoke the exec callback without importing this type. Default `rc` keeps
+/// those fields as zero-width `void` so the production record stays two
+/// pointers and the publish path is comptime-identical.
 pub const ActiveInvocation = struct {
+    header: if (core.runtime.value_root_frames_enabled) core.runtime.ActiveInvocationTrace else void =
+        if (core.runtime.value_root_frames_enabled) undefined else {},
     machine: *Machine,
     current_backtrace_view: *MachineBacktraceView,
+    previous: if (core.runtime.value_root_frames_enabled) ?*ActiveInvocation else void =
+        if (core.runtime.value_root_frames_enabled) null else {},
 };
 
 pub inline fn activeInvocation(rt: *core.JSRuntime) ?*ActiveInvocation {

@@ -69,8 +69,64 @@ pub fn runFunction(rt: *core.JSRuntime, ctx: *core.JSContext, function: *const e
 }
 
 pub fn runMutableVm(vm: *engine.exec.Vm, function: *const engine.bytecode.Bytecode) !core.JSValue {
+    // Fixture top-level Bytecode lives on the native stack (it is not a
+    // registered gc object), and its malloc'd cpool array holds the only
+    // strong refs to child FunctionBytecodes. Neither precise roots nor the
+    // conservative stack scan can reach those children (the scan does not
+    // chase malloc'd arrays), so a tracing collection during the run would
+    // sweep them mid-execution (wide-fclosure autopsy, 2026-08-24). Root the
+    // cpool window for the duration of the run; default `rc` erases this.
+    const rt = vm.ctx.runtime;
+    var cpool_roots = [_]core.runtime.ValueRootSlice{.{ .borrowed = function.cpoolSlice() }};
+    var fixture_frame = core.runtime.ValueRootFrame{ .slices = &cpool_roots };
+    fixture_frame.activate(rt);
+    defer fixture_frame.deactivate(rt);
     var execution_adapter: engine.bytecode.LegacyExecutionAdapter = undefined;
     return vm.run(execution_adapter.init(function));
+}
+
+/// Reclaim whatever the test has just dropped its last reference to.
+///
+/// Under refcounting the drop itself destroys, so a test can assert on
+/// `liveCount()`, heap stats or a finalizer having run the instant it releases.
+/// Under the tracer nothing is reclaimed until a collection runs, and a test
+/// that asserts the refcounting timing would only be asserting that RC is still
+/// doing the work -- which is the thing being removed. Interposing a collection
+/// keeps one test body meaningful in both builds.
+///
+/// The scan is `declared_only` (via `runObjectCycleRemoval`), so anything the
+/// test still holds must be named in a `rootValues`/`rootObjects` frame. That
+/// is deliberate: it is the precise-scan discipline that makes these tests
+/// deterministic, and it is what turns a missing root into a test failure
+/// rather than into a conservative-scan accident.
+pub fn reclaimNow(rt: *core.JSRuntime) void {
+    if (comptime !core.gc.trace_stw_enabled) return;
+    _ = rt.runObjectCycleRemoval();
+}
+
+/// Assert a refcount that is the ownership record under refcounting.
+///
+/// Under the tracer the count is not maintained at all for the kinds it owns
+/// (`core.gc.refCountRemoved`), so there is no arithmetic left to check and the
+/// assertion is skipped rather than deleted -- the refcounting build still
+/// guards exactly what it always did. Kinds the tracer does not own (strings,
+/// ropes, BigInt, and also shapes and realms, which keep their counts for
+/// copy-on-write and host-handle reasons) are checked in both builds.
+pub fn expectRefCount(expected: i32, header: *const core.gc.Header) !void {
+    if (comptime core.gc.trace_stw_enabled) {
+        if (core.gc.refCountRemoved(header.metaConst().flags.kind)) return;
+    }
+    try std.testing.expectEqual(expected, core.gc.headerRefCount(header));
+}
+
+/// Snapshot helper for tests whose expected arithmetic is asserted through
+/// expectRefCount. Tracer-owned kinds deliberately have no count; return their
+/// historical birth value only so the skipped arithmetic remains well-typed.
+pub fn refCountSnapshot(header: *const core.gc.Header) i32 {
+    if (comptime core.gc.trace_stw_enabled) {
+        if (core.gc.refCountRemoved(header.metaConst().flags.kind)) return 1;
+    }
+    return core.gc.headerRefCount(header);
 }
 
 pub fn objectFromValue(value: core.JSValue) *core.Object {
@@ -518,7 +574,7 @@ pub fn sharedTestEngine() *TestEngine {
             shared_engine_baseline_property_count = g.shape_ref.prop_count;
             shared_engine_baseline_shape_prop_count = g.shape_ref.prop_count;
             shared_engine_baseline_shape_hash = g.shape_ref.hash;
-            shared_engine_baseline_shape_deleted_count = g.shape_ref.deleted_prop_count;
+            shared_engine_baseline_shape_deleted_count = g.shape_ref.deletedPropCount();
 
             // Snapshot the baseline property entries (value slots only;
             // key atoms and flags are snapshotted with the shape props
@@ -766,7 +822,7 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
                     cell.varRefIsDeletableSlot().* = state.is_deletable;
                     old_value.free(eng.runtime);
                 }
-                global.prop_values[idx] = .{ .slot = base.slot.dup(base_flags) };
+                global.propertyEntry(idx).* = .{ .slot = base.slot.dup(base_flags) };
             }
         }
 
@@ -915,4 +971,17 @@ pub fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, 
         .value = value.dup(),
     };
     try rt.registerBorrowedReferenceHolder(collection);
+}
+
+/// Drive an open incremental major cycle to completion. Threshold-triggered
+/// collections under the tracer begin a cycle and finish it at a later poll;
+/// tests that assert on freed counts after a crossing call this to reach the
+/// poll where the result lands.
+pub fn finishGcCycles(rt: anytype) void {
+    if (comptime !zjs.core.gc.trace_stw_enabled) return;
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+        std.debug.assert(polls < 100_000);
+        _ = rt.pollGC(null, .safepoint) catch return;
+    }
 }

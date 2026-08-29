@@ -41,6 +41,14 @@ const TailSetupOomArm = struct {
         self.calls += 1;
         if (self.exhaust) {
             const rt = invocation.realm.runtime;
+            // Injecting an allocation failure, not testing the collector: see
+            // `suppressLimitCollectionForTest`.
+            // No `defer` to undo it: this arm runs inside the call whose
+            // allocation must fail, so restoring on the way out of the arm
+            // would re-arm the collector before the failure happens -- and
+            // would clobber the enclosing test's own suppression. The flag is
+            // per-Runtime, so it dies with the fixture.
+            rt.suppressLimitCollectionForTest(true);
             rt.setMemoryLimit(rt.memory.allocated_bytes);
         }
         return core.JSValue.undefinedValue();
@@ -87,6 +95,14 @@ const InterruptOomArm = struct {
         if (self.exhaust) {
             invocation.realm.interrupt_counter = 1;
             const rt = invocation.realm.runtime;
+            // Injecting an allocation failure, not testing the collector: see
+            // `suppressLimitCollectionForTest`.
+            // No `defer` to undo it: this arm runs inside the call whose
+            // allocation must fail, so restoring on the way out of the arm
+            // would re-arm the collector before the failure happens -- and
+            // would clobber the enclosing test's own suppression. The flag is
+            // per-Runtime, so it dies with the fixture.
+            rt.suppressLimitCollectionForTest(true);
             rt.setMemoryLimit(rt.memory.allocated_bytes);
         }
         return core.JSValue.undefinedValue();
@@ -135,6 +151,25 @@ test "eval lazily materializes a bare core context global before root closure co
     defer result.free(rt);
     try helpers.expectStringValueBytes(result, "lazy-global-ok");
     try std.testing.expect(ctx.global != null);
+}
+
+test "object_slots2 literal allocation preserves data and accessor semantics" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\var stored = 0;
+        \\var pair = { a: 3, b: 4 };
+        \\var accessor = {
+        \\  get x() { return stored; },
+        \\  set x(value) { stored = value; }
+        \\};
+        \\accessor.x = pair.a + pair.b;
+        \\pair.c = 5;
+        \\if (accessor.x + pair.c !== 12) throw new Error("object_slots2");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
 }
 
 test "fused cmp_if_false8 interrupt poll stays uncatchable in a for loop" {
@@ -3004,6 +3039,11 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     defer js.runtime.setMemoryLimit(null);
+    // The subject is the unwind out of a faulting target setup, not whether a
+    // collection could have avoided the fault: see
+    // `suppressLimitCollectionForTest`.
+    js.runtime.suppressLimitCollectionForTest(true);
+    defer js.runtime.suppressLimitCollectionForTest(false);
 
     var arm = TailSetupOomArm{};
     try js.defineGlobalExternalHostFunction(
@@ -3013,8 +3053,15 @@ test "tail target setup OOM remains catchable in the retiring caller" {
         TailSetupOomArm.call,
         null,
     );
+    // The handler runs with the account still clamped, so it has to be
+    // allocation-free: a string literal in the catch body would need a fresh
+    // string and fail a second time, this time with nothing left to catch it.
+    // The expected texts are therefore built before the clamp; `===` compares
+    // them by content, so the assertion is the same one.
     const setup = try js.eval(
         \\globalThis.__w2TailSetupBodyRuns = 0;
+        \\globalThis.__w2TailSetupOomName = "InternalError";
+        \\globalThis.__w2TailSetupOomMessage = "out of memory";
         \\function __w2TailSetupOomTarget(value) {
         \\    "use strict";
         \\    __w2TailSetupBodyRuns++;
@@ -3030,8 +3077,8 @@ test "tail target setup OOM remains catchable in the retiring caller" {
         \\            __w2TailSetupOomTarget
         \\        );
         \\    } catch (error) {
-        \\        return error.name === "InternalError" &&
-        \\            error.message === "out of memory" ? 100 : -1000;
+        \\        return error.name === __w2TailSetupOomName &&
+        \\            error.message === __w2TailSetupOomMessage ? 100 : -1000;
         \\    }
         \\}
     );
@@ -3102,6 +3149,11 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
     try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    // The two metrics below are live-allocation metrics, so both the reading
+    // taken here and every reading compared against it have to be taken with
+    // the debris of the failed attempt already returned to the account -- which
+    // is what unwinding did on its own under refcounting.
+    helpers.reclaimNow(js.runtime);
     const stable_allocated_bytes = js.runtime.memory.allocated_bytes;
     const stable_allocation_count = js.runtime.memory.allocation_count;
 
@@ -3131,6 +3183,7 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
     try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
     try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    helpers.reclaimNow(js.runtime);
     try std.testing.expectEqual(stable_allocated_bytes, js.runtime.memory.allocated_bytes);
     try std.testing.expectEqual(stable_allocation_count, js.runtime.memory.allocation_count);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
@@ -3154,6 +3207,7 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
     try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
     try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    helpers.reclaimNow(js.runtime);
     try std.testing.expectEqual(stable_allocated_bytes, js.runtime.memory.allocated_bytes);
     try std.testing.expectEqual(stable_allocation_count, js.runtime.memory.allocation_count);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
@@ -3727,7 +3781,7 @@ test "hidden uninitialized globals compact at the QuickJS sawtooth bound" {
 
     const hidden = global.globalUninitializedVars() orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(u32, 78), hidden.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(u32, 0), hidden.shape_ref.deleted_prop_count);
+    try std.testing.expectEqual(@as(u32, 0), hidden.shape_ref.deletedPropCount());
 
     const expected_counts = [_]struct { props: u32, deleted: u32 }{
         .{ .props = 90, .deleted = 12 },
@@ -3745,7 +3799,7 @@ test "hidden uninitialized globals compact at the QuickJS sawtooth bound" {
             const parked = engine.exec.call_runtime.globalObjectFindUninitializedVar(ctx, global, name, false) orelse
                 return error.TestExpectedEqual;
             parked.free(rt);
-            const deleted = hidden.shape_ref.deleted_prop_count;
+            const deleted = hidden.shape_ref.deletedPropCount();
             const live = hidden.shape_ref.prop_count - deleted;
             try std.testing.expect(deleted < @max(@as(u32, 8), live + 1));
             if (deleted == 0) saw_compaction = true;
@@ -3755,12 +3809,12 @@ test "hidden uninitialized globals compact at the QuickJS sawtooth bound" {
             replacement.free(rt);
         }
         try std.testing.expectEqual(expected.props, hidden.shape_ref.prop_count);
-        try std.testing.expectEqual(expected.deleted, hidden.shape_ref.deleted_prop_count);
+        try std.testing.expectEqual(expected.deleted, hidden.shape_ref.deletedPropCount());
     }
 
     try std.testing.expect(saw_compaction);
     try std.testing.expectEqual(@as(u32, 75), peak_deleted);
-    try std.testing.expectEqual(@as(u32, live_count), hidden.shape_ref.prop_count - hidden.shape_ref.deleted_prop_count);
+    try std.testing.expectEqual(@as(u32, live_count), hidden.shape_ref.prop_count - hidden.shape_ref.deletedPropCount());
     for (names) |name| try std.testing.expect(hidden.hasOwnProperty(name));
 }
 
@@ -3925,6 +3979,10 @@ test "local growth rejects moving storage after an open binding is published" {
     exec_frame.open_var_refs = &open_refs;
     exec_frame.ownership.storage = .borrowed;
 
+    // Injecting an allocation failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    rt.suppressLimitCollectionForTest(true);
+    defer rt.suppressLimitCollectionForTest(false);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.InvalidBytecode, exec_frame.setLocal(&rt.memory, rt, 1, core.JSValue.int32(8)));
     rt.setMemoryLimit(null);
@@ -3947,8 +4005,12 @@ test "call-binding OOM leaves input references with the caller" {
     const execution_function = execution_adapter.init(&function);
     var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
-    const initial_refs = held.header.meta().rc;
+    const initial_refs = helpers.refCountSnapshot(&held.header);
 
+    // Injecting an allocation failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    rt.suppressLimitCollectionForTest(true);
+    defer rt.suppressLimitCollectionForTest(false);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     const result = exec_frame.initCallBindings(rt, .{
         .initial_this_value = held.value(),
@@ -3958,7 +4020,7 @@ test "call-binding OOM leaves input references with the caller" {
     rt.setMemoryLimit(null);
 
     try std.testing.expectError(error.OutOfMemory, result);
-    try std.testing.expectEqual(initial_refs, held.header.meta().rc);
+    try helpers.expectRefCount(initial_refs, &held.header);
 }
 
 test "original-args cold-state OOM does not retain copied references" {
@@ -3980,8 +4042,12 @@ test "original-args cold-state OOM does not retain copied references" {
     const execution_function = execution_adapter.init(&function);
     var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
-    const initial_refs = held.header.meta().rc;
+    const initial_refs = helpers.refCountSnapshot(&held.header);
 
+    // Injecting an allocation failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    rt.suppressLimitCollectionForTest(true);
+    defer rt.suppressLimitCollectionForTest(false);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     const result = exec_frame.initArgumentsBorrowedSlots(
         &rt.memory,
@@ -3993,7 +4059,7 @@ test "original-args cold-state OOM does not retain copied references" {
     rt.setMemoryLimit(null);
 
     try std.testing.expectError(error.OutOfMemory, result);
-    try std.testing.expectEqual(initial_refs, held.header.meta().rc);
+    try helpers.expectRefCount(initial_refs, &held.header);
 }
 
 test "strict generator resident frame supports qjs argument counts beyond u16 storage" {
@@ -4194,11 +4260,11 @@ test "frame setLocal handles self-assignment without dropping object" {
     try frame.setLocal(&rt.memory, rt, 0, object.value());
     object.value().free(rt);
 
-    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
+    try helpers.expectRefCount(1, &object.header);
     const current = frame.locals[0];
     try frame.setLocal(&rt.memory, rt, 0, current);
 
-    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
+    try helpers.expectRefCount(1, &object.header);
     try std.testing.expectEqual(&object.header, frame.locals[0].refHeader().?);
 }
 
@@ -5935,7 +6001,7 @@ test "bytecode calls execute directly from the shared function bytecode" {
         return error.InvalidFunctionBytecode;
     try std.testing.expect(!@hasField(bytecode.FunctionBytecode, "cached_view"));
     try std.testing.expect(fb.byteCode().len != 0);
-    const function_bytecode_refs = fb.header.meta().rc;
+    const function_bytecode_refs = helpers.refCountSnapshot(&fb.header);
 
     const first_args = [_]core.JSValue{core.JSValue.int32(1)};
     const first = try engine.exec.call.callValueWithThisGlobalsAndGlobal(
@@ -5949,7 +6015,7 @@ test "bytecode calls execute directly from the shared function bytecode" {
     );
     defer first.free(js.runtime);
     try std.testing.expectEqual(@as(?i32, 2), first.asInt32());
-    try std.testing.expectEqual(function_bytecode_refs, fb.header.meta().rc);
+    try helpers.expectRefCount(function_bytecode_refs, &fb.header);
 
     const second_args = [_]core.JSValue{core.JSValue.int32(2)};
     const second = try engine.exec.call.callValueWithThisGlobalsAndGlobal(
@@ -5963,7 +6029,7 @@ test "bytecode calls execute directly from the shared function bytecode" {
     );
     defer second.free(js.runtime);
     try std.testing.expectEqual(@as(?i32, 3), second.asInt32());
-    try std.testing.expectEqual(function_bytecode_refs, fb.header.meta().rc);
+    try helpers.expectRefCount(function_bytecode_refs, &fb.header);
 
     const rerun = try js.eval(
         \\assert.sameValue(directFunctionBytecode(3), 4);
@@ -7908,6 +7974,16 @@ test "constructValue AggregateError releases copied errors array owner" {
     try source.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(core.JSValue.int32(2), true, true, true));
     source.setArrayLength(2);
     try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, false));
+
+    // `constructor` and `source` are held only by Zig locals (no heap edge).
+    // RC's cycle removal never touched rc-held stack objects, but the tracing
+    // collector treats the same call as a whole-heap mark-sweep with declared
+    // roots only — name them, or the sweep reclaims live test state.
+    var constructor_slot: ?*core.Object = helpers.objectFromValue(constructor);
+    var source_slot: ?*core.Object = source;
+    var live_roots = core.runtime.rootObjects(.{ &constructor_slot, &source_slot });
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     const baseline_objects = rt.gc.liveCount();
     const result = try engine.exec.construct.constructValue(ctx, constructor, &.{source.value()}, &.{});
@@ -11090,6 +11166,521 @@ test "waitAsync completions enter one typed cross-realm FIFO after facade releas
     try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global_a)) == .success);
 }
 
+test "shadow census sees waitAsync waiter Promise as an exact root" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+        const rt = js.runtime;
+
+        _ = try js.eval(
+            \\globalThis.__waitSab = new SharedArrayBuffer(4);
+            \\globalThis.__waitView = new Int32Array(__waitSab);
+            \\globalThis.__waitResult = Atomics.waitAsync(__waitView, 0, 0);
+        );
+        const scheduled = try js.evalWithOptions("__waitResult.async === true", .{ .filename = "<repl>" });
+        defer scheduled.free(rt);
+        try std.testing.expectEqual(true, scheduled.asBool().?);
+
+        const result = try js.evalWithOptions("__waitResult", .{ .filename = "<repl>" });
+        const value_atom = try rt.internAtom("value");
+        defer rt.atoms.free(value_atom);
+        const result_object = core.value_semantics.objectFromValue(result) orelse return error.TypeError;
+        const promise_value = try result_object.getProperty(value_atom);
+        const promise_object = core.value_semantics.objectFromValue(promise_value) orelse return error.TypeError;
+        const promise_header = &promise_object.header;
+        promise_value.free(rt);
+        result.free(rt);
+        const cleared = try js.eval("__waitResult = undefined");
+        defer cleared.free(rt);
+
+        core.gc_shadow.quiesce(rt);
+        const exact = try core.gc_shadow.isExactReachable(rt, promise_header);
+        const report = try core.gc_shadow.run(rt);
+        var buf: [2048]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try report.format(&w);
+        std.debug.print(
+            \\
+            \\waitAsync hanging waiter (no notify):
+            \\  promise_exact={s}
+            \\{s}
+            \\
+        , .{ if (exact) "yes" else "no", w.buffered() });
+
+        try std.testing.expect(exact);
+        try std.testing.expectEqual(@as(usize, 0), report.unexplained);
+
+        engine.exec.atomics_ops.cleanupAtomicsWaitersForContext(js.context);
+    }
+}
+
+const ActiveJobShadowProbe = struct {
+    var exact_reachable: bool = false;
+
+    fn run(ctx: *core.JSContext, args: []const core.JSValue) core.JSValue {
+        if (comptime core.gc.shadow_tracer_enabled) {
+            const object = core.value_semantics.objectFromValue(args[0]) orelse return core.JSValue.undefinedValue();
+            exact_reachable = core.gc_shadow.isExactReachable(ctx.runtime, &object.header) catch false;
+        }
+        return core.JSValue.undefinedValue();
+    }
+};
+
+test "shadow census sees the dequeued active job payload as an exact root" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+        const rt = js.runtime;
+        try js.ensureTest262GlobalsInstalled();
+        const global = js.context.global orelse return error.InvalidBuiltinRegistry;
+
+        const held = try core.Object.create(rt, core.class.ids.object, null);
+        const held_value = held.value();
+        try rt.job_queue.enqueueFunc(js.context, ActiveJobShadowProbe.run, &.{held_value});
+        held_value.free(rt);
+
+        ActiveJobShadowProbe.exact_reachable = false;
+        const status = try engine.exec.promise_ops.drainOnePendingJob(
+            js.context,
+            null,
+            global,
+        );
+        try std.testing.expectEqual(core.jobs.RunOneStatus.success, status);
+        try std.testing.expect(ActiveJobShadowProbe.exact_reachable);
+    }
+}
+
+const NestedActiveJobShadowProbe = struct {
+    var outer_header: *core.gc.Header = undefined;
+    var global: *core.Object = undefined;
+    var outer_exact_before_nested: bool = false;
+    var outer_exact_inside_nested: bool = false;
+    var inner_exact: bool = false;
+    var nested_status_success: bool = false;
+
+    fn outer(ctx: *core.JSContext, args: []const core.JSValue) core.JSValue {
+        if (comptime core.gc.shadow_tracer_enabled) {
+            const object = core.value_semantics.objectFromValue(args[0]) orelse return core.JSValue.undefinedValue();
+            outer_exact_before_nested = core.gc_shadow.isExactReachable(ctx.runtime, &object.header) catch false;
+            const status = engine.exec.promise_ops.drainOnePendingJob(ctx, null, global) catch return core.JSValue.undefinedValue();
+            nested_status_success = status == .success;
+        }
+        return core.JSValue.undefinedValue();
+    }
+
+    fn inner(ctx: *core.JSContext, args: []const core.JSValue) core.JSValue {
+        if (comptime core.gc.shadow_tracer_enabled) {
+            const object = core.value_semantics.objectFromValue(args[0]) orelse return core.JSValue.undefinedValue();
+            inner_exact = core.gc_shadow.isExactReachable(ctx.runtime, &object.header) catch false;
+            outer_exact_inside_nested = core.gc_shadow.isExactReachable(ctx.runtime, outer_header) catch false;
+        }
+        return core.JSValue.undefinedValue();
+    }
+};
+
+test "shadow census walks the nested active job root chain" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+        const rt = js.runtime;
+        try js.ensureTest262GlobalsInstalled();
+        const global = js.context.global orelse return error.InvalidBuiltinRegistry;
+
+        const outer = try core.Object.create(rt, core.class.ids.object, null);
+        const inner = try core.Object.create(rt, core.class.ids.object, null);
+        const outer_value = outer.value();
+        const inner_value = inner.value();
+        try rt.job_queue.enqueueFunc(js.context, NestedActiveJobShadowProbe.outer, &.{outer_value});
+        try rt.job_queue.enqueueFunc(js.context, NestedActiveJobShadowProbe.inner, &.{inner_value});
+        outer_value.free(rt);
+        inner_value.free(rt);
+
+        NestedActiveJobShadowProbe.outer_header = &outer.header;
+        NestedActiveJobShadowProbe.global = global;
+        NestedActiveJobShadowProbe.outer_exact_before_nested = false;
+        NestedActiveJobShadowProbe.outer_exact_inside_nested = false;
+        NestedActiveJobShadowProbe.inner_exact = false;
+        NestedActiveJobShadowProbe.nested_status_success = false;
+
+        const status = try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global);
+        try std.testing.expectEqual(core.jobs.RunOneStatus.success, status);
+        try std.testing.expect(NestedActiveJobShadowProbe.nested_status_success);
+        try std.testing.expect(NestedActiveJobShadowProbe.outer_exact_before_nested);
+        try std.testing.expect(NestedActiveJobShadowProbe.outer_exact_inside_nested);
+        try std.testing.expect(NestedActiveJobShadowProbe.inner_exact);
+    }
+}
+
+const EvalCompletionShadowProbe = struct {
+    var active: ?*@This() = null;
+
+    header: ?*core.gc.Header = null,
+    exact_reachable: bool = false,
+    job_ran: bool = false,
+
+    fn capture(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const value = invocation.args[0];
+        const object = core.value_semantics.objectFromValue(value) orelse return error.TestUnexpectedResult;
+        self.header = &object.header;
+        active = self;
+        try invocation.realm.runtime.job_queue.enqueueFunc(invocation.realm, run, &.{});
+        return value.dup();
+    }
+
+    fn run(ctx: *core.JSContext, _: []const core.JSValue) core.JSValue {
+        const self = active orelse return core.JSValue.undefinedValue();
+        const header = self.header orelse return core.JSValue.undefinedValue();
+        self.job_ran = true;
+        self.exact_reachable = core.gc_shadow.isExactReachable(ctx.runtime, header) catch false;
+        return core.JSValue.undefinedValue();
+    }
+};
+
+test "shadow census sees the eval completion while draining jobs" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+
+        var probe = EvalCompletionShadowProbe{};
+        EvalCompletionShadowProbe.active = null;
+        defer EvalCompletionShadowProbe.active = null;
+        try js.defineGlobalExternalHostFunction(
+            "__captureEvalCompletion",
+            1,
+            &probe,
+            EvalCompletionShadowProbe.capture,
+            null,
+        );
+
+        const result = try js.evalWithOptions(
+            "__captureEvalCompletion({ marker: 1 });",
+            .{ .filename = "<repl>" },
+        );
+        defer result.free(js.runtime);
+        try std.testing.expect(probe.job_ran);
+        try std.testing.expect(probe.exact_reachable);
+    }
+}
+
+const PublicCallInputsShadowProbe = struct {
+    callee_header: *core.gc.Header,
+    this_header: *core.gc.Header,
+    arg_header: *core.gc.Header,
+    poll_count: usize = 0,
+    callee_exact: bool = false,
+    this_exact: bool = false,
+    arg_exact: bool = false,
+
+    fn run(rt: *core.JSRuntime, userdata: ?*anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        self.poll_count += 1;
+        if (self.poll_count == 1) {
+            self.callee_exact = core.gc_shadow.isExactReachable(rt, self.callee_header) catch false;
+            self.this_exact = core.gc_shadow.isExactReachable(rt, self.this_header) catch false;
+            self.arg_exact = core.gc_shadow.isExactReachable(rt, self.arg_header) catch false;
+        }
+        return false;
+    }
+};
+
+test "shadow census sees public call inputs at pre-dispatch poll" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        const rt = try zjs.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try zjs.JSContext.create(rt);
+        defer ctx.destroy();
+
+        const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+            .realm = ctx.core,
+            .flags = .{ .func_kind = .generator },
+        });
+        var fb_published = false;
+        errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
+        fb.publishFixtureNoFail(rt);
+        fb_published = true;
+
+        const callee = core.JSValue.functionBytecode(&fb.header);
+        defer callee.free(rt);
+        const receiver = try core.Object.create(rt, core.class.ids.object, null);
+        const receiver_value = receiver.value();
+        defer receiver_value.free(rt);
+        const argument = try core.Object.create(rt, core.class.ids.object, null);
+        const argument_value = argument.value();
+        defer argument_value.free(rt);
+
+        var probe = PublicCallInputsShadowProbe{
+            .callee_header = &fb.header,
+            .this_header = &receiver.header,
+            .arg_header = &argument.header,
+        };
+        rt.setInterruptHandler(PublicCallInputsShadowProbe.run, &probe);
+        defer rt.setInterruptHandler(null, null);
+        ctx.core.interrupt_counter = 1;
+
+        const result = try ctx.callFunction(callee, &.{argument_value}, .{
+            .this_value = receiver_value,
+        });
+        defer result.free(rt);
+
+        try std.testing.expectEqual(@as(usize, 1), probe.poll_count);
+        const exact_mask = (@as(u3, @intFromBool(probe.callee_exact)) << 2) |
+            (@as(u3, @intFromBool(probe.this_exact)) << 1) |
+            @as(u3, @intFromBool(probe.arg_exact));
+        try std.testing.expectEqual(@as(u3, 0b111), exact_mask);
+    }
+}
+
+const PublicPropertyInputsShadowProbe = struct {
+    target_header: *core.gc.Header,
+    key_header: *core.gc.Header,
+    poll_count: usize = 0,
+    target_exact: bool = false,
+    key_exact: bool = false,
+
+    fn run(rt: *core.JSRuntime, userdata: ?*anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        self.poll_count += 1;
+        if (self.poll_count == 1) {
+            self.target_exact = core.gc_shadow.isExactReachable(rt, self.target_header) catch false;
+            self.key_exact = core.gc_shadow.isExactReachable(rt, self.key_header) catch false;
+        }
+        return false;
+    }
+};
+
+test "public property inputs remain exact during key coercion" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const target = try ctx.createObject();
+    defer target.free(rt);
+    const property_key = try ctx.eval(
+        "({ [Symbol.toPrimitive]() { return 'missing'; } })",
+        .{},
+    );
+    defer property_key.free(rt);
+    const target_object = try core.Object.expect(target);
+    const key_object = try core.Object.expect(property_key);
+
+    var probe = PublicPropertyInputsShadowProbe{
+        .target_header = &target_object.header,
+        .key_header = &key_object.header,
+    };
+    if (comptime core.gc.shadow_tracer_enabled) {
+        rt.setInterruptHandler(PublicPropertyInputsShadowProbe.run, &probe);
+        ctx.core.interrupt_counter = 1;
+    }
+    defer if (comptime core.gc.shadow_tracer_enabled) rt.setInterruptHandler(null, null);
+
+    const result = try ctx.getPropertyKey(target, property_key, .{});
+    defer result.free(rt);
+
+    if (comptime core.gc.shadow_tracer_enabled) {
+        try std.testing.expectEqual(@as(usize, 1), probe.poll_count);
+        const exact_mask = (@as(u2, @intFromBool(probe.target_exact)) << 1) |
+            @as(u2, @intFromBool(probe.key_exact));
+        try std.testing.expectEqual(@as(u2, 0b11), exact_mask);
+    }
+}
+
+const RemovedModuleContinuationShadowProbe = struct {
+    context: *core.JSContext,
+    continuations: *std.ArrayList(engine.exec.module_graph.ModuleContinuation),
+    resident_len: usize,
+    continuation_header: *core.gc.Header,
+    poll_count: usize = 0,
+    observed_removed_poll: bool = false,
+    continuation_exact: bool = false,
+
+    fn run(rt: *core.JSRuntime, userdata: ?*anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        self.poll_count += 1;
+        if (self.continuations.items.len >= self.resident_len) {
+            // Keep every subsequent call boundary observable until the ready
+            // node has left ContinuationRoots' list view.
+            self.context.interrupt_counter = 1;
+            return false;
+        }
+        if (!self.observed_removed_poll) {
+            self.observed_removed_poll = true;
+            self.continuation_exact = core.gc_shadow.isExactReachable(
+                rt,
+                self.continuation_header,
+            ) catch false;
+        }
+        return false;
+    }
+};
+
+test "shadow census sees removed module continuation at pre-invocation poll" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+        engine.exec.standard_globals.configureRuntime(js.runtime);
+
+        const dir = ".zig-cache/module-continuation-shadow-root-test";
+        const main_path = dir ++ "/main.js";
+        const module_path = dir ++ "/held.mjs";
+        std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+        defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+            .sub_path = module_path,
+            .data =
+            \\await 1;
+            \\globalThis.__removedModuleContinuationResumed = true;
+            \\export const value = 1;
+            ,
+        });
+
+        var state = engine.exec.module_graph.DynamicImportState{
+            .runtime = js.runtime,
+            .output = null,
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .max_source_size = 4096,
+        };
+        defer state.deinit();
+        var loader_scope = try engine.exec.module_graph.installDynamicImport(&state);
+        defer loader_scope.deinit();
+
+        const setup = try js.evalWithOptions(
+            "globalThis.__removedModuleContinuationPromise = import('./held.mjs');",
+            .{ .filename = main_path },
+        );
+        setup.free(js.runtime);
+        try std.testing.expectEqual(@as(usize, 1), state.owned_continuations.items.len);
+
+        const continuation = state.owned_continuations.items[0].continuation;
+        const continuation_object = core.value_semantics.objectFromValue(continuation) orelse
+            return error.TestUnexpectedResult;
+        var probe = RemovedModuleContinuationShadowProbe{
+            .context = js.context,
+            .continuations = &state.owned_continuations,
+            .resident_len = state.owned_continuations.items.len,
+            .continuation_header = &continuation_object.header,
+        };
+        js.runtime.setInterruptHandler(RemovedModuleContinuationShadowProbe.run, &probe);
+        defer js.runtime.setInterruptHandler(null, null);
+        js.context.interrupt_counter = 1;
+
+        try state.runJobs(js.context);
+        try std.testing.expect(probe.poll_count != 0);
+        try std.testing.expect(probe.observed_removed_poll);
+        try std.testing.expect(probe.continuation_exact);
+    }
+}
+
+test "shadow census requires dynamic import root registration to succeed" {
+    if (comptime !core.gc.shadow_tracer_enabled) return error.SkipZigTest;
+    if (comptime core.gc.shadow_tracer_enabled) {
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+
+        const continuation_object = try core.Object.create(
+            js.runtime,
+            core.class.ids.object,
+            null,
+        );
+        const continuation = continuation_object.value();
+        const path = try std.testing.allocator.dupe(u8, "shadow-provider-oom.mjs");
+        var realm = core.RealmRef.retain(js.context);
+        var ownership_transferred = false;
+        errdefer if (!ownership_transferred) {
+            realm.deinit();
+            std.testing.allocator.free(path);
+            continuation.free(js.runtime);
+        };
+
+        var state = engine.exec.module_graph.DynamicImportState{
+            .runtime = js.runtime,
+            .output = null,
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .max_source_size = 4096,
+        };
+        defer state.deinit();
+        try state.owned_continuations.append(std.testing.allocator, .{
+            .realm = realm,
+            .path = path,
+            .continuation = continuation,
+            .awaited = core.JSValue.undefinedValue(),
+            .keep_result = false,
+        });
+        ownership_transferred = true;
+        realm = .{};
+
+        // The live Context occupies the Runtime's one inline provider slot.
+        // Pinning the budget forces the continuation provider's growth to
+        // fail, which must not be reported as a successful installation.
+        js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
+        defer js.runtime.setMemoryLimit(null);
+        try std.testing.expectError(
+            error.OutOfMemory,
+            engine.exec.module_graph.installDynamicImport(&state),
+        );
+        js.runtime.setMemoryLimit(null);
+        try std.testing.expect(!try core.gc_shadow.isExactReachable(
+            js.runtime,
+            &continuation_object.header,
+        ));
+
+        // Give the first growth exactly its accounted headroom. The
+        // continuation provider now registers, but the waiter provider's
+        // second growth fails; activation must roll the first one back.
+        const first_growth_bytes = core.memory.MemoryAccount.accountedSizeForRequest(
+            2 * @sizeOf(core.runtime.RootProvider),
+            std.mem.Alignment.of(core.runtime.RootProvider),
+        );
+        js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes + first_growth_bytes);
+        try std.testing.expectError(
+            error.OutOfMemory,
+            engine.exec.module_graph.installDynamicImport(&state),
+        );
+        js.runtime.setMemoryLimit(null);
+        try std.testing.expect(!try core.gc_shadow.isExactReachable(
+            js.runtime,
+            &continuation_object.header,
+        ));
+
+        var loader_scope = try engine.exec.module_graph.installDynamicImport(&state);
+        defer loader_scope.deinit();
+
+        try std.testing.expect(try core.gc_shadow.isExactReachable(
+            js.runtime,
+            &continuation_object.header,
+        ));
+    }
+}
+
+test "HeapValueSlot bind retain/release counts" {
+    if (comptime !core.gc_slot.stats_enabled) return error.SkipZigTest;
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    core.gc_slot.stats.reset();
+    const bound = try js.evalWithOptions("(function (a, b) { return a + b; }).bind({}, 1, 2)", .{ .filename = "<repl>" });
+    defer bound.free(js.runtime);
+    const slot_stats = core.gc_slot.stats;
+    std.debug.print(
+        \\
+        \\bind HeapValueSlot/GcBuffer: sets={d} retains={d} publishes={d} releases={d}
+        \\
+    , .{ slot_stats.set_calls, slot_stats.retains, slot_stats.publishes, slot_stats.releases });
+    try std.testing.expectEqual(@as(usize, 3), slot_stats.set_calls);
+    try std.testing.expectEqual(@as(usize, 3), slot_stats.retains);
+    try std.testing.expectEqual(@as(usize, 3), slot_stats.publishes);
+    try std.testing.expectEqual(@as(usize, 0), slot_stats.releases);
+}
+
 test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -11476,6 +12067,15 @@ test "job queue symbol roots preserve weak map values" {
 
     const weak_map = try core.Object.create(rt, core.class.ids.weakmap, null);
     defer weak_map.value().free(rt);
+    // The map is held only by this Zig local. The tracing collector treats
+    // the host-explicit cycle removal below as a whole-heap mark-sweep with
+    // declared roots, so name the TABLE; the entry value must stay alive
+    // through ephemeron semantics alone (symbol key live via the queued
+    // atom ref), which is exactly what this test exists to observe.
+    var weak_map_slot: ?*core.Object = weak_map;
+    var live_roots = core.runtime.rootObjects(.{&weak_map_slot});
+    live_roots.activate(rt);
+    defer live_roots.deactivate(rt);
 
     const value = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-job-queue-weak-key");
@@ -12228,8 +12828,8 @@ test "Engine eval balances refcounts for refcounted duplicate-key object literal
     defer o1.free(rt);
     const o2 = try js.evalWithOptions("__dupLitO2", .{ .filename = "<repl>" });
     defer o2.free(rt);
-    const o1_baseline = o1.refHeader().?.meta().rc;
-    const o2_baseline = o2.refHeader().?.meta().rc;
+    const o1_baseline = helpers.refCountSnapshot(o1.refHeader().?);
+    const o2_baseline = helpers.refCountSnapshot(o2.refHeader().?);
 
     const result = try js.evalWithOptions(
         \\let __dupLitLast = null;
@@ -12246,8 +12846,8 @@ test "Engine eval balances refcounts for refcounted duplicate-key object literal
     // Every literal died (last = null): both source objects must be back at
     // their pre-loop refcounts — no per-iteration leak from the duplicate-key
     // replace, no over-free from the append move.
-    try std.testing.expectEqual(o1_baseline, o1.refHeader().?.meta().rc);
-    try std.testing.expectEqual(o2_baseline, o2.refHeader().?.meta().rc);
+    try helpers.expectRefCount(o1_baseline, o1.refHeader().?);
+    try helpers.expectRefCount(o2_baseline, o2.refHeader().?);
 }
 
 test "Engine eval executes compound assignment and update statements through quick parser" {
@@ -14249,6 +14849,10 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     try l0_stack.pushOwned(callable.dup());
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
+    // Injecting an allocation failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    rt.suppressLimitCollectionForTest(true);
+    defer rt.suppressLimitCollectionForTest(false);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     const failed = machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     rt.setMemoryLimit(null);
@@ -14608,7 +15212,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
     const initial_call_depth = ctx.runtime.hot.call_depth;
-    const baseline_rc = receiver_object.header.meta().rc;
+    const baseline_rc = helpers.refCountSnapshot(&receiver_object.header);
 
     // Fresh Machine: the speculative arm must miss without consuming either
     // slot of the [receiver, callable] region or changing call depth.
@@ -14630,9 +15234,9 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try std.testing.expect(first.frame.this_value.same(receiver));
     try std.testing.expect(first.frame.ownership.this_value == .owned);
     try std.testing.expect(region_start[0].isUndefined());
-    try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
+    try helpers.expectRefCount(baseline_rc + 1, &receiver_object.header);
     machine.popReturnedEmptyLeaf(ctx.runtime);
-    try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
+    try helpers.expectRefCount(baseline_rc, &receiver_object.header);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
@@ -14650,9 +15254,9 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try std.testing.expect(warm.frame.ownership.this_value == .owned);
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(create_calls, rt.memory.create_calls);
-    try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
+    try helpers.expectRefCount(baseline_rc + 1, &receiver_object.header);
     machine.popReturnedEmptyLeaf(ctx.runtime);
-    try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
+    try helpers.expectRefCount(baseline_rc, &receiver_object.header);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 
     // Setup failure must restore depth/watermark and release BOTH region
@@ -14665,14 +15269,18 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try l0_stack.pushOwned(callable.dup());
     region_start = l0_stack.topPtr() - 2;
     l0_stack.setTopPtr(region_start);
+    // Injecting the failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    rt.suppressLimitCollectionForTest(true);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     const failed = machine.pushEmptyLeafCall(.receiver, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     rt.setMemoryLimit(null);
+    rt.suppressLimitCollectionForTest(false);
     try std.testing.expectError(error.OutOfMemory, failed);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expect(region_start[0].isUndefined());
     try std.testing.expect(region_start[1].isUndefined());
-    try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
+    try helpers.expectRefCount(baseline_rc, &receiver_object.header);
     try std.testing.expectEqual(oversized_bytes, rt.memory.allocated_bytes);
     oversized.destroyUnpublishedFixture(rt);
     oversized_alive = false;
@@ -15332,7 +15940,7 @@ test "dense write leaf consumes reserved appends only inside the qjs capacity wi
     try std.testing.expectEqual(@as(u32, 1), array.fastArrayCount());
     try std.testing.expectEqual(@as(u32, 1), array.arrayLength());
     try std.testing.expectEqual(&stored.header, array.fastArrayElementAt(0).refHeader().?);
-    try std.testing.expectEqual(@as(i32, 2), stored.header.meta().rc);
+    try helpers.expectRefCount(2, &stored.header);
 
     const growth_array = try core.Object.createArray(rt, null);
     defer growth_array.value().free(rt);
@@ -15346,7 +15954,7 @@ test "dense write leaf consumes reserved appends only inside the qjs capacity wi
             retained.value(),
         ),
     );
-    try std.testing.expectEqual(@as(i32, 1), retained.header.meta().rc);
+    try helpers.expectRefCount(1, &retained.header);
     retained.value().free(rt);
 
     const shaped_array = try core.Object.createArray(rt, null);
@@ -15369,7 +15977,7 @@ test "dense write leaf consumes reserved appends only inside the qjs capacity wi
             shaped_retained.value(),
         ),
     );
-    try std.testing.expectEqual(@as(i32, 1), shaped_retained.header.meta().rc);
+    try helpers.expectRefCount(1, &shaped_retained.header);
     shaped_retained.value().free(rt);
 }
 
@@ -17693,9 +18301,10 @@ test "iterator results use ordinary transitions without a sixth realm shape" {
 
     // QuickJS's js_create_iterator_result performs the ordinary `value` then
     // `done` transitions. With no realm-pinned iterator layout, zjs likewise
-    // creates the object and the transient one-property Shape; the property
-    // array remains pre-sized in one allocation.
-    try std.testing.expectEqual(alloc_calls + 1, js.runtime.memory.alloc_calls);
+    // creates the object and the transient one-property Shape. The exact
+    // two-slot property payload now trails the Object, so there is no second
+    // general `alloc` call for the value array.
+    try std.testing.expectEqual(alloc_calls, js.runtime.memory.alloc_calls);
     try std.testing.expectEqual(create_calls + 2, js.runtime.memory.create_calls);
     const object = try core.Object.expect(result);
     try std.testing.expectEqual(@as(?i32, 2), object.asDataAt(0).?.asInt32());
@@ -17987,6 +18596,14 @@ test "FinalizationRegistry cleanup job keeps registry realm before invoking call
     );
     defer registry_value.free(rt);
     const registry = try core.Object.expect(registry_value);
+    // The registry is held only by this Zig local once both facades are
+    // destroyed (deliberately — the test observes the registry keeping its
+    // realms alive on its own). Name it for the tracing sweep; `target`
+    // stays unrooted because its collection is the event under test.
+    var registry_slot: ?*core.Object = registry;
+    var registry_roots = core.runtime.rootObjects(.{&registry_slot});
+    registry_roots.activate(rt);
+    defer registry_roots.deactivate(rt);
     try std.testing.expectEqual(registry_realm, registry.finalizationRegistryRealmContext().?);
     try std.testing.expectEqual(callback_realm, callback_object.nativeFunctionRealm().?);
 
@@ -18553,7 +19170,7 @@ test "dynamic import failures preserve unsupported not-found and host I/O mappin
         .max_source_size = 8,
     };
     defer state.deinit();
-    var loader_scope = engine.exec.module_graph.installDynamicImport(&state);
+    var loader_scope = try engine.exec.module_graph.installDynamicImport(&state);
     defer loader_scope.deinit();
 
     const missing_specifier = try engine.exec.value_ops.createStringValue(js.runtime, "./missing.mjs");
@@ -19414,7 +20031,7 @@ test "Runtime loader keeps same-path TLA continuations and waiters in parent and
         .max_source_size = 4096,
     };
     defer state.deinit();
-    var loader_scope = engine.exec.module_graph.installDynamicImport(&state);
+    var loader_scope = try engine.exec.module_graph.installDynamicImport(&state);
     defer loader_scope.deinit();
 
     const child_holder = try engine.exec.call.createRealmObject(js.context);
@@ -19651,7 +20268,7 @@ test "module TLA continuation OOM retains FIFO node for retry" {
         .max_source_size = 4096,
     };
     defer state.deinit();
-    var dynamic_import_scope = engine.exec.module_graph.installDynamicImport(&state);
+    var dynamic_import_scope = try engine.exec.module_graph.installDynamicImport(&state);
     defer dynamic_import_scope.deinit();
 
     const setup = try js.evalWithOptions(
@@ -19941,7 +20558,11 @@ const ReflectActiveRootSymbolProbe = struct {
             self.rt.memory.trigger_gc_fn = saved_trigger_fn;
             self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
         }
-        _ = self.rt.runObjectCycleRemoval();
+        // The trigger models an allocation-point collection, which is an
+        // engine-frames-active trigger: scan conservative so natively held
+        // in-flight construction state survives, exactly as the production
+        // pollGC(.normal) path behaves.
+        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
         self.saw_symbol = self.rt.atoms.name(self.atom_id) != null;
     }
 };
@@ -19964,6 +20585,15 @@ test "reflect construct roots argument list while resolving prototype" {
     const realm_global = try core.Object.create(rt, core.class.ids.object, null);
     _ = try realm_global.ensureRealmPayload(rt);
     defer realm_global.value().free(rt);
+    // The installed realm graph hangs off this Zig local; the probe below
+    // runs whole-heap cycle removal on every allocation, so the tracing
+    // sweep needs the global named as a root or the intrinsics vanish and
+    // prototype resolution throws InvalidBuiltinRegistry. The behavior under
+    // test — engine-side rooting of the argument list — is unaffected.
+    var realm_global_slot: ?*core.Object = realm_global;
+    var realm_roots = core.runtime.rootObjects(.{&realm_global_slot});
+    realm_roots.activate(rt);
+    defer realm_roots.deactivate(rt);
     engine.exec.standard_globals.configureRuntime(rt);
     try rt.installStandardGlobals(realm_global);
 
@@ -21600,4 +22230,167 @@ test "flat string strict-eq matches content across distinct objects" {
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
+}
+
+const ActiveInvocationRootProbe = struct {
+    allocator: std.mem.Allocator,
+    saw_live_local: bool = false,
+    unused_capacity_checked: bool = false,
+    unused_capacity_leaked: bool = false,
+
+    fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const rt = invocation.realm.runtime;
+        try std.testing.expect(rt.active_invocation != null);
+
+        const active = inline_calls.activeInvocation(rt) orelse return error.TestUnexpectedResult;
+        var seen = std.AutoHashMap(usize, void).init(self.allocator);
+        defer seen.deinit();
+
+        const Recorder = struct {
+            seen: *std.AutoHashMap(usize, void),
+
+            fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+                const recorder: *@This() = @ptrCast(@alignCast(context));
+                if (slot.cycleMarkHeader()) |header| {
+                    const addr = @intFromPtr(header);
+                    if (addr < 4096 or addr % @alignOf(core.gc.Header) != 0) return error.OutOfMemory;
+                    try recorder.seen.put(addr, {});
+                }
+            }
+
+            fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
+                const recorder: *@This() = @ptrCast(@alignCast(context));
+                const object = slot.* orelse return;
+                try recorder.seen.put(@intFromPtr(&object.header), {});
+            }
+        };
+        var recorder = Recorder{ .seen = &seen };
+        var visitor = core.runtime.RootVisitor{
+            .context = @ptrCast(&recorder),
+            .visit_value = Recorder.visitValue,
+            .visit_object = Recorder.visitObject,
+        };
+        try rt.traceActiveRoots(&visitor);
+
+        var live_local: ?*core.gc.Header = null;
+        try assertLiveWindowsVisited(active, &seen, &live_local);
+        self.saw_live_local = live_local != null;
+
+        const stack = active.machine.currentLevel().stack;
+        const unused = stack.backingValues()[stack.len()..];
+        if (unused.len != 0) {
+            self.unused_capacity_checked = true;
+            const orphan = try core.Object.create(rt, core.class.ids.object, null);
+            const saved = unused[0];
+            unused[0] = orphan.value();
+            defer unused[0] = saved;
+            defer orphan.value().free(rt);
+
+            seen.clearRetainingCapacity();
+            try rt.traceActiveRoots(&visitor);
+            if (seen.contains(@intFromPtr(&orphan.header))) {
+                self.unused_capacity_leaked = true;
+            }
+        }
+
+        // Heap-wide shadow tracing is a post-quiesce observer. A live native
+        // callback is not a quiesced heap (in-flight payloads can still hold
+        // uninit child slots). Live-window coverage is the visitor lockstep.
+
+        return core.JSValue.boolean(self.saw_live_local and !self.unused_capacity_leaked);
+    }
+};
+
+fn assertLiveWindowsVisited(
+    active: *inline_calls.ActiveInvocation,
+    seen: *std.AutoHashMap(usize, void),
+    live_local: *?*core.gc.Header,
+) !void {
+    var current: ?*inline_calls.ActiveInvocation = active;
+    while (current) |invocation| {
+        try expectFrameVisited(invocation.machine.l0.level.frame, seen, live_local);
+        try expectValueVisitedSlice(invocation.machine.l0.level.stack.liveValues(), seen);
+        var entry = invocation.machine.top;
+        while (entry) |current_entry| {
+            try expectFrameVisited(&current_entry.frame, seen, live_local);
+            try expectValueVisitedSlice(current_entry.stack.liveValues(), seen);
+            if (current_entry.teardown.has_native_caller or current_entry.teardown.constructor_completion) {
+                try expectValueVisited(&current_entry.native_caller, seen);
+            }
+            entry = current_entry.prev;
+        }
+        current = invocation.previous;
+    }
+}
+
+fn expectFrameVisited(
+    frame: *frame_mod.Frame,
+    seen: *std.AutoHashMap(usize, void),
+    live_local: *?*core.gc.Header,
+) !void {
+    try expectValueVisited(&frame.this_value, seen);
+    try expectValueVisited(&frame.current_function, seen);
+    try expectValueVisitedSlice(frame.args, seen);
+    try expectValueVisitedSlice(frame.locals, seen);
+    if (live_local.* == null) {
+        for (frame.locals) |*local| {
+            if (local.cycleMarkHeader()) |header| {
+                live_local.* = header;
+                break;
+            }
+        }
+    }
+    if (frame.cold) |cold| {
+        if (frame.ownership.new_target != .aliases_function) {
+            try expectValueVisited(&cold.new_target, seen);
+        }
+        try expectValueVisitedSlice(cold.original_args, seen);
+    }
+    for (frame.var_refs) |cell| {
+        var cell_value = cell.valueRef();
+        try expectValueVisited(&cell_value, seen);
+    }
+    for (frame.open_var_refs) |maybe_cell| {
+        const cell = maybe_cell orelse continue;
+        var cell_value = cell.valueRef();
+        try expectValueVisited(&cell_value, seen);
+    }
+}
+
+fn expectValueVisitedSlice(values: []core.JSValue, seen: *std.AutoHashMap(usize, void)) !void {
+    for (values) |*value| try expectValueVisited(value, seen);
+}
+
+fn expectValueVisited(value: *core.JSValue, seen: *std.AutoHashMap(usize, void)) !void {
+    const header = value.cycleMarkHeader() orelse return;
+    try std.testing.expect(seen.contains(@intFromPtr(header)));
+}
+
+test "active invocation Adapter traces live VM windows and not unused stack capacity" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var probe = ActiveInvocationRootProbe{ .allocator = std.testing.allocator };
+    try js.defineGlobalExternalHostFunction(
+        "activeInvocationProbe",
+        0,
+        &probe,
+        ActiveInvocationRootProbe.call,
+        null,
+    );
+
+    const result = try js.eval(
+        \\function holdHidden() {
+        \\    const hidden = { marker: 1 };
+        \\    const ok = activeInvocationProbe();
+        \\    return [ok, hidden];
+        \\}
+        \\holdHidden();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(probe.saw_live_local);
+    try std.testing.expect(probe.unused_capacity_checked);
+    try std.testing.expect(!probe.unused_capacity_leaked);
 }

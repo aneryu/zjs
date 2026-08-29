@@ -430,6 +430,17 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     defer if (function_alive) function_value.free(rt);
     const function_object = objectFromValue(function_value) orelse return error.TypeError;
 
+    // Root only the FUNCTION for the quiescent whole-heap collections below:
+    // the mid-phase assertions observe state/symbols surviving through the
+    // function's own stored edges, which is the behavior under test. (The
+    // paced threshold collections during creation scan engine-active and
+    // cover the stack-held locals conservatively.)
+    var function_slot: ?*core.Object = function_object;
+    var live_roots = core.runtime.rootObjects(.{&function_slot});
+    live_roots.activate(rt);
+    var live_roots_active = true;
+    defer if (live_roots_active) live_roots.deactivate(rt);
+
     try std.testing.expect(rt.atoms.name(promise_symbol) != null);
     try std.testing.expect(rt.atoms.name(state_symbol) != null);
     try std.testing.expectEqual(promise_symbol, function_object.functionPromiseResolvingTarget().?.asSymbolAtom().?);
@@ -448,6 +459,8 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
         try std.testing.expectEqual(state_symbol, marker_value.asSymbolAtom().?);
     }
 
+    live_roots.deactivate(rt);
+    live_roots_active = false;
     function_value.free(rt);
     function_alive = false;
     _ = rt.runObjectCycleRemoval();
@@ -491,6 +504,10 @@ pub fn appendPromiseReaction(rt: *core.JSRuntime, promise: *core.Object, reactio
     std.debug.assert(len < capacity_slot.*);
     slot.*.ptr[len] = reaction.dup();
     slot.* = slot.*.ptr[0 .. len + 1];
+    // The reaction list lives in the promise's payload, so the promise is the
+    // owner. A pending promise is usually the older of the two -- it is what
+    // the subscriber is attaching to.
+    rt.gc.generationalBarrier(&promise.header, reaction.cycleMarkHeader());
 }
 
 pub fn promiseReactionRecord(
@@ -621,6 +638,18 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     reaction_payload.free(rt);
     reaction_payload_alive = false;
 
+    // The holder under test is the native Job struct; its JSValue refs are
+    // invisible to a declared-roots tracing sweep, so name the job's slots
+    // directly. Deactivated before the death phase.
+    var job_roots_storage = [_]core.runtime.ValueRootValue{
+        .{ .value = &job.payload.promise_reaction.reaction },
+        .{ .value = &job.payload.promise_reaction.value },
+    };
+    var job_roots = core.runtime.ValueRootFrame{ .values = &job_roots_storage };
+    job_roots.activate(rt);
+    var job_roots_active = true;
+    defer if (job_roots_active) job_roots.deactivate(rt);
+
     try std.testing.expect(rt.atoms.name(reaction_symbol) != null);
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
     try std.testing.expectEqual(value_symbol, job.payload.promise_reaction.value.asSymbolAtom().?);
@@ -639,6 +668,8 @@ test "promiseReactionJob roots reaction and value while allocating job" {
         try std.testing.expectEqual(reaction_symbol, marker_value.asSymbolAtom().?);
     }
 
+    job_roots.deactivate(rt);
+    job_roots_active = false;
     job.deinit();
     job_alive = false;
     _ = rt.runObjectCycleRemoval();
@@ -785,11 +816,17 @@ pub fn promiseSettleValue(
     const old_result = result_slot.*;
     result_slot.* = next_result;
     next_result_owned = false;
+    // Settling writes straight into the payload rather than through
+    // `Object.setPromiseResult`, so it takes the barrier itself: a promise
+    // that has been pending for a while is old, and the value it settles with
+    // was just produced.
+    ctx.runtime.gc.generationalBarrier(&promise.header, next_result.cycleMarkHeader());
     promise.promiseIsRejectedSlot().* = rejected;
     if (old_result) |stored| stored.free(ctx.runtime);
     if (next_reaction_arg) |reaction_arg| {
         const old_reaction_arg = reaction_arg_slot.*;
         reaction_arg_slot.* = reaction_arg;
+        ctx.runtime.gc.generationalBarrier(&promise.header, reaction_arg.cycleMarkHeader());
         next_reaction_arg = null;
         if (old_reaction_arg) |stored| stored.free(ctx.runtime);
     }
@@ -819,12 +856,14 @@ test "promiseSettleValue handles result self-assignment" {
 
     try promise.setPromiseResult(rt, result.value().dup());
     result.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), result.header.meta().rc);
+    if (comptime !core.gc.trace_stw_enabled)
+        try std.testing.expectEqual(@as(i32, 1), core.gc.headerRefCount(&result.header));
 
     const current = promise.promiseResult().?;
     try promiseSettleValue(ctx, global, promise, current, false);
 
-    try std.testing.expectEqual(@as(i32, 1), result.header.meta().rc);
+    if (comptime !core.gc.trace_stw_enabled)
+        try std.testing.expectEqual(@as(i32, 1), core.gc.headerRefCount(&result.header));
     try std.testing.expectEqual(&result.header, promise.promiseResult().?.refHeader().?);
 }
 
@@ -1962,6 +2001,14 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     defer if (result_alive) result_value.free(rt);
     const result = objectFromValue(result_value) orelse return error.TypeError;
 
+    // Root the RESULT (the holder under test) for the quiescent collections;
+    // the symbol's mid-phase survival must come via its stored property.
+    var result_slot: ?*core.Object = result;
+    var result_roots = core.runtime.rootObjects(.{&result_slot});
+    result_roots.activate(rt);
+    var result_roots_active = true;
+    defer if (result_roots_active) result_roots.deactivate(rt);
+
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
     values.value().free(rt);
     values_alive = false;
@@ -1977,6 +2024,8 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
         try std.testing.expectEqual(value_symbol, stored.asSymbolAtom().?);
     }
 
+    result_roots.deactivate(rt);
+    result_roots_active = false;
     result_value.free(rt);
     result_alive = false;
     _ = rt.runObjectCycleRemoval();
@@ -3808,6 +3857,10 @@ pub fn drainOnePendingJob(
     var entry = ctx.runtime.job_queue.takeFirst().?;
     var entry_owned = true;
     defer if (entry_owned) entry.deinit();
+    var active_job_root: core.runtime.ActiveJobRoot = .{};
+    active_job_root.activate(ctx.runtime, &entry);
+    defer active_job_root.deactivate(ctx.runtime);
+    defer if (comptime core.gc.trace_stw_enabled) ctx.runtime.clearWeakRefKeptAlive();
     const job_ctx = entry.realm.borrow() orelse unreachable;
     const job_global = job_ctx.global orelse return error.InvalidBuiltinRegistry;
     var result: ?core.JSValue = null;

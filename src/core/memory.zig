@@ -12,8 +12,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
+const gc_representation = @import("gc_representation_constants.zig");
+const gc_block_heap = @import("gc_block_heap.zig");
 
 const diagnostic_accounting_enabled = builtin.is_test or builtin.mode == .Debug;
+/// Exact per-allocation cycle peaks are available only to the experimental
+/// tracing collector. The default RC account keeps neither the pointer nor
+/// the branch in its allocation paths.
+const cycle_envelope_tracking_available = std.mem.eql(u8, build_options.zjs_gc, "trace_stw");
+const block_heap_enabled = std.mem.eql(u8, build_options.zjs_gc, "trace_stw");
 
 /// OOM-injection coverage (v1), gated by `-Dzjs_oom_coverage` (default
 /// false; the recording branches below are `comptime`-eliminated so the
@@ -31,7 +38,54 @@ const diagnostic_accounting_enabled = builtin.is_test or builtin.mode == .Debug;
 /// `MemoryAccount.allocator` container call sites at the backing-allocator
 /// vtable instead, and schedule fail-injection toward not-yet-failed sites.
 pub const oom_coverage_enabled: bool = build_options.zjs_oom_coverage;
+
+/// Does a collector in this build need to find an arena from an interior
+/// pointer?
+///
+/// Only the tracing and shadow collectors scan conservatively, and only they
+/// resolve a stack word against the heap. Refcounting never asks, so it should
+/// not pay: self-aligned arenas, the `magic` word in the arena header, the
+/// lifetime observer, and the class-byte stamps all exist for that one query.
+/// Mirrors `gc.address_registry_enabled`, which cannot be imported here --
+/// `gc.zig` depends on this module, not the other way round.
+pub const arena_addressable: bool = std.mem.eql(u8, build_options.zjs_gc, "trace_stw") or
+    std.mem.eql(u8, build_options.zjs_gc, "shadow") or
+    builtin.is_test;
+const trace_stw_enabled: bool = std.mem.eql(u8, build_options.zjs_gc, "trace_stw");
 pub const force_gc_on_allocation_enabled: bool = build_options.zjs_force_gc;
+
+/// Issue the next slab pop's block-header fetch one allocation early.
+///
+/// The free chain qjs threads through the free blocks themselves
+/// (`JSMallocBlockHeader.u.next_block`, quickjs.c:275) costs one load per pop,
+/// and that load's result is what names the *following* pop's block -- so
+/// without this it cannot start until the caller has finished initializing the
+/// previous object.
+///
+/// Under refcounting that load is free and this would be pure cost: the alloc
+/// side cycles a handful of arenas that never leave L1/L2 (measured on splay:
+/// 4.8 free arenas per class, 16.6% of arena switches return to one of the
+/// last 8 that class used). Under tracing the identical code walks a set two
+/// orders of magnitude larger -- 2,733 free arenas per class, 0.04% revisits
+/// -- because a sweep leaves thousands of arenas partially free at once and
+/// the alloc side then drains each exactly once. Every arena visit lands on a
+/// cold page and the chain becomes a serial run of cold dependent loads:
+/// 80.4% of `allocAlignedBytesNoTrigger`'s self cycles and sixty times rc's
+/// L2D refill count.
+///
+/// Measurements, and the two heavier designs this was chosen over, are in
+/// `docs/slab-reuse-2026-08-29.md`.
+const slab_alloc_prefetch: bool = trace_stw_enabled;
+
+/// Compile in the slab free-list locality audit (`slab_locality_audit.zig`).
+///
+/// Measurement instrument, never `true` in the tree. The import is on the
+/// taken side of a `comptime` branch so the file is not even parsed when this
+/// is off -- parking the counters in this file instead moved the refcounting
+/// build by 171 instructions with no semantic change, and this module is on
+/// that build's hottest path.
+pub const slab_locality_audit: bool = false;
+const slab_audit = if (slab_locality_audit) @import("slab_locality_audit.zig") else struct {};
 
 /// Whether an ordinary allocation consults the GC threshold at all.
 ///
@@ -89,6 +143,11 @@ const oom_coverage = struct {
     }
 };
 
+/// Print the slab locality report. Compiled out unless `slab_locality_audit`.
+pub fn slabLocalityReport() void {
+    if (comptime slab_locality_audit) slab_audit.dump();
+}
+
 /// Number of distinct allocation call sites observed since process start
 /// (or the last `oomCoverageReset`). Always 0 when coverage is disabled.
 pub fn oomCoverageDistinctSiteCount() usize {
@@ -109,12 +168,52 @@ pub const SmallObjectSlab = struct {
     pub const arena_size: usize = 4 * 1024;
     pub const max_size: usize = 512;
     const slab_alignment: std.mem.Alignment = .@"8";
+    /// Arenas are aligned to their own size, so `ptr & ~(arena_size - 1)` is
+    /// the arena that owns any interior pointer.
+    ///
+    /// This is what lets the collector resolve a conservative stack candidate
+    /// with arithmetic instead of a hash lookup. An arena holds one size class
+    /// with its header at the base, so once the base is known the owning block
+    /// is `(ptr - base - header) / block_size`, and the block's first byte is
+    /// the GC metadata prefix that says whether it is a live GC object at all.
+    /// Without this alignment none of that is reachable from an interior
+    /// pointer and every published object has to be inserted into a side table
+    /// instead -- which is what the address registry was, at 76% of raytrace's
+    /// runtime. The arena is a whole page either way, so alignment costs the
+    /// backing allocator nothing it was not already paying.
+    pub const arena_alignment: std.mem.Alignment =
+        if (arena_addressable) .fromByteUnits(arena_size) else slab_alignment;
     const free_nil: u16 = std.math.maxInt(u16);
     const block_sizes = [_]usize{
         16,  24,  32,  40,  48,  56,  64,  72,
         80,  88,  96,  104, 112, 120, 128, 144,
         160, 176, 192, 208, 224, 240, 256, 288,
         320, 352, 384, 416, 448, 480, 512,
+    };
+    pub const class_count: usize = block_sizes.len;
+
+    /// Every arena alive right now, for an observer installed after the fact.
+    ///
+    /// The runtime allocates before its GC registry exists, so by the time the
+    /// observer can be installed some arenas are already serving objects.
+    /// Without this they would never enter the arena set and every object in
+    /// them would be invisible to the conservative scanner -- a use-after-free
+    /// rather than a leak, and one that only shows up when a stack candidate
+    /// happens to name an early object.
+    pub fn forEachArena(self: *SmallObjectSlab, context: *anyopaque, visit: *const fn (*anyopaque, usize) void) void {
+        for (&self.arenas) |head| {
+            var node = head;
+            while (node) |arena| {
+                node = arena.next;
+                visit(context, @intFromPtr(arena));
+            }
+        }
+    }
+
+    pub const ArenaObserver = struct {
+        ctx: *anyopaque,
+        on_create: *const fn (ctx: *anyopaque, base: usize) void,
+        on_release: *const fn (ctx: *anyopaque, base: usize) void,
     };
 
     const BlockHeader = extern struct {
@@ -132,7 +231,18 @@ pub const SmallObjectSlab = struct {
         block_size_idx: u8,
     };
 
+    /// Set on every live arena, checked before an address masked out of a
+    /// conservative candidate is believed.
+    ///
+    /// The observer set below is the real authority -- a stray word can point
+    /// at an unmapped page, and reading a magic out of it would fault rather
+    /// than return false. This is the second check, against a word that points
+    /// into some other mapped allocation that happens to share a page base
+    /// with nothing at all.
+    pub const arena_magic: u32 = 0x5a4a5341;
+
     const Arena = struct {
+        magic: if (arena_addressable) u32 else void = if (arena_addressable) arena_magic else {},
         next: ?*Arena = null,
         prev: ?*Arena = null,
         free_next: ?*Arena = null,
@@ -154,9 +264,26 @@ pub const SmallObjectSlab = struct {
 
     arenas: [block_sizes.len]?*Arena = @splat(null),
     free_arenas: [block_sizes.len]?*Arena = @splat(null),
+    /// Trace-only physical backing for the 4 KiB arenas. Logical payload
+    /// accounting and limits still belong to MemoryAccount; this only keeps
+    /// arena refills off glibc's high-alignment malloc path.
+    arena_backing: if (arena_addressable) ?std.mem.Allocator else void =
+        if (arena_addressable) null else {},
+    /// Told when an arena is created or released, so the collector can keep a
+    /// set of valid arena bases. Arena lifetime, not object lifetime: at 4 KiB
+    /// per arena against ~64-byte objects this is roughly two orders of
+    /// magnitude less traffic than registering each published object.
+    arena_observer: if (arena_addressable) ?ArenaObserver else void =
+        if (arena_addressable) null else {},
 
     pub inline fn canUse(byte_count: usize, alignment: std.mem.Alignment) bool {
         return classIndex(byte_count, alignment) != null;
+    }
+
+    pub fn setArenaBacking(self: *SmallObjectSlab, allocator: std.mem.Allocator) void {
+        if (comptime !arena_addressable) return;
+        for (self.arenas) |head| std.debug.assert(head == null);
+        self.arena_backing = allocator;
     }
 
     /// Eligibility-only variant of `classIndex`: true iff that would return an
@@ -204,7 +331,30 @@ pub const SmallObjectSlab = struct {
         const block_idx = arena.first_free_block;
         std.debug.assert(block_idx != free_nil);
         const header = blockHeaderAt(arena, block_idx, block_size);
-        arena.first_free_block = header.index_or_next;
+        if (comptime slab_locality_audit) slab_audit.notePop(
+            @intFromPtr(arena),
+            @intFromPtr(header),
+            @as(u64, arena.block_count) - @as(u64, arena.used_blocks),
+            index,
+        );
+        const next_free = header.index_or_next;
+        arena.first_free_block = next_free;
+        if (comptime slab_alloc_prefetch) {
+            const prefetch_idx: u16 = if (next_free == free_nil) 0 else next_free;
+            // The property that makes this cheap instead of ruinous: the
+            // address always lands inside this arena's own 4 KiB page, which
+            // is mapped and in the TLB. An address outside it costs a page
+            // walk the prefetch then throws away -- measured at 12.6% of
+            // earley-boyer's total cycles when `free_nil` was left unfolded.
+            std.debug.assert(prefetch_idx < arena.block_count);
+            const prefetch_addr = @intFromPtr(arenaBlocks(arena)) + @as(usize, prefetch_idx) * block_size;
+            std.debug.assert(prefetch_addr - @intFromPtr(arena) < arena_size);
+            @prefetch(@as(*const u8, @ptrFromInt(prefetch_addr)), .{
+                .rw = .write,
+                .locality = 3,
+                .cache = .data,
+            });
+        }
         header.index_or_next = block_idx;
         if (comptime stamp_class) header.block_size_idx = @intCast(index);
         arena.used_blocks += 1;
@@ -229,11 +379,19 @@ pub const SmallObjectSlab = struct {
         const arena = arenaFromBlock(header, block_idx, block_size);
 
         std.debug.assert(index < block_sizes.len);
+        // Same reason as the arena-init stamp: a freed block must not read as
+        // a live GC object. `recordHeapFreeWithBytes` clears `heap_accounted`
+        // on the way here, but it returns early when the recorded size is
+        // zero, and relying on every GC free path to have done it makes the
+        // collector's answer depend on a chain of invariants rather than on
+        // the state of the block. One byte store closes it here instead.
+        header.block_size_idx = @intCast(index);
         std.debug.assert(block_idx < arena.block_count);
         std.debug.assert(arena.block_size_idx == index);
         std.debug.assert(arena.used_blocks != 0);
 
         const was_full = arena.used_blocks == arena.block_count;
+        if (comptime slab_locality_audit) slab_audit.noteFree(@intFromPtr(arena), @intFromPtr(header), was_full, index, @as(u64, arena.block_count) - @as(u64, arena.used_blocks) + 1);
         header.index_or_next = arena.first_free_block;
         arena.first_free_block = block_idx;
         if (was_full) {
@@ -251,17 +409,27 @@ pub const SmallObjectSlab = struct {
     /// Out of line so the per-free hot path stays call-free (the mirror of qjs
     /// keeping `js_malloc_new_arena` no_inline on the alloc side).
     noinline fn releaseEmptyArena(self: *SmallObjectSlab, backing: *const std.mem.Allocator, index: usize, arena: *Arena) void {
+        if (comptime slab_locality_audit) slab_audit.noteArena(false, @intFromPtr(arena), index);
         self.removeArena(index, arena);
         self.removeFreeArena(index, arena);
-        backing.rawFree(arenaAllocation(arena), slab_alignment, @returnAddress());
+        if (comptime arena_addressable) {
+            if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(arena));
+            arena.magic = 0;
+        }
+        self.arenaBacking(backing.*).rawFree(arenaAllocation(arena), arena_alignment, @returnAddress());
     }
 
     pub fn deinit(self: *SmallObjectSlab, backing: std.mem.Allocator) void {
+        if (comptime slab_locality_audit) slab_audit.dump();
         for (&self.arenas) |*head| {
             var arena = head.*;
             while (arena) |node| {
                 arena = node.next;
-                backing.rawFree(arenaAllocation(node), slab_alignment, @returnAddress());
+                if (comptime arena_addressable) {
+                    if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(node));
+                    node.magic = 0;
+                }
+                self.arenaBacking(backing).rawFree(arenaAllocation(node), arena_alignment, @returnAddress());
             }
         }
         self.* = .{};
@@ -275,7 +443,8 @@ pub const SmallObjectSlab = struct {
         const block_count = (arena_size - arena_header_size) / block_size;
         std.debug.assert(block_count > 0 and block_count <= free_nil);
         const alloc_size = arena_header_size + block_count * block_size;
-        const storage_ptr = backing.rawAlloc(alloc_size, slab_alignment, @returnAddress()) orelse return error.OutOfMemory;
+        const storage_ptr = self.arenaBacking(backing).rawAlloc(alloc_size, arena_alignment, @returnAddress()) orelse return error.OutOfMemory;
+        if (comptime arena_addressable) std.debug.assert(@intFromPtr(storage_ptr) % arena_size == 0);
         const arena: *Arena = @ptrCast(@alignCast(storage_ptr));
         arena.* = .{
             .block_size_idx = @intCast(index),
@@ -286,9 +455,22 @@ pub const SmallObjectSlab = struct {
         while (block_idx < arena.block_count) : (block_idx += 1) {
             const header = blockHeaderAt(arena, block_idx, block_size);
             header.index_or_next = if (block_idx + 1 == arena.block_count) free_nil else block_idx + 1;
+            // Stamp the class now, which also clears the GC accounting bits
+            // that share this byte with it. Arenas come from recycled backing
+            // memory, so a block that has never been allocated would otherwise
+            // carry whatever its previous life left here -- and the collector
+            // reads exactly this byte to decide whether an address masked out
+            // of a conservative candidate is a live GC object. A stale
+            // `heap_accounted` bit in a never-allocated block makes the tracer
+            // walk garbage as if it were an object.
+            if (comptime arena_addressable) header.block_size_idx = @intCast(index);
         }
+        if (comptime slab_locality_audit) slab_audit.noteArena(true, @intFromPtr(arena), index);
         self.addArenaList(index, arena);
         self.addFreeArena(index, arena);
+        if (comptime arena_addressable) {
+            if (self.arena_observer) |observer| observer.on_create(observer.ctx, @intFromPtr(arena));
+        }
         return arena;
     }
 
@@ -347,6 +529,66 @@ pub const SmallObjectSlab = struct {
         return @as([*]u8, @ptrCast(arena)) + arena_header_size;
     }
 
+    /// Resolve an interior pointer to the user address of the block holding it,
+    /// given the arena base it was masked out of.
+    ///
+    /// This is the whole reason arenas are self-aligned. `base` must have come
+    /// from `addr & ~(arena_size - 1)` AND been confirmed as a live arena by
+    /// the caller's own set -- the magic check here is a second filter against
+    /// a mapped-but-unrelated page, not a substitute for the first, because a
+    /// stray candidate can name an unmapped address where reading the magic
+    /// would fault.
+    ///
+    /// Returns the USER pointer (past the 8-byte block header), which for a GC
+    /// tenant is its `gc.Header`; the header itself is the metadata prefix, so
+    /// a candidate pointing at the prefix and one pointing at the object both
+    /// land on the same block and resolve identically.
+    pub fn userPtrWithinArena(base: usize, addr: usize) ?[*]u8 {
+        if (comptime !arena_addressable) return null;
+        const arena: *Arena = @ptrFromInt(base);
+        if (arena.magic != arena_magic) return null;
+        const blocks = @intFromPtr(arenaBlocks(arena));
+        if (addr < blocks) return null;
+        const block_size = block_sizes[arena.block_size_idx];
+        const index = (addr - blocks) / block_size;
+        if (index >= arena.block_count) return null;
+        return @as([*]u8, @ptrFromInt(blocks + index * block_size)) + block_header_size;
+    }
+
+    /// Every block of an arena, with the slab's own opinion of whether it is
+    /// free, so the collector can audit the invariant its candidate validation
+    /// rests on: a block reads as a live GC object exactly when it holds one.
+    ///
+    /// Both halves of that are checkable only from here. "Free" means on this
+    /// arena's free chain, which covers blocks never handed out (a fresh arena
+    /// threads all of them onto it) and blocks returned by `freeAtIndex`. Those
+    /// are precisely the two states whose stale `alloc_info` byte made the
+    /// tracer walk garbage as an object.
+    pub fn forEachArenaBlock(
+        base: usize,
+        context: *anyopaque,
+        visit: *const fn (ctx: *anyopaque, user: [*]u8, is_free: bool) void,
+    ) void {
+        if (comptime !arena_addressable) return;
+        const arena: *Arena = @ptrFromInt(base);
+        if (arena.magic != arena_magic) return;
+        const block_size = block_sizes[arena.block_size_idx];
+        // 253 blocks is the most any size class fits in a 4 KiB arena.
+        var free_bits: [4]u64 = @splat(0);
+        var cursor = arena.first_free_block;
+        var guard: usize = 0;
+        while (cursor != free_nil and guard <= arena.block_count) : (guard += 1) {
+            if (cursor >= arena.block_count) break;
+            free_bits[cursor / 64] |= @as(u64, 1) << @intCast(cursor % 64);
+            cursor = blockHeaderAt(arena, cursor, block_size).index_or_next;
+        }
+        var index: u16 = 0;
+        while (index < arena.block_count) : (index += 1) {
+            const is_free = (free_bits[index / 64] & (@as(u64, 1) << @intCast(index % 64))) != 0;
+            visit(context, userData(blockHeaderAt(arena, index, block_size)), is_free);
+        }
+    }
+
     inline fn blockHeaderAt(arena: *Arena, block_idx: u16, block_size: usize) *BlockHeader {
         return @ptrCast(@alignCast(arenaBlocks(arena) + @as(usize, block_idx) * block_size));
     }
@@ -370,6 +612,11 @@ pub const SmallObjectSlab = struct {
         return @as([*]u8, @ptrCast(arena))[0..alloc_size];
     }
 
+    inline fn arenaBacking(self: *const SmallObjectSlab, fallback: std.mem.Allocator) std.mem.Allocator {
+        if (comptime arena_addressable) return self.arena_backing orelse fallback;
+        return fallback;
+    }
+
     fn addArenaList(self: *SmallObjectSlab, index: usize, arena: *Arena) void {
         arena.prev = null;
         arena.next = self.arenas[index];
@@ -390,6 +637,7 @@ pub const SmallObjectSlab = struct {
     }
 
     fn addFreeArena(self: *SmallObjectSlab, index: usize, arena: *Arena) void {
+        if (comptime slab_locality_audit) slab_audit.noteFreeList(index, 1, @intFromPtr(arena));
         arena.free_prev = null;
         arena.free_next = self.free_arenas[index];
         if (arena.free_next) |next| next.free_prev = arena;
@@ -397,6 +645,7 @@ pub const SmallObjectSlab = struct {
     }
 
     fn removeFreeArena(self: *SmallObjectSlab, index: usize, arena: *Arena) void {
+        if (comptime slab_locality_audit) slab_audit.noteFreeList(index, -1, @intFromPtr(arena));
         if (arena.free_prev) |prev| {
             prev.free_next = arena.free_next;
         } else {
@@ -438,6 +687,12 @@ pub const MemoryAccount = struct {
     allocation_count: usize = 0,
     peak_allocated_bytes: usize = 0,
     peak_allocation_count: usize = 0,
+    /// Optional destination for §1.3's same-domain cycle peak. Installed from
+    /// the settled S/T reset through the next incremental cycle's completion;
+    /// null keeps an ordinary tracing run to one predictable branch per
+    /// account credit.
+    cycle_peak_output: if (cycle_envelope_tracking_available) ?*usize else void =
+        if (cycle_envelope_tracking_available) null else {},
     alloc_calls: usize = 0,
     free_calls: usize = 0,
     create_calls: usize = 0,
@@ -446,8 +701,29 @@ pub const MemoryAccount = struct {
     trace_writer: ?*std.Io.Writer = null,
     trace_failed: bool = false,
     profile_alloc_count: ?*u64 = null,
+    /// Concrete block heap used for tracing collector Object cells. The
+    /// collector choice is compile-time-known, so the trace build calls the
+    /// allocator directly and the default RC build carries neither this
+    /// pointer nor a dead nullable-function-pointer branch. The Object kind's
+    /// byte encoding is part of the shared allocator representation above.
+    gc_object_cell_heap: if (block_heap_enabled) ?*gc_block_heap.Heap else void =
+        if (block_heap_enabled) null else {},
+
     trigger_gc_fn: ?*const fn (ctx: ?*anyopaque, size: usize) void = null,
     trigger_gc_ctx: ?*anyopaque = null,
+    /// Collect-and-retry hook for an allocation that would cross `limit`.
+    ///
+    /// Under refcounting, crossing the limit really does mean out of memory:
+    /// everything unreachable has already been freed. Under the tracer,
+    /// garbage accumulates by design until a collection runs, so rejecting the
+    /// allocation without collecting first reports OOM for a heap that is
+    /// mostly garbage. Installed only by the tracing build; null elsewhere, so
+    /// the refcounting limit behaviour is bit-for-bit what it was.
+    limit_gc_fn: ?*const fn (ctx: *anyopaque) void = null,
+    /// Deliberately separate from `trigger_gc_ctx`: tests repoint that one at
+    /// their own allocation probes, and this hook must keep reaching the
+    /// runtime.
+    limit_gc_ctx: ?*anyopaque = null,
 
     pub fn init(allocator: std.mem.Allocator) MemoryAccount {
         return .{ .allocator = allocator, .persistent_allocator = allocator, .backing_allocator = allocator };
@@ -477,6 +753,7 @@ pub const MemoryAccount = struct {
 
     inline fn creditAlloc(self: *MemoryAccount, request_bytes: usize, slab_class: ?usize) void {
         self.allocated_bytes +%= accountedMallocSize(request_bytes, slab_class);
+        self.noteCyclePeak();
     }
 
     inline fn debitAlloc(self: *MemoryAccount, request_bytes: usize, slab_class: ?usize) void {
@@ -599,6 +876,7 @@ pub const MemoryAccount = struct {
         } else {
             self.allocated_bytes -= old_len - new_len;
         }
+        self.noteCyclePeak();
         if (comptime diagnostic_accounting_enabled) self.updatePeak();
     }
 
@@ -800,6 +1078,7 @@ pub const MemoryAccount = struct {
         } else {
             self.allocated_bytes -= old_bytes - new_bytes;
         }
+        self.noteCyclePeak();
         if (comptime diagnostic_accounting_enabled) {
             if (remapped_ptr != old_raw.ptr) {
                 self.traceFree(@intFromPtr(old_raw.ptr));
@@ -828,11 +1107,48 @@ pub const MemoryAccount = struct {
         if (comptime trigger_gc) {
             self.triggerGCBeforeAllocation(byte_count);
         }
-        const slab_class = if (self.small_slab_enabled) SmallObjectSlab.classIndex(byte_count, alignment) else null;
-        const accounted = accountedMallocSize(byte_count, slab_class);
-        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, accounted) catch return error.OutOfMemory;
-        const ptr = try self.rawAlloc(byte_count, alignment);
+        var next_allocated_bytes: usize = undefined;
+        // The accounting classification and `rawAlloc`'s classification are the
+        // same `classIndex` call on the same two arguments, run twice. The
+        // index is on the address-dependency chain of the arena free-list load
+        // that carries ~78% of this function's cycles, so the duplicate is
+        // both wasted work and delay in front of the miss.
+        //
+        // The answer is carried as an index-or-`class_count` sentinel rather
+        // than an `?usize`: with the optional live across the account update,
+        // LLVM sank it to memory and the function got *longer* than the version
+        // that recomputed. The sentinel keeps it in one register.
+        //
+        // Kept behind the tracing build so the default RC `.text` stays
+        // byte-identical to the branch point; this is a tracing-gap knife, not
+        // a shared-allocator change.
+        const ptr = if (comptime trace_stw_enabled) blk: {
+            // The sentinel must be outside the class index domain, otherwise a
+            // real class would be mistaken for "not slab-backed".
+            comptime std.debug.assert(
+                SmallObjectSlab.blockSizeIndex(SmallObjectSlab.max_size) < SmallObjectSlab.class_count,
+            );
+            const slab_class = self.rawSlabClass(byte_count, alignment) orelse SmallObjectSlab.class_count;
+            const accounted = if (slab_class < SmallObjectSlab.class_count)
+                accountedMallocSize(byte_count, slab_class)
+            else
+                byte_count;
+            next_allocated_bytes = std.math.add(usize, self.allocated_bytes, accounted) catch
+                return error.OutOfMemory;
+            if (slab_class < SmallObjectSlab.class_count) {
+                break :blk try self.small_slab.allocAtIndex(self.backing_allocator, slab_class, true);
+            }
+            break :blk self.backing_allocator.rawAlloc(byte_count, alignment, @returnAddress()) orelse
+                return error.OutOfMemory;
+        } else blk: {
+            const slab_class = if (self.small_slab_enabled) SmallObjectSlab.classIndex(byte_count, alignment) else null;
+            const accounted = accountedMallocSize(byte_count, slab_class);
+            next_allocated_bytes = std.math.add(usize, self.allocated_bytes, accounted) catch
+                return error.OutOfMemory;
+            break :blk try self.rawAlloc(byte_count, alignment);
+        };
         self.allocated_bytes = next_allocated_bytes;
+        self.noteCyclePeak();
         if (comptime diagnostic_accounting_enabled) {
             self.allocation_count += 1;
             self.alloc_calls += 1;
@@ -875,19 +1191,21 @@ pub const MemoryAccount = struct {
     /// Size of GC metadata immediately before every GC object. Small slab
     /// allocations overlay it on the slab block header; other allocations
     /// reserve a standalone prefix. MUST equal `@sizeOf(gc.Metadata)`.
-    const gc_prefix_size: usize = 8;
+    const gc_prefix_size: usize = gc_representation.metadata_size;
 
-    /// A GC object is any struct whose first field (`header`, offset 0) is the
-    /// 16-byte intrusive-list `BlockHeader` (`prev`/`next`). Such objects carry
-    /// refcount/kind/flags at `objectPtr - 8`; plain allocations (and the 4-byte
-    /// `StringHeader`, which has no prev/next) do not.
+    /// A GC object is any tagged struct whose first field is either the RC
+    /// 16-byte intrusive header or the trace-only compact 8-byte successor.
+    /// This module stays below gc.zig, so it recognizes the structural ABI
+    /// instead of importing the selected Header alias.
     inline fn isGcObject(comptime T: type) bool {
         if (@typeInfo(T) != .@"struct") return false;
         if (!@hasDecl(T, "gc_kind_tag")) return false;
         if (!@hasField(T, "header")) return false;
         if (@offsetOf(T, "header") != 0) return false;
         const H = @FieldType(T, "header");
-        return @typeInfo(H) == .@"struct" and @hasField(H, "prev") and @hasField(H, "next") and @sizeOf(H) == 16;
+        if (@typeInfo(H) != .@"struct" or !@hasField(H, "next")) return false;
+        return (@hasField(H, "prev") and @sizeOf(H) == 16) or
+            (!@hasField(H, "prev") and @sizeOf(H) == 8);
     }
 
     /// Total leading bytes reserved before a GC object so that (a) the 8-byte
@@ -912,11 +1230,19 @@ pub const MemoryAccount = struct {
         return self.backing_allocator.rawAlloc(bytes, alignment, @returnAddress()) orelse error.OutOfMemory;
     }
 
+    /// `alloc_info` value marking a GC object served from the collector's
+    /// block heap rather than the slab: class field saturated (31, one past
+    /// the slab's 30 real classes), large/accounted/standalone bits all zero
+    /// -- which is exactly what the account's existing branches need to do
+    /// nothing special with it. The cell is `[8B metadata prefix][object]`,
+    /// 16-aligned, and `destroy` routes on this byte back to the block heap.
+    pub const alloc_info_block_cell: u8 = gc_representation.block_cell_alloc_info;
+
     /// Byte 2 of the GC prefix (`gc.Metadata.alloc_info`): bits 0..4 slab
     /// class index, bit 6 heap-accounted (registry-owned), bit 7 standalone
     /// prefix. Bit positions are asserted against gc.AllocInfo in gc.zig.
-    const alloc_info_standalone: u8 = 1 << 7;
-    const alloc_info_class_mask: u8 = 0x1f;
+    const alloc_info_standalone: u8 = gc_representation.alloc_info_standalone_mask;
+    const alloc_info_class_mask: u8 = gc_representation.alloc_info_class_mask;
 
     /// Reads back byte 2 of a live GC object's prefix. For slab-backed objects
     /// it carries the allocator's class index (qjs `__js_free` reads
@@ -932,6 +1258,19 @@ pub const MemoryAccount = struct {
     /// allocation (null = standalone prefix); it lands in the alloc_info byte,
     /// mirroring qjs `JSMallocBlockHeader`'s adjacent block_size_idx +
     /// gc_obj_type:7|mark:1 bytes (quickjs.c:275-277) with one u16 store.
+    /// Prefix writer for a block-heap cell: same field layout as
+    /// `initGcPrefix`, info byte fixed to the block-cell marker.
+    inline fn initGcPrefixBlockCell(comptime T: type, meta: [*]u8) void {
+        comptime std.debug.assert(T.gc_kind_tag < 8);
+        // Bytes 0..2 carry the CELL INDEX, stamped by the block allocator so
+        // the mark accessors never pay the non-power-of-two division on the
+        // trace's hottest path. Preserved here, not zeroed.
+        std.mem.writeInt(u16, meta[2..4], @as(u16, alloc_info_block_cell) | (@as(u16, T.gc_kind_tag) << 8), .little);
+        // trace header state: newborn epoch 0, Object Shape summary zero,
+        // husk/reserved clear.
+        @as(*align(4) u32, @ptrCast(@alignCast(meta + 4))).* = 0;
+    }
+
     inline fn initGcPrefix(comptime T: type, meta: [*]u8, slab_class: ?usize) void {
         // The kind must stay inside the low 3 bits of the shared kind/flags
         // byte (gc.BlockFlags.kind).
@@ -939,12 +1278,15 @@ pub const MemoryAccount = struct {
         // Exact-value stores (no memset-then-overwrite): size_class (bytes
         // 0..2, preserved when the slab header is overlaid), alloc_info + kind
         // as one u16 (byte order fixed by the gc.zig offset asserts), and the
-        // refcount as a native i32 (gc reads Metadata.rc as a struct field).
+        // lifetime word at offset 4. Default RC/shadow and trace BigInt need a
+        // native i32 count of 1; trace-owned carriers must start with an all-
+        // zero epoch/state word so publication can prove newborn/unmarked.
         if (slab_class == null) std.mem.writeInt(u16, meta[0..2], 0, .little);
         if (slab_class) |index| std.debug.assert(index <= alloc_info_class_mask);
         const info: u8 = if (slab_class) |index| @intCast(index) else alloc_info_standalone;
         std.mem.writeInt(u16, meta[2..4], @as(u16, info) | (@as(u16, T.gc_kind_tag) << 8), .little);
-        @as(*align(4) i32, @ptrCast(@alignCast(meta + 4))).* = 1;
+        const initial_lifetime_word: u32 = if (trace_stw_enabled and T.gc_kind_tag != 7) 0 else 1;
+        @as(*align(4) u32, @ptrCast(@alignCast(meta + 4))).* = initial_lifetime_word;
     }
 
     fn createInternal(self: *MemoryAccount, comptime T: type, comptime trigger_gc: bool) !*T {
@@ -957,6 +1299,34 @@ pub const MemoryAccount = struct {
             @sizeOf(T),
             if (is_gc) gcAlignment(T) else std.mem.Alignment.of(T),
         );
+        // Collector-served cell: the tracing build routes fixed-size objects
+        // of the selected kind directly to its block heap. The build-mode arm
+        // is comptime-eliminated in RC; the direct call also lets the compiler
+        // specialize the block size class for fixed-size Object allocations.
+        if (comptime block_heap_enabled and is_gc) {
+            if (comptime T.gc_kind_tag == gc_representation.object_kind_tag) {
+                if (comptime gc_block_heap.canAllocCellSize(gc_prefix_size + @sizeOf(T))) {
+                    if (self.gc_object_cell_heap) |heap| {
+                        const bytes: usize = @sizeOf(T);
+                        try self.checkAllocation(bytes);
+                        if (comptime trigger_gc) self.triggerGCBeforeAllocation(bytes);
+                        if (heap.allocCellFixedPtr(gc_prefix_size + bytes)) |cell| {
+                            initGcPrefixBlockCell(T, cell);
+                            // Slab accounting parity: the ledger records the
+                            // object's size, never the prefix -- the heap-account
+                            // verifier derives its expectation from
+                            // `allocationSize`, and an 8-byte skew per object is
+                            // a HeapLiveBytesMismatch on the first audit.
+                            self.creditAlloc(bytes, null);
+                            self.noteAllocDiagnostics(true, @sizeOf(T), 1, @intFromPtr(cell) + gc_prefix_size);
+                            return @ptrFromInt(@intFromPtr(cell) + gc_prefix_size);
+                        }
+                        // Block heap declined (OOM in its backing): the slab
+                        // still serves, which is the graceful direction.
+                    }
+                }
+            }
+        }
         if (comptime slab_class != null) {
             if (self.small_slab_enabled) {
                 const bytes: usize = @sizeOf(T);
@@ -1006,6 +1376,19 @@ pub const MemoryAccount = struct {
         const is_gc = comptime isGcObject(T);
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
         const bytes_ptr: [*]u8 = @ptrCast(ptr);
+        // Collector-served cell goes home first: the marker byte is in the
+        // prefix this free is already about to touch.
+        if (comptime block_heap_enabled and is_gc) {
+            if (gcAllocInfoByte(ptr) == alloc_info_block_cell) {
+                if (self.gc_object_cell_heap) |heap| {
+                    const bytes: usize = @sizeOf(T);
+                    self.debitAlloc(bytes, null);
+                    self.noteFreeDiagnostics(true);
+                    heap.freeSmallCell(@ptrFromInt(@intFromPtr(ptr) - gc_prefix_size));
+                    return;
+                }
+            }
+        }
         // Straight-line slab arm mirroring qjs `__js_free`'s small-block path
         // (quickjs.c:1613); the class index is comptime for a sized type.
         const slab_class = comptime SmallObjectSlab.classIndex(@sizeOf(T), if (is_gc) gcAlignment(T) else std.mem.Alignment.of(T));
@@ -1067,6 +1450,25 @@ pub const MemoryAccount = struct {
         comptime std.debug.assert(isGcObject(T));
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         const payload_bytes = std.math.add(usize, @sizeOf(T), fam_bytes) catch return error.OutOfMemory;
+        // Shape-sized trailing Object storage must stay on the collector's
+        // ordinary classed-block bump path. This is the variable-size twin of
+        // createInternal's direct block route: only the authorized GC kind can enter,
+        // and medium/large requests are declined by allocCell and fall through
+        // to the compatibility slab without acquiring a partial block.
+        if (comptime block_heap_enabled) {
+            if (comptime T.gc_kind_tag == gc_representation.object_kind_tag) {
+                if (self.gc_object_cell_heap) |heap| {
+                    try self.checkAllocation(payload_bytes);
+                    if (comptime trigger_gc) self.triggerGCBeforeAllocation(payload_bytes);
+                    if ((heap.allocCell(gc_prefix_size + payload_bytes) catch null)) |cell| {
+                        initGcPrefixBlockCell(T, cell.ptr);
+                        self.creditAlloc(payload_bytes, null);
+                        self.noteAllocDiagnostics(true, 1, payload_bytes, @intFromPtr(cell.ptr) + gc_prefix_size);
+                        return @ptrFromInt(@intFromPtr(cell.ptr) + gc_prefix_size);
+                    }
+                }
+            }
+        }
         // Inline hot arm = qjs `__js_malloc` small-block path (quickjs.c:1566)
         // with the runtime `get_block_size_index` classification qjs also pays
         // for a runtime size. Arena refill and the standalone-prefix route live
@@ -1113,6 +1515,7 @@ pub const MemoryAccount = struct {
     /// qjs `__js_free` never re-derives size from JSShape.prop_size.
     pub fn gcSlabAccountedPayload(ptr: *const anyopaque) ?usize {
         const info = gcAllocInfoByte(ptr);
+        if (info & alloc_info_class_mask == alloc_info_block_cell) return null;
         if (info & alloc_info_standalone != 0) return null;
         return SmallObjectSlab.usablePayloadFromClass(info & alloc_info_class_mask);
     }
@@ -1127,10 +1530,24 @@ pub const MemoryAccount = struct {
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
         const payload_bytes = @sizeOf(T) + fam_bytes;
         const alignment = comptime gcAlignment(T);
+        const info = gcAllocInfoByte(ptr);
+        // Variable-sized block cells carry the same route marker as fixed
+        // Objects. Debit the logical Object+tail payload and return the exact
+        // cell to the classed block; no class reclassification or partial-block
+        // reuse is introduced here.
+        if (comptime block_heap_enabled) {
+            if (info & alloc_info_class_mask == alloc_info_block_cell) {
+                if (self.gc_object_cell_heap) |heap| {
+                    self.debitAlloc(payload_bytes, null);
+                    self.noteFreeDiagnostics(true);
+                    heap.freeSmallCell(@ptrFromInt(@intFromPtr(ptr) - gc_prefix_size));
+                    return;
+                }
+            }
+        }
         // Straight-line slab arm mirroring qjs `__js_free`'s small-block path
         // (quickjs.c:1613-1617): the block header byte carries the class index,
         // so the free never re-derives the class from the byte size.
-        const info = gcAllocInfoByte(ptr);
         if (info & alloc_info_standalone == 0) {
             const slab_class: usize = info & alloc_info_class_mask;
             std.debug.assert(self.small_slab_enabled);
@@ -1146,6 +1563,24 @@ pub const MemoryAccount = struct {
         self.backing_allocator.rawFree(base[0..bytes], alignment, @returnAddress());
     }
 
+    /// Stage-3 Pass-A settlement: the accounting half of the block-cell arm of
+    /// `destroy` / `destroyWithFam`, without returning the cell to the heap.
+    /// The caller (`object_gc.trySettleTracerBlockCorpse`) clears the alloc bit
+    /// and the block's `allocated_count` itself, so the cell is released but
+    /// unlinked; see `Heap.settleDoomedCellInPassA`.
+    ///
+    /// `payload_bytes` MUST be the same logical size the deferred free would
+    /// have debited: `@sizeOf(Object)` normally and `@sizeOf(Object) +
+    /// trailing_property_bytes` for the FAM variant. 62.3% of splay's block
+    /// corpses are the FAM variant, so a block-uniform size would silently
+    /// rewrite the RC comparison denominator.
+    pub inline fn debitBlockCellPayload(self: *MemoryAccount, ptr: *const anyopaque, payload_bytes: usize) void {
+        comptime std.debug.assert(block_heap_enabled);
+        if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
+        self.debitAlloc(payload_bytes, null);
+        self.noteFreeDiagnostics(true);
+    }
+
     pub fn hasOutstandingAllocations(self: MemoryAccount) bool {
         if (comptime diagnostic_accounting_enabled) {
             return self.allocated_bytes != 0 or self.allocation_count != 0;
@@ -1155,6 +1590,15 @@ pub const MemoryAccount = struct {
 
     pub fn enableSmallObjectSlab(self: *MemoryAccount) void {
         self.small_slab_enabled = true;
+        if (comptime slab_locality_audit) slab_audit.audit_slab = &self.small_slab;
+    }
+
+    /// Conservative resolution requires page-aligned slab arenas. The trace
+    /// runtime serves those physical pages from Zig's independent allocator;
+    /// logical allocations remain charged to this account.
+    pub fn useIndependentSmallObjectSlabArenaBacking(self: *MemoryAccount) void {
+        if (comptime !arena_addressable) return;
+        self.small_slab.setArenaBacking(std.heap.smp_allocator);
     }
 
     pub fn deinitSmallObjectSlab(self: *MemoryAccount) void {
@@ -1170,13 +1614,18 @@ pub const MemoryAccount = struct {
         return self.limit;
     }
 
-    fn checkAllocation(self: MemoryAccount, bytes: usize) !void {
+    fn checkAllocation(self: *MemoryAccount, bytes: usize) !void {
         const limit = self.limit orelse {
             @branchHint(.likely);
             return;
         };
         const next = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
-        if (next > limit) return error.OutOfMemory;
+        if (next <= limit) return;
+        const collect = self.limit_gc_fn orelse return error.OutOfMemory;
+        const ctx = self.limit_gc_ctx orelse return error.OutOfMemory;
+        collect(ctx);
+        const retried = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
+        if (retried > limit) return error.OutOfMemory;
     }
 
     inline fn triggerGCBeforeAllocation(self: *MemoryAccount, byte_count: usize) void {
@@ -1194,9 +1643,58 @@ pub const MemoryAccount = struct {
         if (self.trigger_gc_fn) |trigger| trigger(self.trigger_gc_ctx, byte_count);
     }
 
+    /// Sample the lifetime account high-water at a collection boundary.
+    ///
+    /// Per-allocation peak tracking is Debug/test-only (`updatePeak` under
+    /// `diagnostic_accounting_enabled`) because a RMW per allocation is the
+    /// kind of tax this allocator exists to avoid. This historical field is a
+    /// cheap lifetime diagnostic, not §1.3's cycle peak: allocations continue
+    /// while an incremental major is open. `beginCyclePeakTracking` installs
+    /// the exact, explicitly requested per-allocation instrument for that row.
+    pub fn samplePeakAtCollection(self: *MemoryAccount) void {
+        self.updatePeak();
+    }
+
     fn updatePeak(self: *MemoryAccount) void {
         self.peak_allocated_bytes = @max(self.peak_allocated_bytes, self.allocated_bytes);
         self.peak_allocation_count = @max(self.peak_allocation_count, self.allocation_count);
+    }
+
+    /// Route account credits to one pacing window's peak. The caller owns the
+    /// destination and must keep it stable until `endCyclePeakTracking`.
+    pub fn beginCyclePeakTracking(self: *MemoryAccount, output: *usize) void {
+        if (comptime !cycle_envelope_tracking_available) return;
+        std.debug.assert(self.cycle_peak_output == null);
+        output.* = self.allocated_bytes;
+        self.cycle_peak_output = output;
+    }
+
+    pub fn endCyclePeakTracking(self: *MemoryAccount) void {
+        if (comptime !cycle_envelope_tracking_available) return;
+        self.cycle_peak_output = null;
+    }
+
+    inline fn noteCyclePeak(self: *MemoryAccount) void {
+        if (comptime !cycle_envelope_tracking_available) return;
+        if (self.cycle_peak_output) |peak| peak.* = @max(peak.*, self.allocated_bytes);
+    }
+
+    /// The slab-routing predicate `allocAlignedBytesInternal`'s tracing arm
+    /// hoists so it is not derived twice per allocation. It must stay
+    /// identical to the one inline in `rawAlloc` below; the test
+    /// "aligned byte allocations charge their slab class" pins the agreement
+    /// by observing the account delta, which is the only externally visible
+    /// consequence of choosing a different class.
+    ///
+    /// Deliberately NOT shared with `rawAlloc` by having `rawAlloc` call it:
+    /// routing that call through a function boundary left the RC build
+    /// semantically identical but re-encoded 26 `tbz wN,#0` as `cbz wN`, which
+    /// costs the byte-identical RC `.text` gate for zero benefit.
+    inline fn rawSlabClass(self: *const MemoryAccount, byte_count: usize, alignment: std.mem.Alignment) ?usize {
+        if (self.small_slab_enabled) {
+            return SmallObjectSlab.classIndex(byte_count, alignment);
+        }
+        return null;
     }
 
     inline fn rawAlloc(self: *MemoryAccount, byte_count: usize, alignment: std.mem.Alignment) ![*]u8 {
@@ -1239,6 +1737,35 @@ pub const MemoryAccount = struct {
         };
     }
 };
+
+test "aligned byte allocations charge their slab class" {
+    // Pins `allocAlignedBytesInternal`'s slab routing to the account contract.
+    // The tracing arm hoists the classification out of `rawAlloc` and carries
+    // it as an index-or-sentinel; if that arm ever picked a different class
+    // than `rawAlloc` would, the ledger delta below is what would drift --
+    // it is the only externally visible consequence of the choice.
+    for ([_]bool{ false, true }) |slab_enabled| {
+        var account = MemoryAccount.init(std.testing.allocator);
+        defer account.small_slab.deinit(std.testing.allocator);
+        account.small_slab_enabled = slab_enabled;
+
+        var byte_count: usize = 1;
+        while (byte_count <= SmallObjectSlab.max_size + 64) : (byte_count += 1) {
+            for ([_]std.mem.Alignment{ .@"1", .@"8", .@"16", .@"64" }) |alignment| {
+                const before = account.allocated_bytes;
+                const bytes = try account.allocAlignedBytesNoTrigger(byte_count, alignment);
+                const charged = account.allocated_bytes - before;
+                const expected = if (slab_enabled)
+                    MemoryAccount.accountedMallocSize(byte_count, SmallObjectSlab.classIndex(byte_count, alignment))
+                else
+                    byte_count;
+                try std.testing.expectEqual(expected, charged);
+                account.freeAlignedBytes(bytes, alignment);
+                try std.testing.expectEqual(before, account.allocated_bytes);
+            }
+        }
+    }
+}
 
 test "small object slab releases an empty arena immediately" {
     var slab: SmallObjectSlab = .{};
@@ -1313,7 +1840,10 @@ test "small slab GC allocation reuses allocator header for metadata" {
     const expected_class = SmallObjectSlab.classIndex(@sizeOf(TestGc), MemoryAccount.gcAlignment(TestGc)).?;
     try std.testing.expectEqual(expected_class, second_meta[2]);
     try std.testing.expectEqual(TestGc.gc_kind_tag, second_meta[3] & 0x7);
-    try std.testing.expectEqual(@as(i32, 1), @as(*align(4) const i32, @ptrFromInt(@intFromPtr(second) - 4)).*);
+    // Offset 4 is configuration-owned: RC starts at one; trace carriers must
+    // be born with epoch/state zero so publication cannot read them marked.
+    const expected_lifetime: u32 = if (trace_stw_enabled) 0 else 1;
+    try std.testing.expectEqual(expected_lifetime, @as(*align(4) const u32, @ptrFromInt(@intFromPtr(second) - 4)).*);
 
     // Free a non-zero-index block, then prove its allocator index survived GC
     // prefix initialization by reusing the same slot.

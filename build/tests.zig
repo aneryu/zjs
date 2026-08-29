@@ -129,6 +129,37 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .link_libc = true,
     });
     scoped_test_engine_mod.addOptions("build_options", scoped_test_options);
+
+    // Deterministic representation dump for driver review.  It is a tooling
+    // artifact over the same Debug engine module used by focused core tests;
+    // the shipped CLI does not import it or embed the committed baseline.
+    const gc_representation_mod = b.createModule(.{
+        .root_source_file = b.path("src/gc_representation.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "zjs", .module = scoped_test_engine_mod },
+        },
+    });
+    const gc_representation_exe = b.addExecutable(.{
+        .name = "gc-representation-snapshot",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gc/representation_snapshot.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "gc_representation", .module = gc_representation_mod },
+            },
+        }),
+    });
+    forceLlvmBackendOnDebug(gc_representation_exe);
+    const run_gc_representation = b.addRunArtifact(gc_representation_exe);
+    const gc_representation_step = b.step(
+        "gc-representation-snapshot",
+        "Print the deterministic GC representation snapshot",
+    );
+    gc_representation_step.dependOn(&run_gc_representation.step);
+
     const ScopedTestConfig = struct {
         name: []const u8,
         description: []const u8,

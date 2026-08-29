@@ -19,6 +19,39 @@ const Descriptor = core.Descriptor;
 const class = core.class;
 const atom = core.atom;
 const string = core.string;
+
+/// Exact window for raw JSValues borrowed by a public embedding call.  This
+/// deliberately lives at the binding seam: internal VM calls already have
+/// their own frame/argv ownership and must not pay for a blanket scalar-root
+/// policy.  Default RC erases the slice descriptor and frame entirely.
+fn PublicValueRootWindow(comptime count: usize) type {
+    return struct {
+        const Self = @This();
+
+        values: [count]JSValue,
+        slices: if (core.runtime.value_root_frames_enabled) [1]core.runtime.ValueRootSlice else void =
+            if (core.runtime.value_root_frames_enabled) undefined else {},
+        frame: if (core.runtime.value_root_frames_enabled) core.runtime.ValueRootFrame else void =
+            if (core.runtime.value_root_frames_enabled) .{} else {},
+
+        fn init(values: [count]JSValue) Self {
+            return .{ .values = values };
+        }
+
+        fn activate(self: *Self, rt: *JSRuntime) void {
+            if (comptime core.runtime.value_root_frames_enabled) {
+                self.slices[0] = .{ .borrowed = &self.values };
+                self.frame.slices = &self.slices;
+                self.frame.activate(rt);
+            }
+        }
+
+        fn deactivate(self: *Self, rt: *JSRuntime) void {
+            if (comptime core.runtime.value_root_frames_enabled) self.frame.deactivate(rt);
+        }
+    };
+}
+
 fn ensureStandardGlobalsRegistered(rt: *JSRuntime) void {
     if (rt.materialize_context_global_cb == null) {
         rt.materialize_context_global_cb = struct {
@@ -316,10 +349,13 @@ pub const JSContext = struct {
     }
 
     pub fn getPropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !JSValue {
+        var roots = PublicValueRootWindow(2).init(.{ val, property_key });
+        roots.activate(self.core.runtime);
+        defer roots.deactivate(self.core.runtime);
         const global = options.realm_global orelse try self.globalObject();
-        const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, property_key, null, null);
+        const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, roots.values[1], null, null);
         defer self.core.runtime.atoms.free(key);
-        return exec.object_ops.getValueProperty(self.core, options.output, global, val, key, null, null);
+        return exec.object_ops.getValueProperty(self.core, options.output, global, roots.values[0], key, null, null);
     }
 
     pub fn deleteProperty(self: *JSContext, val: JSValue, property_name: []const u8) !bool {
@@ -329,10 +365,13 @@ pub const JSContext = struct {
     }
 
     pub fn deletePropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !bool {
+        var roots = PublicValueRootWindow(2).init(.{ val, property_key });
+        roots.activate(self.core.runtime);
+        defer roots.deactivate(self.core.runtime);
         const global = options.realm_global orelse try self.globalObject();
-        const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, property_key, null, null);
+        const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, roots.values[1], null, null);
         defer self.core.runtime.atoms.free(key);
-        return self.deletePropertyAtom(val, key, .{ .output = options.output, .realm_global = global });
+        return self.deletePropertyAtom(roots.values[0], key, .{ .output = options.output, .realm_global = global });
     }
 
     pub fn hasOwnProperty(self: *JSContext, val: JSValue, property_name: []const u8) !bool {
@@ -342,17 +381,23 @@ pub const JSContext = struct {
     }
 
     pub fn hasOwnPropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !bool {
+        var roots = PublicValueRootWindow(2).init(.{ val, property_key });
+        roots.activate(self.core.runtime);
+        defer roots.deactivate(self.core.runtime);
         const global = options.realm_global orelse try self.globalObject();
-        const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, property_key, null, null);
+        const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, roots.values[1], null, null);
         defer self.core.runtime.atoms.free(key);
-        return self.hasOwnPropertyAtom(val, key, .{ .output = options.output, .realm_global = global });
+        return self.hasOwnPropertyAtom(roots.values[0], key, .{ .output = options.output, .realm_global = global });
     }
 
     pub fn ownPropertyDescriptor(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !?core.PropertyDescriptor {
+        var roots = PublicValueRootWindow(2).init(.{ val, property_key });
+        roots.activate(self.core.runtime);
+        defer roots.deactivate(self.core.runtime);
         const global = options.realm_global orelse try self.globalObject();
-        const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, property_key, null, null);
+        const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, roots.values[1], null, null);
         defer self.core.runtime.atoms.free(key);
-        return self.ownPropertyDescriptorAtom(val, key, .{ .output = options.output, .realm_global = global });
+        return self.ownPropertyDescriptorAtom(roots.values[0], key, .{ .output = options.output, .realm_global = global });
     }
 
     pub fn toString(self: *JSContext, val: JSValue) !JSValue {
@@ -405,8 +450,25 @@ pub const JSContext = struct {
 
     pub fn callFunction(self: *JSContext, callee: JSValue, args: []const JSValue, options: core.FunctionCallOptions) !JSValue {
         const global = options.realm_global orelse try self.globalObject();
-        const this_value = options.this_value orelse JSValue.undefinedValue();
-        return exec.call_runtime.callValueOrBytecodeRoot(self.core, options.output, global, this_value, callee, args, null, null) catch |err|
+        var rooted_callee = callee;
+        var rooted_this = options.this_value orelse JSValue.undefinedValue();
+        var root_values = [_]core.runtime.ValueRootValue{
+            .{ .value = &rooted_callee },
+            .{ .value = &rooted_this },
+        };
+        // The public embedding boundary borrows raw JSValues from native
+        // caller storage. Keep that window, plus the scalar callee/receiver,
+        // exact through the dispatch poll and the complete synchronous call.
+        // A slice descriptor links this frame in production tracing builds
+        // even when `args` itself is empty; default RC erases the frame.
+        var root_slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = args }};
+        var root_frame = core.runtime.ValueRootFrame{
+            .values = &root_values,
+            .slices = &root_slices,
+        };
+        root_frame.activate(self.core.runtime);
+        defer root_frame.deactivate(self.core.runtime);
+        return exec.call_runtime.callValueOrBytecodeRoot(self.core, options.output, global, rooted_this, rooted_callee, args, null, null) catch |err|
             self.restoreUncaughtOutOfMemory(err);
     }
 

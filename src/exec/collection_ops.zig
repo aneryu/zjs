@@ -429,6 +429,15 @@ fn methodCallResolved(
     args: []const core.JSValue,
     host: CallbackHost,
 ) !core.JSValue {
+    // Collection methods reach the engine through this channel rather than
+    // the builtin dispatch funnel, so the receiver has to be rooted here too.
+    // A minor that runs mid-insert would otherwise reclaim the very
+    // collection the operation is walking.
+    var receiver: ?*core.Object = object;
+    var receiver_roots = core.runtime.rootObjects(.{&receiver});
+    receiver_roots.activate(rt);
+    defer receiver_roots.deactivate(rt);
+
     return switch (method) {
         1 => {
             const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -569,6 +578,9 @@ fn mapSetNoResult(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, 
         const next_value = value.dup();
         const old_value = entry.value;
         entry.value = next_value;
+        // Overwriting an existing entry stores into the payload slice, which
+        // no property-store barrier covers.
+        rt.gc.generationalBarrier(&object.header, next_value.cycleMarkHeader());
         old_value.free(rt);
     } else {
         const entry = core.object.CollectionEntry{ .key = canonical_key.dup(), .value = value.dup() };
@@ -689,6 +701,11 @@ fn iteratorPrototype(
     if (slot < realm.class_prototypes.len) {
         const value = prototype.value();
         realm.class_prototypes[slot] = value.dup();
+        // Raw slot store, not `setClassPrototype`: see the same barrier on the
+        // Array-iterator prototype in iterator_ops. Lazily built long after the
+        // realm went old, and the realm is not a root once its create-ref is
+        // consumed.
+        rt.gc.generationalBarrier(&realm.header, &prototype.header);
         value.free(rt);
         return .{ .object = prototype, .owned = false };
     }
@@ -1380,7 +1397,7 @@ test "appendValue roots existing values and incoming value during growth" {
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            _ = self.rt.runObjectCycleRemoval();
+            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
             self.saw_first = self.rt.atoms.name(self.first_atom) != null;
             self.saw_second = self.rt.atoms.name(self.second_atom) != null;
         }

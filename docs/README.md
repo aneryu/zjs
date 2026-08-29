@@ -49,6 +49,12 @@ when needed.
   Stack Bytecode VM Status chapter (VM mechanisms, the §8 PMU governance
   gate); evolution scope lives in the
   [Engine Evolution Plan](engine-evolution-plan.md).
+- [Tracing GC Design](tracing-gc-design.md): project-specific target
+  architecture, safety contracts, and staged migration from RC; the legacy
+  collector remains documented in [Cycle Collector Invariants](gc-invariants.md).
+- [Experimental Tracing GC And RC Rollback](tracing-gc-experimental-rollout.md):
+  explicit experimental build entry, release rollback procedure, compatibility
+  boundary, and the Stage 7 production-default preflight table.
 - [API Boundary](api-boundary.md): layering rules between public API, core,
   runtime, bindings, and CLI.
 - [Testing Graph](testing-graph.md): compile-root chain, shell classes, step names.

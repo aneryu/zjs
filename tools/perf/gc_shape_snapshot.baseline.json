@@ -1,0 +1,2137 @@
+{
+  "engine": {
+    "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+    "sha256": "7c157b4f409d1174e0376126b1e06619abc3032f327006d00fe2e7a434fa152e",
+    "sourceRevision": "02541f9d4ab7b29965828b6f8853f4b216097664",
+    "sourceTrackedDirty": false,
+    "sourceTreeDirty": true
+  },
+  "execution": {
+    "cpu": 4,
+    "runsPerBenchmark": 1
+  },
+  "interpretation": "One run per benchmark; structural counts are diff guards. Nanosecond fields are diagnostic only, not a performance gate.",
+  "kind": "gc-heavy-six-fixed-work-structure",
+  "runs": [
+    {
+      "benchmark": "deltablue",
+      "fixedSourceSha256": "55a3f692271d7f54b80b903669d4d4ddb07c40b8697801849bf2763aafeac48a",
+      "stats": {
+        "allocations": {
+          "belowLarge": 18648134,
+          "coveredBySmall": 16874764,
+          "large": 0,
+          "maxSmall": 128,
+          "p50BelowLarge": 64,
+          "p95BelowLarge": 160,
+          "p99BelowLarge": 160,
+          "payloadBytes": 1520332764,
+          "publications": 18648134
+        },
+        "barriers": {
+          "generational": {
+            "calls": 60131419,
+            "exitOldTarget": 260662,
+            "exitYoungOwner": 59719645,
+            "rememberedOwner": 151112
+          },
+          "marking": {
+            "calls": 1578,
+            "exitMarkedTarget": 989,
+            "exitUnpublishedOwner": 0,
+            "exitUnpublishedTarget": 0,
+            "requeuedOwner": 444,
+            "shadedTarget": 145
+          },
+          "totalCalls": 60132997
+        },
+        "blockHeap": {
+          "committed": 2097152,
+          "committedOverLiveX1000": 12043,
+          "currentDecommitted": 0,
+          "decommitChecks": 323,
+          "decommittedCumulative": 0,
+          "largeMaps": 0,
+          "live": 174144,
+          "maxDecommitBatch": 0,
+          "recommittedCumulative": 0,
+          "releasedBlocksCumulative": 0,
+          "superblocks": 1,
+          "thresholdGrowthResets": 0,
+          "thresholdSmallHeapFloorResets": 1936,
+          "trimAttempts": 0,
+          "trimSuccesses": 0
+        },
+        "collector": {
+          "objectsFreed": 10053435,
+          "zeroRefDrains": 0
+        },
+        "cycles": {
+          "collectionEntries": 968,
+          "envelope": {
+            "forcedFinishes": 0,
+            "maxPeakOverThreshold": {
+              "begin": 2088433,
+              "beginOverThresholdX1000000": 1001873,
+              "incrementalWindowGrowthBytes": 208,
+              "peak": 2088641,
+              "peakOverStartX1000000": 4082048,
+              "peakOverThresholdX1000000": 1001973,
+              "start": 511665,
+              "threshold": 2084529
+            },
+            "measured": 967,
+            "passesPeakOverThreshold36Over35": true,
+            "skipped": 1
+          },
+          "failed": 0,
+          "incrementalAborted": 0,
+          "incrementalCompleted": 968,
+          "incrementalForced": 0,
+          "majorCompleted": 968,
+          "markSteps": 968,
+          "minor": 0
+        },
+        "doomed": {
+          "condemnedHeaders": 10053435,
+          "destroyedCountedObjects": 10053435,
+          "parkedDrainSlices": 2902,
+          "parkedEntriesDrained": 10052169
+        },
+        "generation": {
+          "conservativeOnlyYoung": {
+            "available": false,
+            "verifiedMinors": 0,
+            "young": 0
+          },
+          "currentYoung": 545,
+          "minorPauseDistribution": {
+            "available": false,
+            "max": 0,
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "sampleDrops": 0,
+            "samplesRetained": 0,
+            "samplesTotal": 0
+          },
+          "minorReclaimed": 0,
+          "minorSuspensions": 0,
+          "minorYoungAtStartMax": 0,
+          "minorYoungAtStartMean": 0,
+          "promotedAll": 0,
+          "promotedByMinor": 0,
+          "rememberedDrops": 0,
+          "rememberedOwners": 8,
+          "rememberedWithoutYoung": 0
+        },
+        "heapBytes": {
+          "accountPeak": 2218913,
+          "live": 234796
+        },
+        "markFootprint": {
+          "allocatedBytes": 626980486,
+          "allocationTouches": 6079074,
+          "allocationTouchesPerMarkedX1000": 2840,
+          "blockHeaders": 1868053,
+          "byKind": {
+            "functionBytecode": 104540,
+            "module": 0,
+            "object": 1868053,
+            "realmContext": 968,
+            "shape": 108234,
+            "varRef": 58063
+          },
+          "byTraceClass": {
+            "bytecodeFunction": 99652,
+            "exoticObject": 145095,
+            "fastArray": 394215,
+            "nonObject": 271805,
+            "ordinaryObject": 1229091
+          },
+          "cacheLinesPerMarkedX1000": 6448,
+          "inlineOrdinaryPropertyUpper": {
+            "slots1": {
+              "cacheLinesPerMarkedX1000": 206,
+              "eligibleObjects": 391407,
+              "externalAllocatedBytes": 12566784,
+              "externalTouchedCacheLines": 441297
+            },
+            "slots2": {
+              "cacheLinesPerMarkedX1000": 222,
+              "eligibleObjects": 414632,
+              "externalAllocatedBytes": 13309984,
+              "externalTouchedCacheLines": 476135
+            },
+            "slots4": {
+              "cacheLinesPerMarkedX1000": 404,
+              "eligibleObjects": 646894,
+              "externalAllocatedBytes": 28174752,
+              "externalTouchedCacheLines": 866561
+            }
+          },
+          "inlinePropertyUpper": {
+            "slots1": {
+              "cacheLinesPerMarkedX1000": 206,
+              "eligibleObjects": 392375,
+              "externalAllocatedBytes": 12597760,
+              "externalTouchedCacheLines": 442265
+            },
+            "slots2": {
+              "cacheLinesPerMarkedX1000": 282,
+              "eligibleObjects": 506587,
+              "externalAllocatedBytes": 16283520,
+              "externalTouchedCacheLines": 604871
+            },
+            "slots4": {
+              "cacheLinesPerMarkedX1000": 565,
+              "eligibleObjects": 867541,
+              "externalAllocatedBytes": 39384576,
+              "externalTouchedCacheLines": 1211072
+            }
+          },
+          "majors": 968,
+          "markedHeaders": 2139858,
+          "markedPerMajorX1000": 2210597,
+          "refcountRemovedHeaders": 2030656,
+          "storage": {
+            "base": {
+              "allocatedBytes": 229149878,
+              "allocationTouches": 2139858,
+              "averageAllocatedBytesX1000": 107086,
+              "cacheLinesPerMarkedX1000": 2557,
+              "touchedCacheLines": 5472398
+            },
+            "dense_elements": {
+              "allocatedBytes": 17830976,
+              "allocationTouches": 388944,
+              "averageAllocatedBytesX1000": 45844,
+              "cacheLinesPerMarkedX1000": 272,
+              "touchedCacheLines": 583284
+            },
+            "payload_backing": {
+              "allocatedBytes": 5575272,
+              "allocationTouches": 67732,
+              "averageAllocatedBytesX1000": 82313,
+              "cacheLinesPerMarkedX1000": 68,
+              "touchedCacheLines": 147104
+            },
+            "property_slots": {
+              "allocatedBytes": 127944192,
+              "allocationTouches": 1471328,
+              "averageAllocatedBytesX1000": 86958,
+              "cacheLinesPerMarkedX1000": 1374,
+              "touchedCacheLines": 2941631
+            },
+            "shape": {
+              "allocatedBytes": 238367136,
+              "allocationTouches": 1868053,
+              "averageAllocatedBytesX1000": 127601,
+              "cacheLinesPerMarkedX1000": 2041,
+              "touchedCacheLines": 4367616
+            },
+            "trace_payload": {
+              "allocatedBytes": 8113032,
+              "allocationTouches": 143159,
+              "averageAllocatedBytesX1000": 56671,
+              "cacheLinesPerMarkedX1000": 134,
+              "touchedCacheLines": 287816
+            }
+          },
+          "touchedCacheLines": 13799849,
+          "traceClassStorage": {
+            "bytecode_function": {
+              "allocatedBytes": 28057864,
+              "allocationTouches": 353136,
+              "allocationTouchesPerMarkedX1000": 3543,
+              "averageAllocatedBytesX1000": 79453,
+              "cacheLinesPerMarkedX1000": 7388,
+              "markedHeaders": 99652,
+              "touchedCacheLines": 736265
+            },
+            "exotic_object": {
+              "allocatedBytes": 58802944,
+              "allocationTouches": 590160,
+              "allocationTouchesPerMarkedX1000": 4067,
+              "averageAllocatedBytesX1000": 99638,
+              "cacheLinesPerMarkedX1000": 9165,
+              "markedHeaders": 145095,
+              "touchedCacheLines": 1329924
+            },
+            "fast_array": {
+              "allocatedBytes": 84059096,
+              "allocationTouches": 1177374,
+              "allocationTouchesPerMarkedX1000": 2986,
+              "averageAllocatedBytesX1000": 71395,
+              "cacheLinesPerMarkedX1000": 5479,
+              "markedHeaders": 394215,
+              "touchedCacheLines": 2160144
+            },
+            "non_object": {
+              "allocatedBytes": 94588142,
+              "allocationTouches": 271805,
+              "allocationTouchesPerMarkedX1000": 1000,
+              "averageAllocatedBytesX1000": 348000,
+              "cacheLinesPerMarkedX1000": 6384,
+              "markedHeaders": 271805,
+              "touchedCacheLines": 1735324
+            },
+            "ordinary_object": {
+              "allocatedBytes": 361472440,
+              "allocationTouches": 3686599,
+              "allocationTouchesPerMarkedX1000": 2999,
+              "averageAllocatedBytesX1000": 98050,
+              "cacheLinesPerMarkedX1000": 6377,
+              "markedHeaders": 1229091,
+              "touchedCacheLines": 7838192
+            }
+          }
+        },
+        "marking": {
+          "clearMarksNonBlockHeaders": 272544,
+          "retiredNonBlockHeaders": 2133,
+          "retiredRememberedSets": 967,
+          "retiredYoungBlocks": 13106
+        },
+        "pauseNs": {
+          "incrementalCycleLast": 653381,
+          "incrementalCycleMax": 878502,
+          "incrementalPhaseSegmentMax": {
+            "begin": 603188,
+            "destroy": 387138,
+            "finish": 260658,
+            "increment": 190001
+          },
+          "incrementalSubphaseTotals": {
+            "beginClear": 9096498,
+            "beginConservativeSeed": 18136609,
+            "beginPreciseSeed": 11840531,
+            "beginRetire": 1182983,
+            "finishCondemn": 6521272,
+            "finishConservativeSeedSubset": 26227911,
+            "finishRemarkTotal": 178613740,
+            "finishWeak": 262576
+          },
+          "major": {
+            "max": 357155,
+            "p50": 39008,
+            "p95": 322211,
+            "p99": 338722,
+            "retainedPauses": 1024,
+            "totalPauses": 4838
+          },
+          "minor": {
+            "max": 0,
+            "mean": 0,
+            "total": 0
+          },
+          "minorPhaseTotals": {
+            "clear": 0,
+            "conservative": 0,
+            "other": 0,
+            "promote": 0,
+            "remembered": 0,
+            "roots": 0,
+            "sweepDestroy": 0,
+            "trace": 0
+          },
+          "stwTotals": {
+            "begin": {
+              "ns": 41413204,
+              "segments": 968
+            },
+            "destroy": {
+              "ns": 318624242,
+              "segments": 2902
+            },
+            "finish": {
+              "ns": 195053777,
+              "segments": 968
+            },
+            "increment": {
+              "ns": 106273901,
+              "segments": 968
+            }
+          }
+        },
+        "retirement": {
+          "abandons": 0,
+          "commits": 968,
+          "state": "clean"
+        },
+        "weakState": {
+          "finalizerQueueCurrent": 0,
+          "weakRefsCurrent": 0
+        }
+      }
+    },
+    {
+      "benchmark": "earley-boyer",
+      "fixedSourceSha256": "9f5a58a178cc4a50b0bfb291dea0a7c00c608c8cc951262359bd59b250d6813d",
+      "stats": {
+        "allocations": {
+          "belowLarge": 255025370,
+          "coveredBySmall": 255024438,
+          "large": 0,
+          "maxSmall": 128,
+          "p50BelowLarge": 64,
+          "p95BelowLarge": 96,
+          "p99BelowLarge": 128,
+          "payloadBytes": 17469601948,
+          "publications": 255025370
+        },
+        "barriers": {
+          "generational": {
+            "calls": 415564988,
+            "exitOldTarget": 513324,
+            "exitYoungOwner": 408109767,
+            "rememberedOwner": 6941897
+          },
+          "marking": {
+            "calls": 31105,
+            "exitMarkedTarget": 15267,
+            "exitUnpublishedOwner": 0,
+            "exitUnpublishedTarget": 0,
+            "requeuedOwner": 15828,
+            "shadedTarget": 10
+          },
+          "totalCalls": 415596093
+        },
+        "blockHeap": {
+          "committed": 27824128,
+          "committedOverLiveX1000": 3920,
+          "currentDecommitted": 1536000,
+          "decommitChecks": 454,
+          "decommittedCumulative": 38338560,
+          "largeMaps": 0,
+          "live": 7099584,
+          "maxDecommitBatch": 4300800,
+          "recommittedCumulative": 36802560,
+          "releasedBlocksCumulative": 624,
+          "superblocks": 14,
+          "thresholdGrowthResets": 9463,
+          "thresholdSmallHeapFloorResets": 6036,
+          "trimAttempts": 0,
+          "trimSuccesses": 0
+        },
+        "collector": {
+          "objectsFreed": 171661271,
+          "zeroRefDrains": 0
+        },
+        "cycles": {
+          "collectionEntries": 10573,
+          "envelope": {
+            "forcedFinishes": 0,
+            "maxPeakOverThreshold": {
+              "begin": 3363478,
+              "beginOverThresholdX1000000": 1000224,
+              "incrementalWindowGrowthBytes": 1336,
+              "peak": 3364814,
+              "peakOverStartX1000000": 1879930,
+              "peakOverThresholdX1000000": 1000621,
+              "start": 1789862,
+              "threshold": 3362726
+            },
+            "measured": 7749,
+            "passesPeakOverThreshold36Over35": true,
+            "skipped": 1
+          },
+          "failed": 0,
+          "incrementalAborted": 0,
+          "incrementalCompleted": 7750,
+          "incrementalForced": 0,
+          "majorCompleted": 7750,
+          "markSteps": 8307,
+          "minor": 2823
+        },
+        "doomed": {
+          "condemnedHeaders": 142930876,
+          "destroyedCountedObjects": 142930867,
+          "parkedDrainSlices": 37519,
+          "parkedEntriesDrained": 142930849
+        },
+        "generation": {
+          "conservativeOnlyYoung": {
+            "available": false,
+            "verifiedMinors": 0,
+            "young": 0
+          },
+          "currentYoung": 1406,
+          "minorPauseDistribution": {
+            "available": true,
+            "max": 1212952,
+            "p50": 867302,
+            "p95": 978022,
+            "p99": 1020471,
+            "sampleDrops": 0,
+            "samplesRetained": 2823,
+            "samplesTotal": 2823
+          },
+          "minorReclaimed": 28730404,
+          "minorSuspensions": 0,
+          "minorYoungAtStartMax": 17274,
+          "minorYoungAtStartMean": 16689,
+          "promotedAll": 18385279,
+          "promotedByMinor": 18385279,
+          "rememberedDrops": 0,
+          "rememberedOwners": 3,
+          "rememberedWithoutYoung": 2651
+        },
+        "heapBytes": {
+          "accountPeak": 15275323,
+          "live": 6167805
+        },
+        "markFootprint": {
+          "allocatedBytes": 16303634857,
+          "allocationTouches": 186569863,
+          "allocationTouchesPerMarkedX1000": 2787,
+          "blockHeaders": 58300153,
+          "byKind": {
+            "functionBytecode": 3448972,
+            "module": 0,
+            "object": 58300153,
+            "realmContext": 7750,
+            "shape": 899612,
+            "varRef": 4273777
+          },
+          "byTraceClass": {
+            "bytecodeFunction": 3232951,
+            "exoticObject": 1302252,
+            "fastArray": 514200,
+            "nonObject": 8630111,
+            "ordinaryObject": 53250750
+          },
+          "cacheLinesPerMarkedX1000": 5915,
+          "inlineOrdinaryPropertyUpper": {
+            "slots1": {
+              "cacheLinesPerMarkedX1000": 0,
+              "eligibleObjects": 46494,
+              "externalAllocatedBytes": 1487808,
+              "externalTouchedCacheLines": 46494
+            },
+            "slots2": {
+              "cacheLinesPerMarkedX1000": 1086,
+              "eligibleObjects": 52847104,
+              "externalAllocatedBytes": 1691107328,
+              "externalTouchedCacheLines": 72705070
+            },
+            "slots4": {
+              "cacheLinesPerMarkedX1000": 1089,
+              "eligibleObjects": 52987265,
+              "externalAllocatedBytes": 1700077632,
+              "externalTouchedCacheLines": 72931145
+            }
+          },
+          "inlinePropertyUpper": {
+            "slots1": {
+              "cacheLinesPerMarkedX1000": 0,
+              "eligibleObjects": 54244,
+              "externalAllocatedBytes": 1735808,
+              "externalTouchedCacheLines": 54244
+            },
+            "slots2": {
+              "cacheLinesPerMarkedX1000": 1104,
+              "eligibleObjects": 53716391,
+              "externalAllocatedBytes": 1719172480,
+              "externalTouchedCacheLines": 73900507
+            },
+            "slots4": {
+              "cacheLinesPerMarkedX1000": 1192,
+              "eligibleObjects": 57327782,
+              "externalAllocatedBytes": 1950301504,
+              "externalTouchedCacheLines": 79799599
+            }
+          },
+          "majors": 7750,
+          "markedHeaders": 66930264,
+          "markedPerMajorX1000": 8636163,
+          "refcountRemovedHeaders": 66022902,
+          "storage": {
+            "base": {
+              "allocatedBytes": 8024740281,
+              "allocationTouches": 66930264,
+              "averageAllocatedBytesX1000": 119897,
+              "cacheLinesPerMarkedX1000": 2755,
+              "touchedCacheLines": 184446002
+            },
+            "dense_elements": {
+              "allocatedBytes": 66755152,
+              "allocationTouches": 497397,
+              "averageAllocatedBytesX1000": 134208,
+              "cacheLinesPerMarkedX1000": 21,
+              "touchedCacheLines": 1451819
+            },
+            "payload_backing": {
+              "allocatedBytes": 106093744,
+              "allocationTouches": 1838053,
+              "averageAllocatedBytesX1000": 57720,
+              "cacheLinesPerMarkedX1000": 49,
+              "touchedCacheLines": 3333548
+            },
+            "property_slots": {
+              "allocatedBytes": 2154642240,
+              "allocationTouches": 57730770,
+              "averageAllocatedBytesX1000": 37322,
+              "cacheLinesPerMarkedX1000": 1235,
+              "touchedCacheLines": 82690182
+            },
+            "shape": {
+              "allocatedBytes": 5879140800,
+              "allocationTouches": 58300153,
+              "averageAllocatedBytesX1000": 100842,
+              "cacheLinesPerMarkedX1000": 1814,
+              "touchedCacheLines": 121419959
+            },
+            "trace_payload": {
+              "allocatedBytes": 72262640,
+              "allocationTouches": 1273226,
+              "averageAllocatedBytesX1000": 56755,
+              "cacheLinesPerMarkedX1000": 38,
+              "touchedCacheLines": 2554402
+            }
+          },
+          "touchedCacheLines": 395895912,
+          "traceClassStorage": {
+            "bytecode_function": {
+              "allocatedBytes": 933179560,
+              "allocationTouches": 11428405,
+              "allocationTouchesPerMarkedX1000": 3534,
+              "averageAllocatedBytesX1000": 81654,
+              "cacheLinesPerMarkedX1000": 7481,
+              "markedHeaders": 3232951,
+              "touchedCacheLines": 24188334
+            },
+            "exotic_object": {
+              "allocatedBytes": 586754320,
+              "allocationTouches": 5285571,
+              "allocationTouchesPerMarkedX1000": 4058,
+              "averageAllocatedBytesX1000": 111010,
+              "cacheLinesPerMarkedX1000": 9780,
+              "markedHeaders": 1302252,
+              "touchedCacheLines": 12736922
+            },
+            "fast_array": {
+              "allocatedBytes": 153008880,
+              "allocationTouches": 1520020,
+              "allocationTouchesPerMarkedX1000": 2956,
+              "averageAllocatedBytesX1000": 100662,
+              "cacheLinesPerMarkedX1000": 6809,
+              "markedHeaders": 514200,
+              "touchedCacheLines": 3501390
+            },
+            "non_object": {
+              "allocatedBytes": 3826633329,
+              "allocationTouches": 8630111,
+              "allocationTouchesPerMarkedX1000": 1000,
+              "averageAllocatedBytesX1000": 443404,
+              "cacheLinesPerMarkedX1000": 7860,
+              "markedHeaders": 8630111,
+              "touchedCacheLines": 67837947
+            },
+            "ordinary_object": {
+              "allocatedBytes": 10804058768,
+              "allocationTouches": 159705756,
+              "allocationTouchesPerMarkedX1000": 2999,
+              "averageAllocatedBytesX1000": 67649,
+              "cacheLinesPerMarkedX1000": 5401,
+              "markedHeaders": 53250750,
+              "touchedCacheLines": 287631319
+            }
+          }
+        },
+        "marking": {
+          "clearMarksNonBlockHeaders": 79878093,
+          "retiredNonBlockHeaders": 71220266,
+          "retiredRememberedSets": 1058,
+          "retiredYoungBlocks": 71370
+        },
+        "pauseNs": {
+          "incrementalCycleLast": 4822450,
+          "incrementalCycleMax": 7881221,
+          "incrementalPhaseSegmentMax": {
+            "begin": 460195,
+            "destroy": 1043239,
+            "finish": 2605426,
+            "increment": 1010583
+          },
+          "incrementalSubphaseTotals": {
+            "beginClear": 315953711,
+            "beginConservativeSeed": 112654614,
+            "beginPreciseSeed": 169901828,
+            "beginRetire": 1718315,
+            "finishCondemn": 605815262,
+            "finishConservativeSeedSubset": 106928226,
+            "finishRemarkTotal": 3177027564,
+            "finishWeak": 557858
+          },
+          "major": {
+            "max": 3260662,
+            "p50": 49216,
+            "p95": 1884333,
+            "p99": 2859972,
+            "retainedPauses": 1024,
+            "totalPauses": 53967
+          },
+          "minor": {
+            "max": 1212952,
+            "mean": 870703,
+            "total": 2457995861
+          },
+          "minorPhaseTotals": {
+            "clear": 344935550,
+            "conservative": 79651559,
+            "other": 42203640,
+            "promote": 137250482,
+            "remembered": 1187686,
+            "roots": 115704284,
+            "sweepDestroy": 1183430383,
+            "trace": 553632277
+          },
+          "stwTotals": {
+            "begin": {
+              "ns": 602439936,
+              "segments": 7750
+            },
+            "destroy": {
+              "ns": 3355643388,
+              "segments": 37910
+            },
+            "finish": {
+              "ns": 3804817509,
+              "segments": 7750
+            },
+            "increment": {
+              "ns": 2076944945,
+              "segments": 8307
+            }
+          }
+        },
+        "retirement": {
+          "abandons": 0,
+          "commits": 7750,
+          "state": "clean"
+        },
+        "weakState": {
+          "finalizerQueueCurrent": 0,
+          "weakRefsCurrent": 0
+        }
+      }
+    },
+    {
+      "benchmark": "pdfjs",
+      "fixedSourceSha256": "b6328cef73513b04621a1f77bfb191f67a8fe9967a927d675751645074e38c94",
+      "stats": {
+        "allocations": {
+          "belowLarge": 4603415,
+          "coveredBySmall": 4584714,
+          "large": 4,
+          "maxSmall": 128,
+          "p50BelowLarge": 64,
+          "p95BelowLarge": 128,
+          "p99BelowLarge": 128,
+          "payloadBytes": 395883162,
+          "publications": 4603419
+        },
+        "barriers": {
+          "generational": {
+            "calls": 7217786,
+            "exitOldTarget": 16852,
+            "exitYoungOwner": 7119877,
+            "rememberedOwner": 81057
+          },
+          "marking": {
+            "calls": 71,
+            "exitMarkedTarget": 26,
+            "exitUnpublishedOwner": 0,
+            "exitUnpublishedTarget": 0,
+            "requeuedOwner": 43,
+            "shadedTarget": 2
+          },
+          "totalCalls": 7217857
+        },
+        "blockHeap": {
+          "committed": 15486976,
+          "committedOverLiveX1000": 5851,
+          "currentDecommitted": 1290240,
+          "decommitChecks": 18,
+          "decommittedCumulative": 1290240,
+          "largeMaps": 0,
+          "live": 2647312,
+          "maxDecommitBatch": 1290240,
+          "recommittedCumulative": 0,
+          "releasedBlocksCumulative": 21,
+          "superblocks": 8,
+          "thresholdGrowthResets": 37,
+          "thresholdSmallHeapFloorResets": 0,
+          "trimAttempts": 0,
+          "trimSuccesses": 0
+        },
+        "collector": {
+          "objectsFreed": 2794331,
+          "zeroRefDrains": 0
+        },
+        "cycles": {
+          "collectionEntries": 170,
+          "envelope": {
+            "forcedFinishes": 0,
+            "maxPeakOverThreshold": {
+              "begin": 29633552,
+              "beginOverThresholdX1000000": 1003791,
+              "incrementalWindowGrowthBytes": 245427,
+              "peak": 29878979,
+              "peakOverStartX1000000": 1771183,
+              "peakOverThresholdX1000000": 1012105,
+              "start": 16869509,
+              "threshold": 29521640
+            },
+            "measured": 18,
+            "passesPeakOverThreshold36Over35": true,
+            "skipped": 1
+          },
+          "failed": 0,
+          "incrementalAborted": 0,
+          "incrementalCompleted": 19,
+          "incrementalForced": 0,
+          "majorCompleted": 19,
+          "markSteps": 25,
+          "minor": 151
+        },
+        "doomed": {
+          "condemnedHeaders": 357423,
+          "destroyedCountedObjects": 357422,
+          "parkedDrainSlices": 94,
+          "parkedEntriesDrained": 355061
+        },
+        "generation": {
+          "conservativeOnlyYoung": {
+            "available": false,
+            "verifiedMinors": 0,
+            "young": 0
+          },
+          "currentYoung": 14822,
+          "minorPauseDistribution": {
+            "available": true,
+            "max": 1456634,
+            "p50": 1228169,
+            "p95": 1388026,
+            "p99": 1436634,
+            "sampleDrops": 0,
+            "samplesRetained": 151,
+            "samplesTotal": 151
+          },
+          "minorReclaimed": 2436909,
+          "minorSuspensions": 0,
+          "minorYoungAtStartMax": 18793,
+          "minorYoungAtStartMean": 16776,
+          "promotedAll": 96298,
+          "promotedByMinor": 96298,
+          "rememberedDrops": 0,
+          "rememberedOwners": 21,
+          "rememberedWithoutYoung": 477
+        },
+        "heapBytes": {
+          "accountPeak": 41004431,
+          "live": 5956235
+        },
+        "markFootprint": {
+          "allocatedBytes": 276708009,
+          "allocationTouches": 872973,
+          "allocationTouchesPerMarkedX1000": 2822,
+          "blockHeaders": 275507,
+          "byKind": {
+            "functionBytecode": 18789,
+            "module": 0,
+            "object": 275507,
+            "realmContext": 19,
+            "shape": 6997,
+            "varRef": 7936
+          },
+          "byTraceClass": {
+            "bytecodeFunction": 16051,
+            "exoticObject": 5281,
+            "fastArray": 129475,
+            "nonObject": 33741,
+            "ordinaryObject": 124700
+          },
+          "cacheLinesPerMarkedX1000": 15289,
+          "inlineOrdinaryPropertyUpper": {
+            "slots1": {
+              "cacheLinesPerMarkedX1000": 21,
+              "eligibleObjects": 5519,
+              "externalAllocatedBytes": 176608,
+              "externalTouchedCacheLines": 6765
+            },
+            "slots2": {
+              "cacheLinesPerMarkedX1000": 570,
+              "eligibleObjects": 118704,
+              "externalAllocatedBytes": 3798528,
+              "externalTouchedCacheLines": 176386
+            },
+            "slots4": {
+              "cacheLinesPerMarkedX1000": 584,
+              "eligibleObjects": 121229,
+              "externalAllocatedBytes": 3960128,
+              "externalTouchedCacheLines": 180715
+            }
+          },
+          "inlinePropertyUpper": {
+            "slots1": {
+              "cacheLinesPerMarkedX1000": 22,
+              "eligibleObjects": 5586,
+              "externalAllocatedBytes": 178752,
+              "externalTouchedCacheLines": 6839
+            },
+            "slots2": {
+              "cacheLinesPerMarkedX1000": 586,
+              "eligibleObjects": 122184,
+              "externalAllocatedBytes": 3932928,
+              "externalTouchedCacheLines": 181257
+            },
+            "slots4": {
+              "cacheLinesPerMarkedX1000": 683,
+              "eligibleObjects": 140582,
+              "externalAllocatedBytes": 5110400,
+              "externalTouchedCacheLines": 211327
+            }
+          },
+          "majors": 19,
+          "markedHeaders": 309248,
+          "markedPerMajorX1000": 16276210,
+          "refcountRemovedHeaders": 302232,
+          "storage": {
+            "base": {
+              "allocatedBytes": 95083969,
+              "allocationTouches": 309248,
+              "averageAllocatedBytesX1000": 307468,
+              "cacheLinesPerMarkedX1000": 5690,
+              "touchedCacheLines": 1759633
+            },
+            "dense_elements": {
+              "allocatedBytes": 139966256,
+              "allocationTouches": 128576,
+              "averageAllocatedBytesX1000": 1088587,
+              "cacheLinesPerMarkedX1000": 6757,
+              "touchedCacheLines": 2089825
+            },
+            "payload_backing": {
+              "allocatedBytes": 302840,
+              "allocationTouches": 10997,
+              "averageAllocatedBytesX1000": 27538,
+              "cacheLinesPerMarkedX1000": 47,
+              "touchedCacheLines": 14632
+            },
+            "property_slots": {
+              "allocatedBytes": 10269056,
+              "allocationTouches": 144619,
+              "averageAllocatedBytesX1000": 71007,
+              "cacheLinesPerMarkedX1000": 852,
+              "touchedCacheLines": 263561
+            },
+            "shape": {
+              "allocatedBytes": 30839360,
+              "allocationTouches": 275507,
+              "averageAllocatedBytesX1000": 111936,
+              "cacheLinesPerMarkedX1000": 1915,
+              "touchedCacheLines": 592218
+            },
+            "trace_payload": {
+              "allocatedBytes": 246528,
+              "allocationTouches": 4026,
+              "averageAllocatedBytesX1000": 61233,
+              "cacheLinesPerMarkedX1000": 26,
+              "touchedCacheLines": 8340
+            }
+          },
+          "touchedCacheLines": 4728209,
+          "traceClassStorage": {
+            "bytecode_function": {
+              "allocatedBytes": 4454368,
+              "allocationTouches": 58831,
+              "allocationTouchesPerMarkedX1000": 3665,
+              "averageAllocatedBytesX1000": 75714,
+              "cacheLinesPerMarkedX1000": 7371,
+              "markedHeaders": 16051,
+              "touchedCacheLines": 118312
+            },
+            "exotic_object": {
+              "allocatedBytes": 2395352,
+              "allocationTouches": 19167,
+              "allocationTouchesPerMarkedX1000": 3629,
+              "averageAllocatedBytesX1000": 124972,
+              "cacheLinesPerMarkedX1000": 8936,
+              "markedHeaders": 5281,
+              "touchedCacheLines": 47196
+            },
+            "fast_array": {
+              "allocatedBytes": 161718056,
+              "allocationTouches": 387526,
+              "allocationTouchesPerMarkedX1000": 2993,
+              "averageAllocatedBytesX1000": 417308,
+              "cacheLinesPerMarkedX1000": 20140,
+              "markedHeaders": 129475,
+              "touchedCacheLines": 2607725
+            },
+            "non_object": {
+              "allocatedBytes": 71526249,
+              "allocationTouches": 33741,
+              "allocationTouchesPerMarkedX1000": 1000,
+              "averageAllocatedBytesX1000": 2119861,
+              "cacheLinesPerMarkedX1000": 34097,
+              "markedHeaders": 33741,
+              "touchedCacheLines": 1150469
+            },
+            "ordinary_object": {
+              "allocatedBytes": 36613984,
+              "allocationTouches": 373708,
+              "allocationTouchesPerMarkedX1000": 2996,
+              "averageAllocatedBytesX1000": 97974,
+              "cacheLinesPerMarkedX1000": 6451,
+              "markedHeaders": 124700,
+              "touchedCacheLines": 804507
+            }
+          }
+        },
+        "marking": {
+          "clearMarksNonBlockHeaders": 39102,
+          "retiredNonBlockHeaders": 2400,
+          "retiredRememberedSets": 18,
+          "retiredYoungBlocks": 373
+        },
+        "pauseNs": {
+          "incrementalCycleLast": 5562438,
+          "incrementalCycleMax": 5921241,
+          "incrementalPhaseSegmentMax": {
+            "begin": 570692,
+            "destroy": 1119176,
+            "finish": 1354282,
+            "increment": 1267625
+          },
+          "incrementalSubphaseTotals": {
+            "beginClear": 2570338,
+            "beginConservativeSeed": 832170,
+            "beginPreciseSeed": 428530,
+            "beginRetire": 43200,
+            "finishCondemn": 3550730,
+            "finishConservativeSeedSubset": 634724,
+            "finishRemarkTotal": 14939751,
+            "finishWeak": 7088
+          },
+          "major": {
+            "max": 2151391,
+            "p50": 143745,
+            "p95": 1736316,
+            "p99": 2016382,
+            "retainedPauses": 159,
+            "totalPauses": 159
+          },
+          "minor": {
+            "max": 1456634,
+            "mean": 1238614,
+            "total": 187030806
+          },
+          "minorPhaseTotals": {
+            "clear": 21221815,
+            "conservative": 6508905,
+            "other": 3057382,
+            "promote": 1428747,
+            "remembered": 1794540,
+            "roots": 7073661,
+            "sweepDestroy": 133811698,
+            "trace": 12134058
+          },
+          "stwTotals": {
+            "begin": {
+              "ns": 4217584,
+              "segments": 19
+            },
+            "destroy": {
+              "ns": 34373328,
+              "segments": 115
+            },
+            "finish": {
+              "ns": 18564017,
+              "segments": 19
+            },
+            "increment": {
+              "ns": 17405051,
+              "segments": 25
+            }
+          }
+        },
+        "retirement": {
+          "abandons": 0,
+          "commits": 19,
+          "state": "clean"
+        },
+        "weakState": {
+          "finalizerQueueCurrent": 0,
+          "weakRefsCurrent": 0
+        }
+      }
+    },
+    {
+      "benchmark": "raytrace",
+      "fixedSourceSha256": "c70e5303a58a4fc39eb64634b1c5451758f0874956a2c4ee839afd0b2b42e45f",
+      "stats": {
+        "allocations": {
+          "belowLarge": 90430575,
+          "coveredBySmall": 88554392,
+          "large": 0,
+          "maxSmall": 128,
+          "p50BelowLarge": 96,
+          "p95BelowLarge": 96,
+          "p99BelowLarge": 160,
+          "payloadBytes": 6980200164,
+          "publications": 90430575
+        },
+        "barriers": {
+          "generational": {
+            "calls": 151985283,
+            "exitOldTarget": 3824,
+            "exitYoungOwner": 151975617,
+            "rememberedOwner": 5842
+          },
+          "marking": {
+            "calls": 14823,
+            "exitMarkedTarget": 3686,
+            "exitUnpublishedOwner": 0,
+            "exitUnpublishedTarget": 0,
+            "requeuedOwner": 10979,
+            "shadedTarget": 158
+          },
+          "totalCalls": 152000106
+        },
+        "blockHeap": {
+          "committed": 2035712,
+          "committedOverLiveX1000": 4720,
+          "currentDecommitted": 61440,
+          "decommitChecks": 249,
+          "decommittedCumulative": 430080,
+          "largeMaps": 0,
+          "live": 431296,
+          "maxDecommitBatch": 61440,
+          "recommittedCumulative": 368640,
+          "releasedBlocksCumulative": 7,
+          "superblocks": 1,
+          "thresholdGrowthResets": 0,
+          "thresholdSmallHeapFloorResets": 7468,
+          "trimAttempts": 0,
+          "trimSuccesses": 0
+        },
+        "collector": {
+          "objectsFreed": 44194247,
+          "zeroRefDrains": 0
+        },
+        "cycles": {
+          "collectionEntries": 3734,
+          "envelope": {
+            "forcedFinishes": 0,
+            "maxPeakOverThreshold": {
+              "begin": 2154481,
+              "beginOverThresholdX1000000": 1070535,
+              "incrementalWindowGrowthBytes": 312,
+              "peak": 2154793,
+              "peakOverStartX1000000": 4900989,
+              "peakOverThresholdX1000000": 1070690,
+              "start": 439665,
+              "threshold": 2012529
+            },
+            "measured": 3733,
+            "passesPeakOverThreshold36Over35": false,
+            "skipped": 1
+          },
+          "failed": 0,
+          "incrementalAborted": 0,
+          "incrementalCompleted": 3734,
+          "incrementalForced": 0,
+          "majorCompleted": 3734,
+          "markSteps": 3734,
+          "minor": 0
+        },
+        "doomed": {
+          "condemnedHeaders": 44194247,
+          "destroyedCountedObjects": 44194247,
+          "parkedDrainSlices": 11200,
+          "parkedEntriesDrained": 44178554
+        },
+        "generation": {
+          "conservativeOnlyYoung": {
+            "available": false,
+            "verifiedMinors": 0,
+            "young": 0
+          },
+          "currentYoung": 5345,
+          "minorPauseDistribution": {
+            "available": false,
+            "max": 0,
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "sampleDrops": 0,
+            "samplesRetained": 0,
+            "samplesTotal": 0
+          },
+          "minorReclaimed": 0,
+          "minorSuspensions": 0,
+          "minorYoungAtStartMax": 0,
+          "minorYoungAtStartMean": 0,
+          "promotedAll": 0,
+          "promotedByMinor": 0,
+          "rememberedDrops": 0,
+          "rememberedOwners": 3,
+          "rememberedWithoutYoung": 0
+        },
+        "heapBytes": {
+          "accountPeak": 2563245,
+          "live": 482796
+        },
+        "markFootprint": {
+          "allocatedBytes": 993359019,
+          "allocationTouches": 6306697,
+          "allocationTouchesPerMarkedX1000": 2451,
+          "blockHeaders": 1478053,
+          "byKind": {
+            "functionBytecode": 418101,
+            "module": 0,
+            "object": 1478053,
+            "realmContext": 3734,
+            "shape": 490930,
+            "varRef": 181254
+          },
+          "byTraceClass": {
+            "bytecodeFunction": 388253,
+            "exoticObject": 573781,
+            "fastArray": 37331,
+            "nonObject": 1094019,
+            "ordinaryObject": 478688
+          },
+          "cacheLinesPerMarkedX1000": 7722,
+          "inlineOrdinaryPropertyUpper": {
+            "slots1": {
+              "cacheLinesPerMarkedX1000": 7,
+              "eligibleObjects": 14781,
+              "externalAllocatedBytes": 472992,
+              "externalTouchedCacheLines": 18960
+            },
+            "slots2": {
+              "cacheLinesPerMarkedX1000": 52,
+              "eligibleObjects": 95978,
+              "externalAllocatedBytes": 4118944,
+              "externalTouchedCacheLines": 134953
+            },
+            "slots4": {
+              "cacheLinesPerMarkedX1000": 203,
+              "eligibleObjects": 325479,
+              "externalAllocatedBytes": 23356704,
+              "externalTouchedCacheLines": 523575
+            }
+          },
+          "inlinePropertyUpper": {
+            "slots1": {
+              "cacheLinesPerMarkedX1000": 8,
+              "eligibleObjects": 18515,
+              "externalAllocatedBytes": 592480,
+              "externalTouchedCacheLines": 22694
+            },
+            "slots2": {
+              "cacheLinesPerMarkedX1000": 254,
+              "eligibleObjects": 465615,
+              "externalAllocatedBytes": 16066816,
+              "externalTouchedCacheLines": 655232
+            },
+            "slots4": {
+              "cacheLinesPerMarkedX1000": 725,
+              "eligibleObjects": 1201632,
+              "externalAllocatedBytes": 67721600,
+              "externalTouchedCacheLines": 1865507
+            }
+          },
+          "majors": 3734,
+          "markedHeaders": 2572072,
+          "markedPerMajorX1000": 688824,
+          "refcountRemovedHeaders": 2077408,
+          "storage": {
+            "base": {
+              "allocatedBytes": 568122859,
+              "allocationTouches": 2572072,
+              "averageAllocatedBytesX1000": 220881,
+              "cacheLinesPerMarkedX1000": 4366,
+              "touchedCacheLines": 11232210
+            },
+            "dense_elements": {
+              "allocatedBytes": 569808,
+              "allocationTouches": 21164,
+              "averageAllocatedBytesX1000": 26923,
+              "cacheLinesPerMarkedX1000": 9,
+              "touchedCacheLines": 25354
+            },
+            "payload_backing": {
+              "allocatedBytes": 20641048,
+              "allocationTouches": 238939,
+              "averageAllocatedBytesX1000": 86386,
+              "cacheLinesPerMarkedX1000": 211,
+              "touchedCacheLines": 545121
+            },
+            "property_slots": {
+              "allocatedBytes": 142218752,
+              "allocationTouches": 1436392,
+              "averageAllocatedBytesX1000": 99011,
+              "cacheLinesPerMarkedX1000": 1146,
+              "touchedCacheLines": 2949859
+            },
+            "shape": {
+              "allocatedBytes": 229964256,
+              "allocationTouches": 1478053,
+              "averageAllocatedBytesX1000": 155585,
+              "cacheLinesPerMarkedX1000": 1548,
+              "touchedCacheLines": 3983351
+            },
+            "trace_payload": {
+              "allocatedBytes": 31842296,
+              "allocationTouches": 560077,
+              "averageAllocatedBytesX1000": 56853,
+              "cacheLinesPerMarkedX1000": 438,
+              "touchedCacheLines": 1127622
+            }
+          },
+          "touchedCacheLines": 19863517,
+          "traceClassStorage": {
+            "bytecode_function": {
+              "allocatedBytes": 107188192,
+              "allocationTouches": 1351422,
+              "allocationTouchesPerMarkedX1000": 3480,
+              "averageAllocatedBytesX1000": 79315,
+              "cacheLinesPerMarkedX1000": 7230,
+              "markedHeaders": 388253,
+              "touchedCacheLines": 2807375
+            },
+            "exotic_object": {
+              "allocatedBytes": 230552816,
+              "allocationTouches": 2332472,
+              "allocationTouchesPerMarkedX1000": 4065,
+              "averageAllocatedBytesX1000": 98844,
+              "cacheLinesPerMarkedX1000": 9102,
+              "markedHeaders": 573781,
+              "touchedCacheLines": 5222633
+            },
+            "fast_array": {
+              "allocatedBytes": 6749048,
+              "allocationTouches": 93317,
+              "allocationTouchesPerMarkedX1000": 2499,
+              "averageAllocatedBytesX1000": 72323,
+              "cacheLinesPerMarkedX1000": 4585,
+              "markedHeaders": 37331,
+              "touchedCacheLines": 171180
+            },
+            "non_object": {
+              "allocatedBytes": 461344643,
+              "allocationTouches": 1094019,
+              "allocationTouchesPerMarkedX1000": 1000,
+              "averageAllocatedBytesX1000": 421697,
+              "cacheLinesPerMarkedX1000": 7561,
+              "markedHeaders": 1094019,
+              "touchedCacheLines": 8272370
+            },
+            "ordinary_object": {
+              "allocatedBytes": 187524320,
+              "allocationTouches": 1435467,
+              "allocationTouchesPerMarkedX1000": 2998,
+              "averageAllocatedBytesX1000": 130636,
+              "cacheLinesPerMarkedX1000": 7081,
+              "markedHeaders": 478688,
+              "touchedCacheLines": 3389959
+            }
+          }
+        },
+        "marking": {
+          "clearMarksNonBlockHeaders": 4047703,
+          "retiredNonBlockHeaders": 2956661,
+          "retiredRememberedSets": 2076,
+          "retiredYoungBlocks": 52261
+        },
+        "pauseNs": {
+          "incrementalCycleLast": 467859,
+          "incrementalCycleMax": 663189,
+          "incrementalPhaseSegmentMax": {
+            "begin": 552228,
+            "destroy": 389731,
+            "finish": 219873,
+            "increment": 65665
+          },
+          "incrementalSubphaseTotals": {
+            "beginClear": 41028353,
+            "beginConservativeSeed": 63324413,
+            "beginPreciseSeed": 33146060,
+            "beginRetire": 1864606,
+            "finishCondemn": 44404913,
+            "finishConservativeSeedSubset": 51449564,
+            "finishRemarkTotal": 472318459,
+            "finishWeak": 446344
+          },
+          "major": {
+            "max": 238098,
+            "p50": 32864,
+            "p95": 228545,
+            "p99": 234066,
+            "retainedPauses": 1024,
+            "totalPauses": 18668
+          },
+          "minor": {
+            "max": 0,
+            "mean": 0,
+            "total": 0
+          },
+          "minorPhaseTotals": {
+            "clear": 0,
+            "conservative": 0,
+            "other": 0,
+            "promote": 0,
+            "remembered": 0,
+            "roots": 0,
+            "sweepDestroy": 0,
+            "trace": 0
+          },
+          "stwTotals": {
+            "begin": {
+              "ns": 141239351,
+              "segments": 3734
+            },
+            "destroy": {
+              "ns": 1017130006,
+              "segments": 11200
+            },
+            "finish": {
+              "ns": 529661500,
+              "segments": 3734
+            },
+            "increment": {
+              "ns": 135485384,
+              "segments": 3734
+            }
+          }
+        },
+        "retirement": {
+          "abandons": 0,
+          "commits": 3734,
+          "state": "clean"
+        },
+        "weakState": {
+          "finalizerQueueCurrent": 0,
+          "weakRefsCurrent": 0
+        }
+      }
+    },
+    {
+      "benchmark": "regexp",
+      "fixedSourceSha256": "67f770174b9743502612835b656d033179f279a39848b985765a12516e301d46",
+      "stats": {
+        "allocations": {
+          "belowLarge": 2753657,
+          "coveredBySmall": 2753557,
+          "large": 1,
+          "maxSmall": 128,
+          "p50BelowLarge": 64,
+          "p95BelowLarge": 64,
+          "p99BelowLarge": 64,
+          "payloadBytes": 176527779,
+          "publications": 2753658
+        },
+        "barriers": {
+          "generational": {
+            "calls": 2260,
+            "exitOldTarget": 100,
+            "exitYoungOwner": 1973,
+            "rememberedOwner": 187
+          },
+          "marking": {
+            "calls": 5,
+            "exitMarkedTarget": 1,
+            "exitUnpublishedOwner": 0,
+            "exitUnpublishedTarget": 0,
+            "requeuedOwner": 2,
+            "shadedTarget": 2
+          },
+          "totalCalls": 2265
+        },
+        "blockHeap": {
+          "committed": 2097152,
+          "committedOverLiveX1000": 4119,
+          "currentDecommitted": 0,
+          "decommitChecks": 79,
+          "decommittedCumulative": 184320,
+          "largeMaps": 0,
+          "live": 509184,
+          "maxDecommitBatch": 61440,
+          "recommittedCumulative": 184320,
+          "releasedBlocksCumulative": 3,
+          "superblocks": 1,
+          "thresholdGrowthResets": 470,
+          "thresholdSmallHeapFloorResets": 1,
+          "trimAttempts": 0,
+          "trimSuccesses": 0
+        },
+        "collector": {
+          "objectsFreed": 2737957,
+          "zeroRefDrains": 0
+        },
+        "cycles": {
+          "collectionEntries": 236,
+          "envelope": {
+            "forcedFinishes": 0,
+            "maxPeakOverThreshold": {
+              "begin": 2434961,
+              "beginOverThresholdX1000000": 1101327,
+              "incrementalWindowGrowthBytes": 334473,
+              "peak": 2769434,
+              "peakOverStartX1000000": 4340330,
+              "peakOverThresholdX1000000": 1252609,
+              "start": 638070,
+              "threshold": 2210934
+            },
+            "measured": 235,
+            "passesPeakOverThreshold36Over35": false,
+            "skipped": 1
+          },
+          "failed": 0,
+          "incrementalAborted": 0,
+          "incrementalCompleted": 236,
+          "incrementalForced": 0,
+          "majorCompleted": 236,
+          "markSteps": 236,
+          "minor": 0
+        },
+        "doomed": {
+          "condemnedHeaders": 2737957,
+          "destroyedCountedObjects": 2737957,
+          "parkedDrainSlices": 747,
+          "parkedEntriesDrained": 2737957
+        },
+        "generation": {
+          "conservativeOnlyYoung": {
+            "available": false,
+            "verifiedMinors": 0,
+            "young": 0
+          },
+          "currentYoung": 5932,
+          "minorPauseDistribution": {
+            "available": false,
+            "max": 0,
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "sampleDrops": 0,
+            "samplesRetained": 0,
+            "samplesTotal": 0
+          },
+          "minorReclaimed": 0,
+          "minorSuspensions": 0,
+          "minorYoungAtStartMax": 0,
+          "minorYoungAtStartMean": 0,
+          "promotedAll": 0,
+          "promotedByMinor": 0,
+          "rememberedDrops": 0,
+          "rememberedOwners": 3,
+          "rememberedWithoutYoung": 0
+        },
+        "heapBytes": {
+          "accountPeak": 7224643,
+          "live": 721955
+        },
+        "markFootprint": {
+          "allocatedBytes": 185869420,
+          "allocationTouches": 485500,
+          "allocationTouchesPerMarkedX1000": 2238,
+          "blockHeaders": 110149,
+          "byKind": {
+            "functionBytecode": 12036,
+            "module": 0,
+            "object": 110149,
+            "realmContext": 236,
+            "shape": 18849,
+            "varRef": 75663
+          },
+          "byTraceClass": {
+            "bytecodeFunction": 11040,
+            "exoticObject": 59620,
+            "fastArray": 26293,
+            "nonObject": 106784,
+            "ordinaryObject": 13196
+          },
+          "cacheLinesPerMarkedX1000": 13952,
+          "inlineOrdinaryPropertyUpper": {
+            "slots1": {
+              "cacheLinesPerMarkedX1000": 3,
+              "eligibleObjects": 704,
+              "externalAllocatedBytes": 22528,
+              "externalTouchedCacheLines": 704
+            },
+            "slots2": {
+              "cacheLinesPerMarkedX1000": 27,
+              "eligibleObjects": 4234,
+              "externalAllocatedBytes": 135488,
+              "externalTouchedCacheLines": 5884
+            },
+            "slots4": {
+              "cacheLinesPerMarkedX1000": 52,
+              "eligibleObjects": 7536,
+              "externalAllocatedBytes": 346816,
+              "externalTouchedCacheLines": 11309
+            }
+          },
+          "inlinePropertyUpper": {
+            "slots1": {
+              "cacheLinesPerMarkedX1000": 121,
+              "eligibleObjects": 23542,
+              "externalAllocatedBytes": 753344,
+              "externalTouchedCacheLines": 26396
+            },
+            "slots2": {
+              "cacheLinesPerMarkedX1000": 301,
+              "eligibleObjects": 51092,
+              "externalAllocatedBytes": 1642464,
+              "externalTouchedCacheLines": 65490
+            },
+            "slots4": {
+              "cacheLinesPerMarkedX1000": 470,
+              "eligibleObjects": 73208,
+              "externalAllocatedBytes": 3057888,
+              "externalTouchedCacheLines": 101983
+            }
+          },
+          "majors": 236,
+          "markedHeaders": 216933,
+          "markedPerMajorX1000": 919207,
+          "refcountRemovedHeaders": 197848,
+          "storage": {
+            "base": {
+              "allocatedBytes": 82999524,
+              "allocationTouches": 216933,
+              "averageAllocatedBytesX1000": 382604,
+              "cacheLinesPerMarkedX1000": 6864,
+              "touchedCacheLines": 1489063
+            },
+            "dense_elements": {
+              "allocatedBytes": 76709984,
+              "allocationTouches": 25585,
+              "averageAllocatedBytesX1000": 2998240,
+              "cacheLinesPerMarkedX1000": 4591,
+              "touchedCacheLines": 996044
+            },
+            "payload_backing": {
+              "allocatedBytes": 2123432,
+              "allocationTouches": 12229,
+              "averageAllocatedBytesX1000": 173639,
+              "cacheLinesPerMarkedX1000": 207,
+              "touchedCacheLines": 44968
+            },
+            "property_slots": {
+              "allocatedBytes": 7073632,
+              "allocationTouches": 84058,
+              "averageAllocatedBytesX1000": 84151,
+              "cacheLinesPerMarkedX1000": 728,
+              "touchedCacheLines": 158119
+            },
+            "shape": {
+              "allocatedBytes": 14886608,
+              "allocationTouches": 110149,
+              "averageAllocatedBytesX1000": 135149,
+              "cacheLinesPerMarkedX1000": 1222,
+              "touchedCacheLines": 265294
+            },
+            "trace_payload": {
+              "allocatedBytes": 2076240,
+              "allocationTouches": 36546,
+              "averageAllocatedBytesX1000": 56811,
+              "cacheLinesPerMarkedX1000": 338,
+              "touchedCacheLines": 73324
+            }
+          },
+          "touchedCacheLines": 3026812,
+          "traceClassStorage": {
+            "bytecode_function": {
+              "allocatedBytes": 4029416,
+              "allocationTouches": 42044,
+              "allocationTouchesPerMarkedX1000": 3808,
+              "averageAllocatedBytesX1000": 95838,
+              "cacheLinesPerMarkedX1000": 8936,
+              "markedHeaders": 11040,
+              "touchedCacheLines": 98661
+            },
+            "exotic_object": {
+              "allocatedBytes": 19289872,
+              "allocationTouches": 218457,
+              "allocationTouchesPerMarkedX1000": 3664,
+              "averageAllocatedBytesX1000": 88300,
+              "cacheLinesPerMarkedX1000": 7567,
+              "markedHeaders": 59620,
+              "touchedCacheLines": 451173
+            },
+            "fast_array": {
+              "allocatedBytes": 81171080,
+              "allocationTouches": 78628,
+              "allocationTouchesPerMarkedX1000": 2990,
+              "averageAllocatedBytesX1000": 1032343,
+              "cacheLinesPerMarkedX1000": 41926,
+              "markedHeaders": 26293,
+              "touchedCacheLines": 1102382
+            },
+            "non_object": {
+              "allocatedBytes": 75053948,
+              "allocationTouches": 106784,
+              "allocationTouchesPerMarkedX1000": 1000,
+              "averageAllocatedBytesX1000": 702857,
+              "cacheLinesPerMarkedX1000": 11879,
+              "markedHeaders": 106784,
+              "touchedCacheLines": 1268530
+            },
+            "ordinary_object": {
+              "allocatedBytes": 6325104,
+              "allocationTouches": 39587,
+              "allocationTouchesPerMarkedX1000": 2999,
+              "averageAllocatedBytesX1000": 159777,
+              "cacheLinesPerMarkedX1000": 8037,
+              "markedHeaders": 13196,
+              "touchedCacheLines": 106066
+            }
+          }
+        },
+        "marking": {
+          "clearMarksNonBlockHeaders": 106781,
+          "retiredNonBlockHeaders": 451,
+          "retiredRememberedSets": 13,
+          "retiredYoungBlocks": 3466
+        },
+        "pauseNs": {
+          "incrementalCycleLast": 951238,
+          "incrementalCycleMax": 1078792,
+          "incrementalPhaseSegmentMax": {
+            "begin": 552788,
+            "destroy": 714405,
+            "finish": 212945,
+            "increment": 97696
+          },
+          "incrementalSubphaseTotals": {
+            "beginClear": 2552957,
+            "beginConservativeSeed": 7762471,
+            "beginPreciseSeed": 3066388,
+            "beginRetire": 281106,
+            "finishCondemn": 1217414,
+            "finishConservativeSeedSubset": 6059075,
+            "finishRemarkTotal": 34782723,
+            "finishWeak": 53184
+          },
+          "major": {
+            "max": 714405,
+            "p50": 56432,
+            "p95": 643764,
+            "p99": 669493,
+            "retainedPauses": 1024,
+            "totalPauses": 1219
+          },
+          "minor": {
+            "max": 0,
+            "mean": 0,
+            "total": 0
+          },
+          "minorPhaseTotals": {
+            "clear": 0,
+            "conservative": 0,
+            "other": 0,
+            "promote": 0,
+            "remembered": 0,
+            "roots": 0,
+            "sweepDestroy": 0,
+            "trace": 0
+          },
+          "stwTotals": {
+            "begin": {
+              "ns": 14231151,
+              "segments": 236
+            },
+            "destroy": {
+              "ns": 156511558,
+              "segments": 747
+            },
+            "finish": {
+              "ns": 36966731,
+              "segments": 236
+            },
+            "increment": {
+              "ns": 19480749,
+              "segments": 236
+            }
+          }
+        },
+        "retirement": {
+          "abandons": 0,
+          "commits": 236,
+          "state": "clean"
+        },
+        "weakState": {
+          "finalizerQueueCurrent": 0,
+          "weakRefsCurrent": 0
+        }
+      }
+    },
+    {
+      "benchmark": "splay",
+      "fixedSourceSha256": "35ebfb84c40827b7ef9908d9338903f3e1dc42beeef6c549118d4f148c36e4a7",
+      "stats": {
+        "allocations": {
+          "belowLarge": 18409431,
+          "coveredBySmall": 18409325,
+          "large": 0,
+          "maxSmall": 128,
+          "p50BelowLarge": 96,
+          "p95BelowLarge": 96,
+          "p99BelowLarge": 112,
+          "payloadBytes": 1582797112,
+          "publications": 18409431
+        },
+        "barriers": {
+          "generational": {
+            "calls": 39488823,
+            "exitOldTarget": 2319092,
+            "exitYoungOwner": 35134019,
+            "rememberedOwner": 2035712
+          },
+          "marking": {
+            "calls": 2037,
+            "exitMarkedTarget": 1402,
+            "exitUnpublishedOwner": 0,
+            "exitUnpublishedTarget": 0,
+            "requeuedOwner": 447,
+            "shadedTarget": 188
+          },
+          "totalCalls": 39490860
+        },
+        "blockHeap": {
+          "committed": 318398464,
+          "committedOverLiveX1000": 3774,
+          "currentDecommitted": 368640,
+          "decommitChecks": 23,
+          "decommittedCumulative": 2211840,
+          "largeMaps": 0,
+          "live": 84375728,
+          "maxDecommitBatch": 1351680,
+          "recommittedCumulative": 1843200,
+          "releasedBlocksCumulative": 36,
+          "superblocks": 152,
+          "thresholdGrowthResets": 54,
+          "thresholdSmallHeapFloorResets": 4,
+          "trimAttempts": 0,
+          "trimSuccesses": 0
+        },
+        "collector": {
+          "objectsFreed": 11261296,
+          "zeroRefDrains": 0
+        },
+        "cycles": {
+          "collectionEntries": 37,
+          "envelope": {
+            "forcedFinishes": 0,
+            "maxPeakOverThreshold": {
+              "begin": 1834906,
+              "beginOverThresholdX1000000": 999985,
+              "incrementalWindowGrowthBytes": 616,
+              "peak": 1835522,
+              "peakOverStartX1000000": 7003938,
+              "peakOverThresholdX1000000": 1000321,
+              "start": 262070,
+              "threshold": 1834934
+            },
+            "measured": 28,
+            "passesPeakOverThreshold36Over35": true,
+            "skipped": 1
+          },
+          "failed": 0,
+          "incrementalAborted": 0,
+          "incrementalCompleted": 29,
+          "incrementalForced": 0,
+          "majorCompleted": 29,
+          "markSteps": 710,
+          "minor": 8
+        },
+        "doomed": {
+          "condemnedHeaders": 11257382,
+          "destroyedCountedObjects": 11257382,
+          "parkedDrainSlices": 2761,
+          "parkedEntriesDrained": 11257381
+        },
+        "generation": {
+          "conservativeOnlyYoung": {
+            "available": false,
+            "verifiedMinors": 0,
+            "young": 0
+          },
+          "currentYoung": 67664,
+          "minorPauseDistribution": {
+            "available": true,
+            "max": 1503930,
+            "p50": 1078696,
+            "p95": 1503930,
+            "p99": 1503930,
+            "sampleDrops": 0,
+            "samplesRetained": 8,
+            "samplesTotal": 8
+          },
+          "minorReclaimed": 3914,
+          "minorSuspensions": 4,
+          "minorYoungAtStartMax": 19965,
+          "minorYoungAtStartMean": 17940,
+          "promotedAll": 139607,
+          "promotedByMinor": 139607,
+          "rememberedDrops": 0,
+          "rememberedOwners": 1773,
+          "rememberedWithoutYoung": 1500
+        },
+        "heapBytes": {
+          "accountPeak": 244943274,
+          "live": 71065264
+        },
+        "markFootprint": {
+          "allocatedBytes": 4378101952,
+          "allocationTouches": 49696662,
+          "allocationTouchesPerMarkedX1000": 2999,
+          "blockHeaders": 16561861,
+          "byKind": {
+            "functionBytecode": 1564,
+            "module": 0,
+            "object": 16561861,
+            "realmContext": 29,
+            "shape": 2558,
+            "varRef": 1664
+          },
+          "byTraceClass": {
+            "bytecodeFunction": 1354,
+            "exoticObject": 4208,
+            "fastArray": 5518327,
+            "nonObject": 5815,
+            "ordinaryObject": 11037972
+          },
+          "cacheLinesPerMarkedX1000": 6512,
+          "inlineOrdinaryPropertyUpper": {
+            "slots1": {
+              "cacheLinesPerMarkedX1000": 0,
+              "eligibleObjects": 129,
+              "externalAllocatedBytes": 4128,
+              "externalTouchedCacheLines": 143
+            },
+            "slots2": {
+              "cacheLinesPerMarkedX1000": 983,
+              "eligibleObjects": 10864292,
+              "externalAllocatedBytes": 347657344,
+              "externalTouchedCacheLines": 16296082
+            },
+            "slots4": {
+              "cacheLinesPerMarkedX1000": 1003,
+              "eligibleObjects": 11037173,
+              "externalAllocatedBytes": 358721728,
+              "externalTouchedCacheLines": 16621548
+            }
+          },
+          "inlinePropertyUpper": {
+            "slots1": {
+              "cacheLinesPerMarkedX1000": 0,
+              "eligibleObjects": 158,
+              "externalAllocatedBytes": 5056,
+              "externalTouchedCacheLines": 172
+            },
+            "slots2": {
+              "cacheLinesPerMarkedX1000": 983,
+              "eligibleObjects": 10866942,
+              "externalAllocatedBytes": 347743072,
+              "externalTouchedCacheLines": 16299718
+            },
+            "slots4": {
+              "cacheLinesPerMarkedX1000": 1003,
+              "eligibleObjects": 11042076,
+              "externalAllocatedBytes": 358951648,
+              "externalTouchedCacheLines": 16628945
+            }
+          },
+          "majors": 29,
+          "markedHeaders": 16567676,
+          "markedPerMajorX1000": 571299172,
+          "refcountRemovedHeaders": 16565089,
+          "storage": {
+            "base": {
+              "allocatedBytes": 1542115976,
+              "allocationTouches": 16567676,
+              "averageAllocatedBytesX1000": 93079,
+              "cacheLinesPerMarkedX1000": 2329,
+              "touchedCacheLines": 38592466
+            },
+            "dense_elements": {
+              "allocatedBytes": 882906336,
+              "allocationTouches": 5518240,
+              "averageAllocatedBytesX1000": 159997,
+              "cacheLinesPerMarkedX1000": 1172,
+              "touchedCacheLines": 19433835
+            },
+            "payload_backing": {
+              "allocatedBytes": 159400,
+              "allocationTouches": 1296,
+              "averageAllocatedBytesX1000": 122993,
+              "cacheLinesPerMarkedX1000": 0,
+              "touchedCacheLines": 3636
+            },
+            "property_slots": {
+              "allocatedBytes": 359452768,
+              "allocationTouches": 11043439,
+              "averageAllocatedBytesX1000": 32548,
+              "cacheLinesPerMarkedX1000": 1004,
+              "touchedCacheLines": 16636021
+            },
+            "shape": {
+              "allocatedBytes": 1593231104,
+              "allocationTouches": 16561861,
+              "averageAllocatedBytesX1000": 96198,
+              "cacheLinesPerMarkedX1000": 2005,
+              "touchedCacheLines": 33220592
+            },
+            "trace_payload": {
+              "allocatedBytes": 236368,
+              "allocationTouches": 4150,
+              "averageAllocatedBytesX1000": 56956,
+              "cacheLinesPerMarkedX1000": 0,
+              "touchedCacheLines": 8358
+            }
+          },
+          "touchedCacheLines": 107894908,
+          "traceClassStorage": {
+            "bytecode_function": {
+              "allocatedBytes": 392968,
+              "allocationTouches": 4952,
+              "allocationTouchesPerMarkedX1000": 3657,
+              "averageAllocatedBytesX1000": 79355,
+              "cacheLinesPerMarkedX1000": 7593,
+              "markedHeaders": 1354,
+              "touchedCacheLines": 10281
+            },
+            "exotic_object": {
+              "allocatedBytes": 1728288,
+              "allocationTouches": 17159,
+              "allocationTouchesPerMarkedX1000": 4077,
+              "averageAllocatedBytesX1000": 100721,
+              "cacheLinesPerMarkedX1000": 9221,
+              "markedHeaders": 4208,
+              "touchedCacheLines": 38802
+            },
+            "fast_array": {
+              "allocatedBytes": 1809985272,
+              "allocationTouches": 16554894,
+              "allocationTouchesPerMarkedX1000": 2999,
+              "averageAllocatedBytesX1000": 109332,
+              "cacheLinesPerMarkedX1000": 7521,
+              "markedHeaders": 5518327,
+              "touchedCacheLines": 41507143
+            },
+            "non_object": {
+              "allocatedBytes": 2016192,
+              "allocationTouches": 5815,
+              "allocationTouchesPerMarkedX1000": 1000,
+              "averageAllocatedBytesX1000": 346722,
+              "cacheLinesPerMarkedX1000": 6369,
+              "markedHeaders": 5815,
+              "touchedCacheLines": 37039
+            },
+            "ordinary_object": {
+              "allocatedBytes": 2563979232,
+              "allocationTouches": 33113842,
+              "allocationTouchesPerMarkedX1000": 2999,
+              "averageAllocatedBytesX1000": 77429,
+              "cacheLinesPerMarkedX1000": 6006,
+              "markedHeaders": 11037972,
+              "touchedCacheLines": 66301643
+            }
+          }
+        },
+        "marking": {
+          "clearMarksNonBlockHeaders": 5811,
+          "retiredNonBlockHeaders": 250,
+          "retiredRememberedSets": 28,
+          "retiredYoungBlocks": 18301
+        },
+        "pauseNs": {
+          "incrementalCycleLast": 106033794,
+          "incrementalCycleMax": 106470275,
+          "incrementalPhaseSegmentMax": {
+            "begin": 547108,
+            "destroy": 1051975,
+            "finish": 29481438,
+            "increment": 1011255
+          },
+          "incrementalSubphaseTotals": {
+            "beginClear": 251553,
+            "beginConservativeSeed": 4807780,
+            "beginPreciseSeed": 375941,
+            "beginRetire": 2710881,
+            "finishCondemn": 7523298,
+            "finishConservativeSeedSubset": 4596879,
+            "finishRemarkTotal": 596475178,
+            "finishWeak": 9360
+          },
+          "major": {
+            "max": 29850976,
+            "p50": 74321,
+            "p95": 1010455,
+            "p99": 1020983,
+            "retainedPauses": 1024,
+            "totalPauses": 4075
+          },
+          "minor": {
+            "max": 1503930,
+            "mean": 1157586,
+            "total": 9260691
+          },
+          "minorPhaseTotals": {
+            "clear": 1079992,
+            "conservative": 698343,
+            "other": 136307,
+            "promote": 931045,
+            "remembered": 746423,
+            "roots": 147200,
+            "sweepDestroy": 1370251,
+            "trace": 4151130
+          },
+          "stwTotals": {
+            "begin": {
+              "ns": 8593886,
+              "segments": 29
+            },
+            "destroy": {
+              "ns": 780602131,
+              "segments": 3336
+            },
+            "finish": {
+              "ns": 604143678,
+              "segments": 29
+            },
+            "increment": {
+              "ns": 697731195,
+              "segments": 710
+            }
+          }
+        },
+        "retirement": {
+          "abandons": 0,
+          "commits": 29,
+          "state": "clean"
+        },
+        "weakState": {
+          "finalizerQueueCurrent": 0,
+          "weakRefsCurrent": 0
+        }
+      }
+    }
+  ],
+  "schemaVersion": 6,
+  "workload": {
+    "iterationDivisor": 1,
+    "sourceRevision": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+    "sourceTrackedDirty": false,
+    "sourceTreeDirty": false,
+    "suite": "javascript-zoo Octane deterministic fixed-work"
+  }
+}

@@ -105,7 +105,8 @@ pub fn main(init: std.process.Init) !void {
     dumpHostDispatchStats(init.environ_map);
     try printSummary(io, summary);
     const has_unexpected = summary.failed != 0 or summary.fixed != 0;
-    std.process.exit(if (has_unexpected) 1 else 0);
+    const shadow_unexplained = summary.shadow_unexplained_tests != 0 or summary.shadow_census_errors != 0;
+    std.process.exit(if (has_unexpected or shadow_unexplained) 1 else 0);
 }
 
 /// The default execution path evaluates tests in-process, so the engine's
@@ -145,6 +146,35 @@ fn printSummary(io: std.Io, summary: ExecutionSummary) !void {
     if (summary.known_failures != 0) try stdout.print(", known {d}", .{summary.known_failures});
     if (summary.fixed != 0) try stdout.print(", fixed {d}", .{summary.fixed});
     try stdout.print("\n", .{});
+    if (summary.shadow_census_tests != 0 or summary.shadow_census_errors != 0) {
+        const mean_ns: u64 = if (summary.shadow_census_tests == 0)
+            0
+        else
+            summary.shadow_census_ns / summary.shadow_census_tests;
+        try stdout.print(
+            "shadow-census: tests={d} errors={d} unexplained_tests={d} unexplained_objects={d} pending_finalization={d} pinned={d} declared_external={d} known_semantic={d} conservative_only={d} max_allocated={d} mean_ns={d} max_ns={d}\n",
+            .{
+                summary.shadow_census_tests,
+                summary.shadow_census_errors,
+                summary.shadow_unexplained_tests,
+                summary.shadow_unexplained_objects,
+                summary.shadow_pending_finalization,
+                summary.shadow_pinned,
+                summary.shadow_declared_external_owner,
+                summary.shadow_known_current_collector_semantic,
+                summary.shadow_conservative_only,
+                summary.shadow_max_allocated,
+                mean_ns,
+                summary.shadow_max_census_ns,
+            },
+        );
+        if (summary.shadow_first_unexplained_path_len != 0) {
+            try stdout.print("shadow-census first unexplained: {s}\n", .{summary.shadowFirstUnexplainedPath()});
+        }
+        if (comptime test262_root.core.gc.shadow_tracer_enabled) {
+            try test262_root.core.gc_write_audit.format(stdout);
+        }
+    }
     try stdout.flush();
 }
 
@@ -183,9 +213,71 @@ pub const ExecutionSummary = struct {
     failed: usize = 0,
     known_failures: usize = 0,
     fixed: usize = 0,
+    shadow_census_tests: usize = 0,
+    shadow_unexplained_tests: usize = 0,
+    shadow_unexplained_objects: usize = 0,
+    shadow_pending_finalization: usize = 0,
+    shadow_pinned: usize = 0,
+    shadow_declared_external_owner: usize = 0,
+    shadow_known_current_collector_semantic: usize = 0,
+    shadow_conservative_only: usize = 0,
+    shadow_allocated_sum: usize = 0,
+    shadow_max_allocated: usize = 0,
+    shadow_census_ns: u64 = 0,
+    shadow_max_census_ns: u64 = 0,
+    shadow_census_errors: usize = 0,
+    shadow_first_unexplained_path_buf: [256]u8 = undefined,
+    shadow_first_unexplained_path_len: usize = 0,
 
     pub fn deinit(self: *ExecutionSummary, allocator: std.mem.Allocator) void {
         self.selection.deinit(allocator);
+    }
+
+    pub fn shadowFirstUnexplainedPath(self: *const ExecutionSummary) []const u8 {
+        return self.shadow_first_unexplained_path_buf[0..self.shadow_first_unexplained_path_len];
+    }
+};
+
+const ShadowCensusAgg = struct {
+    mutex: std.Io.Mutex = .init,
+    tests: usize = 0,
+    unexplained_tests: usize = 0,
+    unexplained_objects: usize = 0,
+    pending_finalization: usize = 0,
+    pinned: usize = 0,
+    declared_external_owner: usize = 0,
+    known_current_collector_semantic: usize = 0,
+    conservative_only: usize = 0,
+    allocated_sum: usize = 0,
+    max_allocated: usize = 0,
+    total_ns: u64 = 0,
+    max_ns: u64 = 0,
+    census_errors: usize = 0,
+    first_unexplained_path_buf: [256]u8 = undefined,
+    first_unexplained_path_len: usize = 0,
+
+    fn copyInto(self: *const ShadowCensusAgg, summary: *ExecutionSummary) void {
+        // Called after workers join; record() cannot race.
+        summary.shadow_census_tests = self.tests;
+        summary.shadow_unexplained_tests = self.unexplained_tests;
+        summary.shadow_unexplained_objects = self.unexplained_objects;
+        summary.shadow_pending_finalization = self.pending_finalization;
+        summary.shadow_pinned = self.pinned;
+        summary.shadow_declared_external_owner = self.declared_external_owner;
+        summary.shadow_known_current_collector_semantic = self.known_current_collector_semantic;
+        summary.shadow_conservative_only = self.conservative_only;
+        summary.shadow_allocated_sum = self.allocated_sum;
+        summary.shadow_max_allocated = self.max_allocated;
+        summary.shadow_census_ns = self.total_ns;
+        summary.shadow_max_census_ns = self.max_ns;
+        summary.shadow_census_errors = self.census_errors;
+        summary.shadow_first_unexplained_path_len = self.first_unexplained_path_len;
+        if (self.first_unexplained_path_len != 0) {
+            @memcpy(
+                summary.shadow_first_unexplained_path_buf[0..self.first_unexplained_path_len],
+                self.first_unexplained_path_buf[0..self.first_unexplained_path_len],
+            );
+        }
     }
 };
 
@@ -208,8 +300,8 @@ const WorkerResult = struct {
 };
 
 /// Runner state shared by the single-worker path and every thread adapter.
-/// Cross-thread mutation stays confined to `next_index` and `reporter`, whose
-/// implementations own their synchronization.
+/// Cross-thread mutation stays confined to `next_index`, `reporter`, and
+/// `shadow_census`, whose implementations own their synchronization.
 const WorkerShared = struct {
     io: std.Io,
     engine_path: []const u8,
@@ -225,6 +317,8 @@ const WorkerShared = struct {
     timeout_ms: ?u32,
     global_module: bool,
     reporter: ?*Reporter,
+    gc_shadow_check: bool = false,
+    shadow_census: ?*ShadowCensusAgg = null,
 };
 
 /// Per-thread ownership kept separate from the shared run description.
@@ -304,6 +398,7 @@ fn runSelectedTestsWithReporterMode(
     defer _ = test_gpa.deinit();
     const test_allocator = test_gpa.allocator();
     var next_index: std.atomic.Value(usize) = .init(0);
+    var shadow_census = ShadowCensusAgg{};
     const worker_shared = WorkerShared{
         .io = io,
         .engine_path = engine_path,
@@ -318,6 +413,8 @@ fn runSelectedTestsWithReporterMode(
         .timeout_ms = config.timeout_ms,
         .global_module = config.module,
         .reporter = &reporter,
+        .gc_shadow_check = config.gc_shadow_check,
+        .shadow_census = if (config.gc_shadow_check) &shadow_census else null,
     };
     if (worker_count == 1) {
         try runWorkerLoop(
@@ -377,6 +474,8 @@ fn runSelectedTestsWithReporterMode(
         }
     }
 
+    if (config.gc_shadow_check) shadow_census.copyInto(&summary);
+
     if (config.update_errors and summary.selection.errorfile != null) {
         var merged_failures = try mergeKnownErrorsForUpdate(allocator, known_errors, prepared.tests, current_failures);
         defer merged_failures.deinit();
@@ -433,6 +532,8 @@ fn runWorkerLoop(
                 shared.global_module,
                 shared.skipped_features,
                 shared.reporter,
+                shared.gc_shadow_check,
+                shared.shadow_census,
                 &stderr_storage,
                 &stderr_text,
             ) catch |err| {
@@ -574,10 +675,13 @@ fn runOneTest(
     global_module: bool,
     skipped_features: NameList,
     reporter: ?*Reporter,
+    gc_shadow_check: bool,
+    shadow_census: ?*ShadowCensusAgg,
     stderr_storage: *[stderr_storage_len]u8,
     stderr_out: *[]const u8,
 ) !TestRunResult {
     const started = std.Io.Clock.Timestamp.now(io, .awake);
+    if (std.c.getenv("ZJS_T262_TRACE") != null) std.debug.print("[{d}] {s}\n", .{ test_index, test_path });
     const test_source = try readTestSource(allocator, io, test_path);
     defer allocator.free(test_source);
 
@@ -606,7 +710,7 @@ fn runOneTest(
     const exited_zero = if (use_external_engine)
         try runExternalEngine(allocator, io, engine_path, source, test_path, test_index, run_as_module, can_block, is_async, timeout_ms, stderr_storage, &stderr)
     else
-        try runEmbeddedEngine(allocator, io, source, test_path, run_as_module, can_block, is_async, stderr_storage, &stderr);
+        try runEmbeddedEngine(allocator, io, source, test_path, run_as_module, can_block, is_async, stderr_storage, &stderr, if (gc_shadow_check) shadow_census else null);
     const elapsed_ms: i64 = started.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.toMilliseconds();
     const passed = if (metadata.negative) |negative|
         negativeResultMatches(negative, exited_zero, stderr)
@@ -634,6 +738,7 @@ fn runEmbeddedEngine(
     is_async: bool,
     stderr_storage: *[stderr_storage_len]u8,
     stderr_out: *[]const u8,
+    shadow_census: ?*ShadowCensusAgg,
 ) !bool {
     const rt = try zjs.JSRuntime.createWithOptions(allocator, .{});
     errdefer rt.destroy();
@@ -647,6 +752,7 @@ fn runEmbeddedEngine(
     const global_obj = try ctx.globalObject();
     try installTest262Globals(rt, ctx, global_obj);
     defer {
+        maybeRunShadowCensus(rt, io, path, shadow_census);
         event_loop.deinit();
         _ = cleanupTest262Agents(rt);
         runtime_layer.cleanupAtomicsWaitersForContext(ctx);
@@ -666,7 +772,7 @@ fn runEmbeddedEngine(
         .max_source_size = 16 * 1024 * 1024,
     };
     defer dynamic_import_state.deinit();
-    var dynamic_import_scope = test262_root.exec.module_graph.installDynamicImport(&dynamic_import_state);
+    var dynamic_import_scope = try test262_root.exec.module_graph.installDynamicImport(&dynamic_import_state);
     defer dynamic_import_scope.deinit();
     var value = (if (run_as_module)
         runtime_layer.evalFileModuleGraphWithOutput(ctx, source, &output, path, io, allocator, 16 * 1024 * 1024)
@@ -705,6 +811,43 @@ fn runEmbeddedEngine(
         }
     }
     return !value.isException();
+}
+
+fn maybeRunShadowCensus(rt: *zjs.JSRuntime, io: std.Io, path: []const u8, agg: ?*ShadowCensusAgg) void {
+    if (comptime !test262_root.core.gc.shadow_tracer_enabled) return;
+    if (comptime test262_root.core.gc.shadow_tracer_enabled) {
+        const census = agg orelse return;
+        test262_root.core.gc_shadow.quiesce(rt);
+        const t0 = test262_root.platform_clock.monotonicNanos();
+        const report = test262_root.core.gc_shadow.run(rt) catch {
+            census.mutex.lockUncancelable(io);
+            defer census.mutex.unlock(io);
+            census.census_errors += 1;
+            return;
+        };
+        const ns = test262_root.platform_clock.elapsedNanosSince(t0);
+        census.mutex.lockUncancelable(io);
+        defer census.mutex.unlock(io);
+        census.tests += 1;
+        census.allocated_sum += report.allocated;
+        census.unexplained_objects += report.unexplained;
+        census.pending_finalization += report.pending_finalization;
+        census.pinned += report.pinned;
+        census.declared_external_owner += report.declared_external_owner;
+        census.known_current_collector_semantic += report.known_current_collector_semantic;
+        census.conservative_only += report.conservative.retained_only_conservatively;
+        census.total_ns += ns;
+        if (report.allocated > census.max_allocated) census.max_allocated = report.allocated;
+        if (ns > census.max_ns) census.max_ns = ns;
+        if (report.unexplained != 0) {
+            census.unexplained_tests += 1;
+            if (census.first_unexplained_path_len == 0) {
+                const n = @min(path.len, census.first_unexplained_path_buf.len);
+                @memcpy(census.first_unexplained_path_buf[0..n], path[0..n]);
+                census.first_unexplained_path_len = n;
+            }
+        }
+    }
 }
 
 /// Mirrors the reference runner's async-test oracle: run-test262.c js_print
@@ -1037,6 +1180,13 @@ test "test262 args parse external engine path" {
     try std.testing.expectEqual(@as(?usize, 20), config.stop_index);
 }
 
+test "test262 args parse gc-shadow-check" {
+    const enabled = try parseArgs(&.{ "--gc-shadow-check", "-c", "test262.conf" });
+    try std.testing.expect(enabled.gc_shadow_check);
+    const disabled = try parseArgs(&.{ "-c", "test262.conf" });
+    try std.testing.expect(!disabled.gc_shadow_check);
+}
+
 test "test262 args parse feature overrides" {
     const config = try parseArgs(&.{
         "--enable-feature", "await-dictionary",
@@ -1297,6 +1447,7 @@ test "embedded runner reports thrown proxy constructors as test failures" {
         false,
         &stderr_storage,
         &stderr,
+        null,
     );
 
     try std.testing.expect(!passed);
@@ -1333,6 +1484,7 @@ test "embedded runner fails async test whose $DONE reports an error" {
         true,
         &stderr_storage,
         &stderr,
+        null,
     );
 
     try std.testing.expect(!passed);
@@ -1353,6 +1505,7 @@ test "embedded runner passes async test that completes via $DONE" {
         true,
         &stderr_storage,
         &stderr,
+        null,
     );
 
     try std.testing.expect(passed);
@@ -1384,6 +1537,7 @@ test "embedded Debug runner executes a representative test262 harness within its
         false,
         &stderr_storage,
         &stderr,
+        null,
     );
 
     try std.testing.expectEqualStrings("", stderr);

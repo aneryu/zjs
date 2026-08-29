@@ -468,6 +468,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             try vm_literal.object(vm.ctx, vm.stack, vm.global);
         }
     }.b);
+    t[op.object_slots2] = h(struct {
+        fn b(vm: *Vm) HostError!void {
+            try vm_literal.objectReserved2(vm.ctx, vm.stack, vm.global);
+        }
+    }.b);
     t[op.array_from] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try vm_literal.arrayFrom(vm.ctx, vm.stack, vm.function, vm.frame, vm.global);
@@ -982,6 +987,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // dispatch-audit). Fast handler on the plain-data-add / OOM-free path; every exotic
     // case falls to the cold h_* shell assigned above.
     t[op.object] = dispatch.op_object; // bare {} create; OOM → cold h_object
+    t[op.object_slots2] = dispatch.op_object_slots2;
     t[op.define_field] = dispatch.op_define_field; // plain data add; array/private/proxy/setter → cold h_field
     t[op.array_from] = dispatch.op_array_from; // dense array build; OOM → cold h_array_from
     t[op.add_loc] = dispatch.op_add_loc;

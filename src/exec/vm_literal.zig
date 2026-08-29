@@ -35,6 +35,20 @@ pub noinline fn object(
     try stack.pushOwned(value);
 }
 
+pub noinline fn objectReserved2(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    global: *core.Object,
+) !void {
+    const created = try core.Object.createPlainObjectReserved2(
+        ctx.runtime,
+        object_ops.objectPrototypeFromGlobal(ctx.runtime, global),
+    );
+    const value = created.value();
+    errdefer value.free(ctx.runtime);
+    try stack.pushOwned(value);
+}
+
 /// Frameless OP_object fast path (qjs CASE(OP_object): `*sp++ = JS_NewObject(ctx)`,
 /// quickjs.c:17961). Creates a bare `{}` and returns it OWNED for the handler to push
 /// onto the register-resident sp, so no `publish`/stack round-trip is needed — object
@@ -43,6 +57,14 @@ pub noinline fn object(
 /// body minus the stack.pushOwned so the value stays in a register.
 pub inline fn newPlainObjectValue(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
     const created = try core.Object.create(ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(ctx.runtime, global));
+    return created.value();
+}
+
+pub inline fn newPlainObjectReserved2Value(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
+    const created = try core.Object.createPlainObjectReserved2(
+        ctx.runtime,
+        object_ops.objectPrototypeFromGlobal(ctx.runtime, global),
+    );
     return created.value();
 }
 

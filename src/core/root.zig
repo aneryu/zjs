@@ -9,6 +9,8 @@
 
 pub const subsystem_name = "core_runtime";
 
+const builtin = @import("builtin");
+
 pub const value = @import("value.zig");
 pub const value_semantics = @import("value_semantics.zig");
 pub const value_format = @import("value_format.zig");
@@ -16,6 +18,33 @@ pub const value_string = @import("value_string.zig");
 pub const number = @import("number.zig");
 pub const list = @import("list.zig");
 pub const gc = @import("gc.zig");
+/// Slot-under-RC protocol. Default `rc` erases the module so production
+/// `.text` does not grow a unused Slot Implementation.
+pub const gc_slot = if (builtin.is_test or gc.shadow_tracer_enabled)
+    @import("gc_slot.zig")
+else
+    struct {
+        pub const stats_enabled = false;
+    };
+/// Shadow write audit of Slot-bypassing heap stores. Default `rc` erases the
+/// module so production `.text` does not grow observer symbols.
+pub const gc_write_audit = if (builtin.is_test or gc.shadow_tracer_enabled)
+    @import("gc_write_audit.zig")
+else
+    struct {
+        pub const enabled = false;
+        pub fn reset() void {}
+        pub fn snapshot() Snapshot {
+            return .{};
+        }
+        pub fn format(_: anytype) !void {}
+        pub const Snapshot = struct {
+            slot_writes: usize = 0,
+            pub fn hits(_: Snapshot) usize {
+                return 0;
+            }
+        };
+    };
 pub const atom = @import("atom.zig");
 pub const string = @import("string.zig");
 pub const bigint = @import("bigint.zig");
@@ -47,6 +76,59 @@ pub const context = @import("context.zig");
 pub const exception = @import("exception.zig");
 pub const memory = @import("memory.zig");
 pub const profile = @import("profile.zig");
+/// Imported only when `-Dzjs_gc=shadow`. Default `rc` builds see an empty
+/// namespace so the observer is not part of the production compile.
+pub const gc_shadow = if (gc.shadow_tracer_enabled) @import("gc_shadow.zig") else struct {
+    pub const enabled = false;
+};
+/// Live page-radix address registry. Default production `rc` erases the
+/// module so the allocation hot path does not grow a registry Implementation.
+pub const gc_address_registry = if (gc.address_registry_enabled)
+    @import("gc_address_registry.zig")
+else
+    struct {
+        pub const enabled = false;
+    };
+/// Measured size-class table and publication histogram. Default production
+/// `rc` erases the module.
+pub const gc_space = if (gc.space_model_enabled)
+    @import("gc_space.zig")
+else
+    struct {
+        pub const enabled = false;
+    };
+/// Logical 64 KiB window sweep machine and four debt quantities. Default
+/// production `rc` erases the module.
+pub const gc_sweep_model = if (gc.sweep_model_enabled)
+    @import("gc_sweep_model.zig")
+else
+    struct {
+        pub const enabled = false;
+    };
+/// 64 KiB block heap. Default production `rc` and default tests erase it;
+/// `-Dzjs_experimental_gc=trace_stw` is the only consumer.
+pub const gc_block_heap = if (gc.block_heap_enabled)
+    @import("gc_block_heap.zig")
+else
+    struct {
+        pub const enabled = false;
+    };
+/// Pass-B corpse census. Measurement-only namespace; erased unless
+/// `-Dzjs_experimental_gc_corpse_census=true`.
+pub const gc_corpse_census = @import("gc_corpse_census.zig");
+/// Imported only when `-Dzjs_experimental_gc=trace_stw`. Default `rc` builds see an empty
+/// namespace so the reclaiming tracer is not part of the production compile.
+pub const gc_trace_stw = if (gc.trace_stw_enabled) @import("gc_trace_stw.zig") else struct {
+    pub const enabled = false;
+    pub const Report = struct {
+        ephemeron_values_shaded: usize = 0,
+        census_ns: u64 = 0,
+    };
+    pub var last_report: Report = .{};
+    /// Present so callers need no `comptime` guard; the `rc` build has no
+    /// whole-heap census to switch off.
+    pub var detailed_reports: bool = false;
+};
 
 pub const JSValue = value.JSValue;
 pub const JSString = JSValue.String;

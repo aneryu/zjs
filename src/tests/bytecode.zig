@@ -8,6 +8,7 @@ const compiler = zjs.compiler;
 const frame_mod = zjs.exec.frame;
 const parser = zjs.parser;
 const parser_tests = @import("parser.zig");
+const helpers = @import("helpers.zig");
 
 test "constant pool retains and releases values" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -165,6 +166,11 @@ test "script or module metadata owns each bytecode transfer" {
 
     core.JSValue.functionBytecode(&fb.header).free(rt);
     fb_alive = false;
+    // The published FB is the referrer atom's second owner, and the atom table
+    // only balances when the FB is torn down -- which the tracer defers to a
+    // collection. Nothing names the FB from here on, so the collection reaches
+    // it; `function` and `fd` are native-stack carriers the sweep never visits.
+    helpers.reclaimNow(rt);
     try std.testing.expectEqual(base_ref_count + 1, rt.atoms.refCount(referrer).?);
 
     fd.deinit(rt);
@@ -405,7 +411,10 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
             .has_debug = case.debug,
             .has_extension = case.extension,
         });
-        try std.testing.expectEqual(@as(usize, 96), @sizeOf(bytecode.FunctionBytecode));
+        try std.testing.expectEqual(
+            @as(usize, if (core.gc.trace_stw_enabled) 88 else 96),
+            @sizeOf(bytecode.FunctionBytecode),
+        );
         try std.testing.expectEqual(@as(usize, 8), @alignOf(bytecode.FunctionBytecode));
         try std.testing.expectEqual(case.fam_bytes, fb.famBytes());
         try std.testing.expectEqual(@sizeOf(bytecode.FunctionBytecode) + case.fam_bytes, fb.layout().mainPayloadBytes());
@@ -416,7 +425,7 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
         try std.testing.expectEqual(@as(usize, 0), @intFromPtr(fb) % 8);
         try std.testing.expectEqual(@as(usize, 8), @intFromPtr(fb) - @intFromPtr(fb.header.meta()));
         try std.testing.expectEqual(core.gc.GcKind.function_bytecode, fb.header.meta().flags.kind);
-        try std.testing.expectEqual(@as(i32, 1), fb.header.meta().rc);
+        try helpers.expectRefCount(1, &fb.header);
         try std.testing.expect(!fb.header.meta().alloc_info.standalone);
 
         try std.testing.expect(fb.byte_code == null);
@@ -434,7 +443,10 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
         try std.testing.expectEqual(@as(u8, 0), fb.flag_byte18 & 0x80);
 
         if (fb.debugInfo()) |dbg| {
-            try std.testing.expectEqual(@intFromPtr(fb) + 0x60, @intFromPtr(dbg));
+            try std.testing.expectEqual(
+                @intFromPtr(fb) + @sizeOf(bytecode.FunctionBytecode),
+                @intFromPtr(dbg),
+            );
             try std.testing.expectEqual(@as(u32, 0), dbg._padding);
             try std.testing.expect(dbg.pc2line_buf == null);
             try std.testing.expect(dbg.source_ptr == null);
@@ -478,7 +490,8 @@ test "FunctionLayout matches the QJS-order core pack" {
         3,
     );
     const value_size = @sizeOf(core.JSValue);
-    const expected_cpool_off: usize = 0x80;
+    const expected_cpool_off = @sizeOf(bytecode.FunctionBytecode) +
+        @sizeOf(bytecode.function_bytecode.DebugInfo);
     const expected_vardefs_off = expected_cpool_off + 2 * value_size;
     const expected_closure_var_off = expected_vardefs_off + 3 * @sizeOf(bytecode.function_bytecode.BytecodeVarDef);
     const expected_byte_code_off = expected_closure_var_off + 2 * @sizeOf(bytecode.function_bytecode.BytecodeClosureVar);
@@ -502,25 +515,26 @@ test "FunctionLayout matches the QJS-order core pack" {
     // code end, so the totals are pinned relative to `byte_code_end` instead of
     // re-hardcoding the extension's own (zjs-owned) width.
     const hot_bytes = @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
+    const trace_layout_delta: usize = if (core.gc.trace_stw_enabled) 8 else 0;
     switch (value_size) {
         16 => {
-            try std.testing.expectEqual(@as(usize, 0x80), layout.cpool_off);
-            try std.testing.expectEqual(@as(usize, 0xa0), layout.vardefs_off);
-            try std.testing.expectEqual(@as(usize, 0xc4), layout.closure_var_off);
-            try std.testing.expectEqual(@as(usize, 0xd4), layout.byte_code_off);
-            try std.testing.expectEqual(@as(usize, 0xd7), layout.byte_code_end);
-            try std.testing.expectEqual(@as(?usize, 0xd7), layout.hot_off);
-            try std.testing.expectEqual(@as(usize, 0xd7) + hot_bytes, layout.total_size);
+            try std.testing.expectEqual(@as(usize, 0x80) - trace_layout_delta, layout.cpool_off);
+            try std.testing.expectEqual(@as(usize, 0xa0) - trace_layout_delta, layout.vardefs_off);
+            try std.testing.expectEqual(@as(usize, 0xc4) - trace_layout_delta, layout.closure_var_off);
+            try std.testing.expectEqual(@as(usize, 0xd4) - trace_layout_delta, layout.byte_code_off);
+            try std.testing.expectEqual(@as(usize, 0xd7) - trace_layout_delta, layout.byte_code_end);
+            try std.testing.expectEqual(@as(?usize, 0xd7 - trace_layout_delta), layout.hot_off);
+            try std.testing.expectEqual(@as(usize, 0xd7) - trace_layout_delta + hot_bytes, layout.total_size);
             try std.testing.expectEqual(@as(usize, 0x77) + hot_bytes, layout.famBytes());
         },
         8 => {
-            try std.testing.expectEqual(@as(usize, 0x80), layout.cpool_off);
-            try std.testing.expectEqual(@as(usize, 0x90), layout.vardefs_off);
-            try std.testing.expectEqual(@as(usize, 0xb4), layout.closure_var_off);
-            try std.testing.expectEqual(@as(usize, 0xc4), layout.byte_code_off);
-            try std.testing.expectEqual(@as(usize, 0xc7), layout.byte_code_end);
-            try std.testing.expectEqual(@as(?usize, 0xc7), layout.hot_off);
-            try std.testing.expectEqual(@as(usize, 0xc7) + hot_bytes, layout.total_size);
+            try std.testing.expectEqual(@as(usize, 0x80) - trace_layout_delta, layout.cpool_off);
+            try std.testing.expectEqual(@as(usize, 0x90) - trace_layout_delta, layout.vardefs_off);
+            try std.testing.expectEqual(@as(usize, 0xb4) - trace_layout_delta, layout.closure_var_off);
+            try std.testing.expectEqual(@as(usize, 0xc4) - trace_layout_delta, layout.byte_code_off);
+            try std.testing.expectEqual(@as(usize, 0xc7) - trace_layout_delta, layout.byte_code_end);
+            try std.testing.expectEqual(@as(?usize, 0xc7 - trace_layout_delta), layout.hot_off);
+            try std.testing.expectEqual(@as(usize, 0xc7) - trace_layout_delta + hot_bytes, layout.total_size);
             try std.testing.expectEqual(@as(usize, 0x67) + hot_bytes, layout.famBytes());
         },
         else => return error.TestUnexpectedResult,
@@ -619,8 +633,8 @@ test "FunctionLayout places the exact hot tail at every code-end residue" {
             @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
 
         try std.testing.expect(std.meta.eql(expected, actual));
-        try std.testing.expectEqual(@as(usize, 0x60), actual.byte_code_off);
-        try std.testing.expectEqual(@as(usize, 0x60) + code_len, actual.byte_code_end);
+        try std.testing.expectEqual(@sizeOf(bytecode.FunctionBytecode), actual.byte_code_off);
+        try std.testing.expectEqual(@sizeOf(bytecode.FunctionBytecode) + code_len, actual.byte_code_end);
         try std.testing.expectEqual(code_len, actual.byte_code_end % 8);
         try std.testing.expectEqual(@as(?usize, expected_hot_extension_off), actual.hot_off);
         try std.testing.expectEqual(expected_total_size, actual.total_size);
@@ -640,10 +654,11 @@ test "FunctionLayout places the exact hot tail at every code-end residue" {
         try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), fb.callFacts());
 
         if (code_len == 3) {
-            try std.testing.expectEqual(@as(usize, 0x63), actual.byte_code_end);
-            try std.testing.expectEqual(@as(?usize, 0x63), actual.hot_off);
+            const exact_code_end = @sizeOf(bytecode.FunctionBytecode) + 3;
+            try std.testing.expectEqual(exact_code_end, actual.byte_code_end);
+            try std.testing.expectEqual(@as(?usize, exact_code_end), actual.hot_off);
             try std.testing.expectEqual(
-                @as(usize, 0x63) + @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
+                exact_code_end + @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
                 actual.total_size,
             );
         }
@@ -809,9 +824,10 @@ test "packed FunctionBytecode zero-count pointers stay null beside non-empty seg
     );
     try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), fb.callFacts());
     const hot_bytes = @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
-    try std.testing.expectEqual(@as(usize, 0x7c), layout.byte_code_end);
-    try std.testing.expectEqual(@as(?usize, 0x7c), layout.hot_off);
-    try std.testing.expectEqual(@as(usize, 0x7c) + hot_bytes, layout.total_size);
+    const expected_code_end: usize = if (core.gc.trace_stw_enabled) 0x74 else 0x7c;
+    try std.testing.expectEqual(expected_code_end, layout.byte_code_end);
+    try std.testing.expectEqual(@as(?usize, expected_code_end), layout.hot_off);
+    try std.testing.expectEqual(expected_code_end + hot_bytes, layout.total_size);
 }
 
 test "non-empty W1c5 fixture does not force the optional extension" {
@@ -924,7 +940,7 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
     );
     try std.testing.expectEqual(@as(u16, 0), second.hotExtension().?.ctor_alloc.capacity);
     try std.testing.expectEqual(core.gc.GcKind.function_bytecode, second.header.meta().flags.kind);
-    try std.testing.expectEqual(@as(i32, 1), second.header.meta().rc);
+    try helpers.expectRefCount(1, &second.header);
 }
 
 test "published no-debug no-extension FunctionBytecode uses the deferred zero-FAM free path" {
@@ -1438,14 +1454,19 @@ test "parent finalization failure releases its published child realm owner" {
     const child_header = parent.cpool[0].objectHeader() orelse return error.TestExpectedEqual;
     const child_fb: *bytecode.FunctionBytecode = @alignCast(@fieldParentPtr("header", child_header));
     try std.testing.expectEqual(realm, child_fb.realmContext());
-    try std.testing.expectEqual(@as(i32, 2), realm.header.meta().rc);
+    try helpers.expectRefCount(2, &realm.header);
 
     // The failed parent FunctionDef still owns the installed cpool value.
     // Releasing that owner must drop the child's independent RealmRef exactly
     // once; no partially-created parent FB may retain another reference.
     parent.deinit(rt);
     parent_alive = false;
-    try std.testing.expectEqual(@as(i32, 1), realm.header.meta().rc);
+    // The child's RealmRef is dropped by the child's own teardown, not by the
+    // cpool release that orphans it, so under the tracer the drop lands in the
+    // collection. The realm survives it as a live host handle on the runtime's
+    // context list; the orphaned child is named by nothing and is reclaimed.
+    helpers.reclaimNow(rt);
+    try helpers.expectRefCount(1, &realm.header);
 }
 
 test "parent finalization moves an existing child FunctionBytecode cpool owner without rc churn" {
@@ -1471,8 +1492,9 @@ test "parent finalization moves an existing child FunctionBytecode cpool owner w
     _ = try fd.appendCpool(child_value);
     child_value.free(rt);
     child_value_alive = false;
-    const child_rc_before = child_fb.header.meta().rc;
-    try std.testing.expectEqual(@as(i32, 1), child_rc_before);
+    const child_rc_before = helpers.refCountSnapshot(&child_fb.header);
+    if (comptime !core.gc.refCountRemoved(.function_bytecode))
+        try std.testing.expectEqual(@as(i32, 1), child_rc_before);
 
     const parent_slice = try pipeline.finalize.createFunctionBytecode(&fd, .{ .realm = realm });
     const parent_fb = &parent_slice[0];
@@ -1480,26 +1502,40 @@ test "parent finalization moves an existing child FunctionBytecode cpool owner w
     defer if (parent_alive) core.JSValue.functionBytecode(&parent_fb.header).free(rt);
 
     try std.testing.expect(fd.cpool[0].isUndefined());
-    try std.testing.expectEqual(child_rc_before, child_fb.header.meta().rc);
+    try helpers.expectRefCount(child_rc_before, &child_fb.header);
     try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].objectHeader().?);
 
     fd.deinit(rt);
     fd_alive = false;
-    try std.testing.expectEqual(child_rc_before, child_fb.header.meta().rc);
+    try helpers.expectRefCount(child_rc_before, &child_fb.header);
     try std.testing.expectEqual(name, child_fb.funcName());
     try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].objectHeader().?);
 
     const held_child = parent_fb.cpoolSlice()[0].dup();
     var held_child_alive = true;
     defer if (held_child_alive) held_child.free(rt);
-    const realm_refs_before_parent_free = realm.header.meta().rc;
-    core.JSValue.functionBytecode(&parent_fb.header).free(rt);
-    parent_alive = false;
-    try std.testing.expectEqual(child_rc_before, child_fb.header.meta().rc);
-    try std.testing.expectEqual(realm_refs_before_parent_free - 1, realm.header.meta().rc);
+    const realm_refs_before_parent_free = helpers.refCountSnapshot(&realm.header);
+    {
+        // `held_child` is the child's only remaining owner once the parent is
+        // gone, and it is a Zig local the declared_only scan cannot see.
+        // Without this frame the collection that stands in for the parent's
+        // teardown would take the child with it, and both realm references
+        // would come off at once instead of one per owner.
+        var child_roots = [_]core.runtime.HeaderRootValue{.{ .header = &child_fb.header }};
+        var child_frame = core.runtime.ValueRootFrame{ .headers = &child_roots };
+        child_frame.activate(rt);
+        defer child_frame.deactivate(rt);
+
+        core.JSValue.functionBytecode(&parent_fb.header).free(rt);
+        parent_alive = false;
+        helpers.reclaimNow(rt);
+        try helpers.expectRefCount(child_rc_before, &child_fb.header);
+        try helpers.expectRefCount(realm_refs_before_parent_free - 1, &realm.header);
+    }
     held_child.free(rt);
     held_child_alive = false;
-    try std.testing.expectEqual(@as(i32, 1), realm.header.meta().rc);
+    helpers.reclaimNow(rt);
+    try helpers.expectRefCount(1, &realm.header);
 }
 
 // ---- F10.1b: FunctionDef-driven local-slot lowering ----
@@ -1614,7 +1650,10 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     try std.testing.expectEqual(captured_refs_before, rt.atoms.refCount(captured_name).?);
     try std.testing.expect(fb.hasDebug());
     try std.testing.expect(fb.hasExtension());
-    try std.testing.expectEqual(@intFromPtr(fb) + 0x60, @intFromPtr(fb.debugInfo().?));
+    try std.testing.expectEqual(
+        @intFromPtr(fb) + @sizeOf(bytecode.FunctionBytecode),
+        @intFromPtr(fb.debugInfo().?),
+    );
     try std.testing.expectEqual(
         @intFromPtr(fb) + fb.layout().hot_off.?,
         @intFromPtr(fb.hotExtension().?),
@@ -1938,15 +1977,17 @@ test "legacy execution adapter delegates synthetic var-ref name mirrors" {
     try std.testing.expectEqual(@as(u16, 1), execution_function.openVarRefCount());
     try std.testing.expect(execution_function.callFacts().execution.has_mapped_arguments);
     try std.testing.expectEqual(
-        @as(usize, 168),
+        @as(usize, if (core.gc.trace_stw_enabled) 160 else 168),
         @sizeOf(bytecode.LegacyExecutionAdapter),
     );
     // The negative sentinel deliberately keeps this borrowed stack bridge out
     // of canonical count-based FunctionLayout reconstruction. Its hot tail and
-    // borrowed pointer occupy fixed base+96/base+160 slots even though the
-    // mirrored table counts and borrowed code are all non-empty.
+    // borrowed pointer follow the active FunctionBytecode body even though the
+    // mirrored table counts and borrowed code are all non-empty. The body size
+    // is the offset authority in both representations.
     try std.testing.expectEqual(
-        @as(usize, 0xa0),
+        @sizeOf(bytecode.FunctionBytecode) +
+            @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
         @offsetOf(bytecode.LegacyExecutionAdapter, "legacy_bytecode_adapter"),
     );
     try std.testing.expectEqual(
@@ -2881,9 +2922,14 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
 
     core.JSValue.functionBytecode(&fb.header).free(rt);
     fb_alive = false;
+    // Large-space accounting is unwound by the FB's teardown, which the tracer
+    // defers to a collection. `fd` handed its owners to the FB and holds no
+    // heap bytes of its own, so the ledger is expected to reach zero here.
+    helpers.reclaimNow(rt);
     const after_free = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 0), after_free.total_allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 0), after_free.peak_allocated_bytes);
+    // High-water: survives the free rather than echoing live-now.
+    try std.testing.expect(after_free.peak_allocated_bytes > 0);
     try std.testing.expectEqual(@as(usize, 0), after_free.large_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 0), after_free.large_alloc_count);
     try std.testing.expectEqual(@as(usize, 0), after_free.heap_live_bytes);
@@ -3215,6 +3261,11 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
         ownership.dump(shape.*, "compile-only", "B4-artifact-only", b4);
 
         window.releaseArtifact();
+        // The emit residual lives inside the published child FunctionBytecodes,
+        // whose atom owners are released by their teardown rather than by the
+        // artifact release that orphans them. Under the tracer that teardown is
+        // this collection, and only after it does the atom table balance.
+        helpers.reclaimNow(rt);
         var terminal = try window.sampleNext(.final, &b4);
         ownership.setBuilderCommitted(&terminal, 0);
         try ownership.expectTerminal(terminal);

@@ -58,7 +58,8 @@ Status: normative — 本契约是
    承诺内(见 §5.2)。
 3. **默认 `rc` 构建零痕迹**:gc_slot 模块在默认构建被擦除
    (production `.text` 无 gc_slot 符号);tracing 仅经显式
-   `-Dzjs_gc=` 门可达,RC 是 shipped default(Stage 7 记录)。
+   `-Dzjs_experimental_gc=trace_stw` 门可达,RC 是 shipped default
+   (Stage 7 记录)。
 
 ## 2. 堆边突变协议(Slot)
 

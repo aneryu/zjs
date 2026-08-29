@@ -48,6 +48,79 @@ pub const ModuleEvalStep = union(enum) {
     },
 };
 
+
+/// A module continuation list holds JSValues inside a native array, which a
+/// declared-roots trace cannot see. Under refcounting that was harmless --
+/// the stored values carried counts -- but the tracing collector is the
+/// liveness authority, so the list has to announce itself. Registers for the
+/// scope of the list and traces both value fields of every live element.
+///
+/// Erased entirely in the default `rc` build, where no trace runs.
+const ContinuationRoots = struct {
+    runtime: *core.JSRuntime,
+    list: *std.ArrayList(ModuleContinuation),
+    registered: bool = false,
+
+    fn traceRoots(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        const self: *ContinuationRoots = @ptrCast(@alignCast(context));
+        for (self.list.items) |*entry| {
+            try visitor.value(&entry.continuation);
+            try visitor.value(&entry.awaited);
+        }
+    }
+
+    fn provider(self: *ContinuationRoots) core.runtime.RootProvider {
+        return .{ .context = @ptrCast(self), .trace = traceRoots };
+    }
+
+    inline fn activate(self: *ContinuationRoots) !void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        try self.runtime.registerRootProvider(self.provider());
+        self.registered = true;
+    }
+
+    fn deactivate(self: *ContinuationRoots) void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        if (!self.registered) return;
+        self.runtime.unregisterRootProvider(self.provider());
+        self.registered = false;
+    }
+};
+
+
+/// Sibling of `ContinuationRoots` for the evaluation-waiter lists, which hold
+/// their `resolve`/`reject` functions in the same kind of native array.
+const WaiterRoots = struct {
+    runtime: *core.JSRuntime,
+    list: *std.ArrayList(ModuleEvaluationWaiter),
+    registered: bool = false,
+
+    fn traceRoots(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        const self: *WaiterRoots = @ptrCast(@alignCast(context));
+        for (self.list.items) |*entry| {
+            try visitor.value(&entry.resolve);
+            try visitor.value(&entry.reject);
+        }
+    }
+
+    fn provider(self: *WaiterRoots) core.runtime.RootProvider {
+        return .{ .context = @ptrCast(self), .trace = traceRoots };
+    }
+
+    inline fn activate(self: *WaiterRoots) !void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        try self.runtime.registerRootProvider(self.provider());
+        self.registered = true;
+    }
+
+    fn deactivate(self: *WaiterRoots) void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        if (!self.registered) return;
+        self.runtime.unregisterRootProvider(self.provider());
+        self.registered = false;
+    }
+};
+
 pub const ModuleContinuation = struct {
     realm: core.RealmRef,
     path: []const u8,
@@ -120,6 +193,15 @@ pub const DynamicImportState = struct {
     waiters: ?*std.ArrayList(ModuleEvaluationWaiter) = null,
     owned_continuations: std.ArrayList(ModuleContinuation) = .empty,
     owned_waiters: std.ArrayList(ModuleEvaluationWaiter) = .empty,
+    /// Root scopes over whichever lists this state schedules through, held for
+    /// the state's whole lifetime rather than only while jobs drain. A module
+    /// that suspends on top-level await parks its continuation during
+    /// evaluation, long before anything calls `runJobs`, and a collection in
+    /// that window has no other way to see the generator object the
+    /// continuation names.
+    continuation_roots: ContinuationRoots = undefined,
+    waiter_roots: WaiterRoots = undefined,
+    roots_active: bool = false,
     /// Load-relevant import attribute (`type`) for the job currently being
     /// dispatched, set by dynamicImportJobCall before invoking the callback
     /// (jobs run one at a time on this thread, so a single slot suffices —
@@ -152,9 +234,33 @@ pub const DynamicImportState = struct {
         };
     }
 
+    /// Announce the scheduling lists to the tracer. Called from
+    /// `installDynamicImport`, which every construction site already goes
+    /// through, and undone by `deinit`. External lists use these providers as
+    /// their sole root owner while the loader scope is active.
+    fn activateRoots(self: *DynamicImportState) !void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        if (self.roots_active) return;
+        self.continuation_roots = .{ .runtime = self.runtime, .list = self.continuationList() };
+        try self.continuation_roots.activate();
+        errdefer self.continuation_roots.deactivate();
+        self.waiter_roots = .{ .runtime = self.runtime, .list = self.waiterList() };
+        try self.waiter_roots.activate();
+        self.roots_active = true;
+    }
+
+    fn deactivateRoots(self: *DynamicImportState) void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        if (!self.roots_active) return;
+        self.waiter_roots.deactivate();
+        self.continuation_roots.deactivate();
+        self.roots_active = false;
+    }
+
     /// Release only state-owned scheduling data. Static module graph runners
     /// pass external lists whose lifetime they continue to manage themselves.
     pub fn deinit(self: *DynamicImportState) void {
+        self.deactivateRoots();
         freeModuleContinuations(self.runtime, self.allocator, &self.owned_continuations);
         freeModuleEvaluationWaiters(self.runtime, self.allocator, &self.owned_waiters);
     }
@@ -738,11 +844,28 @@ fn dynamicImportRejectionValue(
 /// The state must outlive every job drain that may run an import job (the
 /// CLI keeps one alive for the whole process; the module-graph runners
 /// install a scoped one and drain before restoring).
-pub fn installDynamicImport(state: *DynamicImportState) core.runtime.DynamicImportLoaderScope {
-    return state.runtime.installDynamicImportLoader(.{
+/// Pairs the installed loader with the state's root registration so the two
+/// cannot get out of step. They did: activation used to happen in
+/// `installDynamicImport` and deactivation only in `DynamicImportState.deinit`,
+/// which the static graph evaluator never calls -- its lists are owned by the
+/// caller -- so the provider outlived the stack frame holding the state and
+/// the next collection walked a poisoned pointer.
+pub const DynamicImportScope = struct {
+    loader: core.runtime.DynamicImportLoaderScope,
+    state: *DynamicImportState,
+
+    pub fn deinit(self: *DynamicImportScope) void {
+        self.loader.deinit();
+        self.state.deactivateRoots();
+    }
+};
+
+pub fn installDynamicImport(state: *DynamicImportState) !DynamicImportScope {
+    try state.activateRoots();
+    return .{ .state = state, .loader = state.runtime.installDynamicImportLoader(.{
         .callback = DynamicImportState.load,
         .userdata = state,
-    });
+    }) };
 }
 
 fn runJobs(runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer) !void {
@@ -808,7 +931,7 @@ pub fn evalFileModuleGraphWithOutput(
         .continuations = &continuations,
         .waiters = &module_waiters,
     };
-    var dynamic_import_scope = installDynamicImport(&dynamic_import_state);
+    var dynamic_import_scope = try installDynamicImport(&dynamic_import_state);
     defer dynamic_import_scope.deinit();
     for (module_postorder.items) |path| {
         if (std.mem.eql(u8, path, normalized_filename)) continue;
@@ -898,6 +1021,9 @@ pub fn evalFileModuleGraphWithHostHooks(
 
     var continuations = std.ArrayList(ModuleContinuation).empty;
     defer freeModuleContinuations(runtime, allocator, &continuations);
+    var continuation_roots = ContinuationRoots{ .runtime = runtime, .list = &continuations };
+    try continuation_roots.activate();
+    defer continuation_roots.deactivate();
 
     for (module_postorder.items) |path| {
         if (std.mem.eql(u8, path, filename)) continue;
@@ -1442,7 +1568,20 @@ fn drainOneModuleContinuation(
     index: usize,
 ) !?core.JSValue {
     var current = continuations.orderedRemove(index);
+    // Taking the entry out of the list takes it out of `ContinuationRoots`'
+    // view: from here until it is reinserted or consumed, its continuation and
+    // awaited promise live only in this frame. The resumed evaluation enters
+    // `runWithCallEnv`'s interrupt/GC poll before publishing ActiveInvocation,
+    // so scalar stack capture cannot be replaced by the list provider alone.
+    // Publish the pair as one native window; production trace intentionally
+    // erases scalar ValueRootScopes.
+    var current_root_values = [_]core.JSValue{ current.continuation, current.awaited };
+    var current_root_slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &current_root_values }};
+    var current_root_frame = core.runtime.ValueRootFrame{ .slices = &current_root_slices };
+    current_root_frame.activate(runtime);
+    defer current_root_frame.deactivate(runtime);
     var restore_current = true;
+    // On errors, restore list ownership before the root window is unlinked.
     errdefer if (restore_current) continuations.insertAssumeCapacity(index, current);
     const context = current.realm.borrow() orelse unreachable;
     std.debug.assert(context.runtime == runtime);
@@ -1899,6 +2038,9 @@ fn evalDynamicImportModuleWithHostHooks(
 
     var continuations = std.ArrayList(ModuleContinuation).empty;
     defer freeModuleContinuations(runtime, allocator, &continuations);
+    var continuation_roots = ContinuationRoots{ .runtime = runtime, .list = &continuations };
+    try continuation_roots.activate();
+    defer continuation_roots.deactivate();
 
     for (postorder.items) |path| {
         const module_atom = try runtime.internAtom(path);

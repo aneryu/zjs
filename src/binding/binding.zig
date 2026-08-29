@@ -906,6 +906,11 @@ test "JSObject payload explicit deinit releases persistent value roots" {
     handle = .{};
 
     value.free(rt);
+    // The payload's `deinit`, and with it the release of the persistent handle
+    // the payload owns, runs during the object's teardown -- a collection
+    // under the tracer rather than this release. Without it the handle
+    // outlives the Runtime and teardown refuses.
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
     rt.drainDeferredClassPayloadFinalizers();
     try std.testing.expectEqual(@as(usize, 1), deinit_count);
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
@@ -945,6 +950,11 @@ test "JSObject installs class and owns js external payload" {
     try std.testing.expectEqual(@as(u32, 42), payload.value);
 
     value.free(rt);
+    // The js-owned payload is freed by the object's teardown, which under the
+    // tracer is a collection rather than this release. Nothing needs rooting:
+    // the object is exactly what has to die, and `deinit_count` is a Zig
+    // local the heap never sees.
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
     rt.drainDeferredClassPayloadFinalizers();
     try std.testing.expectEqual(@as(usize, 1), deinit_count);
 }
@@ -1226,6 +1236,11 @@ test "JSObject inline_value stores payload in object allocation and finalizes sy
     try std.testing.expect(payload_start + @sizeOf(Payload) <= object_end);
 
     value.free(rt);
+    // "Synchronously" names the relationship between teardown and the
+    // finalizer, not between the release and the finalizer: an inline payload
+    // is finalized inside the object's destruction with no deferral queue in
+    // between. Under the tracer that destruction is a collection.
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), deinit_count);
 }
 

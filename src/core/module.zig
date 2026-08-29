@@ -42,7 +42,7 @@ pub const SyntheticKind = enum {
 /// their targets (matching QuickJS `JSReqModuleEntry.module`).
 pub const RequestEntry = struct {
     module_name: atom.Atom,
-    module: ?*ModuleRecord = null,
+    module: ?*ModuleRecord = null, // gc-slot: weak
 };
 
 pub const ImportEntry = struct {
@@ -357,6 +357,16 @@ pub const ModuleRecord = struct {
         // MemoryAccount places the common GC metadata immediately before the
         // record, so the embedded header must remain at payload offset zero.
         std.debug.assert(@offsetOf(@This(), "header") == 0);
+        std.debug.assert(@sizeOf(@This()) == 272);
+        std.debug.assert(@alignOf(@This()) == 16);
+        std.debug.assert(@offsetOf(@This(), "registry_prev") == if (gc.trace_stw_enabled) 136 else 144);
+        std.debug.assert(@offsetOf(@This(), "registry") == if (gc.trace_stw_enabled) 32 else 40);
+        std.debug.assert(@offsetOf(@This(), "memory") == if (gc.trace_stw_enabled) 40 else 48);
+        std.debug.assert(@offsetOf(@This(), "module_name") == if (gc.trace_stw_enabled) 244 else 252);
+        std.debug.assert(@offsetOf(@This(), "requests") == if (gc.trace_stw_enabled) 104 else 112);
+        std.debug.assert(@offsetOf(@This(), "func_obj") == if (gc.trace_stw_enabled) 192 else 200);
+        std.debug.assert(@offsetOf(@This(), "module_ns") == if (gc.trace_stw_enabled) 208 else 216);
+        std.debug.assert(@offsetOf(@This(), "status") == if (gc.trace_stw_enabled) 256 else 264);
     }
 
     header: gc.GCObjectHeader align(16) = .{},
@@ -415,6 +425,15 @@ pub const ModuleRecord = struct {
         };
     }
 
+    /// Under the tracing collector this does nothing: `.module` is one of the
+    /// kinds in `gc.refCountRemoved`, so a record's lifetime is decided by
+    /// reachability alone. That is safe today only because every caller is a
+    /// test -- nothing in the engine or the embedding surface holds a record
+    /// across an allocation on the strength of this call. A host that needed
+    /// to would have no way to say so: `rootObjects` takes `?*Object` and
+    /// there is no header-rooting form. Adding one is the work if that
+    /// changes; silently counting again would not help, because the count no
+    /// longer keeps anything alive.
     pub fn retain(self: *ModuleRecord) void {
         gc.retain(&self.header);
     }
@@ -541,7 +560,7 @@ pub const ModuleRecord = struct {
         self.clearForDestroy(rt);
         self.atoms.free(owned_module_name);
 
-        if (rt.gc.phase == .remove_cycles) {
+        if (gc.phaseIsTwoPassTeardown(rt.gc.phase)) {
             rt.gc.deferCycleStructFree(header);
             return;
         }
@@ -597,6 +616,7 @@ pub const ModuleRecord = struct {
     pub fn setEvalException(self: *ModuleRecord, rt: anytype, value: value_mod.JSValue) void {
         if (self.eval_exception) |old| old.free(rt);
         self.eval_exception = value;
+        rt.gc.generationalBarrier(&self.header, value.cycleMarkHeader());
     }
 
     pub fn request(self: *ModuleRecord, request_index: u32) ?*RequestEntry {
@@ -640,10 +660,13 @@ pub const ModuleRecord = struct {
 
     /// Complete a FunctionBytecode -> function-object move after the old owner
     /// was taken. A live slot may never be silently replaced or freed here.
-    pub fn adoptFuncObjectValueNoFail(self: *ModuleRecord, next: value_mod.JSValue) void {
+    pub fn adoptFuncObjectValueNoFail(self: *ModuleRecord, rt: anytype, next: value_mod.JSValue) void {
         std.debug.assert(self.func_obj.isUndefined());
         std.debug.assert(!next.isUndefined());
         self.func_obj = next;
+        // A ModuleRecord is a traced heap object; installing its function is an
+        // owner-to-child store like any other.
+        rt.gc.generationalBarrier(&self.header, next.cycleMarkHeader());
     }
 
     pub fn takeFuncObjectValueNoFail(self: *ModuleRecord) value_mod.JSValue {
@@ -657,10 +680,11 @@ pub const ModuleRecord = struct {
     }
 
     /// Publish a completely-constructed namespace. The record takes ownership.
-    pub fn publishModuleNamespaceNoFail(self: *ModuleRecord, owned: value_mod.JSValue) void {
+    pub fn publishModuleNamespaceNoFail(self: *ModuleRecord, rt: anytype, owned: value_mod.JSValue) void {
         std.debug.assert(self.module_ns.isUndefined());
         std.debug.assert(owned.isObject());
         self.module_ns = owned;
+        rt.gc.generationalBarrier(&self.header, owned.cycleMarkHeader());
     }
 
     pub fn namespaceAutoInitOwner(self: *const ModuleRecord) *const module_auto_init.AutoInitModuleOwner {
@@ -864,6 +888,10 @@ pub const Registry = struct {
         const record = try self.memory.create(ModuleRecord);
         record.prepare(self.memory, self.atoms, name);
         record.replaceDefinitionNoFail(pending);
+        // Bulk install of a whole pending definition -- exports, the function
+        // object, import attributes. Remember the record once instead of
+        // enumerating the fields.
+        self.gc_registry.rememberOwnerForBulkWrite(&record.header);
         self.gc_registry.addInitializedWithSizeNoFail(&record.header, @sizeOf(ModuleRecord));
         self.link(record);
         return .{ .fresh = record };

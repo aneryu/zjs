@@ -1,6 +1,7 @@
 //! Exercises lexer/parser semantics and emitted bytecode invariants.
 const std = @import("std");
 const zjs = @import("zjs");
+const helpers = @import("helpers.zig");
 const engine = zjs;
 const core = zjs.core;
 const parser = zjs.parser;
@@ -2546,13 +2547,43 @@ test "F4: trailing comma in array literal is allowed" {
     try std.testing.expectEqual(@as(u16, 2), argc);
 }
 
-test "F4: object literal { a: 1, b: 2 } lowers to object + define_field" {
+test "F4: two-slot object literal carries its allocation capacity hint" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ a: 1, b: 2 }");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.object, op.push_1, op.define_field, op.push_2, op.define_field });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.object_slots2, op.push_1, op.define_field, op.push_2, op.define_field });
+}
+
+test "F4: object literal capacity hint counts unique static slots only" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const hinted = [_][]const u8{
+        "{ a: 1 }",
+        "{ a: 1, a: 2 }",
+        "{ __proto__: null, a: 1, b: 2 }",
+        "{ get x() {}, set x(v) {} }",
+    };
+    for (hinted) |source| {
+        var fn_bc = try parseExpr(&env, source);
+        defer fn_bc.deinit(env.rt);
+        try std.testing.expectEqual(op.object_slots2, fn_bc.code[0]);
+    }
+
+    const unhinted = [_][]const u8{
+        "{}",
+        "{ __proto__: null }",
+        "{ a: 1, b: 2, c: 3 }",
+        "{ [x]: 1 }",
+        "{ a: 1, ...x }",
+    };
+    for (unhinted) |source| {
+        var fn_bc = try parseExpr(&env, source);
+        defer fn_bc.deinit(env.rt);
+        try std.testing.expectEqual(op.object, fn_bc.code[0]);
+    }
 }
 
 test "F4: empty object literal emits object" {
@@ -2574,7 +2605,7 @@ test "F4: shorthand object property { x } emits get_var x ; define_field x" {
     var fn_bc = try parseExpr(&env, "{ x }");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.object, op.get_var, op.define_field });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.object_slots2, op.get_var, op.define_field });
 }
 
 test "M3.1 F4: computed object property emits define_array_el" {
@@ -2610,7 +2641,7 @@ test "M3.1 F4: keyword object property names parse as literal keys" {
     var fn_bc = try parseExpr(&env, "{ default: 1, while: 2 }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.object, fn_bc.code[0]);
+    try std.testing.expectEqual(op.object_slots2, fn_bc.code[0]);
     try std.testing.expectEqual(@as(usize, 2), countOpcode(fn_bc.code, op.define_field));
 }
 
@@ -2634,7 +2665,7 @@ test "M3.1 F4: object method shorthand emits define_method" {
     // QuickJS leaves object method bytecode unnamed; OP_define_method assigns
     // the function object's visible name from the property key at runtime.
     try expectAtomName(&env, child.func_name, "");
-    try std.testing.expectEqual(op.object, fn_bc.code[0]);
+    try std.testing.expectEqual(op.object_slots2, fn_bc.code[0]);
     try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.define_method) != null);
 }
 
@@ -2743,6 +2774,7 @@ test "M3.1 F4: object string getter emits define_method getter flag" {
     var fn_bc = try parseExpr(&env, "{ get \"default\"() { return 1; } }");
     defer fn_bc.deinit(env.rt);
 
+    try std.testing.expectEqual(op.object_slots2, fn_bc.code[0]);
     const offset = std.mem.indexOfScalar(u8, fn_bc.code, op.define_method) orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(u8, 5), fn_bc.code[offset + 5]);
 }
@@ -2753,6 +2785,7 @@ test "M3.1 F4: object numeric setter emits define_method setter flag" {
     var fn_bc = try parseExpr(&env, "{ set 0(v) { x = v; } }");
     defer fn_bc.deinit(env.rt);
 
+    try std.testing.expectEqual(op.object_slots2, fn_bc.code[0]);
     const offset = std.mem.indexOfScalar(u8, fn_bc.code, op.define_method) orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(u8, 6), fn_bc.code[offset + 5]);
 }
@@ -6376,7 +6409,7 @@ test "Object literal: method shorthand" {
     var fn_bc = try parseExpr(&env, "{ method() {} }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.object, fn_bc.code[0]);
+    try std.testing.expectEqual(op.object_slots2, fn_bc.code[0]);
     try expectOpcode(fn_bc.code, op.define_method);
 }
 
@@ -6405,7 +6438,7 @@ test "Object literal: get/set shorthand is accepted" {
     for (accepted) |src| {
         var fn_bc = try parseExpr(&env, src);
         defer fn_bc.deinit(env.rt);
-        try std.testing.expectEqual(op.object, fn_bc.code[0]);
+        try std.testing.expectEqual(op.object_slots2, fn_bc.code[0]);
         try expectOpcode(fn_bc.code, op.define_field);
     }
 }
@@ -10232,18 +10265,22 @@ test "canonical root and child independently keep their compile realm alive" {
     const child = findFunctionConstantNamed(&parsed, rt, "child") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(realm, root.realmContext());
     try std.testing.expectEqual(realm, child.realmContext());
-    try std.testing.expectEqual(@as(i32, 3), realm.header.meta().rc);
+    try helpers.expectRefCount(3, &realm.header);
 
     // Drop the facade/public owner. The two finalized FBs must each keep their
     // own QuickJS-style JS_DupContext edge until their individual teardown.
     realm.destroy();
     realm_alive = false;
-    try std.testing.expectEqual(@as(i32, 2), realm.header.meta().rc);
+    try helpers.expectRefCount(2, &realm.header);
     try std.testing.expectEqual(realm, root.realmContext());
     try std.testing.expectEqual(realm, child.realmContext());
 
     parsed.deinit();
     parsed_alive = false;
+    // The realm outlives its last release for as long as the two
+    // FunctionBytecodes holding its JS_DupContext edges are unreclaimed, and
+    // reclaiming a FunctionBytecode is the tracer's decision, not the drop's.
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -10316,6 +10353,10 @@ test "module nested function independently keeps its compile realm alive" {
     try std.testing.expectEqual(realm, nested.realmContext());
     parsed.deinit();
     parsed_alive = false;
+    // Same edge as the script case: the module root and the nested
+    // FunctionBytecode each hold the realm, so the realm's last edge falls
+    // only when those two are reclaimed.
+    helpers.reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -10351,6 +10392,19 @@ test "canonical root and child survive parser arena release allocation churn and
     // before reading every published slice again. Arena-backed FB storage would
     // now be overwritten or freed; the Result's owned FB ref keeps root+child
     // alive without materialising a second heap bytecode representation.
+    //
+    // Tests trace precise-only (no conservative scan), so the Result's
+    // native-stack ownership is invisible to the tracer: root the two FB
+    // headers explicitly for the survival window. Deactivated before the
+    // final release so the freeing assertion still observes the sweep.
+    var fb_roots = [_]core.runtime.HeaderRootValue{
+        .{ .header = @constCast(&root.header) },
+        .{ .header = @constCast(&child.header) },
+    };
+    var fb_frame = core.runtime.ValueRootFrame{ .headers = &fb_roots };
+    var fb_frame_active = true;
+    fb_frame.activate(rt);
+    defer if (fb_frame_active) fb_frame.deactivate(rt);
     var iteration: usize = 0;
     while (iteration < 32) : (iteration += 1) {
         const size = 4096 + iteration * 257;
@@ -10366,6 +10420,8 @@ test "canonical root and child survive parser arena release allocation churn and
     try std.testing.expectEqualStrings("child", rt.atoms.name(child.func_name).?);
     try std.testing.expectEqualSlices(u8, root.byteCode(), parsed.byteCode());
 
+    fb_frame.deactivate(rt);
+    fb_frame_active = false;
     parsed.deinit();
     parsed_owned = false;
     _ = try rt.forceGC(null);
@@ -11232,7 +11288,8 @@ test "quick parser emits basic array and object literals" {
     try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 
     const new_array_count = countOpcode(parsed.byteCode(), engine.bytecode.opcode.op.array_from);
-    const new_object_count = countOpcode(parsed.byteCode(), engine.bytecode.opcode.op.object);
+    const new_object_count = countOpcode(parsed.byteCode(), engine.bytecode.opcode.op.object) +
+        countOpcode(parsed.byteCode(), engine.bytecode.opcode.op.object_slots2);
     const get_index_count = countOpcode(parsed.byteCode(), engine.bytecode.opcode.op.get_array_el);
     try std.testing.expect(new_array_count >= 1);
     try std.testing.expect(new_object_count >= 1);
@@ -12885,6 +12942,13 @@ test "parser releases identifier and private-name token atoms" {
         defer warmup.deinit();
         try std.testing.expect(warmup.syntax_error == null);
     }
+    // The compile product's atom retains are owned by its FunctionBytecodes,
+    // which the tracer reclaims on its own schedule rather than at the release
+    // above. Both the baseline and the measurement therefore have to be taken
+    // after a collection, or `before` still carries the warm-up's retains and
+    // `after` carries two compiles' worth. Nothing here is held past the
+    // release, so the compile products are unreachable and need no root frame.
+    helpers.reclaimNow(rt);
 
     const before = atomStrongRefTotal(rt);
     {
@@ -12892,6 +12956,7 @@ test "parser releases identifier and private-name token atoms" {
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error == null);
     }
+    helpers.reclaimNow(rt);
     const after = atomStrongRefTotal(rt);
     try std.testing.expectEqual(before, after);
 }
@@ -12918,6 +12983,9 @@ test "parser releases module and import-attribute token atoms" {
         defer warmup.deinit();
         try std.testing.expect(warmup.syntax_error == null);
     }
+    // Module records own atoms too, and are equally reclaimed by the trace
+    // rather than by the release above; both samples bracket a collection.
+    helpers.reclaimNow(rt);
 
     const before = atomStrongRefTotal(rt);
     {
@@ -12925,6 +12993,7 @@ test "parser releases module and import-attribute token atoms" {
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error == null);
     }
+    helpers.reclaimNow(rt);
     const after = atomStrongRefTotal(rt);
     try std.testing.expectEqual(before, after);
 }
@@ -12963,12 +13032,17 @@ test "parser returns the atom table to balance across every token-bearing constr
             defer warmup.deinit();
             try std.testing.expect(warmup.syntax_error == null);
         }
+        // Both samples bracket a collection: the atoms are owned by the
+        // compile product's FunctionBytecodes and module record, which the
+        // tracer -- not the release above -- decides to reclaim.
+        helpers.reclaimNow(rt);
         const before = atomStrongRefTotal(rt);
         {
             var parsed = try compileForTest(rt, c.src, options);
             defer parsed.deinit();
             try std.testing.expect(parsed.syntax_error == null);
         }
+        helpers.reclaimNow(rt);
         const after = atomStrongRefTotal(rt);
         if (before != after) {
             std.debug.print("atom balance case {d} ({s}): before={d} after={d}\n", .{ index, c.file, before, after });

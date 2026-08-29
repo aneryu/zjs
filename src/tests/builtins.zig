@@ -760,6 +760,10 @@ test "standard Array prototype guard publication and invalidation are realm loca
     pinned_oom_shape.retain();
     defer js.runtime.shapes.release(pinned_oom_shape);
     const index_zero = core.atom.atomFromUInt32(0);
+    // Injecting an allocation failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    js.runtime.suppressLimitCollectionForTest(true);
+    defer js.runtime.suppressLimitCollectionForTest(false);
     js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
     defer js.runtime.setMemoryLimit(null);
     try std.testing.expectError(
@@ -4950,7 +4954,7 @@ test "shared engine baseline restore survives compacting global deletes" {
         \\}
     );
     result.free(js.runtime);
-    try std.testing.expect(js.context.global.?.shape_ref.deleted_prop_count < 8);
+    try std.testing.expect(js.context.global.?.shape_ref.deletedPropCount() < 8);
 
     helpers.endSharedTest();
     defer helpers.endSharedTest();

@@ -58,6 +58,9 @@ pub const RuntimeOptions = struct {
     leak_check: bool = false,
     include_paths: [max_include_paths][]const u8 = @splat(""),
     include_count: usize = 0,
+    /// Shadow-only. Void in default `rc` so this struct's layout is unchanged.
+    gc_shadow_check: if (engine.core.gc.shadow_tracer_enabled) bool else void =
+        if (engine.core.gc.shadow_tracer_enabled) false else {},
 
     fn addInclude(self: *RuntimeOptions, path: []const u8) !void {
         if (self.include_count == self.include_paths.len) return error.TooManyIncludes;
@@ -103,8 +106,18 @@ pub fn parseArgs(args: []const []const u8) CliError!Command {
         }
         if (std.mem.eql(u8, rest[0], "--gc-stats")) {
             options.gc_stats = true;
+            // The panel's census costs six whole-heap walks per major, so the
+            // collector only performs them when someone is going to read them.
+            engine.core.gc_trace_stw.detailed_reports = true;
             rest = rest[1..];
             continue;
+        }
+        if (comptime engine.core.gc.shadow_tracer_enabled) {
+            if (std.mem.eql(u8, rest[0], "--gc-shadow-check")) {
+                options.gc_shadow_check = true;
+                rest = rest[1..];
+                continue;
+            }
         }
         if (std.mem.eql(u8, rest[0], "--profile-opcodes")) {
             options.profile_opcodes = true;
@@ -272,7 +285,7 @@ pub fn main(init: std.process.Init) !void {
         .allocator = allocator,
         .max_source_size = max_source_size,
     };
-    var dynamic_import_scope = engine.exec.module_graph.installDynamicImport(&dynamic_import_state);
+    var dynamic_import_scope = try engine.exec.module_graph.installDynamicImport(&dynamic_import_state);
     defer dynamic_import_scope.deinit();
     setup_ns = platform_clock.elapsedNanosSince(setup_start);
     // NB: we intentionally do NOT `defer runtime.deinit()` on the happy path.
@@ -324,14 +337,23 @@ pub fn main(init: std.process.Init) !void {
         if (runtime.context.hasException()) {
             try stdout_writer.interface.flush();
             try printEvaluationError(io, &runtime, err);
+            if (comptime engine.core.gc.shadow_tracer_enabled) {
+                exitAfterOptionalShadowCheck(&stdout_writer.interface, runtime.runtime, runtime_options, 1);
+            }
             std.process.exit(1);
         }
         if (err == error.TypeError) {
             try stdout_writer.interface.flush();
             try printTypeErrorNotFunction(io, command);
+            if (comptime engine.core.gc.shadow_tracer_enabled) {
+                exitAfterOptionalShadowCheck(&stdout_writer.interface, runtime.runtime, runtime_options, 1);
+            }
             std.process.exit(1);
         }
         try printEvaluationError(io, &runtime, err);
+        if (comptime engine.core.gc.shadow_tracer_enabled) {
+            exitAfterOptionalShadowCheck(&stdout_writer.interface, runtime.runtime, runtime_options, 1);
+        }
         std.process.exit(1);
     };
     eval_ns = platform_clock.elapsedNanosSince(eval_start);
@@ -339,6 +361,9 @@ pub fn main(init: std.process.Init) !void {
 
     if (value.isException()) {
         try cli_process.printError(io, "zjs: uncaught exception\n", .{});
+        if (comptime engine.core.gc.shadow_tracer_enabled) {
+            exitAfterOptionalShadowCheck(&stdout_writer.interface, runtime.runtime, runtime_options, 1);
+        }
         std.process.exit(1);
     }
 
@@ -363,6 +388,9 @@ pub fn main(init: std.process.Init) !void {
             exception.free(runtime.runtime);
             if (!runtime.context.hasUnhandledRejection()) break;
         }
+        if (comptime engine.core.gc.shadow_tracer_enabled) {
+            exitAfterOptionalShadowCheck(&stdout_writer.interface, runtime.runtime, runtime_options, 1);
+        }
         std.process.exit(1);
     }
 
@@ -370,15 +398,46 @@ pub fn main(init: std.process.Init) !void {
         try dumpMemoryUsage(&stdout_writer.interface, &runtime);
         try stdout_writer.interface.flush();
     }
+    // The CLI does not tear the runtime down on the happy path, so the slab
+    // never gets to report from its own `deinit`. The `comptime` guard is
+    // load-bearing: an unguarded call to an empty function still moved the
+    // refcounting build's `.text`, which is the one thing this measurement
+    // instrument must not do.
+    if (comptime engine.core.memory.slab_locality_audit) engine.core.memory.slabLocalityReport();
     if (commandRuntimeOptions(command).profile_opcodes) {
         opcode_profile.flushPendingDispatch();
         try dumpOpcodeProfile(&stdout_writer.interface, runtime.runtime.opcode_profile.?);
         try stdout_writer.interface.flush();
     }
     if (commandRuntimeOptions(command).gc_stats) {
-        try dumpGcStats(&stdout_writer.interface, runtime.runtime.gcStats());
+        try dumpGcStats(&stdout_writer.interface, runtime.runtime.gcStats(), &runtime.runtime.gc);
         try dumpGcPauses(&stdout_writer.interface, runtime.runtime.gcPauseDistribution());
+        if (comptime engine.core.gc.space_model_enabled) {
+            try dumpGcSpaceStats(&stdout_writer.interface, &runtime.runtime.gc);
+        }
+        if (comptime engine.core.gc.block_heap_enabled) {
+            try dumpGcBlockHeapStats(&stdout_writer.interface, &runtime.runtime.gc);
+            try dumpGcParallelStats(&stdout_writer.interface, runtime.runtime);
+            try dumpGcMarkFootprint(&stdout_writer.interface, runtime.runtime);
+            try dumpGcPhaseTotals(&stdout_writer.interface, &runtime.runtime.gc);
+        }
+        if (comptime engine.core.gc.generation_enabled) {
+            try dumpGcGenerationStats(&stdout_writer.interface, &runtime.runtime.gc);
+        }
+        if (comptime engine.core.gc.trace_stw_enabled) {
+            try stdout_writer.interface.print("gc: terminal doomed_pending {s}\n", .{
+                if (runtime.runtime.gc.doomed_pending) "true" else "false",
+            });
+        }
+        if (comptime engine.core.gc.corpse_census_enabled) {
+            try engine.core.gc_corpse_census.report(&stdout_writer.interface);
+        }
         try stdout_writer.interface.flush();
+    }
+    if (comptime engine.core.gc.shadow_tracer_enabled) {
+        if (commandRuntimeOptions(command).gc_shadow_check) {
+            try runGcShadowCheck(&stdout_writer.interface, runtime.runtime);
+        }
     }
     if (commandRuntimeOptions(command).perf_json) {
         opcode_profile.flushPendingDispatch();
@@ -416,7 +475,41 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn printUsage(io: std.Io) !void {
+    if (comptime engine.core.gc.shadow_tracer_enabled) {
+        try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-shadow-check] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-shadow-check] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
+        return;
+    }
     try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
+}
+
+fn runGcShadowCheck(out: *std.Io.Writer, rt: *zjs.JSRuntime) !void {
+    if (comptime !engine.core.gc.shadow_tracer_enabled) return;
+    engine.core.gc_shadow.quiesce(rt);
+    const report = engine.core.gc_shadow.run(rt) catch |err| {
+        try out.print("zjs: gc-shadow-check failed: {s}\n", .{@errorName(err)});
+        try out.flush();
+        std.process.exit(1);
+    };
+    try report.format(out);
+    if (comptime engine.core.gc.shadow_tracer_enabled) {
+        try engine.core.gc_write_audit.format(out);
+    }
+    try out.flush();
+    if (report.unexplained != 0) std.process.exit(1);
+}
+
+fn exitAfterOptionalShadowCheck(
+    out: *std.Io.Writer,
+    rt: *zjs.JSRuntime,
+    options: RuntimeOptions,
+    exit_code: u8,
+) noreturn {
+    if (comptime engine.core.gc.shadow_tracer_enabled) {
+        if (options.gc_shadow_check) {
+            runGcShadowCheck(out, rt) catch std.process.exit(1);
+        }
+    }
+    std.process.exit(exit_code);
 }
 
 /// Standalone query flag: it takes no script and constructs no runtime, so it
@@ -739,44 +832,434 @@ const OpcodeProfileRow = struct {
 /// Post-run GC counters. Every line here has a maintained write site in the
 /// collector; fields the engine does not instrument are simply absent rather
 /// than printed as zero.
-fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats) !void {
-    try writer.print("gc: collection entries {d}, completed rounds {d}, failed {d}\n", .{
+fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
+    if (comptime engine.core.gc.space_model_enabled) {
+        const space = engine.core.gc_space;
+        const hist = registry.space_histogram;
+        const p50 = hist.percentilePayloadBelowLarge(50);
+        const p95 = hist.percentilePayloadBelowLarge(95);
+        const p99 = hist.percentilePayloadBelowLarge(99);
+        try writer.print(
+            "gc: allocation histogram publications {d}, payload bytes {d}, p50-below-large {d}, p95-below-large {d}, p99-below-large {d}, max-small {d}, covered-by-small {d}/{d} below-large, large {d}\n",
+            .{
+                hist.total,
+                hist.bytes_total,
+                p50,
+                p95,
+                p99,
+                space.max_small_payload,
+                hist.coveredByMaxSmall(),
+                hist.belowLarge(),
+                hist.large,
+            },
+        );
+    }
+}
+
+/// Generational counters. `remembered without young` is the one to watch: it
+/// counts owners a minor re-traced that turned out to hold no young child, so
+/// a large share means the write barrier is firing more than it needs to.
+fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Registry) !void {
+    const st = registry.generation.stats;
+    try writer.print("gc: generation current young {d}, remembered owners {d}\n", .{
+        st.young_count,
+        registry.generation.rememberedOwnerCount(),
+    });
+    try writer.print("gc: minor collections {d}, reclaimed {d}, promoted-by-minor {d}, promoted-all {d}, remembered without young {d}, remembered drops {d}, suspensions {d}\n", .{
+        st.minor_collections,
+        st.minor_reclaimed,
+        st.minor_promoted,
+        st.promoted,
+        st.remembered_without_young,
+        st.remembered_drops,
+        st.minor_suspensions,
+    });
+    try writer.print("gc: major retirement commits {d}, abandons {d}, current state {s}\n", .{
+        st.retirement_commits,
+        st.retirement_abandons,
+        @tagName(registry.generation.major_retirement),
+    });
+    try writer.print("gc: generational barrier calls {d}, exit young-owner {d}, exit old-target {d}, remembered-owner {d}\n", .{
+        st.barrier_calls,
+        st.barrier_young_owner,
+        st.barrier_old_target,
+        st.barrier_calls -| st.barrier_young_owner -| st.barrier_old_target,
+    });
+    const mean_pause = if (st.minor_collections == 0) 0 else st.pause_ns_total / st.minor_collections;
+    const mean_young = if (st.minor_collections == 0) 0 else st.young_at_start_total / st.minor_collections;
+    try writer.print("gc: minor stw total {d} ns, mean {d} ns, max {d} ns\n", .{ st.pause_ns_total, mean_pause, st.pause_ns_max });
+    if (registry.generation.minorPauseDistribution()) |d| {
+        try writer.print("gc: minor pause p50 {d} ns, p95 {d} ns, p99 {d} ns, max {d} ns over {d} retained of {d} samples\n", .{
+            d.p50_ns,
+            d.p95_ns,
+            d.p99_ns,
+            d.max_ns,
+            d.samples_retained,
+            d.samples_total,
+        });
+    } else {
+        try writer.print("gc: minor pause distribution unavailable, sample drops {d}\n", .{registry.generation.minor_pause_sample_drops});
+    }
+    try writer.print(
+        "gc: minor phase totals clear {d}, roots {d}, conservative {d}, remembered {d}, trace {d}, sweep+destroy {d}, promote {d}, other {d} ns\n",
+        .{
+            st.minor_clear_ns_total,
+            st.minor_roots_ns_total,
+            st.minor_conservative_ns_total,
+            st.minor_remembered_ns_total,
+            st.minor_trace_ns_total,
+            st.minor_sweep_ns_total,
+            st.minor_promote_ns_total,
+            st.pause_ns_total -| st.minorPhaseNsTotal(),
+        },
+    );
+    try writer.print("gc: minor young-at-start mean {d}, max {d}\n", .{
+        mean_young,
+        st.young_at_start_max,
+    });
+    if (engine.core.gc.verify_minor) {
+        try writer.print("gc: conservative-only young {d} over {d} verified minors\n", .{
+            st.conservative_only_young,
+            st.minor_collections,
+        });
+    } else {
+        try writer.print("gc: conservative-only young unavailable (set ZJS_GC_VERIFY_MINOR=1)\n", .{});
+    }
+    if (comptime engine.core.gc.concurrent_enabled) {
+        const cs = registry.concurrent.stats;
+        try writer.print(
+            "gc: exact-target marking barrier calls {d}, exit marked-target {d}, exit unpublished-owner {d}, exit unpublished-target {d}, requeued-owner {d}, shaded-target {d}\n",
+            .{
+                cs.barrier_calls,
+                cs.barrier_marked_target,
+                cs.barrier_unpublished_owner,
+                cs.barrier_unpublished_target,
+                cs.barrier_requeued_owner,
+                cs.shaded,
+            },
+        );
+        try writer.print("gc: incremental doomed condemned headers {d}, destroyed counted objects {d}, parked entries drained {d}, parked-drain slices {d}\n", .{
+            cs.doomed_condemned_headers,
+            cs.doomed_destroyed_objects,
+            cs.doomed_parked_entries_drained,
+            cs.doomed_parked_drain_slices,
+        });
+        try writer.print(
+            "gc: incremental major cycles completed {d}, aborted {d}, forced {d}, mark steps {d}, cycle STW last {d} ns max {d} ns\n",
+            .{ cs.cycles_completed, cs.cycles_aborted, cs.forced_finishes, cs.increments, cs.last_cycle_stw_ns, cs.max_cycle_stw_ns },
+        );
+        if (comptime engine.core.gc.sticky_major_enabled) {
+            const sticky = registry.stickyMajorStats();
+            const baseline = registry.stickyMajorFullBaseline();
+            try writer.print(
+                "gc: sticky-major experiment arm {s}, full {d}, sticky {d}, pressure-forced full {d}, last-full settled {d}, full-pressure threshold {d}, oracle checks sticky {d} full {d}, violations precise {d} conservative-only {d}, inject-skip {d}\n",
+                .{
+                    if (engine.core.gc.sticky_major_on) "on" else "off",
+                    sticky.full_cycles,
+                    sticky.sticky_cycles,
+                    sticky.full_forced_by_pressure,
+                    baseline.settled_bytes,
+                    baseline.pressure_threshold,
+                    sticky.oracle_checks_sticky,
+                    sticky.oracle_checks_full,
+                    sticky.oracle_violations_precise,
+                    sticky.oracle_violations_conservative,
+                    engine.core.gc.sticky_inject_skip,
+                },
+            );
+            try writer.print(
+                "gc: sticky-major floating garbage max {d} bytes, sum {d} bytes over {d} sticky cycles, max ordinary threshold {d}\n",
+                .{
+                    sticky.max_sticky_excess_bytes,
+                    sticky.sum_sticky_excess_bytes,
+                    sticky.sticky_cycles,
+                    sticky.max_ordinary_threshold,
+                },
+            );
+        }
+        try writer.print(
+            "gc: cycle envelope measured {d}, skipped {d}, max-P/T S {d}, T {d}, B {d}, P {d}, B/T-x1000000 {d}, P/T-x1000000 {d}, P/S-x1000000 {d}, forced {d}\n",
+            .{
+                cs.envelope_measured_cycles,
+                cs.envelope_skipped_cycles,
+                cs.envelope_max_start_bytes,
+                cs.envelope_max_threshold_bytes,
+                cs.envelope_max_begin_bytes,
+                cs.envelope_max_peak_bytes,
+                engine.core.gc.concurrent.envelopeBeginOverThresholdMillionths(cs),
+                engine.core.gc.concurrent.envelopePeakOverThresholdMillionths(cs),
+                engine.core.gc.concurrent.envelopePeakOverStartMillionths(cs),
+                cs.forced_finishes,
+            },
+        );
+        try writer.print(
+            "gc: incremental STW phase-segment max ns begin {d}, increment {d}, destroy {d}, finish {d}\n",
+            .{ cs.segment_max_ns[0], cs.segment_max_ns[1], cs.segment_max_ns[2], cs.segment_max_ns[3] },
+        );
+        if (engine.core.gc_trace_stw.destroy_probe) {
+            try writer.print(
+                "gc: destroy probe destructor {d} ns, parked-drain {d} ns, condemned headers {d}\n",
+                .{
+                    engine.core.gc_trace_stw.destroy_probe_dtor_ns,
+                    engine.core.gc_trace_stw.destroy_probe_drain_ns,
+                    engine.core.gc_trace_stw.destroy_probe_corpses,
+                },
+            );
+        }
+        try writer.print(
+            "gc: incremental STW phase totals begin {d} ns/{d} segments, increment {d} ns/{d} segments, destroy {d} ns/{d} segments, finish {d} ns/{d} segments\n",
+            .{
+                cs.total_stw_by_kind[0], cs.total_segments_by_kind[0],
+                cs.total_stw_by_kind[1], cs.total_segments_by_kind[1],
+                cs.total_stw_by_kind[2], cs.total_segments_by_kind[2],
+                cs.total_stw_by_kind[3], cs.total_segments_by_kind[3],
+            },
+        );
+    }
+}
+
+fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
+    if (comptime engine.core.gc.block_heap_enabled) {
+        const st = registry.block_heap.stats;
+        try writer.print(
+            "gc: block heap committed {d} live {d} committed/live-x1000 {d} superblocks {d} large maps {d}\n",
+            .{
+                st.committed_bytes,
+                registry.block_heap.liveBytes(),
+                registry.block_heap.committedLiveMilli(),
+                st.superblocks,
+                st.large_maps,
+            },
+        );
+        const census = registry.block_heap.census();
+        try writer.print(
+            "gc: block heap topology classed superblocks {d}, medium superblocks {d}, initialized blocks {d}, reserved-uninitialized blocks {d}, nonempty blocks {d}, partially-full blocks {d}, empty-free blocks {d}, empty-active blocks {d}, decommitted-empty blocks {d}, wholly-empty superblocks {d}, hot-reuse blocks {d}, interval-active blocks {d}\n",
+            .{
+                census.classed_superblocks,
+                census.medium_superblocks,
+                census.initialized_blocks,
+                census.reserved_uninitialized_blocks,
+                census.nonempty_blocks,
+                census.partially_full_blocks,
+                census.empty_free_blocks,
+                census.empty_active_blocks,
+                census.decommitted_empty_blocks,
+                census.wholly_empty_superblocks,
+                census.hot_reuse_blocks,
+                census.interval_active_blocks,
+            },
+        );
+        try writer.print(
+            "gc: block heap cell capacity live {d}, nonempty capacity {d}, empty capacity {d}, within-nonempty-unused {d}\n",
+            .{
+                census.live_cell_bytes,
+                census.nonempty_cell_capacity_bytes,
+                census.empty_cell_capacity_bytes,
+                census.nonempty_cell_capacity_bytes -| census.live_cell_bytes,
+            },
+        );
+        for (engine.core.gc_space.classes, 0..) |cell_size, class_idx| {
+            const class = census.classes[class_idx];
+            if (class.initialized_blocks == 0) continue;
+            try writer.print(
+                "gc: block heap class {d} bytes initialized {d}, nonempty {d}, empty-free {d}, empty-active {d}, live-cells {d}, capacity-cells {d}\n",
+                .{
+                    cell_size,
+                    class.initialized_blocks,
+                    class.nonempty_blocks,
+                    class.empty_free_blocks,
+                    class.empty_active_blocks,
+                    class.live_cells,
+                    class.cell_capacity,
+                },
+            );
+        }
+        try writer.print(
+            "gc: block heap deferred block runs {d}, hot reuse published {d}, reopened {d}, pass-A settled cells {d}\n",
+            .{ st.deferred_block_runs_completed, st.hot_blocks_published, st.hot_blocks_reopened, st.passa_settled_cells },
+        );
+        try writer.print(
+            "gc: major threshold resets growth {d}, small-heap-floor {d}\n",
+            .{ registry.stats.threshold_growth_hits, registry.stats.threshold_floor_hits },
+        );
+        try writer.print(
+            "gc: block heap page returns cumulative decommitted {d}, recommitted {d}\n",
+            .{ st.decommitted_bytes, st.recommitted_bytes },
+        );
+        try writer.print(
+            "gc: block heap decommit checks {d}, released blocks cumulative {d}, current bytes {d}, max batch bytes {d}\n",
+            .{
+                st.decommit_checks,
+                st.decommitted_bytes / (engine.core.gc_block_heap.block_bytes - engine.core.gc_block_heap.page_bytes),
+                st.currentDecommittedBytes(),
+                st.decommit_max_batch_bytes,
+            },
+        );
+        try writer.print(
+            "gc: process heap trim attempts {d}, successes {d}\n",
+            .{ st.malloc_trim_attempts, st.malloc_trim_successes },
+        );
+    }
+}
+
+fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
+    if (comptime engine.core.gc.trace_stw_enabled) {
+        const ph = registry.concurrent.stats;
+        try writer.print(
+            "gc: incremental subphase ns totals begin-clear {d}, begin-precise-seed {d}, begin-conservative-seed {d}, begin-retire {d}, finish-remark-total {d}, finish-conservative-seed-subset {d}, finish-weak {d}, finish-condemn {d}\n",
+            .{
+                ph.phase_begin_clear_ns,
+                ph.phase_begin_precise_seed_ns,
+                ph.phase_begin_conservative_seed_ns,
+                ph.phase_begin_retire_ns,
+                ph.phase_finish_remark_ns,
+                ph.phase_finish_conservative_seed_ns,
+                ph.phase_finish_weak_ns,
+                ph.phase_finish_condemn_ns,
+            },
+        );
+        try writer.print(
+            "gc: incremental subphase work totals retired non-block headers {d}, retired young blocks {d}, retired remembered sets {d}, clearMarks non-block headers {d}\n",
+            .{ ph.phase_retired_nonblock_headers, ph.phase_retired_young_blocks, ph.phase_retired_remembered_sets, ph.phase_cleared_nonblock_headers },
+        );
+    }
+}
+
+fn dumpGcParallelStats(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime) !void {
+    if (comptime engine.core.gc.trace_stw_enabled) {
+        const ps = rt.gc_mark_pool.stats;
+        if (ps.parallel_slices == 0 and rt.gc_mark_pool.count == 0) return;
+        try writer.print(
+            "gc: parallel mark claims workers {d}, slices {d}, owner successful {d}, helpers successful {d}\n",
+            .{ rt.gc_mark_pool.count, ps.parallel_slices, ps.owner_marked, ps.worker_marked },
+        );
+    }
+}
+
+fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime) !void {
+    if (comptime engine.core.gc.trace_stw_enabled) {
+        const fp = rt.gc_mark_pool.footprint;
+        try writer.print(
+            "gc: marked-set census majors {d}, headers {d}, block headers {d}, refcount-removed headers {d}\n",
+            .{ fp.major_censuses, fp.marked_headers, fp.block_headers, fp.refcount_removed_headers },
+        );
+        try writer.print(
+            "gc: marked-set kinds object {d}, function-bytecode {d}, var-ref {d}, realm-context {d}, module {d}, shape {d}\n",
+            .{
+                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.object)],
+                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.function_bytecode)],
+                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.var_ref)],
+                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.realm_context)],
+                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.module)],
+                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.shape)],
+            },
+        );
+        try writer.print(
+            "gc: marked-set trace classes ordinary-object {d}, fast-array {d}, bytecode-function {d}, exotic-object {d}, non-object {d}\n",
+            .{
+                fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.ordinary_object)],
+                fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.fast_array)],
+                fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.bytecode_function)],
+                fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.exotic_object)],
+                fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.non_object)],
+            },
+        );
+        inline for (std.meta.tags(engine.core.gc_trace_stw.MarkStorageComponent)) |component| {
+            const aggregate = fp.storage[@intFromEnum(component)];
+            try writer.print(
+                "gc: mark storage {s} allocation-touches {d}, allocated-bytes {d}, touched-cache-lines {d}\n",
+                .{ @tagName(component), aggregate.allocation_touches, aggregate.allocated_bytes, aggregate.touched_cache_lines },
+            );
+        }
+        inline for (std.meta.tags(engine.core.gc_trace_stw.MarkTraceClass)) |trace_class| {
+            const aggregate = fp.storage_by_trace_class[@intFromEnum(trace_class)];
+            try writer.print(
+                "gc: mark trace class storage {s} allocation-touches {d}, allocated-bytes {d}, touched-cache-lines {d}\n",
+                .{ @tagName(trace_class), aggregate.allocation_touches, aggregate.allocated_bytes, aggregate.touched_cache_lines },
+            );
+        }
+        inline for (engine.core.gc_trace_stw.MarkFootprint.inline_limits, 0..) |limit, index| {
+            const plain_external = fp.inline_eligible_objects[index] -
+                fp.inline_direct_objects[index] -
+                fp.inline_tail_grown_external_objects[index];
+            try writer.print(
+                "gc: inline property upper slots {d}, eligible-objects {d}, direct-inline {d}, tail-grown-external {d}, plain-external {d}, external-allocated-bytes {d}, external-touched-cache-lines {d}\n",
+                .{ limit, fp.inline_eligible_objects[index], fp.inline_direct_objects[index], fp.inline_tail_grown_external_objects[index], plain_external, fp.inline_property_bytes[index], fp.inline_property_cache_lines[index] },
+            );
+            const ordinary_plain_external = fp.inline_ordinary_eligible_objects[index] -
+                fp.inline_ordinary_direct_objects[index] -
+                fp.inline_ordinary_tail_grown_external_objects[index];
+            try writer.print(
+                "gc: inline ordinary property upper slots {d}, eligible-objects {d}, direct-inline {d}, tail-grown-external {d}, plain-external {d}, external-allocated-bytes {d}, external-touched-cache-lines {d}\n",
+                .{ limit, fp.inline_ordinary_eligible_objects[index], fp.inline_ordinary_direct_objects[index], fp.inline_ordinary_tail_grown_external_objects[index], ordinary_plain_external, fp.inline_ordinary_property_bytes[index], fp.inline_ordinary_property_cache_lines[index] },
+            );
+        }
+    }
+}
+
+fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const engine.core.gc.Registry) !void {
+    const minors = if (comptime engine.core.gc.generation_enabled)
+        registry.generation.stats.minor_collections
+    else
+        0;
+    try writer.print("gc: collection entries total {d}, major completed {d}, minor completed {d}, failed {d}\n", .{
         stats.collections,
         stats.major_gc_count,
+        minors,
         stats.failed_collections,
     });
-    try writer.print("gc: objects freed {d}, zero-ref drains {d}\n", .{
+    try writer.print("gc: collector counted objects freed {d} (excludes bytecode), zero-ref drains {d}\n", .{
         stats.freed_objects,
         stats.zero_ref_drains,
     });
-    try writer.print("gc: collection time total {d} ns, last {d} ns\n", .{
-        stats.major_gc_time_ns,
-        stats.last_collection_time_ns,
-    });
-    try writer.print("gc: live {d} bytes, peak {d} bytes, allocated {d} bytes\n", .{
+    try writer.print("gc: heap live {d} bytes, account peak {d} bytes\n", .{
         stats.heap_live_bytes,
         stats.peak_allocated_bytes,
-        stats.total_allocated_bytes,
     });
-    try writer.print("gc: weak refs {d}, finalizer queue {d}\n", .{
+    // External is a separate reporting dimension, even where an ordinary
+    // ArrayBuffer's engine-owned backing also overlaps the whole
+    // MemoryAccount. The weighted debt is a pacing counter, not current live
+    // bytes; printing both prevents either from being mistaken for the other.
+    try writer.print(
+        "gc: external bytes current {d}, peak {d}, token bytes {d} in {d} tokens, untracked bytes {d}, allocations {d}, frees {d}, invalid releases {d}, weighted debt {d}\n",
+        .{
+            stats.external_bytes,
+            stats.peak_external_bytes,
+            stats.external_token_bytes,
+            stats.external_token_count,
+            stats.external_untracked_bytes,
+            stats.external_alloc_count,
+            stats.external_free_count,
+            stats.external_invalid_release_count,
+            stats.allocation_debt,
+        },
+    );
+    try writer.print("gc: weak refs current {d}, finalizer queue current {d}\n", .{
         stats.weak_ref_count,
         stats.finalizer_queue_length,
     });
 }
 
-/// Pause percentiles, or an explicit "no rounds" line. Never print zeros for
-/// an empty distribution: a run that never collected must not read like a run
-/// that collected instantly.
+/// Pause percentiles, or an explicit "no pauses" line. Never print zeros for
+/// an empty distribution: a run that never stopped must not read like a run
+/// that stopped instantly.
+///
+/// MAJOR collections only. Minors keep their own line below, because the two
+/// populations are more than an order of magnitude apart and mixing them made
+/// this p50 report a minor while claiming to report the whole-heap pause the
+/// design target is written against.
 fn dumpGcPauses(writer: *std.Io.Writer, distribution: ?zjs.GCPauseDistribution) !void {
     const d = distribution orelse {
-        try writer.print("gc: pauses none (no collection completed)\n", .{});
+        try writer.print("gc: major pauses none\n", .{});
         return;
     };
-    try writer.print("gc: pause p50 {d} ns, p95 {d} ns, p99 {d} ns, max {d} ns over {d} rounds\n", .{
+    const retained = @min(d.samples, engine.core.gc.pause_sample_capacity);
+    try writer.print("gc: major pause p50 {d} ns, p95 {d} ns, p99 {d} ns, max {d} ns, retained {d} of {d} pauses\n", .{
         d.p50_ns,
         d.p95_ns,
         d.p99_ns,
         d.max_ns,
+        retained,
         d.samples,
     });
 }
@@ -1050,6 +1533,16 @@ test "zjs args accept include preload files" {
     try std.testing.expectEqual(@as(usize, 2), command.file.options.include_count);
     try std.testing.expectEqualStrings("prelude.js", command.file.options.includes()[0]);
     try std.testing.expectEqualStrings("setup.mjs", command.file.options.includes()[1]);
+}
+
+test "zjs args accept gc-shadow-check only in shadow builds" {
+    if (comptime engine.core.gc.shadow_tracer_enabled) {
+        const command = try parseArgs(&.{ "--gc-shadow-check", "-e", "1" });
+        try std.testing.expect(command == .eval);
+        try std.testing.expect(command.eval.options.gc_shadow_check);
+    } else {
+        try std.testing.expectError(error.Usage, parseArgs(&.{ "--gc-shadow-check", "-e", "1" }));
+    }
 }
 
 test "zjs args accept memory dump flag" {

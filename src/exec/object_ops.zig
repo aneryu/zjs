@@ -1110,6 +1110,15 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
     const prototype = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     var prototype_raw_owned = true;
     errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(rt, &prototype.header);
+    // Every step below allocates -- six native method objects, their shape
+    // transitions, the property array growth -- and any of them can trigger a
+    // collection. Until `storeRealmValue` publishes it, this half-built
+    // prototype is reachable from nothing but this Zig local, which the trace
+    // does not consider a root.
+    var rooted_prototype: ?*core.Object = prototype;
+    var prototype_roots = core.runtime.rootObjects(.{&rooted_prototype});
+    prototype_roots.activate(rt);
+    defer prototype_roots.deactivate(rt);
 
     const methods = [_]struct { name: []const u8, id: core.function.HostGlobalMethod }{
         .{ .name = "getFunction", .id = .callsite_get_function },
@@ -1155,7 +1164,7 @@ pub fn regExpPrototypeMethodIsDefault(_: *core.JSRuntime, object: *core.Object, 
     const property_index = proto.findProperty(atom_id) orelse return false;
     const prop_flags = core.property.Flags.fromBits(proto.shapeProps()[property_index].flags);
     if (prop_flags.isAccessor()) return false;
-    const entry = proto.prop_values[property_index];
+    const entry = proto.propertyEntry(property_index).*;
     return switch (proto.propKindAt(property_index)) {
         .data => regExpNativeBuiltinMatches(entry.slot.data, expected_id),
         .auto_init => regExpAutoInitBuiltinMatches(core.property.autoInit(entry.slot.auto_init).*, expected_id),
@@ -1178,7 +1187,7 @@ pub fn regExpPrototypeGetterIsDefault(_: *core.JSRuntime, object: *core.Object, 
     // Shape-hash probe of the prototype, mirroring qjs check_regexp_getter's
     // find_property_regexp (not a linear property walk).
     const property_index = proto.findProperty(atom_id) orelse return false;
-    const entry = proto.prop_values[property_index];
+    const entry = proto.propertyEntry(property_index).*;
     return switch (proto.propKindAt(property_index)) {
         .accessor => regExpNativeBuiltinMatches(entry.slot.accessor.getterValue(), expected_id),
         .auto_init, .data, .var_ref => false,
@@ -2285,6 +2294,11 @@ pub fn importMetaObject(
     try defineValueProperty(ctx.runtime, object, "main", core.JSValue.boolean(record.import_meta_main));
     const value = object.value();
     record.import_meta = value.dup();
+    // The record is created when the module is loaded; `import.meta` is built
+    // the first time the module body evaluates the expression, which can be
+    // arbitrarily later. `ModuleRecord.setEvalException` already barriers its
+    // sibling field for exactly this reason; this store had no funnel at all.
+    ctx.runtime.gc.generationalBarrier(&record.header, value.cycleMarkHeader());
     return value;
 }
 
@@ -3071,7 +3085,7 @@ pub fn ownDataOrAutoInitPropertyValue(object: *core.Object, atom_id: core.Atom) 
     if (object.hasExoticMethods()) return null;
     if (object.findProperty(atom_id)) |index| {
         return switch (object.propKindAt(index)) {
-            .data => object.prop_values[index].slot.data.dup(),
+            .data => object.propertyEntry(index).*.slot.data.dup(),
             .auto_init => try object.getProperty(atom_id),
             .var_ref, .accessor => null,
         };
@@ -4818,6 +4832,11 @@ test "private brand atom is released with home object" {
     try std.testing.expectEqual(core.atom.AtomKind.private, rt.atoms.kind(brand_atom).?);
 
     home.value().free(rt);
+    // The brand Atom is owned by the home object and comes back when the home
+    // object is torn down; under the tracer that is a collection rather than
+    // the last release. Nothing here needs rooting -- `home` is the thing that
+    // must die.
+    if (comptime core.gc.trace_stw_enabled) _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(brand_atom) == null);
 }
 

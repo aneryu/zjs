@@ -249,6 +249,10 @@ test "embedding cookbook strings and bytes examples compile and run" {
 
     array_buffer.free(rt);
     array_buffer_live = false;
+    // This is a public-embedding compile target: exercise the public explicit
+    // collection seam instead of importing test helpers whose `zjs.core`
+    // dependency is intentionally absent from `src/root.zig`.
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), bytes_state.calls);
 }
 
@@ -801,13 +805,22 @@ test "public API surface snapshot matches the checked-in name lists" {
     // offset `asCatchOffset` (already public) encodes. Three dispatch files
     // had hand-written that decode; it belongs next to the encoding. The
     // surface grew by one on purpose — which is what this pin is for.
+    // 89 -> 90 on 2026-08-27: `isTracerOwned` centralizes the exact tag range
+    // whose retain/release operations tracing erases. It remains an internal
+    // helper exposed through the known broad JSValue surface; pin the leak
+    // rather than pretending the declaration did not land.
     const jsvalue_decl_count = @typeInfo(zjs.JSValue).@"struct".decls.len;
-    try std.testing.expectEqual(@as(usize, 89), jsvalue_decl_count);
+    try std.testing.expectEqual(@as(usize, 90), jsvalue_decl_count);
     try std.testing.expect(@hasDecl(zjs.JSValue, "freeObjectAssumeObjectDuringActiveBytecode"));
 
     // JSRuntime is likewise a public type with a deliberately broad internal
     // surface. Pin its declaration count so additions and removals require an
     // explicit contract update instead of passing silently.
+    // 168 -> 174 during the tracing-GC tranche: `traceValueRootFrameChain`,
+    // WeakRef's `keepAliveWeakRefTarget` / `clearWeakRefKeptAlive`, the two
+    // test-only pacing controls, and `enqueueFinalizationJobReserved`. These
+    // are six named internal seams on the already-broad type, not an unnoticed
+    // embedding API promise.
     const jsruntime_decl_count = @typeInfo(zjs.JSRuntime).@"struct".decls.len;
-    try std.testing.expectEqual(@as(usize, 168), jsruntime_decl_count);
+    try std.testing.expectEqual(@as(usize, 174), jsruntime_decl_count);
 }

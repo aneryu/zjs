@@ -7233,11 +7233,13 @@ pub const parser_core = struct {
         try s.advance(); // consume '{'
         // qjs js_parse_object_literal starts with OP_object
         // (quickjs.c:24361-24383).
+        const object_opcode_pos = s.activeBuilder().code_len;
         try Emitter.op(s, opcode.op.object);
         var proto_field_seen = false;
+        var capacity_hint = ObjectLiteralCapacityHint{};
         if (s.peekKind() != @as(tok.TokenKind, @intCast('}'))) {
             while (true) {
-                try parseObjectProperty(s, flags, &proto_field_seen);
+                try parseObjectProperty(s, flags, &proto_field_seen, &capacity_hint);
                 if (s.peekKind() == @as(tok.TokenKind, @intCast(','))) {
                     try s.advance();
                     if (s.peekKind() == @as(tok.TokenKind, @intCast('}'))) break;
@@ -7247,9 +7249,40 @@ pub const parser_core = struct {
             }
         }
         try expectPunct(s, '}');
+        if (capacity_hint.eligible and capacity_hint.unique_count != 0) {
+            s.activeBuilder().code[object_opcode_pos] = opcode.op.object_slots2;
+        }
     }
 
-    fn parseObjectProperty(s: *State, flags: ParseFlags, proto_field_seen: *bool) Error!void {
+    const ObjectLiteralCapacityHint = struct {
+        atoms: [2]Atom = undefined,
+        unique_count: u8 = 0,
+        eligible: bool = true,
+
+        fn invalidate(self: *@This()) void {
+            self.eligible = false;
+        }
+
+        fn noteStaticProperty(self: *@This(), atom_id: Atom) void {
+            if (!self.eligible) return;
+            for (self.atoms[0..self.unique_count]) |existing| {
+                if (existing == atom_id) return;
+            }
+            if (self.unique_count == self.atoms.len) {
+                self.eligible = false;
+                return;
+            }
+            self.atoms[self.unique_count] = atom_id;
+            self.unique_count += 1;
+        }
+    };
+
+    fn parseObjectProperty(
+        s: *State,
+        flags: ParseFlags,
+        proto_field_seen: *bool,
+        capacity_hint: *ObjectLiteralCapacityHint,
+    ) Error!void {
         _ = flags;
         const k = s.peekKind();
         const property_source_start = s.currentFunctionSourceStart();
@@ -7260,6 +7293,7 @@ pub const parser_core = struct {
 
         // Spread property: ...obj
         if (k == tok.TOK_ELLIPSIS) {
+            capacity_hint.invalidate();
             s.features.insert(.spread_rest);
             try s.advance();
             try parseAssignExpr2(s, ParseFlags.default);
@@ -7273,6 +7307,7 @@ pub const parser_core = struct {
         if (k == @as(tok.TokenKind, @intCast('*'))) {
             try s.advance();
             if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
+                capacity_hint.invalidate();
                 try s.advance();
                 try parseAssignExpr2(s, computed_flags);
                 try expectPunct(s, ']');
@@ -7284,6 +7319,7 @@ pub const parser_core = struct {
             const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
             const name = name_info.atom;
             defer if (name_info.retained) s.function.atoms.free(name);
+            capacity_hint.noteStaticProperty(name);
             if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
             try emitObjectMethodFunction(s, null, .generator, property_source_start);
             try Emitter.opAtomU8(s, opcode.op.define_method, name, 4);
@@ -7303,6 +7339,7 @@ pub const parser_core = struct {
                 break :blk .async_generator;
             } else .async;
             if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
+                capacity_hint.invalidate();
                 try s.advance();
                 try parseAssignExpr2(s, computed_flags);
                 try expectPunct(s, ']');
@@ -7314,6 +7351,7 @@ pub const parser_core = struct {
             const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
             const name = name_info.atom;
             defer if (name_info.retained) s.function.atoms.free(name);
+            capacity_hint.noteStaticProperty(name);
             if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
             try emitObjectMethodFunction(s, null, func_kind, property_source_start);
             try Emitter.opAtomU8(s, opcode.op.define_method, name, 4);
@@ -7322,6 +7360,7 @@ pub const parser_core = struct {
 
         // Computed property name: [expr]: value
         if (k == @as(tok.TokenKind, @intCast('['))) {
+            capacity_hint.invalidate();
             try s.advance();
             s.features.insert(.expression);
             try parseAssignExpr2(s, computed_flags);
@@ -7353,7 +7392,14 @@ pub const parser_core = struct {
                 s.peekKind() != @as(tok.TokenKind, @intCast(',')) and
                 s.peekKind() != @as(tok.TokenKind, @intCast('}')))
             {
-                try parseObjectAccessorProperty(s, computed_flags, if (is_getter) .get else .set, if (is_getter) 1 else 2, property_source_start);
+                try parseObjectAccessorProperty(
+                    s,
+                    computed_flags,
+                    if (is_getter) .get else .set,
+                    if (is_getter) 1 else 2,
+                    property_source_start,
+                    capacity_hint,
+                );
             } else if (s.peekKind() == @as(tok.TokenKind, @intCast(':'))) {
                 try s.advance();
                 try parseAssignExpr2(s, ParseFlags.default);
@@ -7362,13 +7408,16 @@ pub const parser_core = struct {
                     proto_field_seen.* = true;
                     try Emitter.opU8(s, opcode.op.using, opcode.using_sub.set_proto);
                 } else {
+                    capacity_hint.noteStaticProperty(name);
                     try setObjectName(s, name);
                     try Emitter.opAtom(s, opcode.op.define_field, name);
                 }
             } else if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
+                capacity_hint.noteStaticProperty(name);
                 try emitObjectMethodFunction(s, null, .method, property_source_start);
                 try Emitter.opAtomU8(s, opcode.op.define_method, name, 4);
             } else if (name_info.allow_shorthand) {
+                capacity_hint.noteStaticProperty(name);
                 // Shorthand `{ x }` is an ordinary identifier read. Keep the
                 // producer uniform and let scope resolution decide whether a
                 // surrounding with-object supplies the value.
@@ -7388,8 +7437,10 @@ pub const parser_core = struct {
         func_kind: ParseFunctionKind,
         define_flags: u8,
         source_start: FunctionSourceStart,
+        capacity_hint: *ObjectLiteralCapacityHint,
     ) Error!void {
         if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
+            capacity_hint.invalidate();
             try s.advance();
             try parseAssignExpr2(s, flags);
             try expectPunct(s, ']');
@@ -7402,6 +7453,7 @@ pub const parser_core = struct {
         const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
         const name = name_info.atom;
         defer if (name_info.retained) s.function.atoms.free(name);
+        capacity_hint.noteStaticProperty(name);
         if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
         try emitObjectMethodFunction(s, null, func_kind, source_start);
         try Emitter.opAtomU8(s, opcode.op.define_method, name, define_flags | 4);

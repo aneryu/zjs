@@ -23,6 +23,10 @@ const exception_ops = @import("exception_ops.zig");
 const exceptions = @import("exceptions.zig");
 const vm_gen_async = @import("vm_gen_async.zig");
 const inline_calls = @import("inline_calls.zig");
+const active_invocation_trace = if (core.runtime.value_root_frames_enabled)
+    @import("active_invocation_trace.zig")
+else
+    struct {};
 const vm_property_globals = @import("vm_property_globals.zig");
 const call_runtime = @import("call_runtime.zig");
 const tailcall_dispatch = @import("tailcall_dispatch.zig");
@@ -477,7 +481,16 @@ fn runWithArgsState(
         );
     } else frame_mod.Frame.init(entry_function);
     defer {
-        if (break_var_ref_cycles_on_exit) _ = ctx.runtime.runObjectCycleRemoval();
+        // This collection fires while engine native frames are live — most
+        // importantly while the invocation's RETURN VALUE is held only by
+        // native locals on its way out. The tracing collector must scan
+        // engine-active here (conservative in test builds too), or a precise
+        // sweep reclaims the value being returned (watchpoint-proven: the
+        // constructed Map was destroyFromHeader'd by this very collection).
+        // Runtime teardown and host-explicit cycle removal keep the
+        // declared-roots contract; this exit seam is the engine-active case.
+        if (break_var_ref_cycles_on_exit)
+            _ = ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
     }
     defer {
         if (entry_generator_state == null or !frame_storage.isEmptyResidentExecutionShell()) {
@@ -515,6 +528,10 @@ fn runWithArgsState(
         .machine = &machine,
         .current_backtrace_view = &root_backtrace_view,
     };
+    if (comptime core.runtime.value_root_frames_enabled) {
+        invocation.header = .{ .traceRoots = active_invocation_trace.traceRoots };
+        invocation.previous = inline_calls.activeInvocation(ctx.runtime);
+    }
     const previous_invocation = ctx.runtime.active_invocation;
     ctx.runtime.active_invocation = &invocation;
     defer ctx.runtime.active_invocation = previous_invocation;

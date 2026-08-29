@@ -1553,7 +1553,7 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
                 self.rt.memory.trigger_gc_fn = saved_trigger_fn;
                 self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
             }
-            _ = self.rt.runObjectCycleRemoval();
+            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
             self.saw_arg = self.rt.atoms.name(self.atom_id) != null;
         }
     };
@@ -3359,7 +3359,7 @@ pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_
             // pr->u.var_ref = var_ref1 (17157): the property slot's ref on the
             // old cell transfers to us; the new cell's creation ref transfers
             // to the property slot. Kind stays .var_ref — no shape change.
-            global.prop_values[gidx].slot.var_ref = new_cell;
+            global.propertyEntry(gidx).*.slot.var_ref = new_cell;
             // Keep one rollback ref because appendPreparedPropertyEntry consumes
             // the transferred property ref even when its shape allocation fails.
             const rollback_cell = old_cell.dupCell();
@@ -3369,7 +3369,7 @@ pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_
                 new_cell.varRefValueSlot().* = core.JSValue.undefinedValue();
                 old_cell.is_lexical = old_is_lexical;
                 old_cell.varRefIsConstSlot().* = old_is_const;
-                global.prop_values[gidx].slot.var_ref = rollback_cell;
+                global.propertyEntry(gidx).*.slot.var_ref = rollback_cell;
                 new_cell.freeCell(rt);
                 rollback_cell_owned = false;
             };
@@ -3486,16 +3486,19 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
         if (!atomIdOrNameEql(rt, prop.atom_id, atom_id)) continue;
         switch (env.propKindAt(index)) {
             .data => {
-                const stored = &env.prop_values[index].slot.data;
+                const stored = &env.propertyEntry(index).*.slot.data;
                 if (!stored.isUninitialized()) return false;
                 const next = value.dup();
                 const old_value = stored.*;
                 stored.* = next;
+                // Initialising a binding in a long-lived environment object is
+                // an old-to-young edge like any other property store.
+                rt.gc.generationalBarrier(&env.header, next.cycleMarkHeader());
                 old_value.free(rt);
                 return true;
             },
             .var_ref => {
-                const cell = env.prop_values[index].slot.var_ref;
+                const cell = env.propertyEntry(index).*.slot.var_ref;
                 if (!cell.varRefValue().isUninitialized()) return false;
                 cell.setVarRefValue(rt, value.dup());
                 return true;
@@ -3624,7 +3627,7 @@ pub const ActiveRootValueProbe = struct {
             self.rt.memory.trigger_gc_fn = saved_trigger_fn;
             self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
         }
-        _ = self.rt.runObjectCycleRemoval();
+        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
     }
 };
 
@@ -3675,7 +3678,7 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
                 self.rt.memory.trigger_gc_fn = saved_trigger_fn;
                 self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
             }
-            _ = self.rt.runObjectCycleRemoval();
+            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
             self.saw_symbol = self.rt.atoms.name(self.atom_id) != null;
         }
     };

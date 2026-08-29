@@ -432,7 +432,7 @@ fn globalOwnRejectedNonStrictSet(global: *core.Object, atom_id: core.Atom) bool 
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
         if (prop_flags.isAccessor()) {
-            return global.prop_values[property_index].slot.accessor.setterIsUndefined();
+            return global.propertyEntry(property_index).*.slot.accessor.setterIsUndefined();
         }
         return switch (global.propKindAt(property_index)) {
             .data => !prop_flags.writable,

@@ -72,6 +72,12 @@ pub const FinalizationRegistryCell = struct {
         if (self.target_identity) |identity| rt.releaseWeakIdentity(identity);
         if (self.unregister_token_identity) |identity| rt.releaseWeakIdentity(identity);
         self.held_value.free(rt);
+        // Active/pending cells still own the job-queue reservation taken at
+        // register. Queued cells already consumed it via enqueueReserved.
+        // Runtime teardown destroys the queue before leftover objects.
+        if ((self.isActive() or self.isPending()) and rt.job_queue.capacity != 0) {
+            rt.job_queue.releaseReservedEntries(1);
+        }
     }
 };
 
@@ -319,14 +325,14 @@ pub const OrdinaryPayload = struct {
 };
 
 pub const IteratorPayload = struct {
-    target: ?JSValue = null,
-    data: ?JSValue = null,
-    next: ?JSValue = null,
-    callback: ?JSValue = null,
-    inner_next: ?JSValue = null,
-    zip_nexts: ?JSValue = null,
-    zip_pads: ?JSValue = null,
-    zip_keys: ?JSValue = null,
+    target: ?JSValue = null, // gc-slot: heap
+    data: ?JSValue = null, // gc-slot: heap
+    next: ?JSValue = null, // gc-slot: heap
+    callback: ?JSValue = null, // gc-slot: heap
+    inner_next: ?JSValue = null, // gc-slot: heap
+    zip_nexts: ?JSValue = null, // gc-slot: heap
+    zip_pads: ?JSValue = null, // gc-slot: heap
+    zip_keys: ?JSValue = null, // gc-slot: heap
     atom_keys: []atom.Atom = &.{},
     index: usize = 0,
     length: u32 = 0,
@@ -374,8 +380,8 @@ pub const IteratorPayload = struct {
 /// into Runtime.borrowed_reference_holders; keeping both pieces here matches
 /// QuickJS's payload-resident JSWeakRefHeader without growing JSObject.
 pub const WeakReferenceHolderLink = struct {
-    previous: ?*Object = null,
-    next: ?*Object = null,
+    previous: ?*Object = null, // gc-slot: weak
+    next: ?*Object = null, // gc-slot: weak
     borrowed_holder_index: u32 = 0,
     registered: bool = false,
 };
@@ -629,7 +635,7 @@ pub const BufferPayload = struct {
 };
 
 pub const TypedArrayPayload = struct {
-    buffer: ?JSValue = null,
+    buffer: ?JSValue = null, // gc-slot: heap
     byte_offset: usize = 0,
     element_size: u32 = 0,
     fixed_length: ?u32 = null,
@@ -709,8 +715,8 @@ pub const RegExpPayload = extern struct {
     /// `JSObject.u.regexp` (quickjs.c:748-751, 47554-47564). Keeping the zjs
     /// representation pointer-only lets the standard RegExp class use the
     /// object's existing union instead of a second payload allocation.
-    source: ?*string.String = null,
-    compiled_bytecode: ?*string.String = null,
+    source: ?*string.String = null, // gc-slot: immutable
+    compiled_bytecode: ?*string.String = null, // gc-slot: immutable
 
     pub fn destroy(self: *RegExpPayload, rt: *JSRuntime) void {
         const old_source = self.source;
@@ -732,10 +738,13 @@ pub const RegExpPayload = extern struct {
     }
 };
 
+/// Cold Function.prototype.bind payload. Heap JSValue fields are written
+/// through `gc_slot.HeapValueSlot` / `GcBuffer` (Stage 2 Slot-under-RC
+/// pilot). Layout stays `?JSValue` / `[]JSValue`.
 pub const BoundFunctionPayload = struct {
-    target: ?JSValue = null,
-    this_value: ?JSValue = null,
-    args: []JSValue = &.{},
+    target: ?JSValue = null, // gc-slot: heap
+    this_value: ?JSValue = null, // gc-slot: heap
+    args: []JSValue = &.{}, // gc-slot: heap
 
     pub fn destroy(self: *BoundFunctionPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.target);
@@ -751,8 +760,8 @@ pub const BoundFunctionPayload = struct {
 };
 
 pub const ProxyPayload = struct {
-    target: ?JSValue = null,
-    handler: ?JSValue = null,
+    target: ?JSValue = null, // gc-slot: heap
+    handler: ?JSValue = null, // gc-slot: heap
 
     pub fn destroy(self: *ProxyPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.target);
@@ -766,7 +775,7 @@ pub const ProxyPayload = struct {
 };
 
 pub const ArgumentsPayload = struct {
-    var_refs: []JSValue = &.{},
+    var_refs: []JSValue = &.{}, // gc-slot: heap
 
     pub fn destroy(self: *ArgumentsPayload, rt: *JSRuntime) void {
         destroyValueSlice(rt, &self.var_refs);
@@ -778,7 +787,7 @@ pub const ArgumentsPayload = struct {
 };
 
 pub const ObjectDataPayload = struct {
-    data: ?JSValue = null,
+    data: ?JSValue = null, // gc-slot: heap
 
     pub fn destroy(self: *ObjectDataPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.data);

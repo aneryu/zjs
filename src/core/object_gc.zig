@@ -9,6 +9,8 @@ const context_mod = @import("context.zig");
 const gc = @import("gc.zig");
 const module_mod = @import("module.zig");
 const object_mod = @import("object.zig");
+const block_heap = @import("gc_block_heap.zig");
+const corpse_census = @import("gc_corpse_census.zig");
 const property = @import("property.zig");
 const runtime_mod = @import("runtime.zig");
 const shape = @import("shape.zig");
@@ -22,6 +24,7 @@ const WeakCollectionEntry = object_mod.WeakCollectionEntry;
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 const std = @import("std");
+const builtin = @import("builtin");
 
 const ObjectVisitSet = std.AutoHashMap(usize, void);
 const ObjectGraphError = std.mem.Allocator.Error || error{PayloadMarkFailed};
@@ -37,13 +40,25 @@ const MarkFunc = *const fn (rt: *JSRuntime, header: *gc.Header) void;
 /// Comptime so Decref / ScanIncref each get a small hot copy with the
 /// child update inlined (no per-edge `blr`). Rare class-payload tails
 /// stay in `markChildrenCold`.
-const MarkMode = enum(u8) { decref, scan_incref, scan_restore };
+const MarkMode = enum(u8) { decref, scan_incref, scan_restore, collect_test };
+
+threadlocal var cycle_mark_test_headers: ?*ObjectVisitSet = null;
+threadlocal var cycle_mark_test_oom: bool = false;
+
+fn collectCycleMarkChildForTest(_: *JSRuntime, header: *gc.Header) void {
+    if (!builtin.is_test) @compileError("cycle-mark child collection is test-only");
+    const headers = cycle_mark_test_headers orelse unreachable;
+    headers.put(@intFromPtr(header), {}) catch {
+        cycle_mark_test_oom = true;
+    };
+}
 
 inline fn markFuncFor(comptime mode: MarkMode) MarkFunc {
     return switch (mode) {
         .decref => gcDecrefChild,
         .scan_incref => gcScanIncrefChild,
         .scan_restore => gcScanIncrefChild2,
+        .collect_test => collectCycleMarkChildForTest,
     };
 }
 
@@ -55,9 +70,8 @@ inline fn isOrdinaryCycleHotObject(self: *const Object) bool {
 
 /// qjs `gc_decref_child` (quickjs.c:6687-6695).
 inline fn gcDecrefChildInline(rt: *JSRuntime, p: *gc.Header) void {
-    std.debug.assert(p.meta().rc > 0);
-    p.meta().rc -= 1;
-    if (p.meta().rc == 0 and p.meta().flags.mark) {
+    const ref_count = gc.decrementHeaderRefCount(p);
+    if (ref_count == 0 and p.meta().flags.mark) {
         rt.gc.detachCycleCandidate(p);
         gc.listAddTail(&rt.gc.tmp_obj_list, p);
     }
@@ -69,14 +83,14 @@ fn gcDecrefChild(rt: *JSRuntime, p: *gc.Header) void {
 
 /// qjs `gc_scan_incref_child` (quickjs.c:6719-6728).
 inline fn gcScanIncrefChildInline(rt: *JSRuntime, p: *gc.Header) void {
-    p.meta().rc += 1;
-    if (p.meta().rc != 1) return;
+    gc.incrementHeaderRefCount(p);
+    if (gc.headerRefCount(p) != 1) return;
     // Unlinked headers are not cycle-list members (heap BigInt used to
     // reach here via refCountHeader; cycleMarkHeader now matches
     // JS_MarkValue, but force-GC and mid-construction edges can still
     // present a non-listed GC header). list_del on prev==null is SEGV.
-    if (p.prev == null) return;
-    gc.listDel(p);
+    if (!gc.headerLinked(p)) return;
+    gc.listDel(&rt.gc.tmp_obj_list, p);
     rt.gc.restoreCycleCandidate(p);
     p.meta().flags.mark = false;
 }
@@ -88,7 +102,7 @@ fn gcScanIncrefChild(rt: *JSRuntime, p: *gc.Header) void {
 /// qjs `gc_scan_incref_child2` (quickjs.c:6731-6734).
 inline fn gcScanIncrefChild2Inline(rt: *JSRuntime, p: *gc.Header) void {
     _ = rt;
-    p.meta().rc += 1;
+    gc.incrementHeaderRefCount(p);
 }
 
 fn gcScanIncrefChild2(rt: *JSRuntime, p: *gc.Header) void {
@@ -100,6 +114,7 @@ inline fn markHeader(rt: *JSRuntime, h: *gc.Header, comptime mode: MarkMode) voi
         .decref => gcDecrefChildInline(rt, h),
         .scan_incref => gcScanIncrefChildInline(rt, h),
         .scan_restore => gcScanIncrefChild2Inline(rt, h),
+        .collect_test => collectCycleMarkChildForTest(rt, h),
     }
 }
 
@@ -180,7 +195,7 @@ fn markIteratorNextCacheCold(rt: *JSRuntime, self: *Object, mark_func: MarkFunc)
 
 inline fn markPropertyDataSlots(rt: *JSRuntime, self: *Object, comptime mode: MarkMode) void {
     const traced_prop_count = self.shape_ref.prop_count;
-    for (self.prop_values[0..traced_prop_count], 0..) |*entry, index| {
+    for (self.propertyStorageEntries(traced_prop_count), 0..) |*entry, index| {
         const slot_flags = self.propFlagsAt(index);
         if (slot_flags.deleted) continue;
         if (slot_flags.kind == .data) {
@@ -372,24 +387,15 @@ fn sweepDeadWeakPayloadReferences(
             continue;
         }
 
+        if (cell.state == .queued) continue;
         if (cell.isActive()) cell.state = .pending_enqueue;
         if (finalization_enqueue_blocked.*) {
             finalization_payload.cells[write_index] = cell;
             write_index += 1;
             continue;
         }
-        enqueueFinalizationCleanup(rt, finalization_payload, cell.held_value) catch |err| switch (err) {
-            error.OutOfMemory => {
-                // No later cleanup in this GC traversal may overtake this
-                // retained cell. A later collection retries the stable
-                // registry/entry order after allocator recovery.
-                finalization_enqueue_blocked.* = true;
-                finalization_payload.cells[write_index] = cell;
-                write_index += 1;
-                continue;
-            },
-            error.PayloadMarkFailed => return error.PayloadMarkFailed,
-        };
+        finalization_payload.cells[read_index].state = .queued;
+        enqueueFinalizationCleanup(rt, finalization_payload, cell.held_value);
         cell.state = .queued;
         cell.destroy(rt);
     }
@@ -425,7 +431,7 @@ pub fn destroyRuntimeCyclesWithValueRoots(rt: *JSRuntime, roots: ?*const runtime
             // its children, then move it immediately if its trial count
             // is zero. GcObjectIterator captured `next` before tracing.
             h.meta().flags.mark = true;
-            if (h.meta().rc == 0) {
+            if (gc.headerRefCount(h) == 0) {
                 rt.gc.detachCycleCandidate(h);
                 gc.listAddTail(&rt.gc.tmp_obj_list, h);
             }
@@ -437,10 +443,10 @@ pub fn destroyRuntimeCyclesWithValueRoots(rt: *JSRuntime, roots: ?*const runtime
         // Walk the live list dynamically: reviving a trial-zero child moves
         // it from tmp_obj_list to the registry tail, so it is visited without
         // recursion or an auxiliary worklist.
-        var cursor = rt.gc.gc_obj_list.next;
+        var cursor = rt.gc.gc_obj_list.sentinel.next;
         while (cursor) |h| {
-            if (h == &rt.gc.gc_obj_list) break;
-            std.debug.assert(h.meta().rc > 0);
+            if (h == &rt.gc.gc_obj_list.sentinel) break;
+            std.debug.assert(gc.headerRefCount(h) > 0);
             h.meta().flags.mark = false;
             markOne(rt, h, .scan_incref);
             cursor = h.next;
@@ -450,9 +456,9 @@ pub fn destroyRuntimeCyclesWithValueRoots(rt: *JSRuntime, roots: ?*const runtime
     // Phase 3: restore refcounts of the detached dead-cycle partition
     // (quickjs.c:6749-6753, gc_scan_incref_child2).
     {
-        var cursor = rt.gc.tmp_obj_list.next;
+        var cursor = rt.gc.tmp_obj_list.sentinel.next;
         while (cursor) |h| {
-            if (h == &rt.gc.tmp_obj_list) break;
+            if (h == &rt.gc.tmp_obj_list.sentinel) break;
             markOne(rt, h, .scan_restore);
             cursor = h.next;
         }
@@ -476,54 +482,54 @@ pub fn destroyRuntimeCyclesWithValueRoots(rt: *JSRuntime, roots: ?*const runtime
 
     var garbage_count: usize = 0;
     // One walk per kind (O(n)), not one walk per node (O(n²)).
-    var cursor = rt.gc.tmp_obj_list.next;
+    var cursor = rt.gc.tmp_obj_list.sentinel.next;
     while (cursor) |h| {
-        if (h == &rt.gc.tmp_obj_list) break;
+        if (h == &rt.gc.tmp_obj_list.sentinel) break;
         const next = h.next;
         if (h.meta().flags.kind == .object) {
-            gc.listDel(h);
+            gc.listDel(&rt.gc.tmp_obj_list, h);
             garbage_count += 1;
             Object.destroyFromHeader(rt, h);
         }
         cursor = next;
     }
-    cursor = rt.gc.tmp_obj_list.next;
+    cursor = rt.gc.tmp_obj_list.sentinel.next;
     while (cursor) |h| {
-        if (h == &rt.gc.tmp_obj_list) break;
+        if (h == &rt.gc.tmp_obj_list.sentinel) break;
         const next = h.next;
         if (h.meta().flags.kind == .realm_context) {
-            gc.listDel(h);
+            gc.listDel(&rt.gc.tmp_obj_list, h);
             garbage_count += 1;
             rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
             context_mod.JSContext.destroyFromHeader(rt, h);
         }
         cursor = next;
     }
-    cursor = rt.gc.tmp_obj_list.next;
+    cursor = rt.gc.tmp_obj_list.sentinel.next;
     while (cursor) |h| {
-        if (h == &rt.gc.tmp_obj_list) break;
+        if (h == &rt.gc.tmp_obj_list.sentinel) break;
         const next = h.next;
         if (h.meta().flags.kind == .module) {
-            gc.listDel(h);
+            gc.listDel(&rt.gc.tmp_obj_list, h);
             garbage_count += 1;
             rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
             module_mod.ModuleRecord.destroyFromHeader(rt, h);
         }
         cursor = next;
     }
-    cursor = rt.gc.tmp_obj_list.next;
+    cursor = rt.gc.tmp_obj_list.sentinel.next;
     while (cursor) |h| {
-        if (h == &rt.gc.tmp_obj_list) break;
+        if (h == &rt.gc.tmp_obj_list.sentinel) break;
         const next = h.next;
         if (h.meta().flags.kind == .function_bytecode) {
-            gc.listDel(h);
+            gc.listDel(&rt.gc.tmp_obj_list, h);
             rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
             function_bytecode_mod.destroyFromHeader(rt, h);
         }
         cursor = next;
     }
     while (gc.listFirst(&rt.gc.tmp_obj_list)) |h| {
-        gc.listDel(h);
+        gc.listDel(&rt.gc.tmp_obj_list, h);
         switch (h.meta().flags.kind) {
             .var_ref => {
                 garbage_count += 1;
@@ -558,34 +564,246 @@ pub fn destroyRuntimeCyclesWithValueRoots(rt: *JSRuntime, roots: ?*const runtime
 /// leftovers whose owners skipped them via cycle_visited. Does not delete
 /// `cycle_visited`, does not touch RC teardown or ScanIncref.
 pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
+    _ = drainCycleDeferredFreesBudgeted(rt, std.math.maxInt(usize));
+}
+
+inline fn freeCycleDeferredObject(rt: *JSRuntime, h: *gc.Header) void {
+    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
+    // qjs:6803-6806. deinit must still free weak husks (phase != remove_cycles).
+    if (gc.phaseIsTwoPassTeardown(rt.gc.phase) and obj.weakReferenceCount() != 0) {
+        // Neither pop path clears the dead allocation's links. This is the one
+        // branch that keeps the allocation, so finish the detach here.
+        h.next = null;
+        if (comptime !gc.trace_stw_enabled) h.prev = null;
+        h.meta().flags.mark = false;
+        h.meta().flags.cycle_visited = false;
+        h.meta().flags.finalizing = false;
+        // Under the tracer the shared word is mark/husk state, not an object
+        // count, so stamp the state for `releaseWeakIdentity` to recognise it.
+        if (comptime gc.trace_stw_enabled) gc.setHeaderWeakHusk(h);
+    } else {
+        Object.freeCycleDeferredStruct(rt, obj);
+    }
+}
+
+/// Stage 3 (`docs/corpse-census-2026-08-29.md` §5.2/§5.3): settle a trivially
+/// releasable block corpse HERE, in Pass A, instead of parking it for Pass B.
+///
+/// The census priced Pass B at 27.8 cycles and **1.13 L2D refills per entry**
+/// and showed those cycles are essentially all cache refill: Pass A has just
+/// touched this corpse's line (`destroyFromHeader` wrote its flags), the LIFO
+/// push evicts it, and the drain's pointer chase pulls it back a second time.
+/// So the classification has to happen while the line is still hot -- doing it
+/// in Pass B would pay exactly the miss it is trying to remove (§5.3).
+///
+/// What the settlement omits relative to the deferred free, and why each is
+/// safe:
+///
+/// * the LIFO push/pop -- the corpse never enters the parked queue;
+/// * `pushCell`'s per-cell free link -- 95.6% of those writes on splay are
+///   provably dead stores (`openBlock` rebuilds intervals from the alloc
+///   bitmap and resets `next_free`), and the remaining ones are rebuilt the
+///   same way. This is stage 2 arriving as a by-product, exactly as §5.1
+///   predicted;
+/// * the empty-block transition and the allocator-current block -- both
+///   vetoed by `Heap.canSettleDoomedCellInPassA`.
+///
+/// Nothing about destructor ordering moves: the cell is released but unlinked,
+/// its bytes are untouched, and it can only be handed out again after the
+/// publication gate, which still runs in Pass B / at transaction close.
+pub inline fn trySettleTracerBlockCorpse(
+    rt: *JSRuntime,
+    self: *Object,
+    class_is_settleable: bool,
+    payload_bytes: usize,
+) bool {
+    if (comptime !gc.trace_stw_enabled) return false;
+    // Only the tracer's own destruction window. rc's `.remove_cycles` and
+    // `.deinit` keep the established park path: this must not improve the
+    // comparison denominator, and deinit tears the block heap down anyway.
+    if (rt.gc.phase != .tracer_destroy) return false;
+    if (!class_is_settleable) return false;
+    if (!gc.Registry.isBlockCellHeader(&self.header)) return false;
+    // `freeCycleDeferredObject` would keep this allocation as a weak husk, and
+    // the fast arm would still have to drop a weak-id side-table entry. Both
+    // are 0 on all three census workloads, so the exclusion is free.
+    if (self.weakReferenceCount() != 0 or self.flags.has_weak_id) return false;
+
+    const cell_addr = @intFromPtr(&self.header) - gc.metadata_prefix_size;
+    const cell: [*]u8 = @ptrFromInt(cell_addr);
+    const block = block_heap.Block.fromCellTrusted(cell_addr);
+    if (!rt.gc.block_heap.canSettleDoomedCellInPassA(block)) return false;
+
+    if (comptime std.debug.runtime_safety) {
+        // The settlement predicate must be a SUBSET of the Pass-B fast arm:
+        // everything skipped here is something `freeCycleDeferredStruct` would
+        // also have skipped. A dynamic class id would leak its definition pin
+        // (`Table.deinit`'s `assert(!state.isPinned())`), and an inline-payload
+        // class would have had its allocation base before the Object.
+        std.debug.assert(Object.passBFastArmEligible(rt, self.class_id));
+        std.debug.assert(payload_bytes == self.allocationSize(rt));
+    }
+
+    const index: u32 = std.mem.readInt(u16, cell[0..2], .little);
+    rt.memory.debitBlockCellPayload(self, payload_bytes);
+    rt.gc.block_heap.settleDoomedCellInPassA(block, index);
+    corpse_census.noteSettled(payload_bytes != @sizeOf(Object));
+    return true;
+}
+
+/// Census-only classification of one parked corpse, taken BEFORE the physical
+/// release. Every field describes work the release must do beyond clearing the
+/// alloc bit, decrementing `allocated_count` and debiting `MemoryAccount`.
+fn censusNoteParked(rt: *JSRuntime, h: *gc.Header) void {
+    if (comptime !corpse_census.enabled) return;
+    const kind = h.meta().flags.kind;
+    if (!gc.Registry.isBlockCellHeader(h)) {
+        corpse_census.note(.{
+            .block_cell = false,
+            .kind = @intFromEnum(kind),
+            .weak_husk = false,
+            .weak_id = false,
+            .fast_class = false,
+            .standard_class = false,
+            .inline_payload = false,
+            .trailing_fam = false,
+            .interval_allocator = false,
+            .allocator_current = false,
+            .becomes_empty = false,
+            .cell_index = 0,
+            .class_id = 0,
+        });
+        return;
+    }
+    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
+    const cell_addr = @intFromPtr(h) - gc.metadata_prefix_size;
+    const cell: [*]u8 = @ptrFromInt(cell_addr);
+    const block = block_heap.Block.fromCellTrusted(cell_addr);
+    const index: u32 = std.mem.readInt(u16, cell[0..2], .little);
+    const facts = rt.gc.block_heap.censusCellFacts(block, index);
+    const plan = rt.classes.destructionPlan(obj.class_id);
+    corpse_census.note(.{
+        .block_cell = true,
+        .kind = @intFromEnum(kind),
+        .weak_husk = gc.phaseIsTwoPassTeardown(rt.gc.phase) and obj.weakReferenceCount() != 0,
+        .weak_id = obj.flags.has_weak_id,
+        .fast_class = Object.passBFastArmEligible(rt, obj.class_id),
+        .standard_class = obj.class_id < class.ids.init_count,
+        .inline_payload = if (plan) |p| p.inline_payload_size != 0 else false,
+        .trailing_fam = obj.hasTrailingPropertyAllocation(),
+        .interval_allocator = facts.interval_allocator,
+        .allocator_current = facts.allocator_current,
+        .becomes_empty = facts.becomes_empty,
+        .cell_index = index,
+        .class_id = obj.class_id,
+    });
+}
+
+/// Return up to `budget` parked struct frees to the allocator. Returns true
+/// when the queue is empty. The park's only obligation is to outlive every
+/// destructor of the same condemned set; once destruction is complete the
+/// frees can trickle out across polls -- a single-shot drain of a large
+/// morgue was a 6.8 ms pause hiding at the tail of the last slice.
+pub fn drainCycleDeferredFreesBudgeted(rt: *JSRuntime, budget: usize) bool {
     const parked = &rt.gc.cycle_deferred_frees;
-    var cursor = gc.listFirst(&parked.sentinel);
-    while (cursor) |h| {
-        const next = parked.nextAfter(h);
-        parked.remove(h);
+    corpse_census.noteDrainCall();
+    if (comptime gc.trace_stw_enabled) {
+        if (gc.arena_audit) {
+            rt.gc.verifyDeferredFreeRunTopology() catch |err| {
+                std.debug.print("gc: DEFERRED RUN AUDIT: {s}\n", .{@errorName(err)});
+                @panic("deferred free run invariant violated");
+            };
+        }
+    }
+    // Keep RC on its established pop path: this trace-only experiment must not
+    // improve the comparison denominator.
+    if (comptime !gc.trace_stw_enabled) {
+        var remaining = budget;
+        while (parked.head != null) {
+            if (remaining == 0) return false;
+            remaining -= 1;
+            const h = parked.popForFree().?;
+            switch (h.meta().flags.kind) {
+                .object => freeCycleDeferredObject(rt, h),
+                .function_bytecode => function_bytecode_mod.freeCycleDeferredStruct(rt, h),
+                .module => module_mod.ModuleRecord.freeCycleDeferredStruct(rt, h),
+                .var_ref => var_ref_mod.VarRef.freeCycleDeferredStruct(rt, h),
+                .realm_context => context_mod.JSContext.freeCycleDeferredStruct(rt, h),
+                else => {},
+            }
+        }
+        return true;
+    }
+
+    var remaining = @min(budget, parked.count);
+    var unsettled_at = remaining;
+    var cursor = parked.head;
+
+    // Pass A parks block cells before list carriers. LIFO reversal therefore
+    // leaves a generic prefix followed by one proven block-only suffix. Pay the
+    // exact route-marker test only while finding that suffix.
+    while (remaining != 0) {
+        const h = cursor orelse unreachable;
+        if (gc.Registry.isBlockCellHeader(h)) break;
+        cursor = h.next;
+        remaining -= 1;
+        censusNoteParked(rt, h);
         switch (h.meta().flags.kind) {
-            .object => {
-                const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                // qjs:6803-6806. deinit must still free weak husks (phase != remove_cycles).
-                if (rt.gc.phase == .remove_cycles and obj.weakref_count != 0) {
-                    h.meta().flags.mark = false;
-                    h.meta().flags.cycle_visited = false;
-                    h.meta().flags.finalizing = false;
-                } else {
-                    Object.freeCycleDeferredStruct(rt, obj);
-                }
-            },
+            .object => freeCycleDeferredObject(rt, h),
             .function_bytecode => function_bytecode_mod.freeCycleDeferredStruct(rt, h),
             .module => module_mod.ModuleRecord.freeCycleDeferredStruct(rt, h),
             .var_ref => var_ref_mod.VarRef.freeCycleDeferredStruct(rt, h),
             .realm_context => context_mod.JSContext.freeCycleDeferredStruct(rt, h),
             else => {},
         }
-        cursor = next;
     }
+
+    // Inside the block suffix, the topology checker proves every entry is an
+    // Object and each block occurs in one contiguous run. The only per-entry
+    // route work is the 64 KiB mask/compare on the already-captured successor.
+    if (remaining != 0) {
+        var block = block_heap.Block.fromCellTrusted(@intFromPtr(cursor.?) - gc.metadata_prefix_size);
+        while (remaining != 0) {
+            const h = cursor orelse unreachable;
+            cursor = h.next;
+            remaining -= 1;
+            censusNoteParked(rt, h);
+            freeCycleDeferredObject(rt, h);
+
+            const next_base = if (cursor) |next|
+                @intFromPtr(next) & ~@as(usize, block_heap.block_bytes - 1)
+            else
+                0;
+            if (next_base == @intFromPtr(block)) continue;
+
+            // Settle only on an actual run boundary. No released cell from the
+            // completed run remains reachable when the callback publishes it.
+            parked.head = cursor;
+            parked.count -= unsettled_at - remaining;
+            unsettled_at = remaining;
+            corpse_census.noteRunBoundary(@intFromPtr(block));
+            rt.gc.block_heap.onBlockPassBComplete(block);
+            if (next_base != 0) block = @ptrFromInt(next_base);
+        }
+    }
+
+    // A budget may stop in the generic prefix or halfway through a block run.
+    // No Pass-B arm invokes a payload callback, so one final settlement is
+    // sufficient for that partial batch.
+    parked.head = cursor;
+    parked.count -= unsettled_at - remaining;
+    std.debug.assert((parked.head == null) == (parked.count == 0));
+    if (parked.head != null) corpse_census.noteBudgetStop();
+    corpse_census.noteSliceEnd();
+    return parked.head == null;
 }
 
 pub fn releaseCallbackOwnedFunctionBytecodeCycles(rt: *JSRuntime) void {
+    // This is a last-ref reconstruction pass for the RC collector. The tracer
+    // already treats FunctionBytecode as an ordinary traced carrier; running
+    // an invented count over its survivors would clear live constant pools.
+    if (comptime gc.trace_stw_enabled) return;
+
     var candidates = ObjectVisitSet.init(rt.memory.allocator);
     defer candidates.deinit();
 
@@ -616,7 +834,7 @@ fn pruneCallbackOwnedFunctionBytecodeCycles(candidates: *ObjectVisitSet) ObjectG
         while (iterator.next()) |address| {
             const function_bytecode: *const FunctionBytecode = @ptrFromInt(address.*);
             const internal_refs = countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, candidates);
-            const ref_count = function_bytecode.header.metaConst().rc;
+            const ref_count: usize = @intCast(gc.headerRefCount(&function_bytecode.header));
             if (ref_count == internal_refs or (ref_count != 0 and ref_count - 1 == internal_refs)) continue;
 
             _ = candidates.remove(address.*);
@@ -697,10 +915,23 @@ pub fn enqueueFinalizationCleanup(
     rt: *JSRuntime,
     payload: *const FinalizationRegistryPayload,
     held_value: JSValue,
-) ObjectGraphError!void {
-    const callback = payload.cleanup_callback orelse return;
+) void {
+    // §9.3: the job slot was reserved when the cell was registered. Sweep
+    // must not allocate.
+    const callback = payload.cleanup_callback orelse {
+        if (rt.job_queue.capacity != 0) rt.job_queue.releaseReservedEntries(1);
+        return;
+    };
     const realm = payload.realm.borrow() orelse unreachable;
-    try rt.enqueueFinalizationJobForRealm(realm, callback, held_value);
+    // Normal collections consume the slot reserved at register. Runtime
+    // teardown deinits the queue first, then cycle-removes leftover
+    // objects; fall back to an allocating enqueue so that path can
+    // rehydrate the queue the way trial deletion always did.
+    if (rt.job_queue.reserved_entries != 0) {
+        rt.enqueueFinalizationJobReserved(realm, callback, held_value);
+    } else {
+        rt.enqueueFinalizationJobForRealm(realm, callback, held_value) catch {};
+    }
 }
 
 fn functionBytecodeFromGcHeader(header: *gc.GCObjectHeader) ?*const FunctionBytecode {
@@ -748,45 +979,32 @@ comptime {
 
 pub const CycleMarkPathForTest = enum { mark_one, children_cold };
 
-/// Test-only: run a production mark walk (`markOne` or `markChildrenCold`) in
-/// the decref phase and return the child GC headers whose RC dropped. Callers
-/// must hang unique children (a header visited twice can hit RC 0). Restores
-/// every listed header's RC before returning. Does not change the specialized
-/// hot-arm production copies.
+/// Test-only: run a production mark walk (`markOne` or `markChildrenCold`) with
+/// a child-recording update and return the visited GC headers. `collect_test`
+/// is a separate comptime instantiation of the same specialized hot arms, so
+/// production Decref/Scan copies are unchanged and no carrier lifetime word is
+/// perturbed in either collector configuration.
 pub fn collectCycleMarkChildHeadersForTest(
     rt: *JSRuntime,
     header: *gc.Header,
     path: CycleMarkPathForTest,
     allocator: std.mem.Allocator,
 ) ![]usize {
-    const rc_pad: i32 = 16;
-    var snap = std.AutoHashMap(usize, i32).init(allocator);
-    defer snap.deinit();
-    var iterator = rt.gc.objectIterator();
-    while (iterator.next()) |h| {
-        try snap.put(@intFromPtr(h), h.meta().rc);
-        h.meta().rc += rc_pad;
-    }
-
-    switch (path) {
-        .mark_one => markOne(rt, header, .decref),
-        .children_cold => markChildrenCold(rt, header, gcDecrefChild),
-    }
+    if (!builtin.is_test) @compileError("cycle-mark child collection is test-only");
+    std.debug.assert(cycle_mark_test_headers == null);
+    std.debug.assert(!cycle_mark_test_oom);
 
     var set = ObjectVisitSet.init(allocator);
     defer set.deinit();
-    var restore = rt.gc.objectIterator();
-    while (restore.next()) |h| {
-        const ptr = @intFromPtr(h);
-        const orig = snap.get(ptr) orelse {
-            h.meta().rc += rc_pad;
-            continue;
-        };
-        if (h.meta().rc < orig + rc_pad) {
-            try set.put(ptr, {});
-        }
-        h.meta().rc = orig;
+    cycle_mark_test_headers = &set;
+    defer cycle_mark_test_headers = null;
+    defer cycle_mark_test_oom = false;
+
+    switch (path) {
+        .mark_one => markOne(rt, header, .collect_test),
+        .children_cold => markChildrenCold(rt, header, collectCycleMarkChildForTest),
     }
+    if (cycle_mark_test_oom) return error.OutOfMemory;
 
     const keys = try allocator.alloc(usize, set.count());
     var index: usize = 0;
