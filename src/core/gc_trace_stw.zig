@@ -2484,6 +2484,29 @@ const Collector = struct {
         }
     }
 
+    /// One bit per `gc.GcKind`, so a whole condemned residue's kind census
+    /// fits in a register the object pass never has to spill.
+    const KindSet = std.meta.Int(.unsigned, gc.gc_kind_count);
+
+    inline fn kindBit(kind: gc.GcKind) KindSet {
+        return @as(KindSet, 1) << @intFromEnum(kind);
+    }
+
+    /// Checker for the `residual_kinds` gate. A skipped pass claims its kind is
+    /// absent from `tmp_obj_list`; this is the only thing standing between a
+    /// wrong claim and the final pass's `unreachable`, so it walks the list and
+    /// says so in safe builds. Compiled away in ReleaseFast, which is where the
+    /// gate is worth anything.
+    fn assertCondemnedKindAbsent(self: *Collector, kind: gc.GcKind) void {
+        if (comptime !std.debug.runtime_safety) return;
+        var cursor = self.rt.gc.tmp_obj_list.sentinel.next;
+        while (cursor) |h| {
+            if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
+            std.debug.assert(h.metaConst().flags.kind != kind);
+            cursor = h.next;
+        }
+    }
+
     /// Ordered teardown of everything condemned onto `tmp_obj_list`.
     ///
     /// The order is load-bearing (qjs `gc_free_cycles`): objects first, then
@@ -2500,75 +2523,96 @@ const Collector = struct {
     /// condemned set has to be closed under "reachable only from other
     /// condemned nodes", and the only way to keep it closed is to free every
     /// kind the trace condemned, not a subset.
+    ///
+    /// Passes two through four are gated on `residual_kinds`, the set of kinds
+    /// the object pass actually saw left behind. The order above is untouched;
+    /// what is skipped is only a walk over a residue that provably contains no
+    /// member of that pass's kind. On EarleyBoyer that residue is 73.6M
+    /// var_refs and the module pass finds zero of them on every one of the 2536
+    /// majors, so three full traversals of a 70M-node list were pure白工
+    /// (`.scratch/eb-alloc-account.md` §4 K1: 657M cycles, 19.0% of the EB
+    /// cycle gap). The kind is already loaded by the object test, so the set is
+    /// an in-register `orr` on the nodes the object pass skips anyway -- no new
+    /// per-object store, and no producer-side counter that could drift out of
+    /// step with the list.
     fn destroyCondemned(self: *Collector) usize {
         self.rt.gc.beginDeferredFreeProducerSequence();
         var garbage_count: usize = 0;
+        var residual_kinds: KindSet = 0;
         var previous: *gc.Header = &self.rt.gc.tmp_obj_list.sentinel;
         var cursor = self.rt.gc.tmp_obj_list.sentinel.next;
         while (cursor) |h| {
             if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
             const next = h.next;
-            if (h.meta().flags.kind == .object) {
+            const kind = h.meta().flags.kind;
+            if (kind == .object) {
                 gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
                 garbage_count += 1;
                 self.rt.gc.sweep_current = h;
                 Object.destroyFromHeader(self.rt, h);
                 self.rt.gc.sweep_current = null;
             } else {
+                residual_kinds |= kindBit(kind);
                 previous = h;
             }
             cursor = next;
         }
-        previous = &self.rt.gc.tmp_obj_list.sentinel;
-        cursor = self.rt.gc.tmp_obj_list.sentinel.next;
-        while (cursor) |h| {
-            if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
-            const next = h.next;
-            if (h.meta().flags.kind == .realm_context) {
-                gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
-                garbage_count += 1;
-                self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
-                self.rt.gc.sweep_current = h;
-                context_mod.JSContext.destroyFromHeader(self.rt, h);
-                self.rt.gc.sweep_current = null;
-            } else {
-                previous = h;
+        if (residual_kinds & kindBit(.realm_context) != 0) {
+            previous = &self.rt.gc.tmp_obj_list.sentinel;
+            cursor = self.rt.gc.tmp_obj_list.sentinel.next;
+            while (cursor) |h| {
+                if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
+                const next = h.next;
+                if (h.meta().flags.kind == .realm_context) {
+                    gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
+                    garbage_count += 1;
+                    self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
+                    self.rt.gc.sweep_current = h;
+                    context_mod.JSContext.destroyFromHeader(self.rt, h);
+                    self.rt.gc.sweep_current = null;
+                } else {
+                    previous = h;
+                }
+                cursor = next;
             }
-            cursor = next;
-        }
-        previous = &self.rt.gc.tmp_obj_list.sentinel;
-        cursor = self.rt.gc.tmp_obj_list.sentinel.next;
-        while (cursor) |h| {
-            if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
-            const next = h.next;
-            if (h.meta().flags.kind == .module) {
-                gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
-                garbage_count += 1;
-                self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
-                self.rt.gc.sweep_current = h;
-                module_mod.ModuleRecord.destroyFromHeader(self.rt, h);
-                self.rt.gc.sweep_current = null;
-            } else {
-                previous = h;
+        } else self.assertCondemnedKindAbsent(.realm_context);
+        if (residual_kinds & kindBit(.module) != 0) {
+            previous = &self.rt.gc.tmp_obj_list.sentinel;
+            cursor = self.rt.gc.tmp_obj_list.sentinel.next;
+            while (cursor) |h| {
+                if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
+                const next = h.next;
+                if (h.meta().flags.kind == .module) {
+                    gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
+                    garbage_count += 1;
+                    self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
+                    self.rt.gc.sweep_current = h;
+                    module_mod.ModuleRecord.destroyFromHeader(self.rt, h);
+                    self.rt.gc.sweep_current = null;
+                } else {
+                    previous = h;
+                }
+                cursor = next;
             }
-            cursor = next;
-        }
-        previous = &self.rt.gc.tmp_obj_list.sentinel;
-        cursor = self.rt.gc.tmp_obj_list.sentinel.next;
-        while (cursor) |h| {
-            if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
-            const next = h.next;
-            if (h.meta().flags.kind == .function_bytecode) {
-                gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
-                self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
-                self.rt.gc.sweep_current = h;
-                function_bytecode_mod.destroyFromHeader(self.rt, h);
-                self.rt.gc.sweep_current = null;
-            } else {
-                previous = h;
+        } else self.assertCondemnedKindAbsent(.module);
+        if (residual_kinds & kindBit(.function_bytecode) != 0) {
+            previous = &self.rt.gc.tmp_obj_list.sentinel;
+            cursor = self.rt.gc.tmp_obj_list.sentinel.next;
+            while (cursor) |h| {
+                if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
+                const next = h.next;
+                if (h.meta().flags.kind == .function_bytecode) {
+                    gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
+                    self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
+                    self.rt.gc.sweep_current = h;
+                    function_bytecode_mod.destroyFromHeader(self.rt, h);
+                    self.rt.gc.sweep_current = null;
+                } else {
+                    previous = h;
+                }
+                cursor = next;
             }
-            cursor = next;
-        }
+        } else self.assertCondemnedKindAbsent(.function_bytecode);
         while (gc.listFirst(&self.rt.gc.tmp_obj_list)) |h| {
             gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, &self.rt.gc.tmp_obj_list.sentinel, h);
             switch (h.meta().flags.kind) {
