@@ -1,5 +1,14 @@
 # AGENTS.md
 
+## Verification policy (read first)
+
+All verification/gating obligations are defined by
+[docs/verification-policy.md](docs/verification-policy.md) — the single
+authority (owner ruling 2026-08-29). Per-change work: `zig build check` for
+iteration, targeted tests, one final `zig build test`. Expensive gates
+(test262 / gate_smoke / arena audit) run once per merge batch, not per
+change. rc-neutrality checks are abolished (the rc collector is retired).
+
 ## No shortcuts / No cheating
 
 Do real work. Do not make the code only look correct.
