@@ -635,3 +635,34 @@ finish 是唯一未预算化的段)。
 > gc_merge_policy 预注册行、roadmap:270、GC-GAP manifest 的 trace 停顿列
 > 须重新锚定(方向全部下移);tools/perf/gc_stats_snapshot.py 的 inline 行
 > 正则在 main 上已错列(4 列 vs 7 列),tail_grown_external 单调性契约待裁。
+
+## 官方读数第四轮 + 本波五刀终账(2026-08-29 安静窗口,main@6374ba73)
+
+| | deltablue | regexp | pdfjs | raytrace | EB | splay | geomean |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 第三轮 | 0.962 | 1.020 | 1.005 | 1.043 | 1.037 | 1.1994 | 1.0419* |
+| **第四轮** | 0.957 | 1.034 | **1.000** | 1.018 | **1.0008** | **1.1724** | **1.0281** |
+
+*第三轮与本轮之间隔 rc 退役与三维快照的 1.0466 读数;本波五刀(仪器/delist/
+屏障折叠/EB K1/K3)兑现 **−1.84pp,六基准无一劣化**;**EB 与 rc 实质打平**,
+达标 5/6。bench_v8 composite 0.9554→**0.9615**(Splay 0.767 在其 7–11% 双臂
+离散带内,非退步)。EB 兑现 −3.32pp 远超其指令刀之和=省掉的是带 stall 的工作。
+
+### dense 数组刀:预注册验收失败,关轨(勿重试)
+
+五条线只过一条:splay cycles −0.57%(线 −1%)、raytrace **+0.81% 真回归**
+(八对八分布分离,insn/L2D/cycles 三项同向)、splay **L2D +1.47% 与机理预期
+相反**(指令省了被 footprint/cache 行为吃掉)、maxrss +2.86%。分支
+gc/dense-array-align 留档。教训:标记线口径的「结构机会」≠refill 兑现,
+adjacent-line prefetch 把 96B 两条相邻线的账早已摊掉大半。
+
+### 停顿重锚(修正后仪器,双臂;替换上方旧停顿表)
+
+- **splay:tip p99 1.01ms vs rc p99 44.7ms(44 倍)**——tracing 停顿优势的
+  全部来源;pdfjs/EB 亦胜;regexp/raytrace/deltablue 输但绝对值 0.14–0.46ms
+  且 rc 侧几乎不真收集。
+- **destroy 仍是六基准最大 STW 相位(50–85%)**——仪器修正没有推翻这条。
+- ⭐**EB minor 总停顿 3.15s(7,701×0.39ms)= 全表最大单项 STW 支出**,是其
+  major destroy 的 4 倍 ⇒ **EB 停顿问题=minor 频次问题**,新观察项。
+- 口径:deltablue/raytrace/EB 的分位数是 1024 蓄水池保留,跨基准比较须带此列。
+  完整三表在 .scratch/quiet-verdict.md(driver 收编前的原始件)。
