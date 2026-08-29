@@ -2648,6 +2648,46 @@ pub const Registry = struct {
     /// publication only updates scalar accounting and intrusive links; every
     /// allocation and owner-producing operation must already have completed.
     pub fn addInitializedWithSizeNoFail(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
+        self.publishInitialized(h, bytes, .fast);
+    }
+
+    /// Cold twin of the publication funnel: the SAME body, instantiated with
+    /// every cold arm live. The fast instantiation reaches this by tail call
+    /// the moment any of the three cold conditions holds, which is what lets
+    /// the fast body drop all three calls and become a leaf -- LLVM will not
+    /// shrink-wrap a prologue around calls it can see, so the only way to stop
+    /// paying five callee-saved pairs on 255M EarleyBoyer publications that
+    /// call nothing is to make the hot instantiation call nothing.
+    ///
+    /// This is a comptime split, not a copy: there is one body, so the two arms
+    /// cannot drift. What CAN drift is `publicationNeedsColdArm` -- a cold
+    /// condition left out of it would be silently skipped on the fast arm --
+    /// so each cold arm asserts its own condition is false when it is compiled
+    /// out. Those asserts are the guard's checker.
+    noinline fn publishInitializedCold(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
+        self.publishInitialized(h, bytes, .cold);
+    }
+
+    const PublicationArm = enum { fast, cold };
+
+    /// Runtime half of the fast/cold split. The comptime half (`is_test`
+    /// histogram, sweep-model stats) needs no gate: those arms are already
+    /// absent from production builds, and `detailed_reports` is reached by a
+    /// tail call that costs the frame nothing.
+    inline fn publicationNeedsColdArm(self: *const Registry, is_large: bool, standalone: bool) bool {
+        if (is_large or standalone) return true;
+        if (comptime concurrent_enabled) {
+            if (self.concurrent.markingActive()) return true;
+        }
+        return false;
+    }
+
+    inline fn publishInitialized(
+        self: *Registry,
+        h: *GCObjectHeader,
+        bytes: usize,
+        comptime arm: PublicationArm,
+    ) void {
         assertInitialHeaderLifetime(h);
         std.debug.assert(!h.meta().flags.mark);
         std.debug.assert(!h.meta().flags.finalizing);
@@ -2678,7 +2718,20 @@ pub const Registry = struct {
             if (comptime !block_heap_enabled) break :block_cell_blk false;
             break :block_cell_blk info_at_entry.block_size_idx == representation.block_cell_size_class;
         };
-        if (info_at_entry.standalone) h.meta().size_class = encodeHeapBytes(bytes);
+        if (comptime arm == .fast) {
+            if (self.publicationNeedsColdArm(is_large, info_at_entry.standalone)) {
+                @branchHint(.unlikely);
+                self.publishInitializedCold(h, bytes);
+                return;
+            }
+        }
+        // Only the cold arm can be standalone; the fast arm asserts it, which
+        // is what keeps `publicationNeedsColdArm` honest.
+        const standalone = if (comptime arm == .fast) standalone_blk: {
+            std.debug.assert(!info_at_entry.standalone);
+            break :standalone_blk false;
+        } else info_at_entry.standalone;
+        if (standalone) h.meta().size_class = encodeHeapBytes(bytes);
         h.meta().alloc_info.heap_accounted = true;
         // qjs add_gc_object writes header bookkeeping once and then
         // list_add_tail's (quickjs.c:6540-6546). No membership flag.
@@ -2688,7 +2741,10 @@ pub const Registry = struct {
         // the alloc-time large classification (read back by
         // recordHeapFreeWithBytes) and credits the large space; the hot arm is
         // the policy compare + a fixed-offset old_space bump.
-        if (is_large) {
+        if (comptime arm == .fast) {
+            std.debug.assert(!is_large);
+            self.old_space.recordAlloc(bytes);
+        } else if (is_large) {
             @branchHint(.unlikely);
             h.meta().alloc_info.large = true;
             self.recordLargeSpaceAllocCold(bytes);
@@ -2710,7 +2766,7 @@ pub const Registry = struct {
         std.debug.assert(is_block_cell == isBlockCellHeader(h));
         if (comptime address_registry_enabled) {
             if (tracked and !is_block_cell) self.linkGcObjectTail(h);
-            self.registerLiveAddressClassified(h, bytes, tracked, info_at_entry.standalone, is_block_cell);
+            self.registerLiveAddressClassified(h, bytes, tracked, standalone, is_block_cell, arm);
             self.observeNewPublication(h, bytes);
         } else if (tracked) self.linkGcObjectTail(h);
     }
@@ -4306,7 +4362,7 @@ pub const Registry = struct {
         if (comptime !address_registry_enabled) return;
         if (!tracked) return;
         const info = header.metaConst().alloc_info;
-        self.registerLiveAddressClassified(header, bytes, true, info.standalone, isBlockCellHeader(header));
+        self.registerLiveAddressClassified(header, bytes, true, info.standalone, isBlockCellHeader(header), .cold);
     }
 
     /// `registerLiveAddress` for callers that already hold the header's
@@ -4320,6 +4376,7 @@ pub const Registry = struct {
         tracked: bool,
         standalone: bool,
         is_block_cell: bool,
+        comptime arm: PublicationArm,
     ) void {
         if (comptime !address_registry_enabled) return;
         if (!tracked) return;
@@ -4328,14 +4385,23 @@ pub const Registry = struct {
         // is the same "live GC object" answer the table was storing. Only
         // standalone-prefix allocations -- past the slab's 512-byte class
         // ceiling, or over-aligned -- are unreachable that way.
-        if (!standalone) {
-            self.markPublishedYoungClassified(header, is_block_cell);
-            return;
+        if (standalone) {
+            @branchHint(.unlikely);
+            self.insertLiveAddressCold(header, bytes);
         }
+        self.markPublishedYoungClassified(header, is_block_cell, arm);
+    }
+
+    /// Outlined so the standalone-prefix arm's call does not have to be
+    /// register-allocated inside the publication funnel. Slab and block-cell
+    /// publications -- everything EarleyBoyer allocates -- never reach it, and
+    /// leaving the `Table.insert` call inline made the funnel keep values live
+    /// across it, which is what put five `stp` pairs in a prologue whose hot
+    /// path calls nothing at all.
+    noinline fn insertLiveAddressCold(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
         self.address_registry.insert(addressRegistryAllocator(), header, bytes) catch {
             self.address_registry.noteFailedInsert();
         };
-        self.markPublishedYoungClassified(header, is_block_cell);
     }
 
     /// Generation shares publication's lifetime: an object is young from the
@@ -4344,7 +4410,7 @@ pub const Registry = struct {
     /// allocation.
     inline fn markPublishedYoung(self: *Registry, header: *GCObjectHeader) void {
         if (comptime !generation_enabled) return;
-        self.markPublishedYoungClassified(header, isBlockCellHeader(header));
+        self.markPublishedYoungClassified(header, isBlockCellHeader(header), .cold);
     }
 
     /// `markPublishedYoung` for callers holding the block-cell answer already.
@@ -4352,7 +4418,12 @@ pub const Registry = struct {
     /// alloc_info (byte 2) of the same prefix word, so deriving the class after
     /// the young store forced a reload of a byte adjacent to a just-issued
     /// store -- see `addInitializedWithSizeNoFail`'s note.
-    inline fn markPublishedYoungClassified(self: *Registry, header: *GCObjectHeader, is_block_cell: bool) void {
+    inline fn markPublishedYoungClassified(
+        self: *Registry,
+        header: *GCObjectHeader,
+        is_block_cell: bool,
+        comptime arm: PublicationArm,
+    ) void {
         if (comptime !generation_enabled) return;
         // §8.6 concurrent mark: "new objects are black-published AND ALL
         // INITIAL STRONG EDGES ARE SHADED". Both halves, and the second is
@@ -4366,24 +4437,16 @@ pub const Registry = struct {
         // Publication queues the object itself instead -- published-grey --
         // and its one trace covers every construction-time edge at once.
         if (comptime concurrent_enabled) {
-            if (self.concurrent.markingActive()) {
-                // Published-grey applies to PLAIN OBJECTS ONLY. An object is
-                // the one kind a published container can hold before its
-                // construction settles, so its initial edges need the push.
-                // Every other kind becomes reachable through a store made
-                // AFTER its construction completes -- a closure adopting its
-                // FunctionBytecode, a frame linking a var_ref -- and that
-                // store's barrier greys it at a moment it is fully traceable;
-                // until then it stays WHITE, protected by its creator's stack
-                // reference, which the remark's conservative rescan honors.
-                // The first version pushed every kind here and re-planted
-                // both mines this file had just cleared: shapes back in the
-                // queue (mutator-freeable), and FunctionBytecode clones
-                // popped mid-construction.
-                if (header.meta().flags.kind == .object) {
-                    self.setHeaderMarked(header);
-                    _ = self.concurrent_mark_queue.pushSingle(header);
-                }
+            if (comptime arm == .fast) {
+                // `publicationNeedsColdArm` already routed an active marker to
+                // the cold twin. This assert is what proves it did -- and it is
+                // spelled with an explicit safety gate because `markingActive`
+                // is an atomic load that ReleaseFast may not delete even with
+                // its result discarded (it left a dead `ldrb wzr` behind).
+                if (comptime std.debug.runtime_safety) std.debug.assert(!self.concurrent.markingActive());
+            } else if (self.concurrent.markingActive()) {
+                @branchHint(.unlikely);
+                self.publishGreyCold(header);
             }
         }
         header.meta().flags.young = true;
@@ -4411,6 +4474,32 @@ pub const Registry = struct {
             // predecessor search (or, worse, make it splice the wrong node).
             std.debug.assert(self.young_predecessor != null);
             self.young_head = header;
+        }
+    }
+
+    /// The published-grey arm of `markPublishedYoungClassified`, outlined.
+    /// `setHeaderMarked` and `pushSingle` are the publication funnel's other
+    /// two calls; concurrent marking is inactive for the overwhelming majority
+    /// of publications, so keeping them inline only bought the hot path a
+    /// callee-saved prologue it never used.
+    noinline fn publishGreyCold(self: *Registry, header: *GCObjectHeader) void {
+        if (comptime !concurrent_enabled) return;
+        // Published-grey applies to PLAIN OBJECTS ONLY. An object is
+        // the one kind a published container can hold before its
+        // construction settles, so its initial edges need the push.
+        // Every other kind becomes reachable through a store made
+        // AFTER its construction completes -- a closure adopting its
+        // FunctionBytecode, a frame linking a var_ref -- and that
+        // store's barrier greys it at a moment it is fully traceable;
+        // until then it stays WHITE, protected by its creator's stack
+        // reference, which the remark's conservative rescan honors.
+        // The first version pushed every kind here and re-planted
+        // both mines this file had just cleared: shapes back in the
+        // queue (mutator-freeable), and FunctionBytecode clones
+        // popped mid-construction.
+        if (header.meta().flags.kind == .object) {
+            self.setHeaderMarked(header);
+            _ = self.concurrent_mark_queue.pushSingle(header);
         }
     }
 
