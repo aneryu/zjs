@@ -316,6 +316,50 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const test_oom_step = b.step("test-oom", "Run allocation-failure injection over the embedded OOM corpus plus recovery canaries (instrumentation tier; runs nightly)");
     test_oom_step.dependOn(&run_oom_tests.step);
 
+    // ===== `zig build check`: semantic analysis, no codegen, no link =====
+    // A `Compile` step whose emitted binary nobody consumes is invoked with
+    // `-fno-emit-bin` (`std.Build.Step.Compile`: `if (compile.generated_bin ==
+    // null) try zig_args.append("-fno-emit-bin")`), which stops the pipeline
+    // after semantic analysis. Measured on this tree at d0159646 (aarch64,
+    // Zig 0.16.0), serially, interleaved A/B/A/B, pinned to one exclusive
+    // 3.9 GHz core -- this machine is big.LITTLE and a compile pinned across
+    // both core types reads ~2x slower and ~10x noisier:
+    //
+    //   emitting        wall 112.6 / 113.0 s   peak rss 8.25 GB
+    //   -fno-emit-bin   wall  54.7 /  55.0 s   peak rss 1.40 GB
+    //
+    // So a little over half of a Debug test compile is LLVM codegen plus the
+    // link of a 245 MB object file, and that half buys 5.9x the peak memory.
+    // An edit that does not compile is rejected in ~55 s instead of ~176 s
+    // (113 s compile + the 63 s test run it never reaches).
+    //
+    // What this DOES check: every comptime assertion the tree owns still runs.
+    // `config_signature.attest`, the opcode declaration ledger's comptime
+    // asserts and the FNABI `@cImport` round-trip are semantic analysis, not
+    // codegen, so they all fire here.
+    //
+    // What it does NOT check: anything a machine-code backend decides, and any
+    // behaviour at all. `@call(.always_tail)` lowering and the `.space`
+    // tombstones are codegen; no test is executed. `check` is therefore a
+    // convenience and never a gate -- no `*-gate` step depends on it, and
+    // `zig build test` remains the checkpoint dependency.
+    //
+    // It shares `unified_tests.root_module` deliberately. A second module
+    // "configured the same way" would be a second thing to keep in sync, and
+    // the entire value of the step is that it analyses exactly what
+    // `zig build test` compiles.
+    const check_unified = b.addTest(.{
+        .name = "check-unified-tests",
+        .root_module = unified_tests.root_module,
+    });
+    forceLlvmBackendOnDebug(check_unified);
+    check_unified.test_runner = .{
+        .path = b.path("tools/timing_test_runner.zig"),
+        .mode = .simple,
+    };
+    const check_step = b.step("check", "Semantic-analysis-only compile of the unified test root: reject a non-compiling edit without codegen, link, or running any test");
+    check_step.dependOn(&check_unified.step);
+
     // User-facing steps to expose
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
 
