@@ -688,3 +688,21 @@ adjacent-line prefetch 把 96B 两条相邻线的账早已摊掉大半。
   major destroy 的 4 倍 ⇒ **EB 停顿问题=minor 频次问题**,新观察项。
 - 口径:deltablue/raytrace/EB 的分位数是 1024 蓄水池保留,跨基准比较须带此列。
   完整三表在 .scratch/quiet-verdict.md(driver 收编前的原始件)。
+
+## 96B→64B 主刀设计过审(2026-08-29;设计文=opus-64b worktree .scratch/obj64-design.md)
+
+- **范围修订**:②Metadata 前缀出线**删出本刀**——16B 尺寸梯下 ①③④ 已到 64B,
+  ②零收益(仍落 64 类)且让 fast-array 48 类→1.5 线/对象(33% trace 人口净负),
+  还要拆屏障折叠+给 363 个 .meta() 点加分支。JSC 自己也留 8B 在 cell 里。
+- **收益下修**:−23% 冷线 → **splay −2.3~3.5% cycles / geomean −0.4~0.6pp**
+  (96B 从 128 对齐基址排,offset mod 128 循环 0/96/64/32,恰 50% 跨 buddy 对
+  ⇒ 7.92M 结构线只有 ~3.96M 可兑现 refill)。**排刀算术已按此更新。**
+- ⭐**分母定义入册**:冷标记线池 = base 19.97M + dense 14.13M = **34.10M**
+  (shape 24.16M 是热的——1,942 个 distinct;property_slots 8.15M 与 base 物理
+  重叠双记)。**拿 66.42M 当分母会把 23% 算成 11.9%。**
+- 阶段:**S0 引擎外 stride 微基准**(预注册 kill line:带 prefetch 臂 cycles<1.5%
+  且 refill<8% ⇒ 线轴判死,④不建,80B 是终点)→ S1(①+③→80B 足迹单变量)
+  → S2(④→64B 线轴)→ S3(②三准入另议)。
+- 材料勘误:「next 是 padding」只对 gc_obj_list 成立(块 cell 的 next 有四个写者,
+  但停车路径实测 0.0066%,替换便宜);保守扫描旧描述已过时;WebKit 现树无
+  MarkedBlock::Footer(已改名 Header 且在块偏移 0)。
