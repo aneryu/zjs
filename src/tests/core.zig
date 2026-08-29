@@ -315,11 +315,11 @@ test "shape-sized trailing property storage grows externally and compacts in pla
     try std.testing.expectEqual(@as(u32, 0), object.weakReferenceCount());
     try std.testing.expect(object.hasTrailingPropertyAllocation());
     try std.testing.expectEqual(
-        object_address + @sizeOf(core.Object),
+        object_address + core.Object.objectBodyBytes(core.class.ids.object),
         @intFromPtr(object.propertyStorageBase()),
     );
     try std.testing.expectEqual(
-        @sizeOf(core.Object) + core.Object.trailing_property_bytes,
+        core.Object.objectBodyBytes(core.class.ids.object) + core.Object.trailing_property_bytes,
         object.allocationSize(rt),
     );
 
@@ -342,7 +342,7 @@ test "shape-sized trailing property storage grows externally and compacts in pla
     try std.testing.expect(!object.propertyStorageIsInline());
     try std.testing.expect(object.hasTrailingPropertyAllocation());
     try std.testing.expectEqual(
-        @sizeOf(core.Object) + core.Object.trailing_property_bytes,
+        core.Object.objectBodyBytes(core.class.ids.object) + core.Object.trailing_property_bytes,
         object.allocationSize(rt),
     );
 
@@ -2387,7 +2387,7 @@ const ObjectConstructionOrderProbe = struct {
 
     fn trigger(raw: ?*anyopaque, size: usize) void {
         const self: *@This() = @ptrCast(@alignCast(raw.?));
-        if (size != @sizeOf(core.Object)) return;
+        if (size != core.Object.objectBodyBytes(core.class.ids.object)) return;
         self.object_boundary_calls += 1;
         // The Shape is fully initialized, hash-visible, and published before
         // the reentrant object-allocation boundary. The boundary roots it
@@ -2772,7 +2772,7 @@ test "class construction pins its definition across reentrant unregister" {
     try std.testing.expect(rt.classes.unregisterPending(class_id));
     try std.testing.expectError(error.InvalidClassId, core.Object.create(rt, class_id, null));
     try std.testing.expectEqual(core.class.PayloadKind.object_data, object.flags.class_payload_kind);
-    try std.testing.expect(object.u.payload != null);
+    try std.testing.expect(object.payloadArm().* != null);
     try std.testing.expect(object.flags.has_exotic_methods);
 
     object.value().free(rt);
@@ -3138,7 +3138,7 @@ test "object destruction runs class payload finalizers synchronously without all
 
     payload_finalizer_calls = 0;
     const payloadless = try core.Object.create(rt, payloadless_id, null);
-    try std.testing.expect(payloadless.u.payload == null);
+    try std.testing.expect(payloadless.payloadArm().* == null);
     const payloadless_alloc_calls = rt.memory.alloc_calls;
     const payloadless_create_calls = rt.memory.create_calls;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
@@ -3162,7 +3162,7 @@ test "object destruction runs class payload finalizers synchronously without all
     const external = try core.Object.create(rt, external_id, null);
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{};
-    external.u.payload = @ptrCast(payload);
+    external.payloadArm().* = @ptrCast(payload);
     const external_alloc_calls = rt.memory.alloc_calls;
     const external_create_calls = rt.memory.create_calls;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
@@ -3720,7 +3720,7 @@ test "runtime cycle removal follows class payload mark hooks" {
     var external = try core.Object.create(rt, external_id, null);
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{ .value = payloadless.value().dup() };
-    external.u.payload = @ptrCast(payload);
+    external.payloadArm().* = @ptrCast(payload);
 
     const key = try rt.internAtom("external");
     defer rt.atoms.free(key);
@@ -3773,7 +3773,7 @@ test "synchronous class payload finalizer drains payload-owned zero-ref children
 
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{ .value = child.value().dup() };
-    wrapper.u.payload = @ptrCast(payload);
+    wrapper.payloadArm().* = @ptrCast(payload);
 
     child.value().free(rt);
     payload_finalizer_calls = 0;
@@ -3813,7 +3813,7 @@ test "synchronous external payload callback pins its generation through reentran
     const child_header = &child.header;
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{ .value = child.value().dup() };
-    wrapper.u.payload = @ptrCast(payload);
+    wrapper.payloadArm().* = @ptrCast(payload);
     child.value().free(rt);
 
     wrapper.value().free(rt);
@@ -3851,7 +3851,7 @@ test "runtime cycle removal synchronously finalizes class payload object slots o
     const payload = try rt.memory.create(TestExternalObjectPayload);
     payload.* = .{ .object = child };
     core.gc.retain(&child.header);
-    external.u.payload = @ptrCast(payload);
+    external.payloadArm().* = @ptrCast(payload);
 
     const key = try rt.internAtom("external");
     defer rt.atoms.free(key);
@@ -3888,9 +3888,9 @@ test "plain objects do not allocate class payload storage" {
     const object = try core.Object.create(rt, core.class.ids.object, null);
     defer object.value().free(rt);
 
-    try std.testing.expectEqual(null, object.u.payload);
+    try std.testing.expectEqual(null, object.payloadArm().*);
     try std.testing.expectEqual(core.class.PayloadKind.none, object.flags.class_payload_kind);
-    try std.testing.expect(@sizeOf(core.Object) <= core.Object.post_a_object_size_baseline / 2);
+    try std.testing.expect(core.Object.objectBodyBytes(core.class.ids.object) <= core.Object.post_a_object_size_baseline / 2);
 }
 
 test "iterator classes store iterator state in class payload" {
@@ -3900,7 +3900,7 @@ test "iterator classes store iterator state in class payload" {
     const iterator = try core.Object.create(rt, core.class.ids.array_iterator, null);
     defer iterator.value().free(rt);
 
-    try std.testing.expect(iterator.u.payload != null);
+    try std.testing.expect(iterator.payloadArm().* != null);
     iterator.iteratorIndexSlot().* = 7;
     iterator.iteratorKindSlot().* = 3;
     try std.testing.expectEqual(@as(usize, 7), iterator.iteratorIndexSlot().*);
@@ -3914,7 +3914,7 @@ test "collection classes store entries in class payload" {
     const map = try core.Object.create(rt, core.class.ids.map, null);
     defer map.value().free(rt);
 
-    try std.testing.expect(map.u.payload != null);
+    try std.testing.expect(map.payloadArm().* != null);
     const entries = try rt.memory.alloc(core.object.CollectionEntry, 1);
     entries[0] = .{ .key = core.JSValue.int32(1), .value = core.JSValue.int32(2), .active = true };
     map.collectionEntriesSlot().* = entries;
@@ -3929,7 +3929,7 @@ test "buffer and typed array state use payload storage" {
 
     const buffer = try core.Object.create(rt, core.class.ids.array_buffer, null);
     defer buffer.value().free(rt);
-    try std.testing.expect(buffer.u.payload != null);
+    try std.testing.expect(buffer.payloadArm().* != null);
     try std.testing.expectEqual(core.class.PayloadKind.buffer, buffer.flags.class_payload_kind);
     const bytes = try rt.memory.alloc(u8, 3);
     @memset(bytes, 9);
@@ -3942,7 +3942,7 @@ test "buffer and typed array state use payload storage" {
     const view = try core.Object.create(rt, core.class.ids.object, null);
     defer view.value().free(rt);
     try view.initTypedArrayView(rt, buffer.value().dup(), 1, 2, 1, 4);
-    try std.testing.expect(view.u.payload != null);
+    try std.testing.expect(view.payloadArm().* != null);
     try std.testing.expectEqual(core.class.PayloadKind.typed_array, view.flags.class_payload_kind);
     try std.testing.expect(view.typedArrayBuffer() != null);
     try std.testing.expectEqual(@as(usize, 1), view.typedArrayByteOffset());
@@ -4349,7 +4349,7 @@ test "bound function state uses payload storage" {
     const bound = try core.Object.create(rt, core.class.ids.bound_function, null);
     defer bound.value().free(rt);
 
-    try std.testing.expect(bound.u.payload != null);
+    try std.testing.expect(bound.payloadArm().* != null);
     try std.testing.expectEqual(core.class.PayloadKind.bound_function, bound.flags.class_payload_kind);
     bound.boundTargetSlot().* = core.JSValue.int32(11);
     bound.boundThisSlot().* = core.JSValue.int32(22);
@@ -4373,7 +4373,7 @@ test "proxy state uses payload storage" {
     defer proxy.value().free(rt);
     try proxy.ensureProxyPayload(rt);
 
-    try std.testing.expect(proxy.u.payload != null);
+    try std.testing.expect(proxy.payloadArm().* != null);
     try std.testing.expectEqual(core.class.PayloadKind.proxy, proxy.flags.class_payload_kind);
     proxy.proxyTargetSlot().* = core.JSValue.int32(55);
     proxy.proxyHandlerSlot().* = core.JSValue.int32(66);
@@ -4394,7 +4394,7 @@ test "mapped arguments state uses inline var-ref storage" {
     refs[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(77));
     refs[1] = try core.VarRef.createClosed(rt, core.JSValue.int32(88));
 
-    try std.testing.expectEqual(@intFromPtr(refs.ptr), @intFromPtr(arguments.u.array.values));
+    try std.testing.expectEqual(@intFromPtr(refs.ptr), @intFromPtr(arguments.arrayArm().*.values));
     try std.testing.expect(arguments.externalClassPayload() == null);
     try std.testing.expectEqual(@as(usize, 2), arguments.argumentsVarRefs().len);
     try std.testing.expectEqual(@as(?i32, 77), arguments.argumentsVarRefs()[0].?.varRefValue().asInt32());
@@ -4468,7 +4468,7 @@ test "object data state uses payload storage" {
     const data = try core.string.String.createAscii(rt, "wrapped");
     defer data.value().free(rt);
 
-    try std.testing.expect(object.u.payload != null);
+    try std.testing.expect(object.payloadArm().* != null);
     try std.testing.expectEqual(core.class.PayloadKind.object_data, object.flags.class_payload_kind);
     object.objectDataSlot().* = data.value().dup();
     try std.testing.expect(object.objectData() != null);
@@ -4481,8 +4481,8 @@ test "array element state uses inline fast-array storage" {
     const array = try core.Object.createArray(rt, null);
     defer array.value().free(rt);
 
-    try std.testing.expectEqual(@as(u32, 0), array.u.array.count);
-    try std.testing.expectEqual(@as(u32, 0), array.u.array.capacity);
+    try std.testing.expectEqual(@as(u32, 0), array.arrayArm().*.count);
+    try std.testing.expectEqual(@as(u32, 0), array.arrayArm().*.capacity);
     try std.testing.expectEqual(core.class.PayloadKind.none, array.flags.class_payload_kind);
     try std.testing.expect(array.flags.fast_array);
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array.arrayElementStorageMode());
@@ -4498,7 +4498,7 @@ test "promise state uses payload storage" {
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     defer promise.value().free(rt);
 
-    try std.testing.expect(promise.u.payload != null);
+    try std.testing.expect(promise.payloadArm().* != null);
     try std.testing.expectEqual(core.class.PayloadKind.promise, promise.flags.class_payload_kind);
     try promise.setPromiseResult(rt, core.JSValue.int32(101));
     try promise.setPromiseReactionCallback(rt, core.JSValue.int32(202));
@@ -4518,7 +4518,7 @@ test "generator state uses payload storage" {
     const generator = try core.Object.create(rt, core.class.ids.generator, null);
     defer generator.value().free(rt);
 
-    try std.testing.expect(generator.u.payload != null);
+    try std.testing.expect(generator.payloadArm().* != null);
     try std.testing.expectEqual(core.class.PayloadKind.generator, generator.flags.class_payload_kind);
     generator.generatorThisSlot().* = core.JSValue.int32(404);
     const args = try rt.memory.alloc(core.JSValue, 1);
@@ -4736,7 +4736,7 @@ test "native function state uses payload storage" {
     const source = try core.string.String.createAscii(rt, "function f(){}");
     defer source.value().free(rt);
 
-    try std.testing.expect(function.u.payload != null);
+    try std.testing.expect(function.payloadArm().* != null);
     try std.testing.expectEqual(core.class.PayloadKind.function, function.flags.class_payload_kind);
     (try function.functionSourceSlot(rt)).* = source.value().dup();
     function.hostFunctionKindSlot().* = 11;
@@ -4855,7 +4855,7 @@ test "module namespace uses shape-only live-binding storage" {
     try namespace.defineModuleVarRefProperty(rt, export_name, cell);
     namespace.preventExtensions();
 
-    try std.testing.expect(namespace.u.payload == null);
+    try std.testing.expect(namespace.payloadArm().* == null);
     try std.testing.expectEqual(core.class.PayloadKind.none, namespace.flags.class_payload_kind);
     try std.testing.expectEqual(@as(usize, 1), namespace.shape_ref.prop_count);
     try std.testing.expectEqual(core.property.Kind.var_ref, namespace.propKindAt(0));
@@ -7943,7 +7943,7 @@ test "object traceChildEdgesFallible propagates class payload visitor errors" {
 
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{ .value = child.value().dup() };
-    obj.u.payload = @ptrCast(payload);
+    obj.payloadArm().* = @ptrCast(payload);
 
     const Visitor = struct {
         err: ?core.gc.CollectionError = null,
@@ -8565,7 +8565,7 @@ test "arguments payload value-slice cycle is released by runtime cycle removal" 
     defer rt.atoms.free(key);
 
     // Pins ArgumentsPayload.var_refs value-slice edges, object.zig:8670-8672.
-    const payload: *core.object.ArgumentsPayload = @ptrCast(@alignCast(arguments.u.payload.?));
+    const payload: *core.object.ArgumentsPayload = @ptrCast(@alignCast(arguments.payloadArm().*.?));
     payload.var_refs = try rt.memory.alloc(core.JSValue, 1);
     payload.var_refs[0] = target.value().dup();
     try target.defineOwnProperty(rt, key, core.Descriptor.data(arguments.value(), true, true, true));
@@ -10358,7 +10358,7 @@ test "class payload function bytecode constant object cycle is released by runti
     const payload = try rt.memory.create(TestExternalPayload);
     fb.cpoolSlice()[0] = captured.value().dup();
     payload.* = .{ .value = core.JSValue.functionBytecode(&fb.header) };
-    external.u.payload = @ptrCast(payload);
+    external.payloadArm().* = @ptrCast(payload);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
     try captured.defineOwnProperty(rt, external_key, core.Descriptor.data(external.value(), true, true, true));

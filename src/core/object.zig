@@ -414,6 +414,55 @@ pub const ObjectStorage = extern union {
     }
 };
 
+/// Widest union arm; the storage a class may actually own is
+/// `unionArmBytes(class_id)` and may be narrower (obj64 knife ③).
+pub const union_arm_max_bytes: usize = @sizeOf(ObjectStorage);
+/// Narrowest arm: the payload word every class owns unconditionally.
+pub const union_arm_min_bytes: usize = @sizeOf(class.Payload);
+
+/// The cell-resident class-data width, in bytes, for `class_id`.
+///
+/// This is the SIZING AUTHORITY for every `.object` allocation and free, and it
+/// MUST be a pure function of `class_id`: the cell width is fixed when the cell
+/// is taken, while `flags.fast_array` is recomputed after construction
+/// (`recomputeArrayStorageMode`), so flags can never be the discriminator.
+/// `class_id` is immutable for the object's whole lifetime.
+///
+/// Wide (24 B) classes are exactly the ones with a non-payload arm:
+///   * dense element storage  -> `DenseArrayStorage` (24 B)
+///   * bytecode callables     -> `BytecodeFunctionStorage` (24 B)
+///   * RegExp                 -> `RegExpPayload` (16 B, rounded to the wide arm
+///     so the knife introduces exactly two widths rather than three)
+///   * String exotics         -> defensive: `classOwnsIndexedElementStorage`
+///     admits `ids.string` to the index-probe path, and no narrowing is worth
+///     the audit of every indexed read reached from there.
+/// Everything else owns only the payload word.
+pub fn unionArmBytes(class_id: class.ClassId) usize {
+    return switch (class_id) {
+        class.ids.array,
+        class.ids.arguments,
+        class.ids.mapped_arguments,
+        class.ids.string,
+        class.ids.regexp,
+        class.ids.bytecode_function,
+        class.ids.generator_function,
+        class.ids.async_function,
+        class.ids.async_generator_function,
+        => union_arm_max_bytes,
+        else => union_arm_min_bytes,
+    };
+}
+
+comptime {
+    // The wide set must cover every arm the union can actually name.
+    std.debug.assert(union_arm_max_bytes == 24);
+    std.debug.assert(union_arm_min_bytes == 8);
+    std.debug.assert(@sizeOf(DenseArrayStorage) <= union_arm_max_bytes);
+    std.debug.assert(@sizeOf(BytecodeFunctionStorage) <= union_arm_max_bytes);
+    std.debug.assert(@sizeOf(RegExpPayload) <= union_arm_max_bytes);
+    std.debug.assert(@sizeOf(class.Payload) <= union_arm_min_bytes);
+}
+
 pub const Object = extern struct {
     pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.object);
     pub const trailing_property_capacity: usize = 2;
@@ -425,9 +474,11 @@ pub const Object = extern struct {
         // be at offset 0. `extern struct` fixes the declared field order while
         // preserving each concrete GC object's natural alignment.
         std.debug.assert(@offsetOf(@This(), "header") == 0);
-        // qjs JSObject is 64B: 16B GC header + 8B metadata + shape/prop
-        // pointers + the 24B class-specific union.
-        std.debug.assert(@sizeOf(@This()) == 56);
+        // The FIXED head. The class-data union is no longer a struct field: it
+        // trails the head at `unionArmBytes(class_id)` bytes wide, so
+        // `@sizeOf(Object)` is the head only and is NEVER an allocation size.
+        // Use `bodyBytes()` / `objectBodyBytes(class_id)` for that.
+        std.debug.assert(@sizeOf(@This()) == 32);
         std.debug.assert(@sizeOf(ObjectFlags) == 2);
         std.debug.assert(@sizeOf(ObjectStorage) == 24);
         const header_bytes = @sizeOf(gc.GCObjectHeader);
@@ -436,14 +487,22 @@ pub const Object = extern struct {
         std.debug.assert(@offsetOf(@This(), "flags") == header_bytes + 6);
         std.debug.assert(@offsetOf(@This(), "shape_ref") == header_bytes + 8);
         std.debug.assert(@offsetOf(@This(), "prop_values") == header_bytes + 16);
-        std.debug.assert(@offsetOf(@This(), "u") == header_bytes + 24);
         std.debug.assert(trailing_property_allocation_bit & weakref_count_mask == 0);
+        // The widest body must still be what the pre-knife fixed struct was, so
+        // no wide class silently changed size class.
+        std.debug.assert(@sizeOf(@This()) + union_arm_max_bytes == 56);
+        // ③'s size-class contract, stated where it is checked rather than in a
+        // comment: the trailing-property form (only `ids.object` may have one)
+        // must land in the 64-byte block class in ReleaseFast, and the dense
+        // arm classes must NOT fall into the 48-byte class (whose 64-byte-grid
+        // phase costs 1.5 lines/object -- a net regression for 33% of the
+        // traced population).
         if (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall) {
             std.debug.assert(trailing_property_bytes == 32);
-            std.debug.assert(@sizeOf(@This()) + trailing_property_bytes == 88);
+            std.debug.assert(objectBodyBytes(class.ids.object) + trailing_property_bytes == 72);
+            std.debug.assert(objectBodyBytes(class.ids.array) == 56);
         } else {
             std.debug.assert(trailing_property_bytes == 48);
-            std.debug.assert(@sizeOf(@This()) + trailing_property_bytes == 104);
         }
     }
     header: gc.GCObjectHeader,
@@ -456,9 +515,126 @@ pub const Object = extern struct {
     // dangling sentinel means no storage; the compiler-proven slots2 form
     // points this same field at the allocation's trailing entries.
     prop_values: [*]property.Entry = emptyPropertyStorageBase(),
-    // qjs 24-byte class union: payload pointer OR dense-array state. All six
-    // construction literals override this; keep omission safe and null-backed.
-    u: ObjectStorage = ObjectStorage.initPayload(null),
+    // NOTE: the qjs 24-byte class union `u` used to live here. It is now a
+    // class-sized trailing region reached through `payloadArm`/`arrayArm`/
+    // `bytecodeArm`/`regexpArm`.
+
+    /// Re-exports so representation snapshots and cross-module checkers can
+    /// name the two arm widths without reaching into the file scope.
+    pub const arm_min_bytes: usize = union_arm_min_bytes;
+    pub const arm_max_bytes: usize = union_arm_max_bytes;
+
+    /// Head + class-data arm. The single authority for how many bytes an
+    /// `.object` allocation owns before its optional trailing property FAM.
+    pub inline fn objectBodyBytes(class_id: class.ClassId) usize {
+        return @sizeOf(Object) + unionArmBytes(class_id);
+    }
+
+    pub inline fn bodyBytes(self: *const Object) usize {
+        return objectBodyBytes(self.class_id);
+    }
+
+    /// Bytes trailing the fixed head: the class-data arm plus the optional
+    /// property FAM. This is the flexible-array size every `.object`
+    /// allocation and every matching free MUST pass, and the reason ③ cannot
+    /// silently corrupt the heap: alloc and free derive it from the same pure
+    /// function of the same immutable `class_id`.
+    pub inline fn objectTailBytes(class_id: class.ClassId, has_trailing_properties: bool) usize {
+        return unionArmBytes(class_id) +
+            @as(usize, if (has_trailing_properties) trailing_property_bytes else 0);
+    }
+
+    inline fn allocCell(rt: *JSRuntime, class_id: class.ClassId, comptime has_trailing: bool) !*Object {
+        return rt.memory.createWithFamNoTrigger(Object, objectTailBytes(class_id, has_trailing));
+    }
+
+    /// `allocCell` for the constructors whose class is a literal. The tail is
+    /// then a compile-time constant, which is what keeps the block heap's
+    /// specialized `allocCellFixedPtr` route (and the comptime slab class)
+    /// alive after ③ turned the cell size into a function of `class_id`.
+    inline fn allocCellConst(
+        rt: *JSRuntime,
+        comptime class_id: class.ClassId,
+        comptime has_trailing: bool,
+    ) !*Object {
+        return rt.memory.createConstFamNoTrigger(Object, comptime objectTailBytes(class_id, has_trailing));
+    }
+
+    inline fn freeRawCellConst(
+        rt: *JSRuntime,
+        self: *Object,
+        comptime class_id: class.ClassId,
+        comptime has_trailing: bool,
+    ) void {
+        rt.memory.destroyConstFam(Object, comptime objectTailBytes(class_id, has_trailing), self);
+    }
+
+    /// Free a cell whose head was never initialized past `class_id`: the
+    /// construction error paths. `has_trailing` is the caller's own allocation
+    /// decision, not a header read.
+    inline fn freeRawCell(rt: *JSRuntime, self: *Object, class_id: class.ClassId, comptime has_trailing: bool) void {
+        rt.memory.destroyWithFam(Object, self, objectTailBytes(class_id, has_trailing));
+    }
+
+    /// The class-data region's base. Always in bounds: every class owns at
+    /// least the payload word.
+    inline fn armBase(self: *const Object) usize {
+        return @intFromPtr(self) + @sizeOf(Object);
+    }
+
+    /// Checker for the silent out-of-bounds class ③ creates: a narrow class
+    /// reaching a wide arm reads (or writes) the trailing property entries or
+    /// the next cell. Compiled away in ReleaseFast, where the arms are already
+    /// proven by the guards this assertion audits.
+    ///
+    /// The kind probe below is deliberately weak and is NOT the guard for the
+    /// second hazard (a by-value `Object`, which copies only the head and
+    /// leaves the arm behind). It was tried as one and measured useless:
+    /// `GcKind.object` is tag 0, so a zeroed stack slot reads back as a valid
+    /// kind and the injected by-value copy sailed through the whole test
+    /// suite. That hazard is caught textually instead, by the
+    /// `Object passed by value` rule in `tools/perf/lint_anti_goals.sh`.
+    inline fn assertArmReadable(self: *const Object, comptime T: type) void {
+        if (comptime !std.debug.runtime_safety) return;
+        std.debug.assert(unionArmBytes(self.class_id) >= @sizeOf(T));
+    }
+
+    /// Word 0 of the class-data region: the out-of-line class payload pointer
+    /// (qjs `JSObject.u.opaque`). Valid for every class.
+    pub inline fn payloadArm(self: *const Object) *class.Payload {
+        return @ptrFromInt(self.armBase());
+    }
+
+    pub inline fn arrayArm(self: *const Object) *DenseArrayStorage {
+        self.assertArmReadable(DenseArrayStorage);
+        return @ptrFromInt(self.armBase());
+    }
+
+    pub inline fn bytecodeArm(self: *const Object) *BytecodeFunctionStorage {
+        self.assertArmReadable(BytecodeFunctionStorage);
+        return @ptrFromInt(self.armBase());
+    }
+
+    pub inline fn regexpArm(self: *const Object) *RegExpPayload {
+        self.assertArmReadable(RegExpPayload);
+        return @ptrFromInt(self.armBase());
+    }
+
+    /// Install the class-data region for a freshly allocated cell.
+    ///
+    /// Replaces the old `ObjectStorage.initPayload` whole-union store: word 0
+    /// takes the payload, and the remaining arm bytes are zeroed only when the
+    /// class actually owns them. Cross-arm checks that read `arrayArm().count`
+    /// on a payload-arm object depend on that zero fill, so it must cover the
+    /// whole owned arm and nothing beyond it.
+    inline fn initArmPayload(self: *Object, payload: class.Payload) void {
+        const arm = unionArmBytes(self.class_id);
+        if (arm > union_arm_min_bytes) {
+            const bytes: [*]u8 = @ptrFromInt(self.armBase() + union_arm_min_bytes);
+            @memset(bytes[0 .. arm - union_arm_min_bytes], 0);
+        }
+        self.payloadArm().* = payload;
+    }
 
     // Trace-only Shape projection stored in the low seven bits of Metadata
     // byte 6. The high bit is leased to the generational write barrier's
@@ -708,15 +884,15 @@ pub const Object = extern struct {
         // fallible payload allocation first, then service the boundary and take
         // the block cell as the final fallible step. No collection can observe
         // a raw, uninitialized cell in between.
-        rt.collectBeforeObjectAllocation(@sizeOf(Object));
-        const self = try rt.memory.createNoTrigger(Object);
-        errdefer rt.memory.destroy(Object, self);
+        const alloc_size = objectBodyBytes(class_id);
+        rt.collectBeforeObjectAllocation(alloc_size);
+        const self = try allocCell(rt, class_id, false);
+        errdefer freeRawCell(rt, self, class_id, false);
 
         const has_exotic_methods = classHasExoticMethods(class_id, definition.has_exotic);
         self.* = .{
             .header = .{},
             .class_id = class_id,
-            .u = ObjectStorage.initPayload(class_payload),
             // These fields become readable only after finishGeneratorShell.
             .shape_ref = undefined,
             .prop_values = emptyPropertyStorageBase(),
@@ -729,6 +905,7 @@ pub const Object = extern struct {
         // finishes. Name this complete payload-only shell explicitly so a
         // collection in that window marks its block cell and payload edges
         // without trying to read the deliberately undefined shape_ref.
+        self.initArmPayload(class_payload);
         rt.gc.addConstructionRoot(&self.header);
         return self;
     }
@@ -743,7 +920,7 @@ pub const Object = extern struct {
         std.debug.assert(final_shape.prop_count == 0);
         self.shape_ref = final_shape;
         rt.gc.removeConstructionRoot(&self.header);
-        rt.registerObjectWithBytes(self, @sizeOf(Object)) catch |err| {
+        rt.registerObjectWithBytes(self, self.bodyBytes()) catch |err| {
             self.header.meta().lifetime.trace.object_shape_summary = 0;
             rt.gc.addConstructionRoot(&self.header);
             self.shape_ref = undefined;
@@ -763,10 +940,10 @@ pub const Object = extern struct {
         std.debug.assert(!self.header.meta().alloc_info.heap_accounted);
         rt.gc.removeConstructionRoot(&self.header);
         if (self.flags.is_borrowed_reference_holder) rt.unregisterBorrowedReferenceHolder(self);
-        freeClassPayloadAllocation(rt, self.u.payload, self.flags.class_payload_kind);
-        self.u.payload = null;
+        freeClassPayloadAllocation(rt, self.payloadArm().*, self.flags.class_payload_kind);
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
-        rt.memory.destroy(Object, self);
+        freeRawCell(rt, self, self.class_id, false);
     }
 
     /// Create a fresh object with the same class, prototype, shared shape, and
@@ -855,21 +1032,18 @@ pub const Object = extern struct {
             property_storage_owned = true;
         }
 
-        const alloc_size = @sizeOf(Object);
+        const alloc_size = objectBodyBytes(class.ids.array);
         rt.collectBeforeObjectAllocation(alloc_size);
-        const self = try rt.memory.createNoTrigger(Object);
+        const self = try allocCellConst(rt, class.ids.array, false);
         var initialized = false;
         errdefer if (initialized)
             destroyFromHeader(rt, &self.header)
         else
-            rt.memory.destroy(Object, self);
+            freeRawCellConst(rt, self, class.ids.array, false);
 
         self.* = .{
             .header = .{},
             .class_id = class.ids.array,
-            // Null first word = qjs empty array pointer + no-payload sentinel;
-            // count/capacity/length stay zero (see createInternal's array arm).
-            .u = ObjectStorage.initPayload(null),
             .flags = .{
                 .class_payload_kind = .none,
                 // qjs JS_CLASS_ARRAY arm sets p->fast_array = 1. qjs's
@@ -885,6 +1059,9 @@ pub const Object = extern struct {
             .shape_ref = initial_shape,
             .prop_values = if (property_capacity == 0) emptyPropertyStorageBase() else property_storage.ptr,
         };
+        // Null first word = qjs empty array pointer + no-payload sentinel;
+        // count/capacity/length stay zero (see createInternal's array arm).
+        self.initArmPayload(null);
         std.debug.assert(!self.isWeakReferenceHolderClass());
         std.debug.assert(self.shape_ref.prop_count == 0);
         property_storage_owned = false;
@@ -942,23 +1119,18 @@ pub const Object = extern struct {
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
 
-        const alloc_size = @sizeOf(Object);
+        const alloc_size = objectBodyBytes(class.ids.object);
         collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size);
-        const self = try rt.memory.createNoTrigger(Object);
+        const self = try allocCellConst(rt, class.ids.object, false);
         var initialized = false;
         errdefer if (initialized)
             destroyFromHeader(rt, &self.header)
         else
-            rt.memory.destroy(Object, self);
+            freeRawCellConst(rt, self, class.ids.object, false);
 
         self.* = .{
             .header = .{},
             .class_id = class.ids.object,
-            // Null payload pointer: the object class's declared `.ordinary`
-            // payload is attached lazily, so a fresh `{}` carries no payload
-            // allocation and `class_payload_kind` stays `.none` (identical to
-            // createInternal's non-allocating ordinary path).
-            .u = ObjectStorage.initPayload(null),
             .flags = .{
                 .class_payload_kind = .none,
                 .has_exotic_methods = false,
@@ -970,6 +1142,11 @@ pub const Object = extern struct {
             // aligned sentinel means no storage yet.
             .prop_values = emptyPropertyStorageBase(),
         };
+        // Null payload pointer: the object class's declared `.ordinary`
+        // payload is attached lazily, so a fresh `{}` carries no payload
+        // allocation and `class_payload_kind` stays `.none` (identical to
+        // createInternal's non-allocating ordinary path).
+        self.initArmPayload(null);
         std.debug.assert(!self.isWeakReferenceHolderClass());
         std.debug.assert(self.shape_ref.prop_count == 0);
         shape_owned = false;
@@ -1017,20 +1194,19 @@ pub const Object = extern struct {
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
 
-        const alloc_size = @sizeOf(Object) + trailing_property_bytes;
+        const alloc_size = objectBodyBytes(class.ids.object) + trailing_property_bytes;
         collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size);
-        const self = try rt.memory.createWithFamNoTrigger(Object, trailing_property_bytes);
+        const self = try allocCellConst(rt, class.ids.object, true);
         var initialized = false;
         errdefer if (initialized)
             destroyFromHeader(rt, &self.header)
         else
-            rt.memory.destroyWithFam(Object, self, trailing_property_bytes);
+            freeRawCellConst(rt, self, class.ids.object, true);
 
         self.* = .{
             .header = .{},
             .weakref_count = trailing_property_allocation_bit,
             .class_id = class.ids.object,
-            .u = ObjectStorage.initPayload(null),
             .flags = .{
                 .class_payload_kind = .none,
                 .has_exotic_methods = false,
@@ -1038,6 +1214,7 @@ pub const Object = extern struct {
             .shape_ref = shape_ref,
             .prop_values = trailingPropertyStorageBase(self),
         };
+        self.initArmPayload(null);
         std.debug.assert(!self.isWeakReferenceHolderClass());
         std.debug.assert(self.shape_ref.prop_count == 0);
         shape_owned = false;
@@ -1197,22 +1374,18 @@ pub const Object = extern struct {
         var property_storage_owned = true;
         errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
 
-        const alloc_size = @sizeOf(Object);
+        const alloc_size = objectBodyBytes(class_id);
         rt.collectBeforeObjectAllocation(alloc_size);
-        const self = try rt.memory.createNoTrigger(Object);
+        const self = try allocCell(rt, class_id, false);
         var initialized = false;
         errdefer if (initialized)
             destroyFromHeader(rt, &self.header)
         else
-            rt.memory.destroy(Object, self);
+            freeRawCell(rt, self, class_id, false);
 
         self.* = .{
             .header = .{},
             .class_id = class_id,
-            // Null first word: qjs's empty fast-array union (quickjs.c:
-            // 5695-5697) doubling as the no-payload sentinel — identical to
-            // createInternal's arguments storage arm.
-            .u = ObjectStorage.initPayload(null),
             .flags = .{
                 .class_payload_kind = .none,
                 .has_exotic_methods = false,
@@ -1220,6 +1393,10 @@ pub const Object = extern struct {
             .shape_ref = initial_shape,
             .prop_values = property_storage.ptr,
         };
+        // Null first word: qjs's empty fast-array union (quickjs.c:
+        // 5695-5697) doubling as the no-payload sentinel — identical to
+        // createInternal's arguments storage arm.
+        self.initArmPayload(null);
         std.debug.assert(!self.isWeakReferenceHolderClass());
         if (comptime builtin.is_test) {
             auditWrite(.memcpy_bulk, .object_prop_values_memcpy);
@@ -1299,19 +1476,18 @@ pub const Object = extern struct {
         // Side storage is the only fallible preparation after retaining the
         // shape. Finish it first, then service the qjs object boundary and take
         // the block cell immediately before initialization/publication.
-        const alloc_size = @sizeOf(Object);
+        const alloc_size = objectBodyBytes(template.class_id);
         rt.collectBeforeObjectAllocation(alloc_size);
-        const self = try rt.memory.createNoTrigger(Object);
+        const self = try allocCell(rt, template.class_id, false);
         var initialized = false;
         errdefer if (initialized)
             destroyFromHeader(rt, &self.header)
         else
-            rt.memory.destroy(Object, self);
+            freeRawCell(rt, self, template.class_id, false);
 
         self.* = .{
             .header = .{},
             .class_id = template.class_id,
-            .u = ObjectStorage.initPayload(null),
             .flags = .{
                 .has_exotic_methods = template.flags.has_exotic_methods,
                 .class_payload_kind = template.flags.class_payload_kind,
@@ -1319,6 +1495,7 @@ pub const Object = extern struct {
             .shape_ref = shape_ref,
             .prop_values = if (property_capacity == 0) emptyPropertyStorageBase() else property_storage.ptr,
         };
+        self.initArmPayload(null);
         switch (entry_ownership) {
             .borrowed => {
                 const props = shape_ref.props();
@@ -1385,7 +1562,7 @@ pub const Object = extern struct {
         else
             construction.definition;
         const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
-        const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
+        const alloc_size = if (inline_layout) |layout| layout.object_size else objectBodyBytes(class_id);
         // qjs shape model (faithful): start from the SHARED, transition-cacheable
         // empty root shape (qjs hash-consed shapes) so objects adding the same
         // properties converge on one shared shape via cached transitions, instead
@@ -1465,7 +1642,7 @@ pub const Object = extern struct {
             // unnecessarily expensive in force-GC builds).
             const bytes = try rt.memory.allocAlignedBytesNoTrigger(layout.allocation_size, layout.allocation_alignment);
             break :blk @as(*Object, @ptrFromInt(@intFromPtr(bytes.ptr) + layout.object_offset));
-        } else try rt.memory.createNoTrigger(Object);
+        } else try allocCell(rt, class_id, false);
         var initialized = false;
         errdefer {
             if (initialized) {
@@ -1474,7 +1651,7 @@ pub const Object = extern struct {
                 const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
                 rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
             } else {
-                rt.memory.destroy(Object, self);
+                freeRawCell(rt, self, class_id, false);
             }
         }
         if (inline_layout) |layout| {
@@ -1482,20 +1659,6 @@ pub const Object = extern struct {
             class_payload_kind = .none;
         }
         const has_exotic_methods = classHasExoticMethods(class_id, definition.has_exotic);
-        const initial_storage: ObjectStorage = switch (class_id) {
-            class.ids.bytecode_function,
-            class.ids.generator_function,
-            class.ids.async_function,
-            class.ids.async_generator_function,
-            => .{ .bytecode_function = .{} },
-            // A null first word is simultaneously qjs's empty array pointer and
-            // the no-payload sentinel. Counts/length stay zero in the remaining
-            // words; Array.prototype may later use the pointer word for its
-            // cold realm metadata while remaining non-dense.
-            class.ids.array, class.ids.arguments, class.ids.mapped_arguments => ObjectStorage.initPayload(null),
-            class.ids.regexp => .{ .regexp = .{} },
-            else => ObjectStorage.initPayload(class_payload),
-        };
         // Reacquire by id after the complete fallible window and validate the
         // pinned generation. An unregister requested mid-construction remains
         // pending; this exact in-flight object atomically transfers that pin to
@@ -1505,7 +1668,6 @@ pub const Object = extern struct {
         self.* = .{
             .header = .{},
             .class_id = class_id,
-            .u = initial_storage,
             .flags = .{
                 .class_payload_kind = class_payload_kind,
                 .has_exotic_methods = has_exotic_methods,
@@ -1513,6 +1675,23 @@ pub const Object = extern struct {
             .shape_ref = shape_ref,
             .prop_values = if (property_capacity == 0) emptyPropertyStorageBase() else property_storage.ptr,
         };
+        switch (class_id) {
+            class.ids.bytecode_function,
+            class.ids.generator_function,
+            class.ids.async_function,
+            class.ids.async_generator_function,
+            => self.bytecodeArm().* = .{},
+            // A null first word is simultaneously qjs's empty array pointer and
+            // the no-payload sentinel. Counts/length stay zero in the remaining
+            // words; Array.prototype may later use the pointer word for its
+            // cold realm metadata while remaining non-dense.
+            class.ids.array,
+            class.ids.arguments,
+            class.ids.mapped_arguments,
+            => self.initArmPayload(null),
+            class.ids.regexp => self.regexpArm().* = .{},
+            else => self.initArmPayload(class_payload),
+        }
         if (property_template) |template| {
             const props = template.shape_ref.props();
             if (comptime builtin.is_test) {
@@ -1732,13 +1911,19 @@ pub const Object = extern struct {
         return inlineClassPayloadLayoutFromScalars(definition.inline_payload_size, definition.inline_payload_align);
     }
 
+    /// Inline class payloads exist only for embedder-registered classes
+    /// (`binding.zig`), which never select a wide union arm, so the body they
+    /// trail is the narrow one. Asserted at every consumer that also holds the
+    /// class id.
+    pub const inline_payload_body_bytes: usize = @sizeOf(Object) + union_arm_min_bytes;
+
     fn inlineClassPayloadLayoutFromScalars(inline_payload_size: u32, inline_payload_align: u16) ?InlineClassPayloadLayout {
         if (inline_payload_size == 0) return null;
         const payload_align = std.mem.Alignment.fromByteUnits(inline_payload_align);
         const object_align = std.mem.Alignment.of(Object);
         const allocation_alignment = if (payload_align.compare(.gt, object_align)) payload_align else object_align;
         const object_offset = std.mem.alignForward(usize, 8, allocation_alignment.toByteUnits());
-        const payload_offset = std.mem.alignForward(usize, @sizeOf(Object), payload_align.toByteUnits());
+        const payload_offset = std.mem.alignForward(usize, inline_payload_body_bytes, payload_align.toByteUnits());
         const object_size = std.math.add(usize, payload_offset, inline_payload_size) catch return null;
         const allocation_size = std.math.add(usize, object_offset, object_size) catch return null;
         return .{
@@ -1777,15 +1962,18 @@ pub const Object = extern struct {
         if (definition.inline_payload_size != 0) {
             return freeInlinePayloadObjectAllocation(rt, self, definition);
         }
+        // ③'s alloc/free size contract: both ends derive the tail from
+        // `unionArmBytes(class_id)`, and `class_id` cannot change after
+        // construction, so the free can never hand the allocator a size the
+        // alloc did not request.
         if (self.hasTrailingPropertyAllocation()) {
             std.debug.assert(self.class_id == class.ids.object);
-            return rt.memory.destroyWithFam(
-                Object,
-                self,
-                trailing_property_bytes,
-            );
+            return rt.memory.destroyConstFam(Object, comptime objectTailBytes(class.ids.object, true), self);
         }
-        rt.memory.destroy(Object, self);
+        if (self.class_id == class.ids.object) {
+            return rt.memory.destroyConstFam(Object, comptime objectTailBytes(class.ids.object, false), self);
+        }
+        rt.memory.destroyWithFam(Object, self, objectTailBytes(self.class_id, false));
     }
 
     noinline fn freeInlinePayloadObjectAllocation(rt: *JSRuntime, self: *Object, definition: class.Table.DefinitionPlan) void {
@@ -1805,13 +1993,16 @@ pub const Object = extern struct {
         comptime std.debug.assert(@bitSizeOf(usize) == 64);
         std.debug.assert(definition.inline_payload_size != 0);
         std.debug.assert(std.math.isPowerOfTwo(definition.inline_payload_align));
-        const payload_offset = std.mem.alignForward(usize, @sizeOf(Object), definition.inline_payload_align);
+        const payload_offset = std.mem.alignForward(usize, inline_payload_body_bytes, definition.inline_payload_align);
         return payload_offset + definition.inline_payload_size;
     }
 
     pub fn allocationSize(self: *const Object, rt: *const JSRuntime) usize {
-        if (inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id))) |layout| return layout.object_size;
-        return @sizeOf(Object) + @as(usize, if (self.hasTrailingPropertyAllocation()) trailing_property_bytes else 0);
+        if (inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id))) |layout| {
+            std.debug.assert(unionArmBytes(self.class_id) == union_arm_min_bytes);
+            return layout.object_size;
+        }
+        return @sizeOf(Object) + objectTailBytes(self.class_id, self.hasTrailingPropertyAllocation());
     }
 
     pub fn createArray(rt: *JSRuntime, prototype: ?*Object) !*Object {
@@ -1907,10 +2098,10 @@ pub const Object = extern struct {
 
     pub fn ensureOrdinaryPayload(self: *Object, rt: *JSRuntime) !*OrdinaryPayload {
         if (self.ordinaryPayload()) |payload| return payload;
-        std.debug.assert(self.u.payload == null);
+        std.debug.assert(self.payloadArm().* == null);
         const payload = try rt.createRuntime(OrdinaryPayload);
         payload.* = .{};
-        self.u.payload = @ptrCast(payload);
+        self.payloadArm().* = @ptrCast(payload);
         self.flags.class_payload_kind = .ordinary;
         return payload;
     }
@@ -1944,7 +2135,7 @@ pub const Object = extern struct {
         std.debug.assert(self.class_id == class.ids.global_object);
         const payload = try rt.createRuntime(GlobalPayload);
         payload.* = .{};
-        self.u.payload = @ptrCast(payload);
+        self.payloadArm().* = @ptrCast(payload);
         self.flags.class_payload_kind = .global;
         return payload;
     }
@@ -1958,18 +2149,18 @@ pub const Object = extern struct {
     }
 
     pub fn installOwnedRealmRef(self: *Object, rt: *JSRuntime, owner: *context_mod.RealmRef) !void {
-        std.debug.assert(self.u.payload == null);
+        std.debug.assert(self.payloadArm().* == null);
         std.debug.assert(owner.borrow() != null);
         const payload = try rt.createRuntime(RealmRecordPayload);
         payload.* = .{ .realm = owner.* };
         owner.* = .{};
-        self.u.payload = @ptrCast(payload);
+        self.payloadArm().* = @ptrCast(payload);
         self.flags.class_payload_kind = .realm_record;
     }
 
     pub fn realmContext(self: *const Object) ?*context_mod.RealmContext {
         if (self.flags.class_payload_kind != .realm_record) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         const payload: *const RealmRecordPayload = @ptrCast(@alignCast(ptr));
         return payload.realm.borrow();
     }
@@ -1978,7 +2169,7 @@ pub const Object = extern struct {
 
     inline fn bytecodeFunctionAux(self: *Object) ?*BytecodeFunctionAux {
         if (!class.isBytecodeFunctionClass(self.class_id)) return null;
-        const stored = self.u.bytecode_function.home_or_aux orelse return null;
+        const stored = self.bytecodeArm().*.home_or_aux orelse return null;
         const raw = @intFromPtr(stored);
         if ((raw & bytecode_function_aux_tag) == 0) return null;
         return @ptrFromInt(raw & ~bytecode_function_aux_tag);
@@ -1986,7 +2177,7 @@ pub const Object = extern struct {
 
     inline fn bytecodeFunctionAuxConst(self: *const Object) ?*const BytecodeFunctionAux {
         if (!class.isBytecodeFunctionClass(self.class_id)) return null;
-        const stored = self.u.bytecode_function.home_or_aux orelse return null;
+        const stored = self.bytecodeArm().*.home_or_aux orelse return null;
         const raw = @intFromPtr(stored);
         if ((raw & bytecode_function_aux_tag) == 0) return null;
         return @ptrFromInt(raw & ~bytecode_function_aux_tag);
@@ -2001,11 +2192,11 @@ pub const Object = extern struct {
             if (self.bytecodeFunctionAux()) |aux| return &aux.rare;
             const aux = try rt.createRuntime(BytecodeFunctionAux);
             aux.* = .{};
-            if (self.u.bytecode_function.home_or_aux) |stored| {
+            if (self.bytecodeArm().*.home_or_aux) |stored| {
                 std.debug.assert((@intFromPtr(stored) & bytecode_function_aux_tag) == 0);
                 aux.home_object = @ptrCast(@alignCast(stored));
             }
-            self.u.bytecode_function.home_or_aux = encodeBytecodeFunctionAux(aux);
+            self.bytecodeArm().*.home_or_aux = encodeBytecodeFunctionAux(aux);
             return &aux.rare;
         }
         const payload = self.functionPayload() orelse {
@@ -2032,9 +2223,26 @@ pub const Object = extern struct {
     }
 
     pub fn installExternalClassPayload(self: *Object, payload: *anyopaque) void {
-        std.debug.assert(self.u.payload == null);
-        self.u.payload = payload;
+        std.debug.assert(self.payloadArm().* == null);
+        self.payloadArm().* = payload;
         self.flags.class_payload_kind = .none;
+    }
+
+    /// The proof that word 0 really is a payload pointer and nothing else in
+    /// the class-data region is live.
+    ///
+    /// Before obj64 ③ this was three "union bytes 8..24 are zero" assertions.
+    /// The arm is now class-sized, so for a narrow class those bytes are NOT
+    /// this object's memory and reading them is the out-of-bounds the knife
+    /// introduces: the statement to check is the ARM WIDTH. Wide-armed classes
+    /// that still reach here (String exotics keep a 24-byte arm defensively)
+    /// keep the original zero proof, so no coverage is lost.
+    inline fn assertOnlyPayloadWordIsLive(self: *const Object) void {
+        if (comptime !std.debug.runtime_safety) return;
+        if (unionArmBytes(self.class_id) == union_arm_min_bytes) return;
+        std.debug.assert(self.arrayArm().*.count == 0);
+        std.debug.assert(self.arrayArm().*.capacity == 0);
+        std.debug.assert(self.arrayArm().*.length == 0);
     }
 
     pub fn externalClassPayload(self: *Object) ?*anyopaque {
@@ -2043,21 +2251,17 @@ pub const Object = extern struct {
         // eligible because their word 0 really is the payload pointer. A new
         // inline/dense arm must join this exclusion before storing union data.
         if (self.isArray() or self.flags.fast_array or self.class_id == class.ids.mapped_arguments or self.flags.class_payload_kind != .none) return null;
-        std.debug.assert(self.u.array.count == 0);
-        std.debug.assert(self.u.array.capacity == 0);
-        std.debug.assert(self.u.array.length == 0);
-        std.debug.assert(self.u.payload == null or @intFromPtr(self.u.payload.?) != @alignOf(JSValue));
-        return self.u.payload;
+        assertOnlyPayloadWordIsLive(self);
+        std.debug.assert(self.payloadArm().* == null or @intFromPtr(self.payloadArm().*.?) != @alignOf(JSValue));
+        return self.payloadArm().*;
     }
 
     pub fn externalClassPayloadConst(self: *const Object) ?*anyopaque {
         // Keep this exclusion and its Debug proof paired with the mutable arm.
         if (self.isArray() or self.flags.fast_array or self.class_id == class.ids.mapped_arguments or self.flags.class_payload_kind != .none) return null;
-        std.debug.assert(self.u.array.count == 0);
-        std.debug.assert(self.u.array.capacity == 0);
-        std.debug.assert(self.u.array.length == 0);
-        std.debug.assert(self.u.payload == null or @intFromPtr(self.u.payload.?) != @alignOf(JSValue));
-        return self.u.payload;
+        assertOnlyPayloadWordIsLive(self);
+        std.debug.assert(self.payloadArm().* == null or @intFromPtr(self.payloadArm().*.?) != @alignOf(JSValue));
+        return self.payloadArm().*;
     }
 
     pub fn cachedFunctionProtoSlot(self: *Object, rt: *JSRuntime) !*?*Object {
@@ -2193,7 +2397,7 @@ pub const Object = extern struct {
 
         const object_shape = self.shape_ref;
         const old_storage = self.prop_values;
-        const alloc_size = @sizeOf(Object) + @as(usize, if (has_trailing_allocation) trailing_property_bytes else 0);
+        const alloc_size = @sizeOf(Object) + objectTailBytes(self.class_id, has_trailing_allocation);
         const old_property_capacity = self.propertyStorageCapacity();
         const old_storage_entries = self.propertyStorageEntries(old_property_capacity);
         const old_properties = old_storage_entries[0..object_shape.prop_count];
@@ -2232,14 +2436,13 @@ pub const Object = extern struct {
             rt.gc.deferCycleStructFree(&self.header);
             return;
         }
+        // `destroyFromHeader` enters this arm only for `class.ids.object`, so
+        // both tails are compile-time constants.
+        std.debug.assert(self.class_id == class.ids.object);
         if (has_trailing_allocation) {
-            rt.memory.destroyWithFam(
-                Object,
-                self,
-                trailing_property_bytes,
-            );
+            rt.memory.destroyConstFam(Object, comptime objectTailBytes(class.ids.object, true), self);
         } else {
-            rt.memory.destroy(Object, self);
+            rt.memory.destroyConstFam(Object, comptime objectTailBytes(class.ids.object, false), self);
         }
     }
 
@@ -2279,7 +2482,7 @@ pub const Object = extern struct {
         const alloc_size = if (has_inline_payload)
             inlineClassObjectSize(definition)
         else
-            @sizeOf(Object) + @as(usize, if (self.hasTrailingPropertyAllocation()) trailing_property_bytes else 0);
+            @sizeOf(Object) + objectTailBytes(destroying_class_id, self.hasTrailingPropertyAllocation());
         // These intrusive/side-table links borrow storage owned by class
         // payloads, so detach them before that storage is destroyed. Heap-list
         // unlink and live-byte accounting deliberately remain at the qjs
@@ -2357,7 +2560,7 @@ pub const Object = extern struct {
         // release (destroyOrdinaryPayload's own first check).
         const payload_kind = self.flags.class_payload_kind;
         const payload_dead = payload_kind == .none or
-            (payload_kind == .ordinary and self.u.payload == null);
+            (payload_kind == .ordinary and self.payloadArm().* == null);
         if (!payload_dead) switch (payload_kind) {
             .none => unreachable,
             .ordinary => self.destroyOrdinaryPayload(rt),
@@ -2487,9 +2690,14 @@ pub const Object = extern struct {
             }
             if (self.flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
             if (self.hasTrailingPropertyAllocation()) {
-                return rt.memory.destroyWithFam(Object, self, trailing_property_bytes);
+                return rt.memory.destroyConstFam(Object, comptime objectTailBytes(class.ids.object, true), self);
             }
-            rt.memory.destroy(Object, self);
+            // The overwhelmingly common Pass-B corpse is a plain object; give
+            // it the constant tail and leave the class switch to the rest.
+            if (class_id == class.ids.object) {
+                return rt.memory.destroyConstFam(Object, comptime objectTailBytes(class.ids.object, false), self);
+            }
+            rt.memory.destroyWithFam(Object, self, objectTailBytes(class_id, false));
             return;
         }
         const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
@@ -2520,18 +2728,18 @@ pub const Object = extern struct {
             generation,
             @ptrCast(rt),
             @ptrCast(self),
-            &self.u.payload,
+            &self.payloadArm().*,
         );
         std.debug.assert(finalized);
         if (inline_payload) {
             // The callback owns only the contents; the bytes are part of the
             // Object allocation and are reclaimed by freeObjectAllocation.
-            self.u.payload = null;
+            self.payloadArm().* = null;
             self.flags.class_payload_kind = .none;
             return;
         }
-        var remaining_payload = self.u.payload;
-        self.u.payload = null;
+        var remaining_payload = self.payloadArm().*;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         destroyDetachedClassPayload(rt, self.class_id, payload_kind, &remaining_payload);
     }
@@ -2842,7 +3050,7 @@ pub const Object = extern struct {
 
     pub const post_a_object_size_baseline: usize = 192;
     comptime {
-        std.debug.assert(@sizeOf(Object) <= post_a_object_size_baseline / 2);
+        std.debug.assert(@sizeOf(Object) + union_arm_max_bytes <= post_a_object_size_baseline / 2);
     }
 
     // ===== iterator* =====
@@ -2869,11 +3077,11 @@ pub const Object = extern struct {
 
     pub fn arrayLengthSlot(self: *Object) *u32 {
         std.debug.assert(self.isArray());
-        return &self.u.array.length;
+        return &self.arrayArm().*.length;
     }
 
     pub fn arrayLength(self: *const Object) u32 {
-        return if (self.isArray()) self.u.array.length else 0;
+        return if (self.isArray()) self.arrayArm().*.length else 0;
     }
 
     /// Set the JS-observable `.length` only. Faithful to qjs `set_array_length`
@@ -2883,7 +3091,7 @@ pub const Object = extern struct {
     /// also shrink the dense extent pair this with `truncateArrayElements`.
     pub fn setArrayLength(self: *Object, length: u32) void {
         std.debug.assert(self.isArray());
-        self.u.array.length = length;
+        self.arrayArm().*.length = length;
     }
 
     pub fn hasExoticMethods(self: *const Object) bool {
@@ -2901,7 +3109,7 @@ pub const Object = extern struct {
         // cold ordinary payload used while standard globals are bootstrapped.
         return !self.flags.fast_array and
             self.flags.class_payload_kind == .ordinary and
-            self.u.array.capacity == 0;
+            self.arrayArm().*.capacity == 0;
     }
 
     pub inline fn isProxy(self: *const Object) bool {
@@ -3610,10 +3818,10 @@ pub const Object = extern struct {
 
     pub fn ensureVarRefPayload(self: *Object, rt: *JSRuntime) !*VarRefPayload {
         if (self.varRefPayload()) |payload| return payload;
-        std.debug.assert(self.u.payload == null);
+        std.debug.assert(self.payloadArm().* == null);
         const payload = try rt.createRuntime(VarRefPayload);
         payload.* = .{};
-        self.u.payload = @ptrCast(payload);
+        self.payloadArm().* = @ptrCast(payload);
         self.flags.class_payload_kind = .var_ref;
         return payload;
     }
@@ -3764,7 +3972,7 @@ pub const Object = extern struct {
         if (self.typedArrayPayload() != null) return;
         const payload = try rt.createRuntime(TypedArrayPayload);
         payload.* = .{};
-        self.u.payload = @ptrCast(payload);
+        self.payloadArm().* = @ptrCast(payload);
         self.flags.class_payload_kind = .typed_array;
     }
 
@@ -4183,7 +4391,7 @@ pub const Object = extern struct {
         if (self.proxyPayload() != null) return;
         const payload = try rt.createRuntime(ProxyPayload);
         payload.* = .{};
-        self.u.payload = @ptrCast(payload);
+        self.payloadArm().* = @ptrCast(payload);
         self.flags.class_payload_kind = .proxy;
     }
 
@@ -4218,14 +4426,14 @@ pub const Object = extern struct {
     pub fn allocateMappedArgumentsVarRefsAssumingEmpty(self: *Object, rt: *JSRuntime, count: usize) ![]?*var_ref_mod.VarRef {
         std.debug.assert(self.class_id == class.ids.mapped_arguments);
         std.debug.assert(self.flags.class_payload_kind == .none);
-        std.debug.assert(self.u.array.count == 0 and self.u.array.capacity == 0);
+        std.debug.assert(self.arrayArm().*.count == 0 and self.arrayArm().*.capacity == 0);
         if (count == 0) return &.{};
 
         const backing = try rt.memory.alloc(JSValue, count);
-        self.u.array.values = backing.ptr;
-        self.u.array.count = @intCast(count);
-        self.u.array.capacity = @intCast(count);
-        self.u.array.length = @intCast(count);
+        self.arrayArm().*.values = backing.ptr;
+        self.arrayArm().*.count = @intCast(count);
+        self.arrayArm().*.capacity = @intCast(count);
+        self.arrayArm().*.length = @intCast(count);
         self.markIndexedProperties(rt);
 
         const refs = self.argumentsVarRefsMut();
@@ -4240,9 +4448,9 @@ pub const Object = extern struct {
     /// arguments object that lost its dense representation falls back.
     pub fn unmappedArgumentsDenseValues(self: *const Object) []const JSValue {
         if (self.class_id != class.ids.arguments or !self.flags.fast_array) return &.{};
-        if (self.u.array.count == 0) return &.{};
-        std.debug.assert(self.u.array.capacity >= self.u.array.count);
-        return self.u.array.values[0..@as(usize, @intCast(self.u.array.count))];
+        if (self.arrayArm().*.count == 0) return &.{};
+        std.debug.assert(self.arrayArm().*.capacity >= self.arrayArm().*.count);
+        return self.arrayArm().*.values[0..@as(usize, @intCast(self.arrayArm().*.count))];
     }
 
     /// Var-ref window of a MAPPED arguments object whose every index is still
@@ -4265,19 +4473,19 @@ pub const Object = extern struct {
     }
 
     pub fn argumentsVarRefs(self: *const Object) []const ?*var_ref_mod.VarRef {
-        if (self.class_id != class.ids.mapped_arguments or self.u.array.count == 0) return &.{};
-        std.debug.assert(self.u.array.capacity >= self.u.array.count);
-        const backing = self.u.array.values[0..@as(usize, @intCast(self.u.array.capacity))];
+        if (self.class_id != class.ids.mapped_arguments or self.arrayArm().*.count == 0) return &.{};
+        std.debug.assert(self.arrayArm().*.capacity >= self.arrayArm().*.count);
+        const backing = self.arrayArm().*.values[0..@as(usize, @intCast(self.arrayArm().*.capacity))];
         const cells = std.mem.bytesAsSlice(?*var_ref_mod.VarRef, std.mem.sliceAsBytes(backing));
-        return cells[0..@as(usize, @intCast(self.u.array.count))];
+        return cells[0..@as(usize, @intCast(self.arrayArm().*.count))];
     }
 
     pub fn argumentsVarRefsMut(self: *Object) []?*var_ref_mod.VarRef {
-        if (self.class_id != class.ids.mapped_arguments or self.u.array.count == 0) return &.{};
-        std.debug.assert(self.u.array.capacity >= self.u.array.count);
-        const backing = self.u.array.values[0..@as(usize, @intCast(self.u.array.capacity))];
+        if (self.class_id != class.ids.mapped_arguments or self.arrayArm().*.count == 0) return &.{};
+        std.debug.assert(self.arrayArm().*.capacity >= self.arrayArm().*.count);
+        const backing = self.arrayArm().*.values[0..@as(usize, @intCast(self.arrayArm().*.capacity))];
         const cells = std.mem.bytesAsSlice(?*var_ref_mod.VarRef, std.mem.sliceAsBytes(backing));
-        return cells[0..@as(usize, @intCast(self.u.array.count))];
+        return cells[0..@as(usize, @intCast(self.arrayArm().*.count))];
     }
 
     pub fn objectDataSlot(self: *Object) *?JSValue {
@@ -4335,26 +4543,26 @@ pub const Object = extern struct {
     }
 
     pub fn arrayElements(self: *const Object) []JSValue {
-        if (!self.flags.fast_array or self.u.array.count == 0) return &.{};
-        std.debug.assert(self.u.array.capacity >= self.u.array.count);
-        std.debug.assert(self.u.array.length >= self.u.array.count);
-        return self.u.array.values[0..@as(usize, @intCast(self.u.array.count))];
+        if (!self.flags.fast_array or self.arrayArm().*.count == 0) return &.{};
+        std.debug.assert(self.arrayArm().*.capacity >= self.arrayArm().*.count);
+        std.debug.assert(self.arrayArm().*.length >= self.arrayArm().*.count);
+        return self.arrayArm().*.values[0..@as(usize, @intCast(self.arrayArm().*.count))];
     }
 
     fn arrayElementsMut(self: *Object) []JSValue {
-        if (!self.flags.fast_array or self.u.array.count == 0) return &.{};
-        std.debug.assert(self.u.array.capacity >= self.u.array.count);
-        std.debug.assert(self.u.array.length >= self.u.array.count);
-        return self.u.array.values[0..@as(usize, @intCast(self.u.array.count))];
+        if (!self.flags.fast_array or self.arrayArm().*.count == 0) return &.{};
+        std.debug.assert(self.arrayArm().*.capacity >= self.arrayArm().*.count);
+        std.debug.assert(self.arrayArm().*.length >= self.arrayArm().*.count);
+        return self.arrayArm().*.values[0..@as(usize, @intCast(self.arrayArm().*.count))];
     }
 
     fn allocatedArrayElements(self: *Object) []JSValue {
-        if (self.u.array.capacity == 0) return &.{};
-        return self.u.array.values[0..@as(usize, @intCast(self.u.array.capacity))];
+        if (self.arrayArm().*.capacity == 0) return &.{};
+        return self.arrayArm().*.values[0..@as(usize, @intCast(self.arrayArm().*.capacity))];
     }
 
     pub fn arrayElementsCapacity(self: *const Object) usize {
-        return @intCast(self.u.array.capacity);
+        return @intCast(self.arrayArm().*.capacity);
     }
 
     pub fn isFastArray(self: *const Object) bool {
@@ -4362,22 +4570,22 @@ pub const Object = extern struct {
     }
 
     pub fn isFastArrayIndexInBounds(self: *const Object, index: u32) bool {
-        return self.flags.fast_array and index < self.u.array.count;
+        return self.flags.fast_array and index < self.arrayArm().*.count;
     }
 
     pub fn fastArrayElementAt(self: *const Object, index: u32) JSValue {
         std.debug.assert(self.isFastArrayIndexInBounds(index));
-        return self.u.array.values[@intCast(index)];
+        return self.arrayArm().*.values[@intCast(index)];
     }
 
     pub fn fastArrayElementSlot(self: *Object, index: u32) *JSValue {
         std.debug.assert(self.isFastArrayIndexInBounds(index));
-        return &self.u.array.values[@intCast(index)];
+        return &self.arrayArm().*.values[@intCast(index)];
     }
 
     pub fn fastArrayElementDup(self: *const Object, index: u32) ?JSValue {
         if (!self.isFastArrayIndexInBounds(index)) return null;
-        return self.u.array.values[@intCast(index)].dup();
+        return self.arrayArm().*.values[@intCast(index)].dup();
     }
 
     /// Indexed read of a MAPPED arguments object — qjs JS_GetPropertyValue's
@@ -4413,7 +4621,7 @@ pub const Object = extern struct {
 
     pub fn setFastArrayElementDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
         if (!self.isFastArrayIndexInBounds(index)) return false;
-        const slot = &self.u.array.values[@intCast(index)];
+        const slot = &self.arrayArm().*.values[@intCast(index)];
         const old = slot.*;
         if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
@@ -4433,9 +4641,9 @@ pub const Object = extern struct {
         if (!self.isFastArrayIndexInBounds(index)) return false;
         if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
-            replaceOwnedValue(rt, &self.u.array.values[@intCast(index)], new_value);
+            replaceOwnedValue(rt, &self.arrayArm().*.values[@intCast(index)], new_value);
         } else {
-            replaceOwnedValue(rt, &self.u.array.values[@intCast(index)], new_value);
+            replaceOwnedValue(rt, &self.arrayArm().*.values[@intCast(index)], new_value);
         }
         rt.gc.generationalBarrier(&self.header, new_value.cycleMarkHeader());
         return true;
@@ -4447,7 +4655,7 @@ pub const Object = extern struct {
     /// the caller.
     pub fn setFastArrayElementOwnedDuringActiveBytecode(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
         if (!self.isFastArrayIndexInBounds(index)) return false;
-        const slot = &self.u.array.values[@intCast(index)];
+        const slot = &self.arrayArm().*.values[@intCast(index)];
         const old_value = slot.*;
         if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
@@ -4462,13 +4670,13 @@ pub const Object = extern struct {
 
     pub fn adoptDenseArrayElementsAssumingEmpty(self: *Object, elements: []JSValue) void {
         std.debug.assert(self.isArray());
-        std.debug.assert(self.u.array.count == 0);
-        std.debug.assert(self.u.array.capacity == 0);
-        self.u.array.values = elements.ptr;
-        self.u.array.count = @intCast(elements.len);
-        self.u.array.capacity = @intCast(elements.len);
+        std.debug.assert(self.arrayArm().*.count == 0);
+        std.debug.assert(self.arrayArm().*.capacity == 0);
+        self.arrayArm().*.values = elements.ptr;
+        self.arrayArm().*.count = @intCast(elements.len);
+        self.arrayArm().*.capacity = @intCast(elements.len);
         // Fully-dense adoption: the logical length equals the dense extent.
-        self.u.array.length = @intCast(elements.len);
+        self.arrayArm().*.length = @intCast(elements.len);
         self.flags.fast_array = true;
     }
 
@@ -4480,44 +4688,44 @@ pub const Object = extern struct {
         std.debug.assert(self.class_id == class.ids.arguments);
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.flags.class_payload_kind == .none);
-        std.debug.assert(self.u.array.count == 0);
-        std.debug.assert(self.u.array.capacity == 0);
-        if (elements.len != 0) self.u.array.values = elements.ptr;
-        self.u.array.count = @intCast(elements.len);
-        self.u.array.capacity = @intCast(elements.len);
-        self.u.array.length = @intCast(elements.len);
+        std.debug.assert(self.arrayArm().*.count == 0);
+        std.debug.assert(self.arrayArm().*.capacity == 0);
+        if (elements.len != 0) self.arrayArm().*.values = elements.ptr;
+        self.arrayArm().*.count = @intCast(elements.len);
+        self.arrayArm().*.capacity = @intCast(elements.len);
+        self.arrayArm().*.length = @intCast(elements.len);
         self.flags.fast_array = true;
         if (elements.len != 0) self.markIndexedProperties(rt);
     }
 
     pub fn clearFastArray(self: *Object) void {
         if (!self.isArray()) return;
-        std.debug.assert(self.u.array.capacity == 0);
+        std.debug.assert(self.arrayArm().*.capacity == 0);
         self.flags.fast_array = false;
     }
 
     pub fn setArraySparseLength(self: *Object, length: u32) void {
         std.debug.assert(self.isArray());
-        std.debug.assert(self.u.array.capacity == 0);
+        std.debug.assert(self.arrayArm().*.capacity == 0);
         // Sparse arrays carry no dense extent: count is 0, length is the
         // JS-observable `.length`. (Invariant 5: sparse => array_count == 0.)
-        self.u.array.count = 0;
-        self.u.array.length = length;
+        self.arrayArm().*.count = 0;
+        self.arrayArm().*.length = length;
         self.flags.fast_array = false;
     }
 
     pub fn resetFastArrayEmpty(self: *Object) void {
         std.debug.assert(self.isArray());
-        std.debug.assert(self.u.array.capacity == 0);
-        self.u.array.count = 0;
-        self.u.array.length = 0;
+        std.debug.assert(self.arrayArm().*.capacity == 0);
+        self.arrayArm().*.count = 0;
+        self.arrayArm().*.length = 0;
         self.flags.fast_array = true;
     }
 
     pub fn takeLastFastArrayElement(self: *Object) ?JSValue {
-        if (!self.isArray() or !self.flags.fast_array or self.u.array.count == 0) return null;
-        self.u.array.count -= 1;
-        return self.u.array.values[@intCast(self.u.array.count)];
+        if (!self.isArray() or !self.flags.fast_array or self.arrayArm().*.count == 0) return null;
+        self.arrayArm().*.count -= 1;
+        return self.arrayArm().*.values[@intCast(self.arrayArm().*.count)];
     }
 
     /// Pop the last element of a FULLY DENSE fast array (count == length),
@@ -4527,20 +4735,20 @@ pub const Object = extern struct {
     /// Mirrors the pop fast path's "delete last, length-=1" pair.
     pub fn takeLastFullyDenseFastArrayElement(self: *Object) ?JSValue {
         if (!self.isArray() or !self.flags.fast_array) return null;
-        if (self.u.array.count == 0 or self.u.array.count != self.u.array.length) return null;
-        self.u.array.count -= 1;
-        self.u.array.length -= 1;
-        return self.u.array.values[@intCast(self.u.array.count)];
+        if (self.arrayArm().*.count == 0 or self.arrayArm().*.count != self.arrayArm().*.length) return null;
+        self.arrayArm().*.count -= 1;
+        self.arrayArm().*.length -= 1;
+        return self.arrayArm().*.values[@intCast(self.arrayArm().*.count)];
     }
 
     pub fn borrowLastFastArrayElement(self: *Object) ?*JSValue {
-        if (!self.isArray() or !self.flags.fast_array or self.u.array.count == 0) return null;
-        return &self.u.array.values[@intCast(self.u.array.count - 1)];
+        if (!self.isArray() or !self.flags.fast_array or self.arrayArm().*.count == 0) return null;
+        return &self.arrayArm().*.values[@intCast(self.arrayArm().*.count - 1)];
     }
 
     pub fn shrinkFastArrayByOne(self: *Object) void {
-        std.debug.assert(self.isArray() and self.flags.fast_array and self.u.array.count != 0);
-        self.u.array.count -= 1;
+        std.debug.assert(self.isArray() and self.flags.fast_array and self.arrayArm().*.count != 0);
+        self.arrayArm().*.count -= 1;
     }
 
     fn destroyArrayElements(self: *Object, rt: *JSRuntime) void {
@@ -4557,38 +4765,38 @@ pub const Object = extern struct {
                 cell.release(rt);
             }
             const allocated = self.allocatedArrayElements();
-            self.u.array.count = 0;
-            self.u.array.capacity = 0;
-            self.u.array.length = 0;
+            self.arrayArm().*.count = 0;
+            self.arrayArm().*.capacity = 0;
+            self.arrayArm().*.length = 0;
             if (allocated.len != 0) rt.memory.free(JSValue, allocated);
             return;
         }
-        if (!self.flags.fast_array and self.u.array.capacity == 0) return;
+        if (!self.flags.fast_array and self.arrayArm().*.capacity == 0) return;
         if (self.flags.fast_array) {
             var index: usize = 0;
-            const count: usize = @intCast(self.u.array.count);
-            while (index < count) : (index += 1) self.u.array.values[index].free(rt);
+            const count: usize = @intCast(self.arrayArm().*.count);
+            while (index < count) : (index += 1) self.arrayArm().*.values[index].free(rt);
         } else {
-            std.debug.assert(self.u.array.capacity == 0);
+            std.debug.assert(self.arrayArm().*.capacity == 0);
         }
         const allocated = self.allocatedArrayElements();
-        self.u.array.count = 0;
-        self.u.array.capacity = 0;
-        self.u.array.length = 0;
+        self.arrayArm().*.count = 0;
+        self.arrayArm().*.capacity = 0;
+        self.arrayArm().*.length = 0;
         self.flags.fast_array = false;
         if (allocated.len != 0) rt.memory.free(JSValue, allocated);
     }
 
     fn freeArrayElementBufferAfterMove(self: *Object, rt: *JSRuntime) void {
-        std.debug.assert(!self.flags.fast_array or self.u.array.count == 0);
+        std.debug.assert(!self.flags.fast_array or self.arrayArm().*.count == 0);
         const allocated = self.allocatedArrayElements();
-        self.u.array.capacity = 0;
+        self.arrayArm().*.capacity = 0;
         self.flags.fast_array = false;
         if (allocated.len != 0) rt.memory.free(JSValue, allocated);
     }
 
     fn ensureArrayBufferCapacity(self: *Object, rt: *JSRuntime, needed_len: usize) !void {
-        const old_capacity: usize = @intCast(self.u.array.capacity);
+        const old_capacity: usize = @intCast(self.arrayArm().*.capacity);
         if (needed_len <= old_capacity) return;
         // Mirror QuickJS expand_fast_array (quickjs.c:9530):
         //   new_size = max_int(new_len, size * 3 / 2)
@@ -4610,31 +4818,31 @@ pub const Object = extern struct {
             // allocator, and some allocators decline relocation; keep the
             // copy/free fallback for those cases.
             if (try rt.remapRuntime(JSValue, old_allocated, next_capacity)) |next| {
-                self.u.array.values = next.ptr;
-                self.u.array.capacity = @intCast(next_capacity);
+                self.arrayArm().*.values = next.ptr;
+                self.arrayArm().*.capacity = @intCast(next_capacity);
                 return;
             }
         }
         const next = try rt.allocRuntime(JSValue, next_capacity);
         errdefer rt.memory.free(JSValue, next);
-        if (self.flags.fast_array and self.u.array.count != 0) {
-            const count: usize = @intCast(self.u.array.count);
+        if (self.flags.fast_array and self.arrayArm().*.count != 0) {
+            const count: usize = @intCast(self.arrayArm().*.count);
             if (comptime builtin.is_test) {
                 auditWrite(.memcpy_bulk, .object_dense_memcpy);
-                @memcpy(next[0..count], self.u.array.values[0..count]);
+                @memcpy(next[0..count], self.arrayArm().*.values[0..count]);
             } else {
-                @memcpy(next[0..count], self.u.array.values[0..count]);
+                @memcpy(next[0..count], self.arrayArm().*.values[0..count]);
             }
         }
-        self.u.array.values = next.ptr;
-        self.u.array.capacity = @intCast(next_capacity);
+        self.arrayArm().*.values = next.ptr;
+        self.arrayArm().*.capacity = @intCast(next_capacity);
         if (old_allocated.len != 0) rt.memory.free(JSValue, old_allocated);
     }
 
     pub fn appendUninitializedFastArraySlot(self: *Object, rt: *JSRuntime) !*JSValue {
-        const index = self.u.array.count;
+        const index = self.arrayArm().*.count;
         try self.ensureArrayBufferCapacity(rt, @as(usize, @intCast(index)) + 1);
-        self.u.array.count = index + 1;
+        self.arrayArm().*.count = index + 1;
         self.flags.fast_array = true;
         // Every dense append reaches its storage through here and then writes
         // the slot itself, in four different callers. Remembering the owner at
@@ -4642,7 +4850,7 @@ pub const Object = extern struct {
         // old array visible to the minor, whose sticky marks stop the trace at
         // the array.
         rt.gc.rememberOwnerForBulkWrite(&self.header);
-        return &self.u.array.values[@intCast(index)];
+        return &self.arrayArm().*.values[@intCast(index)];
     }
 
     pub fn fastArrayEnsureCapacity(self: *Object, rt: *JSRuntime, needed: u32) !void {
@@ -4650,16 +4858,16 @@ pub const Object = extern struct {
     }
 
     pub fn fastArrayValuesPtr(self: *const Object) ?[*]JSValue {
-        if (!self.isFastArray() or self.u.array.count == 0) return null;
-        return self.u.array.values;
+        if (!self.isFastArray() or self.arrayArm().*.count == 0) return null;
+        return self.arrayArm().*.values;
     }
 
     pub fn fastArrayCount(self: *const Object) u32 {
-        return if (self.isFastArray()) self.u.array.count else 0;
+        return if (self.isFastArray()) self.arrayArm().*.count else 0;
     }
 
     pub fn fastArrayCapacity(self: *const Object) u32 {
-        return self.u.array.capacity;
+        return self.arrayArm().*.capacity;
     }
 
     pub fn fastArrayValues(self: *const Object) []JSValue {
@@ -4671,19 +4879,19 @@ pub const Object = extern struct {
     }
 
     pub fn arrayElementsForCount(self: *const Object) []const JSValue {
-        if (!self.flags.fast_array or self.u.array.count == 0) return &.{};
-        return self.u.array.values[0..@as(usize, @intCast(self.u.array.count))];
+        if (!self.flags.fast_array or self.arrayArm().*.count == 0) return &.{};
+        return self.arrayArm().*.values[0..@as(usize, @intCast(self.arrayArm().*.count))];
     }
 
     pub fn setFastArrayCountAssumeCapacity(self: *Object, count: u32) void {
-        std.debug.assert(count <= self.u.array.capacity);
-        self.u.array.count = count;
+        std.debug.assert(count <= self.arrayArm().*.capacity);
+        self.arrayArm().*.count = count;
         self.flags.fast_array = true;
     }
 
     pub fn fastArraySlotAssumeCapacity(self: *Object, index: u32) *JSValue {
-        std.debug.assert(index < self.u.array.capacity);
-        return &self.u.array.values[@intCast(index)];
+        std.debug.assert(index < self.arrayArm().*.capacity);
+        return &self.arrayArm().*.values[@intCast(index)];
     }
 
     pub fn fastArraySetSparseLength(self: *Object, length: u32) void {
@@ -4824,7 +5032,7 @@ pub const Object = extern struct {
     pub inline fn generatorPayloadPtr(self: *Object) *GeneratorPayload {
         std.debug.assert(self.class_id == class.ids.generator or self.class_id == class.ids.async_generator);
         std.debug.assert(self.flags.class_payload_kind == .generator);
-        return @ptrCast(@alignCast(self.u.payload.?));
+        return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
     /// Attach every open cell in this generator's parked frame to the object
@@ -5502,8 +5710,8 @@ pub const Object = extern struct {
         const header = next_value.objectHeader() orelse return error.InvalidBytecode;
         std.debug.assert(header.meta().flags.kind == .function_bytecode);
         const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
-        const old_fb = self.u.bytecode_function.function_bytecode;
-        self.u.bytecode_function.function_bytecode = fb;
+        const old_fb = self.bytecodeArm().*.function_bytecode;
+        self.bytecodeArm().*.function_bytecode = fb;
         // A FunctionBytecode is a traced heap object, and a closure gaining one
         // is an ordinary owner-to-child store. Closures are created lazily and
         // repeatedly against long-lived function objects, so this is the
@@ -5516,18 +5724,18 @@ pub const Object = extern struct {
     pub inline fn bytecodeFunctionStoragePtr(self: *Object) *BytecodeFunctionStorage {
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
         std.debug.assert(self.flags.class_payload_kind == .function);
-        return &self.u.bytecode_function;
+        return &self.bytecodeArm().*;
     }
 
     pub inline fn bytecodeFunctionStoragePtrConst(self: *const Object) *const BytecodeFunctionStorage {
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
         std.debug.assert(self.flags.class_payload_kind == .function);
-        return &self.u.bytecode_function;
+        return &self.bytecodeArm().*;
     }
 
     pub fn functionBytecode(self: *const Object) ?JSValue {
         if (!class.isBytecodeFunctionClass(self.class_id)) return null;
-        const fb = self.u.bytecode_function.function_bytecode orelse return null;
+        const fb = self.bytecodeArm().*.function_bytecode orelse return null;
         return JSValue.functionBytecode(&fb.header);
     }
 
@@ -5728,7 +5936,7 @@ pub const Object = extern struct {
 
     pub fn functionCaptures(self: *const Object) []*var_ref_mod.VarRef {
         if (!class.isBytecodeFunctionClass(self.class_id)) return &.{};
-        return self.u.bytecode_function.captureSlice();
+        return self.bytecodeArm().*.captureSlice();
     }
 
     /// Borrow the nullable module closure table during construction/linking.
@@ -5736,7 +5944,7 @@ pub const Object = extern struct {
     /// ordinary execution uses `functionCaptures` after `sealModuleCaptures`.
     pub fn moduleCaptureSlots(self: *const Object) []const ?*var_ref_mod.VarRef {
         if (!class.isBytecodeFunctionClass(self.class_id)) return &.{};
-        return self.u.bytecode_function.captureSlots();
+        return self.bytecodeArm().*.captureSlots();
     }
 
     /// qjs `js_closure2` (quickjs.c:17276-17280): `js_mallocz` the capture
@@ -5745,7 +5953,7 @@ pub const Object = extern struct {
     /// Inline: qjs does this mallocz inside js_closure2, not as a sibling call.
     pub inline fn allocateNullCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
         if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
-        const storage = &self.u.bytecode_function;
+        const storage = &self.bytecodeArm().*;
         const fb = storage.function_bytecode orelse return error.InvalidBytecode;
         if (count != fb.closureVarCount()) return error.InvalidBytecode;
         if (storage.var_refs != BytecodeFunctionStorage.emptyVarRefs()) return error.InvalidBytecode;
@@ -5766,7 +5974,7 @@ pub const Object = extern struct {
     /// Mutable view of the attached capture array during js_closure2 fill.
     pub inline fn mutableCaptureSlots(self: *Object) []?*var_ref_mod.VarRef {
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
-        return self.u.bytecode_function.captureSlots();
+        return self.bytecodeArm().*.captureSlots();
     }
 
     /// Replace one module capture slot, transferring the caller's owned cell
@@ -5778,7 +5986,7 @@ pub const Object = extern struct {
         cell: *var_ref_mod.VarRef,
     ) !void {
         if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
-        const slots = self.u.bytecode_function.captureSlots();
+        const slots = self.bytecodeArm().*.captureSlots();
         if (index >= slots.len) return error.InvalidBytecode;
 
         const old = slots[index];
@@ -5791,7 +5999,7 @@ pub const Object = extern struct {
     /// changes nothing.
     pub fn clearModuleImportCaptureSlot(self: *Object, rt: *JSRuntime, index: usize) !void {
         if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
-        const slots = self.u.bytecode_function.captureSlots();
+        const slots = self.bytecodeArm().*.captureSlots();
         if (index >= slots.len) return error.InvalidBytecode;
 
         const old = slots[index];
@@ -5804,8 +6012,8 @@ pub const Object = extern struct {
     /// import slot and a later successful link may validate the same array again.
     pub fn sealModuleCaptures(self: *const Object) !void {
         if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
-        const fb = self.u.bytecode_function.function_bytecode orelse return error.InvalidBytecode;
-        const slots = self.u.bytecode_function.captureSlots();
+        const fb = self.bytecodeArm().*.function_bytecode orelse return error.InvalidBytecode;
+        const slots = self.bytecodeArm().*.captureSlots();
         if (slots.len != fb.closureVarCount()) return error.InvalidBytecode;
         for (slots) |slot| {
             if (slot == null) return error.InvalidBytecode;
@@ -5818,8 +6026,8 @@ pub const Object = extern struct {
     /// directly and never scan.
     pub fn functionCaptureCell(self: *const Object, name: atom.Atom) ?*var_ref_mod.VarRef {
         if (!class.isBytecodeFunctionClass(self.class_id)) return null;
-        const fb = self.u.bytecode_function.function_bytecode orelse return null;
-        const captures = self.u.bytecode_function.captureSlots();
+        const fb = self.bytecodeArm().*.function_bytecode orelse return null;
+        const captures = self.bytecodeArm().*.captureSlots();
         for (fb.closureVar(), 0..) |capture, index| {
             if (capture.var_name == name and index < captures.len) return captures[index];
         }
@@ -5830,11 +6038,11 @@ pub const Object = extern struct {
     /// the cell-typed `setValueSlice` (ownership of `next_cells` transfers).
     pub fn setFunctionCaptures(self: *Object, rt: *JSRuntime, next_cells: []*var_ref_mod.VarRef) void {
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
-        var old_cells = self.u.bytecode_function.captureSlots();
-        if (self.u.bytecode_function.function_bytecode) |fb| {
+        var old_cells = self.bytecodeArm().*.captureSlots();
+        if (self.bytecodeArm().*.function_bytecode) |fb| {
             std.debug.assert(next_cells.len == fb.closureVarCount());
         }
-        self.u.bytecode_function.var_refs = if (next_cells.len == 0)
+        self.bytecodeArm().*.var_refs = if (next_cells.len == 0)
             BytecodeFunctionStorage.emptyVarRefs()
         else
             @ptrCast(next_cells.ptr);
@@ -5844,7 +6052,7 @@ pub const Object = extern struct {
     pub fn functionHomeObject(self: *const Object) ?*Object {
         if (!class.isBytecodeFunctionClass(self.class_id)) return null;
         if (self.bytecodeFunctionAuxConst()) |aux| return aux.home_object;
-        const stored = self.u.bytecode_function.home_or_aux orelse return null;
+        const stored = self.bytecodeArm().*.home_or_aux orelse return null;
         std.debug.assert((@intFromPtr(stored) & bytecode_function_aux_tag) == 0);
         return @ptrCast(@alignCast(stored));
     }
@@ -5859,7 +6067,7 @@ pub const Object = extern struct {
         if (self.bytecodeFunctionAux()) |aux| {
             aux.home_object = home_object;
         } else {
-            self.u.bytecode_function.home_or_aux = if (home_object) |next| @ptrCast(next) else null;
+            self.bytecodeArm().*.home_or_aux = if (home_object) |next| @ptrCast(next) else null;
         }
         if (old_home_object) |old| old.value().free(rt);
     }
@@ -6223,7 +6431,7 @@ pub const Object = extern struct {
 
     pub fn bytecodeFunctionRealmContext(self: *const Object) ?*context_mod.RealmContext {
         if (!class.isBytecodeFunctionClass(self.class_id)) return null;
-        const fb = self.u.bytecode_function.function_bytecode orelse return null;
+        const fb = self.bytecodeArm().*.function_bytecode orelse return null;
         return fb.realmContext();
     }
 
@@ -6277,17 +6485,17 @@ pub const Object = extern struct {
 
     fn ordinaryPayload(self: *Object) ?*OrdinaryPayload {
         if (self.flags.class_payload_kind != .ordinary) return null;
-        return @ptrCast(@alignCast(self.u.payload.?));
+        return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
     fn ordinaryPayloadConst(self: *const Object) ?*const OrdinaryPayload {
         if (self.flags.class_payload_kind != .ordinary) return null;
-        return @ptrCast(@alignCast(self.u.payload.?));
+        return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
     fn destroyOrdinaryPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.ordinaryPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(OrdinaryPayload, payload);
@@ -6295,13 +6503,13 @@ pub const Object = extern struct {
 
     fn iteratorPayload(self: *Object) ?*IteratorPayload {
         if (self.flags.class_payload_kind != .iterator) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn iteratorPayloadConst(self: *const Object) ?*const IteratorPayload {
         if (self.flags.class_payload_kind != .iterator) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
@@ -6322,7 +6530,7 @@ pub const Object = extern struct {
     fn destroyIteratorPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.iteratorPayload() orelse return;
         releaseIteratorCollectionCursor(self.class_id, payload);
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(IteratorPayload, payload);
@@ -6330,7 +6538,7 @@ pub const Object = extern struct {
 
     fn collectionPayload(self: *Object) ?*CollectionPayload {
         if (self.flags.class_payload_kind != .collection) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
@@ -6341,13 +6549,13 @@ pub const Object = extern struct {
 
     fn collectionPayloadConst(self: *const Object) ?*const CollectionPayload {
         if (self.flags.class_payload_kind != .collection) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyCollectionPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.collectionPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(CollectionPayload, payload);
@@ -6355,7 +6563,7 @@ pub const Object = extern struct {
 
     fn finalizationRegistryPayload(self: *Object) ?*FinalizationRegistryPayload {
         if (self.flags.class_payload_kind != .finalization_registry) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
@@ -6366,13 +6574,13 @@ pub const Object = extern struct {
 
     fn finalizationRegistryPayloadConst(self: *const Object) ?*const FinalizationRegistryPayload {
         if (self.flags.class_payload_kind != .finalization_registry) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyFinalizationRegistryPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.finalizationRegistryPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(FinalizationRegistryPayload, payload);
@@ -6380,7 +6588,7 @@ pub const Object = extern struct {
 
     fn weakRefPayload(self: *Object) ?*WeakRefPayload {
         if (self.flags.class_payload_kind != .weak_ref) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
@@ -6391,13 +6599,13 @@ pub const Object = extern struct {
 
     fn weakRefPayloadConst(self: *const Object) ?*const WeakRefPayload {
         if (self.flags.class_payload_kind != .weak_ref) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyWeakRefPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.weakRefPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(WeakRefPayload, payload);
@@ -6436,19 +6644,19 @@ pub const Object = extern struct {
 
     fn stdFilePayload(self: *Object) ?*StdFilePayload {
         if (self.flags.class_payload_kind != .std_file) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn stdFilePayloadConst(self: *const Object) ?*const StdFilePayload {
         if (self.flags.class_payload_kind != .std_file) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyStdFilePayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.stdFilePayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy();
         rt.memory.destroy(StdFilePayload, payload);
@@ -6456,19 +6664,19 @@ pub const Object = extern struct {
 
     fn disposableStackPayload(self: *Object) ?*DisposableStackPayload {
         if (self.flags.class_payload_kind != .disposable_stack) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn disposableStackPayloadConst(self: *const Object) ?*const DisposableStackPayload {
         if (self.flags.class_payload_kind != .disposable_stack) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyDisposableStackPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.disposableStackPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(DisposableStackPayload, payload);
@@ -6476,19 +6684,19 @@ pub const Object = extern struct {
 
     fn globalPayload(self: *Object) ?*GlobalPayload {
         if (self.flags.class_payload_kind != .global) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn globalPayloadConst(self: *const Object) ?*const GlobalPayload {
         if (self.flags.class_payload_kind != .global) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyGlobalPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.globalPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.destroyRuntime(GlobalPayload, payload);
@@ -6496,9 +6704,9 @@ pub const Object = extern struct {
 
     fn destroyRealmRecordPayload(self: *Object, rt: *JSRuntime) void {
         if (self.flags.class_payload_kind != .realm_record) return;
-        const ptr = self.u.payload orelse return;
+        const ptr = self.payloadArm().* orelse return;
         const payload: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy();
         rt.destroyRuntime(RealmRecordPayload, payload);
@@ -6506,19 +6714,19 @@ pub const Object = extern struct {
 
     fn bufferPayload(self: *Object) ?*BufferPayload {
         if (self.flags.class_payload_kind != .buffer) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn bufferPayloadConst(self: *const Object) ?*const BufferPayload {
         if (self.flags.class_payload_kind != .buffer) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyBufferPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.bufferPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(BufferPayload, payload);
@@ -6526,17 +6734,17 @@ pub const Object = extern struct {
 
     fn typedArrayPayload(self: *Object) ?*TypedArrayPayload {
         if (self.flags.class_payload_kind != .typed_array) return null;
-        return @ptrCast(@alignCast(self.u.payload.?));
+        return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
     fn typedArrayPayloadConst(self: *const Object) ?*const TypedArrayPayload {
         if (self.flags.class_payload_kind != .typed_array) return null;
-        return @ptrCast(@alignCast(self.u.payload.?));
+        return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
     fn destroyTypedArrayPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.typedArrayPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(TypedArrayPayload, payload);
@@ -6544,15 +6752,15 @@ pub const Object = extern struct {
 
     fn regExpPayload(self: *Object) ?*RegExpPayload {
         if (self.flags.class_payload_kind != .regexp) return null;
-        if (self.class_id == class.ids.regexp) return &self.u.regexp;
-        const ptr = self.u.payload orelse return null;
+        if (self.class_id == class.ids.regexp) return &self.regexpArm().*;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn regExpPayloadConst(self: *const Object) ?*const RegExpPayload {
         if (self.flags.class_payload_kind != .regexp) return null;
-        if (self.class_id == class.ids.regexp) return &self.u.regexp;
-        const ptr = self.u.payload orelse return null;
+        if (self.class_id == class.ids.regexp) return &self.regexpArm().*;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
@@ -6560,11 +6768,11 @@ pub const Object = extern struct {
         const payload = self.regExpPayload() orelse return;
         if (self.class_id == class.ids.regexp) {
             payload.destroy(rt);
-            self.u.regexp = .{};
+            self.regexpArm().* = .{};
             self.flags.class_payload_kind = .none;
             return;
         }
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(RegExpPayload, payload);
@@ -6572,19 +6780,19 @@ pub const Object = extern struct {
 
     fn boundFunctionPayload(self: *Object) ?*BoundFunctionPayload {
         if (self.flags.class_payload_kind != .bound_function) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn boundFunctionPayloadConst(self: *const Object) ?*const BoundFunctionPayload {
         if (self.flags.class_payload_kind != .bound_function) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyBoundFunctionPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.boundFunctionPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(BoundFunctionPayload, payload);
@@ -6592,19 +6800,19 @@ pub const Object = extern struct {
 
     fn proxyPayload(self: *Object) ?*ProxyPayload {
         if (self.flags.class_payload_kind != .proxy) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn proxyPayloadConst(self: *const Object) ?*const ProxyPayload {
         if (self.flags.class_payload_kind != .proxy) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyProxyPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.proxyPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(ProxyPayload, payload);
@@ -6612,19 +6820,19 @@ pub const Object = extern struct {
 
     fn argumentsPayload(self: *Object) ?*ArgumentsPayload {
         if (self.flags.class_payload_kind != .arguments) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn argumentsPayloadConst(self: *const Object) ?*const ArgumentsPayload {
         if (self.flags.class_payload_kind != .arguments) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyArgumentsPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.argumentsPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(ArgumentsPayload, payload);
@@ -6632,19 +6840,19 @@ pub const Object = extern struct {
 
     fn objectDataPayload(self: *Object) ?*ObjectDataPayload {
         if (self.flags.class_payload_kind != .object_data) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn objectDataPayloadConst(self: *const Object) ?*const ObjectDataPayload {
         if (self.flags.class_payload_kind != .object_data) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyObjectDataPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.objectDataPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(ObjectDataPayload, payload);
@@ -6652,17 +6860,17 @@ pub const Object = extern struct {
 
     fn varRefPayload(self: *Object) ?*VarRefPayload {
         if (self.flags.class_payload_kind != .var_ref) return null;
-        return @ptrCast(@alignCast(self.u.payload.?));
+        return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
     fn varRefPayloadConst(self: *const Object) ?*const VarRefPayload {
         if (self.flags.class_payload_kind != .var_ref) return null;
-        return @ptrCast(@alignCast(self.u.payload.?));
+        return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
     fn destroyVarRefPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.varRefPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(VarRefPayload, payload);
@@ -6670,17 +6878,17 @@ pub const Object = extern struct {
 
     pub fn promisePayload(self: *Object) ?*PromisePayload {
         if (self.flags.class_payload_kind != .promise) return null;
-        return @ptrCast(@alignCast(self.u.payload.?));
+        return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
     fn promisePayloadConst(self: *const Object) ?*const PromisePayload {
         if (self.flags.class_payload_kind != .promise) return null;
-        return @ptrCast(@alignCast(self.u.payload.?));
+        return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
     fn destroyPromisePayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.promisePayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(PromisePayload, payload);
@@ -6688,19 +6896,19 @@ pub const Object = extern struct {
 
     fn generatorPayload(self: *Object) ?*GeneratorPayload {
         if (self.flags.class_payload_kind != .generator) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn generatorPayloadConst(self: *const Object) ?*const GeneratorPayload {
         if (self.flags.class_payload_kind != .generator) return null;
-        const ptr = self.u.payload orelse return null;
+        const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyGeneratorPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.generatorPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(GeneratorPayload, payload);
@@ -6709,39 +6917,39 @@ pub const Object = extern struct {
     fn functionPayload(self: *Object) ?*FunctionPayload {
         if (self.flags.class_payload_kind != .function) return null;
         if (class.isBytecodeFunctionClass(self.class_id)) return null;
-        return @ptrCast(@alignCast(self.u.payload.?));
+        return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
     fn functionPayloadConst(self: *const Object) ?*const FunctionPayload {
         if (self.flags.class_payload_kind != .function) return null;
         if (class.isBytecodeFunctionClass(self.class_id)) return null;
-        return @ptrCast(@alignCast(self.u.payload.?));
+        return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
     fn destroyFunctionPayload(self: *Object, rt: *JSRuntime) void {
         if (class.isBytecodeFunctionClass(self.class_id)) {
-            var captures = self.u.bytecode_function.captureSlots();
-            self.u.bytecode_function.var_refs = BytecodeFunctionStorage.emptyVarRefs();
+            var captures = self.bytecodeArm().*.captureSlots();
+            self.bytecodeArm().*.var_refs = BytecodeFunctionStorage.emptyVarRefs();
             destroyOptionalVarRefCellSlice(rt, &captures);
 
             if (self.bytecodeFunctionAux()) |aux| {
-                self.u.bytecode_function.home_or_aux = null;
+                self.bytecodeArm().*.home_or_aux = null;
                 aux.destroy(rt);
                 rt.memory.destroy(BytecodeFunctionAux, aux);
             } else if (self.functionHomeObject()) |home| {
-                self.u.bytecode_function.home_or_aux = null;
+                self.bytecodeArm().*.home_or_aux = null;
                 home.value().free(rt);
             }
 
-            if (self.u.bytecode_function.function_bytecode) |fb| {
-                self.u.bytecode_function.function_bytecode = null;
+            if (self.bytecodeArm().*.function_bytecode) |fb| {
+                self.bytecodeArm().*.function_bytecode = null;
                 gc.release(rt, &fb.header);
             }
             self.flags.class_payload_kind = .none;
             return;
         }
         const payload = self.functionPayload() orelse return;
-        self.u.payload = null;
+        self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroyNative(rt);
         rt.memory.destroy(FunctionPayload, payload);
@@ -6797,9 +7005,9 @@ pub const Object = extern struct {
         // Arrays keep `array_values` (not a payload) in the union; bytecode
         // functions keep `u.func` (qjs JSObject.u.func). Neither is a host
         // payload pointer — do not pun the union into markPayload.
-        if (self.isArray() or class.isBytecodeFunctionClass(self.class_id) or self.u.payload == null)
+        if (self.isArray() or class.isBytecodeFunctionClass(self.class_id) or self.payloadArm().* == null)
             return false;
-        return rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(self), &self.u.payload, visitor);
+        return rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(self), &self.payloadArm().*, visitor);
     }
 
     fn countPayloadFunctionBytecodeRef(context_ptr: *anyopaque, value_ptr: *anyopaque) void {
@@ -7020,13 +7228,13 @@ pub const Object = extern struct {
         // Fast arrays and mapped arguments share the same allocation-bearing
         // union arm. The latter stores VarRef pointers in JSValue-sized cells.
         if (self.flags.fast_array or self.class_id == class.ids.mapped_arguments) {
-            const capacity: usize = self.u.array.capacity;
-            const live: usize = self.u.array.count;
+            const capacity: usize = self.arrayArm().*.capacity;
+            const live: usize = self.arrayArm().*.count;
             if (capacity != 0 and live != 0) {
                 Helper.allocation(
                     recorder,
                     .dense_elements,
-                    self.u.array.values,
+                    self.arrayArm().*.values,
                     capacity * @sizeOf(JSValue),
                     live * @sizeOf(JSValue),
                 );
@@ -7036,7 +7244,7 @@ pub const Object = extern struct {
         // Bytecode-callable state is inline in Object; only the capture array
         // and optional cold aux are separate allocations.
         if (class.isBytecodeFunctionClass(self.class_id)) {
-            const captures = self.u.bytecode_function.captureSlots();
+            const captures = self.bytecodeArm().*.captureSlots();
             Helper.backing(recorder, captures.ptr, captures.len, captures.len, ?*var_ref_mod.VarRef);
             if (self.bytecodeFunctionAuxConst()) |aux| {
                 Helper.allocation(recorder, .trace_payload, aux, @sizeOf(BytecodeFunctionAux), @sizeOf(BytecodeFunctionAux));
@@ -7090,7 +7298,7 @@ pub const Object = extern struct {
                 Helper.allocation(recorder, .trace_payload, payload, @sizeOf(GlobalPayload), @sizeOf(GlobalPayload));
             },
             .realm_record => {
-                const ptr = self.u.payload orelse return;
+                const ptr = self.payloadArm().* orelse return;
                 const payload: *const RealmRecordPayload = @ptrCast(@alignCast(ptr));
                 Helper.allocation(recorder, .trace_payload, payload, @sizeOf(RealmRecordPayload), @sizeOf(RealmRecordPayload));
             },
@@ -7248,7 +7456,7 @@ pub const Object = extern struct {
             return;
         }
         if (self.flags.class_payload_kind == .realm_record) {
-            const ptr = self.u.payload orelse unreachable;
+            const ptr = self.payloadArm().* orelse unreachable;
             const payload: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
             try payload.traceChildEdges(visitor);
         }
@@ -7307,16 +7515,16 @@ pub const Object = extern struct {
             // function_bytecode header. Then stop — do not fall into host
             // markClassPayload (that path is JSClass.gc_mark for exotic
             // host classes, not u.func).
-            const captures = self.u.bytecode_function.captureSlots();
+            const captures = self.bytecodeArm().*.captureSlots();
             for (captures) |maybe_cell| {
                 const cell = maybe_cell orelse continue;
                 var cell_value = cell.valueRef();
                 try Helper.callVisitValue(visitor, &cell_value);
             }
-            if (self.u.bytecode_function.function_bytecode) |fb| {
+            if (self.bytecodeArm().*.function_bytecode) |fb| {
                 var bytecode_value = JSValue.functionBytecode(&fb.header);
                 try Helper.callVisitValue(visitor, &bytecode_value);
-                self.u.bytecode_function.function_bytecode = if (bytecode_value.objectHeader()) |header|
+                self.bytecodeArm().*.function_bytecode = if (bytecode_value.objectHeader()) |header|
                     @alignCast(@fieldParentPtr("header", header))
                 else
                     null;
@@ -7326,7 +7534,7 @@ pub const Object = extern struct {
             if (self.bytecodeFunctionAux()) |aux| {
                 aux.home_object = home_object;
             } else {
-                self.u.bytecode_function.home_or_aux = if (home_object) |home| @ptrCast(home) else null;
+                self.bytecodeArm().*.home_or_aux = if (home_object) |home| @ptrCast(home) else null;
             }
             // zjs-only aux (source / realm_global / promise slots). Absent in
             // qjs 6262; keep so rare cycle edges stay live. Then return: the
@@ -9254,7 +9462,7 @@ pub const Object = extern struct {
         // gate is `idx == count`, NOT `idx == length`. A holey array (length >
         // count) can append at `count`; `length` is bumped to `index+1` only
         // when it grows past the current length.
-        if (!self.isArray() or index != self.u.array.count or !self.flags.length_writable) return false;
+        if (!self.isArray() or index != self.arrayArm().*.count or !self.flags.length_writable) return false;
         if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         if (!self.canExtendFastArray()) return false;
         if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
@@ -9266,7 +9474,7 @@ pub const Object = extern struct {
         } else {
             element_slot.* = if (take_ownership) new_value else new_value.dup();
         }
-        if (index + 1 > self.u.array.length) self.u.array.length = index + 1;
+        if (index + 1 > self.arrayArm().*.length) self.arrayArm().*.length = index + 1;
         self.markIndexedProperties(rt);
         return true;
     }
@@ -9274,7 +9482,7 @@ pub const Object = extern struct {
     pub fn appendDenseArrayValues(self: *Object, rt: *JSRuntime, start: u32, values: []const JSValue) !bool {
         // Dense append gate keys off the dense extent (array_count), not the
         // logical length: a holey array appends at count. See add_fast_array_element.
-        if (!self.isArray() or start != self.u.array.count or !self.flags.length_writable) return false;
+        if (!self.isArray() or start != self.arrayArm().*.count or !self.flags.length_writable) return false;
         if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         if (!self.canExtendFastArray()) return false;
         const added: u32 = std.math.cast(u32, values.len) orelse return false;
@@ -9298,17 +9506,17 @@ pub const Object = extern struct {
         if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             for (values) |item| {
-                self.u.array.values[element_index] = item.dup();
+                self.arrayArm().*.values[element_index] = item.dup();
                 element_index += 1;
             }
         } else {
             for (values) |item| {
-                self.u.array.values[element_index] = item.dup();
+                self.arrayArm().*.values[element_index] = item.dup();
                 element_index += 1;
             }
         }
         self.setFastArrayCountAssumeCapacity(limit);
-        if (limit > self.u.array.length) self.u.array.length = limit;
+        if (limit > self.arrayArm().*.length) self.arrayArm().*.length = limit;
         self.markIndexedProperties(rt);
         return true;
     }
@@ -9319,20 +9527,20 @@ pub const Object = extern struct {
     /// No named-property scan: qjs writes `u.array.u.values` directly.
     pub fn appendFastArrayPushValues(self: *Object, rt: *JSRuntime, values: []const JSValue) !void {
         const added: u32 = @intCast(values.len);
-        const new_len = self.u.array.count + added;
-        if (new_len > self.u.array.capacity) {
+        const new_len = self.arrayArm().*.count + added;
+        if (new_len > self.arrayArm().*.capacity) {
             try self.ensureArrayElementCapacity(rt, new_len);
         }
-        var element_index: usize = @intCast(self.u.array.count);
+        var element_index: usize = @intCast(self.arrayArm().*.count);
         if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             for (values) |item| {
-                self.u.array.values[element_index] = item.dup();
+                self.arrayArm().*.values[element_index] = item.dup();
                 element_index += 1;
             }
         } else {
             for (values) |item| {
-                self.u.array.values[element_index] = item.dup();
+                self.arrayArm().*.values[element_index] = item.dup();
                 element_index += 1;
             }
         }
@@ -9340,13 +9548,13 @@ pub const Object = extern struct {
             for (values) |item| rt.gc.generationalBarrier(&self.header, item.cycleMarkHeader());
         }
         self.setFastArrayCountAssumeCapacity(new_len);
-        if (new_len > self.u.array.length) self.u.array.length = new_len;
+        if (new_len > self.arrayArm().*.length) self.arrayArm().*.length = new_len;
         if (added != 0) self.markIndexedProperties(rt);
     }
 
     pub fn initDenseArrayIndexZeroAssumingEmpty(self: *Object, rt: *JSRuntime, new_value: JSValue) !void {
         std.debug.assert(self.isArray());
-        std.debug.assert(self.u.array.count == 0);
+        std.debug.assert(self.arrayArm().*.count == 0);
         std.debug.assert(self.flags.length_writable);
         std.debug.assert(self.flags.extensible);
         std.debug.assert(self.arrayElements().len == 0);
@@ -9359,7 +9567,7 @@ pub const Object = extern struct {
         } else {
             element_slot.* = new_value.dup();
         }
-        if (self.u.array.length < 1) self.u.array.length = 1;
+        if (self.arrayArm().*.length < 1) self.arrayArm().*.length = 1;
         self.markIndexedProperties(rt);
     }
 
@@ -9383,7 +9591,7 @@ pub const Object = extern struct {
     }
 
     fn appendDenseArrayDefineIndexMode(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue, comptime take_ownership: bool) !bool {
-        if (!self.isArray() or index != self.u.array.count or !self.flags.length_writable) return false;
+        if (!self.isArray() or index != self.arrayArm().*.count or !self.flags.length_writable) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
         if (!self.flags.extensible) return false;
         if (self.shape_ref.prop_count != 0 and self.findPropertyIndexTrusted(atom_id) != null) return false;
@@ -9395,29 +9603,29 @@ pub const Object = extern struct {
         } else {
             element_slot.* = if (take_ownership) new_value else new_value.dup();
         }
-        if (index + 1 > self.u.array.length) self.u.array.length = index + 1;
+        if (index + 1 > self.arrayArm().*.length) self.arrayArm().*.length = index + 1;
         self.markIndexedProperties(rt);
         return true;
     }
 
     pub fn initDenseArrayLiteralValuesAssumingEmpty(self: *Object, rt: *JSRuntime, values: []const JSValue) !bool {
         if (!self.isArray() or !self.flags.length_writable or !self.flags.extensible) return false;
-        if (self.u.array.count != 0 or self.u.array.length != 0 or self.shape_ref.prop_count != 0) return false;
+        if (self.arrayArm().*.count != 0 or self.arrayArm().*.length != 0 or self.shape_ref.prop_count != 0) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
         if (values.len > array.max_array_length) return false;
 
         try self.ensureArrayElementCapacity(rt, values.len);
         self.setFastArrayCountAssumeCapacity(@intCast(values.len));
-        self.u.array.length = @intCast(values.len);
+        self.arrayArm().*.length = @intCast(values.len);
         if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             for (values, 0..) |item, index| {
-                const element_slot = &self.u.array.values[index];
+                const element_slot = &self.arrayArm().*.values[index];
                 element_slot.* = item.dup();
             }
         } else {
             for (values, 0..) |item, index| {
-                const element_slot = &self.u.array.values[index];
+                const element_slot = &self.arrayArm().*.values[index];
                 element_slot.* = item.dup();
             }
         }
@@ -9438,26 +9646,26 @@ pub const Object = extern struct {
     /// which our caller's error route performs instead).
     pub fn initDenseArrayLiteralValuesOwnedTrusted(self: *Object, rt: *JSRuntime, values: []const JSValue) !void {
         std.debug.assert(self.isArray() and self.flags.length_writable and self.flags.extensible);
-        std.debug.assert(self.u.array.count == 0 and self.u.array.length == 0);
+        std.debug.assert(self.arrayArm().*.count == 0 and self.arrayArm().*.length == 0);
         std.debug.assert(self.shape_ref.prop_count == 0);
         std.debug.assert(self.arrayElementStorageMode() == .dense);
         std.debug.assert(values.len <= array.max_array_length);
         if (values.len == 0) return;
         try self.ensureArrayElementCapacity(rt, values.len);
         self.setFastArrayCountAssumeCapacity(@intCast(values.len));
-        self.u.array.length = @intCast(values.len);
+        self.arrayArm().*.length = @intCast(values.len);
         if (comptime builtin.is_test) {
             auditWrite(.memcpy_bulk, .object_dense_memcpy);
-            @memcpy(self.u.array.values[0..values.len], values);
+            @memcpy(self.arrayArm().*.values[0..values.len], values);
         } else {
-            @memcpy(self.u.array.values[0..values.len], values);
+            @memcpy(self.arrayArm().*.values[0..values.len], values);
         }
         self.markIndexedProperties(rt);
     }
 
     pub fn appendDenseArrayInt32Range(self: *Object, rt: *JSRuntime, start: u32, limit: u32) !bool {
         if (!self.isArray() or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (start != self.u.array.count or start >= limit or !self.flags.length_writable or !self.flags.extensible) return false;
+        if (start != self.arrayArm().*.count or start >= limit or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.getPrototype()) |proto| {
             if (!arrayPrototypeChainAllowsBulkIndexedSet(proto)) return false;
         }
@@ -9467,18 +9675,18 @@ pub const Object = extern struct {
 
         try self.ensureArrayElementCapacity(rt, limit_index);
         self.setFastArrayCountAssumeCapacity(limit);
-        if (limit > self.u.array.length) self.u.array.length = limit;
+        if (limit > self.arrayArm().*.length) self.arrayArm().*.length = limit;
         self.markIndexedProperties(rt);
 
         var index = start_index;
         if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
             while (index < limit_index) : (index += 1) {
-                self.u.array.values[index] = JSValue.int32(@intCast(index));
+                self.arrayArm().*.values[index] = JSValue.int32(@intCast(index));
             }
         } else {
             while (index < limit_index) : (index += 1) {
-                self.u.array.values[index] = JSValue.int32(@intCast(index));
+                self.arrayArm().*.values[index] = JSValue.int32(@intCast(index));
             }
         }
         return true;
@@ -9487,7 +9695,7 @@ pub const Object = extern struct {
     pub fn appendDenseArrayInt32ValueRange(self: *Object, rt: *JSRuntime, start_index: u32, start_value: i32, count: u32) !bool {
         if (count == 0) return true;
         if (!self.isArray() or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.u.array.count or !self.flags.length_writable or !self.flags.extensible) return false;
+        if (start_index != self.arrayArm().*.count or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.getPrototype()) |proto| {
             if (!arrayPrototypeChainAllowsBulkIndexedSet(proto)) return false;
         }
@@ -9504,7 +9712,7 @@ pub const Object = extern struct {
 
         try self.ensureArrayElementCapacity(rt, limit_element);
         self.setFastArrayCountAssumeCapacity(limit);
-        if (limit > self.u.array.length) self.u.array.length = limit;
+        if (limit > self.arrayArm().*.length) self.arrayArm().*.length = limit;
         self.markIndexedProperties(rt);
 
         var offset: u32 = 0;
@@ -9514,14 +9722,14 @@ pub const Object = extern struct {
                 const index = start_element + @as(usize, @intCast(offset));
                 const element_delta: i32 = @intCast(offset);
                 const element_value = start_value + element_delta;
-                self.u.array.values[index] = JSValue.int32(element_value);
+                self.arrayArm().*.values[index] = JSValue.int32(element_value);
             }
         } else {
             while (offset < count) : (offset += 1) {
                 const index = start_element + @as(usize, @intCast(offset));
                 const element_delta: i32 = @intCast(offset);
                 const element_value = start_value + element_delta;
-                self.u.array.values[index] = JSValue.int32(element_value);
+                self.arrayArm().*.values[index] = JSValue.int32(element_value);
             }
         }
         return true;
@@ -9531,7 +9739,7 @@ pub const Object = extern struct {
         if (start_index >= limit) return true;
         if (multiplier < 0 or mask < 0) return false;
         if (!self.isArray() or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.u.array.count or !self.flags.length_writable or !self.flags.extensible) return false;
+        if (start_index != self.arrayArm().*.count or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.getPrototype()) |proto| {
             if (!arrayPrototypeChainAllowsBulkIndexedSet(proto)) return false;
         }
@@ -9547,7 +9755,7 @@ pub const Object = extern struct {
 
         try self.ensureArrayElementCapacity(rt, limit_element);
         self.setFastArrayCountAssumeCapacity(limit);
-        if (limit > self.u.array.length) self.u.array.length = limit;
+        if (limit > self.arrayArm().*.length) self.arrayArm().*.length = limit;
         self.markIndexedProperties(rt);
 
         var index = start_element;
@@ -9557,14 +9765,14 @@ pub const Object = extern struct {
                 const product_exact = @as(i128, @intCast(index)) * @as(i128, multiplier);
                 const product: i32 = @truncate(product_exact);
                 const element_value = product & mask;
-                self.u.array.values[index] = JSValue.int32(element_value);
+                self.arrayArm().*.values[index] = JSValue.int32(element_value);
             }
         } else {
             while (index < limit_element) : (index += 1) {
                 const product_exact = @as(i128, @intCast(index)) * @as(i128, multiplier);
                 const product: i32 = @truncate(product_exact);
                 const element_value = product & mask;
-                self.u.array.values[index] = JSValue.int32(element_value);
+                self.arrayArm().*.values[index] = JSValue.int32(element_value);
             }
         }
         return true;
@@ -9578,7 +9786,7 @@ pub const Object = extern struct {
         if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
 
         const mask_index: usize = @intCast(mask);
-        if (mask_index >= self.u.array.count) return false;
+        if (mask_index >= self.arrayArm().*.count) return false;
 
         var guard_index: u32 = 0;
         while (guard_index <= mask) : (guard_index += 1) {
@@ -9592,7 +9800,7 @@ pub const Object = extern struct {
             auditWrite(.fam_slice, .object_dense_store);
             while (value_index < limit) : (value_index += 1) {
                 const element_index: usize = @intCast(value_index & mask);
-                const element_slot = &self.u.array.values[element_index];
+                const element_slot = &self.arrayArm().*.values[element_index];
                 const old = element_slot.*;
                 const new_value = JSValue.int32(@intCast(value_index));
                 element_slot.* = new_value;
@@ -9601,7 +9809,7 @@ pub const Object = extern struct {
         } else {
             while (value_index < limit) : (value_index += 1) {
                 const element_index: usize = @intCast(value_index & mask);
-                const element_slot = &self.u.array.values[element_index];
+                const element_slot = &self.arrayArm().*.values[element_index];
                 const old = element_slot.*;
                 const new_value = JSValue.int32(@intCast(value_index));
                 element_slot.* = new_value;
@@ -9622,8 +9830,8 @@ pub const Object = extern struct {
         if (self.findProperty(atom_id) != null) return false;
 
         const element_index: usize = @intCast(index);
-        if (element_index > self.u.array.count) return false;
-        const appended = element_index == self.u.array.count;
+        if (element_index > self.arrayArm().*.count) return false;
+        const appended = element_index == self.arrayArm().*.count;
         if (appended) {
             if (!self.flags.extensible) return false;
             if (index >= self.arrayLength() and !self.flags.length_writable) return false;
@@ -9633,12 +9841,12 @@ pub const Object = extern struct {
             if (index != self.arrayLength()) return false;
             try self.ensureArrayElementCapacity(rt, element_index + 1);
             self.setFastArrayCountAssumeCapacity(index + 1);
-            if (index + 1 > self.u.array.length) self.u.array.length = index + 1;
+            if (index + 1 > self.arrayArm().*.length) self.arrayArm().*.length = index + 1;
         }
 
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
-        const element_slot = &self.u.array.values[element_index];
+        const element_slot = &self.arrayArm().*.values[element_index];
         const old = if (appended) JSValue.undefinedValue() else element_slot.*;
         if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
@@ -9696,7 +9904,7 @@ pub const Object = extern struct {
         return true;
     }
 
-    pub fn canDefineDenseArrayDataPropertiesUnchecked(self: Object) bool {
+    pub fn canDefineDenseArrayDataPropertiesUnchecked(self: *const Object) bool {
         return self.isArray() and
             !self.hasExoticMethods() and
             self.arrayElementStorageMode() == .dense and
@@ -9710,17 +9918,17 @@ pub const Object = extern struct {
         std.debug.assert(index < self.arrayLength() or self.flags.length_writable);
 
         const element_index: usize = @intCast(index);
-        if (element_index > self.u.array.count) return;
-        const appended = element_index == self.u.array.count;
+        if (element_index > self.arrayArm().*.count) return;
+        const appended = element_index == self.arrayArm().*.count;
         if (appended) {
             try self.ensureArrayElementCapacity(rt, element_index + 1);
             self.setFastArrayCountAssumeCapacity(index + 1);
-            if (index + 1 > self.u.array.length) self.u.array.length = index + 1;
+            if (index + 1 > self.arrayArm().*.length) self.arrayArm().*.length = index + 1;
         }
 
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
-        const element_slot = &self.u.array.values[element_index];
+        const element_slot = &self.arrayArm().*.values[element_index];
         const old = if (appended) JSValue.undefinedValue() else element_slot.*;
         if (comptime builtin.is_test) {
             auditWrite(.fam_slice, .object_dense_store);
@@ -9756,7 +9964,7 @@ pub const Object = extern struct {
             if (self.flags.fast_array) {
                 if (try arrayLengthFromValue(rt, new_value)) |len| {
                     self.truncateArrayElements(rt, len);
-                    self.u.array.length = len;
+                    self.arrayArm().*.length = len;
                     return;
                 }
                 return error.InvalidLength;
@@ -10369,9 +10577,9 @@ pub const Object = extern struct {
         return true;
     }
 
-    pub fn ownKeys(self: Object, rt: *JSRuntime) OwnKeysError![]atom.Atom {
+    pub fn ownKeys(self: *const Object, rt: *JSRuntime) OwnKeysError![]atom.Atom {
         if (self.exoticMethods(rt)) |methods| {
-            if (methods.own_keys) |hook| return try hook(@constCast(&self), rt);
+            if (methods.own_keys) |hook| return try hook(@constCast(self), rt);
         }
 
         var keys: []atom.Atom = &.{};
@@ -10453,7 +10661,7 @@ pub const Object = extern struct {
         // descriptor flags. This is required for both Arrays and unmapped
         // arguments: dense slots implicitly have writable/enumerable/
         // configurable=true and need real shape entries before sealing.
-        if (self.flags.fast_array and self.u.array.count != 0) {
+        if (self.flags.fast_array and self.arrayArm().*.count != 0) {
             try self.convertDenseArrayElementsToSparseProperties(rt);
         }
         try self.materializeAllMappedArgumentsProperties(rt);
@@ -10594,10 +10802,10 @@ pub const Object = extern struct {
 
     pub fn truncateArrayElements(self: *Object, rt: *JSRuntime, new_len: u32) void {
         if (!self.isArray() or !self.flags.fast_array) return;
-        const len: usize = @min(@as(usize, @intCast(new_len)), self.u.array.count);
-        while (self.u.array.count > len) {
-            self.u.array.count -= 1;
-            const old = self.u.array.values[@intCast(self.u.array.count)];
+        const len: usize = @min(@as(usize, @intCast(new_len)), self.arrayArm().*.count);
+        while (self.arrayArm().*.count > len) {
+            self.arrayArm().*.count -= 1;
+            const old = self.arrayArm().*.values[@intCast(self.arrayArm().*.count)];
             old.free(rt);
         }
     }
@@ -10609,7 +10817,7 @@ pub const Object = extern struct {
         // live `[0, count)` slots into index properties; Array holes in
         // `[count, length)` stay absent. For arguments this internal length is
         // unobservable; their own `length` property is already in the shape.
-        const saved_length = self.u.array.length;
+        const saved_length = self.arrayArm().*.length;
         const elements = self.arrayElements();
         for (elements, 0..) |stored, index| {
             const atom_id = atom.atomFromUInt32(@intCast(index));
@@ -10617,10 +10825,10 @@ pub const Object = extern struct {
             try self.addProperty(rt, atom_id, descriptor.Descriptor.data(stored, true, true, true));
         }
         for (elements) |stored| stored.free(rt);
-        self.u.array.count = 0;
+        self.arrayArm().*.count = 0;
         self.freeArrayElementBufferAfterMove(rt);
         // Sparse array: count stays 0, length is the JS-observable `.length`.
-        self.u.array.length = saved_length;
+        self.arrayArm().*.length = saved_length;
         self.flags.is_std_array_prototype = false;
     }
 
@@ -10628,8 +10836,8 @@ pub const Object = extern struct {
         if (!self.flags.fast_array) return null;
         if (!atom.isTaggedInt(atom_id)) return null;
         const index = atom.atomToUInt32(atom_id);
-        if (index >= self.u.array.count) return null;
-        return self.u.array.values[@intCast(index)];
+        if (index >= self.arrayArm().*.count) return null;
+        return self.arrayArm().*.values[@intCast(index)];
     }
 
     fn hasDenseArrayElement(self: *const Object, index: u32) bool {
@@ -10655,7 +10863,7 @@ pub const Object = extern struct {
 
     fn recomputeArrayStorageMode(self: *Object, rt: *JSRuntime) void {
         if (!self.isArray()) return;
-        self.flags.fast_array = self.u.array.capacity >= self.u.array.count;
+        self.flags.fast_array = self.arrayArm().*.capacity >= self.arrayArm().*.count;
         for (self.shapeProps()) |prop| {
             if (property.Flags.fromBits(prop.flags).deleted) continue;
             const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
@@ -10994,7 +11202,7 @@ pub const Object = extern struct {
         inserted = false;
     }
 
-    fn shapeNeedsMutationCopy(self: Object) bool {
+    fn shapeNeedsMutationCopy(self: *const Object) bool {
         return self.shape_ref.refCount() != 1;
     }
 
@@ -11079,8 +11287,18 @@ pub const Object = extern struct {
         return @ptrFromInt(@alignOf(property.Entry));
     }
 
+    /// The trailing property FAM starts right after the class-data arm. Only
+    /// `ids.object` may own one (`verifyObjectPropertyStorageLayouts` /
+    /// `freeObjectAllocation` both enforce it), so the offset stays a compile-
+    /// time constant on this hot path rather than a `class_id` load.
+    pub const trailing_property_storage_offset: usize = objectBodyBytes(class.ids.object);
+
+    /// NOTE: `createPlainObjectReserved2` calls this while building the head's
+    /// struct literal, i.e. before any field of `self` is written. It must stay
+    /// a pure address computation; the "only `ids.object` owns a trailing FAM"
+    /// rule is checked by `verifyObjectPropertyStorageLayouts` instead.
     pub inline fn trailingPropertyStorageBase(self: *const Object) [*]property.Entry {
-        return @ptrFromInt(@intFromPtr(self) + @sizeOf(Object));
+        return @ptrFromInt(@intFromPtr(self) + trailing_property_storage_offset);
     }
 
     pub inline fn propertyStoragePointerIsExternal(self: *const Object, ptr: [*]property.Entry) bool {
@@ -11966,7 +12184,7 @@ const IndexKey = struct {
     atom_id: atom.Atom,
 };
 
-fn hasPropertyIndexKeys(self: Object, rt: *JSRuntime) bool {
+fn hasPropertyIndexKeys(self: *const Object, rt: *JSRuntime) bool {
     for (self.shapeProps()) |prop| {
         if (property.Flags.fromBits(prop.flags).deleted) continue;
         const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;

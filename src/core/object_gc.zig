@@ -341,7 +341,10 @@ pub inline fn trySettleTracerBlockCorpse(
     const index: u32 = std.mem.readInt(u16, cell[0..2], .little);
     rt.memory.debitBlockCellPayload(self, payload_bytes);
     rt.gc.block_heap.settleDoomedCellInPassA(block, index);
-    corpse_census.noteSettled(payload_bytes != @sizeOf(Object));
+    // ③ made "ordinary size" a per-class quantity. Comparing against the head
+    // size alone would report every wide-armed corpse (every fast array) as
+    // non-ordinary and silently rewrite the stage-3 settlement census.
+    corpse_census.noteSettled(payload_bytes != Object.objectBodyBytes(class.ids.object));
     return true;
 }
 

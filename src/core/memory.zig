@@ -1167,13 +1167,28 @@ pub const MemoryAccount = struct {
 
     /// Returns owned memory. Caller must destroy it with `destroy`.
     pub inline fn create(self: *MemoryAccount, comptime T: type) !*T {
-        return self.createInternal(T, true);
+        return self.createInternal(T, 0, true);
     }
 
     /// Runtime hot path variant. The owning runtime performs a direct GC
     /// threshold check before entering, avoiding the nullable trigger callback.
     pub inline fn createNoTrigger(self: *MemoryAccount, comptime T: type) !*T {
-        return self.createInternal(T, false);
+        return self.createInternal(T, 0, false);
+    }
+
+    /// `createWithFamNoTrigger` for a flexible-array size the CALLER knows at
+    /// compile time. obj64 ③ made every `.object` allocation carry a
+    /// class-sized tail; routing those through the runtime-sized `allocCell`
+    /// would have retired the comptime `allocCellFixedPtr` path that the
+    /// fixed-size Object allocation used to take. The tail is a pure function
+    /// of an immutable `class_id`, so at the hot constructors it is a
+    /// constant, and the block heap keeps its specialized size class.
+    pub inline fn createConstFamNoTrigger(
+        self: *MemoryAccount,
+        comptime T: type,
+        comptime fam_bytes: usize,
+    ) !*T {
+        return self.createInternal(T, fam_bytes, false);
     }
 
     /// Size of GC metadata immediately before every GC object. Small slab
@@ -1277,14 +1292,15 @@ pub const MemoryAccount = struct {
         @as(*align(4) u32, @ptrCast(@alignCast(meta + 4))).* = initial_lifetime_word;
     }
 
-    fn createInternal(self: *MemoryAccount, comptime T: type, comptime trigger_gc: bool) !*T {
+    fn createInternal(self: *MemoryAccount, comptime T: type, comptime fam_bytes: usize, comptime trigger_gc: bool) !*T {
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         const is_gc = comptime isGcObject(T);
+        const payload_size = comptime @sizeOf(T) + fam_bytes;
         // Inline hot arm = qjs `__js_malloc` small-block path (quickjs.c:1566);
         // everything else (arena refill, slab-disabled, standalone prefix,
         // non-slab classes) lives in the noinline slow twin.
         const slab_class = comptime SmallObjectSlab.classIndex(
-            @sizeOf(T),
+            payload_size,
             if (is_gc) gcAlignment(T) else std.mem.Alignment.of(T),
         );
         // Collector-served cell: the tracing build routes fixed-size objects
@@ -1293,9 +1309,9 @@ pub const MemoryAccount = struct {
         // specialize the block size class for fixed-size Object allocations.
         if (comptime block_heap_enabled and is_gc) {
             if (comptime T.gc_kind_tag == gc_representation.object_kind_tag) {
-                if (comptime gc_block_heap.canAllocCellSize(gc_prefix_size + @sizeOf(T))) {
+                if (comptime gc_block_heap.canAllocCellSize(gc_prefix_size + payload_size)) {
                     if (self.gc_object_cell_heap) |heap| {
-                        const bytes: usize = @sizeOf(T);
+                        const bytes: usize = payload_size;
                         try self.checkAllocation(bytes);
                         if (comptime trigger_gc) self.triggerGCBeforeAllocation(bytes);
                         if (heap.allocCellFixedPtr(gc_prefix_size + bytes)) |cell| {
@@ -1306,7 +1322,7 @@ pub const MemoryAccount = struct {
                             // `allocationSize`, and an 8-byte skew per object is
                             // a HeapLiveBytesMismatch on the first audit.
                             self.creditAlloc(bytes, null);
-                            self.noteAllocDiagnostics(true, @sizeOf(T), 1, @intFromPtr(cell) + gc_prefix_size);
+                            self.noteAllocDiagnostics(true, payload_size, 1, @intFromPtr(cell) + gc_prefix_size);
                             return @ptrFromInt(@intFromPtr(cell) + gc_prefix_size);
                         }
                         // Block heap declined (OOM in its backing): the slab
@@ -1317,29 +1333,30 @@ pub const MemoryAccount = struct {
         }
         if (comptime slab_class != null) {
             if (self.small_slab_enabled) {
-                const bytes: usize = @sizeOf(T);
+                const bytes: usize = payload_size;
                 try self.checkAllocation(bytes);
                 if (comptime trigger_gc) self.triggerGCBeforeAllocation(bytes);
                 const raw = self.slabPopHot(comptime slab_class.?, !is_gc) orelse
-                    return self.createInternalSlow(T, trigger_gc);
+                    return self.createInternalSlow(T, fam_bytes, trigger_gc);
                 if (comptime is_gc) initGcPrefix(T, @ptrFromInt(@intFromPtr(raw) - gc_prefix_size), comptime slab_class.?);
                 self.creditAlloc(bytes, comptime slab_class);
-                self.noteAllocDiagnostics(true, @sizeOf(T), 1, @intFromPtr(raw));
+                self.noteAllocDiagnostics(true, payload_size, 1, @intFromPtr(raw));
                 return @ptrCast(@alignCast(raw));
             }
         }
-        return self.createInternalSlow(T, trigger_gc);
+        return self.createInternalSlow(T, fam_bytes, trigger_gc);
     }
 
     /// Cold continuation of `createInternal`: arena refill, non-slab classes,
     /// and the slab-disabled/standalone-prefix routes. Re-running the limit
     /// check (and, on refill, the GC trigger request) here is idempotent.
-    noinline fn createInternalSlow(self: *MemoryAccount, comptime T: type, comptime trigger_gc: bool) !*T {
+    noinline fn createInternalSlow(self: *MemoryAccount, comptime T: type, comptime fam_bytes: usize, comptime trigger_gc: bool) !*T {
         const is_gc = comptime isGcObject(T);
+        const payload_size = comptime @sizeOf(T) + fam_bytes;
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
-        const slab_index = if (self.small_slab_enabled) SmallObjectSlab.classIndex(@sizeOf(T), alignment) else null;
+        const slab_index = if (self.small_slab_enabled) SmallObjectSlab.classIndex(payload_size, alignment) else null;
         const prefix = if (comptime is_gc) (if (slab_index != null) 0 else gcPrefixSize(T)) else 0;
-        const bytes = prefix + @sizeOf(T);
+        const bytes = prefix + payload_size;
         try self.checkAllocation(bytes);
         if (comptime trigger_gc) {
             self.triggerGCBeforeAllocation(bytes);
@@ -1354,14 +1371,22 @@ pub const MemoryAccount = struct {
             @ptrFromInt(obj_addr)
         else
             @ptrCast(@alignCast(raw));
-        self.creditAlloc(if (slab_index != null) @sizeOf(T) else bytes, slab_index);
-        self.noteAllocDiagnostics(true, @sizeOf(T), 1, @intFromPtr(ptr));
+        self.creditAlloc(if (slab_index != null) payload_size else bytes, slab_index);
+        self.noteAllocDiagnostics(true, payload_size, 1, @intFromPtr(ptr));
         return ptr;
     }
 
     pub fn destroy(self: *MemoryAccount, comptime T: type, ptr: *T) void {
+        return self.destroyConstFam(T, 0, ptr);
+    }
+
+    /// `destroyWithFam` for a flexible-array size the caller knows at compile
+    /// time; the comptime twin of `createConstFamNoTrigger`. Keeps the slab
+    /// class index and the block-cell debit constant on the destroy hot path.
+    pub fn destroyConstFam(self: *MemoryAccount, comptime T: type, comptime fam_bytes: usize, ptr: *T) void {
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
         const is_gc = comptime isGcObject(T);
+        const payload_size = comptime @sizeOf(T) + fam_bytes;
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
         const bytes_ptr: [*]u8 = @ptrCast(ptr);
         // Collector-served cell goes home first: the marker byte is in the
@@ -1369,7 +1394,7 @@ pub const MemoryAccount = struct {
         if (comptime block_heap_enabled and is_gc) {
             if (gcAllocInfoByte(ptr) == alloc_info_block_cell) {
                 if (self.gc_object_cell_heap) |heap| {
-                    const bytes: usize = @sizeOf(T);
+                    const bytes: usize = payload_size;
                     self.debitAlloc(bytes, null);
                     self.noteFreeDiagnostics(true);
                     heap.freeSmallCell(@ptrFromInt(@intFromPtr(ptr) - gc_prefix_size));
@@ -1379,17 +1404,17 @@ pub const MemoryAccount = struct {
         }
         // Straight-line slab arm mirroring qjs `__js_free`'s small-block path
         // (quickjs.c:1613); the class index is comptime for a sized type.
-        const slab_class = comptime SmallObjectSlab.classIndex(@sizeOf(T), if (is_gc) gcAlignment(T) else std.mem.Alignment.of(T));
+        const slab_class = comptime SmallObjectSlab.classIndex(payload_size, if (is_gc) gcAlignment(T) else std.mem.Alignment.of(T));
         if (comptime slab_class != null) {
             if (self.small_slab_enabled) {
                 if (comptime is_gc) std.debug.assert(gcAllocInfoByte(ptr) & (alloc_info_standalone | alloc_info_class_mask) == comptime slab_class.?);
-                self.debitAlloc(@sizeOf(T), comptime slab_class);
+                self.debitAlloc(payload_size, comptime slab_class);
                 self.noteFreeDiagnostics(true);
                 return self.small_slab.freeAtIndex(&self.backing_allocator, bytes_ptr, comptime slab_class.?);
             }
         }
         const prefix = if (comptime is_gc) gcPrefixSize(T) else 0;
-        const bytes = prefix + @sizeOf(T);
+        const bytes = prefix + payload_size;
         self.debitAlloc(bytes, null);
         self.noteFreeDiagnostics(true);
         const base: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - prefix);

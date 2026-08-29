@@ -670,6 +670,13 @@ fn applyForwardCallMethod(
     const receiver = region_start[0];
     const method = region_start[1];
     const method_obj = object_ops.objectFromValue(method) orelse return .threw;
+    // `resolveInlineFunctionFromObject` contracts for a caller-verified
+    // bytecode-function class (its other two call sites test it). The method
+    // here is a runtime property read whose specialize-time guard is never
+    // re-validated, so a native/bound/closure replacement lands here; reading
+    // the bytecode arm off one is out of bounds now that the arm is
+    // class-sized. Fall back to the authoritative slow call instead.
+    if (method_obj.class_id != core.class.ids.bytecode_function) return .threw;
     const resolved = inline_calls.resolveInlineFunctionFromObject(vm.global, method_obj) orelse return .threw;
     const target = resolved.bind(receiver, method);
     return switch (pushApplyForwardEntry(vm, &target, region_start, argc)) {
@@ -3584,7 +3591,7 @@ pub fn op_put_array_el_ta(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
     // registration contract discharges the raw payload-union read below.
     std.debug.assert(core.class.isNumericTypedArrayClass(object.class_id));
     std.debug.assert(object.flags.class_payload_kind == .typed_array);
-    if (object.u.payload) |raw| {
+    if (object.payloadArm().*) |raw| {
         const payload: *const core.object.TypedArrayPayload = @ptrCast(@alignCast(raw));
         const backing = payload.backing_payload orelse {
             value.freeDuringActiveBytecode(rt);
@@ -3650,20 +3657,20 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
                     // idx == count, fast_array, can_extend, new_len <= size.
                     // Growing `.length` needs the length slot writable;
                     // filling a hole at `count` while `count < length` does not.
-                    if (object.flags.fast_array and index == object.u.array.count) {
+                    if (object.flags.fast_array and index == object.arrayArm().*.count) {
                         const new_count = index +% 1;
                         if (new_count > index and
-                            new_count <= object.u.array.capacity and
+                            new_count <= object.arrayArm().*.capacity and
                             object.canExtendFastArray() and
-                            (new_count <= object.u.array.length or
+                            (new_count <= object.arrayArm().*.length or
                                 object.flags.length_writable))
                         {
                             const slot = object.fastArraySlotAssumeCapacity(index);
                             storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
                             vm.ctx.runtime.gc.generationalBarrier(&object.header, (sp - 1)[0].cycleMarkHeader());
-                            object.u.array.count = new_count;
-                            if (new_count > object.u.array.length)
-                                object.u.array.length = new_count;
+                            object.arrayArm().*.count = new_count;
+                            if (new_count > object.arrayArm().*.length)
+                                object.arrayArm().*.length = new_count;
                             object.flags.may_have_indexed_properties = true;
                             if (obj.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(vm.ctx.runtime)) {
                                 return @call(.always_tail, zjs_op_put_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
@@ -4148,7 +4155,7 @@ pub fn op_get_array_el_ta(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
     // class_id already proved numeric TA: skip the payload-kind reload.
     std.debug.assert(core.class.isNumericTypedArrayClass(object.class_id));
     std.debug.assert(object.flags.class_payload_kind == .typed_array);
-    if (object.u.payload) |raw| {
+    if (object.payloadArm().*) |raw| {
         const payload: *const core.object.TypedArrayPayload = @ptrCast(@alignCast(raw));
         if (index < payload.live_length) {
             result = core.typed_array.decodeNumericElementByClass(object.class_id, payload.data.?, index);

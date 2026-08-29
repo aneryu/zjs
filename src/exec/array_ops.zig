@@ -3191,7 +3191,7 @@ pub inline fn tryFastArrayPush(
     if (!object.flags.fast_array) return null;
     if (!object.canExtendFastArray()) return null;
     if (!object.flags.length_writable) return null;
-    const count = object.u.array.count;
+    const count = object.arrayArm().*.count;
     if (object.arrayLength() != count) return null;
     const argc = std.math.cast(u32, args.len) orelse return null;
     const new_len = std.math.add(u32, count, argc) catch return null;

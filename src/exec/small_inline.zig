@@ -355,7 +355,7 @@ pub fn specializeCallSite(
     // object, discharging the raw bytecode-function union read below.
     std.debug.assert(core.class.isBytecodeFunctionClass(caller_obj.class_id));
     std.debug.assert(caller_obj.flags.class_payload_kind == .function);
-    const base_fb = caller_obj.u.bytecode_function.function_bytecode orelse caller;
+    const base_fb = caller_obj.bytecodeArm().*.function_bytecode orelse caller;
     // One clone expands every same-argc constructor site. A second clone of an
     // already-expanded spec is unsafe (while/goto images).
     if (callerState(base_fb)) |st| {

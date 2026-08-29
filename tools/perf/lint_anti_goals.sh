@@ -125,8 +125,10 @@ import sys
 
 expected = [
     # Mirrors qjs JSObject (quickjs.c:1017): an intrusive header, the weak
-    # ref count, class_id, the packed flag word, the shape pointer, the
-    # property value array and the class payload union. Update this list
+    # ref count, class_id, the packed flag word, the shape pointer and the
+    # property value array. The qjs class payload union `u` is NOT a field
+    # any more: obj64 knife (3) made it a class-sized trailing region reached
+    # through payloadArm/arrayArm/bytecodeArm/regexpArm. Update this list
     # only alongside a reviewed Object shape change -- it is the tripwire
     # for one landing unnoticed.
     "header",
@@ -135,7 +137,6 @@ expected = [
     "flags",
     "shape_ref",
     "prop_values",
-    "u",
 ]
 
 path = Path("src/core/object.zig")
@@ -175,6 +176,27 @@ PY
 if [[ -n "$object_shape_errors" ]]; then
   echo "anti-goal violation: Object top-level field allowlist changed" >&2
   echo "$object_shape_errors" >&2
+  status=1
+fi
+
+# Whole-tree (not diff-scoped): `Object` may never cross a function boundary by
+# value. Since obj64 knife (3) the class-data arm lives PAST `@sizeOf(Object)`,
+# so a by-value copy is a head-only copy and every `arrayArm()`/`bytecodeArm()`
+# read off it is out of bounds. This is silent -- it compiles, it does not
+# fault, and it returns plausible-looking garbage. It shipped once already:
+# `ownKeys(self: Object)` and three siblings truncated every key enumeration
+# on dense arrays and arguments objects, and the whole unit-test suite stayed
+# green. There is no runtime guard that can see it (a zeroed stack slot reads
+# back as a valid `.object` kind byte), so the check has to be textual.
+object_by_value="$(
+  git grep -nE '(\(|,[[:space:]]*)[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*(core\.)?Object[,)]' -- src \
+    | grep -vE '\*(const )?Object|\?Object' \
+    | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*)' || true
+)"
+
+if [[ -n "$object_by_value" ]]; then
+  echo "anti-goal violation: Object passed by value (head-only copy; the class-data arm is not in it)" >&2
+  echo "$object_by_value" >&2
   status=1
 fi
 

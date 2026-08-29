@@ -2734,7 +2734,7 @@ fn createBytecodeConstructorInstance(
             return createProfiledConstructorInstance(
                 ctx.runtime,
                 prototype,
-                function_object.u.bytecode_function.function_bytecode,
+                function_object.bytecodeArm().*.function_bytecode,
             );
         }
     }

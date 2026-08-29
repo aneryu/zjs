@@ -31,8 +31,8 @@ fn kindContract(comptime kind: gc.GcKind) []const u8 {
 
 fn objectLayout() []const u8 {
     return std.fmt.comptimePrint(
-        "object size={d} align={d} header={d} weakref_count={d} class_id={d} flags={d} shape_ref={d} prop_values={d} u={d}\n",
-        .{ @sizeOf(core.Object), @alignOf(core.Object), @offsetOf(core.Object, "header"), @offsetOf(core.Object, "weakref_count"), @offsetOf(core.Object, "class_id"), @offsetOf(core.Object, "flags"), @offsetOf(core.Object, "shape_ref"), @offsetOf(core.Object, "prop_values"), @offsetOf(core.Object, "u") },
+        "object head={d} align={d} header={d} weakref_count={d} class_id={d} flags={d} shape_ref={d} prop_values={d} arm_narrow={d} arm_wide={d}\n",
+        .{ @sizeOf(core.Object), @alignOf(core.Object), @offsetOf(core.Object, "header"), @offsetOf(core.Object, "weakref_count"), @offsetOf(core.Object, "class_id"), @offsetOf(core.Object, "flags"), @offsetOf(core.Object, "shape_ref"), @offsetOf(core.Object, "prop_values"), core.Object.arm_min_bytes, core.Object.arm_max_bytes },
     );
 }
 

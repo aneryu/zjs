@@ -21184,10 +21184,10 @@ test "small-function-inlining: sc_Pair constructor is eligible and arguments cto
     const pair_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(pair_fn).?;
     const args_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(args_fn).?;
     const big_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(big_fn).?;
-    const pair_fb = pair_obj.u.bytecode_function.function_bytecode.?;
+    const pair_fb = pair_obj.bytecodeArm().*.function_bytecode.?;
     try std.testing.expect(pair_fb.smallInlineEligible());
-    try std.testing.expect(!args_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
-    try std.testing.expect(!big_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!args_obj.bytecodeArm().*.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!big_obj.bytecodeArm().*.function_bytecode.?.smallInlineEligible());
 }
 
 test "small-function-inlining: setter throw stack is setter, ctor, caller" {
@@ -21268,7 +21268,7 @@ test "small-function-inlining: polymorphic site is not specialized" {
     const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
     defer outer_fn.free(js.runtime);
     const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
-    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    const outer_fb = outer_obj.bytecodeArm().*.function_bytecode.?;
     if (zjs.exec.small_inline.callerState(outer_fb)) |state| {
         try std.testing.expectEqual(@as(u8, 0), state.inlined_len);
         var i: u8 = 0;
@@ -21366,7 +21366,7 @@ test "small-function-inlining: derived class constructor is not eligible" {
     const d_fn = try global.getProperty(try js.runtime.internAtom("__d"));
     defer d_fn.free(js.runtime);
     const d_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(d_fn).?;
-    try std.testing.expect(!d_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!d_obj.bytecodeArm().*.function_bytecode.?.smallInlineEligible());
 }
 
 test "small-function-inlining: next-entry specialize is installed on the caller" {
@@ -21389,7 +21389,7 @@ test "small-function-inlining: next-entry specialize is installed on the caller"
     const batch_fn = try global.getProperty(try js.runtime.internAtom("__batch"));
     defer batch_fn.free(js.runtime);
     const batch_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(batch_fn).?;
-    const batch_fb = batch_obj.u.bytecode_function.function_bytecode.?;
+    const batch_fb = batch_obj.bytecodeArm().*.function_bytecode.?;
     const state = zjs.exec.small_inline.callerState(batch_fb);
     try std.testing.expect(state != null);
     try std.testing.expect(state.?.inlined_len >= 1);
@@ -21414,7 +21414,7 @@ test "small-function-inlining: spec copy keeps simple_inline bits after extra TA
     const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
     defer outer_fn.free(js.runtime);
     const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
-    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    const outer_fb = outer_obj.bytecodeArm().*.function_bytecode.?;
     const state = zjs.exec.small_inline.callerState(outer_fb);
     try std.testing.expect(state != null);
     try std.testing.expect(state.?.inlined_len >= 1);
@@ -21454,7 +21454,7 @@ test "small-function-inlining: sibling constructor sites both specialize" {
     const both_fn = try global.getProperty(try js.runtime.internAtom("__both"));
     defer both_fn.free(js.runtime);
     const both_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(both_fn).?;
-    const both_fb = both_obj.u.bytecode_function.function_bytecode.?;
+    const both_fb = both_obj.bytecodeArm().*.function_bytecode.?;
     const state = zjs.exec.small_inline.callerState(both_fb);
     try std.testing.expect(state != null);
     try std.testing.expect(state.?.inlined_len >= 2);
@@ -21495,7 +21495,7 @@ test "small-function-inlining: call_constructor callers keep published frame geo
     const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
     defer outer_fn.free(js.runtime);
     const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
-    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    const outer_fb = outer_obj.bytecodeArm().*.function_bytecode.?;
     // Deleted OSR spare was +9 locals / +4 stack on every call_constructor
     // caller. Published geometry must match the compiler's real slots.
     try std.testing.expectEqual(@as(u16, 0), outer_fb.var_count);
@@ -21524,10 +21524,10 @@ test "small-function-inlining: leftover-operand bodies are not small-inline elig
     defer ctor_fn.free(js.runtime);
     const inc_fn = try global.getProperty(try js.runtime.internAtom("__inc"));
     defer inc_fn.free(js.runtime);
-    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(drop_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
-    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(sw_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
-    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(ctor_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
-    try std.testing.expect(zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(inc_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(drop_fn).?.bytecodeArm().*.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(sw_fn).?.bytecodeArm().*.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(ctor_fn).?.bytecodeArm().*.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(inc_fn).?.bytecodeArm().*.function_bytecode.?.smallInlineEligible());
 }
 
 test "small-function-inlining: leftover ctor is not specialized and does not overflow" {
@@ -21547,11 +21547,11 @@ test "small-function-inlining: leftover ctor is not specialized and does not ove
     const global = try js.context.globalObject();
     const c_fn = try global.getProperty(try js.runtime.internAtom("__C"));
     defer c_fn.free(js.runtime);
-    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(c_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(c_fn).?.bytecodeArm().*.function_bytecode.?.smallInlineEligible());
     const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
     defer outer_fn.free(js.runtime);
     const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
-    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    const outer_fb = outer_obj.bytecodeArm().*.function_bytecode.?;
     if (zjs.exec.small_inline.callerState(outer_fb)) |state| {
         try std.testing.expectEqual(@as(u8, 0), state.inlined_len);
     }
@@ -21576,7 +21576,7 @@ test "small-function-inlining: extra ctor args do not overwrite callee fields" {
     const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
     defer outer_fn.free(js.runtime);
     const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
-    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    const outer_fb = outer_obj.bytecodeArm().*.function_bytecode.?;
     const state = zjs.exec.small_inline.callerState(outer_fb);
     try std.testing.expect(state != null);
     try std.testing.expect(state.?.inlined_len >= 1);
@@ -21617,7 +21617,7 @@ test "small-function-inlining L1: apply-arguments ctor specializes" {
     const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
     defer outer_fn.free(js.runtime);
     const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
-    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    const outer_fb = outer_obj.bytecodeArm().*.function_bytecode.?;
     const state = zjs.exec.small_inline.callerState(outer_fb);
     try std.testing.expect(state != null);
     try std.testing.expect(state.?.inlined_len >= 1);

@@ -67,6 +67,7 @@ pub const sweep_model_stats_enabled: bool = sweep_model_enabled and builtin.is_t
 pub const block_heap_enabled: bool = trace_stw_enabled;
 
 const BlockHeapMod = @import("gc_block_heap.zig");
+const gc_space = @import("gc_space.zig");
 
 const AddressRegistryTable = if (address_registry_enabled)
     @import("gc_address_registry.zig").Table
@@ -1641,6 +1642,7 @@ pub const InvariantError = error{
     InvalidTrailingPropertyLayout,
     InvalidTrailingPropertyCapacity,
     UndersizedTrailingObjectCell,
+    ObjectCellSizeClassMismatch,
     DeferredPayloadRootNotLive,
     DeferredPayloadRootDoomed,
 };
@@ -2801,10 +2803,10 @@ pub const Registry = struct {
             // WithBytes APIs, as before.
             .object => blk: {
                 const obj: *const object.Object = @alignCast(@fieldParentPtr("header", h));
-                break :blk @sizeOf(object.Object) + if (obj.hasTrailingPropertyAllocation())
-                    object.Object.trailing_property_bytes
-                else
-                    0;
+                break :blk @sizeOf(object.Object) + object.Object.objectTailBytes(
+                    obj.class_id,
+                    obj.hasTrailingPropertyAllocation(),
+                );
             },
             .function_bytecode => blk: {
                 const fb: *const FunctionBytecode = @fieldParentPtr("header", h);
@@ -3403,8 +3405,20 @@ pub const Registry = struct {
                 if (isBlockCellHeader(header)) {
                     const cell = @intFromPtr(header) - metadata_prefix_size;
                     const block = BlockHeapMod.Block.fromCellTrusted(cell);
-                    if (block.cell_size < metadata_prefix_size + owner.allocationSize(rt))
+                    const wanted = metadata_prefix_size + owner.allocationSize(rt);
+                    if (block.cell_size < wanted)
                         return error.UndersizedTrailingObjectCell;
+                    // obj64 ③: the cell width is now a function of `class_id`,
+                    // and alloc and free each compute it independently. A cell
+                    // that is merely BIG ENOUGH is not enough: it means the two
+                    // sides disagreed, and the free will hand the allocator a
+                    // size class the alloc never took. Demand the exact class.
+                    const wanted_class = gc_space.classIndexForPayload(wanted) orelse
+                        return error.ObjectCellSizeClassMismatch;
+                    const actual_class = gc_space.classIndexForPayload(block.cell_size) orelse
+                        return error.ObjectCellSizeClassMismatch;
+                    if (wanted_class != actual_class)
+                        return error.ObjectCellSizeClassMismatch;
                 }
             }
         }
