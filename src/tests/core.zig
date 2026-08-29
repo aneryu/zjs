@@ -5687,7 +5687,11 @@ test "definePlainDataPropertyKnownFast barriers follow committed slot and shape 
 
     const reports_before = core.gc_trace_stw.detailed_reports;
     core.gc_trace_stw.detailed_reports = true;
-    defer core.gc_trace_stw.detailed_reports = reports_before;
+    rt.gc.refreshBarrierGate();
+    defer {
+        core.gc_trace_stw.detailed_reports = reports_before;
+        rt.gc.refreshBarrierGate();
+    }
 
     var barriers_before = rt.gc.generation.stats.barrier_calls;
     try holder.definePlainDataPropertyKnownFast(rt, key, first.value());
@@ -8857,7 +8861,11 @@ test "trace_stw survivor classes on a known graph" {
     // means this assertion tests a number instead of testing zero.
     const census_before = core.gc_trace_stw.detailed_reports;
     core.gc_trace_stw.detailed_reports = true;
-    defer core.gc_trace_stw.detailed_reports = census_before;
+    rt.gc.refreshBarrierGate();
+    defer {
+        core.gc_trace_stw.detailed_reports = census_before;
+        rt.gc.refreshBarrierGate();
+    }
     const swept = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(closed_property_cycle_reclaimed_count, swept);
     try std.testing.expect(rt.gc.containsHeader(live_header));
@@ -15687,6 +15695,142 @@ test "the generational barrier ignores edges a minor would find anyway" {
     try std.testing.expectEqual(before, rt.gc.generation.stats.remembered_owners);
 }
 
+test "the folded barrier gate skips exactly the two owner facts" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const saved_audit = core.gc.minor_audit;
+    core.gc.minor_audit = true;
+    defer core.gc.minor_audit = saved_audit;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const edge_key = try rt.internAtom("barrier-gate-fold");
+    defer rt.atoms.free(edge_key);
+    const owner = try core.Object.createPlainObject(rt, null);
+    defer owner.value().free(rt);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    var owner_slot: ?*core.Object = owner;
+    var roots = core.runtime.rootObjects(.{&owner_slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    // State 1 -- young, unremembered. The gate retires the call on the young
+    // bit alone, without ever naming a target.
+    try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.barrier_gate);
+    try std.testing.expect(rt.gc.generation.isYoung(&owner.header));
+    try std.testing.expect(rt.gc.barrierOwnerSkips(&owner.header));
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+
+    // State 2 -- old, unremembered. This is the ONLY state that reaches the
+    // slow path in the steady phase, and the only one that can classify a
+    // target.
+    try std.testing.expect(!rt.gc.generation.isYoung(&owner.header));
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask,
+    );
+    try std.testing.expect(!rt.gc.barrierOwnerSkips(&owner.header));
+
+    // State 3 -- old, remembered. This is the exit the fold ADDS: the pre-fold
+    // path classified the target on every one of these writes. It is sound
+    // because bit7 implies map membership (the direction
+    // `RememberedCacheWithoutOwner` enforces at every collection boundary) and
+    // a remembered owner is re-traced whole.
+    const first = try core.Object.createPlainObject(rt, null);
+    defer first.value().free(rt);
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(first.value(), true, true, true));
+    try std.testing.expect(owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask != 0);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    try std.testing.expect(rt.gc.barrierOwnerSkips(&owner.header));
+
+    // A second old-to-young edge out of the same owner is genuinely covered by
+    // the entry already there, so the skip loses nothing: the map is still
+    // authoritative for exactly one owner and the representation audit -- which
+    // is what makes the skip's premise machine-checked -- still passes.
+    const second = try core.Object.createPlainObject(rt, null);
+    defer second.value().free(rt);
+    rt.gc.generationalBarrierValue(&owner.header, second.value());
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.rememberedOwnerCount());
+    try rt.gc.verifyRepresentationInvariants();
+
+    // State 4 -- the word/mask correspondence on a REAL header, not just the
+    // comptime probe. The owner is old and remembered right now, so the masked
+    // word must be EXACTLY the remembered bit: a mask that had picked up a
+    // neighbouring field (shape summary, mark epoch, alloc_info) would fail
+    // here even though every behavioural assertion above still passed.
+    const word = core.gc.barrierOwnerWord(&owner.header);
+    try std.testing.expectEqual(core.gc.barrier_remembered_bit, word & core.gc.barrier_skip_bits);
+    // ... and the two bits really are the two facts, read back off the header.
+    try std.testing.expectEqual(
+        rt.gc.generation.isYoung(&owner.header),
+        word & core.gc.barrier_young_bit != 0,
+    );
+    try std.testing.expectEqual(
+        owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask != 0,
+        word & core.gc.barrier_remembered_bit != 0,
+    );
+}
+
+test "the barrier gate closes on every phase that needs a richer arm" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const young_owner = try core.Object.createPlainObject(rt, null);
+    defer young_owner.value().free(rt);
+    const child = try core.Object.createPlainObject(rt, null);
+    defer child.value().free(rt);
+
+    // Steady state: the gate is open and a young owner exits for free.
+    try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.barrier_gate);
+    try std.testing.expect(rt.gc.barrierOwnerSkips(&young_owner.header));
+
+    // Major marking. The exact-target shading arm must run for EVERY store,
+    // young owner included, so the gate must be zero -- this is the property
+    // that replaces the per-call atomic `markingActive` load.
+    {
+        rt.gc.setMajorMarkingActive(true, .release);
+        defer rt.gc.setMajorMarkingActive(false, .release);
+        try std.testing.expectEqual(@as(u64, 0), rt.gc.barrier_gate);
+        try std.testing.expect(!rt.gc.barrierOwnerSkips(&young_owner.header));
+        rt.gc.setHeaderUnmarked(&child.header);
+        const shaded_before = rt.gc.concurrent.stats.shaded;
+        rt.gc.generationalBarrierValue(&young_owner.header, child.value());
+        try std.testing.expect(rt.gc.concurrent.stats.shaded > shaded_before);
+    }
+    try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.barrier_gate);
+
+    // `--gc-stats`. The counter block lives in the slow path, so the gate has
+    // to close or the young-owner exits -- 89.9% of all calls -- would stop
+    // being counted. Closing it is what keeps the barrier census exact without
+    // a second global load on the fast path.
+    {
+        const reports_before = core.gc_trace_stw.detailed_reports;
+        core.gc_trace_stw.detailed_reports = true;
+        rt.gc.refreshBarrierGate();
+        defer {
+            core.gc_trace_stw.detailed_reports = reports_before;
+            rt.gc.refreshBarrierGate();
+        }
+        try std.testing.expectEqual(@as(u64, 0), rt.gc.barrier_gate);
+        try std.testing.expect(!rt.gc.barrierOwnerSkips(&young_owner.header));
+
+        const calls_before = rt.gc.generation.stats.barrier_calls;
+        const young_before = rt.gc.generation.stats.barrier_young_owner;
+        rt.gc.generationalBarrierValue(&young_owner.header, child.value());
+        try std.testing.expectEqual(calls_before + 1, rt.gc.generation.stats.barrier_calls);
+        try std.testing.expectEqual(young_before + 1, rt.gc.generation.stats.barrier_young_owner);
+    }
+    try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.barrier_gate);
+}
+
 test "candidate validation rejects the tear shapes the litmus measured" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -15764,8 +15908,8 @@ test "the barrier shades exact targets while marking and remembers owners otherw
 
     // Marking active: the same write shades its exact target instead.
     rt.gc.setHeaderUnmarked(&child.header);
-    rt.gc.concurrent.major_marking_active.store(true, .release);
-    defer rt.gc.concurrent.major_marking_active.store(false, .release);
+    rt.gc.setMajorMarkingActive(true, .release);
+    defer rt.gc.setMajorMarkingActive(false, .release);
     rt.gc.generationalBarrierValue(&owner.header, child.value());
     try std.testing.expect(rt.gc.concurrent.stats.shaded > shaded_before);
     try std.testing.expect(rt.gc.headerMarked(&child.header));
@@ -15807,10 +15951,10 @@ test "the barrier shades a target the marker had already passed" {
     // The interleaving the barrier exists for: the mutator stores a reference
     // after the marker already walked the owner, so nothing will re-trace it.
     // Only the shading keeps the target in this cycle's live set.
-    rt.gc.concurrent.major_marking_active.store(true, .release);
+    rt.gc.setMajorMarkingActive(true, .release);
     const shaded_before = rt.gc.concurrent.stats.shaded;
     rt.gc.shadeForConcurrentMark(&target.header, &target.header);
-    rt.gc.concurrent.major_marking_active.store(false, .release);
+    rt.gc.setMajorMarkingActive(false, .release);
 
     try std.testing.expect(rt.gc.headerMarked(&target.header));
     try std.testing.expectEqual(shaded_before + 1, rt.gc.concurrent.stats.shaded);
@@ -16039,7 +16183,7 @@ test "the marker worker marks queued objects on its own thread" {
     var worker = core.gc.marker.Worker{};
     for (held) |obj| try std.testing.expect(queue.push(&obj.header));
 
-    rt.gc.concurrent.major_marking_active.store(true, .release);
+    rt.gc.setMajorMarkingActive(true, .release);
     try worker.start(&rt.gc, &queue);
 
     // Drain-and-join is the owner's side of the handshake: after join every
@@ -16047,7 +16191,7 @@ test "the marker worker marks queued objects on its own thread" {
     // rescan roots without racing the marker.
     while (queue.len() != 0) std.Thread.yield() catch {};
     worker.join();
-    rt.gc.concurrent.major_marking_active.store(false, .release);
+    rt.gc.setMajorMarkingActive(false, .release);
 
     for (held) |obj| try std.testing.expect(rt.gc.headerMarked(&obj.header));
     try std.testing.expectEqual(@as(usize, held.len), worker.stats.marked);
@@ -16072,7 +16216,7 @@ test "the marker worker and a mutator can shade concurrently without losing mark
     queue.ensureCapacity(std.testing.allocator);
     defer queue.deinit(std.testing.allocator);
     var worker = core.gc.marker.Worker{};
-    rt.gc.concurrent.major_marking_active.store(true, .release);
+    rt.gc.setMajorMarkingActive(true, .release);
     try worker.start(&rt.gc, &queue);
 
     // The owner shades half directly (the barrier's path) while the worker
@@ -16088,7 +16232,7 @@ test "the marker worker and a mutator can shade concurrently without losing mark
 
     while (queue.len() != 0) std.Thread.yield() catch {};
     worker.join();
-    rt.gc.concurrent.major_marking_active.store(false, .release);
+    rt.gc.setMajorMarkingActive(false, .release);
 
     for (held) |obj| try std.testing.expect(rt.gc.headerMarked(&obj.header));
 }
@@ -16301,7 +16445,11 @@ test "minor detailed stats decompose the outer STW envelope" {
     defer core.gc.stress_collect = stress_before;
     const reports_before = core.gc_trace_stw.detailed_reports;
     core.gc_trace_stw.detailed_reports = true;
-    defer core.gc_trace_stw.detailed_reports = reports_before;
+    rt.gc.refreshBarrierGate();
+    defer {
+        core.gc_trace_stw.detailed_reports = reports_before;
+        rt.gc.refreshBarrierGate();
+    }
 
     var index: usize = 0;
     while (index < 64) : (index += 1) {
@@ -16417,8 +16565,8 @@ test "marking barrier shades grey, not black: the stored object's children survi
     rt.gc.setHeaderUnmarked(&b.header);
     rt.gc.setHeaderUnmarked(&c.header);
     rt.gc.concurrent_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
-    rt.gc.concurrent.major_marking_active.store(true, .release);
-    defer rt.gc.concurrent.major_marking_active.store(false, .release);
+    rt.gc.setMajorMarkingActive(true, .release);
+    defer rt.gc.setMajorMarkingActive(false, .release);
 
     rt.gc.generationalBarrier(&a.header, &b.header);
 
@@ -16457,8 +16605,8 @@ test "barrier queue overflow downgrades to a rescan, not to lost children" {
     // slot, and must still be found by the remark's marked-object rescan.
     rt.gc.setHeaderUnmarked(&b.header);
     rt.gc.setHeaderUnmarked(&c.header);
-    rt.gc.concurrent.major_marking_active.store(true, .release);
-    defer rt.gc.concurrent.major_marking_active.store(false, .release);
+    rt.gc.setMajorMarkingActive(true, .release);
+    defer rt.gc.setMajorMarkingActive(false, .release);
 
     const owner = try core.Object.create(rt, core.class.ids.object, null);
     defer owner.value().free(rt);
