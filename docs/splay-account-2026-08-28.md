@@ -624,3 +624,14 @@ finish 是唯一未预算化的段)。
 > finish 估计 ~3ms 量级。**先修仪器(把普查移出计时窗/减掉 last_census_ns)
 > 再重测,在此之前 finish 切片不立项**;pause 基值届时整体下移,门禁阈值须
 > 同步重定。详录 review 三报告(fresh-splay-account / finish-anatomy / JSC 全景)。
+>
+> ✅**已结账(仪器修正合入)**:普查自立开关 `--gc-mark-footprint`(`--gc-stats`
+> 回归便宜),增量路径补扣;开/关 SplayLatency 差从 −24.7% 收敛到 −0.56%。
+> **splay 真实读数:finish 段 82µs 均值 / 262µs max,major pause p99 1.014ms /
+> max 1.079ms**——比预估的 ~3ms 还小一个量级,finish 切片议题永久关闭。
+> ⭐连带发现:GC-GAP 时代 trace 臂的全部停顿数字都含未扣普查 ⇒ **trace 的
+> 停顿优势历史上被系统性低估**(splay 官方 6.87ms 实为 ~1ms 量级)。
+> 待办:三维快照的另五个基准停顿数字待安静窗口用修正后仪器重采;
+> gc_merge_policy 预注册行、roadmap:270、GC-GAP manifest 的 trace 停顿列
+> 须重新锚定(方向全部下移);tools/perf/gc_stats_snapshot.py 的 inline 行
+> 正则在 main 上已错列(4 列 vs 7 列),tail_grown_external 单调性契约待裁。
