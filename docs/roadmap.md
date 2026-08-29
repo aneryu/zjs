@@ -269,6 +269,13 @@ G2 合入 gate 的统计机器)= driver 会话。G1-GC 已裁 continue
 (GC-GAP 账在案:fixed-work geomean 1.206、suite 0.832、splay pause
 p99 6.87ms vs rc 42.4ms、splay RSS 3.63x;裁决时欠账=非劣效 margin
 与吞吐三角答案,须在 G2 首个 look 前写入 gc_merge_policy.json)。
+> **停顿列重锚(2026-08-29)**:上面这行的 `6.87ms vs 42.4ms` 是裁决当时的
+> GC-GAP 读数,保留原样作审计基线。**现行值 = splay major p99 1.013ms vs
+> rc 44.73ms**(`docs/pause-baseline-2026-08-29.md`,修正后仪器,706/706 全
+> 保留)。两者**不是同一个 A/B**:候选臂差了三天收集器工作,rc 参照臂也换
+> 了二进制,只能当先后两个基值读。⚠️ GC-GAP 的停顿列**没有**受 08-29 那个
+> 「普查落在计时窗内」的仪器缺陷影响(缺陷 08-28 才引入,晚于该候选臂三天),
+> 核查见 `reports/evidence/GC-GAP/ERRATA-2026-08-29.md`。
 HR-P1 让出 WIP 槽排队(root-handle 与 GC 耦合,亦宜等 GC 线收敛)。
 
 **证据购买(implementation slot 释放后;测量队列串行)**

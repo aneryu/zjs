@@ -60,7 +60,23 @@
   "primary_benefit": {
     "rule": "exactly one preregistered benefit metric per merge candidate, named in the candidate's evidence manifest before the first look (e.g. major pause p99, or cumulative STW p99); all other metrics are descriptive or multiplicity-corrected",
     "basis": "doc (roadmap §2)",
-    "preregistered_metric": "splay major pause p99, run-level (candidate arm; current account: 1.0ms vs rc 42.4ms). Owner-named 2026-08-26; must also be named in the candidate's evidence manifest before the first look."
+    "preregistered_metric": "splay major pause p99, run-level (candidate arm). Owner-named 2026-08-26; must also be named in the candidate's evidence manifest before the first look. The metric is unchanged; only the account it quotes moves.",
+    "account_history": [
+      {
+        "date": "2026-08-26",
+        "value": "1.0ms vs rc 42.4ms",
+        "note": "as preregistered; the 1.0ms was the GC-GAP-era lazy-sweep reading, while the same GC-GAP manifest recorded splay trace p99 6.87ms. Kept verbatim for audit."
+      },
+      {
+        "date": "2026-08-29",
+        "value": "splay major pause p99 1.013ms (max 1.031ms) vs rc 44.73ms",
+        "arms": "candidate main@6374ba73 sha256 2e155412..5480; reference frozen zjs-rc-branchtip-bf624dea sha256 d1cbdf86..9450",
+        "instrument": "clean: census moved off --gc-stats and the incremental path deducts it, as of 7e233ccb",
+        "sampling": "706 of 706 pauses retained (no reservoir truncation on splay); single run per arm, percentiles from the engine histogram",
+        "evidence": "docs/pause-baseline-2026-08-29.md",
+        "note": "re-anchored, not re-preregistered. This is a later baseline against a different reference binary and a different host layout than the 2026-08-26 row; the two rows are successive accounts, not an A/B of any one change."
+      }
+    ]
   },
   "pause_statistics": {
     "rule": "aggregate within each run first (p50/p95/p99/max/cumulative STW); compare run-level statistics only; individual GC events are never independent samples (pseudo-replication)",
@@ -94,6 +110,7 @@
       "measurement, test, and release configurations run the same collector code (no builtin.is_test divergence)",
       "pause timer excludes census/reporting time"
     ],
+    "census_exclusion_note_2026_08_29": "The 'pause timer excludes census/reporting time' row was satisfied on the whole-STW path from the start (runtime.zig subtracts last_census_ns in the CollectionResult duration blk) but NOT on the incremental path: from dd768214 (2026-08-28), recordFinalMarkFootprint ran a whole-heap census inside finishIncrementalCycle's t_remark..t_weak window with no deduction, so the path that actually runs reported an inflated pause from the same --gc-stats flag that printed the distribution. The incremental path satisfies this canary row as of 7e233ccb (2026-08-29), which moved the census behind its own --gc-mark-footprint flag and added the missing deduction. Consequence for gate inputs: any tracing pause number captured with --gc-stats on a build in the dd768214..7e233ccb range is invalid and may not be used as a canary or benefit reading. Readings from before dd768214 (including the GC-GAP evidence) are NOT affected -- verified against 62061f94's sources, see reports/evidence/GC-GAP/ERRATA-2026-08-29.md.",
     "basis": "doc (roadmap §2 canary list); derivation constant 0.5x is proposed"
   },
   "correctness_gates": {

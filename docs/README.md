@@ -72,6 +72,10 @@ when needed.
   last zoo baseline was removed 2026-08-25 — recover from git history).
 - [GC baseline](perf/gc-baseline.md): refcounting-collector behavior
   baseline captured before the GC refactor.
+- [Pause baseline 2026-08-29](pause-baseline-2026-08-29.md): the current
+  major/minor pause account, six benchmarks against the frozen rc arm, taken
+  with the corrected instrument — the authoritative source for any pause
+  number, and the record of which historical pause readings are void.
 - [Performance Workflow](perf/README.md): measurement contract, diagnostic
   benchmarks, profiling, PMU discipline.
 - [Object And Shape Implementation](perf/object-shape-design.md): fixed

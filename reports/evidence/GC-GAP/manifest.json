@@ -363,9 +363,19 @@
    "splay pause: trace major p99 6.87ms/max 7.47ms vs rc p99/max 42.4ms \u2014 the tracer wins the pause row on its own worst throughput workload",
    "splay memory: trace maxrss 544MB vs rc 150MB (3.63x) \u2014 allocator/sweep retention, the account's largest memory signal",
    "SplayLatency suite score 0.185 (trace) and 0.805 (branch rc arm) \u2014 the branch regresses splay latency even under rc; attribution owed",
-   "at-exit committed/live and peak/live are teardown-adjacent readings, not the \u00a71.3 envelope quantities; envelope verdicts need in-cycle sampling"
+   "at-exit committed/live and peak/live are teardown-adjacent readings, not the \u00a71.3 envelope quantities; envelope verdicts need in-cycle sampling",
+   "ERRATUM 2026-08-29 (no number in this manifest changes): see ERRATA-2026-08-29.md in this directory. The tracer pause rows here are NOT affected by the 2026-08-29 census-in-pause-window instrument defect -- that defect entered at dd768214 (2026-08-28), which is not an ancestor of the 62061f94 candidate. splay's 6.87ms p99 tail was the condemn walk inside the final-remark slice (panel: sweep+destroy 5.08ms), i.e. real STW work. The current account is splay major p99 1.013ms vs rc 44.73ms (docs/pause-baseline-2026-08-29.md), which is a later baseline against a different reference binary -- a successor account, not an A/B delta",
+   "caliber: a tracer 'pause' sample is one STW slice (begin/increment/destroy/finish), not one major; pause_events / completed_rounds differ by that factor (deltablue 2904 / 968)"
   ]
  },
+ "errata": [
+  {
+   "date": "2026-08-29",
+   "path": "reports/evidence/GC-GAP/ERRATA-2026-08-29.md",
+   "changes_numbers": false,
+   "subject": "pause-column caliber review; policy_sha256 drift note"
+  }
+ ],
  "canary_base_candidate_medians": {
   "deltablue": {
    "pause_events": 2904.0,

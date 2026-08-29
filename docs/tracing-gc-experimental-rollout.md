@@ -7,7 +7,12 @@ Status: 2026-08-29. Two things happened on this date, in this order.
    gc_heavy_six fixed-work geomean 1.0419 against the frozen rc baseline
    (margin 1.05 met), splay major pause p99 ~1 ms against rc's 42.4 ms,
    dual-variant unit suites green, trace-build test262 0/49778.
-   `docs/splay-account-2026-08-28.md` holds the full ledger.
+   `docs/splay-account-2026-08-28.md` holds the full ledger. The pause row
+   was re-anchored on 2026-08-29 with the corrected instrument (census off
+   `--gc-stats`, incremental path deducting it, `7e233ccb`): splay major
+   p99 **1.013 ms** against rc's **44.73 ms**, six benchmarks both arms in
+   `docs/pause-baseline-2026-08-29.md`. The gate-basis figures above stand
+   as recorded.
 2. **The rc collector was retired outright** (branch `gc/rm-rc`). The rollback
    story moved from a build flag to git history plus the frozen binaries. See
    `docs/rc-retirement-2026-08-29.md` for what was deleted, what was kept, and

@@ -10,6 +10,13 @@ marks and the block heap. Throughput geomean 1.31, bench-v8 combined 0.79 of
 rc, with splay carrying nearly the whole residue in both. Remaining Phase 3
 items stay trigger-gated.**
 
+> **Pause readings here are superseded, not invalidated (2026-08-29).** Every
+> number in this document predates `dd768214`, so none of it carries the
+> census-in-the-pause-window defect that `7e233ccb` fixed; they are simply
+> several collector generations old. The current six-benchmark, two-arm
+> baseline is `docs/pause-baseline-2026-08-29.md` (splay major p99 1.013 ms
+> vs rc 44.73 ms, i.e. the 33.6 ms tail this status line names is gone).
+
 Companion to `tracing-gc-design.md`. That document says what the collector
 should be; this one sequences the work from where the implementation stands on
 2026-08-26, after the arena-geometry campaign and two adversarial reviews of it.

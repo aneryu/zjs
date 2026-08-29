@@ -604,6 +604,11 @@ splay **1.195** → geomean **1.0466**(margin 1.05 达标;*regexp 在其 ±3~4%
 regexp 1.71x、EB 1.61x、deltablue 1.61x、pdfjs 1.57x、raytrace 1.51x——
 与 growth 2.0 定步的 peak/live≈2 构造一致。
 
+> 🧭**指路(2026-08-29 重锚)**:下面这一段停顿数字**全部作废**——它采自
+> `dd768214..7e233ccb` 区间的构建,`--gc-stats` 的全堆普查落在增量路径的计时
+> 窗内且未扣除。**现行停顿基值(六基准双臂,修正后仪器)= `docs/pause-baseline-2026-08-29.md`**;
+> 本文件末尾「停顿重锚」小节是它的摘要。原文保留,不抹历史。
+
 **停顿**(--gc-stats STW 分段):deltablue 最大段 0.43ms / regexp 0.61ms /
 raytrace 0.45ms / pdfjs 单片 cycle 3.8ms / EB 最大段 1.47ms(cycle 累计 max
 4.1ms)/ **splay 最大段 18.5ms(finish 段,22 cycle 均值 12.5ms)**,minor
@@ -635,6 +640,23 @@ finish 是唯一未预算化的段)。
 > gc_merge_policy 预注册行、roadmap:270、GC-GAP manifest 的 trace 停顿列
 > 须重新锚定(方向全部下移);tools/perf/gc_stats_snapshot.py 的 inline 行
 > 正则在 main 上已错列(4 列 vs 7 列),tail_grown_external 单调性契约待裁。
+>
+> ⛔**上面那条「⭐连带发现」的后半句被 2026-08-29 重锚轮回源推翻,勿再引用。**
+> 「GC-GAP 时代 trace 臂的全部停顿数字都含未扣普查」不成立:把普查带进计时窗
+> 的 `recordFinalMarkFootprint` 由 `dd768214`(08-28)引入,而 GC-GAP 的候选臂
+> 是 `62061f94`(08-26),`merge-base --is-ancestor` 为假;读 `62061f94` 的
+> `finishIncrementalCycle` 全函数无 census,六处 `censusStart` 全在整体 STW
+> 路径且那条路径明确减掉了 `last_census_ns`。**GC-GAP 的 6.87ms 尾巴是 final-remark
+> 切片里的 condemn 走查(面板自证 `sweep+destroy 5.08ms`),是真 STW 工作。**
+> ⇒ 6.87→1.01ms 是**收集器工作挣来的**,不是仪器修正让出来的;作废区间仅限
+> `dd768214..7e233ccb`。核查全文 `reports/evidence/GC-GAP/ERRATA-2026-08-29.md`。
+> (前半句「finish 18.5ms 是仪器造的」不受影响,仍然成立。)
+>
+> ✅**待办已清**(2026-08-29 重锚轮):另五个基准已在安静窗口用修正后仪器重采
+> 并收编为 `docs/pause-baseline-2026-08-29.md`;`gc_merge_policy.json` 预注册行
+> 与 canary 条款、`roadmap.md` G1-GC 行、GC-GAP manifest(加勘误注记,数字不改)
+> 均已重锚;`gc_stats_snapshot.py` 的 7 列已补齐,新三列按 driver 裁决**不进
+> 单调性契约**。
 
 ## 官方读数第四轮 + 本波五刀终账(2026-08-29 安静窗口,main@6374ba73)
 

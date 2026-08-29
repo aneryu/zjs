@@ -24,7 +24,10 @@
   supported rollback for the length of that same day; see the entry above.)
   Gate basis: gc_heavy_six fixed-work geomean 1.0419 vs the frozen rc
   baseline (margin 1.05), splay major pause p99 ~1ms vs rc 42.4ms,
-  test262 0/49778 on the trace build. Memory pacing uses growth factor 2.0
+  test262 0/49778 on the trace build. (Pause row re-anchored 2026-08-29
+  under the corrected instrument: splay major p99 1.013 ms vs rc 44.73 ms;
+  the gate-basis figures above are left as recorded. See
+  `docs/pause-baseline-2026-08-29.md`.) Memory pacing uses growth factor 2.0
   (JSC parity); expect higher transient peak RSS than rc on GC-heavy
   workloads (about +10-13% vs the 1.75 pacing on the six-benchmark corpus).
 
