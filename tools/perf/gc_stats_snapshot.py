@@ -920,8 +920,16 @@ def capture(args: argparse.Namespace) -> dict:
             script = tmp_dir / original_path.name
             script.write_bytes(transformed)
             print(f"gc-stats snapshot: {bench} (one fixed-work run)", file=sys.stderr)
+            # `--gc-mark-footprint` and not just `--gc-stats`: the marked-set
+            # census is the structure this snapshot exists to record, and it
+            # became opt-in because it costs a whole-heap walk inside every
+            # final-remark stop (splay: Splay -9.8%, SplayLatency -23.7%). This
+            # tool is explicitly not a performance gate -- one run, no score
+            # recorded, measurement CPUs refused -- so it is the right consumer
+            # to pay for it. Anything reading a timing from a run with this
+            # flag on is reading the instrument.
             proc = run_checked(
-                ["taskset", "-c", str(args.cpu), str(binary), "--gc-stats", str(script)],
+                ["taskset", "-c", str(args.cpu), str(binary), "--gc-mark-footprint", str(script)],
                 args.timeout,
             )
             output = proc.stdout + "\n" + proc.stderr

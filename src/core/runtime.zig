@@ -3295,7 +3295,14 @@ pub const JSRuntime = struct {
             stw.finishPendingDestruction(self);
         }
         const ended = profile.nowNanos();
-        const slice = if (ended > began) ended - began else 0;
+        // Charge the census walks to whoever asked for them, not to the pause
+        // -- the same deduction `tryRunObjectCycleRemovalWithValueRoots` makes
+        // for the synchronous major. It was missing here, so with a census
+        // enabled the STW path reported an honest pause and the incremental
+        // path (the one that actually runs) reported an inflated one, from the
+        // same flag, in the same panel.
+        const census = stw.last_census_ns;
+        const slice = (ended -| began) -| census;
         // The slice's own pause sample is the whole stop, which is what the
         // pause gate measures; the cumulative-by-kind account splits the
         // marking out of it (added above) so the two questions -- "how long

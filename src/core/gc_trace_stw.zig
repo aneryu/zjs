@@ -503,6 +503,26 @@ fn verifyStickyCondemnation(
 /// census ask for it around the body that needs it.
 pub var detailed_reports: bool = false;
 
+/// Run `recordFinalMarkFootprint` -- the marked-set/storage census, a whole
+/// heap walk with per-object property-storage accounting.
+///
+/// This is deliberately NOT `detailed_reports`. Deducting a census from the
+/// number a panel prints (`last_census_ns` below) makes the printed number
+/// honest; it does not give the mutator its time back. The marked-set census
+/// is by far the most expensive of the walks -- on splay it is 525k headers
+/// per major, and it lands inside the final-remark stop -- so bundling it into
+/// `--gc-stats` moved the thing the panel exists to measure: with the flag on,
+/// splay scored -9.8% and SplayLatency -23.7% against the SAME binary with it
+/// off. A latency benchmark measures the mutator's wall clock, not our
+/// bookkeeping, and no amount of subtraction reaches it.
+///
+/// So the census is its own opt-in (`--gc-mark-footprint`). `--gc-stats` keeps
+/// the cheap counters and the pause distribution, and is once again usable as
+/// a ruler for the pause work. The subtraction below is kept as well, for the
+/// runs that do ask for the census: the two mechanisms answer different
+/// questions and neither replaces the other.
+pub var mark_footprint_census: bool = false;
+
 /// Nanoseconds the last collection spent on census walks rather than on
 /// collecting, so the pause it reports is the pause it would have had.
 ///
@@ -514,12 +534,28 @@ pub var detailed_reports: bool = false;
 /// this repository has already been burned twice by rulers that moved.
 pub var last_census_ns: u64 = 0;
 
+/// The final-remark span BEFORE `last_census_ns` is deducted from it.
+///
+/// Written only under `detailed_reports`, and read only by the test that pins
+/// the deduction: without a raw witness "the phase total is census-net" is
+/// asserted about a quantity nothing else records, and the deduction can be
+/// dropped without a single test changing colour.
+pub var last_finish_remark_raw_ns: u64 = 0;
+
+/// Either census family is on, so the walks have to be timed to be deducted.
+/// `mark_footprint_census` is separately switchable, and timing it only when
+/// `detailed_reports` also happened to be set would leave the deduction silently
+/// zero for exactly the walk that dominates the cost.
+inline fn censusTimed() bool {
+    return detailed_reports or mark_footprint_census;
+}
+
 inline fn censusStart() u64 {
-    return if (detailed_reports) profile.nowNanos() else 0;
+    return if (censusTimed()) profile.nowNanos() else 0;
 }
 
 inline fn censusEnd(started: u64) void {
-    if (!detailed_reports) return;
+    if (!censusTimed()) return;
     const now = profile.nowNanos();
     if (now > started) last_census_ns +|= now - started;
 }
@@ -611,8 +647,11 @@ fn verifyCollectorInvariants(
 /// `gc_parallel_mark.Stats.owner_marked/worker_marked` count successful claims
 /// only on slices that actually entered the parallel pool, so a CPU-0 run can
 /// legitimately report both as zero while marking a large graph.
+/// Gated on `mark_footprint_census`, not on `detailed_reports`: this walk runs
+/// inside the final-remark stop and is the one census big enough to move the
+/// benchmark scores the panel is used to read (see `mark_footprint_census`).
 fn recordFinalMarkFootprint(rt: *JSRuntime) void {
-    if (!detailed_reports) return;
+    if (!mark_footprint_census) return;
     const started = censusStart();
     defer censusEnd(started);
 
@@ -1105,6 +1144,10 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
 
+    // Own the accumulator for this finish, the way `collectCycles` owns it for
+    // a synchronous major. Without the reset the deduction below would charge
+    // this pause with whatever the previous collection's walks cost.
+    last_census_ns = 0;
     const t_remark = profile.nowNanos();
     try collector.seedRoots();
     const t_remark_cons = profile.nowNanos();
@@ -1231,7 +1274,18 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     auditDoomedExitInvariant(rt);
 
     const t_end = profile.nowNanos();
-    rt.gc.concurrent.stats.phase_finish_remark_ns +|= t_weak -| t_remark;
+    // Every census walk this finish performed happened between `t_remark` and
+    // `t_weak` -- that is where the marked set still exists to be counted --
+    // so the remark segment is the only one that can carry census time, and
+    // it must not: the panel that prints this row is the same flag that
+    // switches the walks on. The containment assertion is what keeps that
+    // "only" true; a census added after `t_weak` would inflate a segment the
+    // deduction below never touches, silently.
+    const raw_remark_ns = t_weak -| t_remark;
+    const census_ns = last_census_ns;
+    std.debug.assert(census_ns <= raw_remark_ns);
+    if (detailed_reports) last_finish_remark_raw_ns = raw_remark_ns;
+    rt.gc.concurrent.stats.phase_finish_remark_ns +|= raw_remark_ns -| census_ns;
     rt.gc.concurrent.stats.phase_finish_weak_ns +|= t_sweep -| t_weak;
     rt.gc.concurrent.stats.phase_finish_condemn_ns +|= t_end -| t_sweep;
     collector.endSweepModelSweep();
@@ -1245,6 +1299,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     rt.gc.generation.decayLowYieldStreak();
     last_report = collector.report;
     last_report.swept = condemned;
+    last_report.census_ns = census_ns;
     if (gc.invariantChecksEnabled()) {
         verifyCollectorInvariants(rt, collector.conservative_on, true);
     }

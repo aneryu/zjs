@@ -16545,6 +16545,98 @@ test "an incremental cycle frees threshold garbage across bounded polls" {
     try std.testing.expectEqual(@as(u64, 0), untouched.gc.concurrent.stats.phase_begin_clear_ns);
 }
 
+/// Drive one whole incremental major -- open, mark to the frontier's end,
+/// finish, and drain the morgue -- over a heap of `garbage` dead objects.
+/// Returns the number of finish segments the drive produced, so a caller that
+/// reasons about "the finish" can assert there was exactly one.
+fn driveOneIncrementalMajorForCensusTest(rt: *core.JSRuntime, garbage: usize) !u64 {
+    rt.forcePreciseRootScanForTest();
+    var index: usize = 0;
+    while (index < garbage) : (index += 1) {
+        const dead = try core.Object.create(rt, core.class.ids.object, null);
+        dead.value().free(rt);
+    }
+    const finish_index = @intFromEnum(core.gc.Registry.SliceKind.finish);
+    const finishes_before = rt.gc.concurrent.stats.total_segments_by_kind[finish_index];
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+        try std.testing.expect(polls < 10_000);
+        _ = try rt.pollGC(null, .safepoint);
+    }
+    return rt.gc.concurrent.stats.total_segments_by_kind[finish_index] - finishes_before;
+}
+
+test "the marked-set census is its own opt-in, not a rider on the stats panel" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    // `--gc-stats` is the only instrument for the pause distribution, and the
+    // marked-set census is a whole-heap walk inside the final-remark stop. A
+    // ruler that costs 24% of the score it is used to read cannot adjudicate
+    // pause work, so the two flags are separate and this pins the separation:
+    // asking for the panel must not start the walk.
+    const reports_before = core.gc_trace_stw.detailed_reports;
+    core.gc_trace_stw.detailed_reports = true;
+    defer core.gc_trace_stw.detailed_reports = reports_before;
+    const census_before = core.gc_trace_stw.mark_footprint_census;
+    core.gc_trace_stw.mark_footprint_census = false;
+    defer core.gc_trace_stw.mark_footprint_census = census_before;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    try std.testing.expectEqual(@as(u64, 1), try driveOneIncrementalMajorForCensusTest(rt, 256));
+    try std.testing.expectEqual(@as(u64, 0), rt.gc_mark_pool.footprint.major_censuses);
+    try std.testing.expectEqual(@as(u64, 0), rt.gc_mark_pool.footprint.marked_headers);
+
+    // ... and the opt-in must actually reach the walk, or the assertion above
+    // would pass just as well against a census that no flag can turn on.
+    core.gc_trace_stw.mark_footprint_census = true;
+    try std.testing.expectEqual(@as(u64, 1), try driveOneIncrementalMajorForCensusTest(rt, 256));
+    try std.testing.expectEqual(@as(u64, 1), rt.gc_mark_pool.footprint.major_censuses);
+    try std.testing.expect(rt.gc_mark_pool.footprint.marked_headers > 0);
+}
+
+test "the incremental finish reports a remark segment net of its census walk" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    // The other half of the same problem: a run that DOES ask for the census
+    // still needs its phase rows to price collecting, not counting. The
+    // synchronous major has deducted `last_census_ns` since the panel existed;
+    // the incremental path -- the one that actually runs -- did not, so the
+    // same flag produced an honest number on the path nobody takes and an
+    // inflated one on the path everybody takes.
+    const reports_before = core.gc_trace_stw.detailed_reports;
+    core.gc_trace_stw.detailed_reports = true;
+    defer core.gc_trace_stw.detailed_reports = reports_before;
+    const census_before = core.gc_trace_stw.mark_footprint_census;
+    core.gc_trace_stw.mark_footprint_census = true;
+    defer core.gc_trace_stw.mark_footprint_census = census_before;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const remark_before = rt.gc.concurrent.stats.phase_finish_remark_ns;
+    try std.testing.expectEqual(@as(u64, 1), try driveOneIncrementalMajorForCensusTest(rt, 2048));
+    const reported = rt.gc.concurrent.stats.phase_finish_remark_ns - remark_before;
+
+    // The census ran, so there is something to deduct; a zero here would make
+    // the equality below hold for a build that deducts nothing.
+    const census_ns = core.gc_trace_stw.last_report.census_ns;
+    try std.testing.expect(census_ns > 0);
+    // Exactly the census, no more and no less. The raw witness is what makes
+    // this an equality instead of an inequality that "reported is small"
+    // would satisfy by accident.
+    try std.testing.expectEqual(
+        census_ns,
+        core.gc_trace_stw.last_finish_remark_raw_ns - reported,
+    );
+}
+
 test "incremental cycle envelope keeps one exact MemoryAccount S T P domain" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     const reports_before = core.gc_trace_stw.detailed_reports;

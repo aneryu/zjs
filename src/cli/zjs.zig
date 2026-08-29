@@ -103,9 +103,23 @@ pub fn parseArgs(args: []const []const u8) CliError!Command {
         }
         if (std.mem.eql(u8, rest[0], "--gc-stats")) {
             options.gc_stats = true;
-            // The panel's census costs six whole-heap walks per major, so the
+            // The panel's census costs whole-heap walks per major, so the
             // collector only performs them when someone is going to read them.
+            // The marked-set/storage census is NOT among them: it is the one
+            // walk large enough to move the scores this panel is used to
+            // judge, so it has its own flag below.
             engine.core.gc_trace_stw.detailed_reports = true;
+            rest = rest[1..];
+            continue;
+        }
+        if (std.mem.eql(u8, rest[0], "--gc-mark-footprint")) {
+            // Opt in to the marked-set/storage census and print the panel that
+            // reads it. Measured cost on splay: Splay -9.8%, SplayLatency
+            // -23.7% against the same binary. That is a study tool, not a
+            // ruler -- do not take pause or score numbers from a run with it.
+            options.gc_stats = true;
+            engine.core.gc_trace_stw.detailed_reports = true;
+            engine.core.gc_trace_stw.mark_footprint_census = true;
             rest = rest[1..];
             continue;
         }
@@ -443,7 +457,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
+    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-mark-footprint] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-mark-footprint] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
 }
 
 /// Standalone query flag: it takes no script and constructs no runtime, so it
@@ -1068,6 +1082,15 @@ fn dumpGcParallelStats(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
 
 fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime) !void {
     const fp = rt.gc_mark_pool.footprint;
+    // An all-zero panel reads like "nothing was marked", which is a wrong
+    // answer rather than a missing one. Say which it is.
+    if (!engine.core.gc_trace_stw.mark_footprint_census) {
+        try writer.print(
+            "gc: marked-set census not run (pass --gc-mark-footprint; it costs a whole-heap walk inside every final remark)\n",
+            .{},
+        );
+        return;
+    }
     try writer.print(
         "gc: marked-set census majors {d}, headers {d}, block headers {d}, refcount-removed headers {d}\n",
         .{ fp.major_censuses, fp.marked_headers, fp.block_headers, fp.refcount_removed_headers },
