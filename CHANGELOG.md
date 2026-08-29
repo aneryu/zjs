@@ -2,12 +2,26 @@
 
 ## Unreleased
 
+- **GC: the refcounting collector is removed** (2026-08-29). The tracing
+  collector is now the only collector. `-Dzjs_gc=rc` and `-Dzjs_gc=shadow`
+  are rejected with a migration message; `-Dzjs_experimental_gc` stays as an
+  accepted-but-redundant compat alias. Rolling back to refcounting means a
+  frozen binary or a checkout before `6e5d7a69`, not a build flag -- see
+  `docs/tracing-gc-experimental-rollout.md`. What went: the trial-deletion
+  cycle collector, the Stage 1 shadow observer and its `--gc-shadow-check`
+  flags, the doubly-linked `BlockHeader`, the `Phase.remove_cycles` window,
+  and every `else` arm of a collector branch. What stayed, on purpose: the
+  4-byte refcount prefix on flat strings and ropes (the tracer does not scan
+  strings, so the count is their liveness), `LifetimeWord.rc` for `.big_int`,
+  and Shape/Realm's true refcounts. Full accounting in
+  `docs/rc-retirement-2026-08-29.md`.
+
 - **GC: the tracing collector is the production default** (2026-08-29).
   The `gc/tracing` campaign is squashed into main and Stage 7 is executed:
   stop-the-world tracing with generational minors, block heap, parallel STW
   marking, budgeted lazy destruction, and conservative stack scanning
-  replaces refcounting as the default collector. Refcounting remains fully
-  supported as the rollback (`-Dzjs_gc=rc`) and is exercised in CI.
+  replaces refcounting as the default collector. (Refcounting was the
+  supported rollback for the length of that same day; see the entry above.)
   Gate basis: gc_heavy_six fixed-work geomean 1.0419 vs the frozen rc
   baseline (margin 1.05), splay major pause p99 ~1ms vs rc 42.4ms,
   test262 0/49778 on the trace build. Memory pacing uses growth factor 2.0

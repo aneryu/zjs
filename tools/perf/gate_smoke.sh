@@ -61,20 +61,19 @@ if [[ -n "$EXPECTATIONS" && ! -f "$EXPECTATIONS" ]]; then
 fi
 
 # The checker's stats contract (exactly one retirement line, doomed_pending
-# terminal state) only exists in trace_stw builds. The default binary is
-# whatever sits in zig-out, which after an rc rebuild is an rc binary; on
-# 2026-08-29 that produced a red gate whose message ("expected exactly one
-# retirement line, found 0") reads like a stats regression when the actual
-# problem is the wrong variant under test. Probe the variant before the
-# corpus loop and refuse rc binaries by name.
+# terminal state) belongs to the tracing collector. It survived an era when a
+# second collector could occupy zig-out: on 2026-08-29 an rc rebuild produced a
+# red gate whose message ("expected exactly one retirement line, found 0") read
+# like a stats regression when the real problem was the wrong variant under
+# test. The rc collector is gone, but the probe stays -- it is one `--gc-stats`
+# run, and it also catches "you passed a stale or non-zjs binary as $1".
 variant_probe=$(mktemp --suffix=.js)
 echo "0;" > "$variant_probe"
 variant_out=$("$BIN" --gc-stats "$variant_probe" 2>/dev/null || true)
 rm -f "$variant_probe"
 if ! grep -q "^gc: terminal doomed_pending" <<< "$variant_out"; then
-    echo "fixed-work smoke: $BIN is not a trace_stw build (no trace-only stats lines)" >&2
-    echo "  this gate's stats contract only exists in trace builds;" >&2
-    echo "  pass the trace binary explicitly as \$1" >&2
+    echo "fixed-work smoke: $BIN does not emit the collector stats lines this gate reads" >&2
+    echo "  (expected a current zjs build; pass it explicitly as \$1)" >&2
     exit 2
 fi
 
