@@ -706,3 +706,19 @@ adjacent-line prefetch 把 96B 两条相邻线的账早已摊掉大半。
 - 材料勘误:「next 是 padding」只对 gc_obj_list 成立(块 cell 的 next 有四个写者,
   但停车路径实测 0.0066%,替换便宜);保守扫描旧描述已过时;WebKit 现树无
   MarkedBlock::Footer(已改名 Header 且在块偏移 0)。
+
+### S0 预实验判定:线轴活,S1/S2 立项(s0-stride worktree 报告)
+
+- kill line 未触发:引擎忠实臂(随机 frontier 形态)64 vs 96 步长 cycles
+  **−30.66%**、l2d refill −58.82%;THP on/强预取/纯线轴对照三种加严下稳定。
+- ⭐⭐设计文「50% 被 adjacent-line prefetch 免费摊掉」**判负**:l1d refill 在
+  50% 跨 buddy 与 0% 跨 buddy 臂间差 0.05%——**随机序下 7.92M 结构线全是真
+  demand miss**。⭐dense 刀败因得到量化解释:预取覆盖率线性序 51.5% → 随机序
+  **0%**,dense 刀死于线性形态、标记刀活在随机形态。
+- ⭐设计文两路线「独立同中值」是巧合(线数少算一半 × 单价高估 2.6 倍抵消);
+  实测边际线价 **13.4 cyc(下界,微基准 MLP 打满)**,重推导 S2 = 0.11~0.14G
+  = **splay −1.2~−1.6%**(上沿维持下沿放宽)。
+- 裁决:**S2 立项**,附加门禁「落地后 l1d refill 须掉到 ≈7.92M×major 量级」
+  (S0 证明随机序下结构线数=demand refill 数,偏差 +0.1~0.4%,判别器有分辨率);
+  **S1 改口径立项**:≤−1% cycles、主要买 maxrss(足迹轴 S0 故意中和,无信息)。
+- 外推限制入册:真 frontier 是线性/随机混合(未测的高影响变量)。
