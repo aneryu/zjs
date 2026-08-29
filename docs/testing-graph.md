@@ -117,6 +117,31 @@ checkpoint.
 | `-check` | Single check | `config-signature-check`, `test262-check`, `check_gc_slots.js` |
 | (none) | Build or run | `zjs`, `test`, `smoke`, `test-core` |
 
+`check` (no suffix, no prefix) is the one exception, and it is deliberate:
+it is the name the Zig ecosystem and editor tooling already look for.
+
+## `zig build check`: the compile-error half of the edit loop
+
+`check` compiles the unified test root and stops after semantic analysis.
+Nothing consumes its binary, so the build system passes `-fno-emit-bin`:
+no LLVM module, no machine code, no link, no test executed.
+
+It exists because a little over half of a Debug test compile on this tree is
+codegen plus the link of a 245 MB object file, and that half is pure waste
+when the answer is "your edit does not compile": 55 s instead of 113 s, and
+instead of 176 s once the 63 s test run it never reaches is counted. It also
+peaks at 1.4 GB instead of 8.25 GB, which is what decides whether several
+agents can build on one machine at once.
+
+What `check` still proves: every comptime assertion the tree owns.
+`config_signature.attest`, the opcode declaration ledger and the FNABI
+`@cImport` round-trip are semantic analysis, so they all fire.
+
+What it does not prove: anything a machine-code backend decides
+(`@call(.always_tail)` lowering, the `.space` tombstones) and any behaviour
+whatsoever. **`check` is not a gate and no gate depends on it.**
+`zig build test` remains the checkpoint dependency.
+
 ## What CI runs
 
 The build graph is the same everywhere; CI only decides which steps a machine
