@@ -23,15 +23,20 @@ const JSValue = @import("value.zig").JSValue;
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 
-/// `-Dzjs_gc=shadow` compiles the non-reclaiming observer in `gc_shadow.zig`.
-/// Default `rc` keeps this false so the observer is not imported and the
-/// production collector's machine code is unchanged.
-pub const shadow_tracer_enabled: bool = std.mem.eql(u8, build_options.zjs_gc, "shadow");
+/// The Stage 1 non-reclaiming shadow observer. It enumerated the RC heap
+/// through the cycle-list census and compared it against a mark from the
+/// roots; with the RC heap gone there is nothing for it to observe, so it was
+/// removed together with the collector it shadowed (2026-08-29). The constant
+/// survives at `false` only while the last `shadow_tracer_enabled` readers are
+/// being retired batch by batch.
+pub const shadow_tracer_enabled: bool = false;
 
-/// `-Dzjs_experimental_gc=trace_stw` compiles the stop-the-world reclaiming tracer
-/// (`gc_trace_stw.zig`) over the compatibility heap. Mutually exclusive with
-/// `shadow`. Default `rc` stays false so production `.text` is unchanged.
-pub const trace_stw_enabled: bool = std.mem.eql(u8, build_options.zjs_gc, "trace_stw");
+/// The stop-the-world reclaiming tracer in `gc_trace_stw.zig` is now the only
+/// collector, so this is a comptime `true`. The name is kept because roughly
+/// 270 `if (comptime gc.trace_stw_enabled)` gates across the tree read it;
+/// they collapse to their taken arm without any of them having to move, and
+/// the `else` arms they guard are what the removal batches delete.
+pub const trace_stw_enabled: bool = true;
 
 /// Full-every-2 sticky-major experiment. This is a separate compile-time
 /// opt-in underneath the already experimental tracer so the ordinary trace
