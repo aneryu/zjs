@@ -614,3 +614,13 @@ lazy-sweep 测量;当前 tip 上 growth 2.0(堆更大、22 个 major)+ finish �
 未切片使 splay 的 finish 段到 18.5ms——仍优于 rc 同负载的 42.4ms max,但
 ~1ms 已不描述现状。**follow-up:finish 段切片化**(增量/销毁段都已 ≤1.05ms,
 finish 是唯一未预算化的段)。
+
+> ⚠️⚠️**上段的 follow-up 于 2026-08-29 通盘 review 被撤回——「finish 18.5ms」
+> 是仪器造出来的数字**。两路独立发现+ABBA 实测(n=6/臂):`--gc-stats` 的全堆
+> 普查 `recordFinalMarkFootprint`(gc_trace_stw.zig:1116)跑在 `t_remark..t_weak`
+> 计时窗口**内**,整体 STW 路径会扣 `last_census_ns` 而增量路径忘了扣;开
+> `--gc-stats` 让 Splay 评分 −9.75%、SplayLatency **−23.7%**。finish 三段分解:
+> remark(含普查)99.4%、condemn 64µs、weak 257ns。生产构建不跑普查,真实
+> finish 估计 ~3ms 量级。**先修仪器(把普查移出计时窗/减掉 last_census_ns)
+> 再重测,在此之前 finish 切片不立项**;pause 基值届时整体下移,门禁阈值须
+> 同步重定。详录 review 三报告(fresh-splay-account / finish-anatomy / JSC 全景)。
