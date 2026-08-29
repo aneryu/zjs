@@ -45,6 +45,27 @@ GC_HEAVY_SIX = (
     "splay",
 )
 FORBIDDEN_CPUS = frozenset((*range(5, 10), *range(15, 20)))
+
+# The inline-property rows carry seven columns; only these three are held to
+# the "wider slot budget cannot serve fewer objects / fewer bytes / fewer
+# cache lines" monotonicity contract.
+#
+# `direct_inline`, `tail_grown_external` and `plain_external` are deliberately
+# OUT (driver ruling, 2026-08-29): they partition the eligible objects by
+# OUTCOME, not by budget, and nothing has yet shown that the partition moves
+# monotonically with the slot limit -- a wider budget can move an object from
+# `plain_external` into `direct_inline`, which lowers one column while raising
+# another. `tail_grown_external` in particular has no argued monotonicity at
+# all. Parse them, report them, watch them for a cycle; tighten only with a
+# reason. What IS checked for all seven is the partition identity (the three
+# outcomes add up to eligible), which is a schema-drift guard, not a claim
+# about direction -- and it is what catches a column-order mistake in the
+# regexes above.
+INLINE_CONTRACTED_METRICS = (
+    "eligible_objects",
+    "external_allocated_bytes",
+    "external_touched_cache_lines",
+)
 COMPLETION_RE = re.compile(r"^[A-Za-z0-9_-]+:\s+[0-9]+(?:\.[0-9]+)?\s*$", re.MULTILINE)
 
 
@@ -132,6 +153,22 @@ def indexed_matches(
             f"added={sorted(actual - expected)}"
         )
     return rows
+
+
+def inline_upper_row(row: dict[str, int | str], marked_headers: int) -> dict:
+    """Render one inline-property-upper row, outcome columns included."""
+    return {
+        "eligibleObjects": row["eligible_objects"],
+        "directInline": row["direct_inline"],
+        "tailGrownExternal": row["tail_grown_external"],
+        "plainExternal": row["plain_external"],
+        "externalAllocatedBytes": row["external_allocated_bytes"],
+        "externalTouchedCacheLines": row["external_touched_cache_lines"],
+        "cacheLinesPerMarkedX1000": (
+            0 if marked_headers == 0
+            else row["external_touched_cache_lines"] * 1000 // marked_headers
+        ),
+    }
 
 
 def parse_gc_stats(text: str) -> dict:
@@ -326,14 +363,14 @@ def parse_gc_stats(text: str) -> dict:
     )
     inline_properties = indexed_matches(
         text,
-        r"^gc: inline property upper slots (?P<slots>\d+), eligible-objects (?P<eligible_objects>\d+), external-allocated-bytes (?P<external_allocated_bytes>\d+), external-touched-cache-lines (?P<external_touched_cache_lines>\d+)$",
+        r"^gc: inline property upper slots (?P<slots>\d+), eligible-objects (?P<eligible_objects>\d+), direct-inline (?P<direct_inline>\d+), tail-grown-external (?P<tail_grown_external>\d+), plain-external (?P<plain_external>\d+), external-allocated-bytes (?P<external_allocated_bytes>\d+), external-touched-cache-lines (?P<external_touched_cache_lines>\d+)$",
         "inline property upper",
         "slots",
         {"1", "2", "4"},
     )
     inline_ordinary_properties = indexed_matches(
         text,
-        r"^gc: inline ordinary property upper slots (?P<slots>\d+), eligible-objects (?P<eligible_objects>\d+), external-allocated-bytes (?P<external_allocated_bytes>\d+), external-touched-cache-lines (?P<external_touched_cache_lines>\d+)$",
+        r"^gc: inline ordinary property upper slots (?P<slots>\d+), eligible-objects (?P<eligible_objects>\d+), direct-inline (?P<direct_inline>\d+), tail-grown-external (?P<tail_grown_external>\d+), plain-external (?P<plain_external>\d+), external-allocated-bytes (?P<external_allocated_bytes>\d+), external-touched-cache-lines (?P<external_touched_cache_lines>\d+)$",
         "inline ordinary property upper",
         "slots",
         {"1", "2", "4"},
@@ -440,14 +477,26 @@ def parse_gc_stats(text: str) -> dict:
                 f"trace class {trace_class} has fewer allocation touches than headers"
             )
     property_storage = storage["property_slots"]
-    previous = {
-        "eligible_objects": 0,
-        "external_allocated_bytes": 0,
-        "external_touched_cache_lines": 0,
-    }
+    for rows, label in (
+        (inline_properties, "inline property upper"),
+        (inline_ordinary_properties, "inline ordinary property upper"),
+    ):
+        for slots in ("1", "2", "4"):
+            row = rows[slots]
+            partition = (
+                row["direct_inline"]
+                + row["tail_grown_external"]
+                + row["plain_external"]
+            )
+            if partition != row["eligible_objects"]:
+                raise SnapshotError(
+                    f"{label} outcome partition does not add to eligible objects "
+                    f"at {slots} slots"
+                )
+    previous = dict.fromkeys(INLINE_CONTRACTED_METRICS, 0)
     for slots in ("1", "2", "4"):
         row = inline_properties[slots]
-        for metric in previous:
+        for metric in INLINE_CONTRACTED_METRICS:
             if row[metric] < previous[metric]:
                 raise SnapshotError(
                     f"inline property upper is not monotonic at {slots} slots"
@@ -459,15 +508,11 @@ def parse_gc_stats(text: str) -> dict:
         if row["external_touched_cache_lines"] > property_storage["touched_cache_lines"]:
             raise SnapshotError("inline cache lines exceed external property cache lines")
         previous = row
-    previous = {
-        "eligible_objects": 0,
-        "external_allocated_bytes": 0,
-        "external_touched_cache_lines": 0,
-    }
+    previous = dict.fromkeys(INLINE_CONTRACTED_METRICS, 0)
     for slots in ("1", "2", "4"):
         row = inline_ordinary_properties[slots]
         all_classes = inline_properties[slots]
-        for metric in previous:
+        for metric in INLINE_CONTRACTED_METRICS:
             if row[metric] < previous[metric]:
                 raise SnapshotError(
                     f"inline ordinary property upper is not monotonic at {slots} slots"
@@ -696,29 +741,11 @@ def parse_gc_stats(text: str) -> dict:
                 * 1000 // marked["headers"]
             ),
             "inlinePropertyUpper": {
-                f"slots{slots}": {
-                    "eligibleObjects": row["eligible_objects"],
-                    "externalAllocatedBytes": row["external_allocated_bytes"],
-                    "externalTouchedCacheLines": row["external_touched_cache_lines"],
-                    "cacheLinesPerMarkedX1000": (
-                        0 if marked["headers"] == 0 else
-                        row["external_touched_cache_lines"]
-                        * 1000 // marked["headers"]
-                    ),
-                }
+                f"slots{slots}": inline_upper_row(row, marked["headers"])
                 for slots, row in inline_properties.items()
             },
             "inlineOrdinaryPropertyUpper": {
-                f"slots{slots}": {
-                    "eligibleObjects": row["eligible_objects"],
-                    "externalAllocatedBytes": row["external_allocated_bytes"],
-                    "externalTouchedCacheLines": row["external_touched_cache_lines"],
-                    "cacheLinesPerMarkedX1000": (
-                        0 if marked["headers"] == 0 else
-                        row["external_touched_cache_lines"]
-                        * 1000 // marked["headers"]
-                    ),
-                }
+                f"slots{slots}": inline_upper_row(row, marked["headers"])
                 for slots, row in inline_ordinary_properties.items()
             },
         },
@@ -954,7 +981,7 @@ def capture(args: argparse.Namespace) -> dict:
     repo_desc = git_describe(repo)
     zoo_desc = git_describe(zoo)
     return {
-        "schemaVersion": 6,
+        "schemaVersion": 7,
         "kind": "gc-heavy-six-fixed-work-structure",
         "interpretation": (
             "One run per benchmark; structural counts are diff guards. "
@@ -1005,7 +1032,7 @@ def main() -> int:
                 args.threshold_absolute,
             )
             snapshot = {
-                "schemaVersion": 6,
+                "schemaVersion": 7,
                 "kind": "gc-shape-comparison",
                 "baseline": str(baseline_path),
                 "candidate": str(candidate_path),

@@ -59,12 +59,12 @@ gc: mark trace class storage fast_array allocation-touches 40, allocated-bytes 3
 gc: mark trace class storage bytecode_function allocation-touches 25, allocated-bytes 1800, touched-cache-lines 55
 gc: mark trace class storage exotic_object allocation-touches 30, allocated-bytes 2150, touched-cache-lines 65
 gc: mark trace class storage non_object allocation-touches 30, allocated-bytes 2000, touched-cache-lines 40
-gc: inline property upper slots 1, eligible-objects 20, external-allocated-bytes 640, external-touched-cache-lines 25
-gc: inline ordinary property upper slots 1, eligible-objects 10, external-allocated-bytes 320, external-touched-cache-lines 12
-gc: inline property upper slots 2, eligible-objects 30, external-allocated-bytes 960, external-touched-cache-lines 40
-gc: inline ordinary property upper slots 2, eligible-objects 25, external-allocated-bytes 800, external-touched-cache-lines 32
-gc: inline property upper slots 4, eligible-objects 40, external-allocated-bytes 1600, external-touched-cache-lines 55
-gc: inline ordinary property upper slots 4, eligible-objects 35, external-allocated-bytes 1400, external-touched-cache-lines 48
+gc: inline property upper slots 1, eligible-objects 20, direct-inline 4, tail-grown-external 6, plain-external 10, external-allocated-bytes 640, external-touched-cache-lines 25
+gc: inline ordinary property upper slots 1, eligible-objects 10, direct-inline 2, tail-grown-external 3, plain-external 5, external-allocated-bytes 320, external-touched-cache-lines 12
+gc: inline property upper slots 2, eligible-objects 30, direct-inline 12, tail-grown-external 3, plain-external 15, external-allocated-bytes 960, external-touched-cache-lines 40
+gc: inline ordinary property upper slots 2, eligible-objects 25, direct-inline 10, tail-grown-external 2, plain-external 13, external-allocated-bytes 800, external-touched-cache-lines 32
+gc: inline property upper slots 4, eligible-objects 40, direct-inline 25, tail-grown-external 1, plain-external 14, external-allocated-bytes 1600, external-touched-cache-lines 55
+gc: inline ordinary property upper slots 4, eligible-objects 35, direct-inline 22, tail-grown-external 0, plain-external 13, external-allocated-bytes 1400, external-touched-cache-lines 48
 """
 
 
@@ -119,6 +119,22 @@ class GcStatsSnapshotTests(unittest.TestCase):
         self.assertEqual(
             parsed["markFootprint"]["inlineOrdinaryPropertyUpper"]["slots2"]["eligibleObjects"],
             25,
+        )
+        self.assertEqual(
+            parsed["markFootprint"]["inlinePropertyUpper"]["slots4"],
+            {
+                "eligibleObjects": 40,
+                "directInline": 25,
+                "tailGrownExternal": 1,
+                "plainExternal": 14,
+                "externalAllocatedBytes": 1600,
+                "externalTouchedCacheLines": 55,
+                "cacheLinesPerMarkedX1000": 550,
+            },
+        )
+        self.assertEqual(
+            parsed["markFootprint"]["inlineOrdinaryPropertyUpper"]["slots1"]["tailGrownExternal"],
+            3,
         )
         self.assertEqual(parsed["retirement"]["abandons"], 28)
         self.assertEqual(parsed["weakState"]["finalizerQueueCurrent"], 4)
@@ -191,6 +207,51 @@ class GcStatsSnapshotTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(snapshot.SnapshotError, "mark storage rows differ"):
             snapshot.parse_gc_stats(missing)
+
+    def test_outcome_columns_are_outside_the_monotonicity_contract(self) -> None:
+        """driver ruling 2026-08-29: parse and report the three outcome
+        columns, do not hold them to the slot-budget monotonicity contract.
+
+        The shipped PANEL already walks tail-grown-external down 6 -> 3 -> 1;
+        this drives direct-inline down as well (4 -> 12 -> 2) so the ruling is
+        pinned by a case that would fail if the columns were ever folded back
+        into `previous`. The partition identity is preserved, so a failure
+        here can only come from the monotonicity loop.
+        """
+        panel = PANEL.replace(
+            "gc: inline property upper slots 4, eligible-objects 40, direct-inline 25, tail-grown-external 1, plain-external 14,",
+            "gc: inline property upper slots 4, eligible-objects 40, direct-inline 2, tail-grown-external 1, plain-external 37,",
+        )
+        parsed = snapshot.parse_gc_stats(panel)
+        self.assertEqual(
+            parsed["markFootprint"]["inlinePropertyUpper"]["slots4"]["directInline"],
+            2,
+        )
+
+    def test_contracted_inline_metrics_still_fail_closed(self) -> None:
+        """The three budget metrics keep their monotonicity contract."""
+        panel = PANEL.replace(
+            "gc: inline property upper slots 4, eligible-objects 40,",
+            "gc: inline property upper slots 4, eligible-objects 25,",
+        ).replace(
+            "direct-inline 25, tail-grown-external 1, plain-external 14,",
+            "direct-inline 10, tail-grown-external 1, plain-external 14,",
+        )
+        with self.assertRaisesRegex(snapshot.SnapshotError, "is not monotonic"):
+            snapshot.parse_gc_stats(panel)
+
+    def test_inline_outcome_partition_fails_closed(self) -> None:
+        """The three outcomes must add to eligible-objects: a column-order or
+        emitter drift that breaks the identity is a parse failure, not a
+        silently wrong snapshot."""
+        panel = PANEL.replace(
+            "direct-inline 12, tail-grown-external 3, plain-external 15,",
+            "direct-inline 12, tail-grown-external 3, plain-external 16,",
+        )
+        with self.assertRaisesRegex(
+            snapshot.SnapshotError, "partition does not add to eligible objects"
+        ):
+            snapshot.parse_gc_stats(panel)
 
     def test_reserved_measurement_cpus_are_rejected(self) -> None:
         for cpu in (*range(5, 10), *range(15, 20)):
