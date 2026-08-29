@@ -226,7 +226,6 @@ pub var sticky_inject_skip: usize = 0;
 /// Read once at `Registry.init`. "0" or empty disables; "1" enables at the
 /// default cadence; any other integer enables at that cadence.
 fn readStressFromEnv() void {
-    if (comptime !trace_stw_enabled) return;
     if (std.c.getenv("ZJS_MINOR_AUDIT")) |raw| {
         const text = std.mem.span(raw);
         minor_audit = text.len != 0 and !std.mem.eql(u8, text, "0");
@@ -299,14 +298,8 @@ pub const concurrent = @import("gc_concurrent.zig");
 pub const mark_queue = @import("gc_mark_queue.zig");
 
 /// The census switch lives with the collector; the barrier only reads it.
-/// Mutual import with `gc_trace_stw.zig` is fine -- Zig resolves lazily -- and
-/// the `rc` build sees a false constant instead of the module.
-const gc_trace_stw_reports = if (trace_stw_enabled)
-    @import("gc_trace_stw.zig")
-else
-    struct {
-        pub var detailed_reports: bool = false;
-    };
+/// Mutual import with `gc_trace_stw.zig` is fine -- Zig resolves lazily.
+const gc_trace_stw_reports = @import("gc_trace_stw.zig");
 /// Marker worker thread (§8.6). Reads published objects and claims mark state;
 /// never frees, allocates, or calls embedder code.
 pub const marker = @import("gc_marker.zig");
@@ -548,7 +541,7 @@ pub const ExternalMemoryToken = struct {
     }
 };
 
-/// 6.2 BlockHeader / GcKind definition
+/// 6.2 GcKind definition
 /// 3-bit tag packed into the shared kind/flags byte of `Metadata` (qjs
 /// `JSMallocBlockHeader.gc_obj_type : 7`, quickjs.c:276, also shares its byte
 /// with the mark bit).
@@ -587,7 +580,7 @@ pub const StrongEdgeClass = enum(u8) {
 };
 
 /// Physical prefix carried by a RefKind.  `.metadata` is the shared eight-byte
-/// allocator/GC prefix immediately before a 16-byte `BlockHeader`;
+/// allocator/GC prefix immediately before the carrier header;
 /// `.string_rc` is the four-byte refcount-only prefix used by flat strings and
 /// ropes, which intentionally has no allocator or lifecycle fields.
 pub const PrefixModel = enum(u8) {
@@ -702,7 +695,6 @@ pub const gc_kind_count: usize = @typeInfo(GcKind).@"enum".fields.len;
 /// asserts. Strings, ropes, symbols and BigInt are not traced at all, so their
 /// counts are the only thing keeping them alive.
 pub inline fn refCountRemoved(kind: GcKind) bool {
-    if (comptime !trace_stw_enabled) return false;
     return switch (kind) {
         .object, .function_bytecode, .var_ref, .module => true,
         else => false,
@@ -710,29 +702,25 @@ pub inline fn refCountRemoved(kind: GcKind) bool {
 }
 pub const Phase = enum {
     none,
+    /// A batch of zero-ref releases is being held for an outermost drain.
     decref,
-    /// Refcounting's cycle collector is running its two-pass teardown.
-    remove_cycles,
-    /// The tracer is running a destruction slice.
-    ///
-    /// Distinct from `.remove_cycles` even though the two share most of
-    /// their teardown contract, because they do NOT share all of it and a
-    /// single value forced every site to serve both. The visible cost was
-    /// `Object.destroyFromHeader`'s fast arm, which excludes
-    /// `.remove_cycles` for reasons that belong to rc's collector -- so the
-    /// tracing build, which frees every object inside such a window, had
-    /// never once used its own fast teardown. Measured: destruction costs
-    /// the tracer 1.52 s of stopped time on raytrace against rc's 0.50 s for
-    /// the same objects, and raytrace's whole gap is 1.6 s.
+    /// The tracer is running a destruction slice. It used to share this role
+    /// with refcounting's `.remove_cycles`, and a single value forced every
+    /// site to serve both -- visibly so in `Object.destroyFromHeader`, whose
+    /// fast arm excluded `.remove_cycles` for reasons belonging to rc's
+    /// collector, which meant the tracing build never once used its own fast
+    /// teardown. `.remove_cycles` retired with that collector.
     tracer_destroy,
     deinit,
     cycle,
 };
 
-/// Both teardown windows: resources are freed in one pass and structs in
-/// another, so a struct free must be parked either way.
+/// The teardown window where resources are freed in one pass and structs in
+/// another, so a struct free must be parked. There used to be two such
+/// windows; the refcounting one is gone, and this predicate survives as the
+/// name its call sites read.
 pub inline fn phaseIsTwoPassTeardown(phase: Phase) bool {
-    return phase == .remove_cycles or phase == .tracer_destroy;
+    return phase == .tracer_destroy;
 }
 
 pub const MajorPhase = enum(u8) {
@@ -1002,10 +990,11 @@ pub const TraceHeaderState = extern struct {
     flags: TraceHeaderFlags = .{},
 };
 
-/// Physical offset 4 is configuration/kind dependent. Default RC (and shadow)
-/// use `rc` for every GC header. trace_stw uses `trace` for registry carriers,
-/// while heap BigInt keeps `rc`: it is outside the tracing heap and the generic
-/// JSValue retain/free ABI still reaches this exact payload-4 word.
+/// Physical offset 4 is kind dependent. Registry carriers use `trace`; heap
+/// BigInt keeps `rc`, because it is outside the tracing heap and the generic
+/// JSValue retain/free ABI still reaches this exact payload-4 word. `rc` is
+/// therefore NOT dead with the refcounting collector gone: `.big_int` is its
+/// one remaining user and the union arm exists for it.
 pub const LifetimeWord = extern union {
     rc: i32,
     trace: TraceHeaderState,
@@ -1023,10 +1012,7 @@ pub const Metadata = extern struct {
     size_class: u16 align(8) = 0,
     alloc_info: AllocInfo = .{},
     flags: BlockFlags = .{},
-    lifetime: LifetimeWord = if (trace_stw_enabled)
-        .{ .trace = .{} }
-    else
-        .{ .rc = 1 },
+    lifetime: LifetimeWord = .{ .trace = .{} },
 };
 
 /// Size of the metadata prefix that precedes every GC object (objectPtr - 8).
@@ -1068,43 +1054,6 @@ comptime {
     std.debug.assert(@intFromEnum(GcKind.module) == 4 and @intFromEnum(GcKind.shape) == 5);
     std.debug.assert(@intFromEnum(GcKind.string) == 6 and @intFromEnum(GcKind.big_int) == 7);
 }
-
-/// In-object GC header = intrusive list links only (qjs `JSGCObjectHeader`,
-/// 16 bytes). Lifetime state / kind / flags / optional heap-size live in the
-/// Metadata prefix 8 bytes before this header; reach them via `meta()`.
-pub const BlockHeader = extern struct {
-    prev: ?*BlockHeader = null,
-    next: ?*BlockHeader = null,
-
-    comptime {
-        std.debug.assert(@sizeOf(BlockHeader) == 16);
-        std.debug.assert(@sizeOf(Metadata) == 8);
-    }
-
-    pub inline fn meta(self: *BlockHeader) *Metadata {
-        return @ptrFromInt(@intFromPtr(self) - metadata_prefix_size);
-    }
-
-    pub inline fn metaConst(self: *const BlockHeader) *const Metadata {
-        return @ptrFromInt(@intFromPtr(self) - metadata_prefix_size);
-    }
-
-    pub inline fn retain(self: *BlockHeader) void {
-        if (comptime trace_stw_enabled) {
-            if (refCountRemoved(self.metaConst().flags.kind)) return;
-        }
-        std.debug.assert(headerRefCount(self) > 0);
-        incrementHeaderRefCount(self);
-    }
-
-    pub fn pinned(self: *const BlockHeader) bool {
-        return self.metaConst().flags.is_pinned;
-    }
-
-    pub fn setPinned(self: *BlockHeader, value: bool) void {
-        self.meta().flags.is_pinned = value;
-    }
-};
 
 /// Trace-only compact carrier header.
 ///
@@ -1148,9 +1097,9 @@ pub const TraceHeader = extern struct {
 
 /// Common QuickJS-style refcount word. Every refcounted JSValue payload points
 /// at its body, with this header at the fixed `payload - 4` offset (`__js_rc`
-/// in quickjs.h). Strings and heap BigInt always use it. GC carriers use it in
-/// RC/shadow builds; trace_stw reinterprets the same physical word as
-/// `TraceHeaderState` and gates every raw JSValue retain/release before it.
+/// in quickjs.h). Strings and heap BigInt use it. GC carriers reinterpret the
+/// same physical word as `TraceHeaderState`, and every raw JSValue
+/// retain/release is gated before it.
 pub const RefCountHeader = extern struct {
     rc: i32 = 1,
 
@@ -1182,13 +1131,13 @@ pub inline fn refCountHeaderFromPayload(payload: *anyopaque) *RefCountHeader {
 }
 
 comptime {
-    // A GC value stores `BlockHeader *` in its payload. Metadata immediately
+    // A GC value stores `Header *` in its payload. Metadata immediately
     // precedes that header, and its lifetime tail must land at the same
     // payload - 4 address used by strings, symbols, and ropes.
     std.debug.assert(metadata_prefix_size - @offsetOf(Metadata, "lifetime") == ref_count_offset_from_payload);
 }
 
-pub const Header = if (trace_stw_enabled) TraceHeader else BlockHeader;
+pub const Header = TraceHeader;
 pub const GCObjectHeader = Header;
 pub const ObjectHeader = Header;
 
@@ -1205,7 +1154,6 @@ inline fn prefixRefCountConst(meta: *const Metadata) *const i32 {
 /// padding; BigInt remains in the prefix because JSValue's payload-4 ABI owns
 /// it. Calling this for a tracer-owned kind is a contract violation.
 pub inline fn headerRefCount(h: *const Header) i32 {
-    if (comptime !trace_stw_enabled) return prefixRefCountConst(h.metaConst()).*;
     return switch (h.metaConst().flags.kind) {
         .shape => blk: {
             const value: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
@@ -1222,10 +1170,6 @@ pub inline fn headerRefCount(h: *const Header) i32 {
 
 pub inline fn setHeaderRefCount(h: *Header, value: i32) void {
     std.debug.assert(value >= 0);
-    if (comptime !trace_stw_enabled) {
-        prefixRefCount(h.meta()).* = value;
-        return;
-    }
     switch (h.metaConst().flags.kind) {
         .shape => {
             const owner: *shape.Shape = @alignCast(@fieldParentPtr("header", h));
@@ -1255,27 +1199,22 @@ pub inline fn decrementHeaderRefCount(h: *Header) i32 {
 }
 
 pub inline fn headerRefCountIsZeroOrHusk(h: *const Header) bool {
-    if (comptime trace_stw_enabled) {
-        if (h.metaConst().flags.kind == .big_int)
-            return prefixRefCountConst(h.metaConst()).* == 0;
-        return h.metaConst().lifetime.trace.flags.husk;
-    }
-    return prefixRefCountConst(h.metaConst()).* == 0;
+    if (h.metaConst().flags.kind == .big_int)
+        return prefixRefCountConst(h.metaConst()).* == 0;
+    return h.metaConst().lifetime.trace.flags.husk;
 }
 
 /// True when dropping the last WeakRef may reclaim the resource-stripped
-/// object struct. RC distinguishes a finished husk from an in-progress
-/// zero-ref teardown with the historical mark bit; trace_stw has an explicit
-/// state bit and never routes tracer-owned objects through the zero-ref queue.
+/// object struct. There is an explicit state bit for it, and tracer-owned
+/// objects never go through the zero-ref queue.
 pub inline fn headerIsReclaimableWeakHusk(h: *const Header) bool {
     std.debug.assert(h.metaConst().flags.kind == .object);
-    if (comptime trace_stw_enabled) return h.metaConst().lifetime.trace.flags.husk;
-    return prefixRefCountConst(h.metaConst()).* == 0 and !h.metaConst().flags.mark;
+    return h.metaConst().lifetime.trace.flags.husk;
 }
 
 pub inline fn setHeaderWeakHusk(h: *Header) void {
     std.debug.assert(h.metaConst().flags.kind == .object);
-    if (comptime trace_stw_enabled) {
+    {
         std.debug.assert(!h.metaConst().alloc_info.heap_accounted);
         std.debug.assert(h.metaConst().lifetime.trace.flags.reserved == 0);
         // I4 ordering pin. The whole-byte store below also erases the
@@ -1290,16 +1229,10 @@ pub inline fn setHeaderWeakHusk(h: *Header) void {
         // husk has no property graph, so do not retain a stale body projection.
         h.meta().lifetime.trace.object_shape_summary = 0;
         h.meta().lifetime.trace.flags.husk = true;
-    } else {
-        prefixRefCount(h.meta()).* = 0;
     }
 }
 
 inline fn resetHeaderLifetimeForPublication(h: *Header) void {
-    if (comptime !trace_stw_enabled) {
-        prefixRefCount(h.meta()).* = 1;
-        return;
-    }
     if (h.metaConst().flags.kind == .big_int) {
         prefixRefCount(h.meta()).* = 1;
         return;
@@ -1312,10 +1245,6 @@ inline fn resetHeaderLifetimeForPublication(h: *Header) void {
 }
 
 inline fn assertInitialHeaderLifetime(h: *const Header) void {
-    if (comptime !trace_stw_enabled) {
-        std.debug.assert(prefixRefCountConst(h.metaConst()).* == 1);
-        return;
-    }
     if (h.metaConst().flags.kind == .big_int) {
         std.debug.assert(prefixRefCountConst(h.metaConst()).* == 1);
         return;
@@ -1339,13 +1268,12 @@ inline fn assertInitialHeaderLifetime(h: *const Header) void {
     }
 }
 
-/// Shape and Realm retain true refcount semantics under trace_stw, so a
-/// mutator last-release may unlink them at an arbitrary list position. They
-/// store the one backlink compact Header removed in body space made available
-/// by that same shrink. Tracer-owned kinds are only detached by collector
-/// cursor walks and intentionally carry no backlink.
+/// Shape and Realm retain true refcount semantics, so a mutator last-release
+/// may unlink them at an arbitrary list position. They store the one backlink
+/// the compact Header removed, in body space made available by that same
+/// shrink. Tracer-owned kinds are only detached by collector cursor walks and
+/// intentionally carry no backlink.
 inline fn storedListPrevious(h: *const Header) ?*Header {
-    if (comptime !trace_stw_enabled) return h.prev;
     return switch (h.metaConst().flags.kind) {
         .shape => blk: {
             const owner: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
@@ -1360,10 +1288,6 @@ inline fn storedListPrevious(h: *const Header) ?*Header {
 }
 
 inline fn setStoredListPrevious(h: *Header, previous: ?*Header) void {
-    if (comptime !trace_stw_enabled) {
-        h.prev = previous;
-        return;
-    }
     switch (h.metaConst().flags.kind) {
         .shape => {
             const owner: *shape.Shape = @alignCast(@fieldParentPtr("header", h));
@@ -1377,9 +1301,9 @@ inline fn setStoredListPrevious(h: *Header, previous: ?*Header) void {
     }
 }
 
-/// Intrusive-list authority. RC keeps the QuickJS doubly-linked nodes; trace
-/// uses the compact `Header.next` plus this per-list tail. The extra word is
-/// paid once per list, never once per object.
+/// Intrusive-list authority: the compact `Header.next` plus this per-list
+/// tail. The extra word is paid once per list, never once per object. (The
+/// QuickJS doubly-linked node it replaced went with the rc collector.)
 pub const IntrusiveHeaderList = struct {
     sentinel: Header = .{},
     /// Empty lists point at their own sentinel. This keeps append/delete in
@@ -1389,14 +1313,8 @@ pub const IntrusiveHeaderList = struct {
 };
 
 pub inline fn listInit(head: *IntrusiveHeaderList) void {
-    if (comptime trace_stw_enabled) {
-        head.sentinel.next = &head.sentinel;
-        head.tail = &head.sentinel;
-    } else {
-        head.sentinel.prev = &head.sentinel;
-        head.sentinel.next = &head.sentinel;
-        head.tail = &head.sentinel;
-    }
+    head.sentinel.next = &head.sentinel;
+    head.tail = &head.sentinel;
 }
 
 pub inline fn listEmpty(head: *const IntrusiveHeaderList) bool {
@@ -1405,21 +1323,11 @@ pub inline fn listEmpty(head: *const IntrusiveHeaderList) bool {
 
 pub inline fn listAddTail(head: *IntrusiveHeaderList, el: *Header) void {
     std.debug.assert(el.next == null);
-    if (comptime trace_stw_enabled) {
-        const previous = head.tail.?;
-        el.next = &head.sentinel;
-        previous.next = el;
-        head.tail = el;
-        setStoredListPrevious(el, previous);
-    } else {
-        std.debug.assert(el.prev == null);
-        const prev = head.sentinel.prev.?;
-        el.prev = prev;
-        el.next = &head.sentinel;
-        prev.next = el;
-        head.sentinel.prev = el;
-        head.tail = el;
-    }
+    const previous = head.tail.?;
+    el.next = &head.sentinel;
+    previous.next = el;
+    head.tail = el;
+    setStoredListPrevious(el, previous);
 }
 
 /// Append to a collector-private list whose every removal is performed by a
@@ -1427,10 +1335,6 @@ pub inline fn listAddTail(head: *IntrusiveHeaderList, el: *Header) void {
 /// Shape/Realm's arbitrary-unlink backlink, so do not pay the kind dispatch
 /// that maintains it on the allocation-ordered `gc_obj_list`.
 pub inline fn listAddTailTraversalOwned(head: *IntrusiveHeaderList, el: *Header) void {
-    if (comptime !trace_stw_enabled) {
-        listAddTail(head, el);
-        return;
-    }
     std.debug.assert(el.next == null);
     const previous = head.tail.?;
     el.next = &head.sentinel;
@@ -1438,66 +1342,48 @@ pub inline fn listAddTailTraversalOwned(head: *IntrusiveHeaderList, el: *Header)
     head.tail = el;
 }
 
-/// Return the predecessor of `el` in `head`. RC reads the in-node backlink;
-/// compact trace callers that do not already hold a traversal cursor pay one
-/// cold forward scan.
+/// Return the predecessor of `el` in `head`. Callers that do not already hold
+/// a traversal cursor pay one cold forward scan, except for the two kinds that
+/// keep an accelerator backlink in their body.
 pub inline fn listPrevious(head: *IntrusiveHeaderList, el: *Header) *Header {
-    if (comptime trace_stw_enabled) {
-        switch (el.metaConst().flags.kind) {
-            .shape, .realm_context => {
-                const previous = storedListPrevious(el) orelse unreachable;
-                std.debug.assert(previous.next == el);
-                return previous;
-            },
-            else => {},
-        }
-        var previous: *Header = &head.sentinel;
-        while (previous.next != el) {
-            previous = previous.next.?;
-            std.debug.assert(previous != &head.sentinel);
-        }
-        return previous;
+    switch (el.metaConst().flags.kind) {
+        .shape, .realm_context => {
+            const previous = storedListPrevious(el) orelse unreachable;
+            std.debug.assert(previous.next == el);
+            return previous;
+        },
+        else => {},
     }
-    return el.prev.?;
+    var previous: *Header = &head.sentinel;
+    while (previous.next != el) {
+        previous = previous.next.?;
+        std.debug.assert(previous != &head.sentinel);
+    }
+    return previous;
 }
 
 /// Delete `el` when its predecessor is already known by the caller's forward
 /// traversal. This is the normal compact-trace sweep primitive: one pointer
 /// splice, never a search per corpse.
 pub inline fn listDelAfter(head: *IntrusiveHeaderList, previous: *Header, el: *Header) void {
-    if (comptime trace_stw_enabled) {
-        std.debug.assert(previous.next == el);
-        const next = el.next.?;
-        previous.next = next;
-        if (next != &head.sentinel) setStoredListPrevious(next, previous);
-        head.tail = if (head.tail == el) previous else head.tail;
-        // Linkage is already authoritatively cleared by `next = null` below.
-        // ReleaseFast does not pay a second kind dispatch merely to scrub the
-        // Shape/Realm acceleration slot of an object that is either destroyed
-        // or immediately re-linked (which overwrites it). Keep the scrub in
-        // safety builds so stale-backlink misuse still fails close to origin.
-        if (std.debug.runtime_safety) setStoredListPrevious(el, null);
-        el.next = null;
-    } else {
-        std.debug.assert(el.prev == previous);
-        const prev = el.prev.?;
-        const next = el.next.?;
-        prev.next = next;
-        next.prev = prev;
-        head.tail = if (head.tail == el) prev else head.tail;
-        el.prev = null;
-        el.next = null;
-    }
+    std.debug.assert(previous.next == el);
+    const next = el.next.?;
+    previous.next = next;
+    if (next != &head.sentinel) setStoredListPrevious(next, previous);
+    head.tail = if (head.tail == el) previous else head.tail;
+    // Linkage is already authoritatively cleared by `next = null` below.
+    // ReleaseFast does not pay a second kind dispatch merely to scrub the
+    // Shape/Realm acceleration slot of an object that is either destroyed
+    // or immediately re-linked (which overwrites it). Keep the scrub in
+    // safety builds so stale-backlink misuse still fails close to origin.
+    if (std.debug.runtime_safety) setStoredListPrevious(el, null);
+    el.next = null;
 }
 
 /// Traversal-owned counterpart to `listDelAfter`. The caller promises this is
 /// not `gc_obj_list`: no mutator can arbitrarily unlink Shape/Realm nodes from
 /// it, so successor backlinks are deliberately absent and need no repair.
 pub inline fn listDelAfterTraversalOwned(head: *IntrusiveHeaderList, previous: *Header, el: *Header) void {
-    if (comptime !trace_stw_enabled) {
-        listDelAfter(head, previous, el);
-        return;
-    }
     std.debug.assert(previous.next == el);
     previous.next = el.next.?;
     head.tail = if (head.tail == el) previous else head.tail;
@@ -1505,8 +1391,8 @@ pub inline fn listDelAfterTraversalOwned(head: *IntrusiveHeaderList, previous: *
 }
 
 /// qjs `list_del` (list.h:69-78 / remove_gc_object at quickjs.c:6548).
-/// Arbitrary compact-trace mutations recover the predecessor once. Sequential
-/// collector walks must use `listDelAfter` so a sweep remains O(population).
+/// Arbitrary mutations recover the predecessor once. Sequential collector
+/// walks must use `listDelAfter` so a sweep remains O(population).
 pub inline fn listDel(head: *IntrusiveHeaderList, el: *Header) void {
     listDelAfter(head, listPrevious(head, el), el);
 }
@@ -1527,8 +1413,7 @@ pub inline fn listSentinel(head: *const IntrusiveHeaderList) *const Header {
 }
 
 pub inline fn headerLinked(header: *const Header) bool {
-    if (comptime trace_stw_enabled) return header.next != null;
-    return header.prev != null;
+    return header.next != null;
 }
 
 fn verifyCircularHeaderList(
@@ -1540,9 +1425,6 @@ fn verifyCircularHeaderList(
     if (sentinel.next == null) return error.CorruptGcList;
     if (listEmpty(head)) {
         if (head.tail != sentinel) return error.CorruptGcList;
-        if (comptime !trace_stw_enabled) {
-            if (sentinel.prev != sentinel) return error.CorruptGcList;
-        }
         return 0;
     }
 
@@ -1564,7 +1446,7 @@ fn verifyCircularHeaderList(
         if (expected_kind) |kind| {
             if (node.metaConst().flags.kind != kind) return error.DoomedBucketKindMismatch;
         }
-        if (comptime trace_stw_enabled and verify_stored_previous) {
+        if (comptime verify_stored_previous) {
             switch (node.metaConst().flags.kind) {
                 .shape, .realm_context => if (storedListPrevious(node) != previous)
                     return error.CorruptGcList,
@@ -1572,18 +1454,11 @@ fn verifyCircularHeaderList(
             }
         }
         const next = node.next orelse return error.CorruptGcList;
-        if (comptime !trace_stw_enabled) {
-            if (node.prev != previous) return error.CorruptGcList;
-            if (next.prev != node) return error.CorruptGcList;
-        }
         previous = node;
         current = next;
         count += 1;
     }
     if (previous.next != sentinel or head.tail != previous) return error.CorruptGcList;
-    if (comptime !trace_stw_enabled) {
-        if (sentinel.prev != previous) return error.CorruptGcList;
-    }
     return count;
 }
 
@@ -1591,9 +1466,9 @@ fn verifyCircularHeaderList(
 /// Pass-B struct deferral. Same `Header.link` words as the Registry lists
 /// (qjs reuses `JSGCObjectHeader.link`). Call `init()` in place after the
 /// list reaches its stable address — the sentinel is self-referential.
-/// See `Registry.cycle_deferred_frees`. Reuses the header's `next` link;
-/// `prev` is left alone, and the header is off every other list by the time
-/// it gets here (the resource pass detached it).
+/// See `Registry.cycle_deferred_frees`. Reuses the header's `next` link; the
+/// header is off every other list by the time it gets here (the resource pass
+/// detached it).
 pub const DeferredFreeStack = struct {
     head: ?*GCObjectHeader = null,
     count: usize = 0,
@@ -1608,7 +1483,6 @@ pub const DeferredFreeStack = struct {
         const header = self.head orelse return null;
         self.head = header.next;
         header.next = null;
-        if (comptime !trace_stw_enabled) header.prev = null;
         self.count -= 1;
         return header;
     }
@@ -1787,7 +1661,7 @@ pub fn verifyMetadataSemantics(
                 return error.RepresentationPrefixFieldMismatch;
             if (meta.alloc_info.standalone and meta.size_class == 0)
                 return error.RepresentationPrefixFieldMismatch;
-            if (comptime trace_stw_enabled) {
+            {
                 const lifetime = meta.lifetime.trace;
                 if (lifetime.flags.husk or lifetime.flags.reserved != 0)
                     return error.RepresentationPrefixFieldMismatch;
@@ -1806,8 +1680,6 @@ pub fn verifyMetadataSemantics(
                     if (lifetime.object_shape_summary & ~permitted != 0)
                         return error.RepresentationPrefixFieldMismatch;
                 }
-            } else {
-                if (meta.lifetime.rc < 0) return error.RepresentationPrefixFieldMismatch;
             }
         },
         .detached_leaf => {
@@ -1820,13 +1692,10 @@ pub fn verifyMetadataSemantics(
             }
         },
         .construction_block_object => {
-            const initial_lifetime = if (comptime trace_stw_enabled)
-                meta.lifetime.trace.mark_epoch == 0 and
-                    meta.lifetime.trace.object_shape_summary == 0 and
-                    !meta.lifetime.trace.flags.husk and
-                    meta.lifetime.trace.flags.reserved == 0
-            else
-                meta.lifetime.rc == 1;
+            const initial_lifetime = meta.lifetime.trace.mark_epoch == 0 and
+                meta.lifetime.trace.object_shape_summary == 0 and
+                !meta.lifetime.trace.flags.husk and
+                meta.lifetime.trace.flags.reserved == 0;
             if (expected_kind != .object or !is_block_cell or
                 meta.alloc_info.heap_accounted or meta.alloc_info.standalone or
                 meta.alloc_info.large or meta.flags.mark or meta.flags.young or
@@ -2085,9 +1954,7 @@ pub const Registry = struct {
     /// for newborn/unmarked; a major advances this scalar, while minors keep
     /// it fixed so sticky survivor marks remain valid. Unlike a global parity
     /// flip, a stale nonzero epoch cannot make a newborn (0) read marked.
-    /// Default RC/shadow builds keep the historical `flags.mark` bit instead.
-    header_mark_epoch: if (trace_stw_enabled) u16 else void =
-        if (trace_stw_enabled) 1 else {},
+    header_mark_epoch: u16 = 1,
 
     /// Condemned by an incremental cycle's finish, awaiting sliced
     /// destruction at later polls.
@@ -2280,14 +2147,10 @@ pub const Registry = struct {
         var held_var_refs: ?*GCObjectHeader = null;
         var held_function_bytecodes: ?*GCObjectHeader = null;
         while (!listEmpty(&self.gc_obj_list)) {
-            // Compact trace has no backlink on tracer-owned kinds. Teardown
+            // Compact headers have no backlink on tracer-owned kinds. Teardown
             // order is mediated by the holding stacks below, not list order,
-            // so consume its head and keep every detach O(1). RC retains qjs's
-            // tail walk and its in-node backlinks.
-            const h = if (comptime trace_stw_enabled)
-                listFirst(&self.gc_obj_list).?
-            else
-                listLastAssumeNonEmpty(&self.gc_obj_list);
+            // so consume the head and keep every detach O(1).
+            const h = listFirst(&self.gc_obj_list).?;
             if (h.meta().flags.kind == .shape) {
                 self.removeGcObject(h);
                 h.next = held_shapes;
@@ -2576,9 +2439,7 @@ pub const Registry = struct {
     }
 
     pub fn shouldRunMajorAt(self: Registry, point: SchedulerPoint, over_threshold: bool) bool {
-        if (comptime trace_stw_enabled) {
-            if (stress_disable) return false;
-        }
+        if (stress_disable) return false;
         if (point == .urgent or over_threshold) return true;
         const request = self.pendingMajorRequest() orelse return false;
         return switch (point) {
@@ -2723,7 +2584,6 @@ pub const Registry = struct {
         // clearing it here upholds addInitializedWithSizeNoFail's clear-on-entry
         // invariant for re-registered headers.
         h.meta().alloc_info.large = false;
-        if (comptime !trace_stw_enabled) h.prev = null;
         h.next = null;
         try self.addInitializedWithSize(h, bytes);
     }
@@ -3013,11 +2873,9 @@ pub const Registry = struct {
     pub fn unlinkObjectWithBytes(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
         self.recordHeapFreeWithBytes(h, bytes);
         // Condemnation detached this header before its resource destructor.
-        // Let that trace-only structural stamp answer before kind, list, and
-        // generation work; rc comptime-erases this arm.
-        if (comptime trace_stw_enabled) {
-            if (h.meta().flags.cycle_visited) return;
-        }
+        // Let that structural stamp answer before kind, list, and generation
+        // work.
+        if (h.meta().flags.cycle_visited) return;
         if (!isCycleCandidate(h)) return;
         // Already unlinked, or condemned on tmp_obj_list / a partition list.
         // qjs remove_gc_object is only called while the node is on gc_obj_list.
@@ -3223,7 +3081,6 @@ pub const Registry = struct {
     /// Reserve the existing pin ledger before taking a block cell, so adding
     /// the construction pin after initialization is a no-fail scalar publish.
     pub fn prepareConstructionRoot(self: *Registry) !void {
-        if (comptime !trace_stw_enabled) return;
         try self.ensurePinEntryCapacity(self.pin_entries.len + 1);
     }
 
@@ -3231,7 +3088,6 @@ pub const Registry = struct {
     /// installed yet. Only the detached generator constructor has this
     /// lifetime; all other block-cell objects publish immediately.
     pub fn addConstructionRoot(self: *Registry, header: *GCObjectHeader) void {
-        if (comptime !trace_stw_enabled) return;
         std.debug.assert(header.metaConst().flags.kind == .object);
         std.debug.assert(!header.metaConst().alloc_info.heap_accounted);
         std.debug.assert(!headerLinked(header));
@@ -3246,7 +3102,6 @@ pub const Registry = struct {
     }
 
     pub fn removeConstructionRoot(self: *Registry, header: *GCObjectHeader) void {
-        if (comptime !trace_stw_enabled) return;
         const index = self.pinEntryIndex(header) orelse unreachable;
         std.debug.assert(self.pin_entries[index].count == construction_pin_count);
         if (index + 1 < self.pin_entries.len) {
@@ -3261,7 +3116,6 @@ pub const Registry = struct {
     }
 
     fn isConstructionRoot(self: *const Registry, header: *const GCObjectHeader) bool {
-        if (comptime !trace_stw_enabled) return false;
         const index = self.pinEntryIndex(header) orelse return false;
         if (self.pin_entries[index].count != construction_pin_count) return false;
         const meta = header.metaConst();
@@ -3294,7 +3148,6 @@ pub const Registry = struct {
         context: *anyopaque,
         cell_addr: usize,
     ) BlockHeapMod.Heap.UnpublishedCellAllowance.Kind {
-        if (comptime !trace_stw_enabled) return .none;
         const self: *const Registry = @ptrCast(@alignCast(context));
         const header: *const GCObjectHeader = @ptrFromInt(cell_addr + metadata_prefix_size);
         if (self.isConstructionRoot(header)) return .marked_construction;
@@ -3540,11 +3393,8 @@ pub const Registry = struct {
                 return block.isMarked(h.metaConst().size_class, self.block_heap.mark_epoch);
             }
         }
-        if (comptime trace_stw_enabled) {
-            if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
-            return @atomicLoad(u16, &h.metaConst().lifetime.trace.mark_epoch, .monotonic) == self.header_mark_epoch;
-        }
-        return h.metaConst().flags.mark;
+        if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
+        return @atomicLoad(u16, &h.metaConst().lifetime.trace.mark_epoch, .monotonic) == self.header_mark_epoch;
     }
 
     pub inline fn setHeaderMarked(self: *const Registry, h: *GCObjectHeader) void {
@@ -3556,12 +3406,8 @@ pub const Registry = struct {
                 return;
             }
         }
-        if (comptime trace_stw_enabled) {
-            if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
-            @atomicStore(u16, &h.meta().lifetime.trace.mark_epoch, self.header_mark_epoch, .monotonic);
-        } else {
-            h.meta().flags.mark = true;
-        }
+        if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
+        @atomicStore(u16, &h.meta().lifetime.trace.mark_epoch, self.header_mark_epoch, .monotonic);
     }
 
     /// Atomically claim the mark: returns true iff this caller transitioned
@@ -3579,22 +3425,16 @@ pub const Registry = struct {
                 return block.tryAcquireMark(h.metaConst().size_class, self.block_heap.mark_epoch);
             }
         }
-        if (comptime trace_stw_enabled) {
-            if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
-            const epoch_ptr = &h.meta().lifetime.trace.mark_epoch;
-            // The only caller is the parallel STW tracer. Its preceding plain
-            // marked-load filters the common hit; the Registry epoch cannot
-            // change while workers run. One exchange therefore elects exactly
-            // one winner without a general CAS retry loop: a racing loser reads
-            // back the current epoch written by the winner.
-            const epoch = self.header_mark_epoch;
-            const old = @atomicRmw(u16, epoch_ptr, .Xchg, epoch, .monotonic);
-            return old != epoch;
-        }
-        const flags_byte: *u8 = @ptrCast(&h.meta().flags);
-        const mark_mask: u8 = 1 << @bitOffsetOf(BlockFlags, "mark");
-        const old = @atomicRmw(u8, flags_byte, .Or, mark_mask, .monotonic);
-        return (old & mark_mask) == 0;
+        if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
+        const epoch_ptr = &h.meta().lifetime.trace.mark_epoch;
+        // The only caller is the parallel STW tracer. Its preceding plain
+        // marked-load filters the common hit; the Registry epoch cannot
+        // change while workers run. One exchange therefore elects exactly
+        // one winner without a general CAS retry loop: a racing loser reads
+        // back the current epoch written by the winner.
+        const epoch = self.header_mark_epoch;
+        const old = @atomicRmw(u16, epoch_ptr, .Xchg, epoch, .monotonic);
+        return old != epoch;
     }
 
     /// Retire a block cell the tracer has just finished expanding.
@@ -3640,18 +3480,13 @@ pub const Registry = struct {
                 return;
             }
         }
-        if (comptime trace_stw_enabled) {
-            if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
-            @atomicStore(u16, &h.meta().lifetime.trace.mark_epoch, 0, .monotonic);
-        } else {
-            h.meta().flags.mark = false;
-        }
+        if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
+        @atomicStore(u16, &h.meta().lifetime.trace.mark_epoch, 0, .monotonic);
     }
 
     /// O(1) whole-population unmark for the ordinary case. One wrap scrub is
     /// required before reusing epoch 1; 0 always remains newborn/unmarked.
     pub fn advanceHeaderMarkEpoch(self: *Registry) void {
-        if (comptime !trace_stw_enabled) return;
         if (self.header_mark_epoch != std.math.maxInt(u16)) {
             self.header_mark_epoch += 1;
             return;
@@ -4553,7 +4388,8 @@ pub const Registry = struct {
 
     /// Hold zero-ref GC nodes until a batch traversal is complete. QuickJS
     /// uses the same DECREF phase around its weakref_list walk so payload
-    /// finalizers cannot unlink the next weak holder out from under the walk.
+    /// finalizers cannot unlink the next weak holder out from under the walk;
+    /// the tracer's `processWeak` inherited that discipline verbatim.
     pub fn beginDecrefPhase(self: *Registry) void {
         std.debug.assert(self.phase == .none);
         std.debug.assert(listEmpty(&self.zero_ref_list));
@@ -4715,7 +4551,7 @@ pub const Registry = struct {
                 } else if (is_young) return error.DanglingYoungHead;
             }
             if (!isCycleCandidate(h)) return error.CorruptGcList;
-            if (comptime trace_stw_enabled) {
+            {
                 const state = h.metaConst().lifetime.trace;
                 if (state.flags.reserved != 0 or state.flags.husk or state.mark_epoch > self.header_mark_epoch)
                     return error.InvalidHeaderState;
@@ -4727,7 +4563,7 @@ pub const Registry = struct {
                     return error.InvalidHeaderState;
                 if (!refCountRemoved(h.metaConst().flags.kind) and headerRefCount(h) < 0)
                     return error.NegativeRefCount;
-            } else if (headerRefCount(h) < 0) return error.NegativeRefCount;
+            }
             // Trial deletion must leave every mark bit clear once a round
             // ends. Sticky generations invert that: a survivor's mark bit is
             // precisely what records "this is old now" between collections
@@ -4801,7 +4637,6 @@ pub const Registry = struct {
     /// initialized, or wrong-class header as the BlockHeap publication
     /// exception.
     pub fn verifyConstructionRoots(self: *const Registry) InvariantError!void {
-        if (comptime !trace_stw_enabled) return;
         for (self.pin_entries) |entry| {
             if (entry.count != construction_pin_count) continue;
             if (!self.isConstructionRoot(entry.header)) {
@@ -4876,7 +4711,6 @@ pub const Registry = struct {
     /// cache bit before clearing the map, so the two representations must agree
     /// in both directions whenever this checker runs.
     pub fn verifyRepresentationInvariants(self: *const Registry) InvariantError!void {
-        if (comptime !trace_stw_enabled) return;
 
         var live = self.objectIterator();
         while (live.next()) |header| {
@@ -5075,16 +4909,14 @@ pub inline fn release(rt: anytype, header: anytype) void {
         string.String.releaseFromHeader(rt, header);
         return;
     }
-    if (comptime trace_stw_enabled) {
-        if (refCountRemoved(header.meta().flags.kind)) return;
-    }
+    if (refCountRemoved(header.meta().flags.kind)) return;
     if (decrementHeaderRefCount(header) == 0) destroyZeroRef(rt, header);
 }
 
 const ZeroRefKindSet = enum {
     finalizing,
     deinit,
-    remove_cycles,
+    two_pass_teardown,
     enqueue,
 };
 
@@ -5092,7 +4924,7 @@ const ZeroRefKindSet = enum {
 /// comptime selector preserves each call site's exact checks after inlining.
 inline fn zeroRefKindMatches(kind: GcKind, comptime set: ZeroRefKindSet) bool {
     return switch (set) {
-        .finalizing, .remove_cycles => kind == .object or kind == .var_ref or kind == .function_bytecode or kind == .realm_context or kind == .module,
+        .finalizing, .two_pass_teardown => kind == .object or kind == .var_ref or kind == .function_bytecode or kind == .realm_context or kind == .module,
         .deinit => kind == .object or kind == .var_ref or kind == .function_bytecode or kind == .shape or kind == .realm_context or kind == .module,
         .enqueue => kind == .object or kind == .function_bytecode or kind == .realm_context or kind == .module,
     };
@@ -5123,7 +4955,7 @@ pub noinline fn destroyZeroRef(rt: anytype, header: *Header) align(32) void {
     // destroyFromHeader shape-skip);
     // a live/shared shape's eager release here can never reach rc 0 during a cycle
     // round, so shape needs no gate.
-    if (phaseIsTwoPassTeardown(rt.gc.phase) and zeroRefKindMatches(header.meta().flags.kind, .remove_cycles)) return;
+    if (phaseIsTwoPassTeardown(rt.gc.phase) and zeroRefKindMatches(header.meta().flags.kind, .two_pass_teardown)) return;
 
     // Under the tracing collector the trace owns the lifetime of every kind on
     // `gc_obj_list`: `sweepUnmarked` (gc_trace_stw.zig) condemns all six
@@ -5135,7 +4967,7 @@ pub noinline fn destroyZeroRef(rt: anytype, header: *Header) align(32) void {
     // own gate above does not claim. Strings, ropes and BigInt are NOT on
     // `gc_obj_list` -- the tracer never sees them -- so they keep refcounting
     // forever, which is why this gate is a kind test and not a blanket return.
-    if (comptime trace_stw_enabled) {
+    {
         // `.realm_context` is deliberately NOT in this set. A Realm is a host
         // handle with an explicit `JSContext.destroy` API and a teardown-order
         // contract the runtime asserts (`context_head == null` in

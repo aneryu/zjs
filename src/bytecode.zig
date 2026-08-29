@@ -2844,7 +2844,7 @@ pub const function_bytecode = struct {
             // Pass B receives only the header pointer. Preserve the minimum
             // sizing state it needs to reconstruct this exact FAM length after
             // Pass A has released all owners and nulled their pointers.
-            if (rt.gc.phase == .remove_cycles or rt.gc.phase == .deinit) {
+            if (rt.gc.phase == .deinit) {
                 layout_value.restoreSizing(self);
             }
         }
@@ -3047,7 +3047,7 @@ pub const function_bytecode = struct {
         self.deinitWithLayout(rt, layout_value);
         // Cycle removal and runtime deinit both defer the struct-free until all
         // sibling resource destructors have released their edges.
-        if (rt.gc.phase == .remove_cycles or rt.gc.phase == .deinit) {
+        if (rt.gc.phase == .deinit) {
             rt.gc.deferCycleStructFree(header);
             return;
         }

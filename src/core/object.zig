@@ -2192,16 +2192,18 @@ pub const Object = extern struct {
             !self.flags.is_borrowed_reference_holder)
         {
             const phase = rt.gc.phase;
-            // `.remove_cycles` stays excluded -- refcounting's cycle
-            // collector needs more from teardown than this arm provides, and
-            // an earlier attempt to admit it tripped `enqueueZeroRef`'s
-            // `phase == .decref` assertion. `.tracer_destroy` is a separate
-            // value precisely so it can be admitted here: the tracer frees
-            // every object inside such a window, so excluding it meant the
+            // Only `.deinit` is excluded. `.remove_cycles` used to be
+            // excluded beside it -- refcounting's cycle collector needed more
+            // from teardown than this arm provides, and an earlier attempt to
+            // admit it tripped `enqueueZeroRef`'s `phase == .decref`
+            // assertion. `.tracer_destroy` became a separate value precisely
+            // so it could be admitted here: the tracer frees every object
+            // inside such a window, so lumping the two together meant the
             // tracing build never once used its own fast teardown. Measured:
-            // destruction costs the tracer 1.52 s of stopped time on
-            // raytrace against rc's 0.50 s for the same objects.
-            if (phase != .remove_cycles and phase != .deinit) {
+            // destruction cost the tracer 1.52 s of stopped time on raytrace
+            // against rc's 0.50 s for the same objects. `.remove_cycles`
+            // retired with rc; the exclusion is now `.deinit` alone.
+            if (phase != .deinit) {
                 @branchHint(.likely);
                 destroyPlainObjectFast(
                     rt,

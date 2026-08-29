@@ -3051,7 +3051,7 @@ test "cycle deferred drain detaches the weak husk it keeps" {
     const target = try core.Object.create(rt, core.class.ids.object, null);
     target.weakref_count = 1;
     const old_phase = rt.gc.phase;
-    rt.gc.phase = .remove_cycles;
+    rt.gc.phase = .tracer_destroy;
     defer rt.gc.phase = old_phase;
     core.Object.destroyFromHeader(rt, &target.header);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.cycle_deferred_frees.count);
@@ -3059,7 +3059,6 @@ test "cycle deferred drain detaches the weak husk it keeps" {
     core.Object.drainCycleDeferredFrees(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
     try std.testing.expect(target.header.next == null);
-    if (comptime !core.gc.trace_stw_enabled) try std.testing.expect(target.header.prev == null);
     try std.testing.expect(!target.header.meta().flags.finalizing);
 
     // The synthetic weak count has no WeakRef owner to release it later.
@@ -3074,7 +3073,7 @@ test "cycle deferred drain settles its count once per budget" {
     defer rt.destroy();
 
     const old_phase = rt.gc.phase;
-    rt.gc.phase = .remove_cycles;
+    rt.gc.phase = .tracer_destroy;
     defer rt.gc.phase = old_phase;
 
     var objects: [5]*core.Object = undefined;
