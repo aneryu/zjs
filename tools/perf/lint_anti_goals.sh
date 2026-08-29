@@ -154,7 +154,11 @@ for line in lines:
         if stripped in ("pub const Object = struct {", "pub const Object = extern struct {"):
             in_object = True
         continue
-    if stripped.startswith("pub fn ") or stripped.startswith("fn "):
+    # Any function declaration ends the field region. `pub fn`/`fn` alone was
+    # not enough: obj64 ③ added `inline fn` helpers with multi-line parameter
+    # lists directly after the fields, and the scanner happily read `rt:
+    # *JSRuntime,` as a new Object field.
+    if re.match(r"^(pub\s+)?(export\s+)?(inline\s+|noinline\s+)?fn\s", stripped):
         break
     match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*):\s", stripped)
     if match:
