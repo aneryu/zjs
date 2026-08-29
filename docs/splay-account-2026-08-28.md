@@ -722,3 +722,26 @@ adjacent-line prefetch 把 96B 两条相邻线的账早已摊掉大半。
   (S0 证明随机序下结构线数=demand refill 数,偏差 +0.1~0.4%,判别器有分辨率);
   **S1 改口径立项**:≤−1% cycles、主要买 maxrss(足迹轴 S0 故意中和,无信息)。
 - 外推限制入册:真 frontier 是线性/随机混合(未测的高影响变量)。
+
+## S1(③ObjectStorage 按类尺寸化,96B→80B)合入;S2 停手待①(gc/obj64)
+
+- 验收全过:cycles splay **−1.52%(major 数逐位相同=干净等工况)**/EB −2.31%
+  /raytrace −0.63%;maxrss splay −5.50%/EB **−20.09%**;fast-array 线足迹
+  comptime 钉死逐位不变。⚠️R2 在 EB/raytrace 开火(major −12%,allocated
+  bytes −9.6% 过 floor 次数变少)——其收益部分来自少收集,splay 是干净臂。
+- ⭐⭐**顺路两个真缺陷**:①四处按值传 Object(③后是 head-only 拷贝)读脏
+  dense 计数——`getOwnPropertyNames` 返回错值、Reflect.ownKeys 可 core dump,
+  **全套件绿着**;已修+lint 规则闭类。②`call_method_apply_fwd` 未验 class 就读
+  bytecode 臂(替换方法为 native/bound 函数即越界),已加类测。
+- ⭐首刀 +1.41% insn 的教训:统一走运行时尺寸 allocCell 会退役 comptime 特化
+  `allocCellFixedPtr`;补 comptime-tail 孪生后恢复(−1.52%)。
+- **R5 实测(①的门票)**:非块 .object 发布数=六基准 0/test262 全量 0/单测 ≥3
+  ——①的最高风险臂是**门禁够不着的近死代码**;裁决=①独立两步件(先「.object
+  退出 GC 链表」零尺寸变化可测,再删字段),**前置=强制非块群体走 minor/major/
+  teardown 的靶向测试**。④(64B 线轴)据此顺延,判别器已重锚:落地须
+  splay 标记线 20.18M→≈12.14M(−40%)、l1d refill −9.2%。
+- **gate 口径修复**(234df4f1):committed/live 分母加 superblock 地板——
+  raytrace FAIL 是 R8 快照伪影(live-at-exit≈young,38KB 分母);地板后发现
+  **该列在 4/6 负载上本就不可复现**(同二进制 5058/5431/5851 milli 漂移),
+  现确定化;合成 40-superblock 失控形态仍 FAIL=门未钝化。
+- R10 未评(评分口径),入下轮安静窗口清单。
