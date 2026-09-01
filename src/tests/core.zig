@@ -8933,26 +8933,32 @@ test "conservative scan shades a stack-held object header word" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const obj = try core.Object.create(rt, core.class.ids.object, null);
-    defer obj.value().free(rt);
-    const header = &obj.header;
-    var word: usize = @intFromPtr(header);
+    var obj = try core.Object.create(rt, core.class.ids.object, null);
+    var word: usize = @intFromPtr(&obj.header);
+    // The scanner walks the whole native stack, including this frame. Extra
+    // typed locals (`obj`, a header pointer, a target copy in the shade
+    // context) would make hits>0 even if `word` itself were never read.
+    dropGcPtr(&obj);
     std.mem.doNotOptimizeAway(&word);
 
     const Shade = struct {
-        target: *core.gc.Header,
+        word: *const usize,
         hits: usize = 0,
         fn shade(ctx: *anyopaque, found: *core.gc.Header) void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
-            if (found == self.target) self.hits += 1;
+            if (@intFromPtr(found) == self.word.*) self.hits += 1;
         }
     };
-    var ctx: Shade = .{ .target = header };
+    var ctx: Shade = .{ .word = &word };
     var metrics: core.gc_conservative.Metrics = .{};
     core.gc_conservative.spillRegistersAndScan(rt, &metrics, Shade.shade, &ctx);
     try std.testing.expect(metrics.supported);
     try std.testing.expect(metrics.candidates > 0);
     try std.testing.expect(ctx.hits > 0);
+
+    const header: *core.gc.Header = @ptrFromInt(word);
+    const live: *core.Object = @alignCast(@fieldParentPtr("header", header));
+    live.value().free(rt);
 }
 
 test "address registry page radix covers a multi-page allocation" {
