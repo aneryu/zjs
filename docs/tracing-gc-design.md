@@ -855,15 +855,24 @@ implementation fact this migration may assume. Stage 1's conservative scanner
 does not scan fibers: suspended generator/async windows live on
 `GeneratorPayload` and are traced as heap edges.
 
-The first Implementation (`src/core/gc_conservative.zig`, shadow-only) is
-AArch64 Linux AAPCS64: it spills x0–x30 and q0–q31, then scans `[SP, thread
-stack high)` from `pthread_getattr_np`. Candidates are resolved against
-the live page-radix address registry (`src/core/gc_address_registry.zig`)
-which indexes published compatibility-heap objects at insert/remove, not
-a census snapshot built at scan time. Ranges still cover the metadata
-prefix, body, and one-past-end, and are never dereferenced as guessed
-headers. x86_64 SysV, x86_64 Windows, AArch64 Windows, and AArch64 macOS
-are explicit unimplemented branches.
+The first Implementation (`src/core/gc_conservative.zig`) spills every
+GPR and SIMD register that may hold a pointer or 16-byte `JSValue`, then
+scans `[SP, thread stack high)`. Candidates are resolved against the live
+page-radix address registry (`src/core/gc_address_registry.zig`) which
+indexes published compatibility-heap objects at insert/remove, not a census
+snapshot built at scan time. Ranges still cover the metadata prefix, body,
+and one-past-end, and are never dereferenced as guessed headers.
+
+Supported ABIs:
+
+- AArch64 Linux (AAPCS64): `pthread_getattr_np` stack high, `x0–x30` / `q0–q31`
+- AArch64 macOS: Darwin `pthread_get_stackaddr_np` stack high, same spills
+- x86_64 Linux / macOS (SysV): `pthread_getattr_np` / Darwin stack high,
+  `rax–r15` / `xmm0–xmm15`
+- x86_64 Windows: `GetCurrentThreadStackLimits`, same x86_64 spills
+
+AArch64 Windows remains an explicit unimplemented branch and fails at
+compile time.
 
 #### Candidate validation by arena geometry
 

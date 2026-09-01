@@ -23,6 +23,14 @@ pub const blocks_per_superblock: usize = superblock_bytes / block_bytes;
 pub const page_bytes: usize = 4096;
 pub const pages_per_superblock: usize = superblock_bytes / page_bytes;
 pub const block_align: std.mem.Alignment = .fromByteUnits(block_bytes);
+/// Bytes handed back to the OS when a free block is decommitted. The header
+/// stays mapped; on platforms whose OS page is larger than `page_bytes`
+/// (aarch64 macOS, 16 KiB) the retained prefix is one OS page so `madvise`
+/// sees a `page_size_min`-aligned pointer.
+pub const decommit_bytes: usize = blk: {
+    const start = std.mem.alignForward(usize, page_bytes, std.heap.page_size_min);
+    break :blk if (start < block_bytes) block_bytes - start else 0;
+};
 /// Free-list representation.
 ///
 /// A free cell stores its successor in its first four bytes, which are also
@@ -1060,6 +1068,17 @@ pub const Heap = struct {
     /// libc arena. This is a shrink signal, not a steady-state density knob.
     pub const process_trim_min_decommitted_bytes: usize = 128 * 1024 * 1024;
 
+    fn decommitCellPages(block: *Block) bool {
+        if (comptime builtin.os.tag == .windows or decommit_bytes == 0) return false;
+        const start = @intFromPtr(block) + (block_bytes - decommit_bytes);
+        const cells: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(start);
+        if (comptime builtin.os.tag != .windows) {
+            std.posix.madvise(cells, decommit_bytes, std.posix.MADV.DONTNEED) catch return false;
+            return true;
+        }
+        return false;
+    }
+
     /// Hand the cell pages of long-idle fully-free blocks back to the OS.
     /// The header page (magic, links, bitmaps -- all under 2KB) stays
     /// mapped, so the free list keeps working, conservative candidates still
@@ -1078,8 +1097,8 @@ pub const Heap = struct {
                 cursor = if (block.next_free == 0) null else @ptrFromInt(block.next_free);
                 if (block.flags & Block.flag_decommitted != 0) continue;
                 if (now_ns -| block.free_time_ns < decommit_min_idle_ns) continue;
-                const cells: [*]align(page_bytes) u8 = @ptrFromInt(@intFromPtr(block) + page_bytes);
-                std.posix.madvise(cells, block_bytes - page_bytes, std.posix.MADV.DONTNEED) catch continue;
+                if (decommit_bytes == 0) continue;
+                if (!decommitCellPages(block)) continue;
                 // The free-chain LINKS live in the discarded cell pages, not
                 // in the retained header page. They now read as zero and must
                 // no longer be described by the old head/bump pair. Reuse
@@ -1089,7 +1108,7 @@ pub const Heap = struct {
                 block.bump = 0;
                 block.free_list = free_nil;
                 block.flags |= Block.flag_decommitted;
-                released += block_bytes - page_bytes;
+                released += decommit_bytes;
             }
         }
         self.stats.decommitted_bytes += released;
@@ -1821,8 +1840,8 @@ pub const Heap = struct {
             if (block.flags & Block.flag_decommitted != 0) {
                 // The pages re-fault as zero on first touch; only the account
                 // moves here. `resetBlock` clears the flag with the rest.
-                self.stats.recommitted_bytes += block_bytes - page_bytes;
-                self.stats.committed_bytes += block_bytes - page_bytes;
+                self.stats.recommitted_bytes += decommit_bytes;
+                self.stats.committed_bytes += decommit_bytes;
             }
             const super_index = block.super_index;
             self.resetBlock(block, class_idx, cell_size, super_index, true);

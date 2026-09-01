@@ -8927,6 +8927,34 @@ test "address registry tracks published objects and interior pointers" {
     }
 }
 
+test "conservative scan shades a stack-held object header word" {
+    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
+    try std.testing.expect(core.gc_conservative.target_supported);
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    const header = &obj.header;
+    var word: usize = @intFromPtr(header);
+    std.mem.doNotOptimizeAway(&word);
+
+    const Shade = struct {
+        target: *core.gc.Header,
+        hits: usize = 0,
+        fn shade(ctx: *anyopaque, found: *core.gc.Header) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (found == self.target) self.hits += 1;
+        }
+    };
+    var ctx: Shade = .{ .target = header };
+    var metrics: core.gc_conservative.Metrics = .{};
+    core.gc_conservative.spillRegistersAndScan(rt, &metrics, Shade.shade, &ctx);
+    try std.testing.expect(metrics.supported);
+    try std.testing.expect(metrics.candidates > 0);
+    try std.testing.expect(ctx.hits > 0);
+}
+
 test "address registry page radix covers a multi-page allocation" {
     if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
 
@@ -9481,6 +9509,7 @@ test "block heap reopens a swept partial block before reserving a fresh block" {
 
 test "block heap aged decommit reports scans release and recommit" {
     if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     const heap_mod = core.gc_block_heap;
     var heap = heap_mod.Heap.init(std.testing.allocator);
     defer heap.deinit();
@@ -9510,7 +9539,7 @@ test "block heap aged decommit reports scans release and recommit" {
     );
     try std.testing.expectEqual(@as(usize, 1), heap.stats.decommit_checks);
 
-    const cell_pages = heap_mod.block_bytes - heap_mod.page_bytes;
+    const cell_pages = heap_mod.decommit_bytes;
     try std.testing.expectEqual(
         cell_pages,
         heap.releaseFreeBlockPages(heap_mod.Heap.decommit_period_ns + heap_mod.Heap.decommit_min_idle_ns),
