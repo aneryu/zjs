@@ -1038,7 +1038,7 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
             "gc: block heap decommit checks {d}, released blocks cumulative {d}, current bytes {d}, max batch bytes {d}\n",
             .{
                 st.decommit_checks,
-                st.decommitted_bytes / (engine.core.gc_block_heap.block_bytes - engine.core.gc_block_heap.page_bytes),
+                st.decommitted_bytes / @max(engine.core.gc_block_heap.decommit_bytes, 1),
                 st.currentDecommittedBytes(),
                 st.decommit_max_batch_bytes,
             },

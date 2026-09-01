@@ -29,6 +29,7 @@
 //! the exact single-threaded collector it had before.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const gc = @import("gc.zig");
 const runtime_mod = @import("runtime.zig");
 const stw = @import("gc_trace_stw.zig");
@@ -95,13 +96,15 @@ pub const Pool = struct {
 
     /// The condvar releases workers into the first parallel slice of a cycle;
     /// the atomic generation releases the already-hot workers into later
-    /// slices. Raw pthread primitives: zig 0.16 moved std's Mutex/Condition
-    /// behind an Io instance the collector's interior has no business
-    /// threading through, and the process links libc already. The std.c
-    /// default values encode each platform's PTHREAD_*_INITIALIZER, so field
-    /// defaults are valid initialization.
-    wake_mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
-    wake_cond: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER,
+    /// slices. POSIX uses raw pthread primitives: zig 0.16 moved std's
+    /// Mutex/Condition behind an Io instance the collector's interior has no
+    /// business threading through, and the process links libc already. Windows
+    /// has no pthreads; `WaitOnAddress` / `WakeByAddressAll` on `job_gen` are
+    /// the same generation protocol without a mutex.
+    wake_mutex: if (builtin.os.tag == .windows) void else std.c.pthread_mutex_t =
+        if (builtin.os.tag == .windows) {} else std.c.PTHREAD_MUTEX_INITIALIZER,
+    wake_cond: if (builtin.os.tag == .windows) void else std.c.pthread_cond_t =
+        if (builtin.os.tag == .windows) {} else std.c.PTHREAD_COND_INITIALIZER,
     job_gen: std.atomic.Value(u32) = .init(0),
     /// Budget exhausted: spill local stacks and park.
     stop: std.atomic.Value(bool) = .init(false),
@@ -153,10 +156,7 @@ pub const Pool = struct {
             return;
         }
         self.shutdown_flag.store(true, .release);
-        _ = std.c.pthread_mutex_lock(&self.wake_mutex);
-        _ = self.job_gen.fetchAdd(1, .release);
-        _ = std.c.pthread_mutex_unlock(&self.wake_mutex);
-        _ = std.c.pthread_cond_broadcast(&self.wake_cond);
+        self.bumpAndBroadcast();
         for (&self.threads) |*slot| {
             if (slot.*) |thread| thread.join();
             slot.* = null;
@@ -169,13 +169,43 @@ pub const Pool = struct {
         return self.count > 0;
     }
 
+    fn waitForGeneration(self: *Pool, seen: u32) void {
+        if (comptime builtin.os.tag == .windows) {
+            var expected = seen;
+            while (self.job_gen.load(.acquire) == expected) {
+                _ = std.os.windows.ntdll.RtlWaitOnAddress(
+                    @ptrCast(&self.job_gen),
+                    @ptrCast(&expected),
+                    @sizeOf(u32),
+                    null,
+                );
+            }
+        } else {
+            _ = std.c.pthread_mutex_lock(&self.wake_mutex);
+            while (self.job_gen.load(.acquire) == seen) {
+                _ = std.c.pthread_cond_wait(&self.wake_cond, &self.wake_mutex);
+            }
+            _ = std.c.pthread_mutex_unlock(&self.wake_mutex);
+        }
+    }
+
+    fn bumpAndBroadcast(self: *Pool) void {
+        if (comptime builtin.os.tag == .windows) {
+            _ = self.job_gen.fetchAdd(1, .release);
+            std.os.windows.ntdll.RtlWakeAddressAll(@ptrCast(&self.job_gen));
+        } else {
+            _ = std.c.pthread_mutex_lock(&self.wake_mutex);
+            _ = self.job_gen.fetchAdd(1, .release);
+            _ = std.c.pthread_mutex_unlock(&self.wake_mutex);
+            _ = std.c.pthread_cond_broadcast(&self.wake_cond);
+        }
+    }
+
     fn workerMain(self: *Pool, index: usize) void {
         var seen: u32 = 0;
         while (true) {
-            _ = std.c.pthread_mutex_lock(&self.wake_mutex);
-            while (self.job_gen.load(.acquire) == seen) _ = std.c.pthread_cond_wait(&self.wake_cond, &self.wake_mutex);
+            self.waitForGeneration(seen);
             seen = self.job_gen.load(.monotonic);
-            _ = std.c.pthread_mutex_unlock(&self.wake_mutex);
             if (self.shutdown_flag.load(.acquire)) return;
             cycle: while (true) {
                 _ = self.active.fetchAdd(1, .acquire);
@@ -343,10 +373,7 @@ pub fn parallelMarkStep(rt: *JSRuntime, pool: *Pool, budget_ns: u64) bool {
         _ = pool.job_gen.fetchAdd(1, .release);
     } else {
         pool.cycle_hot = true;
-        _ = std.c.pthread_mutex_lock(&pool.wake_mutex);
-        _ = pool.job_gen.fetchAdd(1, .release);
-        _ = std.c.pthread_mutex_unlock(&pool.wake_mutex);
-        _ = std.c.pthread_cond_broadcast(&pool.wake_cond);
+        pool.bumpAndBroadcast();
     }
 
     var tracer = Tracer{ .rt = rt, .local = owner_stack, .queue = queue };

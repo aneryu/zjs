@@ -112,6 +112,7 @@ else
 /// `-Dzjs_experimental_gc_corpse_census=true`.
 pub const gc_corpse_census = @import("gc_corpse_census.zig");
 pub const gc_trace_stw = @import("gc_trace_stw.zig");
+pub const gc_conservative = @import("gc_conservative.zig");
 
 pub const JSValue = value.JSValue;
 pub const JSString = JSValue.String;

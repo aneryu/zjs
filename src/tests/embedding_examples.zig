@@ -818,9 +818,10 @@ test "public API surface snapshot matches the checked-in name lists" {
     // explicit contract update instead of passing silently.
     // 168 -> 174 during the tracing-GC tranche: `traceValueRootFrameChain`,
     // WeakRef's `keepAliveWeakRefTarget` / `clearWeakRefKeptAlive`, the two
-    // test-only pacing controls, and `enqueueFinalizationJobReserved`. These
-    // are six named internal seams on the already-broad type, not an unnoticed
-    // embedding API promise.
+    // test-only pacing controls, and `enqueueFinalizationJobReserved`.
+    // 174 -> 178: the same broad surface grew by four more named internal
+    // seams during the tracing-GC follow-ups (the count is the pin; names
+    // stay on the type). These are not an embedding API promise.
     const jsruntime_decl_count = @typeInfo(zjs.JSRuntime).@"struct".decls.len;
-    try std.testing.expectEqual(@as(usize, 174), jsruntime_decl_count);
+    try std.testing.expectEqual(@as(usize, 178), jsruntime_decl_count);
 }

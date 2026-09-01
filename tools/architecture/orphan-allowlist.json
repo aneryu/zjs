@@ -1,1 +1,7 @@
-[]
+[
+  {
+    "module": "src/abi/gen_header.zig",
+    "reason": "standalone generator invoked via `zig run src/abi/gen_header.zig`; not imported by production or test graphs",
+    "exit_milestone": "keep: tool entry, not an engine module"
+  }
+]

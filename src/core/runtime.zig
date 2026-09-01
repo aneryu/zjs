@@ -1248,7 +1248,7 @@ pub const JSRuntime = struct {
     job_queue: job_mod.Queue = undefined,
     /// WeakRef [[KeptAlive]] (tracing-gc-design.md §9.2). Traced as a root
     /// and cleared at job end.
-    weakref_kept_alive: []JSValue = &.{},
+    weakref_kept_alive: []JSValue = &.{}, // gc-slot: heap
     weakref_kept_alive_capacity: usize = 0,
     /// Test-only root-scan override (`forcePreciseRootScanForTest`). Pacing
     /// MACHINERY tests call the engine-trigger entry points from a quiescent
@@ -3650,10 +3650,13 @@ pub const JSRuntime = struct {
     }
 
     fn readLinuxFile(path: []const u8, buf: []u8) ?[]const u8 {
-        const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch return null;
-        defer _ = std.os.linux.close(fd);
-        const len = std.posix.read(fd, buf) catch return null;
-        return buf[0..len];
+        if (comptime builtin.os.tag == .linux) {
+            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch return null;
+            defer _ = std.os.linux.close(fd);
+            const len = std.posix.read(fd, buf) catch return null;
+            return buf[0..len];
+        }
+        return null;
     }
 
     fn firstToken(contents: []const u8) []const u8 {
