@@ -32,6 +32,7 @@ const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
 const memory_mod = @import("memory.zig");
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 
 const ObjectVisitSet = std.AutoHashMap(usize, void);
 const ObjectIncomingMap = std.AutoHashMap(usize, usize);
@@ -467,6 +468,13 @@ pub const Object = extern struct {
     pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.object);
     pub const trailing_property_capacity: usize = 2;
     pub const trailing_property_bytes: usize = trailing_property_capacity * @sizeOf(property.Entry);
+    /// Pad-only ablation of obj64 S1. Restores the pre-③ 96-byte cell for the
+    /// trailing-property ordinary object (payload 72 → 88, cell 80 → 96) without
+    /// widening the class-data arm the mutator actually touches. The extra 16 B
+    /// sits after the trailing property FAM, so live field offsets stay at the S1
+    /// layout. Wide classes are unchanged: their line footprint is a S1 invariant.
+    /// Default off, comptime-erased.
+    pub const obj64_s1_pad_bytes: usize = if (build_options.zjs_obj64_s1_pad) 16 else 0;
     const trailing_property_allocation_bit: u32 = 1 << 31;
     const weakref_count_mask: u32 = trailing_property_allocation_bit - 1;
     comptime {
@@ -500,9 +508,12 @@ pub const Object = extern struct {
         if (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall) {
             std.debug.assert(trailing_property_bytes == 32);
             std.debug.assert(objectBodyBytes(class.ids.object) + trailing_property_bytes == 72);
+            std.debug.assert(objectAllocBytes(class.ids.object, true) == 72 + obj64_s1_pad_bytes);
             std.debug.assert(objectBodyBytes(class.ids.array) == 56);
+            std.debug.assert(objectAllocBytes(class.ids.array, false) == 56);
         } else {
             std.debug.assert(trailing_property_bytes == 48);
+            std.debug.assert(objectAllocBytes(class.ids.array, false) == objectBodyBytes(class.ids.array));
         }
     }
     header: gc.GCObjectHeader,
@@ -541,7 +552,22 @@ pub const Object = extern struct {
     /// function of the same immutable `class_id`.
     pub inline fn objectTailBytes(class_id: class.ClassId, has_trailing_properties: bool) usize {
         return unionArmBytes(class_id) +
-            @as(usize, if (has_trailing_properties) trailing_property_bytes else 0);
+            @as(usize, if (has_trailing_properties) trailing_property_bytes else 0) +
+            obj64S1PadBytes(class_id, has_trailing_properties);
+    }
+
+    fn obj64S1PadBytes(class_id: class.ClassId, has_trailing_properties: bool) usize {
+        if (comptime obj64_s1_pad_bytes == 0) return 0;
+        if (has_trailing_properties and class_id == class.ids.object) return obj64_s1_pad_bytes;
+        return 0;
+    }
+
+    /// Payload bytes handed to the allocator for this class and trailing-FAM
+    /// choice. Equals `@sizeOf(Object) + objectTailBytes(...)`. Distinct from
+    /// `objectBodyBytes`, which is the live-field layout and does not include
+    /// the S1 pad-only ablation bytes.
+    pub inline fn objectAllocBytes(class_id: class.ClassId, has_trailing_properties: bool) usize {
+        return @sizeOf(Object) + objectTailBytes(class_id, has_trailing_properties);
     }
 
     inline fn allocCell(rt: *JSRuntime, class_id: class.ClassId, comptime has_trailing: bool) !*Object {
@@ -1194,7 +1220,7 @@ pub const Object = extern struct {
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
 
-        const alloc_size = objectBodyBytes(class.ids.object) + trailing_property_bytes;
+        const alloc_size = objectAllocBytes(class.ids.object, true);
         collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size);
         const self = try allocCellConst(rt, class.ids.object, true);
         var initialized = false;

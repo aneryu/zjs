@@ -98,6 +98,11 @@ pub fn build(b: *std.Build) void {
         "EXPERIMENTAL trace_stw Pass-B corpse census (measurement only, default off)",
     );
     const experimental_corpse_census = experimental_corpse_census_option orelse false;
+    const obj64_s1_pad = b.option(
+        bool,
+        "zjs_obj64_s1_pad",
+        "Pad-only ablation of obj64 S1: charge the trailing-property ordinary object 16 extra bytes (80B→96B cell) without widening the class-data arm (default off)",
+    ) orelse false;
 
     // ===== QCP-1 configuration signature =====
     // The defect class this closes is "a gate reports green about a
@@ -187,6 +192,7 @@ pub fn build(b: *std.Build) void {
         .zjs_gc = zjs_gc,
         .experimental_gc_sticky_major = experimental_sticky_major,
         .experimental_gc_corpse_census = experimental_corpse_census,
+        .obj64_s1_pad = obj64_s1_pad,
     };
     // Follows -Doptimize: the public engine module and the OOM corpus engine.
     const engine_options = config.addEngineOptions(b, engine_option_inputs);

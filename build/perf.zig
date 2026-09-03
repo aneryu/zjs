@@ -190,6 +190,41 @@ pub fn addPerfSteps(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts) void {
     const perf_direct_build_step = b.step("perf-direct-build", "Build and install the zjs direct/core benchmark harness");
     perf_direct_build_step.dependOn(&install_perf_direct_zjs.step);
 
+    const stride_mod = b.createModule(.{
+        .root_source_file = b.path("tools/perf/obj64_stride/stride_ablation.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .strip = false,
+        .omit_frame_pointer = true,
+    });
+    const stride_exe = b.addExecutable(.{
+        .name = "obj64-stride-ablation",
+        .root_module = stride_mod,
+    });
+    forceLlvmBackendOnDebug(stride_exe);
+    const install_stride = b.addInstallArtifact(stride_exe, .{});
+    const stride_step = b.step(
+        "obj64-stride-ablation",
+        "Build the engine-external obj64 64/80/96 stride ablation (line axis)",
+    );
+    stride_step.dependOn(&install_stride.step);
+
+    const stride_tests = b.addTest(.{
+        .name = "obj64-stride-ablation-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/perf/obj64_stride/stride_ablation.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    forceLlvmBackendOnDebug(stride_tests);
+    const run_stride_tests = b.addRunArtifact(stride_tests);
+    const stride_test_step = b.step(
+        "obj64-stride-ablation-test",
+        "Equal-work checksum test for the obj64 stride ablation",
+    );
+    stride_test_step.dependOn(&run_stride_tests.step);
+
     const run_perf_direct = b.addSystemCommand(&.{
         "bash",
         "tools/perf/direct/run_direct.sh",

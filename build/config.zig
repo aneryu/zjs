@@ -122,6 +122,10 @@ pub const EngineOptionInputs = struct {
     /// Pass-B corpse census. Measurement-only, comptime-erased when false;
     /// no default artifact enables it.
     experimental_gc_corpse_census: bool,
+    /// Pad-only ablation of obj64 S1: restore the pre-③ 96-byte cell for the
+    /// trailing-property ordinary object without widening the class-data arm
+    /// the mutator actually touches. Default false, comptime-erased.
+    obj64_s1_pad: bool,
 
     pub fn withExpect(self: EngineOptionInputs, expect_config: []const u8) EngineOptionInputs {
         var out = self;
@@ -142,6 +146,7 @@ pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.O
     options.addOption([]const u8, "zjs_gc", in.zjs_gc);
     options.addOption(bool, "zjs_experimental_gc_sticky_major", in.experimental_gc_sticky_major);
     options.addOption(bool, "zjs_experimental_gc_corpse_census", in.experimental_gc_corpse_census);
+    options.addOption(bool, "zjs_obj64_s1_pad", in.obj64_s1_pad);
     return options;
 }
 

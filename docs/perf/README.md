@@ -16,6 +16,7 @@ Current design notes:
   — its frozen baseline doc was removed 2026-08-25 (git history)
 - [GC behaviour baseline](gc-baseline.md) — pre-refactor collector counters
 - [Object and shape implementation](object-shape-design.md)
+- [obj64 stride ablation](../../tools/perf/obj64_stride/README.md) — engine-external 64/80/96 line-axis microbenchmark; in-engine pad arm is `-Dzjs_obj64_s1_pad`
 - [`exec/call_runtime.zig` candidate domains and move criteria](../backlog.md)
 - Frozen subsystem baseline (historical):
   `docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md` — removed

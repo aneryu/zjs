@@ -319,7 +319,7 @@ test "shape-sized trailing property storage grows externally and compacts in pla
         @intFromPtr(object.propertyStorageBase()),
     );
     try std.testing.expectEqual(
-        core.Object.objectBodyBytes(core.class.ids.object) + core.Object.trailing_property_bytes,
+        core.Object.objectAllocBytes(core.class.ids.object, true),
         object.allocationSize(rt),
     );
 
@@ -342,7 +342,7 @@ test "shape-sized trailing property storage grows externally and compacts in pla
     try std.testing.expect(!object.propertyStorageIsInline());
     try std.testing.expect(object.hasTrailingPropertyAllocation());
     try std.testing.expectEqual(
-        core.Object.objectBodyBytes(core.class.ids.object) + core.Object.trailing_property_bytes,
+        core.Object.objectAllocBytes(core.class.ids.object, true),
         object.allocationSize(rt),
     );
 
@@ -3891,6 +3891,29 @@ test "plain objects do not allocate class payload storage" {
     try std.testing.expectEqual(null, object.payloadArm().*);
     try std.testing.expectEqual(core.class.PayloadKind.none, object.flags.class_payload_kind);
     try std.testing.expect(core.Object.objectBodyBytes(core.class.ids.object) <= core.Object.post_a_object_size_baseline / 2);
+}
+
+test "obj64 S1 pad-only ablation charges the 80B ordinary cell and leaves arrays alone" {
+    // Logical layout (live fields) never includes the pad: property offsets
+    // stay at the S1 packing. Allocation size grows only for the trailing
+    // ordinary object, which is the 80B→96B cell under measurement.
+    try std.testing.expectEqual(
+        @sizeOf(core.Object) + core.Object.arm_min_bytes,
+        core.Object.objectBodyBytes(core.class.ids.object),
+    );
+    try std.testing.expectEqual(
+        core.Object.objectBodyBytes(core.class.ids.object) + core.Object.trailing_property_bytes + core.Object.obj64_s1_pad_bytes,
+        core.Object.objectAllocBytes(core.class.ids.object, true),
+    );
+    try std.testing.expectEqual(
+        core.Object.objectBodyBytes(core.class.ids.object),
+        core.Object.objectAllocBytes(core.class.ids.object, false),
+    );
+    try std.testing.expectEqual(
+        core.Object.objectBodyBytes(core.class.ids.array),
+        core.Object.objectAllocBytes(core.class.ids.array, false),
+    );
+    try std.testing.expectEqual(@as(usize, 56), core.Object.objectBodyBytes(core.class.ids.array));
 }
 
 test "iterator classes store iterator state in class payload" {
