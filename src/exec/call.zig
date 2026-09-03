@@ -242,7 +242,7 @@ pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSVal
         try printString(rt, writer, value);
     } else if (value.isObject()) {
         const header = value.refHeader() orelse return writer.writeAll("[object Object]");
-        const object_value: *core.Object = @fieldParentPtr("header", header);
+        const object_value: *core.Object = core.Object.fromHeader(header);
         if (isFunctionClass(object_value.class_id)) {
             try printNativeFunction(rt, writer, object_value);
         } else if (object_value.class_id == core.class.ids.array_buffer) {
@@ -485,7 +485,7 @@ fn promiseObjectFromValue(value: core.JSValue) ?*core.Object {
 pub fn expectCallableObject(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     if (!value.isObject()) return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.c_function and
         object.class_id != core.class.ids.c_function_data and
         !core.class.isBytecodeFunctionClass(object.class_id) and
@@ -2268,7 +2268,7 @@ fn isFunctionToStringCallable(value: core.JSValue) bool {
 pub fn thisObject(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return core.Object.fromHeader(header);
 }
 
 const constructorNameEql = call_runtime.constructorNameEqlLocal;

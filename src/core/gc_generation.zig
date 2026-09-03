@@ -201,9 +201,9 @@ pub const State = struct {
     /// every allocation measured at 28% of benchmark throughput, and a
     /// per-allocation fact has to live somewhere the allocator already
     /// touches.
-    pub fn isYoung(self: *const State, header: *const gc.Header) bool {
+    pub fn isYoung(self: *const State, header: anytype) bool {
         _ = self;
-        return header.metaConst().flags.young;
+        return gc.headerPtrConst(header).metaConst().flags.young;
     }
 
     /// An old owner that now points at a young child. Recorded by owner so a
@@ -227,10 +227,10 @@ pub const State = struct {
         return true;
     }
 
-    pub fn forget(self: *State, header: *const gc.Header) void {
+    pub fn forget(self: *State, header: anytype) void {
         if (comptime remembered_skip_audit) std.debug.assert(!self.retirement_window_open);
         _ = self.remembered.remove(@intFromPtr(header));
-        self.forgetYoungCensus(header);
+        self.forgetYoungCensus(gc.headerPtrConst(header));
         if (comptime mutation_stats_enabled) self.stats.remembered_owners = self.remembered.count();
     }
 

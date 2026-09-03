@@ -1137,7 +1137,7 @@ test "auto_init slot to another realm retains it across JSContext.destroy and cy
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(core.property.Kind.auto_init, obj.propFlagsAt(proto_index).kind);
         const stored = obj.propertyEntry(proto_index).*.slot.auto_init.realm_and_id.realmHeader();
-        try std.testing.expectEqual(&ctx_b.header, stored.?);
+        try std.testing.expectEqual(ctx_b.header.asHeader(), stored.?);
         try helpers.expectRefCount(host_rc + 1, &ctx_b.header);
 
         ctx_b.destroy();
@@ -1145,7 +1145,7 @@ test "auto_init slot to another realm retains it across JSContext.destroy and cy
         try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
         _ = rt.runObjectCycleRemoval();
         try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
-        try std.testing.expectEqual(&ctx_b.header, obj.propertyEntry(proto_index).*.slot.auto_init.realm_and_id.realmHeader().?);
+        try std.testing.expectEqual(ctx_b.header.asHeader(), obj.propertyEntry(proto_index).*.slot.auto_init.realm_and_id.realmHeader().?);
     }
 
     dropGcPtr(&ctx_b);
@@ -2491,6 +2491,71 @@ const InlineObjectLifecycleProbe = struct {
     }
 };
 
+const InlinePayloadListExitProbe = struct {
+    var calls: usize = 0;
+
+    fn reset() void {
+        calls = 0;
+    }
+
+    fn finalize(_: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
+        calls += 1;
+        payload.* = null;
+    }
+};
+
+fn listedKindObjectCount(rt: *core.JSRuntime) usize {
+    var n: usize = 0;
+    var cur = rt.gc.gc_obj_list.sentinel.next;
+    while (cur) |header| {
+        if (header == &rt.gc.gc_obj_list.sentinel) break;
+        if (header.metaConst().flags.kind == .object) n += 1;
+        cur = header.next;
+    }
+    return n;
+}
+
+fn gcListContainsObject(rt: *core.JSRuntime, object: *const core.Object) bool {
+    var cur = rt.gc.gc_obj_list.sentinel.next;
+    while (cur) |header| {
+        if (header == &rt.gc.gc_obj_list.sentinel) break;
+        if (@intFromPtr(header) == @intFromPtr(&object.header)) return true;
+        cur = header.next;
+    }
+    return false;
+}
+
+fn standaloneContainsObject(rt: *core.JSRuntime, object: *const core.Object) bool {
+    for (rt.gc.standalone_objects) |header| {
+        if (@intFromPtr(header) == @intFromPtr(&object.header)) return true;
+    }
+    return false;
+}
+
+fn objectIteratorContains(rt: *core.JSRuntime, object: *const core.Object) bool {
+    var it = rt.gc.objectIterator();
+    while (it.next()) |header| {
+        if (@intFromPtr(header) == @intFromPtr(&object.header)) return true;
+    }
+    return false;
+}
+
+fn registerInlinePayloadListExitClass(
+    rt: *core.JSRuntime,
+    name: []const u8,
+    payload_size: u32,
+    payload_align: u16,
+) !core.ClassId {
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{
+        .class_name = name,
+        .inline_payload_size = payload_size,
+        .inline_payload_align = payload_align,
+        .payload_finalizer = InlinePayloadListExitProbe.finalize,
+    });
+    return class_id;
+}
+
 const ExternalObjectLifecyclePayload = struct {
     event: u8,
 };
@@ -2907,6 +2972,210 @@ test "inline class finalizer observes the live object allocation until callback 
     rt.classes.unregisterDynamic(class_id);
 }
 
+test "object head reclaims TraceHeader.next: 24-byte head, same size classes" {
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(core.gc.ObjectGcToken));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(core.Object));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(core.Object, "header"));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(core.Object, "weakref_count"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(core.Object, "prop_values"));
+
+    const trailing_payload = core.Object.objectBodyBytes(core.class.ids.object) + core.Object.trailing_property_bytes;
+    const array_payload = core.Object.objectBodyBytes(core.class.ids.array);
+    const trailing_cell = core.gc.metadata_prefix_size + trailing_payload;
+    const array_cell = core.gc.metadata_prefix_size + array_payload;
+    const trailing_class = core.gc_space.classes[core.gc_space.classIndexForPayload(trailing_cell).?];
+    const array_class = core.gc_space.classes[core.gc_space.classIndexForPayload(array_cell).?];
+    try std.testing.expectEqual(@as(usize, 64), array_class);
+    if (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall) {
+        try std.testing.expectEqual(@as(usize, 64), trailing_payload);
+        try std.testing.expectEqual(@as(usize, 48), array_payload);
+        try std.testing.expectEqual(@as(usize, 80), trailing_class);
+    } else {
+        try std.testing.expect(trailing_class >= 80);
+        try std.testing.expect(trailing_class > array_class);
+    }
+
+    if (comptime !core.gc.block_heap_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const trailing = try core.Object.createPlainObjectReserved2(rt, null);
+    defer trailing.value().free(rt);
+    const array = try core.Object.createArray(rt, null);
+    defer array.value().free(rt);
+    try std.testing.expectEqual(trailing_payload, trailing.allocationSize(rt));
+    try std.testing.expectEqual(array_payload, array.allocationSize(rt));
+    const trailing_ptr: [*]u8 = @ptrFromInt(@intFromPtr(trailing));
+    const array_ptr: [*]u8 = @ptrFromInt(@intFromPtr(array));
+    const trailing_block = rt.gc.block_heap.blockOf(trailing_ptr) orelse return error.TestUnexpectedResult;
+    const array_block = rt.gc.block_heap.blockOf(array_ptr) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, @intCast(trailing_class)), trailing_block.cell_size);
+    try std.testing.expectEqual(@as(u32, @intCast(array_class)), array_block.cell_size);
+}
+
+test "fitting inline-payload objects are block cells and leave gc_obj_list" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    InlinePayloadListExitProbe.reset();
+    defer InlinePayloadListExitProbe.reset();
+
+    const trailing = try core.Object.createPlainObjectReserved2(rt, null);
+    defer trailing.value().free(rt);
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&trailing.header));
+    try std.testing.expect(!core.gc.headerLinked(&trailing.header));
+
+    const listed_before = listedKindObjectCount(rt);
+    const class_8 = try registerInlinePayloadListExitClass(rt, "InlineListExitFit8", 8, 8);
+    const class_32 = try registerInlinePayloadListExitClass(rt, "InlineListExitFit32", 32, 8);
+    const small = try core.Object.create(rt, class_8, null);
+    defer small.value().free(rt);
+    const medium = try core.Object.create(rt, class_32, null);
+    defer medium.value().free(rt);
+
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&small.header));
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&medium.header));
+    try std.testing.expect(!core.gc.headerLinked(&small.header));
+    try std.testing.expect(!core.gc.headerLinked(&medium.header));
+    try std.testing.expect(!gcListContainsObject(rt, small));
+    try std.testing.expect(!gcListContainsObject(rt, medium));
+    try std.testing.expect(!standaloneContainsObject(rt, small));
+    try std.testing.expect(!standaloneContainsObject(rt, medium));
+    try std.testing.expectEqual(listed_before, listedKindObjectCount(rt));
+    try rt.gc.verifyRepresentationInvariants();
+
+    rt.classes.unregisterDynamic(class_8);
+    rt.classes.unregisterDynamic(class_32);
+}
+
+test "fitting inline-payload objects survive rooted minor and major then die unrooted" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    InlinePayloadListExitProbe.reset();
+    defer InlinePayloadListExitProbe.reset();
+
+    const class_id = try registerInlinePayloadListExitClass(rt, "InlineListExitRootedFit", 8, 8);
+    const object = try core.Object.create(rt, class_id, null);
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&object.header));
+
+    var slot: ?*core.Object = object;
+    var roots = core.runtime.rootObjects(.{&slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    helpers.reclaimNow(rt);
+    try std.testing.expectEqual(@as(usize, 0), InlinePayloadListExitProbe.calls);
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&object.header));
+
+    slot = null;
+    helpers.reclaimNow(rt);
+    try std.testing.expectEqual(@as(usize, 1), InlinePayloadListExitProbe.calls);
+    rt.classes.unregisterDynamic(class_id);
+}
+
+test "fitting inline-payload objects are reclaimed by an unrooted minor" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    InlinePayloadListExitProbe.reset();
+    defer InlinePayloadListExitProbe.reset();
+
+    const class_id = try registerInlinePayloadListExitClass(rt, "InlineListExitUnrootedFit", 32, 8);
+    _ = try core.Object.create(rt, class_id, null);
+    try std.testing.expectEqual(@as(usize, 0), InlinePayloadListExitProbe.calls);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expectEqual(@as(usize, 1), InlinePayloadListExitProbe.calls);
+    rt.classes.unregisterDynamic(class_id);
+}
+
+test "over-aligned inline-payload objects leave gc_obj_list and take the same GC paths" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    InlinePayloadListExitProbe.reset();
+    defer InlinePayloadListExitProbe.reset();
+
+    const listed_before = listedKindObjectCount(rt);
+    const class_id = try registerInlinePayloadListExitClass(rt, "InlineListExitLeftover16", 8, 16);
+    const object = try core.Object.create(rt, class_id, null);
+    try std.testing.expect(!core.gc.Registry.isBlockCellHeader(&object.header));
+    try std.testing.expect(object.header.metaConst().alloc_info.standalone);
+    try std.testing.expect(!core.gc.headerLinked(&object.header));
+    try std.testing.expect(!gcListContainsObject(rt, object));
+    try std.testing.expect(standaloneContainsObject(rt, object));
+    try std.testing.expect(objectIteratorContains(rt, object));
+    try std.testing.expectEqual(listed_before, listedKindObjectCount(rt));
+    try rt.gc.verifyRepresentationInvariants();
+
+    var slot: ?*core.Object = object;
+    var roots = core.runtime.rootObjects(.{&slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    helpers.reclaimNow(rt);
+    try std.testing.expectEqual(@as(usize, 0), InlinePayloadListExitProbe.calls);
+    try std.testing.expect(!gcListContainsObject(rt, object));
+    try std.testing.expect(standaloneContainsObject(rt, object));
+    try std.testing.expect(objectIteratorContains(rt, object));
+
+    slot = null;
+    helpers.reclaimNow(rt);
+    try std.testing.expectEqual(@as(usize, 1), InlinePayloadListExitProbe.calls);
+
+    InlinePayloadListExitProbe.reset();
+    _ = try core.Object.create(rt, class_id, null);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expectEqual(@as(usize, 1), InlinePayloadListExitProbe.calls);
+    rt.classes.unregisterDynamic(class_id);
+}
+
+test "runtime teardown reclaims both inline-payload allocation paths" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    errdefer rt.destroy();
+
+    InlinePayloadListExitProbe.reset();
+    defer InlinePayloadListExitProbe.reset();
+
+    const fit_id = try registerInlinePayloadListExitClass(rt, "InlineListExitTeardownFit", 8, 8);
+    const leftover_id = try registerInlinePayloadListExitClass(rt, "InlineListExitTeardownLeftover", 8, 16);
+    const fit = try core.Object.create(rt, fit_id, null);
+    const leftover = try core.Object.create(rt, leftover_id, null);
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&fit.header));
+    try std.testing.expect(!core.gc.headerLinked(&leftover.header));
+    try std.testing.expect(standaloneContainsObject(rt, leftover));
+
+    var fit_slot: ?*core.Object = fit;
+    var leftover_slot: ?*core.Object = leftover;
+    var roots = core.runtime.rootObjects(.{ &fit_slot, &leftover_slot });
+    roots.activate(rt);
+    roots.deactivate(rt);
+
+    rt.destroy();
+    try std.testing.expectEqual(@as(usize, 2), InlinePayloadListExitProbe.calls);
+}
+
 test "external class finalizers run synchronously with original object identity in zero-ref FIFO order" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -3042,7 +3311,7 @@ test "cycle deferred drain detaches the weak husk it keeps" {
 
     core.Object.drainCycleDeferredFrees(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
-    try std.testing.expect(target.header.next == null);
+    try std.testing.expect(!core.gc.headerLinked(&target.header));
     try std.testing.expect(!target.header.meta().flags.finalizing);
 
     // The synthetic weak count has no WeakRef owner to release it later.
@@ -4038,7 +4307,7 @@ test "shared buffer store can back wrappers in separate runtimes" {
     const right_value = try engine.exec.buffer_ops.sharedArrayBufferFromStore(right_rt, store, null, null);
     defer right_value.free(right_rt);
     const right_header = right_value.refHeader() orelse return error.TestExpectedEqual;
-    const right: *core.Object = @fieldParentPtr("header", right_header);
+    const right: *core.Object = core.Object.fromHeader(right_header);
 
     left.byteStorage()[0] = 77;
     try std.testing.expectEqual(@as(u8, 77), right.byteStorage()[0]);
@@ -4058,7 +4327,7 @@ test "array buffer backing stores report external memory" {
     const detach_result = try engine.exec.buffer_ops.detachArrayBuffer(rt, buffer_value);
     detach_result.free(rt);
     const buffer_header = buffer_value.refHeader() orelse return error.TestExpectedEqual;
-    const buffer: *core.Object = @fieldParentPtr("header", buffer_header);
+    const buffer: *core.Object = core.Object.fromHeader(buffer_header);
     try std.testing.expect(buffer.arrayBufferDetached());
     try std.testing.expectEqual(@as(usize, 0), buffer.byteStorage().len);
     try std.testing.expectEqual(@as(usize, 0), rt.externalMemoryBytes());
@@ -4764,8 +5033,8 @@ test "true C functions own their construction realm while data functions do not"
     var native = try engine.core.function.nativeFunction(ctx, "native", 0);
     const data = try engine.core.function.nativeDataFunctionWithPrototype(rt, function_proto, "data", 1);
 
-    const native_object: *core.Object = @fieldParentPtr("header", native.refHeader().?);
-    const data_object: *core.Object = @fieldParentPtr("header", data.refHeader().?);
+    const native_object: *core.Object = core.Object.fromHeader(native.refHeader().?);
+    const data_object: *core.Object = core.Object.fromHeader(data.refHeader().?);
     try std.testing.expectEqual(core.class.ids.c_function, native_object.class_id);
     try std.testing.expectEqual(ctx, native_object.nativeFunctionRealm().?);
     try std.testing.expectEqual(core.class.ids.c_function_data, data_object.class_id);
@@ -5626,7 +5895,7 @@ test "property replacement preserves references under memory cap" {
 
     const stored = try object.getProperty(key);
     defer stored.free(rt);
-    try std.testing.expectEqual(&replacement.header, stored.refHeader().?);
+    try std.testing.expectEqual(replacement.header.asHeader(), stored.refHeader().?);
 }
 
 // OP_define_field refcounted literal fields (qjs CASE(OP_define_field),
@@ -5652,14 +5921,14 @@ test "definePlainDataPropertyKnownFast refcounted append and duplicate-key repla
     // Append leg: `first` is consumed into the slot (no residual caller ref).
     try holder.definePlainDataPropertyKnownFast(rt, key, first.value());
     try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.prop_count);
-    try std.testing.expectEqual(&first.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+    try std.testing.expectEqual(first.header.asHeader(), holder.propertyEntry(0).*.slot.data.refHeader().?);
     try helpers.expectRefCount(1, &first.header);
 
     // Duplicate-key replace leg (`({a:o1,a:o2})`): `second` is consumed, the
     // displaced `first` is destroyed — rc must balance (slot + probe only).
     try holder.definePlainDataPropertyKnownFast(rt, key, second.value());
     try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.prop_count);
-    try std.testing.expectEqual(&second.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+    try std.testing.expectEqual(second.header.asHeader(), holder.propertyEntry(0).*.slot.data.refHeader().?);
     try helpers.expectRefCount(2, &second.header);
     // Exact mark does not treat Zig locals as roots, and `second` is only
     // reachable through the slot, so `holder` has to be named for the count
@@ -5764,7 +6033,7 @@ test "definePlainDataPropertyKnownFast refcounted define survives forced GC at e
 
     // Append leg under forced GC: consumes the cycle's only external ref.
     try holder.definePlainDataPropertyKnownFast(rt, key, cyclic.value());
-    try std.testing.expectEqual(&cyclic.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+    try std.testing.expectEqual(cyclic.header.asHeader(), holder.propertyEntry(0).*.slot.data.refHeader().?);
     try std.testing.expectEqual(baseline_live + 4, rt.gc.liveCountKind(.object));
     dropGcPtr(&cyclic);
 
@@ -5773,7 +6042,7 @@ test "definePlainDataPropertyKnownFast refcounted define survives forced GC at e
     // reclaimed by the next collection, not leaked.
     try holder.definePlainDataPropertyKnownFast(rt, key, replacement.value());
     try std.testing.expect(probe.fired > 0);
-    try std.testing.expectEqual(&replacement.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+    try std.testing.expectEqual(replacement.header.asHeader(), holder.propertyEntry(0).*.slot.data.refHeader().?);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(baseline_live + 2, rt.gc.liveCountKind(.object));
 }
@@ -5817,7 +6086,7 @@ test "definePlainDataPropertyKnownFast OOM sweep leaves refcounted value owned b
     try std.testing.expect(failures > 0);
     // Success consumed the caller's ref: slot + probe only.
     try helpers.expectRefCount(2, &child.header);
-    try std.testing.expectEqual(&child.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+    try std.testing.expectEqual(child.header.asHeader(), holder.propertyEntry(0).*.slot.data.refHeader().?);
 
     // Same sweep over the duplicate-key replace leg: failures must not touch
     // the incumbent slot value nor consume the caller's replacement ref.
@@ -5838,12 +6107,12 @@ test "definePlainDataPropertyKnownFast OOM sweep leaves refcounted value owned b
             replace_failures += 1;
             try helpers.expectRefCount(2, &replacement.header);
             try helpers.expectRefCount(2, &child.header);
-            try std.testing.expectEqual(&child.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+            try std.testing.expectEqual(child.header.asHeader(), holder.propertyEntry(0).*.slot.data.refHeader().?);
         }
     }
     try helpers.expectRefCount(2, &replacement.header);
     try helpers.expectRefCount(1, &child.header);
-    try std.testing.expectEqual(&replacement.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+    try std.testing.expectEqual(replacement.header.asHeader(), holder.propertyEntry(0).*.slot.data.refHeader().?);
     try std.testing.expectEqual(baseline_live + 3, rt.gc.liveCountKind(.object));
 }
 
@@ -5864,17 +6133,17 @@ test "object data property self-assignment keeps stored object alive" {
     const own_value = holder.propertyEntry(0).*.slot.data;
     try std.testing.expect(try holder.setOwnWritableDataProperty(rt, key, own_value));
     try helpers.expectRefCount(1, &stored.header);
-    try std.testing.expectEqual(&stored.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+    try std.testing.expectEqual(stored.header.asHeader(), holder.propertyEntry(0).*.slot.data.refHeader().?);
 
     const property_value = holder.propertyEntry(0).*.slot.data;
     try holder.setProperty(rt, key, property_value);
     try helpers.expectRefCount(1, &stored.header);
-    try std.testing.expectEqual(&stored.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+    try std.testing.expectEqual(stored.header.asHeader(), holder.propertyEntry(0).*.slot.data.refHeader().?);
 
     const simple_value = holder.propertyEntry(0).*.slot.data;
     try std.testing.expect(try holder.setOrDefineOwnDataPropertyForSimpleSet(rt, key, simple_value));
     try helpers.expectRefCount(1, &stored.header);
-    try std.testing.expectEqual(&stored.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+    try std.testing.expectEqual(stored.header.asHeader(), holder.propertyEntry(0).*.slot.data.refHeader().?);
 }
 
 test "json parse data property self-assignment keeps stored object alive" {
@@ -5895,7 +6164,7 @@ test "json parse data property self-assignment keeps stored object alive" {
     try holder.defineJsonParseDataProperty(rt, key, current);
 
     try helpers.expectRefCount(1, &stored.header);
-    try std.testing.expectEqual(&stored.header, holder.propertyEntry(0).*.slot.data.refHeader().?);
+    try std.testing.expectEqual(stored.header.asHeader(), holder.propertyEntry(0).*.slot.data.refHeader().?);
 }
 
 test "dense array element self-assignment keeps stored object alive" {
@@ -5915,7 +6184,7 @@ test "dense array element self-assignment keeps stored object alive" {
     try array.setProperty(rt, index, current);
 
     try helpers.expectRefCount(1, &stored.header);
-    try std.testing.expectEqual(&stored.header, array.arrayElements()[0].refHeader().?);
+    try std.testing.expectEqual(stored.header.asHeader(), array.arrayElements()[0].refHeader().?);
 }
 
 test "owned dense array writes consume values only on success" {
@@ -5938,7 +6207,7 @@ test "owned dense array writes consume values only on success" {
     try std.testing.expect(array.setFastArrayElementOwned(rt, 0, replacement.value()));
     try helpers.expectRefCount(1, &initial.header);
     try helpers.expectRefCount(2, &replacement.header);
-    try std.testing.expectEqual(&replacement.header, array.arrayElements()[0].refHeader().?);
+    try std.testing.expectEqual(replacement.header.asHeader(), array.arrayElements()[0].refHeader().?);
 
     const rejected = try core.Object.create(rt, core.class.ids.object, null);
     try std.testing.expect(!array.setFastArrayElementOwned(rt, 2, rejected.value()));
@@ -7910,8 +8179,8 @@ test "ordinary object trace visits data slots and TMASK accessor edges" {
 
         pub fn visitValue(self: *@This(), slot: *core.JSValue) void {
             const header = slot.refHeader() orelse return;
-            if (header == &self.data_child.header) self.data_hits += 1;
-            if (header == &self.getter.header) self.getter_hits += 1;
+            if (@intFromPtr(header) == @intFromPtr(&self.data_child.header)) self.data_hits += 1;
+            if (@intFromPtr(header) == @intFromPtr(&self.getter.header)) self.getter_hits += 1;
         }
     };
 
@@ -8109,7 +8378,7 @@ test "fast array iterator-next cache cycle is released by runtime cycle removal"
 }
 
 const CycleMarkParity = struct {
-    fn recordHeader(set: *std.AutoHashMap(usize, void), header: *core.gc.Header) void {
+    fn recordHeader(set: *std.AutoHashMap(usize, void), header: anytype) void {
         set.put(@intFromPtr(header), {}) catch unreachable;
     }
 
@@ -8146,36 +8415,37 @@ const CycleMarkParity = struct {
         }
     };
 
-    fn collectAuthority(rt: *core.JSRuntime, header: *core.gc.Header, allocator: std.mem.Allocator) ![]usize {
+    fn collectAuthority(rt: *core.JSRuntime, header: anytype, allocator: std.mem.Allocator) ![]usize {
         var set = std.AutoHashMap(usize, void).init(allocator);
         defer set.deinit();
         const visitor = AuthorityVisitor{ .set = &set };
-        switch (header.meta().flags.kind) {
+        const h = core.gc.headerPtr(header);
+        switch (h.meta().flags.kind) {
             .object => {
-                const obj: *core.Object = @alignCast(@fieldParentPtr("header", header));
+                const obj: *core.Object = core.Object.fromHeader(h);
                 obj.traceChildEdgesNoFail(rt, visitor);
             },
             .function_bytecode => {
-                const fb: *engine.bytecode.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
+                const fb: *engine.bytecode.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                 var realm = fb.realm.ptr;
                 visitor.visitRealm(&realm);
                 fb.realm.ptr = realm;
                 for (fb.cpoolSlice()) |*stored| visitor.visitValue(stored);
             },
             .var_ref => {
-                const ref: *core.VarRef = @alignCast(@fieldParentPtr("header", header));
+                const ref: *core.VarRef = @alignCast(@fieldParentPtr("header", h));
                 visitor.visitValue(&ref.value);
             },
             .shape => {
-                const shape_ref: *core.Shape = @alignCast(@fieldParentPtr("header", header));
+                const shape_ref: *core.Shape = @alignCast(@fieldParentPtr("header", h));
                 shape_ref.traceChildEdgesNoFail(rt, visitor);
             },
             .realm_context => {
-                const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", header));
+                const ctx: *core.JSContext = @alignCast(@fieldParentPtr("header", h));
                 ctx.traceChildEdgesNoFail(visitor);
             },
             .module => {
-                const record: *core.ModuleRecord = @alignCast(@fieldParentPtr("header", header));
+                const record: *core.ModuleRecord = @alignCast(@fieldParentPtr("header", h));
                 record.traceChildEdgesNoFail(rt, visitor);
             },
             .string, .big_int => {},
@@ -8183,12 +8453,12 @@ const CycleMarkParity = struct {
         return sortedKeys(&set, allocator);
     }
 
-    fn collectMarkOne(rt: *core.JSRuntime, header: *core.gc.Header, allocator: std.mem.Allocator) ![]usize {
-        return core.Object.collectCycleMarkChildHeadersForTest(rt, header, .mark_one, allocator);
+    fn collectMarkOne(rt: *core.JSRuntime, header: anytype, allocator: std.mem.Allocator) ![]usize {
+        return core.Object.collectCycleMarkChildHeadersForTest(rt, core.gc.headerPtr(header), .mark_one, allocator);
     }
 
-    fn collectCold(rt: *core.JSRuntime, header: *core.gc.Header, allocator: std.mem.Allocator) ![]usize {
-        return core.Object.collectCycleMarkChildHeadersForTest(rt, header, .children_cold, allocator);
+    fn collectCold(rt: *core.JSRuntime, header: anytype, allocator: std.mem.Allocator) ![]usize {
+        return core.Object.collectCycleMarkChildHeadersForTest(rt, core.gc.headerPtr(header), .children_cold, allocator);
     }
 
     fn sortedKeys(set: *std.AutoHashMap(usize, void), allocator: std.mem.Allocator) ![]usize {
@@ -8214,7 +8484,7 @@ const CycleMarkParity = struct {
         try std.testing.expectEqualSlices(usize, authority_headers, mark_headers);
     }
 
-    fn expectContains(headers: []const usize, header: *core.gc.Header) !void {
+    fn expectContains(headers: []const usize, header: anytype) !void {
         const ptr = @intFromPtr(header);
         for (headers) |item| {
             if (item == ptr) return;
@@ -8901,7 +9171,7 @@ test "address registry tracks published objects and interior pointers" {
     } else {
         try std.testing.expect(rt.gc.address_registry.stats.arenas_live > 0);
     }
-    const header = &obj.header;
+    const header = obj.header.asHeader();
     const bytes = obj.allocationSize(rt);
     const occupant = core.gc_address_registry.Table.occupantFor(header, bytes);
 
@@ -8957,7 +9227,7 @@ test "conservative scan shades a stack-held object header word" {
     try std.testing.expect(ctx.hits > 0);
 
     const header: *core.gc.Header = @ptrFromInt(word);
-    const live: *core.Object = @alignCast(@fieldParentPtr("header", header));
+    const live: *core.Object = core.Object.fromHeader(header);
     live.value().free(rt);
 }
 
@@ -8969,7 +9239,7 @@ test "address registry page radix covers a multi-page allocation" {
 
     const obj = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, 2048);
     defer obj.value().free(rt);
-    const header = &obj.header;
+    const header = obj.header.asHeader();
     const bytes = obj.allocationSize(rt);
     const occupant = core.gc_address_registry.Table.occupantFor(header, bytes);
     const pages = (occupant.hi - 1) / core.gc_address_registry.page_size - occupant.lo / core.gc_address_registry.page_size + 1;
@@ -9016,7 +9286,7 @@ test "address registry lookup cost stays with page occupants not live N" {
     while (index < lookups) : (index += 1) {
         const obj = objects[index % count];
         const addr = @intFromPtr(&obj.header) + (index % 8);
-        if (rt.gc.address_registry.resolve(addr) == &obj.header) hits += 1;
+        if (rt.gc.address_registry.resolve(addr) == obj.header.asHeader()) hits += 1;
     }
     const lookup_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds() - lookup_start;
     try std.testing.expectEqual(lookups, hits);
@@ -9371,6 +9641,18 @@ test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
     defer rt.shapes.release(obj.shape_ref);
     try std.testing.expectEqual(shape_refs + 1, core.gc.headerRefCount(header));
 
+    InlinePayloadListExitProbe.reset();
+    defer InlinePayloadListExitProbe.reset();
+    const leftover_class = try registerInlinePayloadListExitClass(rt, "EpochWrapLeftover16", 8, 16);
+    const leftover = try core.Object.create(rt, leftover_class, null);
+    defer {
+        leftover.value().free(rt);
+        rt.classes.unregisterDynamic(leftover_class);
+    }
+    try std.testing.expect(standaloneContainsObject(rt, leftover));
+    try std.testing.expect(!core.gc.Registry.isBlockCellHeader(&leftover.header));
+    const shape_refs_live = core.gc.headerRefCount(header);
+
     rt.gc.setHeaderUnmarked(header);
     try std.testing.expect(!rt.gc.headerMarked(header));
     rt.gc.setHeaderMarked(header);
@@ -9388,12 +9670,15 @@ test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
     rt.gc.header_mark_epoch = std.math.maxInt(u16);
     rt.gc.setHeaderMarked(header);
     rt.gc.setHeaderMarked(&fresh_ctx.header);
+    rt.gc.setHeaderMarked(&leftover.header);
 
-    // The wrap path scrubs every list-carrier epoch before reusing 1.
+    // The wrap path scrubs every non-block carrier epoch before reusing 1,
+    // including leftover `.object` on `standalone_objects`.
     rt.gc.advanceHeaderMarkEpoch();
     try std.testing.expect(!rt.gc.headerMarked(header));
     try std.testing.expect(!rt.gc.headerMarked(&fresh_ctx.header));
-    try std.testing.expectEqual(shape_refs + 1, core.gc.headerRefCount(header));
+    try std.testing.expect(!rt.gc.headerMarked(&leftover.header));
+    try std.testing.expectEqual(shape_refs_live, core.gc.headerRefCount(header));
     try std.testing.expectEqual(realm_refs + 1, core.gc.headerRefCount(&fresh_ctx.header));
     try rt.gc.verifyIntrusiveList();
 
@@ -9915,7 +10200,7 @@ test "weak persistent value does not retain direct object target" {
     {
         const live = weak.get();
         defer live.free(rt);
-        try std.testing.expectEqual(&target.header, live.refHeader().?);
+        try std.testing.expectEqual(target.header.asHeader(), live.refHeader().?);
     }
 
     target.value().free(rt);
@@ -10064,7 +10349,7 @@ test "materialized native function cycle is released by runtime cycle removal" {
     );
 
     const cached_value = try global.getProperty(cached_key);
-    const cached_function: *core.Object = @fieldParentPtr("header", cached_value.refHeader().?);
+    const cached_function: *core.Object = core.Object.fromHeader(cached_value.refHeader().?);
     try cached_function.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
 
     cached_value.free(rt);
@@ -10468,7 +10753,7 @@ test "auto-init slot owns its Realm until the property is deleted" {
 
     const slot = holder.propertyEntry(0).*.slot.auto_init;
     try std.testing.expectEqual(core.property.AutoInitId.prop, slot.realm_and_id.id());
-    try std.testing.expectEqual(&ctx.header, slot.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(ctx.header.asHeader(), slot.realm_and_id.realmHeader().?);
 
     ctx.destroy();
     try std.testing.expectEqual(ctx, rt.firstContext().?);
@@ -10561,7 +10846,7 @@ test "MODULE_NS auto-init failure retains its slot Realm and retries once per re
     try std.testing.expectError(error.OutOfMemory, holder.getProperty(key));
     try std.testing.expectEqual(@as(usize, 1), fixture.calls);
     try std.testing.expectEqual(core.property.Kind.auto_init, holder.propKindAt(0));
-    try std.testing.expectEqual(&ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(ctx.header.asHeader(), holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
     try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
 
     const retried = try holder.getProperty(key);
@@ -10695,8 +10980,8 @@ test "native call carriers do not enter borrowed realm bookkeeping" {
     defer native.free(rt);
     const data = try engine.core.function.nativeDataFunctionWithPrototype(rt, function_proto, "data", 0);
     defer data.free(rt);
-    const native_object: *core.Object = @fieldParentPtr("header", native.refHeader().?);
-    const data_object: *core.Object = @fieldParentPtr("header", data.refHeader().?);
+    const native_object: *core.Object = core.Object.fromHeader(native.refHeader().?);
+    const data_object: *core.Object = core.Object.fromHeader(data.refHeader().?);
 
     try data_object.setFunctionRealmGlobalPtr(rt, global);
     try std.testing.expectEqual(ctx, native_object.nativeFunctionRealm().?);
@@ -11098,7 +11383,7 @@ test "data to auto-init replacement stays traceable across allocation GC" {
     try std.testing.expect(probe.calls > 0);
     try std.testing.expect(!probe.collection_failed);
     try std.testing.expectEqual(core.property.Kind.auto_init, holder.propFlagsAt(0).kind);
-    try std.testing.expectEqual(&ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(ctx.header.asHeader(), holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
 }
 
 test "data to auto-init replacement rolls back descriptor OOM and retries in same runtime" {
@@ -11148,7 +11433,7 @@ test "data to auto-init replacement rolls back descriptor OOM and retries in sam
     try std.testing.expectEqual(core.property.Kind.auto_init, holder.propFlagsAt(0).kind);
     try std.testing.expectEqual(flags.withKind(.auto_init).bits(), holder.propFlagsAt(0).bits());
     try helpers.expectRefCount(baseline_realm_refs + 1, &ctx.header);
-    try std.testing.expectEqual(&ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(ctx.header.asHeader(), holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
 
     const materialized = try holder.getProperty(key);
     defer materialized.free(rt);
@@ -11187,7 +11472,7 @@ test "replacing auto-init transfers the owned Realm edge" {
         first_global,
         0,
     );
-    try std.testing.expectEqual(&first_ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(first_ctx.header.asHeader(), holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
 
     try holder.replaceAutoInitPropertyWithRealmAndNative(
         rt,
@@ -11199,7 +11484,7 @@ test "replacing auto-init transfers the owned Realm edge" {
         0,
     );
 
-    try std.testing.expectEqual(&second_ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(second_ctx.header.asHeader(), holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
 }
 
 test "replacing auto-init rolls back descriptor OOM and retries in same runtime" {
@@ -11249,14 +11534,14 @@ test "replacing auto-init rolls back descriptor OOM and retries in same runtime"
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(original_flags.bits(), holder.propFlagsAt(0).bits());
-    try std.testing.expectEqual(&first_ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(first_ctx.header.asHeader(), holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
     try helpers.expectRefCount(first_realm_refs, &first_ctx.header);
     try helpers.expectRefCount(second_realm_refs, &second_ctx.header);
     try std.testing.expectEqual(baseline_allocated_bytes, rt.memory.allocated_bytes);
 
     try holder.replaceAutoInitPropertyWithRealmAndNative(rt, key, "oom-replace-realm-next", 0, next_flags, second_global, 0);
     try std.testing.expectEqual(next_flags.withKind(.auto_init).bits(), holder.propFlagsAt(0).bits());
-    try std.testing.expectEqual(&second_ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(second_ctx.header.asHeader(), holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
     try helpers.expectRefCount(first_realm_refs - 1, &first_ctx.header);
     try helpers.expectRefCount(second_realm_refs + 1, &second_ctx.header);
 }
@@ -11393,7 +11678,7 @@ test "specialized auto-init producers retain the same typed Realm owner" {
     for (holders) |holder| {
         const slot = holder.propertyEntry(0).*.slot.auto_init;
         try std.testing.expectEqual(core.property.AutoInitId.prop, slot.realm_and_id.id());
-        try std.testing.expectEqual(&ctx.header, slot.realm_and_id.realmHeader().?);
+        try std.testing.expectEqual(ctx.header.asHeader(), slot.realm_and_id.realmHeader().?);
     }
     try helpers.expectRefCount(@intCast(1 + holders.len), &ctx.header);
 }
@@ -11449,7 +11734,7 @@ test "materialized auto-init true C function owns its construction realm" {
 
     const function_value = try holder.getProperty(host_key);
     const function_header = function_value.refHeader().?;
-    const function_object: *core.Object = @fieldParentPtr("header", function_header);
+    const function_object: *core.Object = core.Object.fromHeader(function_header);
 
     try std.testing.expectEqual(ctx, function_object.nativeFunctionRealm().?);
     try std.testing.expectEqual(global, function_object.functionRealmGlobalPtr().?);
@@ -11537,7 +11822,7 @@ test "live weak collection key preserves stored value" {
 
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 1), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(&value.header, weakmap.weakCollectionEntries()[0].value.refHeader().?);
+    try std.testing.expectEqual(value.header.asHeader(), weakmap.weakCollectionEntries()[0].value.refHeader().?);
     dropGcPtr(&value);
 
     weakmap.value().free(rt);
@@ -11563,7 +11848,7 @@ test "weak ref target identity does not retain object target" {
     {
         const live = weak_ref.weakRefDeref(rt);
         defer live.free(rt);
-        try std.testing.expectEqual(&target.header, live.refHeader().?);
+        try std.testing.expectEqual(target.header.asHeader(), live.refHeader().?);
     }
     // Job-scoped [[KeptAlive]] from the deref above must not keep the target
     // past the next collection (tracing-gc-design.md §9.2).
@@ -12056,7 +12341,7 @@ test "finalization registry live target preserves held value" {
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 1), registry.finalizationRegistryCells().len);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().weak_ref_count);
-    try std.testing.expectEqual(&held.header, registry.finalizationRegistryCells()[0].held_value.refHeader().?);
+    try std.testing.expectEqual(held.header.asHeader(), registry.finalizationRegistryCells()[0].held_value.refHeader().?);
     dropGcPtr(&held);
 
     registry.value().free(rt);
@@ -13148,11 +13433,11 @@ test "module publication retains indexed metadata and all strong value edges" {
     try std.testing.expect(record.has_top_level_await);
     try std.testing.expect(rt.atoms.name(record.module_name) != null);
     try std.testing.expect(rt.atoms.name(record.imports[0].local_name) != null);
-    try std.testing.expectEqual(&function_owner.header, record.funcObjectValue().refHeader().?);
-    try std.testing.expectEqual(&namespace_owner.header, record.moduleNamespaceValue().refHeader().?);
+    try std.testing.expectEqual(function_owner.header.asHeader(), record.funcObjectValue().refHeader().?);
+    try std.testing.expectEqual(namespace_owner.header.asHeader(), record.moduleNamespaceValue().refHeader().?);
     try std.testing.expectEqual(retained_cell, core.VarRef.fromValue(record.retainedExportCellValue(0).?).?);
-    try std.testing.expectEqual(&import_meta_owner.header, record.import_meta.?.refHeader().?);
-    try std.testing.expectEqual(&exception_owner.header, record.eval_exception.?.refHeader().?);
+    try std.testing.expectEqual(import_meta_owner.header.asHeader(), record.import_meta.?.refHeader().?);
+    try std.testing.expectEqual(exception_owner.header.asHeader(), record.eval_exception.?.refHeader().?);
 }
 
 test "pending module metadata and publication OOM are atomic" {
@@ -15266,7 +15551,7 @@ test "old-to-young edge survives a minor only because the barrier remembered it"
     try std.testing.expect(rt.ownsObject(child));
     const kept = (try owner.getOwnProperty(rt, edge_key)).?;
     defer kept.destroy(rt);
-    try std.testing.expectEqual(&child.header, kept.value.refHeader().?);
+    try std.testing.expectEqual(child.header.asHeader(), kept.value.refHeader().?);
 
     // A stale remembered OWNER is not itself a root for an edge that was
     // deleted before the minor. Re-tracing the owner must observe the current
@@ -15329,7 +15614,7 @@ test "object remembered bit is consumed and rebuilt across consecutive minors" {
         try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.rememberedOwnerCount());
         const kept = (try owner.getOwnProperty(rt, edge_key)).?;
         defer kept.destroy(rt);
-        try std.testing.expectEqual(&replacement.header, kept.value.refHeader().?);
+        try std.testing.expectEqual(replacement.header.asHeader(), kept.value.refHeader().?);
     }
 }
 
@@ -15408,7 +15693,7 @@ test "incremental retirement clears remembered cache before the next generation"
     try std.testing.expectEqual(@as(u8, 0), owner.header.metaConst().lifetime.trace.object_shape_summary & core.gc.trace_remembered_mask);
     const kept = (try owner.getOwnProperty(rt, edge_key)).?;
     defer kept.destroy(rt);
-    try std.testing.expectEqual(&after_major.header, kept.value.refHeader().?);
+    try std.testing.expectEqual(after_major.header.asHeader(), kept.value.refHeader().?);
 }
 
 test "non-object remembered owners use the byte-6 cache and re-arm across consecutive minors" {
@@ -15458,7 +15743,7 @@ test "non-object remembered owners use the byte-6 cache and re-arm across consec
             @as(u8, 0),
             cell.header.metaConst().lifetime.trace.object_shape_summary,
         );
-        try std.testing.expectEqual(&child.header, cell.varRefValue().refHeader().?);
+        try std.testing.expectEqual(child.header.asHeader(), cell.varRefValue().refHeader().?);
     }
 }
 
@@ -16216,7 +16501,7 @@ test "the marker worker marks queued objects on its own thread" {
     queue.ensureCapacity(std.testing.allocator);
     defer queue.deinit(std.testing.allocator);
     var worker = core.gc.marker.Worker{};
-    for (held) |obj| try std.testing.expect(queue.push(&obj.header));
+    for (held) |obj| try std.testing.expect(queue.push(obj.header.asHeader()));
 
     rt.gc.setMajorMarkingActive(true, .release);
     try worker.start(&rt.gc, &queue);
@@ -16261,7 +16546,7 @@ test "the marker worker and a mutator can shade concurrently without losing mark
         if (i % 2 == 0) {
             rt.gc.shadeForConcurrentMark(&obj.header, &obj.header);
         } else {
-            _ = queue.push(&obj.header);
+            _ = queue.push(obj.header.asHeader());
         }
     }
 
@@ -16519,7 +16804,7 @@ test "cell resolution stops at the block header and at unallocated cells" {
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     defer obj.value().free(rt);
-    const header = &obj.header;
+    const header = obj.header.asHeader();
 
     // Plain objects are block cells now; this is the block-arm analogue of
     // the arena boundary test it replaced. The object resolves from its

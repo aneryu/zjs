@@ -63,7 +63,8 @@ inline fn isOrdinaryCycleHotObject(self: *const Object) bool {
     return self.class_id == class.ids.object and self.flags.class_payload_kind == .none;
 }
 
-inline fn markHeader(rt: *JSRuntime, h: *gc.Header, comptime mode: MarkMode) void {
+inline fn markHeader(rt: *JSRuntime, header: anytype, comptime mode: MarkMode) void {
+    const h: *gc.Header = gc.headerPtr(header);
     switch (mode) {
         .collect_test => collectCycleMarkChildForTest(rt, h),
     }
@@ -81,7 +82,7 @@ const MarkVisitor = struct {
     pub fn visitObject(self: MarkVisitor, obj_ptr: *?*Object) void {
         if (obj_ptr.*) |obj| {
             if (@intFromPtr(obj) == 0) return;
-            self.mark_func(self.rt, &obj.header);
+            self.mark_func(self.rt, obj.header.asHeader());
         }
     }
 
@@ -194,7 +195,7 @@ fn markChildrenCold(rt: *JSRuntime, header: *gc.Header, mark_func: MarkFunc) ali
     const visitor = MarkVisitor{ .rt = rt, .mark_func = mark_func };
     switch (header.meta().flags.kind) {
         .object => {
-            const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+            const obj: *Object = Object.fromHeader(header);
             obj.traceChildEdgesNoFail(rt, visitor);
         },
         .function_bytecode => {
@@ -233,7 +234,7 @@ fn markChildrenCold(rt: *JSRuntime, header: *gc.Header, mark_func: MarkFunc) ali
 inline fn markOne(rt: *JSRuntime, header: *gc.Header, comptime mode: MarkMode) void {
     switch (header.meta().flags.kind) {
         .object => {
-            const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+            const obj: *Object = Object.fromHeader(header);
             if (isOrdinaryCycleHotObject(obj)) {
                 @call(.never_inline, markOrdinaryObjectHot, .{ rt, obj, mode });
                 return;
@@ -265,12 +266,14 @@ pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
 }
 
 inline fn freeCycleDeferredObject(rt: *JSRuntime, h: *gc.Header) void {
-    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
+    const obj: *Object = @ptrCast(@alignCast(h));
     // qjs:6803-6806. deinit must still free weak husks (phase != remove_cycles).
     if (gc.phaseIsTwoPassTeardown(rt.gc.phase) and obj.weakReferenceCount() != 0) {
         // Neither pop path clears the dead allocation's links. This is the one
-        // branch that keeps the allocation, so finish the detach here.
-        h.next = null;
+        // branch that keeps the allocation, so finish the detach here. The
+        // Pass-B overlay lives in `prop_values`; restore the empty sentinel
+        // rather than writing `Header.next`.
+        obj.restoreEmptyPropertyStorage();
         h.meta().flags.mark = false;
         h.meta().flags.cycle_visited = false;
         h.meta().flags.finalizing = false;
@@ -372,7 +375,7 @@ fn censusNoteParked(rt: *JSRuntime, h: *gc.Header) void {
         });
         return;
     }
-    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
+    const obj: *Object = Object.fromHeader(h);
     const cell_addr = @intFromPtr(h) - gc.metadata_prefix_size;
     const cell: [*]u8 = @ptrFromInt(cell_addr);
     const block = block_heap.Block.fromCellTrusted(cell_addr);
@@ -421,7 +424,7 @@ pub fn drainCycleDeferredFreesBudgeted(rt: *JSRuntime, budget: usize) bool {
     while (remaining != 0) {
         const h = cursor orelse unreachable;
         if (gc.Registry.isBlockCellHeader(h)) break;
-        cursor = h.next;
+        cursor = gc.deferredFreeSuccessor(h);
         remaining -= 1;
         censusNoteParked(rt, h);
         switch (h.meta().flags.kind) {
@@ -441,7 +444,7 @@ pub fn drainCycleDeferredFreesBudgeted(rt: *JSRuntime, budget: usize) bool {
         var block = block_heap.Block.fromCellTrusted(@intFromPtr(cursor.?) - gc.metadata_prefix_size);
         while (remaining != 0) {
             const h = cursor orelse unreachable;
-            cursor = h.next;
+            cursor = gc.deferredFreeSuccessor(h);
             remaining -= 1;
             censusNoteParked(rt, h);
             freeCycleDeferredObject(rt, h);

@@ -385,7 +385,7 @@ test "sourceFunction roots function and source while attaching source text" {
 fn objectFromFunctionValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return core.Object.fromHeader(header);
 }
 
 pub fn constructFunctionFromSource(

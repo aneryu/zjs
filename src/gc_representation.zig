@@ -106,8 +106,9 @@ fn metadataLayout() []const u8 {
 
 fn activeHeaderLayout() []const u8 {
     return std.fmt.comptimePrint(
-        "TraceHeader size={d} align={d} next={d}\n",
-        .{ @sizeOf(gc.TraceHeader), @alignOf(gc.TraceHeader), @offsetOf(gc.TraceHeader, "next") },
+        "TraceHeader size={d} align={d} next={d}\n" ++
+            "ObjectGcToken size={d}\n",
+        .{ @sizeOf(gc.TraceHeader), @alignOf(gc.TraceHeader), @offsetOf(gc.TraceHeader, "next"), @sizeOf(gc.ObjectGcToken) },
     );
 }
 

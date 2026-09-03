@@ -122,7 +122,7 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
             break :object null;
         };
         owned_prototype_value = prototype_value;
-        break :object @as(*core.Object, @fieldParentPtr("header", header));
+        break :object core.Object.fromHeader(header);
     };
 
     if (constructor.typedArrayElementSize() != 0 and constructor.typedArrayKind() != 0) {
@@ -755,7 +755,7 @@ fn constructTypedArrayTypedArrayInput(rt: *core.JSRuntime, prototype: ?*core.Obj
     if (try core.object.typedArrayOutOfBounds(source)) {
         const buffer_value = source.typedArrayBuffer() orelse return error.TypeError;
         const buffer_header = buffer_value.refHeader() orelse return error.TypeError;
-        const buffer: *core.Object = @fieldParentPtr("header", buffer_header);
+        const buffer: *core.Object = core.Object.fromHeader(buffer_header);
         if (source.typedArrayFixedLength() != null or source.typedArrayByteOffset() > buffer.byteStorage().len) return error.TypeError;
     }
     const length = try core.object.typedArrayLength(rt, source);
@@ -1102,7 +1102,7 @@ fn nativeFunctionNameValue(rt: *core.JSRuntime, function_object: *core.Object, p
 fn isNativeCollectionAdder(rt: *core.JSRuntime, value: core.JSValue, expected: []const u8) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.c_function) return false;
     const name_value = nativeFunctionNameValue(rt, object, true) catch return false;
     defer name_value.free(rt);
@@ -1153,7 +1153,7 @@ fn constructorName(rt: *core.JSRuntime, constructor: *core.Object) !?[]u8 {
 fn isCallableObject(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     return object.class_id == core.class.ids.c_function or
         object.class_id == core.class.ids.c_function_data or
         object.class_id == core.class.ids.c_closure or
@@ -1178,7 +1178,7 @@ fn isConstructibleBytecodeFunctionObject(object: *const core.Object) bool {
 fn expectConstructor(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (core.class.isBytecodeFunctionClass(object.class_id)) {
         if (!isConstructibleBytecodeFunctionObject(object)) return error.TypeError;
         return object;

@@ -229,7 +229,7 @@ pub fn length(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     }
     if (value.isObject()) {
         const header = value.refHeader() orelse return error.TypeError;
-        const object_value: *core.Object = @fieldParentPtr("header", header);
+        const object_value: *core.Object = core.Object.fromHeader(header);
         if (object_value.isArray()) {
             if (object_value.arrayLength() <= @as(u32, @intCast(std.math.maxInt(i32)))) {
                 return core.JSValue.int32(@intCast(object_value.arrayLength()));
@@ -620,7 +620,7 @@ pub fn isTruthy(value: core.JSValue) bool {
 pub fn isFunctionObject(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (object.proxyTarget() != null) return proxyTargetIsFunction(value);
     return object.class_id == core.class.ids.c_function or
         core.class.isBytecodeFunctionClass(object.class_id) or
@@ -632,7 +632,7 @@ pub fn isFunctionObject(value: core.JSValue) bool {
 fn proxyTargetIsFunction(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     const target = object.proxyTarget() orelse return false;
     return target.isFunctionBytecode() or isFunctionObject(target);
 }

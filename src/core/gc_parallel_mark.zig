@@ -292,24 +292,25 @@ pub const Tracer = struct {
 
     /// Parallel visitors receive only typed, precise edges. Conservative
     /// candidates are validated on the owner before they can seed this pool.
-    fn shadeExact(self: *Tracer, header: *gc.Header) void {
+    fn shadeExact(self: *Tracer, header: anytype) void {
+        const h = gc.headerPtr(header);
         // Cheap plain-load filter first: most edges point at already-marked
         // objects, and a fetch-or on every edge is measurably worse than a
         // load + branch. The claim below stays the authority.
-        if (self.rt.gc.headerMarked(header)) return;
-        if (!header.meta().alloc_info.heap_accounted) return;
-        if (header.meta().flags.cycle_visited) return;
-        if (!self.rt.gc.tryAcquireHeaderMark(header)) return;
+        if (self.rt.gc.headerMarked(h)) return;
+        if (!h.meta().alloc_info.heap_accounted) return;
+        if (h.meta().flags.cycle_visited) return;
+        if (!self.rt.gc.tryAcquireHeaderMark(h)) return;
         self.marked += 1;
-        const kind = header.meta().flags.kind;
+        const kind = h.meta().flags.kind;
         if (kind == .shape or kind == .realm_context) {
             // rc-managed kinds never enter any queue (the mutator can free
             // them between slices and the entry would dangle); the claim
             // above already dedups the recursion.
-            self.traceOne(header);
+            self.traceOne(h);
             return;
         }
-        if (!self.local.push(header)) _ = self.queue.push(header);
+        if (!self.local.push(h)) _ = self.queue.push(h);
     }
 
     pub fn visitValue(self: *Tracer, val: *JSValue) void {

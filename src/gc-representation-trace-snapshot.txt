@@ -5,6 +5,7 @@
 [prefix]
 Metadata size=8 align=8 size_class=0 alloc_info=2 flags=3 lifetime=4
 TraceHeader size=8 align=8 next=0
+ObjectGcToken size=0
 StringHeader size=4 rc_payload_delta=-4
 AllocInfo class_mask=0x1f large=0x20 accounted=0x40 standalone=0x80
 BlockFlags kind_mask=0x07 mark=0x08 young=0x10 finalizing=0x20 pinned=0x40 cycle_visited=0x80
@@ -31,7 +32,7 @@ kind.string tag=6 prefix=string_rc allocation=string_family registry=no rc=retai
 kind.big_int tag=7 prefix=metadata allocation=slab_or_standalone registry=no rc=retained
 
 [body-layouts]
-object head=32 align=8 header=0 weakref_count=8 class_id=12 flags=14 shape_ref=16 prop_values=24 arm_narrow=8 arm_wide=24
+object head=24 align=8 header=0 weakref_count=0 class_id=4 flags=6 shape_ref=8 prop_values=16 arm_narrow=8 arm_wide=24
 function_bytecode size=88 align=8 header=0 js_mode=8 byte_code=16 byte_code_len=24 vardefs=32 closure_var=40 realm=64 cpool=72
 var_ref size=40 align=8 header=0 value=8 pvalue=24 is_const=32 is_open=36
 realm_context size=2176 align=16 header=0 runtime=1472 publication_state=2160 modules=1424 global=288 trace_rc=2164 list_prev=2168

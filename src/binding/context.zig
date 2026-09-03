@@ -713,7 +713,7 @@ pub const JSContext = struct {
         const rt = self.core.runtime;
         if (exc.isObject()) {
             const header = exc.refHeader() orelse return error.InvalidEngineState;
-            const object: *Object = @fieldParentPtr("header", header);
+            const object: *Object = Object.fromHeader(header);
 
             const name_opt = try getPropertyString(rt, object, "name", allocator);
             errdefer if (name_opt) |n| allocator.free(n);

@@ -742,7 +742,7 @@ pub const JSContext = struct {
         if (!value.isObject()) return null;
         const header = value.refHeader() orelse return null;
         if (header.meta().flags.kind != .object) return null;
-        return @fieldParentPtr("header", header);
+        return Object.fromHeader(header);
     }
 
     pub fn setNativeErrorPrototype(self: *JSContext, kind: NativeErrorKind, prototype: *Object) void {
@@ -761,7 +761,7 @@ pub const JSContext = struct {
         if (!value.isObject()) return null;
         const header = value.refHeader() orelse return null;
         if (header.meta().flags.kind != .object) return null;
-        return @fieldParentPtr("header", header);
+        return Object.fromHeader(header);
     }
 
     pub fn initializeInitialShapes(

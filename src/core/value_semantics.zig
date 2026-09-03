@@ -28,7 +28,7 @@ pub fn objectFromValue(value: JSValue) ?*object.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     if (header.meta().flags.kind != .object) return null;
-    return @fieldParentPtr("header", header);
+    return object.Object.fromHeader(header);
 }
 
 /// Expression-receiver variant — qjs JS_VALUE_GET_OBJ: tag test then raw
@@ -47,7 +47,7 @@ pub inline fn objectFromValueTrustedExpression(value: JSValue) ?*object.Object {
     if (comptime builtin.mode == .Debug) {
         std.debug.assert(header.meta().flags.kind == .object);
     }
-    return @fieldParentPtr("header", header);
+    return object.Object.fromHeader(header);
 }
 
 /// Checked conversion with the canonical error contract.
@@ -74,6 +74,6 @@ pub fn toBoolean(value: JSValue) bool {
 pub fn isHTMLDDA(value: JSValue) bool {
     if (!value.isObject()) return false;
     const header = value.refHeader() orelse return false;
-    const object_value: *object.Object = @fieldParentPtr("header", header);
+    const object_value: *object.Object = object.Object.fromHeader(header);
     return object_value.flags.is_html_dda;
 }

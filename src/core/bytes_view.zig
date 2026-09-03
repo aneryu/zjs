@@ -220,7 +220,7 @@ pub fn JSBytes(comptime Value: type) type {
             if (!value.isObject()) return null;
             const header = value.refHeader() orelse return null;
             if (header.meta().flags.kind != .object) return null;
-            return @fieldParentPtr("header", header);
+            return @import("object.zig").Object.fromHeader(header);
         }
 
         fn typedArrayBufferObject(object: anytype) ?*@import("object.zig").Object {
@@ -596,5 +596,5 @@ fn testObjectFromValue(comptime Value: type, value: Value) ?*@import("object.zig
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     if (header.meta().flags.kind != .object) return null;
-    return @fieldParentPtr("header", header);
+    return @import("object.zig").Object.fromHeader(header);
 }

@@ -106,7 +106,7 @@ fn appendObjectString(
     comptime policy: Policy,
 ) AppendStringError!void {
     const header = value.refHeader() orelse return;
-    const object_value: *Object = @fieldParentPtr("header", header);
+    const object_value: *Object = Object.fromHeader(header);
     if (object_value.class_id == class.ids.string) {
         const data = object_value.objectData() orelse return error.TypeError;
         return appendValueString(rt, buffer, data, policy);

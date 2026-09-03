@@ -111,17 +111,19 @@ pub fn reclaimNow(rt: *core.JSRuntime) void {
 /// guards exactly what it always did. Kinds the tracer does not own (strings,
 /// ropes, BigInt, and also shapes and realms, which keep their counts for
 /// copy-on-write and host-handle reasons) are checked in both builds.
-pub fn expectRefCount(expected: i32, header: *const core.gc.Header) !void {
-    if (core.gc.refCountRemoved(header.metaConst().flags.kind)) return;
-    try std.testing.expectEqual(expected, core.gc.headerRefCount(header));
+pub fn expectRefCount(expected: i32, header: anytype) !void {
+    const h = core.gc.headerPtrConst(header);
+    if (core.gc.refCountRemoved(h.metaConst().flags.kind)) return;
+    try std.testing.expectEqual(expected, core.gc.headerRefCount(h));
 }
 
 /// Snapshot helper for tests whose expected arithmetic is asserted through
 /// expectRefCount. Tracer-owned kinds deliberately have no count; return their
 /// historical birth value only so the skipped arithmetic remains well-typed.
-pub fn refCountSnapshot(header: *const core.gc.Header) i32 {
-    if (core.gc.refCountRemoved(header.metaConst().flags.kind)) return 1;
-    return core.gc.headerRefCount(header);
+pub fn refCountSnapshot(header: anytype) i32 {
+    const h = core.gc.headerPtrConst(header);
+    if (core.gc.refCountRemoved(h.metaConst().flags.kind)) return 1;
+    return core.gc.headerRefCount(h);
 }
 
 pub fn objectFromValue(value: core.JSValue) *core.Object {
@@ -248,7 +250,7 @@ const ExceptionInfo = struct {
         const value = self.value.get();
         if (value.isObject()) {
             const header = value.refHeader() orelse return error.InvalidEngineState;
-            const object: *core.Object = @fieldParentPtr("header", header);
+            const object: *core.Object = core.Object.fromHeader(header);
 
             const name_opt = try getPropertyString(rt, object, "name", allocator);
             errdefer if (name_opt) |n| allocator.free(n);
@@ -278,7 +280,7 @@ const ExceptionInfo = struct {
         const value = self.value.get();
         if (!value.isObject()) return null;
         const header = value.refHeader() orelse return null;
-        const object: *core.Object = @fieldParentPtr("header", header);
+        const object: *core.Object = core.Object.fromHeader(header);
         return try getPropertyString(rt, object, "stack", allocator);
     }
 };

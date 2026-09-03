@@ -269,7 +269,7 @@ pub fn appendLog(rt: *core.JSRuntime, globals: []globals_mod.Slot, mode: LogMode
 fn expectClosure(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
-    const closure: *core.Object = @fieldParentPtr("header", header);
+    const closure: *core.Object = core.Object.fromHeader(header);
     if (closure.class_id != core.class.ids.c_closure) return error.TypeError;
     return closure;
 }
@@ -988,7 +988,7 @@ fn getGlobalThisObject(rt: *core.JSRuntime, globals: []globals_mod.Slot) !*core.
     defer global_value.free(rt);
     const header = global_value.refHeader() orelse return error.TypeError;
     if (!global_value.isObject()) return error.TypeError;
-    return @fieldParentPtr("header", header);
+    return core.Object.fromHeader(header);
 }
 
 fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {

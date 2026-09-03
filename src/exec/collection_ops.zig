@@ -1513,14 +1513,14 @@ fn stringElementAt(rt: *core.JSRuntime, string_object: *core.string.String, inde
 fn isCallableClosure(value: core.JSValue) bool {
     if (!value.isObject()) return false;
     const header = value.refHeader() orelse return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     return object.class_id == core.class.ids.c_closure;
 }
 
 fn isCallableObject(value: core.JSValue) bool {
     if (!value.isObject()) return false;
     const header = value.refHeader() orelse return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     return object.class_id == core.class.ids.c_closure or object.class_id == core.class.ids.c_function;
 }
 

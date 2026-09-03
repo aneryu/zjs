@@ -1756,7 +1756,7 @@ fn jsDateParseOtherstring(sp: [:0]const u8, fields: *[9]i32, is_local: *bool) bo
 fn expectDateObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.date) return error.TypeError;
     return object;
 }
@@ -1776,7 +1776,7 @@ fn dateValue(object: *const core.Object) !f64 {
 fn dateObjectFromValue(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     if (!value.isObject()) return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.date) return null;
     return object;
 }

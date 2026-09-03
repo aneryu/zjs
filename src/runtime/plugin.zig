@@ -528,7 +528,7 @@ fn installSource(ctx: *core.JSContext, target_value: core.JSValue, path: []const
 fn expectPlainTarget(rt: *core.JSRuntime, value: core.JSValue) InstallError!*core.Object {
     const header = value.refHeader() orelse return error.InvalidTarget;
     if (!value.isObject()) return error.InvalidTarget;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (!rt.ownsObject(object)) return error.InvalidTarget;
     if (object.class_id != core.class.ids.object) return error.InvalidTarget;
     if (object.flags.class_payload_kind != .none and object.flags.class_payload_kind != .ordinary) return error.InvalidTarget;
@@ -678,7 +678,7 @@ fn unwrapOpaqueObjectValue(rt: *core.JSRuntime, value: core.JSValue, expected_ty
 fn opaquePayloadFromValue(rt: *core.JSRuntime, value: core.JSValue) ?*OpaqueWrapperPayload {
     const header = value.refHeader() orelse return null;
     if (!value.isObject()) return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (!rt.ownsObject(object)) return null;
     if (!isOpaqueHostObjectClass(rt, object)) return null;
     const raw_payload = object.externalClassPayloadConst() orelse return null;
@@ -1001,7 +1001,7 @@ test "runtime Plugin installs synchronous bindings on an ordinary target" {
     const add_value = try target.getProperty(add_atom);
     defer add_value.free(rt);
     try std.testing.expect(add_value.isObject());
-    const add_object: *core.Object = @fieldParentPtr("header", add_value.refHeader().?);
+    const add_object: *core.Object = core.Object.fromHeader(add_value.refHeader().?);
     try std.testing.expectEqual(core.host_function.ids.external_host, add_object.hostFunctionKindSlot().*);
     const name_value = try add_object.getProperty(core.atom.ids.name);
     defer name_value.free(rt);
@@ -1015,7 +1015,7 @@ test "runtime Plugin installs synchronous bindings on an ordinary target" {
     defer rt.atoms.free(default_length_atom);
     const default_length_value = try target.getProperty(default_length_atom);
     defer default_length_value.free(rt);
-    const default_length_object: *core.Object = @fieldParentPtr("header", default_length_value.refHeader().?);
+    const default_length_object: *core.Object = core.Object.fromHeader(default_length_value.refHeader().?);
     try std.testing.expectEqual(core.host_function.ids.external_host, default_length_object.hostFunctionKindSlot().*);
     try std.testing.expectEqual(@as(i32, 0), (try default_length_object.getProperty(core.atom.ids.length)).asInt32().?);
 
@@ -2532,7 +2532,7 @@ test "runtime Plugin finalizer reentry mutates, allocates, and does not nest GC"
 
                 fn visitObject(_: *anyopaque, _: *?*core.Object) core.runtime.RootTraceError!void {}
             };
-            var counter = Counter{ .expected = &payload_child.header };
+            var counter = Counter{ .expected = payload_child.header.asHeader() };
             var visitor = core.runtime.RootVisitor{
                 .context = @ptrCast(&counter),
                 .visit_value = Counter.visitValue,
@@ -2605,7 +2605,7 @@ test "runtime Plugin finalizer reentry mutates, allocates, and does not nest GC"
         payload_read_atom,
         core.Descriptor.data(core.JSValue.int32(7), true, true, true),
     );
-    const payload_child_header = &payload_child.header;
+    const payload_child_header = payload_child.header.asHeader();
 
     var state = State{
         .rt = rt,
@@ -2722,7 +2722,7 @@ test "runtime Plugin deferred opaque wrapper finalizers keep traced payload root
     defer State.active = null;
 
     const child = try core.Object.create(rt, core.class.ids.object, null);
-    const child_header = &child.header;
+    const child_header = child.header.asHeader();
     state.slot = child.value().dup();
     child.value().free(rt);
 
@@ -3097,7 +3097,7 @@ test "runtime Plugin host-owned opaque wrappers can trace without taking ownersh
     defer state.slot.free(rt);
 
     const child = try core.Object.create(rt, core.class.ids.object, null);
-    const child_header = &child.header;
+    const child_header = child.header.asHeader();
     state.slot = child.value().dup();
     child.value().free(rt);
 

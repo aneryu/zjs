@@ -84,7 +84,7 @@ pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) Co
         .string, .big_int => return,
     }
 
-    const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+    const obj: *Object = Object.fromHeader(header);
     try obj.traceChildEdgesFallible(rt, visitor);
 }
 
@@ -671,7 +671,7 @@ fn recordFinalMarkFootprint(rt: *JSRuntime) void {
         footprint.noteMarkedHeader(header);
 
         if (header.metaConst().flags.kind == .object) {
-            const object: *const Object = @alignCast(@fieldParentPtr("header", header));
+            const object: *const Object = Object.fromHeaderConst(header);
             object.recordTraceStorageFootprint(rt, footprint);
         } else {
             footprint.beginTraceClass(.non_object);
@@ -1231,6 +1231,22 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
         // Ledger parity: the account carries object sizes, not cell sizes.
         doomed_bytes +|= snap.bytes -| (snap.count * gc.metadata_prefix_size);
     }
+    for (rt.gc.standalone_objects) |header| {
+        if (header.metaConst().flags.cycle_visited) continue;
+        if (rt.gc.headerMarked(header)) {
+            header.meta().flags.young = false;
+            continue;
+        }
+        if (header.metaConst().flags.is_pinned) {
+            header.meta().flags.young = false;
+            continue;
+        }
+        doomed_bytes +|= gc.Registry.heapByteSizeFromHeader(rt, header);
+        rt.gc.unregisterLiveAddress(header);
+        header.meta().flags.cycle_visited = true;
+        rt.gc.standalone_doomed_count += 1;
+        condemned += 1;
+    }
     var previous_node: *gc.Header = &rt.gc.gc_obj_list.sentinel;
     var cursor_node = previous_node.next;
     while (cursor_node) |header| {
@@ -1248,6 +1264,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
             cursor_node = next_node;
             continue;
         }
+        std.debug.assert(header.metaConst().flags.kind != .object);
         doomed_bytes +|= gc.Registry.heapByteSizeFromHeader(rt, header);
         rt.gc.detachCycleCandidateAfter(previous_node, header);
         gc.listAddTailTraversalOwned(&rt.gc.doomed_by_kind[@intFromEnum(header.meta().flags.kind)], header);
@@ -1362,6 +1379,7 @@ pub var destroy_probe_corpses: u64 = 0;
 fn morgueIsEmpty(rt: *const JSRuntime) bool {
     if (rt.gc.doomed_cursor != null) return false;
     if (rt.gc.cycle_deferred_frees.count != 0) return false;
+    if (rt.gc.standalone_doomed_count != 0) return false;
     if (comptime gc.block_heap_enabled) {
         if (rt.gc.block_heap.doomed_blocks != null) return false;
     }
@@ -1472,6 +1490,37 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
             const link = block.doomed_link;
             block.doomed_link = 0;
             rt.gc.block_heap.doomed_blocks = if (link <= 1) null else @ptrFromInt(link);
+        }
+    }
+
+    // Leftover standalone `.object` carriers are not on doomed_by_kind (no
+    // `next` to park them with). Destroy them in the object pass, matching
+    // "objects before realms before shapes".
+    var standalone_i: usize = 0;
+    while (standalone_i < rt.gc.standalone_objects.len) {
+        const header = rt.gc.standalone_objects[standalone_i];
+        if (!header.metaConst().flags.cycle_visited) {
+            standalone_i += 1;
+            continue;
+        }
+        rt.gc.forgetStandaloneObject(header);
+        rt.gc.sweep_current = header;
+        const d0 = if (probe_enabled) profile.nowNanos() else 0;
+        Object.destroyFromHeader(rt, header);
+        if (probe_enabled) {
+            destroy_probe_dtor_ns +|= profile.nowNanos() -| d0;
+            destroy_probe_corpses +|= 1;
+        }
+        rt.gc.sweep_current = null;
+        destroyed += 1;
+        since_clock += 1;
+        if (since_clock == destroy_clock_cadence) {
+            since_clock = 0;
+            if (profile.nowNanos() -| started >= budget_ns) {
+                rt.gc.doomed_destroyed += destroyed;
+                rt.gc.concurrent.stats.doomed_destroyed_objects +|= destroyed;
+                return destroyed;
+            }
         }
     }
 
@@ -1847,9 +1896,10 @@ const Collector = struct {
     /// Shade an edge whose producer owns a typed GC reference. `*Header`
     /// supplies alignment, and the edge contract supplies address validity;
     /// conservative words use `shadeConservativeCandidate` below instead.
-    fn shadeExact(self: *Collector, header: *gc.Header) void {
+    fn shadeExact(self: *Collector, header: anytype) void {
+        const h = gc.headerPtr(header);
         if (self.err != null) return;
-        if (self.rt.gc.headerMarked(header)) return;
+        if (self.rt.gc.headerMarked(h)) return;
         // UNPUBLISHED: a published container can briefly hold a pointer to an
         // object still under construction (the store happens, the barrier
         // correctly skips it), and tracing through the container reaches it
@@ -1858,15 +1908,15 @@ const Collector = struct {
         // so no sweep can condemn it, and its edges are covered by the
         // published-grey push the moment registration completes -- or it
         // dies unconstructed, in which case there was nothing to keep.
-        if (!header.meta().alloc_info.heap_accounted) return;
+        if (!h.meta().alloc_info.heap_accounted) return;
         // A condemned corpse awaiting its destruction slice. No precise root
         // can name it -- the remark proved it unreachable and processWeak
         // cleared its identities -- so the only way here is conservative
         // stack residue resolving a parked slab block that still reads
         // `heap_accounted`. Shading it would trace freed payloads.
         // `detachCycleCandidate` already stamps the bit; this is the read.
-        if (header.meta().flags.cycle_visited) return;
-        self.rt.gc.setHeaderMarked(header);
+        if (h.meta().flags.cycle_visited) return;
+        self.rt.gc.setHeaderMarked(h);
         if (self.shade_to_queue) {
             // rc-managed kinds (shapes and realms still refcount under the
             // tracer) never enter the queue: the mutator can free them during
@@ -1878,7 +1928,7 @@ const Collector = struct {
             // only be freed by the collector itself, which does not run
             // inside its own windows, so the queue needs no validation at
             // all.
-            const kind = header.meta().flags.kind;
+            const kind = h.meta().flags.kind;
             if (kind == .shape or kind == .realm_context) {
                 // Mark BEFORE tracing: the mark is both this object's
                 // survival (an unmarked shape here was condemned alive -- the
@@ -1886,8 +1936,8 @@ const Collector = struct {
                 // found what macro-check missed) and the recursion's
                 // deduplication, since a re-shade of the same shape now takes
                 // the marked early-return above.
-                self.rt.gc.setHeaderMarked(header);
-                self.traceHeader(header) catch |err| {
+                self.rt.gc.setHeaderMarked(h);
+                self.traceHeader(h) catch |err| {
                     self.err = err;
                 };
                 return;
@@ -1896,12 +1946,12 @@ const Collector = struct {
             // array ops. Full or missing -> the shared ring; a failed ring
             // push is the overflow contract (object marked, flag set, the
             // remark's rescan finds it).
-            if (!self.rt.gc.mark_stack.push(header)) {
-                _ = self.rt.gc.concurrent_mark_queue.pushSingle(header);
+            if (!self.rt.gc.mark_stack.push(h)) {
+                _ = self.rt.gc.concurrent_mark_queue.pushSingle(h);
             }
             return;
         }
-        self.work.append(self.allocator(), header) catch |err| {
+        self.work.append(self.allocator(), h) catch |err| {
             self.err = err;
         };
     }
@@ -1957,7 +2007,7 @@ const Collector = struct {
             // cell directly and trace only its initialized payload.
             if (self.rt.gc.pinEntryIsConstructionRoot(entry)) {
                 self.rt.gc.setHeaderMarked(entry.header);
-                const object: *Object = @alignCast(@fieldParentPtr("header", entry.header));
+                const object: *Object = Object.fromHeader(entry.header);
                 try object.traceDetachedGeneratorShellEdges(self);
                 continue;
             }
@@ -2193,6 +2243,72 @@ const Collector = struct {
         holder.pruneBorrowedReferenceHolderIfEmpty(self.rt);
     }
 
+    /// Stamp unmarked leftover `.object` carriers without destroying them.
+    /// Destruction happens in a second walk so a finalizer allocation cannot
+    /// join the condemned set.
+    fn stampUnmarkedStandaloneObjects(self: *Collector, comptime young_only: bool) void {
+        for (self.rt.gc.standalone_objects) |header| {
+            if (header.metaConst().flags.cycle_visited) continue;
+            if (young_only and !header.metaConst().flags.young) continue;
+            if (self.rt.gc.headerMarked(header) or header.metaConst().flags.is_pinned) {
+                if (!young_only) header.meta().flags.young = false;
+                continue;
+            }
+            self.rt.gc.unregisterLiveAddress(header);
+            header.meta().flags.cycle_visited = true;
+            self.rt.gc.standalone_doomed_count += 1;
+        }
+    }
+
+    fn destroyStampedStandaloneObjects(self: *Collector) usize {
+        var reclaimed: usize = 0;
+        var index: usize = 0;
+        while (index < self.rt.gc.standalone_objects.len) {
+            const header = self.rt.gc.standalone_objects[index];
+            if (!header.metaConst().flags.cycle_visited) {
+                index += 1;
+                continue;
+            }
+            self.rt.gc.forgetStandaloneObject(header);
+            self.rt.gc.sweep_current = header;
+            Object.destroyFromHeader(self.rt, header);
+            self.rt.gc.sweep_current = null;
+            reclaimed += 1;
+        }
+        return reclaimed;
+    }
+
+    fn stampUnmarkedBlockObjects(self: *Collector, comptime young_only: bool) void {
+        var iterator = if (young_only)
+            self.rt.gc.youngBlockIterator()
+        else
+            self.rt.gc.deadBlockCandidateIterator();
+        while (iterator.next()) |header| {
+            if (young_only and self.rt.gc.headerMarked(header)) continue;
+            if (header.metaConst().flags.is_pinned) {
+                if (!young_only) header.meta().flags.young = false;
+                continue;
+            }
+            self.rt.gc.detachCycleCandidate(header);
+        }
+    }
+
+    fn destroyStampedBlockObjects(self: *Collector, comptime young_only: bool) usize {
+        var reclaimed: usize = 0;
+        var iterator = if (young_only)
+            self.rt.gc.youngBlockIterator()
+        else
+            self.rt.gc.deadBlockCandidateIterator();
+        while (iterator.next()) |header| {
+            if (!header.metaConst().flags.cycle_visited) continue;
+            self.rt.gc.sweep_current = header;
+            Object.destroyFromHeader(self.rt, header);
+            self.rt.gc.sweep_current = null;
+            reclaimed += 1;
+        }
+        return reclaimed;
+    }
+
     /// Young-only sweep for a minor. An old object cannot be proven dead by a
     /// minor -- its incoming edges were never traced -- so only unmarked young
     /// objects are condemned, and old marks are left alone rather than reset.
@@ -2212,11 +2328,19 @@ const Collector = struct {
         // the liveness authority; rc cannot mask a missing root or barrier.
         if (snapshot_doomed) {
             // Preserve the production producer order even under diagnostics:
-            // block Objects first, then the standalone/list population. Pass A
-            // pushes in this order, so LIFO Pass B gets its required generic
-            // prefix followed by one block-only suffix.
+            // block Objects first, then leftover standalone objects, then the
+            // list population. Pass A used to push in this order, so LIFO
+            // Pass B gets its required generic prefix followed by one
+            // block-only suffix. Objects are now destroyed without `next`.
             var young_blocks = self.rt.gc.youngBlockIterator();
             while (young_blocks.next()) |header| {
+                if (self.rt.gc.headerMarked(header)) continue;
+                if (header.metaConst().flags.is_pinned) continue;
+                doomed.append(self.allocator(), header) catch return 0;
+            }
+            for (self.rt.gc.standalone_objects) |header| {
+                if (header.metaConst().flags.cycle_visited) continue;
+                if (!header.metaConst().flags.young) continue;
                 if (self.rt.gc.headerMarked(header)) continue;
                 if (header.metaConst().flags.is_pinned) continue;
                 doomed.append(self.allocator(), header) catch return 0;
@@ -2229,36 +2353,8 @@ const Collector = struct {
                 if (header.metaConst().flags.is_pinned) continue;
                 doomed.append(self.allocator(), header) catch return 0;
             }
-        } else {
-            // Block cells must be parked before the generic list population.
-            // LIFO reversal then gives Pass B its generic-prefix/block-suffix
-            // topology without a per-entry descriptor.
-            var young_blocks = self.rt.gc.youngBlockIterator();
-            while (young_blocks.next()) |header| {
-                if (self.rt.gc.headerMarked(header)) continue;
-                if (header.metaConst().flags.is_pinned) continue;
-                self.rt.gc.detachCycleCandidate(header);
-                gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
-            }
-            // The list population is a young suffix. Its predecessor was
-            // captured at the first publication, so deletion is O(young).
-            if (self.rt.gc.young_head) |young_head| {
-                var previous = self.rt.gc.young_predecessor orelse unreachable;
-                var cursor: ?*gc.Header = young_head;
-                while (cursor) |header| {
-                    if (header == &self.rt.gc.gc_obj_list.sentinel) break;
-                    const next = header.next;
-                    if (self.rt.gc.headerMarked(header) or header.metaConst().flags.is_pinned) {
-                        previous = header;
-                        cursor = next;
-                        continue;
-                    }
-                    self.rt.gc.detachCycleCandidateAfter(previous, header);
-                    gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
-                    cursor = next;
-                }
-            }
         }
+
         if (full_reachable) |reachable| {
             var violations: usize = 0;
             var precise_violations: usize = 0;
@@ -2268,7 +2364,7 @@ const Collector = struct {
                 if (reachability == .precise) precise_violations += 1;
                 const kind = header.metaConst().flags.kind;
                 if (kind == .object) {
-                    const o: *Object = @alignCast(@fieldParentPtr("header", header));
+                    const o: *Object = Object.fromHeader(header);
                     std.debug.print("VERIFY-MINOR condemned-but-reachable source={s} kind=object class={d} payload={s}\n", .{ @tagName(reachability), o.class_id, @tagName(o.flags.class_payload_kind) });
                 } else {
                     std.debug.print("VERIFY-MINOR condemned-but-reachable source={s} kind={s}\n", .{ @tagName(reachability), @tagName(kind) });
@@ -2284,10 +2380,26 @@ const Collector = struct {
             }
         }
         if (gc.minor_audit) self.auditCondemnedYoung(doomed.items);
-        if (snapshot_doomed) {
-            for (doomed.items) |header| {
-                self.rt.gc.detachCycleCandidate(header);
-                gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
+
+        if (!snapshot_doomed) {
+            self.stampUnmarkedBlockObjects(true);
+            self.stampUnmarkedStandaloneObjects(true);
+            if (self.rt.gc.young_head) |young_head| {
+                var previous = self.rt.gc.young_predecessor orelse unreachable;
+                var cursor: ?*gc.Header = young_head;
+                while (cursor) |header| {
+                    if (header == &self.rt.gc.gc_obj_list.sentinel) break;
+                    const next = header.next;
+                    if (self.rt.gc.headerMarked(header) or header.metaConst().flags.is_pinned) {
+                        previous = header;
+                        cursor = next;
+                        continue;
+                    }
+                    std.debug.assert(header.metaConst().flags.kind != .object);
+                    self.rt.gc.detachCycleCandidateAfter(previous, header);
+                    gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
+                    cursor = next;
+                }
             }
         }
 
@@ -2295,7 +2407,31 @@ const Collector = struct {
         self.rt.gc.phase = .tracer_destroy;
         defer self.rt.gc.phase = old_phase;
 
-        const reclaimed = self.destroyCondemned();
+        var reclaimed: usize = 0;
+        if (snapshot_doomed) {
+            for (doomed.items) |header| {
+                if (header.metaConst().flags.kind == .object) {
+                    if (gc.Registry.isBlockCellHeader(header)) {
+                        self.rt.gc.detachCycleCandidate(header);
+                    } else {
+                        self.rt.gc.unregisterLiveAddress(header);
+                        header.meta().flags.cycle_visited = true;
+                        self.rt.gc.forgetStandaloneObject(header);
+                    }
+                    self.rt.gc.sweep_current = header;
+                    Object.destroyFromHeader(self.rt, header);
+                    self.rt.gc.sweep_current = null;
+                    reclaimed += 1;
+                    continue;
+                }
+                self.rt.gc.detachCycleCandidate(header);
+                gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
+            }
+        } else {
+            reclaimed += self.destroyStampedBlockObjects(true);
+            reclaimed += self.destroyStampedStandaloneObjects();
+        }
+        reclaimed += self.destroyCondemned();
         gc.listInit(&self.rt.gc.tmp_obj_list);
 
         // Destroying under `.remove_cycles` parks every struct free on
@@ -2316,23 +2452,12 @@ const Collector = struct {
     fn sweepUnmarked(self: *Collector) usize {
         gc.listInit(&self.rt.gc.tmp_obj_list);
 
-        // Block cells are appended first so the object Pass-A walk parks them
-        // before standalone/list objects. LIFO reversal is then the same as the
-        // incremental major: optional generic prefix, contiguous block suffix.
-        // Both populations are `.object` in this pass, so this changes no
-        // destructor-kind ordering.
-        var block_iterator = self.rt.gc.deadBlockCandidateIterator();
-        while (block_iterator.next()) |header| {
-            if (header.metaConst().flags.is_pinned) {
-                header.meta().flags.young = false;
-                continue;
-            }
-            self.rt.gc.detachCycleCandidate(header);
-            gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
-        }
+        self.stampUnmarkedBlockObjects(false);
+        self.stampUnmarkedStandaloneObjects(false);
 
         // List carriers are singly linked in trace. Walk them with an explicit
-        // predecessor so every condemnation is an O(1) splice.
+        // predecessor so every condemnation is an O(1) splice. `.object` is
+        // never on this list after ① step 2.
         var previous: *gc.Header = &self.rt.gc.gc_obj_list.sentinel;
         var cursor = previous.next;
         while (cursor) |header| {
@@ -2364,6 +2489,7 @@ const Collector = struct {
                 cursor = next;
                 continue;
             }
+            std.debug.assert(header.metaConst().flags.kind != .object);
             self.rt.gc.detachCycleCandidateAfter(previous, header);
             gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
             cursor = next;
@@ -2378,7 +2504,9 @@ const Collector = struct {
         self.rt.gc.phase = .tracer_destroy;
         defer self.rt.gc.phase = old_phase;
 
-        const garbage_count = self.destroyCondemned();
+        var garbage_count = self.destroyStampedBlockObjects(false);
+        garbage_count += self.destroyStampedStandaloneObjects();
+        garbage_count += self.destroyCondemned();
         if (!self.rt.hasPendingDeferredClassPayloadFinalizers()) {
             object_gc.drainCycleDeferredFrees(self.rt);
             if (comptime gc.block_heap_enabled) {
@@ -2412,13 +2540,13 @@ const Collector = struct {
             owner_ptr: *gc.Header = undefined,
             owner_young: bool = false,
             owner_remembered: bool = false,
-            fn hit(a: *@This(), h: ?*gc.Header) void {
-                const child = h orelse return;
+            fn hit(a: *@This(), header: anytype) void {
+                const child = gc.headerPtrOrNull(header) orelse return;
                 for (a.doomed) |d| {
                     if (d != child) continue;
-                    const c: *Object = @alignCast(@fieldParentPtr("header", child));
+                    const c: *Object = Object.fromHeader(child);
                     if (a.owner_kind == .object) {
-                        const o: *Object = @alignCast(@fieldParentPtr("header", a.owner_ptr));
+                        const o: *Object = Object.fromHeader(a.owner_ptr);
                         var where: []const u8 = "unknown";
                         var hit_atom: u32 = 0;
                         if (o.promisePayload()) |pp| {
@@ -2512,7 +2640,7 @@ const Collector = struct {
             };
             switch (h.metaConst().flags.kind) {
                 .object => {
-                    const owner: *Object = @alignCast(@fieldParentPtr("header", h));
+                    const owner: *Object = Object.fromHeader(h);
                     audit.owner_class = owner.class_id;
                     owner.traceChildEdgesFallible(self.rt, &audit) catch {};
                 },

@@ -364,7 +364,7 @@ fn regexpSourceAccessorCall(
     if (!native_this.isObject()) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
 
     const header = native_this.refHeader() orelse return error.TypeError;
-    const receiver: *core.Object = @fieldParentPtr("header", header);
+    const receiver: *core.Object = core.Object.fromHeader(header);
     if (receiver.class_id == core.class.ids.regexp and (regexpFlagBits(receiver) catch null) != null) {
         return accessor(native_ctx.runtime, native_this, "source") catch |err| switch (err) {
             error.TypeError => error.TypeError,
@@ -393,7 +393,7 @@ fn regexpFlagAccessorCall(
     if (!native_this.isObject()) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
 
     const header = native_this.refHeader() orelse return error.TypeError;
-    const receiver: *core.Object = @fieldParentPtr("header", header);
+    const receiver: *core.Object = core.Object.fromHeader(header);
     if (receiver.class_id == core.class.ids.regexp) {
         if (regexpFlagBits(receiver) catch null) |bits| {
             const mask: u16 = @intCast(native_magic);
@@ -977,7 +977,7 @@ fn groupNameSurrogateCodePoint(high: u16, low: u16) u21 {
 fn regexpObjectFromValue(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     if (!value.isObject()) return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     return if (object.class_id == core.class.ids.regexp) object else null;
 }
 
@@ -1138,7 +1138,7 @@ fn appendCanonicalRegExpFlags(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), f
 fn expectRegExpObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.regexp) return error.TypeError;
     return object;
 }

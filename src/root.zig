@@ -206,7 +206,7 @@ pub const object = struct {
         if (!v.isObject()) return null;
         const header = v.refHeader() orelse return null;
         if (header.meta().flags.kind != .object) return null;
-        return @fieldParentPtr("header", header);
+        return CoreObject.fromHeader(header);
     }
 
     pub fn toValue(obj: *Object) value.Value {
@@ -912,7 +912,7 @@ test "public Buffer borrowBytes detach is rejected up front" {
     // Detach via the backing ArrayBuffer object.
     const ta_core: *zjs_core.Object = @ptrCast(@alignCast(ta));
     const backing_value = ta_core.typedArrayBuffer().?;
-    const backing: *zjs_core.Object = @fieldParentPtr("header", backing_value.refHeader().?);
+    const backing: *zjs_core.Object = zjs_core.Object.fromHeader(backing_value.refHeader().?);
     backing.detachByteStorage(rt);
 
     // A fresh borrow after detach must fail (the old ptr is dead).
