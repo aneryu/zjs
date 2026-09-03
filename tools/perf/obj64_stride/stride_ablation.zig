@@ -16,12 +16,14 @@
 //!
 //! Kill line (from the S0 booking, ARM Cortex-X925): if the prefetch arm of
 //! 64 vs 96 (or 64 vs 80) is <1.5% cycles AND <8% refill, the line axis is
-//! dead. This host may not have the official PMU; wall time and whatever
-//! `perf_event_open` admits are still a directional reading. Re-run on the
-//! measurement machine for a booking-quality number:
+//! dead. Booking runs bind `armv8_pmuv3_1/{instructions,cycles,l2d_cache_refill}`
+//! through sysfs (not generic `PERF_COUNT_HW_*`) and fail closed if `--cpu`
+//! cannot be applied or the named PMU does not own that CPU. On x86, wall
+//! time is directional only.
 //!
 //!     zig build obj64-stride-ablation -Doptimize=ReleaseFast
-//!     taskset -c 17 zig-out/bin/obj64-stride-ablation --cells 1048576 --repeats 8
+//!     taskset -c 17 zig-out/bin/obj64-stride-ablation --cpu 17 --pmu armv8_pmuv3_1 \
+//!         --cells 1048576 --repeats 8 --json obj64-stride.json
 //!
 //! Equal-work: every arm visits each cell once and XORs the same immutable
 //! payload word, so the checksum is independent of visit order.
@@ -45,11 +47,24 @@ const Sample = struct {
     checksum: u64,
     instructions: ?u64 = null,
     cycles: ?u64 = null,
-    cache_misses: ?u64 = null,
+    refill: ?u64 = null,
+};
+
+const default_booking_pmu = "armv8_pmuv3_1";
+
+const PmuOpenError = error{
+    PmuRequiresPinnedCpu,
+    PmuNotFound,
+    PmuCpuMismatch,
+    PmuEventRejected,
+    PmuPathTooLong,
 };
 
 const linux_perf = if (builtin.os.tag == .linux) LinuxPerf else struct {
-    pub fn open() @This() {
+    pmu_name: []const u8 = "none",
+    refill_event: []const u8 = "none",
+    bound: bool = false,
+    pub fn open(_: OpenSpec) PmuOpenError!@This() {
         return .{};
     }
     pub fn close(_: *@This()) void {}
@@ -61,26 +76,36 @@ const linux_perf = if (builtin.os.tag == .linux) LinuxPerf else struct {
     pub const Counters = struct {
         instructions: ?u64 = null,
         cycles: ?u64 = null,
-        cache_misses: ?u64 = null,
+        refill: ?u64 = null,
     };
+    pub const OpenSpec = LinuxPerf.OpenSpec;
 };
 
 const LinuxPerf = struct {
     ins_fd: i32 = -1,
     cyc_fd: i32 = -1,
-    miss_fd: i32 = -1,
+    refill_fd: i32 = -1,
+    pmu_name: []const u8 = "none",
+    refill_event: []const u8 = "none",
+    bound: bool = false,
 
     const Counters = struct {
         instructions: ?u64 = null,
         cycles: ?u64 = null,
-        cache_misses: ?u64 = null,
+        refill: ?u64 = null,
     };
 
-    fn openOne(config: std.os.linux.PERF.COUNT.HW) i32 {
+    pub const OpenSpec = struct {
+        pmu: []const u8,
+        cpu: ?usize,
+        require: bool,
+    };
+
+    fn openTyped(type_id: u32, config: u64, cpu: i32, group_fd: i32) i32 {
         var attr = std.os.linux.perf_event_attr{
-            .type = .HARDWARE,
+            .type = @enumFromInt(type_id),
             .size = @sizeOf(std.os.linux.perf_event_attr),
-            .config = @intFromEnum(config),
+            .config = config,
             .flags = .{
                 .disabled = true,
                 .inherit = true,
@@ -88,46 +113,113 @@ const LinuxPerf = struct {
                 .exclude_hv = true,
             },
         };
-        // linux.perf_event_open returns the raw syscall result; a negative
-        // value is -errno. Do not use posix.perf_event_open: its .INVAL arm
-        // is unreachable, and a rejected event (common in a VM) would abort
-        // a harness whose counters are optional.
-        const rc = std.os.linux.perf_event_open(&attr, 0, -1, -1, 0);
+        const rc = std.os.linux.perf_event_open(&attr, 0, cpu, group_fd, 0);
         const fd: isize = @bitCast(rc);
         if (fd < 0) return -1;
         return @intCast(fd);
     }
 
-    pub fn open() LinuxPerf {
+    fn closeFds(ins_fd: i32, cyc_fd: i32, refill_fd: i32) void {
+        if (ins_fd >= 0) _ = std.os.linux.close(ins_fd);
+        if (cyc_fd >= 0) _ = std.os.linux.close(cyc_fd);
+        if (refill_fd >= 0) _ = std.os.linux.close(refill_fd);
+    }
+
+    fn cpuArg(cpu: ?usize) PmuOpenError!i32 {
+        const n = cpu orelse return -1;
+        return std.math.cast(i32, n) orelse error.PmuCpuMismatch;
+    }
+
+    fn openNamed(pmu: []const u8, cpu: i32) PmuOpenError!LinuxPerf {
+        const type_id = (readSysfsU32(pmu, "type") catch return error.PmuNotFound) orelse return error.PmuNotFound;
+        const ins = (readSysfsEvent(pmu, "instructions") catch return error.PmuNotFound) orelse return error.PmuNotFound;
+        const cyc = (readSysfsEvent(pmu, "cycles") catch return error.PmuNotFound) orelse return error.PmuNotFound;
+        const refill = (readSysfsEvent(pmu, "l2d_cache_refill") catch return error.PmuNotFound) orelse return error.PmuNotFound;
+        // Group the three counters so RESET/ENABLE/DISABLE around each timed
+        // arm is one ioctl on the leader. cpu>=0 counts only that CPU.
+        const ins_fd = openTyped(type_id, ins, cpu, -1);
+        const cyc_fd = openTyped(type_id, cyc, cpu, if (ins_fd >= 0) ins_fd else -1);
+        const refill_fd = openTyped(type_id, refill, cpu, if (ins_fd >= 0) ins_fd else -1);
+        if (ins_fd < 0 or cyc_fd < 0 or refill_fd < 0) {
+            closeFds(ins_fd, cyc_fd, refill_fd);
+            return error.PmuEventRejected;
+        }
         return .{
-            .ins_fd = openOne(.INSTRUCTIONS),
-            .cyc_fd = openOne(.CPU_CYCLES),
-            .miss_fd = openOne(.CACHE_MISSES),
+            .ins_fd = ins_fd,
+            .cyc_fd = cyc_fd,
+            .refill_fd = refill_fd,
+            .pmu_name = pmu,
+            .refill_event = "l2d_cache_refill",
+            .bound = true,
         };
     }
 
+    fn openGenericHw(cpu: i32) LinuxPerf {
+        return .{
+            .ins_fd = openTyped(@intFromEnum(std.os.linux.PERF.TYPE.HARDWARE), @intFromEnum(std.os.linux.PERF.COUNT.HW.INSTRUCTIONS), cpu, -1),
+            .cyc_fd = openTyped(@intFromEnum(std.os.linux.PERF.TYPE.HARDWARE), @intFromEnum(std.os.linux.PERF.COUNT.HW.CPU_CYCLES), cpu, -1),
+            .refill_fd = openTyped(@intFromEnum(std.os.linux.PERF.TYPE.HARDWARE), @intFromEnum(std.os.linux.PERF.COUNT.HW.CACHE_MISSES), cpu, -1),
+            .pmu_name = "generic-hw",
+            .refill_event = "PERF_COUNT_HW_CACHE_MISSES",
+            .bound = false,
+        };
+    }
+
+    pub fn open(spec: OpenSpec) PmuOpenError!LinuxPerf {
+        const cpu = try cpuArg(spec.cpu);
+        const want_named = spec.require or switch (builtin.cpu.arch) {
+            .aarch64, .aarch64_be => true,
+            else => false,
+        };
+        if (want_named) {
+            const pinned = spec.cpu orelse {
+                if (spec.require) return error.PmuRequiresPinnedCpu;
+                return .{ .pmu_name = "unbound", .refill_event = "none", .bound = false };
+            };
+            if (assertPmuOwnsCpu(spec.pmu, pinned)) |_| {
+                return openNamed(spec.pmu, cpu) catch |err| {
+                    if (spec.require) return err;
+                    return .{ .pmu_name = spec.pmu, .refill_event = "none", .bound = false };
+                };
+            } else |err| {
+                if (spec.require) return err;
+                return .{ .pmu_name = spec.pmu, .refill_event = "none", .bound = false };
+            }
+        }
+        var generic = openGenericHw(cpu);
+        generic.bound = generic.ins_fd >= 0 and generic.cyc_fd >= 0 and generic.refill_fd >= 0;
+        return generic;
+    }
+
     pub fn close(self: *LinuxPerf) void {
-        if (self.ins_fd >= 0) _ = std.os.linux.close(self.ins_fd);
-        if (self.cyc_fd >= 0) _ = std.os.linux.close(self.cyc_fd);
-        if (self.miss_fd >= 0) _ = std.os.linux.close(self.miss_fd);
+        closeFds(self.ins_fd, self.cyc_fd, self.refill_fd);
         self.* = .{};
     }
 
-    fn ioctl(fd: i32, request: u32) void {
+    fn ioctl(fd: i32, request: u32, arg: usize) void {
         if (fd < 0) return;
-        _ = std.os.linux.ioctl(fd, request, 0);
+        _ = std.os.linux.ioctl(fd, request, arg);
     }
 
     pub fn enable(self: *LinuxPerf) void {
-        inline for (.{ self.ins_fd, self.cyc_fd, self.miss_fd }) |fd| {
-            ioctl(fd, std.os.linux.PERF.EVENT_IOC.RESET);
-            ioctl(fd, std.os.linux.PERF.EVENT_IOC.ENABLE);
+        if (self.bound) {
+            ioctl(self.ins_fd, std.os.linux.PERF.EVENT_IOC.RESET, std.os.linux.PERF.IOC_FLAG_GROUP);
+            ioctl(self.ins_fd, std.os.linux.PERF.EVENT_IOC.ENABLE, std.os.linux.PERF.IOC_FLAG_GROUP);
+            return;
+        }
+        inline for (.{ self.ins_fd, self.cyc_fd, self.refill_fd }) |fd| {
+            ioctl(fd, std.os.linux.PERF.EVENT_IOC.RESET, 0);
+            ioctl(fd, std.os.linux.PERF.EVENT_IOC.ENABLE, 0);
         }
     }
 
     pub fn disable(self: *LinuxPerf) void {
-        inline for (.{ self.ins_fd, self.cyc_fd, self.miss_fd }) |fd| {
-            ioctl(fd, std.os.linux.PERF.EVENT_IOC.DISABLE);
+        if (self.bound) {
+            ioctl(self.ins_fd, std.os.linux.PERF.EVENT_IOC.DISABLE, std.os.linux.PERF.IOC_FLAG_GROUP);
+            return;
+        }
+        inline for (.{ self.ins_fd, self.cyc_fd, self.refill_fd }) |fd| {
+            ioctl(fd, std.os.linux.PERF.EVENT_IOC.DISABLE, 0);
         }
     }
 
@@ -143,7 +235,7 @@ const LinuxPerf = struct {
         return .{
             .instructions = readFd(self.ins_fd),
             .cycles = readFd(self.cyc_fd),
-            .cache_misses = readFd(self.miss_fd),
+            .refill = readFd(self.refill_fd),
         };
     }
 };
@@ -156,12 +248,128 @@ fn splitmix64(state: *u64) u64 {
     return z ^ (z >> 31);
 }
 
-fn pinCpu(cpu: usize) void {
-    if (builtin.os.tag != .linux) return;
+fn cpuSetBitCapacity() usize {
+    return @sizeOf(std.os.linux.cpu_set_t) * 8;
+}
+
+fn cpuInSet(set: std.os.linux.cpu_set_t, cpu: usize) bool {
+    if (cpu >= cpuSetBitCapacity()) return false;
+    const bits = @bitSizeOf(usize);
+    return set[cpu / bits] & (@as(usize, 1) << @intCast(cpu % bits)) != 0;
+}
+
+fn countCpus(set: std.os.linux.cpu_set_t) usize {
+    var n: usize = 0;
+    for (set) |word| n += @popCount(word);
+    return n;
+}
+
+const AffinityError = error{ CpuOutOfRange, AffinityFailed, AffinityNotExclusive, AffinityUnsupported };
+
+fn pinCpu(cpu: usize) AffinityError!void {
+    if (builtin.os.tag != .linux) return error.AffinityUnsupported;
+    if (cpu >= cpuSetBitCapacity()) return error.CpuOutOfRange;
     var set = std.mem.zeroes(std.os.linux.cpu_set_t);
     const bits = @bitSizeOf(usize);
     set[cpu / bits] |= @as(usize, 1) << @intCast(cpu % bits);
-    std.os.linux.sched_setaffinity(0, &set) catch {};
+    const rc = std.os.linux.syscall3(
+        .sched_setaffinity,
+        0,
+        @sizeOf(std.os.linux.cpu_set_t),
+        @intFromPtr(&set),
+    );
+    if (@as(isize, @bitCast(rc)) < 0) return error.AffinityFailed;
+    const got = try currentAffinity();
+    if (!cpuInSet(got, cpu) or countCpus(got) != 1) return error.AffinityNotExclusive;
+}
+
+fn readSysfs(path: []const u8, buf: []u8) error{PmuPathTooLong}!?[]const u8 {
+    var zpath: [256]u8 = undefined;
+    if (path.len + 1 > zpath.len) return error.PmuPathTooLong;
+    @memcpy(zpath[0..path.len], path);
+    zpath[path.len] = 0;
+    const rc = std.os.linux.open(zpath[0..path.len :0], .{ .CLOEXEC = true }, 0);
+    const fd: i32 = @intCast(@as(isize, @bitCast(rc)));
+    if (fd < 0) return null;
+    defer _ = std.os.linux.close(fd);
+    const n = std.posix.read(fd, buf) catch return null;
+    return std.mem.trim(u8, buf[0..n], " \t\r\n");
+}
+
+fn sysfsDevicePath(buf: []u8, pmu: []const u8, leaf: []const u8) error{PmuPathTooLong}![]u8 {
+    return std.fmt.bufPrint(buf, "/sys/bus/event_source/devices/{s}/{s}", .{ pmu, leaf }) catch error.PmuPathTooLong;
+}
+
+fn readSysfsU32(pmu: []const u8, leaf: []const u8) error{PmuPathTooLong}!?u32 {
+    var path_buf: [256]u8 = undefined;
+    var data_buf: [64]u8 = undefined;
+    const path = try sysfsDevicePath(&path_buf, pmu, leaf);
+    const text = (try readSysfs(path, &data_buf)) orelse return null;
+    return std.fmt.parseInt(u32, text, 0) catch null;
+}
+
+fn readSysfsEvent(pmu: []const u8, event: []const u8) error{PmuPathTooLong}!?u64 {
+    var path_buf: [256]u8 = undefined;
+    var leaf_buf: [64]u8 = undefined;
+    var data_buf: [128]u8 = undefined;
+    const leaf = std.fmt.bufPrint(&leaf_buf, "events/{s}", .{event}) catch return error.PmuPathTooLong;
+    const path = try sysfsDevicePath(&path_buf, pmu, leaf);
+    const text = (try readSysfs(path, &data_buf)) orelse return null;
+    return parseEventConfig(text);
+}
+
+fn assertPmuOwnsCpu(pmu: []const u8, cpu: usize) PmuOpenError!void {
+    var path_buf: [256]u8 = undefined;
+    var data_buf: [256]u8 = undefined;
+    const path = sysfsDevicePath(&path_buf, pmu, "cpus") catch return error.PmuPathTooLong;
+    const text = (readSysfs(path, &data_buf) catch return error.PmuPathTooLong) orelse return error.PmuNotFound;
+    if (!cpuListContains(text, cpu)) return error.PmuCpuMismatch;
+}
+
+fn cpuListContains(text: []const u8, cpu: usize) bool {
+    var it = std.mem.splitScalar(u8, std.mem.trim(u8, text, " \t\r\n"), ',');
+    while (it.next()) |part_raw| {
+        const part = std.mem.trim(u8, part_raw, " \t");
+        if (part.len == 0) continue;
+        if (std.mem.indexOfScalar(u8, part, '-')) |dash| {
+            const lo = std.fmt.parseInt(usize, part[0..dash], 10) catch continue;
+            const hi = std.fmt.parseInt(usize, part[dash + 1 ..], 10) catch continue;
+            if (cpu >= lo and cpu <= hi) return true;
+        } else {
+            const v = std.fmt.parseInt(usize, part, 10) catch continue;
+            if (v == cpu) return true;
+        }
+    }
+    return false;
+}
+
+fn parseEventConfig(text: []const u8) ?u64 {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    var it = std.mem.splitScalar(u8, trimmed, ',');
+    while (it.next()) |tok_raw| {
+        const tok = std.mem.trim(u8, tok_raw, " \t");
+        inline for (.{ "event=", "config=" }) |prefix| {
+            if (std.mem.startsWith(u8, tok, prefix)) {
+                return std.fmt.parseInt(u64, tok[prefix.len..], 0) catch null;
+            }
+        }
+    }
+    return std.fmt.parseInt(u64, trimmed, 0) catch null;
+}
+
+fn currentAffinity() AffinityError!std.os.linux.cpu_set_t {
+    var got = std.mem.zeroes(std.os.linux.cpu_set_t);
+    const rc = std.os.linux.sched_getaffinity(0, @sizeOf(std.os.linux.cpu_set_t), &got);
+    if (@as(isize, @bitCast(rc)) < 0) return error.AffinityFailed;
+    return got;
+}
+
+fn firstCpuOutside(set: std.os.linux.cpu_set_t) ?usize {
+    var cpu: usize = 0;
+    while (cpu < cpuSetBitCapacity()) : (cpu += 1) {
+        if (!cpuInSet(set, cpu)) return cpu;
+    }
+    return null;
 }
 
 fn cellAt(base: [*]u8, stride: usize, index: usize) [*]u8 {
@@ -267,12 +475,22 @@ fn medianU64(values: []u64) u64 {
     return values[values.len / 2];
 }
 
-fn parseArgs(args: []const []const u8) struct { cells: usize, repeats: usize, cpu: ?usize, seed: u64, json_path: ?[]const u8 } {
+fn parseArgs(args: []const []const u8) struct {
+    cells: usize,
+    repeats: usize,
+    cpu: ?usize,
+    seed: u64,
+    json_path: ?[]const u8,
+    pmu: []const u8,
+    require_pmu: ?bool,
+} {
     var cells: usize = 1 << 20;
     var repeats: usize = 7;
     var cpu: ?usize = null;
     var seed: u64 = 0x6a09e667f3bcc909;
     var json_path: ?[]const u8 = null;
+    var pmu: []const u8 = default_booking_pmu;
+    var require_pmu: ?bool = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a = args[i];
@@ -291,12 +509,19 @@ fn parseArgs(args: []const []const u8) struct { cells: usize, repeats: usize, cp
         } else if (std.mem.eql(u8, a, "--json") and i + 1 < args.len) {
             i += 1;
             json_path = args[i];
+        } else if (std.mem.eql(u8, a, "--pmu") and i + 1 < args.len) {
+            i += 1;
+            pmu = args[i];
+        } else if (std.mem.eql(u8, a, "--require-pmu")) {
+            require_pmu = true;
+        } else if (std.mem.eql(u8, a, "--no-require-pmu")) {
+            require_pmu = false;
         } else if (std.mem.eql(u8, a, "--quick")) {
             cells = 1 << 12;
             repeats = 3;
         }
     }
-    return .{ .cells = cells, .repeats = repeats, .cpu = cpu, .seed = seed, .json_path = json_path };
+    return .{ .cells = cells, .repeats = repeats, .cpu = cpu, .seed = seed, .json_path = json_path, .pmu = pmu, .require_pmu = require_pmu };
 }
 
 fn armName(arm: Arm, buf: *[32]u8) []const u8 {
@@ -315,7 +540,18 @@ pub fn main(init: std.process.Init) !void {
     var arg_it = std.process.Args.Iterator.init(init.minimal.args);
     while (arg_it.next()) |a| try arg_list.append(arena, a);
     const cfg = parseArgs(arg_list.items);
-    if (cfg.cpu) |cpu| pinCpu(cpu);
+    if (cfg.cpu) |cpu| {
+        pinCpu(cpu) catch |err| {
+            std.debug.print("obj64-stride-ablation: --cpu {d} failed ({s}); not timing an unpinned run\n", .{
+                cpu, @errorName(err),
+            });
+            return err;
+        };
+    }
+    const require_pmu = cfg.require_pmu orelse switch (builtin.cpu.arch) {
+        .aarch64, .aarch64_be => true,
+        else => false,
+    };
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
@@ -326,8 +562,21 @@ pub fn main(init: std.process.Init) !void {
         std.fmt.bufPrint(&cpu_buf, "{d}", .{c}) catch "?"
     else
         "inherit";
+
+    var perf = linux_perf.open(.{
+        .pmu = cfg.pmu,
+        .cpu = cfg.cpu,
+        .require = require_pmu,
+    }) catch |err| {
+        std.debug.print("obj64-stride-ablation: PMU bind failed ({s}) pmu={s} cpu={s} require={}\n", .{
+            @errorName(err), cfg.pmu, cpu_text, require_pmu,
+        });
+        return err;
+    };
+    defer perf.close();
+
     try out.print(
-        "obj64 stride ablation  cells={d} repeats={d} cpu={s} seed=0x{x} host={s}-{s} cpu_model={s}\n",
+        "obj64 stride ablation  cells={d} repeats={d} cpu={s} seed=0x{x} host={s}-{s} cpu_model={s} pmu={s} refill={s} pmu_bound={}\n",
         .{
             cfg.cells,
             cfg.repeats,
@@ -336,6 +585,9 @@ pub fn main(init: std.process.Init) !void {
             @tagName(builtin.cpu.arch),
             @tagName(builtin.os.tag),
             builtin.cpu.model.name,
+            perf.pmu_name,
+            perf.refill_event,
+            perf.bound,
         },
     );
 
@@ -389,14 +641,10 @@ pub fn main(init: std.process.Init) !void {
     var samples = try arena.alloc([]Sample, arm_count);
     for (samples) |*row| row.* = try arena.alloc(Sample, cfg.repeats);
 
-    var perf = linux_perf.open();
-    defer perf.close();
-
     // Warm the slabs once so the first timed sample is not a cold-mapped page.
-    for (arms, 0..) |arm, ai| {
+    for (arms) |arm| {
         const slab = slabs[strideIndex(arm.stride)].ptr;
         _ = walk(slab, arm.stride, n, arm.order, arm.prefetch, indices);
-        _ = ai;
     }
 
     var round: usize = 0;
@@ -427,14 +675,14 @@ pub fn main(init: std.process.Init) !void {
                 .checksum = checksum,
                 .instructions = counters.instructions,
                 .cycles = counters.cycles,
-                .cache_misses = counters.cache_misses,
+                .refill = counters.refill,
             };
         }
     }
 
     try out.print(
         "{s:<16} {s:>10} {s:>10} {s:>10} {s:>10} {s:>12} {s:>12} {s:>12}\n",
-        .{ "arm", "ns_med", "ns/cell", "vs80", "vs96", "insn_med", "cyc_med", "miss_med" },
+        .{ "arm", "ns_med", "ns/cell", "vs80", "vs96", "insn_med", "cyc_med", "refill_med" },
     );
 
     var med_ns: [strides.len * orders.len * prefetch_arms.len]u64 = undefined;
@@ -460,7 +708,7 @@ pub fn main(init: std.process.Init) !void {
                 cyc_buf[cyc_n] = v;
                 cyc_n += 1;
             }
-            if (s.cache_misses) |v| {
+            if (s.refill) |v| {
                 miss_buf[miss_n] = v;
                 miss_n += 1;
             }
@@ -490,8 +738,9 @@ pub fn main(init: std.process.Init) !void {
 
     if (cfg.json_path) |path| {
         var json_buf: std.ArrayList(u8) = .empty;
-        try json_buf.print(arena, "{{\n  \"host_arch\": \"{s}\",\n  \"host_os\": \"{s}\",\n  \"host_cpu\": \"{s}\",\n  \"cells\": {d},\n  \"repeats\": {d},\n  \"seed\": {d},\n  \"arms\": [\n", .{
-            @tagName(builtin.cpu.arch), @tagName(builtin.os.tag), builtin.cpu.model.name, n, cfg.repeats, cfg.seed,
+        const cpu_json: []const u8 = if (cfg.cpu != null) cpu_text else "null";
+        try json_buf.print(arena, "{{\n  \"host_arch\": \"{s}\",\n  \"host_os\": \"{s}\",\n  \"host_cpu\": \"{s}\",\n  \"cpu\": {s},\n  \"pmu\": \"{s}\",\n  \"refill_event\": \"{s}\",\n  \"pmu_bound\": {},\n  \"require_pmu\": {},\n  \"cells\": {d},\n  \"repeats\": {d},\n  \"seed\": {d},\n  \"arms\": [\n", .{
+            @tagName(builtin.cpu.arch), @tagName(builtin.os.tag), builtin.cpu.model.name, cpu_json, perf.pmu_name, perf.refill_event, perf.bound, require_pmu, n, cfg.repeats, cfg.seed,
         });
         for (arms, 0..) |arm, ai| {
             const vs80 = ratioVs(arms, med_ns[0..], ai, 80);
@@ -503,7 +752,7 @@ pub fn main(init: std.process.Init) !void {
             );
             if (med_insn[ai]) |v| try json_buf.print(arena, ", \"insn_med\": {d}", .{v});
             if (med_cyc[ai]) |v| try json_buf.print(arena, ", \"cycles_med\": {d}", .{v});
-            if (med_miss[ai]) |v| try json_buf.print(arena, ", \"cache_misses_med\": {d}", .{v});
+            if (med_miss[ai]) |v| try json_buf.print(arena, ", \"refill_med\": {d}", .{v});
             try json_buf.print(arena, "}}{s}\n", .{if (ai + 1 == arm_count) "" else ","});
         }
         try json_buf.print(arena, "  ]\n}}\n", .{});
@@ -561,5 +810,40 @@ test "all visit orders xor the same payload" {
         try std.testing.expectEqual(want, walk(raw.ptr, stride, n, .shuf, true, indices));
         try std.testing.expectEqual(want, walk(raw.ptr, stride, n, .chase, false, indices));
         try std.testing.expectEqual(want, walk(raw.ptr, stride, n, .chase, true, indices));
+    }
+}
+
+test "cpu list parser covers the booking big-core set" {
+    try std.testing.expect(cpuListContains("5-9,15-19", 17));
+    try std.testing.expect(cpuListContains("5-9,15-19", 5));
+    try std.testing.expect(!cpuListContains("5-9,15-19", 0));
+    try std.testing.expect(cpuListContains("0-3", 2));
+    try std.testing.expect(!cpuListContains("0-3", 4));
+    try std.testing.expect(cpuListContains("17", 17));
+    try std.testing.expect(!cpuListContains("17", 18));
+}
+
+test "sysfs event= lines parse" {
+    try std.testing.expectEqual(@as(u64, 0x08), parseEventConfig("event=0x08").?);
+    try std.testing.expectEqual(@as(u64, 0x17), parseEventConfig("event=0x17\n").?);
+    try std.testing.expectEqual(@as(u64, 0x11), parseEventConfig("event=0x11,inv=1").?);
+    try std.testing.expectEqual(@as(u64, 0x08), parseEventConfig("config=0x08").?);
+}
+
+test "affinity rejects a CPU outside cpu_set_t" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    try std.testing.expectError(error.CpuOutOfRange, pinCpu(cpuSetBitCapacity()));
+}
+
+test "affinity rejects a CPU the kernel will not pin" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const before = try currentAffinity();
+    const cpu = firstCpuOutside(before) orelse return error.SkipZigTest;
+    try std.testing.expectError(error.AffinityFailed, pinCpu(cpu));
+    const after = try currentAffinity();
+    try std.testing.expectEqual(countCpus(before), countCpus(after));
+    var i: usize = 0;
+    while (i < cpuSetBitCapacity()) : (i += 1) {
+        try std.testing.expectEqual(cpuInSet(before, i), cpuInSet(after, i));
     }
 }

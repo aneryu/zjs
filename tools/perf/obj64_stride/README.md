@@ -30,17 +30,23 @@ strides. S0's kill line is the prefetch arm of 64 vs 96.
 ```sh
 zig build obj64-stride-ablation-test
 zig build obj64-stride-ablation -Doptimize=ReleaseFast
-taskset -c 0 zig-out/bin/obj64-stride-ablation --cells 1048576 --repeats 8 --json obj64-stride.json
+taskset -c 17 zig-out/bin/obj64-stride-ablation --cpu 17 --pmu armv8_pmuv3_1 \
+    --cells 1048576 --repeats 8 --json obj64-stride.json
 ```
 
-`--cpu N` pins via `sched_setaffinity`. Omit it when `taskset` already pinned
-the process. `--quick` drops to 4096 cells / 3 repeats for a sanity check.
+`--cpu N` pins via `sched_setaffinity` and **exits nonzero** if the CPU is
+outside `cpu_set_t`, offline, outside the cpuset, or the resulting affinity is
+not exactly `{N}`. Omit it only for a directional unpinned run; booking runs
+must pass it. `--quick` drops to 4096 cells / 3 repeats for a sanity check.
 
-Official booking numbers must be taken on the ARM Cortex-X925 measurement
-host (quiet window, pinned big core, `armv8_pmuv3_1` / L2D refill). An x86
-cloud reading is directional only: cache-line size is still 64 B,
-adjacent-line prefetch policy is not, and `PERF_COUNT_HW_CACHE_MISSES` is
-not L2D refill.
+On aarch64 the harness binds
+`armv8_pmuv3_1/{instructions,cycles,l2d_cache_refill}` by reading the PMU's
+sysfs `type` and `events/*` files (not generic `PERF_COUNT_HW_*`), then opens
+those configs with `perf_event_open` on the pinned CPU as one counter group.
+`--pmu` must own the pinned CPU (`.../devices/<pmu>/cpus`). That is the default
+and is fail-closed; `--no-require-pmu` is wall-time only. An x86 cloud reading
+is directional: cache-line size is still 64 B, adjacent-line prefetch policy is
+not, and generic `PERF_COUNT_HW_CACHE_MISSES` is not L2D refill.
 
 ## In-engine pad-only arm
 

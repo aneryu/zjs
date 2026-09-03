@@ -72,7 +72,7 @@ S0 kill line(带 prefetch 的 64 vs 96:<1.5% cycles 且 <8% refill ⇒ 线轴死
 
 ```sh
 zig build obj64-stride-ablation -Doptimize=ReleaseFast
-taskset -c 17 zig-out/bin/obj64-stride-ablation --cells 1048576 --repeats 8 --json obj64-stride-arm.json
+taskset -c 17 zig-out/bin/obj64-stride-ablation --cpu 17 --pmu armv8_pmuv3_1 --cells 1048576 --repeats 8 --json obj64-stride-arm.json
 ```
 
 ## 引擎内 pad-only:`pad_alloc.js` 300k 个 `{a,b}`
