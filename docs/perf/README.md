@@ -17,6 +17,7 @@ Current design notes:
 - [GC behaviour baseline](gc-baseline.md) — pre-refactor collector counters
 - [Object and shape implementation](object-shape-design.md)
 - [obj64 stride ablation](../../tools/perf/obj64_stride/README.md) — engine-external 64/80/96 line-axis microbenchmark; in-engine pad arm is `-Dzjs_obj64_s1_pad`
+- [obj64 ablation booking (2026-09-03)](../obj64-ablation-2026-09-03.md) — x86 directional 8 MiB stride + in-engine pad-only class histogram; not an ARM cycles booking
 - [`exec/call_runtime.zig` candidate domains and move criteria](../backlog.md)
 - Frozen subsystem baseline (historical):
   `docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md` — removed

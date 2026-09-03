@@ -745,3 +745,15 @@ adjacent-line prefetch 把 96B 两条相邻线的账早已摊掉大半。
   **该列在 4/6 负载上本就不可复现**(同二进制 5058/5431/5851 milli 漂移),
   现确定化;合成 40-superblock 失控形态仍 FAIL=门未钝化。
 - R10 未评(评分口径),入下轮安静窗口清单。
+
+## obj64 消融臂(2026-09-03;x86 方向性,不入 cycles 账)
+
+- 材料:`tools/perf/obj64_stride/`(引擎外 64/80/96 × seq/chase/shuf × prefetch)
+  与 `-Dzjs_obj64_s1_pad`(默认关;只给 trailing ordinary 垫 16 B,数组不动)。
+  报告:[obj64-ablation-2026-09-03](obj64-ablation-2026-09-03.md)。
+- 本机 Intel Xeon/KVM,无用户态 HW 计数器。8 MiB cell DRAM-bound:`chase-pf`
+  64 vs 96 **−8.2% ns**,80 vs 96 **−2.8% ns**;随机链上 pf≈np。kill line
+  未在这台机器上触发,也未复现 ARM S0 的 −30.66% cycles。
+- 引擎内 300k `{a,b}`:pad-off 30 万个进 **80B class**,pad-on 进 **96B class**;
+  heap live **+4.80 MB = 16×300k**;class 64 两侧都是 6。填充按个数入账。
+- S2 仍停在 ①。生产 80B 默认不动。ARM 安静窗口用同一份 harness 才能入账。
