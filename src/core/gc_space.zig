@@ -162,6 +162,10 @@ pub const Histogram = struct {
     large: usize = 0,
     total: usize = 0,
     bytes_total: usize = 0,
+    /// Detailed-report denominator for terminal M. Updated only in test builds
+    /// or when `--gc-stats` enables the already-cold publication census.
+    object_publications: usize = 0,
+    slots2_object_publications: usize = 0,
 
     pub fn record(self: *Histogram, payload: usize) void {
         self.total += 1;
@@ -176,6 +180,12 @@ pub const Histogram = struct {
         }
         const idx = if (payload == 0) 0 else (payload - 1) / fine_bucket_step;
         self.buckets[idx] += 1;
+    }
+
+    pub fn recordObject(self: *Histogram, payload: usize, slots2: bool) void {
+        self.record(payload);
+        self.object_publications +|= 1;
+        if (slots2) self.slots2_object_publications +|= 1;
     }
 
     pub fn percentilePayload(self: Histogram, hundredths: usize) usize {
@@ -244,5 +254,3 @@ pub fn cutoffForCoverage(hist: Histogram, hundredths: usize) usize {
     const need = @max(linear_limit_bytes, p);
     return snapToGeneratedClass(need);
 }
-
-

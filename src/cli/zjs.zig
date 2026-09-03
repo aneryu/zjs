@@ -54,6 +54,7 @@ pub const RuntimeOptions = struct {
     trace_memory: bool = false,
     profile_opcodes: bool = false,
     gc_stats: bool = false,
+    gc_gate_settle: bool = false,
     perf_json: bool = false,
     leak_check: bool = false,
     include_paths: [max_include_paths][]const u8 = @splat(""),
@@ -108,6 +109,17 @@ pub fn parseArgs(args: []const []const u8) CliError!Command {
             // The marked-set/storage census is NOT among them: it is the one
             // walk large enough to move the scores this panel is used to
             // judge, so it has its own flag below.
+            engine.core.gc_trace_stw.detailed_reports = true;
+            rest = rest[1..];
+            continue;
+        }
+        if (std.mem.eql(u8, rest[0], "--gc-gate-settle")) {
+            // Gate-only contract: retain the natural endpoint, then complete
+            // any irreversible destruction transaction before publishing the
+            // stats the checker treats as settled. This implies --gc-stats so
+            // callers cannot accidentally request a silent settlement.
+            options.gc_stats = true;
+            options.gc_gate_settle = true;
             engine.core.gc_trace_stw.detailed_reports = true;
             rest = rest[1..];
             continue;
@@ -387,18 +399,16 @@ pub fn main(init: std.process.Init) !void {
         try dumpMemoryUsage(&stdout_writer.interface, &runtime);
         try stdout_writer.interface.flush();
     }
-    // The CLI does not tear the runtime down on the happy path, so the slab
-    // never gets to report from its own `deinit`. The `comptime` guard is
-    // load-bearing: an unguarded call to an empty function still moved the
-    // refcounting build's `.text`, which is the one thing this measurement
-    // instrument must not do.
-    if (comptime engine.core.memory.slab_locality_audit) engine.core.memory.slabLocalityReport();
     if (commandRuntimeOptions(command).profile_opcodes) {
         opcode_profile.flushPendingDispatch();
         try dumpOpcodeProfile(&stdout_writer.interface, runtime.runtime.opcode_profile.?);
         try stdout_writer.interface.flush();
     }
     if (commandRuntimeOptions(command).gc_stats) {
+        if (commandRuntimeOptions(command).gc_gate_settle) {
+            try dumpGcDoomedState(&stdout_writer.interface, "endpoint", runtime.runtime);
+            engine.core.runtime.settlePendingDestructionForGateStats(runtime.runtime);
+        }
         try dumpGcStats(&stdout_writer.interface, runtime.runtime.gcStats(), &runtime.runtime.gc);
         try dumpGcPauses(&stdout_writer.interface, runtime.runtime.gcPauseDistribution());
         if (comptime engine.core.gc.space_model_enabled) {
@@ -406,19 +416,20 @@ pub fn main(init: std.process.Init) !void {
         }
         if (comptime engine.core.gc.block_heap_enabled) {
             try dumpGcBlockHeapStats(&stdout_writer.interface, &runtime.runtime.gc);
-            try dumpGcParallelStats(&stdout_writer.interface, runtime.runtime);
             try dumpGcMarkFootprint(&stdout_writer.interface, runtime.runtime);
             try dumpGcPhaseTotals(&stdout_writer.interface, &runtime.runtime.gc);
         }
         if (comptime engine.core.gc.generation_enabled) {
             try dumpGcGenerationStats(&stdout_writer.interface, &runtime.runtime.gc);
         }
-        try stdout_writer.interface.print("gc: terminal doomed_pending {s}\n", .{
-            if (runtime.runtime.gc.doomed_pending) "true" else "false",
-        });
-        if (comptime engine.core.gc.corpse_census_enabled) {
-            try engine.core.gc_corpse_census.report(&stdout_writer.interface);
+        if (comptime engine.core.gc.roots_diag_enabled) {
+            try runtime.runtime.gc.roots_diag.report(&stdout_writer.interface, runtime.runtime);
         }
+        try dumpGcDoomedState(
+            &stdout_writer.interface,
+            if (commandRuntimeOptions(command).gc_gate_settle) "settled" else "endpoint",
+            runtime.runtime,
+        );
         try stdout_writer.interface.flush();
     }
     if (commandRuntimeOptions(command).perf_json) {
@@ -457,7 +468,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-mark-footprint] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-mark-footprint] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
+    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
 }
 
 /// Standalone query flag: it takes no script and constructs no runtime, so it
@@ -896,35 +907,6 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
             "gc: incremental major cycles completed {d}, aborted {d}, forced {d}, mark steps {d}, cycle STW last {d} ns max {d} ns\n",
             .{ cs.cycles_completed, cs.cycles_aborted, cs.forced_finishes, cs.increments, cs.last_cycle_stw_ns, cs.max_cycle_stw_ns },
         );
-        if (comptime engine.core.gc.sticky_major_enabled) {
-            const sticky = registry.stickyMajorStats();
-            const baseline = registry.stickyMajorFullBaseline();
-            try writer.print(
-                "gc: sticky-major experiment arm {s}, full {d}, sticky {d}, pressure-forced full {d}, last-full settled {d}, full-pressure threshold {d}, oracle checks sticky {d} full {d}, violations precise {d} conservative-only {d}, inject-skip {d}\n",
-                .{
-                    if (engine.core.gc.sticky_major_on) "on" else "off",
-                    sticky.full_cycles,
-                    sticky.sticky_cycles,
-                    sticky.full_forced_by_pressure,
-                    baseline.settled_bytes,
-                    baseline.pressure_threshold,
-                    sticky.oracle_checks_sticky,
-                    sticky.oracle_checks_full,
-                    sticky.oracle_violations_precise,
-                    sticky.oracle_violations_conservative,
-                    engine.core.gc.sticky_inject_skip,
-                },
-            );
-            try writer.print(
-                "gc: sticky-major floating garbage max {d} bytes, sum {d} bytes over {d} sticky cycles, max ordinary threshold {d}\n",
-                .{
-                    sticky.max_sticky_excess_bytes,
-                    sticky.sum_sticky_excess_bytes,
-                    sticky.sticky_cycles,
-                    sticky.max_ordinary_threshold,
-                },
-            );
-        }
         try writer.print(
             "gc: cycle envelope measured {d}, skipped {d}, max-P/T S {d}, T {d}, B {d}, P {d}, B/T-x1000000 {d}, P/T-x1000000 {d}, P/S-x1000000 {d}, forced {d}\n",
             .{
@@ -944,16 +926,6 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
             "gc: incremental STW phase-segment max ns begin {d}, increment {d}, destroy {d}, finish {d}\n",
             .{ cs.segment_max_ns[0], cs.segment_max_ns[1], cs.segment_max_ns[2], cs.segment_max_ns[3] },
         );
-        if (engine.core.gc_trace_stw.destroy_probe) {
-            try writer.print(
-                "gc: destroy probe destructor {d} ns, parked-drain {d} ns, condemned headers {d}\n",
-                .{
-                    engine.core.gc_trace_stw.destroy_probe_dtor_ns,
-                    engine.core.gc_trace_stw.destroy_probe_drain_ns,
-                    engine.core.gc_trace_stw.destroy_probe_corpses,
-                },
-            );
-        }
         try writer.print(
             "gc: incremental STW phase totals begin {d} ns/{d} segments, increment {d} ns/{d} segments, destroy {d} ns/{d} segments, finish {d} ns/{d} segments\n",
             .{
@@ -979,49 +951,6 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
                 st.large_maps,
             },
         );
-        const census = registry.block_heap.census();
-        try writer.print(
-            "gc: block heap topology classed superblocks {d}, medium superblocks {d}, initialized blocks {d}, reserved-uninitialized blocks {d}, nonempty blocks {d}, partially-full blocks {d}, empty-free blocks {d}, empty-active blocks {d}, decommitted-empty blocks {d}, wholly-empty superblocks {d}, hot-reuse blocks {d}, interval-active blocks {d}\n",
-            .{
-                census.classed_superblocks,
-                census.medium_superblocks,
-                census.initialized_blocks,
-                census.reserved_uninitialized_blocks,
-                census.nonempty_blocks,
-                census.partially_full_blocks,
-                census.empty_free_blocks,
-                census.empty_active_blocks,
-                census.decommitted_empty_blocks,
-                census.wholly_empty_superblocks,
-                census.hot_reuse_blocks,
-                census.interval_active_blocks,
-            },
-        );
-        try writer.print(
-            "gc: block heap cell capacity live {d}, nonempty capacity {d}, empty capacity {d}, within-nonempty-unused {d}\n",
-            .{
-                census.live_cell_bytes,
-                census.nonempty_cell_capacity_bytes,
-                census.empty_cell_capacity_bytes,
-                census.nonempty_cell_capacity_bytes -| census.live_cell_bytes,
-            },
-        );
-        for (engine.core.gc_space.classes, 0..) |cell_size, class_idx| {
-            const class = census.classes[class_idx];
-            if (class.initialized_blocks == 0) continue;
-            try writer.print(
-                "gc: block heap class {d} bytes initialized {d}, nonempty {d}, empty-free {d}, empty-active {d}, live-cells {d}, capacity-cells {d}\n",
-                .{
-                    cell_size,
-                    class.initialized_blocks,
-                    class.nonempty_blocks,
-                    class.empty_free_blocks,
-                    class.empty_active_blocks,
-                    class.live_cells,
-                    class.cell_capacity,
-                },
-            );
-        }
         try writer.print(
             "gc: block heap deferred block runs {d}, hot reuse published {d}, reopened {d}, pass-A settled cells {d}\n",
             .{ st.deferred_block_runs_completed, st.hot_blocks_published, st.hot_blocks_reopened, st.passa_settled_cells },
@@ -1052,6 +981,9 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
 
 fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
     const ph = registry.concurrent.stats;
+    // Row format is parsed by tools/perf/gc_stats_snapshot.py (Stage 0); the
+    // two finish-side timers added by TGC S0 go on the reconciliation row
+    // below so this row keeps its eight fields.
     try writer.print(
         "gc: incremental subphase ns totals begin-clear {d}, begin-precise-seed {d}, begin-conservative-seed {d}, begin-retire {d}, finish-remark-total {d}, finish-conservative-seed-subset {d}, finish-weak {d}, finish-condemn {d}\n",
         .{
@@ -1065,18 +997,21 @@ fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Reg
             ph.phase_finish_condemn_ns,
         },
     );
+    // Reconciliation against the STW rows above: both are cumulative over
+    // the run, so the residuals are what the subphase timers do not cover
+    // (the `nowNanos` reads around each pause, and for begin the frontier
+    // seeding between clear and retire).
+    const begin_total = ph.total_stw_by_kind[@intFromEnum(engine.core.gc.Registry.SliceKind.begin)];
+    const finish_total = ph.total_stw_by_kind[@intFromEnum(engine.core.gc.Registry.SliceKind.finish)];
+    const begin_sum = ph.phase_begin_clear_ns +| ph.phase_begin_precise_seed_ns +| ph.phase_begin_conservative_seed_ns +| ph.phase_begin_retire_ns;
+    const finish_sum = ph.phase_finish_init_ns +| ph.phase_finish_remark_ns +| ph.phase_finish_weak_ns +| ph.phase_finish_condemn_ns +| ph.phase_finish_tail_ns;
+    try writer.print(
+        "gc: incremental subphase reconciliation finish-init {d}, finish-tail {d}; begin STW {d} - subphases {d} = other {d} ns; finish STW {d} - subphases {d} = other {d} ns\n",
+        .{ ph.phase_finish_init_ns, ph.phase_finish_tail_ns, begin_total, begin_sum, begin_total -| begin_sum, finish_total, finish_sum, finish_total -| finish_sum },
+    );
     try writer.print(
         "gc: incremental subphase work totals retired non-block headers {d}, retired young blocks {d}, retired remembered sets {d}, clearMarks non-block headers {d}\n",
         .{ ph.phase_retired_nonblock_headers, ph.phase_retired_young_blocks, ph.phase_retired_remembered_sets, ph.phase_cleared_nonblock_headers },
-    );
-}
-
-fn dumpGcParallelStats(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime) !void {
-    const ps = rt.gc_mark_pool.stats;
-    if (ps.parallel_slices == 0 and rt.gc_mark_pool.count == 0) return;
-    try writer.print(
-        "gc: parallel mark claims workers {d}, slices {d}, owner successful {d}, helpers successful {d}\n",
-        .{ rt.gc_mark_pool.count, ps.parallel_slices, ps.owner_marked, ps.worker_marked },
     );
 }
 
@@ -1096,7 +1031,7 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
         .{ fp.major_censuses, fp.marked_headers, fp.block_headers, fp.refcount_removed_headers },
     );
     try writer.print(
-        "gc: marked-set kinds object {d}, function-bytecode {d}, var-ref {d}, realm-context {d}, module {d}, shape {d}\n",
+        "gc: marked-set kinds object {d}, function-bytecode {d}, var-ref {d}, realm-context {d}, module {d}, shape {d}, big-int {d}\n",
         .{
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.object)],
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.function_bytecode)],
@@ -1104,6 +1039,7 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.realm_context)],
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.module)],
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.shape)],
+            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.big_int)],
         },
     );
     try writer.print(
@@ -1161,7 +1097,9 @@ fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const engi
     });
     try writer.print("gc: collector counted objects freed {d} (excludes bytecode), zero-ref drains {d}\n", .{
         stats.freed_objects,
-        stats.zero_ref_drains,
+        // `zero ref drains` has no writer since the rc collector went; the
+        // token stays because tools/perf/gc_stats_snapshot.py parses the row.
+        @as(usize, 0),
     });
     try writer.print("gc: heap live {d} bytes, account peak {d} bytes\n", .{
         stats.heap_live_bytes,
@@ -1189,6 +1127,24 @@ fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const engi
         stats.weak_ref_count,
         stats.finalizer_queue_length,
     });
+}
+
+fn dumpGcDoomedState(writer: *std.Io.Writer, layer: []const u8, rt: *const zjs.JSRuntime) !void {
+    const state = engine.core.gc_trace_stw.doomedStateSnapshot(rt);
+    try writer.print(
+        "gc: {s} doomed_pending {s}, doomed_buckets {d}, doomed_headers {d}, doomed_cursor {s}, doomed_blocks {d}, parked_frees {d}, deferred_finalizers {d}, active_finalizer {s}\n",
+        .{
+            layer,
+            if (state.pending) "true" else "false",
+            state.nonempty_buckets,
+            state.bucket_headers,
+            if (state.cursor_present) "true" else "false",
+            state.doomed_blocks,
+            state.parked_frees,
+            state.deferred_finalizers,
+            if (state.active_finalizer) "true" else "false",
+        },
+    );
 }
 
 /// Pause percentiles, or an explicit "no pauses" line. Never print zeros for
@@ -1288,6 +1244,38 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         } else {
             try output.print("{s:<20} {d:>9} {d:>13} {d:>12} {d:>10}\n", .{ display_name, row.count, row.nanos, avg, profile.slow_count[row.opcode] });
         }
+    }
+
+    // D12: the carrier's residents, one row per sub, named from the
+    // declaration. Aggregating them into the one `using` row above is
+    // exactly what 11.5 clause 3 forbids -- the cold plane's population
+    // is the fact a reclaim decision needs.
+    var sub_total: u64 = 0;
+    for (profile.ext0_sub_count) |c| sub_total +|= c;
+    if (sub_total != 0) {
+        try output.print("\nUSING SUB               COUNT\n", .{});
+        for (profile.ext0_sub_count, 0..) |c, sub| {
+            if (c == 0) continue;
+            const resident = engine.bytecode.opcode.logical.subForm(@intCast(sub));
+            const name = if (resident) |form| @tagName(form) else "<range>";
+            try output.print("{s:<20} {d:>9}  (sub {d})\n", .{ name, c, sub });
+        }
+    }
+
+    // D12's family rollup: a GENERATED aggregation view over the form
+    // counts, never a substitute for per-form rows.
+    var family_counts = std.enums.EnumArray(engine.bytecode.opcode.logical.SemanticFamily, u64).initFill(0);
+    for (profile.count, 0..) |c, id| {
+        if (c == 0 or id >= engine.bytecode.opcode.op.op_count) continue;
+        if (engine.bytecode.opcode.physical.stateOf(@intCast(id)) != .claimed) continue;
+        const form: engine.bytecode.opcode.logical.LogicalOpcode = @enumFromInt(id);
+        family_counts.getPtr(engine.bytecode.opcode.logical.familyOf(form)).* +|= c;
+    }
+    try output.print("\nFAMILY (rollup)         COUNT\n", .{});
+    var fam_it = family_counts.iterator();
+    while (fam_it.next()) |entry| {
+        if (entry.value.* == 0) continue;
+        try output.print("{s:<20} {d:>9}\n", .{ @tagName(entry.key), entry.value.* });
     }
 
     try dumpHostDispatchStats(output);
@@ -1583,6 +1571,12 @@ test "zjs args accept module file script arguments" {
     try std.testing.expectEqual(@as(usize, 2), command.file.script_args.len);
     try std.testing.expectEqualStrings("input.mjs", command.file.script_args[0]);
     try std.testing.expectEqualStrings("arg", command.file.script_args[1]);
+}
+
+test "zjs args gate settlement implies GC stats" {
+    const command = try parseArgs(&.{ "--gc-gate-settle", "input.js" });
+    try std.testing.expect(command.file.options.gc_gate_settle);
+    try std.testing.expect(command.file.options.gc_stats);
 }
 
 test "zjs detects module mode from extension and first token (qjs JS_DetectModule)" {

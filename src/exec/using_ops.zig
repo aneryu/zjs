@@ -17,6 +17,7 @@ const promise_ops = @import("promise_ops.zig");
 const object_ops = @import("object_ops.zig");
 const vm_call = @import("vm_call.zig");
 const vm_literal = @import("vm_literal.zig");
+const vm_property_field = @import("vm_property_field.zig");
 const vm_value = @import("vm_value.zig");
 
 pub const Step = enum {
@@ -81,76 +82,93 @@ pub noinline fn execVm(
     if (frame.pc >= code.len) return error.InvalidBytecode;
     const sub = code[frame.pc];
     frame.pc += 1;
-    if (bytecode.opcode.using_sub.isAdd(sub)) {
-        return addResourceWithHint(ctx, output, global, stack, frame, catch_target, bytecode.opcode.using_sub.addHint(sub));
+    if (bytecode.opcode.ext0_sub.isAdd(sub)) {
+        return addResourceWithHint(ctx, output, global, stack, frame, catch_target, bytecode.opcode.ext0_sub.addHint(sub));
     }
     return switch (sub) {
-        bytecode.opcode.using_sub.create => createStackVm(ctx, global, stack, frame, catch_target, output),
-        bytecode.opcode.using_sub.dispose => disposeStackVm(ctx, output, global, stack, frame, catch_target, .normal),
-        bytecode.opcode.using_sub.dispose_throw => disposeStackVm(ctx, output, global, stack, frame, catch_target, .throw),
+        bytecode.opcode.ext0_sub.create => createStackVm(ctx, global, stack, frame, catch_target, output),
+        bytecode.opcode.ext0_sub.dispose => disposeStackVm(ctx, output, global, stack, frame, catch_target, .normal),
+        bytecode.opcode.ext0_sub.dispose_throw => disposeStackVm(ctx, output, global, stack, frame, catch_target, .throw),
         // Cold-plane reclamation (opcode-space survey §7): zero executions
         // in the benchmark suite, so the second-level branch is free.
-        bytecode.opcode.using_sub.put_super_value => {
+        bytecode.opcode.ext0_sub.put_super_value => {
             _ = try object_ops.putSuperValue(ctx, output, global, stack, function, frame, catch_target);
             return .done;
         },
-        bytecode.opcode.using_sub.to_object => {
+        bytecode.opcode.ext0_sub.to_object => {
             _ = try vm_value.toObjectVm(ctx, output, stack, frame, catch_target, global);
             return .done;
         },
-        bytecode.opcode.using_sub.set_proto => {
+        // C0 late-encoding resident: the canonical final encoding of
+        // to_propkey. Identical semantics to the direct id 112, which
+        // stays executable for the D11 alias window only.
+        bytecode.opcode.ext0_sub.to_propkey => {
+            return switch (try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target)) {
+                .done => .done,
+                .continue_loop => .continue_loop,
+            };
+        },
+        // C1-1 resident: identical semantics to the direct id 75, which
+        // stays executable for its D11 window only. The opcode constant is
+        // passed literally -- the shared setName helper selects its
+        // computed arm from it, never from the stream byte.
+        bytecode.opcode.ext0_sub.set_name_computed => {
+            try vm_property_field.setName(ctx, output, global, stack, function, frame, bytecode.opcode.op.set_name_computed);
+            return .done;
+        },
+        bytecode.opcode.ext0_sub.set_proto => {
             try vm_literal.setProto(ctx, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.check_ctor_return => {
+        bytecode.opcode.ext0_sub.check_ctor_return => {
             _ = try vm_call.checkCtorReturnVm(ctx, output, stack, frame, catch_target, global);
             return .done;
         },
-        bytecode.opcode.using_sub.is_undefined => {
+        bytecode.opcode.ext0_sub.is_undefined => {
             try vm_value.isUndefined(ctx.runtime, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.typeof_is_undefined => {
+        bytecode.opcode.ext0_sub.typeof_is_undefined => {
             try vm_value.typeOfIsUndefined(ctx.runtime, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.typeof_is_function => {
+        bytecode.opcode.ext0_sub.typeof_is_function => {
             try vm_value.typeOfIsFunction(ctx.runtime, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.insert4 => {
+        bytecode.opcode.ext0_sub.insert4 => {
             try vm_value.insert4(ctx, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.rot5l => {
+        bytecode.opcode.ext0_sub.rot5l => {
             try vm_value.rot5l(ctx, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.perm5 => {
+        bytecode.opcode.ext0_sub.perm5 => {
             try vm_value.perm5(ctx, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.dup2 => {
+        bytecode.opcode.ext0_sub.dup2 => {
             try vm_value.dup2(ctx, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.swap2 => {
+        bytecode.opcode.ext0_sub.swap2 => {
             try vm_value.swap2(ctx, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.rot3r => {
+        bytecode.opcode.ext0_sub.rot3r => {
             try vm_value.rot3r(ctx, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.rot4l => {
+        bytecode.opcode.ext0_sub.rot4l => {
             try vm_value.rot4l(ctx, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.dup3 => {
+        bytecode.opcode.ext0_sub.dup3 => {
             try vm_value.dup3(ctx, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.dup1 => {
+        bytecode.opcode.ext0_sub.dup1 => {
             try vm_value.dup1(ctx, stack);
             return .done;
         },

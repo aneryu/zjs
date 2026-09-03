@@ -186,7 +186,6 @@ pub const ExecutionSummary = struct {
     pub fn deinit(self: *ExecutionSummary, allocator: std.mem.Allocator) void {
         self.selection.deinit(allocator);
     }
-
 };
 
 const WorkerResult = struct {
@@ -687,6 +686,14 @@ fn runEmbeddedEngine(
             stderr_out.* = name;
             break :failed zjs.JSValue.exception();
         }
+        // `ZJS_T262_ERRTRACE=1` on the Debug runner prints the Zig error
+        // return trace of an engine-level failure (OutOfMemory etc.), which
+        // the one-word report line cannot carry.
+        if (@import("builtin").mode == .Debug) {
+            if (std.c.getenv("ZJS_T262_ERRTRACE") != null) {
+                if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
+            }
+        }
         stderr_out.* = try std.fmt.bufPrint(stderr_storage, "{s}", .{@errorName(err)});
         break :failed zjs.JSValue.exception();
     };
@@ -1043,7 +1050,7 @@ test "test262 args reject the retired gc-shadow-check flag" {
     // script still passing its flag must fail loudly rather than run without
     // the census it thinks it asked for.
     try std.testing.expectError(error.Usage, parseArgs(&.{ "--gc-shadow-check", "-c", "test262.conf" }));
-    const plain = try parseArgs(&.{"-c", "test262.conf"});
+    const plain = try parseArgs(&.{ "-c", "test262.conf" });
     try std.testing.expectEqualStrings("test262.conf", plain.config_path.?);
 }
 

@@ -20,10 +20,13 @@ import json
 import os
 import re
 import subprocess
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 CASES = os.path.join(REPO, "tools", "perf", "same_runtime", "cases")
+sys.path.insert(0, os.path.dirname(HERE))
+from measure_fields import field_metadata, lock_attested, single_cpu
 
 
 def record(binary, cpu, case, event, iterations, warmup, tmpdir, freq):
@@ -75,7 +78,9 @@ def main():
     parser.add_argument("--cases", required=True)
     parser.add_argument("--baseline", required=True)
     parser.add_argument("--events", default="cycles,instructions")
-    parser.add_argument("--cpu", type=int, default=19)
+    parser.add_argument("--field", choices=("a", "b", "host"), default=None)
+    parser.add_argument("--cpu", type=int, default=None,
+                        help="legacy CPU override; noncanonical values are diagnostic-only")
     parser.add_argument("--iterations", type=int, default=200)
     parser.add_argument("--warmup", type=int, default=8)
     parser.add_argument("--freq", type=int, default=20000)
@@ -83,6 +88,11 @@ def main():
     parser.add_argument("--tmpdir", default=os.environ.get("TMPDIR", "/tmp"))
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
+
+    try:
+        measure_field, args.cpu, field_conforming = single_cpu(args.field, args.cpu)
+    except ValueError as error:
+        parser.error(str(error))
 
     binaries = []
     for item in args.binary:
@@ -92,7 +102,13 @@ def main():
     cases = [c for c in args.cases.split(",") if c]
     events = [e for e in args.events.split(",") if e]
     out = {"line": "P7-50", "iterations": args.iterations,
-           "inner": args.inner, "cpu": args.cpu, "profiles": {}}
+           "inner": args.inner, "cpu": args.cpu,
+           "measurement_field": {
+               **field_metadata(measure_field, "single"),
+               "fieldConforming": field_conforming,
+               "lockAttested": lock_attested(measure_field),
+           },
+           "profiles": {}}
 
     for label, path in binaries:
         for event in events:

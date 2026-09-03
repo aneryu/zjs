@@ -42,11 +42,10 @@ fn traceMachine(machine: *inline_calls.Machine, visitor: *RootVisitor) RootTrace
     // ordinary Object walk would read undefined memory (0xaa autopsy,
     // 2026-08-24). The Registry construction pin protects the shell's block
     // cell and traces its initialized generator payload during that window. Trace
-    // this ordinary slot only after publication; the selected header's linked
-    // predicate is authoritative, and seedRoots never runs while sweep-side detachment
-    // transiently unlinks live headers.
+    // this ordinary slot only after publication; Object has no intrusive link
+    // in terminal layout M, so the prefix's accounting bit is the authority.
     if (machine.l0.generator_state) |generator_state| {
-        if (core.gc.headerLinked(&generator_state.header)) {
+        if (generator_state.gcHeaderConst().metaConst().alloc_info.heap_accounted) {
             try visitor.constOptionalObject(generator_state);
         }
     }

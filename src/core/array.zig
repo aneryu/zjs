@@ -144,7 +144,7 @@ pub fn constructLiteralOwnedDenseFromShape(rt: *JSRuntime, values: []const JSVal
 
 inline fn constructLiteralOwnedDenseFromShapeWork(rt: *JSRuntime, values: []const JSValue, initial_shape: *shape_mod.Shape) !JSValue {
     const object = try Object.createArrayFromInitialShape(rt, initial_shape);
-    errdefer Object.destroyFromHeader(rt, &object.header);
+    errdefer Object.destroyFromHeader(rt, object.gcHeader());
     try object.initDenseArrayLiteralValuesOwnedTrusted(rt, values);
     return object.value();
 }
@@ -165,7 +165,7 @@ pub fn constructLiteralWithPrototype(rt: *JSRuntime, values: []const JSValue, pr
     defer root_frame.deactivate(rt);
 
     const object = try Object.createArray(rt, prototype);
-    errdefer Object.destroyFromHeader(rt, &object.header);
+    errdefer Object.destroyFromHeader(rt, object.gcHeader());
 
     if (try object.initDenseArrayLiteralValuesAssumingEmpty(rt, values)) return object.value();
 

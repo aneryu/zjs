@@ -818,10 +818,20 @@ test "public API surface snapshot matches the checked-in name lists" {
     // explicit contract update instead of passing silently.
     // 168 -> 174 during the tracing-GC tranche: `traceValueRootFrameChain`,
     // WeakRef's `keepAliveWeakRefTarget` / `clearWeakRefKeptAlive`, the two
-    // test-only pacing controls, and `enqueueFinalizationJobReserved`.
-    // 174 -> 178: the same broad surface grew by four more named internal
-    // seams during the tracing-GC follow-ups (the count is the pin; names
-    // stay on the type). These are not an embedding API promise.
+    // test-only pacing controls, and `enqueueFinalizationJobReserved`. These
+    // are six named internal seams on the already-broad type, not an unnoticed
+    // embedding API promise.
+    // 174 -> 178 with the deferred class-payload root machinery (rc
+    // retirement tranche): `verifyDeferredClassPayloadRootLiveness`,
+    // `registerReservedDeferredClassPayloadRoot`,
+    // `unregisterDeferredClassPayloadRoot`, and
+    // `isActiveDeferredClassPayloadFinalizerCallback` -- one named family of
+    // internal GC seams, same class as the tranche above. Booked 2026-08-30
+    // when this pin was found red on main since the tranche landed.
     const jsruntime_decl_count = @typeInfo(zjs.JSRuntime).@"struct".decls.len;
-    try std.testing.expectEqual(@as(usize, 178), jsruntime_decl_count);
+    // 178 -> 177 on 2026-09-03 (GC code-volume ablation, batch 1):
+    // `createWithTrace` removed: a zero-caller wrapper over
+    // `createWithOptions(.{ .trace_writer = w })`, which stays public and is
+    // what the `--trace-memory` CLI path uses. No example or doc named it.
+    try std.testing.expectEqual(@as(usize, 177), jsruntime_decl_count);
 }

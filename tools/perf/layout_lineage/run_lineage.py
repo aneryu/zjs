@@ -54,7 +54,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
-FIXED_PMU = REPO / "tools" / "perf" / "zoo" / "run_zoo_fixed_pmu.py"
+FIXED_PMU = REPO / "tools" / "perf" / "bench_v8" / "run_fixed_pmu.py"
 
 
 def fail(msg: str, code: int = 2) -> None:

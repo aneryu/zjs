@@ -242,7 +242,7 @@ pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSVal
         try printString(rt, writer, value);
     } else if (value.isObject()) {
         const header = value.refHeader() orelse return writer.writeAll("[object Object]");
-        const object_value: *core.Object = @fieldParentPtr("header", header);
+        const object_value = core.Object.fromHeader(header);
         if (isFunctionClass(object_value.class_id)) {
             try printNativeFunction(rt, writer, object_value);
         } else if (object_value.class_id == core.class.ids.array_buffer) {
@@ -485,7 +485,7 @@ fn promiseObjectFromValue(value: core.JSValue) ?*core.Object {
 pub fn expectCallableObject(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     if (!value.isObject()) return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.c_function and
         object.class_id != core.class.ids.c_function_data and
         !core.class.isBytecodeFunctionClass(object.class_id) and
@@ -509,8 +509,8 @@ fn promiseResolvingFunctionCall(rt: *core.JSRuntime, function_object: *core.Obje
 fn promiseCapabilityExecutorCall(rt: *core.JSRuntime, function_object: *core.Object, args: []const core.JSValue) !?core.JSValue {
     const slot_value = function_object.functionPromiseCapabilitySlot() orelse return null;
     const slot = thisObject(slot_value) orelse return error.TypeError;
-    const current_resolve = slot.promiseCapabilityResolve();
-    const current_reject = slot.promiseCapabilityReject();
+    const current_resolve = slot.promiseCapabilityResolve(rt);
+    const current_reject = slot.promiseCapabilityReject(rt);
     if ((current_resolve != null and !current_resolve.?.isUndefined()) or
         (current_reject != null and !current_reject.?.isUndefined()))
     {
@@ -550,7 +550,7 @@ fn promiseCombinatorElementCall(
 
     const state_value = function_object.functionPromiseCombinatorState() orelse return error.TypeError;
     const state = thisObject(state_value) orelse return error.TypeError;
-    const values_value = state.promiseCombinatorValues() orelse return error.TypeError;
+    const values_value = state.promiseCombinatorValues(ctx.runtime) orelse return error.TypeError;
     const values = thisObject(values_value) orelse return error.TypeError;
     const index = function_object.functionPromiseCombinatorIndex();
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -565,13 +565,13 @@ fn promiseCombinatorElementCall(
         .any_reject => try setArrayIndex(ctx.runtime, values, index, value),
     }
 
-    const remaining = state.promiseCombinatorRemaining();
+    const remaining = state.promiseCombinatorRemaining(ctx.runtime);
     const next_remaining = remaining - 1;
     (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
     if (next_remaining != 0) return core.JSValue.undefinedValue();
 
-    const resolve_value = state.promiseCombinatorResolve() orelse return error.TypeError;
-    const reject_value = state.promiseCombinatorReject() orelse return error.TypeError;
+    const resolve_value = state.promiseCombinatorResolve(ctx.runtime) orelse return error.TypeError;
+    const reject_value = state.promiseCombinatorReject(ctx.runtime) orelse return error.TypeError;
     switch (mode) {
         .all_resolve, .all_settled_fulfill, .all_settled_reject => {
             const result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), resolve_value, &.{values_value});
@@ -702,8 +702,8 @@ fn createPromiseCapability(
         promise_val = next_promise_val;
     }
 
-    resolve_val = if (capability_slot.promiseCapabilityResolve()) |stored| stored.dup() else core.JSValue.undefinedValue();
-    reject_val = if (capability_slot.promiseCapabilityReject()) |stored| stored.dup() else core.JSValue.undefinedValue();
+    resolve_val = if (capability_slot.promiseCapabilityResolve(ctx.runtime)) |stored| stored.dup() else core.JSValue.undefinedValue();
+    reject_val = if (capability_slot.promiseCapabilityReject(ctx.runtime)) |stored| stored.dup() else core.JSValue.undefinedValue();
     if (!isCallableObjectValue(resolve_val) or !isCallableObjectValue(reject_val)) return error.TypeError;
     return .{
         .promise = promise_val.dup(),
@@ -836,7 +836,7 @@ fn createPromiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: c
     defer root_frame.deactivate(rt);
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &record.header);
+    errdefer core.Object.destroyFromHeader(rt, record.gcHeader());
     const status = try value_ops.createStringValue(rt, if (rejected) "rejected" else "fulfilled");
     defer status.free(rt);
     try defineObjectProperty(rt, record, "status", status);
@@ -887,7 +887,7 @@ fn createPromiseAggregateError(rt: *core.JSRuntime, global: ?*core.Object, error
         }
     }
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &instance.header);
+    errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
     const name_value = try value_ops.createStringValue(rt, "AggregateError");
     defer name_value.free(rt);
     try defineObjectProperty(rt, instance, "name", name_value);
@@ -909,7 +909,7 @@ fn createPromiseCombinatorState(
     defer root_frame.deactivate(rt);
 
     const state = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &state.header);
+    errdefer core.Object.destroyFromHeader(rt, state.gcHeader());
     try state.setPromiseCombinatorResolve(rt, rooted_resolve.dup());
     try state.setPromiseCombinatorReject(rt, rooted_reject.dup());
     try state.setPromiseCombinatorValues(rt, rooted_values.dup());
@@ -942,13 +942,19 @@ test "createPromiseCombinatorState roots direct function bytecode resolve while 
 
     const state = try createPromiseCombinatorState(rt, resolve_value, core.JSValue.undefinedValue(), values);
     var state_alive = true;
-    defer if (state_alive) core.Object.destroyFromHeader(rt, &state.header);
+    defer if (state_alive) core.Object.destroyFromHeader(rt, state.gcHeader());
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = state.promiseCombinatorResolve() orelse return error.TypeError;
+    const stored = state.promiseCombinatorResolve(rt) orelse return error.TypeError;
     try std.testing.expect(stored.same(resolve_value));
 
-    core.Object.destroyFromHeader(rt, &state.header);
+    // The zero threshold opened an incremental mark while constructing the
+    // state. This test deliberately bypasses normal tracer ownership with a
+    // direct destructor below, so first close that epoch and drain the entry
+    // which may name `state`; freeing it while queued is exactly the O2-B
+    // raw-pointer lifetime violation.
+    rt.gc.abortIncrementalCycle();
+    core.Object.destroyFromHeader(rt, state.gcHeader());
     state_alive = false;
     resolve_value.free(rt);
     resolve_alive = false;
@@ -1148,7 +1154,7 @@ pub fn callObjectStatic(
         else
             try expectObjectArg(args[0]);
         const object = try core.Object.create(rt, core.class.ids.object, proto);
-        errdefer core.Object.destroyFromHeader(rt, &object.header);
+        errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
         if (args.len >= 2 and !args[1].isUndefined()) {
             try definePropertiesFromObject(rt, object, args[1]);
         }
@@ -1198,7 +1204,7 @@ pub fn callObjectStatic(
         const keys = try object.ownKeys(rt);
         defer core.Object.freeKeys(rt, keys);
         const out = try core.Object.create(rt, core.class.ids.object, null);
-        errdefer core.Object.destroyFromHeader(rt, &out.header);
+        errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
         for (keys) |key| {
             var desc = (try object.getOwnProperty(rt, key)) orelse continue;
             materializeMappedArgumentsDescriptorValue(rt, object, key, &desc);
@@ -1217,7 +1223,7 @@ pub fn callObjectStatic(
         const keys = try object.ownKeys(rt);
         defer core.Object.freeKeys(rt, keys);
         const out = try core.Object.createArray(rt, if (global) |g| array_ops.arrayPrototypeFromGlobal(rt, g) else null);
-        errdefer core.Object.destroyFromHeader(rt, &out.header);
+        errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
         var out_index: u32 = 0;
         for (keys) |key| {
             const name_value = try rt.atoms.toStringValue(rt, key);
@@ -1235,7 +1241,7 @@ pub fn callObjectStatic(
         const keys = try object.ownKeys(rt);
         defer core.Object.freeKeys(rt, keys);
         const out = try core.Object.createArray(rt, if (global) |g| array_ops.arrayPrototypeFromGlobal(rt, g) else null);
-        errdefer core.Object.destroyFromHeader(rt, &out.header);
+        errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
         for (keys) |key| {
             if (!rt.atoms.isPublicSymbol(key)) continue;
             const symbol_value = try rt.symbolValue(key);
@@ -1611,7 +1617,7 @@ pub fn primitiveWrapper(ctx: *core.JSContext, class_id: core.class.ClassId, prim
     defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, class_id, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
     return object.value();
 }
@@ -1735,14 +1741,9 @@ fn createBoundFunction(
     defer name_value.free(rt);
 
     const object = try core.Object.create(rt, core.class.ids.bound_function, target_object.getPrototype());
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
-    if (comptime core.gc_slot.stats_enabled) {
-        core.gc_slot.HeapValueSlot.setOptionalOwned(rt, object.boundTargetSlot(), rooted_target.dup());
-        core.gc_slot.HeapValueSlot.setOptionalOwned(rt, object.boundThisSlot(), rooted_bound_this.dup());
-    } else {
-        try object.setOptionalValueSlot(rt, object.boundTargetSlot(), rooted_target.dup());
-        try object.setOptionalValueSlot(rt, object.boundThisSlot(), rooted_bound_this.dup());
-    }
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
+    try object.setOptionalValueSlot(rt, object.boundTargetSlot(), rooted_target.dup());
+    try object.setOptionalValueSlot(rt, object.boundThisSlot(), rooted_bound_this.dup());
     // Bound wrappers keep caller semantics. The recursive call selects a realm
     // only after it reaches the final bytecode/C-function target.
     if (rooted_bound_args.len != 0) {
@@ -1767,11 +1768,7 @@ fn createBoundFunction(
             rooted_owned_bound_args = owned_bound_args[0..initialized];
         }
         bound_args_owned = false;
-        if (comptime core.gc_slot.stats_enabled) {
-            core.gc_slot.GcBuffer.setSlice(rt, object.boundArgsSlot(), owned_bound_args);
-        } else {
-            object.boundArgsSlot().* = owned_bound_args;
-        }
+        object.boundArgsSlot().* = owned_bound_args;
         rooted_owned_bound_args = &.{};
     }
     try defineDataPropertyWithFlags(rt, object, core.atom.ids.name, name_value, false, false, true);
@@ -2268,7 +2265,7 @@ fn isFunctionToStringCallable(value: core.JSValue) bool {
 pub fn thisObject(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return core.Object.fromHeader(header);
 }
 
 const constructorNameEql = call_runtime.constructorNameEqlLocal;
@@ -2514,7 +2511,7 @@ fn descriptorObject(rt: *core.JSRuntime, desc: core.Descriptor) !core.JSValue {
     defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     if (desc.kind == .data) try defineObjectProperty(rt, object, "value", desc_value);
     if (desc.kind == .accessor) {
         try defineObjectProperty(rt, object, "get", desc_getter);

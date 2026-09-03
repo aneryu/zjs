@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -24,6 +26,7 @@ gc: weak refs current 3, finalizer queue current 4
 gc: major pause p50 1 ns, p95 2 ns, p99 3 ns, max 4 ns, retained 9 of 50 pauses
 gc: allocation histogram publications 100, payload bytes 200, p50-below-large 16, p95-below-large 32, p99-below-large 64, max-small 128, covered-by-small 90/95 below-large, large 5
 gc: block heap committed 4000 live 500 committed/live-x1000 8000 superblocks 2 large maps 1
+gc: block heap deferred block runs 12, hot reuse published 13, reopened 14, pass-A settled cells 15
 gc: major threshold resets growth 11, small-heap-floor 7
 gc: block heap page returns cumulative decommitted 6000, recommitted 700
 gc: block heap decommit checks 8, released blocks cumulative 9, current bytes 5300, max batch bytes 1000
@@ -82,6 +85,10 @@ class GcStatsSnapshotTests(unittest.TestCase):
         self.assertEqual(parsed["blockHeap"]["currentDecommitted"], 5300)
         self.assertEqual(parsed["blockHeap"]["thresholdGrowthResets"], 11)
         self.assertEqual(parsed["blockHeap"]["thresholdSmallHeapFloorResets"], 7)
+        self.assertEqual(parsed["blockHeap"]["deferredBlockRuns"], 12)
+        self.assertEqual(parsed["blockHeap"]["hotReusePublished"], 13)
+        self.assertEqual(parsed["blockHeap"]["reopened"], 14)
+        self.assertEqual(parsed["blockHeap"]["passASettledCells"], 15)
         self.assertEqual(parsed["allocations"]["publications"], 100)
         self.assertEqual(parsed["barriers"]["generational"]["calls"], 29)
         self.assertEqual(parsed["barriers"]["marking"]["exitMarkedTarget"], 10)
@@ -200,6 +207,33 @@ class GcStatsSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(snapshot.SnapshotError, "marked kind partition"):
             snapshot.parse_gc_stats(inconsistent)
 
+    def test_last_marked_census_may_precede_major_completion(self) -> None:
+        in_flight = PANEL.replace(
+            "marked-set census majors 9", "marked-set census majors 10"
+        )
+        self.assertEqual(snapshot.parse_gc_stats(in_flight)["markFootprint"]["majors"], 10)
+
+    def test_marked_censuses_cannot_lead_by_two_cycles(self) -> None:
+        inconsistent = PANEL.replace(
+            "marked-set census majors 9", "marked-set census majors 11"
+        )
+        with self.assertRaisesRegex(snapshot.SnapshotError, "plus one active cycle"):
+            snapshot.parse_gc_stats(inconsistent)
+
+    def test_eager_zero_ref_destruction_need_not_be_condemned(self) -> None:
+        eager = PANEL.replace(
+            "condemned headers 48, destroyed counted objects 47",
+            "condemned headers 40, destroyed counted objects 60",
+        )
+        self.assertEqual(snapshot.parse_gc_stats(eager)["doomed"]["destroyedCountedObjects"], 60)
+
+    def test_destroyed_objects_cannot_exceed_all_collector_releases(self) -> None:
+        inconsistent = PANEL.replace(
+            "destroyed counted objects 47", "destroyed counted objects 78"
+        )
+        with self.assertRaisesRegex(snapshot.SnapshotError, "collector releases"):
+            snapshot.parse_gc_stats(inconsistent)
+
     def test_missing_storage_component_fails_closed(self) -> None:
         missing = "\n".join(
             line for line in PANEL.splitlines()
@@ -257,6 +291,28 @@ class GcStatsSnapshotTests(unittest.TestCase):
         for cpu in (*range(5, 10), *range(15, 20)):
             with self.assertRaisesRegex(snapshot.SnapshotError, "reserved"):
                 snapshot.validate_cpu(cpu)
+
+    def test_field_a_cpu_requires_explicit_flag_affinity_and_lock(self) -> None:
+        with mock.patch.object(snapshot.os, "sched_getaffinity", return_value={9}), mock.patch.object(
+            snapshot, "lock_attested", return_value=True
+        ):
+            snapshot.validate_cpu(9, allow_field_cpu=True)
+        with mock.patch.object(snapshot.os, "sched_getaffinity", return_value={9}), mock.patch.object(
+            snapshot, "lock_attested", return_value=False
+        ):
+            with self.assertRaisesRegex(snapshot.SnapshotError, "lock attestation"):
+                snapshot.validate_cpu(9, allow_field_cpu=True)
+
+    def test_git_identity_adapts_to_string_revision_api(self) -> None:
+        completed = [
+            subprocess.CompletedProcess([], 0, stdout="abc123\n", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout=" M file\n", stderr=""),
+        ]
+        with mock.patch.object(snapshot.subprocess, "run", side_effect=completed):
+            self.assertEqual(
+                snapshot.git_identity(Path("/repo")),
+                {"commit": "abc123", "dirty": True},
+            )
 
     def test_compare_reports_only_threshold_crossings(self) -> None:
         def shape(value: int, zero_value: int) -> dict:

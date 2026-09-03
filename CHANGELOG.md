@@ -36,6 +36,40 @@ breaking public-API cleanup is approved for this cycle; hot-path structural
 refactors are deferred to `docs/backlog.md` and land only under the
 refactor-policy gates.
 
+- **Iteration-efficiency overhaul** (2026-08-29). checkpoint-gate is green
+  again (`src/abi/gen_header.zig` wired as `zig build gen-abi-header` and
+  registered as a build-graph root; it had been an orphan since
+  2026-08-26). The five slowest tests (~47s of a ~53s unified run) moved to
+  a `test-stress` tier: checkpoint-gate and the per-change
+  `zig build test` close-out run the unified suite alone, while the
+  engine-production gate, primary-platform CI, and the per-merge-batch
+  gate run the stress tier. Fixed-work PMU screening moved into
+  `tools/perf/bench_v8/run_fixed_pmu.py` (`mise run perf-screen`) against
+  the vendored suite; the external-checkout zoo runner (`tools/perf/zoo/`)
+  is retired. `run_benchv8_compare.py` gained a `--suites` diagnostic
+  subset (never headline-eligible) for single-benchmark high-sample
+  iteration. `mise run watch -- <step>` keeps a resident incremental
+  compiler on any focused target, and GUIDE B.6 no longer asks for
+  quick-gate after every coherent edit. Follow-up (2026-08-30, after the
+  F0 merge paid ~18 minutes of sequential gating): `mise run batch-gate`
+  runs the whole per-merge-batch gate as one parallel build graph plus a
+  parallelized gate_smoke (8min -> 3:13); the F0 ledger pins moved to
+  comptime so `zig build check` catches drift; and the two reds the GC
+  tranche left on checkpoint-gate are cleared (gc-slot tag on
+  weakref_kept_alive, JSRuntime decl pin booked 174 -> 178), making
+  checkpoint-gate 27/27 green on main again. Second follow-up
+  (2026-08-30): the accumulated lane debris was reclaimed -- 49 finished
+  worktrees removed (only clean trees; the `T test262` symlink typechange
+  counted as clean), build caches deleted inside the kept dirty ones, and
+  the repo's own `.zig-cache` trimmed of week-old entries, together about
+  650 GB (disk 44% -> 27%); `mise run tidy` makes the cache trim and
+  worktree-metadata prune repeatable. A backend experiment also
+  re-verified the compile floor: the 0.16 self-hosted aarch64 backend
+  still cannot produce a working Debug binary (minutes-long compile,
+  corrupt ELF on a 12-line always_tail probe), so
+  `forceLlvmBackendOnDebug` stays load-bearing and the ~95s unified
+  compile remains the floor.
+
 - **Docs: tree reorganized around a single work queue** (2026-08-25). The
   four queue documents (`impl-quality-backlog.md`,
   `maintainability-backlog.md`, `code-volume.md`,

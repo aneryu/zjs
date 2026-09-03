@@ -42,9 +42,9 @@ pub const ConfigSettings = struct {
 /// deterministic encoding `src/config_signature.zig` produces from the
 /// declarations the compiled code consumes.
 ///
-/// `zjs-config-v2` (was v1, which had no `optimize`): the prefix is versioned
-/// so a historical v1 string cannot be read as complete proof now that the
-/// field set has grown, and cannot match a v2 build on its first five fields.
+/// `zjs-config-v3` adds the terminal GC/Object layout identity. It is not an
+/// option: git is the rollback boundary, but old and new binaries must not
+/// attest the same representation after Object's resident header disappears.
 ///
 /// `repr` is fixed at `tagged`, the same way `compiler` is fixed at `v2`: the
 /// 8-byte NaN-boxed alternative was deleted, so there is no longer a choice to
@@ -55,7 +55,7 @@ pub const ConfigSettings = struct {
 /// from a literal.
 pub fn configSignature(b: *std.Build, settings: ConfigSettings) []const u8 {
     return b.fmt(
-        "zjs-config-v2:compiler={s},layout={s},repr=tagged,optimize={s},force_gc={s},ownership_audit={s}",
+        "zjs-config-v3:compiler={s},layout={s},repr=tagged,gc_layout=obj64_m,optimize={s},force_gc={s},ownership_audit={s}",
         .{
             settings.compiler,
             settings.layout,
@@ -116,12 +116,8 @@ pub const EngineOptionInputs = struct {
     /// (2026-08-29); the field stays a string so the configuration signature
     /// and the build options keep their shape.
     zjs_gc: []const u8,
-    /// Full-every-2 sticky-major experiment. False in every default artifact;
-    /// trace-only validation builds opt in explicitly.
-    experimental_gc_sticky_major: bool,
-    /// Pass-B corpse census. Measurement-only, comptime-erased when false;
-    /// no default artifact enables it.
-    experimental_gc_corpse_census: bool,
+    /// R3 roots diagnosis build. Default false; diag artifacts only.
+    gc_roots_diag: bool,
 
     pub fn withExpect(self: EngineOptionInputs, expect_config: []const u8) EngineOptionInputs {
         var out = self;
@@ -140,8 +136,7 @@ pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.O
     options.addOption(bool, "zjs_ownership_audit", in.ownership_audit);
     options.addOption(usize, "zjs_dossier_layout_pad", in.dossier_layout_pad);
     options.addOption([]const u8, "zjs_gc", in.zjs_gc);
-    options.addOption(bool, "zjs_experimental_gc_sticky_major", in.experimental_gc_sticky_major);
-    options.addOption(bool, "zjs_experimental_gc_corpse_census", in.experimental_gc_corpse_census);
+    options.addOption(bool, "zjs_gc_roots_diag", in.gc_roots_diag);
     return options;
 }
 

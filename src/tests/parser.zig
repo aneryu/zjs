@@ -1321,7 +1321,7 @@ fn semanticOpcodeForTest(op_id: u8) u8 {
         op.fclosure8 => op.fclosure,
         op.push_empty_string => op.push_atom_value,
         op.get_loc8 => op.get_loc,
-        op.put_loc8, op.put_loc8_get_loc8, op.put_loc0_get_loc0 => op.put_loc,
+        op.put_loc8, op.put_loc8_get_loc8 => op.put_loc,
         op.get_loc0_field, op.get_loc2_field => op.get_loc,
         op.push_this_put_loc0 => op.push_this,
         op.cmp_if_false8 => op.lt,
@@ -1605,12 +1605,28 @@ fn countSubOpcode(code: []const u8, sub: u8) usize {
     var pc: usize = 0;
     while (pc < code.len) {
         const opcode_id = code[pc];
-        if (opcode_id == op.using and pc + 1 < code.len and code[pc + 1] == sub) count += 1;
+        if (opcode_id == op.ext0 and pc + 1 < code.len and code[pc + 1] == sub) count += 1;
         const size = engine.bytecode.opcode.sizeOf(opcode_id);
         if (size == 0) break;
         pc += size;
     }
     return count;
+}
+
+/// Byte offset of the first carrier instruction with the given sub tag,
+/// walked on instruction boundaries. C0 moved to_propkey behind the
+/// carrier, so final-stream assertions locate residents this way instead
+/// of scanning for a direct id.
+fn subOpcodeOffset(code: []const u8, sub: u8) ?usize {
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const opcode_id = code[pc];
+        if (opcode_id == op.ext0 and pc + 1 < code.len and code[pc + 1] == sub) return pc;
+        const size = engine.bytecode.opcode.sizeOf(opcode_id);
+        if (size == 0) break;
+        pc += size;
+    }
+    return null;
 }
 
 fn countOpcode(code: []const u8, opcode: u8) usize {
@@ -2004,7 +2020,7 @@ test "F4: null comparison lowering keeps strict folds and loose equality distinc
 
     var strict_undefined = try parseExpr(&env, "value === void 0");
     defer strict_undefined.deinit(env.rt);
-    try expectOpcodeSequence(strict_undefined.code, &.{ op.get_var, op.using });
+    try expectOpcodeSequence(strict_undefined.code, &.{ op.get_var, op.ext0 });
 
     var strict_neq_condition = try parseStatement(&env, "if (value !== null) result;");
     defer strict_neq_condition.deinit(env.rt);
@@ -2124,20 +2140,20 @@ test "F4: typeof comparisons select final short tests at the condition boundary"
 
     var equality = try parseExpr(&env, "typeof x === \"undefined\"");
     defer equality.deinit(env.rt);
-    try expectOpcodeSequence(equality.code, &.{ op.get_var_undef, op.using });
+    try expectOpcodeSequence(equality.code, &.{ op.get_var_undef, op.ext0 });
 
     var inequality_condition = try parseStatement(&env, "if (typeof x !== \"function\") result;");
     defer inequality_condition.deinit(env.rt);
     try expectOpcodeSequence(inequality_condition.code, &.{
         op.get_var_undef,
-        op.using,
+        op.ext0,
         op.if_true8,
         op.get_var,
         op.drop,
     });
     const branch_pc =
         engine.bytecode.opcode.sizeOf(op.get_var_undef) +
-        engine.bytecode.opcode.sizeOf(op.using);
+        engine.bytecode.opcode.sizeOf(op.ext0);
     try std.testing.expectEqual(inequality_condition.code.len, readRelTarget32(inequality_condition.code, branch_pc));
 }
 
@@ -2616,13 +2632,15 @@ test "M3.1 F4: computed object property emits define_array_el" {
 
     // The final property-value cleanup is also the discarded expression
     // result, so the final-bytecode drop; return_undef fold removes it.
+    // C0: to_propkey's final encoding is the carrier pair.
     try expectOpcodeSequence(fn_bc.code, &.{
         op.object,
         op.push_atom_value,
-        op.to_propkey,
+        op.ext0,
         op.push_1,
         op.define_array_el,
     });
+    try std.testing.expectEqual(@as(usize, 1), countSubOpcode(fn_bc.code, engine.bytecode.opcode.ext0_sub.to_propkey));
 }
 
 test "M3.1 F4: object spread emits copy_data_properties" {
@@ -2652,7 +2670,7 @@ test "M3.1 F4: object literal __proto__ emits set_proto" {
     defer fn_bc.deinit(env.rt);
 
     try std.testing.expectEqual(op.object, fn_bc.code[0]);
-    try std.testing.expect(countSubOpcode(fn_bc.code, engine.bytecode.opcode.using_sub.set_proto) > 0);
+    try std.testing.expect(countSubOpcode(fn_bc.code, engine.bytecode.opcode.ext0_sub.set_proto) > 0);
 }
 
 test "M3.1 F4: object method shorthand emits define_method" {
@@ -2806,7 +2824,7 @@ test "M3.1 F4: computed object keys emit to_propkey before definition" {
     var fn_bc = try parseExpr(&env, "{ [key]: value }");
     defer fn_bc.deinit(env.rt);
 
-    const key_offset = std.mem.indexOfScalar(u8, fn_bc.code, op.to_propkey) orelse return error.TestExpectedEqual;
+    const key_offset = subOpcodeOffset(fn_bc.code, engine.bytecode.opcode.ext0_sub.to_propkey) orelse return error.TestExpectedEqual;
     const define_offset = std.mem.indexOfScalar(u8, fn_bc.code, op.define_array_el) orelse return error.TestExpectedEqual;
     try std.testing.expect(key_offset < define_offset);
 }
@@ -2824,7 +2842,7 @@ test "M3.1 F4: computed __proto__ duplicate is permitted" {
     var fn_bc = try parseExpr(&env, "{ __proto__: null, [\"__proto__\"]: 1 }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expect(countSubOpcode(fn_bc.code, engine.bytecode.opcode.using_sub.set_proto) > 0);
+    try std.testing.expect(countSubOpcode(fn_bc.code, engine.bytecode.opcode.ext0_sub.set_proto) > 0);
     try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.define_array_el) != null);
 }
 
@@ -3663,7 +3681,7 @@ test "F4: array literal spread [...a] starts with array_from 0 + push_i32 0" {
     var fn_bc = try parseExpr(&env, "[...a]");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.array_from, op.push_0, op.get_var, op.append, op.using, op.put_field });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.array_from, op.push_0, op.get_var, op.append, op.ext0, op.put_field });
 }
 
 test "F4: array literal mixed spread [a, ...b, c] uses define_array_el+inc" {
@@ -3672,7 +3690,7 @@ test "F4: array literal mixed spread [a, ...b, c] uses define_array_el+inc" {
     var fn_bc = try parseExpr(&env, "[a, ...b, c]");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.array_from, op.push_1, op.get_var, op.append, op.get_var, op.define_array_el, op.inc, op.using, op.put_field });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.array_from, op.push_1, op.get_var, op.append, op.get_var, op.define_array_el, op.inc, op.ext0, op.put_field });
 }
 
 test "F4: template with empty middle still emits call_method with correct argc" {
@@ -6399,7 +6417,7 @@ test "Object literal: computed property name" {
     defer fn_bc.deinit(env.rt);
 
     try std.testing.expectEqual(op.object, fn_bc.code[0]);
-    try expectOpcode(fn_bc.code, op.to_propkey);
+    try std.testing.expect(countSubOpcode(fn_bc.code, engine.bytecode.opcode.ext0_sub.to_propkey) > 0);
     try expectOpcode(fn_bc.code, op.define_array_el);
 }
 
@@ -10893,7 +10911,6 @@ test "final bytecode authorizes plain var-ref stores before execution" {
             countOpcode(code, op.put_loc) +
             countOpcode(code, op.put_loc8) +
             countOpcode(code, op.put_loc8_get_loc8) +
-            countOpcode(code, op.put_loc0_get_loc0) +
             countOpcode(code, op.put_loc0) +
             countOpcode(code, op.put_loc1) +
             countOpcode(code, op.put_loc2) +
@@ -12035,7 +12052,7 @@ test "object computed property names parse async arrow and module await expressi
     try std.testing.expect(async_arrow.hasFeature(.arrow));
     try std.testing.expect(async_arrow.hasFeature(.async_function));
     try std.testing.expect(!async_arrow.hasFeature(.dynamic_import));
-    try expectOpcode(async_arrow.byteCode(), qop.to_propkey);
+    try std.testing.expect(countSubOpcode(async_arrow.byteCode(), engine.bytecode.opcode.ext0_sub.to_propkey) > 0);
     try expectOpcode(async_arrow.byteCode(), qop.define_array_el);
     try std.testing.expect(countFunctionClosures(async_arrow.byteCode()) > 0);
     try expectFunctionKindRecursive(&async_arrow, .async);
@@ -12048,7 +12065,7 @@ test "object computed property names parse async arrow and module await expressi
     try std.testing.expect(!module_await.hasFeature(.dynamic_import));
     try std.testing.expect(module_await.isModule());
     try expectOpcode(module_await.byteCode(), qop.await);
-    try expectOpcode(module_await.byteCode(), qop.to_propkey);
+    try std.testing.expect(countSubOpcode(module_await.byteCode(), engine.bytecode.opcode.ext0_sub.to_propkey) > 0);
     try expectOpcode(module_await.byteCode(), qop.define_array_el);
 }
 

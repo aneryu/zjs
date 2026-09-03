@@ -533,6 +533,86 @@ pub inline fn getFieldFastSlotOrAbsent(
     return getFieldFastSlotWithExoticOrder(rt, receiver, atom_id, true, true, true, absent);
 }
 
+/// Continuation of the named-bytecode field walk after the resident handler
+/// has already proved that the receiver has no own data slot and no own
+/// unusual slot. Keeping this half separate prevents prototype/exotic
+/// classification from being speculated into the dominant own-hit handler;
+/// the property search and its ordering are otherwise the same as
+/// `getFieldFastSlotOrAbsent`.
+pub inline fn getFieldFastSlotOrAbsentAfterOwnMiss(
+    rt: *core.JSRuntime,
+    probed_object: *core.Object,
+    atom_id: core.Atom,
+    absent: *bool,
+) ?*const core.JSValue {
+    debugAssertNonPrivateFieldOperandAtom(rt, atom_id);
+
+    var object = probed_object;
+    // Classify the already-probed object before entering the ordinary
+    // prototype loop. Only object/global and named Array/Arguments misses are
+    // absence-authoritative; all other non-slow classes may still expose an
+    // inherited data property, but running off their chain must defer to the
+    // resolver rather than synthesize undefined here.
+    if (object.class_id == core.class.ids.object or object.isGlobal()) {
+        if (object.hasExoticMethods()) return null;
+        object = object.getPrototype() orelse {
+            absent.* = true;
+            return null;
+        };
+    } else if (namedAtomUsesOrdinaryWalkOnIndexExotic(object.class_id, atom_id)) {
+        object = object.getPrototype() orelse {
+            absent.* = true;
+            return null;
+        };
+    } else {
+        if (object.needsSlowPropertyAccess()) return null;
+        object = object.getPrototype() orelse return null;
+        return getFieldFastSlotAfterNonAuthoritativeLink(object, atom_id);
+    }
+
+    while (true) {
+        var slow_property = false;
+        if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| return slot;
+        if (slow_property) return null;
+        if (object.class_id == core.class.ids.object or object.isGlobal()) {
+            if (object.hasExoticMethods()) return null;
+            object = object.getPrototype() orelse {
+                absent.* = true;
+                return null;
+            };
+            continue;
+        }
+        if (namedAtomUsesOrdinaryWalkOnIndexExotic(object.class_id, atom_id)) {
+            object = object.getPrototype() orelse {
+                absent.* = true;
+                return null;
+            };
+            continue;
+        }
+        if (object.needsSlowPropertyAccess()) return null;
+        object = object.getPrototype() orelse return null;
+        return getFieldFastSlotAfterNonAuthoritativeLink(object, atom_id);
+    }
+}
+
+inline fn getFieldFastSlotAfterNonAuthoritativeLink(
+    first: *core.Object,
+    atom_id: core.Atom,
+) ?*const core.JSValue {
+    var object = first;
+    while (true) {
+        var slow_property = false;
+        if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| return slot;
+        if (slow_property) return null;
+        if (namedAtomUsesOrdinaryWalkOnIndexExotic(object.class_id, atom_id)) {
+            object = object.getPrototype() orelse return null;
+            continue;
+        }
+        if (object.needsSlowPropertyAccess()) return null;
+        object = object.getPrototype() orelse return null;
+    }
+}
+
 pub inline fn getFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     var absent = false;
     const slot = getFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, false, false, &absent) orelse return null;

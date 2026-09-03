@@ -31,7 +31,7 @@ fn constructCompiledLiteralInRealm(
     defer root_frame.deactivate(rt);
 
     const object = try core.Object.createRegExpFromShape(rt, initial_shape);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     try object.setRegexpSource(rt, source_val);
     try object.setRegexpCompiledBytecodeString(rt, compiled_string);
     return object.value();

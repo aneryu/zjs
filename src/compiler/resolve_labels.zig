@@ -225,7 +225,13 @@ fn resolvedJumpAddress(
     output_len: u32,
     jump: JumpSlot,
 ) Error!u32 {
-    const opcode_delta: u32 = if (isDynEnvProbe(jump.op)) 5 else 1;
+    // Writer-side self-check on the OUTPUT stream; `jump.op` is a physical
+    // id until F0c migrates the writers. The deltas are the reader's derived
+    // offsets, shared so they cannot drift apart.
+    const opcode_delta: u32 = if (jump.op == op.dyn_env_probe)
+        operand_off.probe_label
+    else
+        operand_off.jump_label;
     if (jump.pos < opcode_delta or jump.pos > output_len or
         @as(usize, jump.pos) + jump.size > output_len or
         output[jump.pos - opcode_delta] != jump.op)
@@ -243,48 +249,70 @@ fn resolvedJumpAddress(
     return @intCast(target);
 }
 
-const Instruction = struct {
-    op_id: u8,
-    size: u32,
-    format: opcode.Format,
-};
+const Form = opcode.logical.LogicalOpcode;
+const Instruction = opcode.decode.Header;
 
+/// F0b: the reader is the shared decode layer. The Header keeps the one-row
+/// discipline the local reader had (qjs:34900 reads ONE `opcode_info[op]`
+/// row) -- `headerAt` is a single `form_row` load -- and adds what the local
+/// reader could not offer: identity as a form, so an id that is later
+/// reclaimed or moved behind a carrier changes what this pass SEES instead
+/// of silently changing what it matches.
 fn decodeInstruction(code: []const u8, position: u32) Error!Instruction {
-    if (position >= code.len) return error.InvalidBytecode;
-    const op_id = code[position];
-    // qjs:34900 reads ONE `opcode_info[op]` row and takes both `.size` and
-    // `.fmt` out of it. `sizeOf`/`formatOf` each re-derive the short-opcode
-    // index and then stride the 24-byte diagnostic `Info` row separately, so
-    // every S4 decode paid two address computations and two loads into a table
-    // six times larger than it needs to be. `compact_opcode_info` is the
-    // four-byte production row QuickJS actually compiles (bytecode.zig
-    // `CompactInfo`, "do not make each verifier instruction stride across a
-    // 24-byte row just to read these four fields"). Take both fields from it.
-    const info = opcode.finalCompactInfo(op_id) orelse return error.InvalidBytecode;
-    const size = info.size;
-    // `position < code.len` makes the subtraction well-defined, and this
-    // comparison proves the caller's subsequent `position + size` is within
-    // the u32-sized product stream. Do not encode the same proof again as a
-    // checked add in every S4 decode (QuickJS uses pos + len after its table
-    // lookup for the same reason).
-    if (size == 0 or size > code.len - position)
-        return error.InvalidBytecode;
-    return .{ .op_id = op_id, .size = size, .format = info.fmt };
+    // S3, not final: since C0 closed, the input stream may carry a
+    // lowered-direct byte whose final slot is reclaimed. This walker is
+    // the last one allowed to see it -- the writer below selects the
+    // carrier encoding, and every S4 consumer decodes .final.
+    return opcode.decode.headerAt(.s3, code, position) catch
+        error.InvalidBytecode;
 }
 
-fn isJumpOp(op_id: u8) bool {
-    return op_id == op.if_false or op_id == op.if_true or op_id == op.goto or
-        op_id == op.@"catch" or op_id == op.gosub;
+/// The writer seam. Emission helpers (`putShortCode`, `emitHasLabel`,
+/// `appendByte`) still traffic in physical ids -- they are F0c's to migrate,
+/// not F0b's -- and in the final domain a form's value IS its physical id.
+/// Every reader->writer crossing goes through here so that F0c can find
+/// them all with one grep.
+inline fn opId(form: Form) u8 {
+    return @intCast(@intFromEnum(form));
 }
 
-fn isDynEnvProbe(op_id: u8) bool {
-    return op_id == op.dyn_env_probe;
+/// The seam's inverse: emission helpers still take physical ids (F0c
+/// completes when they take forms), and in the final domain the id is the
+/// form's value. Guarded because a reclaimed id has no tag (invariant 5).
+inline fn formOf(op_id: u8) Form {
+    std.debug.assert(opcode.physical.stateOf(op_id) == .claimed);
+    return @enumFromInt(op_id);
 }
 
-fn hasAtomFormat(format: opcode.Format) bool {
-    return format == .atom or format == .atom_u8 or format == .atom_u16 or
-        format == .atom_label_u8 or format == .atom_label_u16;
+fn isJumpOp(form: Form) bool {
+    return form == .if_false or form == .if_true or form == .goto or
+        form == .@"catch" or form == .gosub;
 }
+
+/// Operand offsets derived from the declaration (contract 2). The values are
+/// what the hand-written deltas were -- the point is that they can no longer
+/// drift from the declaration without a compile error.
+const operand_off = struct {
+    /// Label operand of the five plain jumps. One constant because the five
+    /// layouts agree, and the comptime checks below are what let one
+    /// constant stand for all five.
+    const jump_label: u32 = opcode.decode.operandOffsetOf(.goto, 0, u32);
+    /// dyn_env_probe: atom, THEN the label, then the kind byte.
+    const probe_label: u32 = opcode.decode.operandOffsetOf(.dyn_env_probe, 1, u32);
+    /// Atom operands sit at payload offset 0 across every atom-carrying
+    /// form; the decode layer asserts that when it builds `atom_bit`.
+    const atom: u32 = 1;
+    /// Leading index operand (slot/argc/const-pool). Backed by the decode
+    /// layer's index-width assertion; `Header.indexWidth` says how wide.
+    const index: u32 = 1;
+
+    comptime {
+        for ([_]Form{ .if_true, .if_false, .gosub, .@"catch" }) |f| {
+            if (opcode.decode.operandOffsetOf(f, 0, u32) != jump_label)
+                @compileError("jump label operand offsets diverged");
+        }
+    }
+};
 
 fn readU16(code: []const u8, position: u32) Error!u16 {
     const start = std.math.add(u32, position, 1) catch return error.InvalidBytecode;
@@ -352,32 +380,31 @@ fn validateProductCode(product: *const resolve_variables.ResolvedProduct) Error!
     var position: u32 = 0;
     while (position < product.code_len) {
         const instruction = try decodeInstruction(code, position);
-        if (instruction.op_id == op.invalid) return error.InvalidBytecode;
+        if (instruction.form == .invalid) return error.InvalidBytecode;
 
-        switch (instruction.format) {
-            .label => {
-                if (!isJumpOp(instruction.op_id) or instruction.size != 5)
-                    return error.InvalidBytecode;
-                const label_index = try readU32At(code, position, 1);
+        switch (instruction.form) {
+            .goto, .if_true, .if_false, .gosub, .@"catch" => {
+                if (instruction.size != 5) return error.InvalidBytecode;
+                const label_index = try readU32At(code, position, operand_off.jump_label);
                 if (label_index >= product.label_len) return error.InvalidBytecode;
             },
-            .atom_label_u8 => {
-                if (!isDynEnvProbe(instruction.op_id) or instruction.size != 10)
-                    return error.InvalidBytecode;
-                const label_index = try readU32At(code, position, 5);
+            .dyn_env_probe => {
+                if (instruction.size != 10) return error.InvalidBytecode;
+                const label_index = try readU32At(code, position, operand_off.probe_label);
                 if (label_index >= product.label_len) return error.InvalidBytecode;
             },
-            // S3 emits only wide logical LabelIds. Accepting a final short or
-            // another label-bearing format here would reinterpret a relative
-            // operand as an identity and silently corrupt the side table.
-            .label8, .label16, .label_u16, .atom_label_u16 => return error.InvalidBytecode,
-            else => {},
+            // S3 emits only wide logical LabelIds. Any OTHER label-bearing
+            // form -- final shorts today, whatever is added tomorrow -- would
+            // reinterpret a relative operand as an identity and silently
+            // corrupt the side table. The label bit rejects the class, so
+            // this arm does not need extending when a form is.
+            else => if (instruction.hasLabel()) return error.InvalidBytecode,
         }
 
-        if (hasAtomFormat(instruction.format)) {
+        if (instruction.hasAtom()) {
             if (instruction.size < 5 or atom_index >= product.atom_len)
                 return error.InvalidBytecode;
-            const encoded = try readU32At(code, position, 1);
+            const encoded = try readU32At(code, position, operand_off.atom);
             if (encoded != product.atom_operands[atom_index])
                 return error.InvalidBytecode;
             atom_index += 1;
@@ -408,7 +435,7 @@ fn updateLabel(
 }
 
 const PatternToken = struct {
-    options: []const u8,
+    options: []const Form,
     idx: ?u16 = null,
 };
 
@@ -771,12 +798,6 @@ const Resolver = struct {
                 self.fuse_op = op.push_this_put_loc0;
                 self.fuse_b2 = 0;
             },
-            op.put_loc0 => {
-                self.last_sz = 1;
-                self.fuse_b = op.get_loc0;
-                self.fuse_op = op.put_loc0_get_loc0;
-                self.fuse_b2 = 0;
-            },
             op.get_field2 => {
                 self.last_sz = 5;
                 self.fuse_b = op.call_method;
@@ -953,10 +974,10 @@ const Resolver = struct {
             const instruction = try decodeInstruction(self.code, position);
             const position_next = position + instruction.size;
             if (position_next > end) return error.InvalidBytecode;
-            if (hasAtomFormat(instruction.format)) {
+            if (instruction.hasAtom()) {
                 if (self.atom_cursor >= self.input_atoms.len)
                     return error.InvalidBytecode;
-                const encoded = try readU32At(self.code, position, 1);
+                const encoded = try readU32At(self.code, position, operand_off.atom);
                 const ledger_atom = self.input_atoms[self.atom_cursor];
                 if (encoded != ledger_atom) return error.InvalidBytecode;
                 if (keep_atom_position != null and keep_atom_position.? == position) {
@@ -983,10 +1004,10 @@ const Resolver = struct {
         instruction: Instruction,
         keep: bool,
     ) Error!void {
-        if (!hasAtomFormat(instruction.format)) return;
+        if (!instruction.hasAtom()) return;
         if (self.atom_cursor >= self.input_atoms.len)
             return error.InvalidBytecode;
-        const encoded = try readU32At(self.code, position, 1);
+        const encoded = try readU32At(self.code, position, operand_off.atom);
         const ledger_atom = self.input_atoms[self.atom_cursor];
         if (encoded != ledger_atom) return error.InvalidBytecode;
         if (keep) try self.appendOutputAtom(ledger_atom);
@@ -1154,9 +1175,9 @@ const Resolver = struct {
 
     fn readIndex(self: *const Resolver, position: u32) Error!u16 {
         const instruction = try decodeInstruction(self.code, position);
-        return switch (instruction.format) {
-            .u8, .i8, .loc8, .const8 => self.code[position + 1],
-            .u16, .npop, .loc, .arg, .var_ref => try readU16(self.code, position),
+        return switch (instruction.indexWidth()) {
+            1 => self.code[position + operand_off.index],
+            2 => try readU16(self.code, position),
             else => error.InvalidBytecode,
         };
     }
@@ -1168,11 +1189,11 @@ const Resolver = struct {
         var position = start;
         while (position < self.product.code_len) {
             const instruction = try decodeInstruction(self.code, position);
-            if (instruction.op_id == op.line_num) {
+            if (instruction.form == .line_num) {
                 position += instruction.size;
                 continue;
             }
-            if (instruction.op_id != op.@"return") return null;
+            if (instruction.form != .@"return") return null;
             const end = position + instruction.size;
             if (self.hasBindInRange(start, end)) return null;
             return end;
@@ -1195,14 +1216,14 @@ const Resolver = struct {
         var hops: u8 = 0;
         while (position < self.product.code_len) {
             const instruction = try decodeInstruction(self.code, position);
-            if (instruction.op_id == op.line_num) {
+            if (instruction.form == .line_num) {
                 position += instruction.size;
                 continue;
             }
-            if (instruction.op_id == op.goto) {
+            if (instruction.form == .goto) {
                 if (hops >= 8) return null;
                 hops += 1;
-                const label_index = try readU32At(self.code, position, 1);
+                const label_index = try readU32At(self.code, position, operand_off.jump_label);
                 if (label_index >= self.product.label_len) return error.InvalidBytecode;
                 const slot = self.product.label_slots[label_index];
                 if (!slot.flags.bound or slot.bound_offset == labels.unbound or
@@ -1213,7 +1234,7 @@ const Resolver = struct {
                 position = slot.bound_offset;
                 continue;
             }
-            if (instruction.op_id != op.@"return") return null;
+            if (instruction.form != .@"return") return null;
             return position + instruction.size;
         }
         return null;
@@ -1235,11 +1256,11 @@ const Resolver = struct {
                 return null;
             const instruction = try decodeInstruction(self.code, position);
             if (token.options.len == 1) {
-                if (instruction.op_id != token.options[0]) return null;
+                if (instruction.form != token.options[0]) return null;
             } else {
                 var selected = false;
                 for (token.options) |candidate| {
-                    if (instruction.op_id == candidate) {
+                    if (instruction.form == candidate) {
                         selected = true;
                         break;
                     }
@@ -1248,11 +1269,11 @@ const Resolver = struct {
             }
             if (token.idx) |expected| {
                 // The instruction was decoded immediately above. Reuse its
-                // format instead of paying a second metadata lookup and a
+                // header instead of paying a second metadata lookup and a
                 // second bounds proof for every indexed pattern.
-                const actual: u16 = switch (instruction.format) {
-                    .u8, .i8, .loc8, .const8 => self.code[position + 1],
-                    .u16, .npop, .loc, .arg, .var_ref => try readU16(self.code, position),
+                const actual: u16 = switch (instruction.indexWidth()) {
+                    1 => self.code[position + operand_off.index],
+                    2 => try readU16(self.code, position),
                     else => return error.InvalidBytecode,
                 };
                 if (actual != expected) return null;
@@ -1484,8 +1505,8 @@ const Resolver = struct {
         if (position >= self.product.code_len) return false;
         if (self.hasInputSourceAt(position)) return false;
         const instruction = try decodeInstruction(self.code, position);
-        if (instruction.op_id != op.goto) return false;
-        const target = try readU32At(self.code, position, 1);
+        if (instruction.form != .goto) return false;
+        const target = try readU32At(self.code, position, operand_off.jump_label);
         if (target >= self.product.label_len) return error.InvalidBytecode;
         const target_slot = self.product.label_slots[target];
         if (!target_slot.flags.bound or target_slot.bound_offset == labels.unbound or
@@ -1509,9 +1530,9 @@ const Resolver = struct {
         if (slot.flags.bound and slot.bound_offset == position) return true;
         if (position < self.product.code_len) {
             const instruction = try decodeInstruction(self.code, position);
-            if (instruction.op_id == op.goto)
+            if (instruction.form == .goto)
                 return try self.labelsShareBindOffset(
-                    try readU32At(self.code, position, 1),
+                    try readU32At(self.code, position, operand_off.jump_label),
                     label_index,
                 );
         }
@@ -1565,9 +1586,9 @@ const Resolver = struct {
         // their parser source and must retain the legacy CFG edge.
         if (self.hasInputSourceAt(start)) return false;
         const dispatch = try decodeInstruction(self.code, start);
-        if (dispatch.op_id != op.goto or start + dispatch.size != slot.bound_offset)
+        if (dispatch.form != .goto or start + dispatch.size != slot.bound_offset)
             return false;
-        const dispatch_label = try readU32At(self.code, start, 1);
+        const dispatch_label = try readU32At(self.code, start, operand_off.jump_label);
         if (dispatch_label >= self.product.label_len)
             return error.InvalidBytecode;
         const dispatch_slot = self.product.label_slots[dispatch_label];
@@ -1582,11 +1603,11 @@ const Resolver = struct {
     fn findJumpTarget(
         self: *Resolver,
         label0: u32,
-        out_op: *u8,
+        out_op: *Form,
     ) Error!u32 {
         var label_index = label0;
         _ = try updateLabel(self.product, label_index, -1);
-        var target_op: u8 = op.invalid;
+        var target_op: Form = .invalid;
         var iteration: u8 = 0;
         while (iteration < 10) : (iteration += 1) {
             if (label_index >= self.product.label_len)
@@ -1599,18 +1620,18 @@ const Resolver = struct {
             }
             var position = slot.bound_offset;
             if (position == self.product.code_len) {
-                target_op = op.invalid;
+                target_op = .invalid;
                 break;
             }
             const instruction = try decodeInstruction(self.code, position);
-            target_op = instruction.op_id;
-            if (target_op == op.goto) {
-                label_index = try readU32At(self.code, position, 1);
+            target_op = instruction.form;
+            if (target_op == .goto) {
+                label_index = try readU32At(self.code, position, operand_off.jump_label);
                 continue;
             }
-            if (target_op == op.drop) {
+            if (target_op == .drop) {
                 var source_blocked = false;
-                while (position < self.product.code_len and self.code[position] == op.drop) {
+                while (opcode.decode.matchesFormAt(self.code, position, .drop)) {
                     const drop = try decodeInstruction(self.code, position);
                     position += drop.size;
                     // The canonical legacy Stage-4 topology scans the raw
@@ -1625,8 +1646,8 @@ const Resolver = struct {
                 }
                 if (!source_blocked and position < self.product.code_len) {
                     const after_drops = try decodeInstruction(self.code, position);
-                    if (after_drops.op_id == op.return_undef)
-                        target_op = op.return_undef;
+                    if (after_drops.form == .return_undef)
+                        target_op = .return_undef;
                 }
             }
             break;
@@ -1645,7 +1666,7 @@ const Resolver = struct {
     /// canonical legacy resolver also applies it to nullish/typeof fold
     /// targets before dead-code reachability is decided.
     fn findFoldedBranchTarget(self: *Resolver, label_index: u32) Error!u32 {
-        var target_op: u8 = op.invalid;
+        var target_op: Form = .invalid;
         return self.findJumpTarget(label_index, &target_op);
     }
 
@@ -1697,18 +1718,18 @@ const Resolver = struct {
             const instruction = try decodeInstruction(self.code, position);
             const position_next = position + instruction.size;
             self.absorbSources(position_next);
-            switch (instruction.op_id) {
-                op.if_false, op.if_true, op.goto, op.@"catch", op.gosub => {
+            switch (instruction.form) {
+                .if_false, .if_true, .goto, .@"catch", .gosub => {
                     _ = try updateLabel(
                         self.product,
-                        try readU32At(self.code, position, 1),
+                        try readU32At(self.code, position, operand_off.jump_label),
                         -1,
                     );
                 },
-                op.dyn_env_probe => {
+                .dyn_env_probe => {
                     _ = try updateLabel(
                         self.product,
-                        try readU32At(self.code, position, 5),
+                        try readU32At(self.code, position, operand_off.probe_label),
                         -1,
                     );
                 },
@@ -1716,6 +1737,33 @@ const Resolver = struct {
             }
             try self.consumeAtomsRange(position, position_next, null);
             position = position_next;
+        }
+    }
+
+    // The hand-written ladder below is now the BASELINE for the decode
+    // layer's declaration-derived selection; this proves the two agree on
+    // every family and across every branch boundary of the idx domain
+    // before the writer switches to the derived one. The probe values
+    // cover both sides of each threshold the ladder tests.
+    comptime {
+        @setEvalBranchQuota(100000);
+        const wides = [_]Form{
+            .get_loc,     .put_loc,       .set_loc,
+            .get_arg,     .put_arg,       .set_arg,
+            .get_var_ref, .put_var_ref,   .set_var_ref,
+            .call,        .put_loc_check, .get_loc_check,
+            .get_field,   .push_i32,
+        };
+        const probes = [_]u16{ 0, 1, 2, 3, 4, 5, 255, 256, 257, 65535 };
+        for (wides) |wide| {
+            for (probes) |idx| {
+                const hand = shortSlotOp(opId(wide), idx);
+                const derived = opcode.decode.selectSlotShortForm(wide, idx);
+                const derived_id: ?u8 = if (derived) |form| opId(form) else null;
+                if (!std.meta.eql(hand, derived_id))
+                    @compileError("short selection diverges for " ++ @tagName(wide) ++
+                        " at idx " ++ std.fmt.comptimePrint("{d}", .{idx}));
+            }
         }
     }
 
@@ -1748,16 +1796,15 @@ const Resolver = struct {
     }
 
     fn putShortCodeSize(comptime layout: LayoutMode, op_id: u8, idx: u16) u32 {
+        // Contract 3: capacity and emission consume the same selector, and
+        // the selected form's size comes from its row -- there is no second
+        // ladder here to fall out of step with `putShortCode`.
         if (layout == .short) {
-            if (shortSlotOp(op_id, idx)) |short_op| {
-                return if (short_op == op.get_loc8 or short_op == op.put_loc8 or
-                    short_op == op.set_loc8)
-                    2
-                else
-                    1;
+            if (opcode.decode.selectSlotShortForm(formOf(op_id), idx)) |short_form| {
+                return opcode.decode.form_row[@intFromEnum(short_form)].size;
             }
         }
-        return 3;
+        return opcode.decode.form_row[op_id].size;
     }
 
     fn specialObjectSize(comptime layout: LayoutMode, slot: i32) Error!u32 {
@@ -1820,7 +1867,8 @@ const Resolver = struct {
         idx: u16,
     ) Error!void {
         if (layout == .short) {
-            if (shortSlotOp(op_id, idx)) |short_op| {
+            if (opcode.decode.selectSlotShortForm(formOf(op_id), idx)) |short_form| {
+                const short_op = opId(short_form);
                 const pc = self.output_len;
                 if (comptime layout == .short) {
                     if (short_op == op.get_loc8 or short_op == op.put_loc0 or
@@ -1834,9 +1882,10 @@ const Resolver = struct {
                         short_op == op.get_loc8 or short_op == op.get_var_ref0)
                         self.noteFusionA(short_op, pc);
                 }
-                if (short_op == op.get_loc8 or short_op == op.put_loc8 or
-                    short_op == op.set_loc8)
-                {
+                // The byte-payload variants carry the index; whether the
+                // selected form has a payload is the row's fact, not a
+                // second identity list.
+                if (opcode.decode.form_row[@intFromEnum(short_form)].size == 2) {
                     try self.appendByte(@intCast(idx));
                 }
                 return;
@@ -1857,8 +1906,8 @@ const Resolver = struct {
             try self.appendI32(value);
             return;
         }
-        if (value >= -1 and value <= 7) {
-            const short_op: u8 = @intCast(@as(i32, op.push_0) + value);
+        if (opcode.decode.selectPushIntForm(value)) |short_form| {
+            const short_op: u8 = opId(short_form);
             if (comptime layout == .short) {
                 if (short_op == op.push_0 or short_op == op.push_2 or
                     short_op == op.push_1)
@@ -1952,13 +2001,29 @@ const Resolver = struct {
             try self.emitSpecialObject(layout, special.var_object, fd.arg_var_object_idx);
     }
 
-    fn shortJumpOp(op_id: u8) Error!u8 {
-        return switch (op_id) {
-            op.if_false => op.if_false8,
-            op.if_true => op.if_true8,
-            op.goto => op.goto8,
-            else => error.InvalidBytecode,
+    // Baseline for the derived jump selection, kept as the assertion's
+    // reference; the writer consumes the declaration-derived table.
+    comptime {
+        const cases = [_][2]Form{
+            .{ .if_false, .if_false8 },
+            .{ .if_true, .if_true8 },
+            .{ .goto, .goto8 },
         };
+        for (cases) |case| {
+            if (opcode.decode.selectJumpForm(case[0], .narrow) != case[1])
+                @compileError("narrow jump selection diverges for " ++ @tagName(case[0]));
+        }
+        if (opcode.decode.selectJumpForm(.goto, .medium) != Form.goto16)
+            @compileError("medium jump selection diverges for goto");
+        if (opcode.decode.selectJumpForm(.if_false, .medium) != null or
+            opcode.decode.selectJumpForm(.if_true, .medium) != null)
+            @compileError("the conditionals must not gain a 16-bit rung silently");
+    }
+
+    fn shortJumpOp(op_id: u8) Error!u8 {
+        const narrow = opcode.decode.selectJumpForm(formOf(op_id), .narrow) orelse
+            return error.InvalidBytecode;
+        return opId(narrow);
     }
 
     fn emitHasLabel(
@@ -2062,34 +2127,34 @@ const Resolver = struct {
     }
 
     const SlotFamily = struct {
-        get: u8,
-        put: u8,
-        set: u8,
+        get: Form,
+        put: Form,
+        set: Form,
     };
 
-    fn putFamily(op_id: u8) ?SlotFamily {
-        return switch (op_id) {
-            op.put_loc => .{ .get = op.get_loc, .put = op.put_loc, .set = op.set_loc },
-            op.put_loc_check => .{
-                .get = op.get_loc_check,
-                .put = op.put_loc_check,
-                .set = op.set_loc_check,
+    fn putFamily(form: Form) ?SlotFamily {
+        return switch (form) {
+            .put_loc => .{ .get = .get_loc, .put = .put_loc, .set = .set_loc },
+            .put_loc_check => .{
+                .get = .get_loc_check,
+                .put = .put_loc_check,
+                .set = .set_loc_check,
             },
-            op.put_arg => .{ .get = op.get_arg, .put = op.put_arg, .set = op.set_arg },
-            op.put_var_ref => .{
-                .get = op.get_var_ref,
-                .put = op.put_var_ref,
-                .set = op.set_var_ref,
+            .put_arg => .{ .get = .get_arg, .put = .put_arg, .set = .set_arg },
+            .put_var_ref => .{
+                .get = .get_var_ref,
+                .put = .put_var_ref,
+                .set = .set_var_ref,
             },
             else => null,
         };
     }
 
-    fn isShortSlotFamily(op_id: u8) bool {
-        return op_id == op.get_loc or op_id == op.put_loc or op_id == op.set_loc or
-            op_id == op.get_arg or op_id == op.put_arg or op_id == op.set_arg or
-            op_id == op.get_var_ref or op_id == op.put_var_ref or
-            op_id == op.set_var_ref;
+    fn isShortSlotFamily(form: Form) bool {
+        return form == .get_loc or form == .put_loc or form == .set_loc or
+            form == .get_arg or form == .put_arg or form == .set_arg or
+            form == .get_var_ref or form == .put_var_ref or
+            form == .set_var_ref;
     }
 
     fn copyDefault(
@@ -2100,12 +2165,12 @@ const Resolver = struct {
     ) Error!void {
         try self.attachSource();
         const position_next = position + instruction.size;
-        if (instruction.op_id == op.call) {
+        if (instruction.form == .call) {
             try self.putShortCode(layout, op.call, try readU16(self.code, position));
-        } else if (isShortSlotFamily(instruction.op_id)) {
+        } else if (isShortSlotFamily(instruction.form)) {
             try self.putShortCode(
                 layout,
-                instruction.op_id,
+                opId(instruction.form),
                 try readU16(self.code, position),
             );
         } else {
@@ -2144,6 +2209,26 @@ const Resolver = struct {
         try self.consumeInstructionAtom(position, instruction, true);
     }
 
+    /// C0 (contract 3): the late-encoding arm. The lowered stream carries
+    /// the form's direct id all the way here; this is the single point
+    /// where the final encoding is chosen, and the choice comes from the
+    /// declaration (`finalEncodingOf`), not from a hand-written id. Both
+    /// bytes are values of that selection -- there is no capacity-side
+    /// twin to drift from because the output buffer grows as it is
+    /// written.
+    fn emitFinalCarrier(
+        self: *Resolver,
+        position: u32,
+        instruction: Instruction,
+        comptime form: Form,
+    ) Error!void {
+        const enc = comptime opcode.decode.finalEncodingOf(form);
+        try self.attachSource();
+        try self.appendByte(enc.carrier.carrier);
+        try self.appendByte(enc.carrier.tag);
+        try self.consumeInstructionAtom(position, instruction, true);
+    }
+
     fn handleGoto(
         self: *Resolver,
         comptime layout: LayoutMode,
@@ -2151,18 +2236,18 @@ const Resolver = struct {
         initial_next: u32,
         initial_label: u32,
     ) Error!u32 {
-        var target_op: u8 = op.invalid;
+        var target_op: Form = .invalid;
         const label_index = try self.findJumpTarget(initial_label, &target_op);
         if (try self.codeHasLabel(initial_next, label_index)) {
             _ = try updateLabel(self.product, label_index, -1);
             return initial_next;
         }
-        if (target_op == op.@"return" or target_op == op.return_undef or
-            target_op == op.throw)
+        if (target_op == .@"return" or target_op == .return_undef or
+            target_op == .throw)
         {
             _ = try updateLabel(self.product, label_index, -1);
             try self.attachSource();
-            try self.appendByte(target_op);
+            try self.appendByte(opId(target_op));
             return self.skipDeadCode(initial_next);
         }
         if (try self.deadSwitchTrampolineCanReachLabel(initial_next, label_index)) {
@@ -2209,10 +2294,10 @@ const Resolver = struct {
         position_next: u32,
         op_id: u8,
     ) Error!void {
-        const atom_id = try readU32At(self.code, position, 1);
-        var target_op: u8 = op.invalid;
+        const atom_id = try readU32At(self.code, position, operand_off.atom);
+        var target_op: Form = .invalid;
         const label_index = try self.findJumpTarget(
-            try readU32At(self.code, position, 5),
+            try readU32At(self.code, position, operand_off.probe_label),
             &target_op,
         );
         if (label_index >= self.product.label_len)
@@ -2255,7 +2340,7 @@ const Resolver = struct {
             const instruction = try decodeInstruction(self.code, position);
             var position_next = position + instruction.size;
 
-            switch (instruction.op_id) {
+            switch (instruction.form) {
                 // qjs:34941-34957: `call`/`call_method` immediately followed by
                 // `return` (line_num skipped, same as code_match) becomes
                 // `tail_call`/`tail_call_method` via put_short_code(op+1, argc).
@@ -2276,8 +2361,8 @@ const Resolver = struct {
                 // `tail_call_method` still aliases `call_method` (push) for
                 // both modes. Leave the following `return` as the shared
                 // return stub for native / non-reuse completions.
-                op.call, op.call_method => {
-                    const matched: ?u32 = if (instruction.op_id == op.call_method)
+                .call, .call_method => {
+                    const matched: ?u32 = if (instruction.form == .call_method)
                         try self.matchReturnAfter(position_next)
                     else if (self.fd != null and self.fd.?.is_strict_mode)
                         try self.matchTailReturnAfterStrict(position_next)
@@ -2285,7 +2370,7 @@ const Resolver = struct {
                         null;
                     if (matched) |_| {
                         try self.attachSource();
-                        const tail_op: u8 = if (instruction.op_id == op.call)
+                        const tail_op: u8 = if (instruction.form == .call)
                             op.tail_call
                         else
                             op.tail_call_method;
@@ -2310,46 +2395,46 @@ const Resolver = struct {
                 // resolve_bytecode walk, so this is the complete terminal set
                 // whose dead tails that walk removes (qjs:34352-34378), plus
                 // return_async as in resolve_labels (qjs:34960-34967).
-                op.tail_call,
-                op.tail_call_method,
-                op.@"return",
-                op.return_undef,
-                op.return_async,
-                op.throw,
-                op.throw_error,
-                op.ret,
+                .tail_call,
+                .tail_call_method,
+                .@"return",
+                .return_undef,
+                .return_async,
+                .throw,
+                .throw_error,
+                .ret,
                 => {
                     try self.emitRawInstruction(position, instruction);
                     position_next = try self.skipDeadCode(position_next);
                 },
 
                 // qjs:34968-34998.
-                op.goto => {
+                .goto => {
                     position_next = try self.handleGoto(
                         layout,
                         position,
                         position_next,
-                        try readU32At(self.code, position, 1),
+                        try readU32At(self.code, position, operand_off.jump_label),
                     );
                 },
 
                 // qjs:34999-35010. The disabled empty-finalizer fold stays
                 // disabled; S3 already removes that shape.
-                op.gosub, op.@"catch" => {
+                .gosub, .@"catch" => {
                     position_next = try self.emitHasLabel(
                         layout,
                         position,
                         position_next,
-                        instruction.op_id,
-                        try readU32At(self.code, position, 1),
+                        opId(instruction.form),
+                        try readU32At(self.code, position, operand_off.jump_label),
                     );
                 },
 
                 // qjs:35015-35098.
-                op.if_true, op.if_false => {
-                    var target_op: u8 = op.invalid;
+                .if_true, .if_false => {
+                    var target_op: Form = .invalid;
                     var label_index = try self.findJumpTarget(
-                        try readU32At(self.code, position, 1),
+                        try readU32At(self.code, position, operand_off.jump_label),
                         &target_op,
                     );
                     if (try self.codeHasLabel(position_next, label_index)) {
@@ -2357,7 +2442,7 @@ const Resolver = struct {
                         try self.attachSource();
                         try self.appendByte(op.drop);
                     } else if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{op.goto} },
+                        .{ .options = &.{.goto} },
                     })) |match| {
                         if (!(try self.isSwitchDispatchBridgeAt(match.end)) and
                             try self.codeHasLabel(match.end, label_index))
@@ -2365,7 +2450,7 @@ const Resolver = struct {
                             const goto_label = try readU32At(
                                 self.code,
                                 match.positions[0],
-                                1,
+                                operand_off.jump_label,
                             );
                             if (try self.codeHasLabel(match.end, goto_label)) {
                                 // Both arms land on `match.end`: the taken arm
@@ -2393,7 +2478,7 @@ const Resolver = struct {
                                 self.absorbSources(match.end);
                                 _ = try updateLabel(self.product, label_index, -1);
                                 label_index = goto_label;
-                                const inverted = if (instruction.op_id == op.if_false)
+                                const inverted = if (instruction.form == .if_false)
                                     op.if_true
                                 else
                                     op.if_false;
@@ -2410,7 +2495,7 @@ const Resolver = struct {
                                 layout,
                                 position,
                                 position_next,
-                                instruction.op_id,
+                                opId(instruction.form),
                                 label_index,
                             );
                         }
@@ -2419,23 +2504,23 @@ const Resolver = struct {
                             layout,
                             position,
                             position_next,
-                            instruction.op_id,
+                            opId(instruction.form),
                             label_index,
                         );
                     }
                 },
 
                 // qjs:35099-35135.
-                op.dyn_env_probe => try self.emitDynEnvProbe(
+                .dyn_env_probe => try self.emitDynEnvProbe(
                     position,
                     position_next,
-                    instruction.op_id,
+                    opId(instruction.form),
                 ),
 
                 // qjs:35136-35145.
-                op.drop => {
+                .drop => {
                     if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{op.return_undef} },
+                        .{ .options = &.{.return_undef} },
                     })) |match| {
                         // The return is intentionally revisited by the main
                         // loop; only its carried source is absorbed here.
@@ -2446,27 +2531,27 @@ const Resolver = struct {
                 },
 
                 // qjs:35146-35169, followed by the false constant-test case.
-                op.null => {
+                .null => {
                     if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{op.strict_eq} },
+                        .{ .options = &.{.strict_eq} },
                     })) |match| {
                         self.absorbSources(match.end);
                         try self.attachSource();
                         try self.appendByte(op.is_null);
                         position_next = match.end;
                     } else if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{op.strict_neq} },
-                        .{ .options = &.{ op.if_false, op.if_true } },
+                        .{ .options = &.{.strict_neq} },
+                        .{ .options = &.{ .if_false, .if_true } },
                     })) |match| {
                         self.absorbSources(match.end);
                         try self.attachSource();
                         try self.appendByte(op.is_null);
-                        const inverted = if (self.code[match.positions[1]] == op.if_false)
+                        const inverted = if (opcode.decode.matchesFormAt(self.code, match.positions[1], .if_false))
                             op.if_true
                         else
                             op.if_false;
                         const label_index = try self.findFoldedBranchTarget(
-                            try readU32At(self.code, match.positions[1], 1),
+                            try readU32At(self.code, match.positions[1], operand_off.jump_label),
                         );
                         position_next = try self.emitHasLabel(
                             layout,
@@ -2476,7 +2561,7 @@ const Resolver = struct {
                             label_index,
                         );
                     } else if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{ op.if_false, op.if_true } },
+                        .{ .options = &.{ .if_false, .if_true } },
                     })) |match| {
                         position_next = try self.handleConstantTest(
                             layout,
@@ -2490,14 +2575,14 @@ const Resolver = struct {
                 },
 
                 // qjs:35170-35196.
-                op.push_false, op.push_true => {
+                .push_false, .push_true => {
                     if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{ op.if_false, op.if_true } },
+                        .{ .options = &.{ .if_false, .if_true } },
                     })) |match| {
                         position_next = try self.handleConstantTest(
                             layout,
                             position,
-                            instruction.op_id == op.push_true,
+                            instruction.form == .push_true,
                             match,
                         );
                     } else {
@@ -2507,10 +2592,10 @@ const Resolver = struct {
 
                 // qjs:35197-35229, with the deliberate legacy zjs ordering:
                 // constant-test recognition precedes neg and push/drop folds.
-                op.push_i32 => {
+                .push_i32 => {
                     const value = try readI32(self.code, position);
                     if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{ op.if_false, op.if_true } },
+                        .{ .options = &.{ .if_false, .if_true } },
                     })) |match| {
                         position_next = try self.handleConstantTest(
                             layout,
@@ -2520,10 +2605,10 @@ const Resolver = struct {
                         );
                     } else if (value != std.math.minInt(i32) and value != 0) {
                         if (try self.matchSeq(position_next, &.{
-                            .{ .options = &.{op.neg} },
+                            .{ .options = &.{.neg} },
                         })) |neg_match| {
                             if (try self.matchSeq(neg_match.end, &.{
-                                .{ .options = &.{op.drop} },
+                                .{ .options = &.{.drop} },
                             })) |drop_match| {
                                 self.absorbSources(drop_match.end);
                                 position_next = drop_match.end;
@@ -2534,7 +2619,7 @@ const Resolver = struct {
                                 position_next = neg_match.end;
                             }
                         } else if (try self.matchSeq(position_next, &.{
-                            .{ .options = &.{op.drop} },
+                            .{ .options = &.{.drop} },
                         })) |drop_match| {
                             self.absorbSources(drop_match.end);
                             position_next = drop_match.end;
@@ -2543,7 +2628,7 @@ const Resolver = struct {
                             try self.pushShortInt(layout, value);
                         }
                     } else if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{op.drop} },
+                        .{ .options = &.{.drop} },
                     })) |drop_match| {
                         self.absorbSources(drop_match.end);
                         position_next = drop_match.end;
@@ -2555,14 +2640,14 @@ const Resolver = struct {
 
                 // qjs:35230-35250. zjs guards the entire fold, including the
                 // discarded variant, against INT32_MIN.
-                op.push_bigint_i32 => {
+                .push_bigint_i32 => {
                     const value = try readI32(self.code, position);
                     if (value != std.math.minInt(i32)) {
                         if (try self.matchSeq(position_next, &.{
-                            .{ .options = &.{op.neg} },
+                            .{ .options = &.{.neg} },
                         })) |neg_match| {
                             if (try self.matchSeq(neg_match.end, &.{
-                                .{ .options = &.{op.drop} },
+                                .{ .options = &.{.drop} },
                             })) |drop_match| {
                                 self.absorbSources(drop_match.end);
                                 position_next = drop_match.end;
@@ -2582,11 +2667,11 @@ const Resolver = struct {
                 },
 
                 // qjs:35251-35263.
-                op.push_const, op.fclosure => {
-                    const index = try readU32At(self.code, position, 1);
+                .push_const, .fclosure => {
+                    const index = try readU32At(self.code, position, operand_off.index);
                     if (layout == .short and index < 256) {
                         try self.attachSource();
-                        try self.appendByte(if (instruction.op_id == op.push_const)
+                        try self.appendByte(if (instruction.form == .push_const)
                             op.push_const8
                         else
                             op.fclosure8);
@@ -2597,9 +2682,9 @@ const Resolver = struct {
                 },
 
                 // qjs:35264-35275.
-                op.get_field => {
+                .get_field => {
                     if (layout == .short and
-                        try readU32At(self.code, position, 1) == core.atom.ids.length)
+                        try readU32At(self.code, position, operand_off.atom) == core.atom.ids.length)
                     {
                         try self.attachSource();
                         try self.appendByte(op.get_length);
@@ -2610,15 +2695,15 @@ const Resolver = struct {
                 },
 
                 // qjs:35276-35296.
-                op.push_atom_value => {
+                .push_atom_value => {
                     if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{op.drop} },
+                        .{ .options = &.{.drop} },
                     })) |match| {
                         self.absorbSources(match.end);
                         try self.consumeAtomsRange(position, match.end, null);
                         position_next = match.end;
                     } else if (layout == .short and
-                        try readU32At(self.code, position, 1) ==
+                        try readU32At(self.code, position, operand_off.atom) ==
                             core.atom.ids.empty_string)
                     {
                         try self.attachSource();
@@ -2630,18 +2715,25 @@ const Resolver = struct {
                 },
 
                 // qjs:35297-35307 deliberately not ported: legacy zjs has no
-                // to_propkey/store fold.
-                op.to_propkey => try self.copyDefault(layout, position, instruction),
+                // to_propkey/store fold. C0: the final encoding is the
+                // carrier tag; the direct id survives only as the D11
+                // executable alias for the migration window.
+                .to_propkey => try self.emitFinalCarrier(position, instruction, .to_propkey),
+
+                // C1-1: same late-encoding shape as to_propkey; created
+                // only by the builder's trailing set_name rewrite, decoded
+                // here in the s3 domain, written as the carrier pair.
+                .set_name_computed => try self.emitFinalCarrier(position, instruction, .set_name_computed),
 
                 // qjs:35308-35351.
-                op.undefined => {
+                .undefined => {
                     if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{op.drop} },
+                        .{ .options = &.{.drop} },
                     })) |match| {
                         self.absorbSources(match.end);
                         position_next = match.end;
                     } else if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{op.@"return"} },
+                        .{ .options = &.{.@"return"} },
                     })) |match| {
                         self.absorbSources(match.end);
                         try self.attachSource();
@@ -2655,7 +2747,7 @@ const Resolver = struct {
                         try self.retireSpannedDeadBinds(match.end);
                         position_next = try self.skipDeadCode(match.end);
                     } else if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{ op.if_false, op.if_true } },
+                        .{ .options = &.{ .if_false, .if_true } },
                     })) |match| {
                         position_next = try self.handleConstantTest(
                             layout,
@@ -2664,27 +2756,27 @@ const Resolver = struct {
                             match,
                         );
                     } else if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{op.strict_eq} },
+                        .{ .options = &.{.strict_eq} },
                     })) |match| {
                         self.absorbSources(match.end);
                         try self.attachSource();
-                        try self.appendByte(op.using);
-                        try self.appendByte(opcode.using_sub.is_undefined);
+                        try self.appendByte(op.ext0);
+                        try self.appendByte(opcode.ext0_sub.is_undefined);
                         position_next = match.end;
                     } else if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{op.strict_neq} },
-                        .{ .options = &.{ op.if_false, op.if_true } },
+                        .{ .options = &.{.strict_neq} },
+                        .{ .options = &.{ .if_false, .if_true } },
                     })) |match| {
                         self.absorbSources(match.end);
                         try self.attachSource();
-                        try self.appendByte(op.using);
-                        try self.appendByte(opcode.using_sub.is_undefined);
-                        const inverted = if (self.code[match.positions[1]] == op.if_false)
+                        try self.appendByte(op.ext0);
+                        try self.appendByte(opcode.ext0_sub.is_undefined);
+                        const inverted = if (opcode.decode.matchesFormAt(self.code, match.positions[1], .if_false))
                             op.if_true
                         else
                             op.if_false;
                         const label_index = try self.findFoldedBranchTarget(
-                            try readU32At(self.code, match.positions[1], 1),
+                            try readU32At(self.code, match.positions[1], operand_off.jump_label),
                         );
                         position_next = try self.emitHasLabel(
                             layout,
@@ -2726,12 +2818,12 @@ const Resolver = struct {
         instruction: Instruction,
         position_next: *u32,
     ) Error!void {
-        switch (instruction.op_id) {
+        switch (instruction.form) {
             // qjs:35352-35367.
-            op.insert2 => {
+            .insert2 => {
                 if (try self.matchSeq(position_next.*, &.{
-                    .{ .options = &.{op.put_field} },
-                    .{ .options = &.{op.drop} },
+                    .{ .options = &.{.put_field} },
+                    .{ .options = &.{.drop} },
                 })) |match| {
                     // qjs:35352-35367. The marker owned by `insert2` maps to
                     // the replacement store. Legacy's old-PC relocation maps
@@ -2741,7 +2833,7 @@ const Resolver = struct {
                     try self.attachSource();
                     const put_position = match.positions[0];
                     try self.appendByte(op.put_field);
-                    try self.appendU32(try readU32At(self.code, put_position, 1));
+                    try self.appendU32(try readU32At(self.code, put_position, operand_off.atom));
                     try self.consumeAtomsRange(position, match.end, put_position);
                     self.absorbSources(match.end);
                     try self.attachSource();
@@ -2753,16 +2845,17 @@ const Resolver = struct {
 
             // qjs:35368-35394. Explicit families replace qjs's arithmetic
             // get/put/set assumptions, including the checked-local family.
-            op.dup => {
+            .dup => {
                 if (try self.matchSeq(position_next.*, &.{
                     .{ .options = &.{
-                        op.put_loc,
-                        op.put_loc_check,
-                        op.put_arg,
-                        op.put_var_ref,
+                        .put_loc,
+                        .put_loc_check,
+                        .put_arg,
+                        .put_var_ref,
                     } },
                 })) |put_match| {
-                    const family = putFamily(self.code[put_match.positions[0]]) orelse
+                    const put_form = (try decodeInstruction(self.code, put_match.positions[0])).form;
+                    const family = putFamily(put_form) orelse
                         return error.InvalidBytecode;
                     const idx = try self.readIndex(put_match.positions[0]);
                     self.absorbSources(put_match.end);
@@ -2770,7 +2863,7 @@ const Resolver = struct {
                     var final_end = put_match.end;
                     var delayed_source_end: ?u32 = null;
                     if (try self.matchSeq(final_end, &.{
-                        .{ .options = &.{op.drop} },
+                        .{ .options = &.{.drop} },
                     })) |drop_match| {
                         self.absorbSources(drop_match.end);
                         result_op = family.put;
@@ -2787,7 +2880,7 @@ const Resolver = struct {
                         }
                     }
                     try self.attachSource();
-                    try self.putShortCode(layout, result_op, idx);
+                    try self.putShortCode(layout, opId(result_op), idx);
                     if (delayed_source_end) |source_end| {
                         self.absorbSources(source_end);
                         try self.attachSource();
@@ -2799,7 +2892,7 @@ const Resolver = struct {
             },
 
             // qjs:35395-35468.
-            op.get_loc => {
+            .get_loc => {
                 const idx = try readU16(self.code, position);
                 if (idx >= 256) {
                     try self.copyDefault(layout, position, instruction);
@@ -2807,43 +2900,43 @@ const Resolver = struct {
                 }
 
                 if (try self.matchSeq(position_next.*, &.{
-                    .{ .options = &.{ op.post_dec, op.post_inc } },
-                    .{ .options = &.{op.put_loc}, .idx = idx },
-                    .{ .options = &.{op.drop} },
+                    .{ .options = &.{ .post_dec, .post_inc } },
+                    .{ .options = &.{.put_loc}, .idx = idx },
+                    .{ .options = &.{.drop} },
                 })) |match| {
                     self.absorbSources(match.end);
                     try self.attachSource();
-                    try self.appendByte(if (self.code[match.positions[0]] == op.post_inc)
+                    try self.appendByte(if (opcode.decode.matchesFormAt(self.code, match.positions[0], .post_inc))
                         op.inc_loc
                     else
                         op.dec_loc);
                     try self.appendByte(@intCast(idx));
                     position_next.* = match.end;
                 } else if (try self.matchSeq(position_next.*, &.{
-                    .{ .options = &.{ op.dec, op.inc } },
-                    .{ .options = &.{op.dup} },
-                    .{ .options = &.{op.put_loc}, .idx = idx },
-                    .{ .options = &.{op.drop} },
+                    .{ .options = &.{ .dec, .inc } },
+                    .{ .options = &.{.dup} },
+                    .{ .options = &.{.put_loc}, .idx = idx },
+                    .{ .options = &.{.drop} },
                 })) |match| {
                     self.absorbSources(match.end);
                     try self.attachSource();
-                    try self.appendByte(if (self.code[match.positions[0]] == op.inc)
+                    try self.appendByte(if (opcode.decode.matchesFormAt(self.code, match.positions[0], .inc))
                         op.inc_loc
                     else
                         op.dec_loc);
                     try self.appendByte(@intCast(idx));
                     position_next.* = match.end;
                 } else if (try self.matchSeq(position_next.*, &.{
-                    .{ .options = &.{op.push_atom_value} },
-                    .{ .options = &.{op.add} },
-                    .{ .options = &.{op.dup} },
-                    .{ .options = &.{op.put_loc}, .idx = idx },
-                    .{ .options = &.{op.drop} },
+                    .{ .options = &.{.push_atom_value} },
+                    .{ .options = &.{.add} },
+                    .{ .options = &.{.dup} },
+                    .{ .options = &.{.put_loc}, .idx = idx },
+                    .{ .options = &.{.drop} },
                 })) |match| {
                     self.absorbSources(match.end);
                     try self.attachSource();
                     const atom_position = match.positions[0];
-                    const atom_id = try readU32At(self.code, atom_position, 1);
+                    const atom_id = try readU32At(self.code, atom_position, operand_off.atom);
                     if (layout == .short and atom_id == core.atom.ids.empty_string) {
                         try self.appendByte(op.push_empty_string);
                         try self.consumeAtomsRange(position, match.end, null);
@@ -2860,11 +2953,11 @@ const Resolver = struct {
                     try self.appendByte(@intCast(idx));
                     position_next.* = match.end;
                 } else if (try self.matchSeq(position_next.*, &.{
-                    .{ .options = &.{op.push_i32} },
-                    .{ .options = &.{op.add} },
-                    .{ .options = &.{op.dup} },
-                    .{ .options = &.{op.put_loc}, .idx = idx },
-                    .{ .options = &.{op.drop} },
+                    .{ .options = &.{.push_i32} },
+                    .{ .options = &.{.add} },
+                    .{ .options = &.{.dup} },
+                    .{ .options = &.{.put_loc}, .idx = idx },
+                    .{ .options = &.{.drop} },
                 })) |match| {
                     self.absorbSources(match.end);
                     try self.attachSource();
@@ -2873,17 +2966,17 @@ const Resolver = struct {
                     try self.appendByte(@intCast(idx));
                     position_next.* = match.end;
                 } else if (try self.matchSeq(position_next.*, &.{
-                    .{ .options = &.{ op.get_loc, op.get_arg, op.get_var_ref } },
-                    .{ .options = &.{op.add} },
-                    .{ .options = &.{op.dup} },
-                    .{ .options = &.{op.put_loc}, .idx = idx },
-                    .{ .options = &.{op.drop} },
+                    .{ .options = &.{ .get_loc, .get_arg, .get_var_ref } },
+                    .{ .options = &.{.add} },
+                    .{ .options = &.{.dup} },
+                    .{ .options = &.{.put_loc}, .idx = idx },
+                    .{ .options = &.{.drop} },
                 })) |match| {
                     self.absorbSources(match.end);
                     try self.attachSource();
                     try self.putShortCode(
                         layout,
-                        self.code[match.positions[0]],
+                        opId((try decodeInstruction(self.code, match.positions[0])).form),
                         try self.readIndex(match.positions[0]),
                     );
                     try self.appendByte(op.add_loc);
@@ -2896,18 +2989,18 @@ const Resolver = struct {
             },
 
             // qjs:35469-35479.
-            op.get_arg, op.get_var_ref => {
+            .get_arg, .get_var_ref => {
                 try self.attachSource();
                 try self.putShortCode(
                     layout,
-                    instruction.op_id,
+                    opId(instruction.form),
                     try readU16(self.code, position),
                 );
             },
 
             // qjs:35480-35500.
-            op.put_loc, op.put_loc_check, op.put_arg, op.put_var_ref => {
-                const family = putFamily(instruction.op_id) orelse
+            .put_loc, .put_loc_check, .put_arg, .put_var_ref => {
+                const family = putFamily(instruction.form) orelse
                     return error.InvalidBytecode;
                 const idx = try readU16(self.code, position);
                 if (try self.matchSeq(position_next.*, &.{
@@ -2915,27 +3008,28 @@ const Resolver = struct {
                 })) |match| {
                     self.absorbSources(match.end);
                     try self.attachSource();
-                    try self.putShortCode(layout, family.set, idx);
+                    try self.putShortCode(layout, opId(family.set), idx);
                     position_next.* = match.end;
                 } else {
                     try self.attachSource();
                     // put_loc_check is intentionally wide: putShortCode has
                     // no short-family row for it.
-                    try self.putShortCode(layout, family.put, idx);
+                    try self.putShortCode(layout, opId(family.put), idx);
                 }
             },
 
             // qjs:35501-35545.
-            op.post_inc, op.post_dec => {
-                const update_op = if (instruction.op_id == op.post_inc)
+            .post_inc, .post_dec => {
+                const update_op = if (instruction.form == .post_inc)
                     op.inc
                 else
                     op.dec;
                 if (try self.matchSeq(position_next.*, &.{
-                    .{ .options = &.{ op.put_loc, op.put_arg, op.put_var_ref } },
-                    .{ .options = &.{op.drop} },
+                    .{ .options = &.{ .put_loc, .put_arg, .put_var_ref } },
+                    .{ .options = &.{.drop} },
                 })) |store_match| {
-                    const family = putFamily(self.code[store_match.positions[0]]) orelse
+                    const store_form = (try decodeInstruction(self.code, store_match.positions[0])).form;
+                    const family = putFamily(store_form) orelse
                         return error.InvalidBytecode;
                     const idx = try self.readIndex(store_match.positions[0]);
                     var store_op = family.put;
@@ -2952,28 +3046,28 @@ const Resolver = struct {
                     // own marker belongs on the update (qjs:35501-35545).
                     try self.attachSource();
                     try self.appendByte(update_op);
-                    try self.putShortCode(layout, store_op, idx);
+                    try self.putShortCode(layout, opId(store_op), idx);
                     self.absorbSources(final_end);
                     try self.attachSource();
                     position_next.* = final_end;
                 } else if (try self.matchSeq(position_next.*, &.{
-                    .{ .options = &.{op.perm3} },
-                    .{ .options = &.{op.put_field} },
-                    .{ .options = &.{op.drop} },
+                    .{ .options = &.{.perm3} },
+                    .{ .options = &.{.put_field} },
+                    .{ .options = &.{.drop} },
                 })) |match| {
                     try self.attachSource();
                     const put_position = match.positions[1];
                     try self.appendByte(update_op);
                     try self.appendByte(op.put_field);
-                    try self.appendU32(try readU32At(self.code, put_position, 1));
+                    try self.appendU32(try readU32At(self.code, put_position, operand_off.atom));
                     try self.consumeAtomsRange(position, match.end, put_position);
                     self.absorbSources(match.end);
                     try self.attachSource();
                     position_next.* = match.end;
                 } else if (try self.matchSeq(position_next.*, &.{
-                    .{ .options = &.{op.perm4} },
-                    .{ .options = &.{op.put_array_el} },
-                    .{ .options = &.{op.drop} },
+                    .{ .options = &.{.perm4} },
+                    .{ .options = &.{.put_array_el} },
+                    .{ .options = &.{.drop} },
                 })) |match| {
                     try self.attachSource();
                     try self.appendByte(update_op);
@@ -2987,25 +3081,25 @@ const Resolver = struct {
             },
 
             // qjs:35546-35586.
-            op.typeof => {
+            .typeof => {
                 if (try self.matchSeq(position_next.*, &.{
-                    .{ .options = &.{op.push_atom_value} },
-                    .{ .options = &.{ op.strict_eq, op.strict_neq, op.eq, op.neq } },
+                    .{ .options = &.{.push_atom_value} },
+                    .{ .options = &.{ .strict_eq, .strict_neq, .eq, .neq } },
                 })) |compare_match| {
                     const atom_id = try readU32At(
                         self.code,
                         compare_match.positions[0],
-                        1,
+                        operand_off.atom,
                     );
                     const test_op: ?u8 = if (atom_id == core.atom.ids.undefined_)
-                        opcode.using_sub.typeof_is_undefined
+                        opcode.ext0_sub.typeof_is_undefined
                     else if (atom_id == core.atom.ids.type_function)
-                        opcode.using_sub.typeof_is_function
+                        opcode.ext0_sub.typeof_is_function
                     else
                         null;
                     if (test_op) |selected_test| {
-                        const compare_op = self.code[compare_match.positions[1]];
-                        if (compare_op == op.strict_eq or compare_op == op.eq) {
+                        const compare_form = (try decodeInstruction(self.code, compare_match.positions[1])).form;
+                        if (compare_form == .strict_eq or compare_form == .eq) {
                             // Legacy old-PC relocation places the marker on
                             // push_atom_value after the one-byte replacement,
                             // while the later compare marker maps backwards
@@ -3017,7 +3111,7 @@ const Resolver = struct {
                             const deferred_end = self.source_cursor;
                             self.absorbSources(compare_match.end);
                             self.source_attach_cursor = self.source_cursor;
-                            try self.appendByte(op.using);
+                            try self.appendByte(op.ext0);
                             try self.appendByte(selected_test);
                             try self.consumeAtomsRange(
                                 position,
@@ -3033,7 +3127,7 @@ const Resolver = struct {
                             return;
                         }
                         if (try self.matchSeq(compare_match.end, &.{
-                            .{ .options = &.{op.if_false} },
+                            .{ .options = &.{.if_false} },
                         })) |branch_match| {
                             try self.attachSource();
                             const deferred_start = self.source_attach_cursor;
@@ -3041,7 +3135,7 @@ const Resolver = struct {
                             const deferred_end = self.source_cursor;
                             self.absorbSources(branch_match.end);
                             self.source_attach_cursor = self.source_cursor;
-                            try self.appendByte(op.using);
+                            try self.appendByte(op.ext0);
                             try self.appendByte(selected_test);
                             try self.consumeAtomsRange(
                                 position,
@@ -3052,7 +3146,7 @@ const Resolver = struct {
                                 try readU32At(
                                     self.code,
                                     branch_match.positions[0],
-                                    1,
+                                    operand_off.jump_label,
                                 ),
                             );
                             position_next.* = try self.emitHasLabel(
@@ -3106,8 +3200,11 @@ const Resolver = struct {
             var new_op = jump.op;
             if (diff >= -128 and diff <= 127 + @as(i64, delta)) {
                 new_size = 1;
+                // goto16 is itself a rung of the goto family; its narrow
+                // selection is the same goto8 the wide form's is.
                 new_op = if (jump.op == op.goto16)
-                    op.goto8
+                    opId(opcode.decode.selectJumpForm(.goto, .narrow) orelse
+                        return error.InvalidBytecode)
                 else
                     try shortJumpOp(jump.op);
             } else if (jump.op == op.goto and
@@ -3115,7 +3212,8 @@ const Resolver = struct {
             {
                 new_size = 2;
                 delta = 2;
-                new_op = op.goto16;
+                new_op = opId(opcode.decode.selectJumpForm(.goto, .medium) orelse
+                    return error.InvalidBytecode);
             }
 
             const compact_size = new_size orelse continue;
@@ -3488,11 +3586,11 @@ const Resolver = struct {
         var atom_index: u32 = 0;
         while (position < self.output_len) {
             const instruction = try decodeInstruction(code, position);
-            if (instruction.op_id == op.invalid) return error.InvalidBytecode;
-            if (hasAtomFormat(instruction.format)) {
+            if (instruction.form == .invalid) return error.InvalidBytecode;
+            if (instruction.hasAtom()) {
                 if (atom_index >= self.output_atom_len)
                     return error.InvalidBytecode;
-                if (try readU32At(code, position, 1) != self.output_atoms[atom_index])
+                if (try readU32At(code, position, operand_off.atom) != self.output_atoms[atom_index])
                     return error.InvalidBytecode;
                 atom_index += 1;
             }
@@ -3896,7 +3994,7 @@ test "compiler.resolve_labels: typeof string fold preserves legacy source reloca
 
     try std.testing.expectEqualSlices(
         u8,
-        &.{ op.using, opcode.using_sub.typeof_is_undefined, op.push_false, op.strict_eq, op.@"return" },
+        &.{ op.ext0, opcode.ext0_sub.typeof_is_undefined, op.push_false, op.strict_eq, op.@"return" },
         harness.function.code,
     );
     try std.testing.expectEqualSlices(
@@ -4323,8 +4421,8 @@ test "compiler.resolve_labels: folded typeof branch threads through dead goto" {
             op.if_false8,
             8,
             op.get_arg0,
-            op.using,
-            opcode.using_sub.typeof_is_undefined,
+            op.ext0,
+            opcode.ext0_sub.typeof_is_undefined,
             op.if_true8,
             5,
             op.object,
@@ -4343,7 +4441,7 @@ test "compiler.resolve_labels: folded typeof branch threads through dead goto" {
 test "compiler.resolve_labels: folded nullish branches thread through dead goto" {
     const cases = [_]struct { literal: u8, test_bytes: []const u8 }{
         .{ .literal = op.null, .test_bytes = &.{op.is_null} },
-        .{ .literal = op.undefined, .test_bytes = &.{ op.using, opcode.using_sub.is_undefined } },
+        .{ .literal = op.undefined, .test_bytes = &.{ op.ext0, opcode.ext0_sub.is_undefined } },
     };
 
     for (cases) |case| {

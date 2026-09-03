@@ -11,7 +11,7 @@ Discipline (`reports/perf/qjs-align/measurement-contracts.md`):
   first-position counts are recorded in the payload;
 * every perf event carries an explicit PMU prefix and `<not counted>` rows are
   a hard error (big.LITTLE host, two PMUs);
-* `taskset -c 19` plus `flock -x`; no `perf -F` anywhere;
+* canonical measurement-field pinning plus its lock; no `perf -F` anywhere;
 * instructions and cycles are always collected together.
 
 Modes:
@@ -26,7 +26,6 @@ Modes:
 """
 
 import argparse
-import fcntl
 import json
 import math
 import os
@@ -36,7 +35,9 @@ import subprocess
 import sys
 import time
 
-LOCK = "/tmp/zjs-host-heavy.lock"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from measure_fields import field_metadata, measurement_lock, single_cpu
+
 ROTATIONS = [(0, 1, 2, 3), (3, 2, 1, 0), (1, 0, 3, 2), (2, 3, 0, 1)]
 SCORE_RE = re.compile(r"^([A-Za-z0-9_]+):\s*([0-9.]+)\s*$")
 
@@ -95,13 +96,20 @@ def main():
     ap.add_argument("--cases", required=True,
                     help="comma-separated case names (no .js)")
     ap.add_argument("--iterations", type=int, default=20_000_000)
-    ap.add_argument("--cpu", type=int, default=19)
+    ap.add_argument("--field", choices=("a", "b", "host"), default=None)
+    ap.add_argument("--cpu", type=int, default=None,
+                    help="legacy CPU override; noncanonical values are diagnostic-only")
     ap.add_argument("--pmu", default="armv8_pmuv3_1")
     ap.add_argument("--samples", type=int, default=8)
     ap.add_argument("--timeout", type=int, default=1800)
     ap.add_argument("--label", required=True)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+
+    try:
+        measure_field, args.cpu, field_conforming = single_cpu(args.field, args.cpu)
+    except ValueError as error:
+        ap.error(str(error))
 
     if args.samples % 4 != 0:
         sys.exit("samples must be a multiple of 4 (four binaries, balanced "
@@ -125,20 +133,16 @@ def main():
             sys.exit("missing case: " + script)
         samples = {k: [] for k, _ in binaries}
         outputs = {k: set() for k, _ in binaries}
-        with open(LOCK, "a") as lock_fh:
-            fcntl.flock(lock_fh, fcntl.LOCK_EX)
-            try:
-                for s in range(args.samples):
-                    order = ROTATIONS[s % 4]
-                    first_positions[binaries[order[0]][0]] += 1
-                    for idx in order:
-                        key, binary = binaries[idx]
-                        v = run_once(binary, script, args.cpu, events,
-                                     case_dir, args.timeout)
-                        outputs[key].add(v.pop("stdout"))
-                        samples[key].append(v)
-            finally:
-                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        with measurement_lock(measure_field):
+            for s in range(args.samples):
+                order = ROTATIONS[s % 4]
+                first_positions[binaries[order[0]][0]] += 1
+                for idx in order:
+                    key, binary = binaries[idx]
+                    v = run_once(binary, script, args.cpu, events,
+                                 case_dir, args.timeout)
+                    outputs[key].add(v.pop("stdout"))
+                    samples[key].append(v)
 
         rec = {"case": name,
                "outputs": {k: sorted(outputs[k]) for k in outputs},
@@ -173,11 +177,16 @@ def main():
         "label": args.label,
         "mode": args.mode,
         "cpu": args.cpu,
+        "measurement_field": {
+            **field_metadata(measure_field, "single"),
+            "fieldConforming": field_conforming,
+            "lockAttested": True,
+        },
         "pmu": args.pmu,
         "events": events,
         "iterations_per_case": args.iterations if args.mode == "matrix" else None,
         "samples_per_case_per_binary": args.samples,
-        "sampling_order": ("four-binary rotation, one exclusive host lock "
+        "sampling_order": ("four-binary rotation, one canonical field lock "
                            "window per case; every binary occupies every "
                            "position equally"),
         "first_position_counts": first_positions,

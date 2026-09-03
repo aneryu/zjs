@@ -1,0 +1,64 @@
+{
+  "entries": {
+    "src/bytecode.zig:R3_operand": {
+      "reason": "The decode layer ITSELF (headerAtParser/Phase1 atom checks, operandAt) -- the place raw reads are supposed to live. Permanent.",
+      "removal": "permanent (decoder)",
+      "count": 6
+    },
+    "src/compiler/resolve_labels.zig:R1_raw_emit": {
+      "reason": "appendByte(op.X) emission sites; the shortening/relaxation DECISIONS already derive (F0c parts 1-2), the byte-level emit is the encoder's job.",
+      "removal": "F0c encoder",
+      "count": 30
+    },
+    "src/compiler/resolve_labels.zig:R2_identity": {
+      "reason": "Writer-side identity: emission decisions (which op to emit) and output-stream self-checks. The reader side is fully form-keyed (F0b); the writer takes forms when F0c's encoder lands.",
+      "removal": "F0c encoder",
+      "count": 81
+    },
+    "src/compiler/resolve_labels.zig:R3_operand": {
+      "reason": "readU*At helper BODIES -- the shared read primitives consumers call with derived offsets. Permanent until the encoder absorbs them.",
+      "removal": "F0c encoder",
+      "count": 3
+    },
+    "src/compiler/resolve_variables.zig:R2_identity": {
+      "reason": "Lowering pass matches temp/phase-1 identities while REWRITING the stream; reader already goes through headerAtPhase1. Writer-side rewrite seams.",
+      "removal": "F0c encoder",
+      "count": 59
+    },
+    "src/compiler/resolve_variables.zig:R3_operand": {
+      "reason": "Payload reads in the lowering rewriter at fixed offsets; move with the phase-1 encoder.",
+      "removal": "F0c encoder",
+      "count": 9
+    },
+    "src/compiler/cfg.zig:R2_identity": {
+      "reason": "Control-flow predicates (isUnconditionalTerminal etc.) over the parser stream; recorded as F0c generated-matcher input in the F0b closing.",
+      "removal": "F0c generated matcher",
+      "count": 22
+    },
+    "src/exec/small_inline.zig:R1_raw_emit": {
+      "reason": "emitByte(op.call_method_apply_fwd/get_field2/goto): fixed-form direct emissions in the rewriter.",
+      "removal": "F0c encoder",
+      "count": 3
+    },
+    "src/exec/small_inline.zig:R2_identity": {
+      "reason": "Inline-eligibility scanner and rewriter pattern matches over final streams; policy already consumes traits (5.2(3) closed). Identity matching moves to generated matchers.",
+      "removal": "F0c generated matcher",
+      "count": 67
+    },
+    "src/exec/small_inline.zig:R3_operand": {
+      "reason": "Rewriter payload reads at derived offsets.",
+      "removal": "F0c encoder",
+      "count": 5
+    },
+    "src/exec/vm_property.zig:R2_identity": {
+      "reason": "P1-1: runtime matchers keep one-byte-compare shape by ruling. Values already derive from the declaration (sizeOfForm/burnedOperandOf); the identities move to generated matchers only with the carrier adapter.",
+      "removal": "contract 4 / C packages",
+      "count": 72
+    },
+    "src/exec/vm_property.zig:R3_operand": {
+      "reason": "P1-1 matchers' payload reads at declaration-derived offsets (operand_off pattern); structured decode is barred from these paths by ruling.",
+      "removal": "contract 4 / C packages",
+      "count": 17
+    }
+  }
+}

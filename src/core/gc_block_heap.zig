@@ -5,17 +5,28 @@
 //! mapping is released only as a whole superblock. One over-sized mapping
 //! plus per-block `munmap` is forbidden.
 //!
-//! Compiled only when `-Dzjs_experimental_gc=trace_stw`. Default `rc` keeps the existing
-//! allocator. This module does not replace object headers.
+//! Every published Object lives in a block cell (terminal layout M); the
+//! non-block kinds (shape, realm, module, function bytecode, var_ref) keep
+//! the slab / standalone allocator and their intrusive lists.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
 const gc_representation = @import("gc_representation_constants.zig");
+const gc = @import("gc.zig");
+const carrier = @import("gc_carrier.zig");
 const space = @import("gc_space.zig");
-const sweep = @import("gc_sweep_model.zig");
+
+const block_generation_enabled = carrier.block_generation_enabled;
+const lifecycle_state_enabled = carrier.lifecycle_state_enabled;
+const block_tracking_enabled = carrier.block_tracking_enabled;
 
 pub const enabled = true;
+
+/// Test-only proof that a young-only morgue close does not accidentally run
+/// the major-only whole-heap publication scan.
+pub var publish_completed_hot_blocks_calls_for_test: if (builtin.is_test) usize else void =
+    if (builtin.is_test) 0 else {};
 
 pub const superblock_bytes: usize = 2 * 1024 * 1024;
 pub const block_bytes: usize = 64 * 1024;
@@ -50,19 +61,15 @@ pub const decommit_bytes: usize = blk: {
 /// chosen so a free cell read as a header is rejected by every path that
 /// matters: `block_size_idx` reads 0 (not a block cell), `heap_accounted`
 /// reads 0 (the iterators and `shade` refuse it), `cycle_visited` reads 1
-/// (`shade` refuses it again), and the kind reads `.big_int`, which is not
-/// traced at all.
+/// (`shade` refuses it again), and the kind reads `.string`, which is not
+/// traced until S2.
 pub const free_nil: u32 = 0xFFFF;
 pub const free_link_mask: u32 = gc_representation.free_cell_link_mask;
 pub const free_poison: u32 = gc_representation.free_cell_poison;
 /// Match JSC's default 0.9 `minMarkedBlockUtilization`: a completed block is
 /// worth reopening when at least one tenth of its cells can form intervals.
 pub const hot_reuse_min_free_percent: u32 = 10;
-// Policy candidates retained for the pricing sweep; only the selected value
-// participates in production until the combined candidate is measured.
-pub const hot_reuse_k32: u32 = 32;
 pub const hot_reuse_k64: u32 = 64;
-pub const hot_reuse_k128: u32 = 128;
 pub const hot_reuse_min_interval_cells: u32 = hot_reuse_k64;
 
 comptime {
@@ -99,8 +106,17 @@ pub const cell_alignment: usize = 16;
 /// its own binary and performance gates. Until then this heap is exercised
 /// through its own tests and reports its geometry, and the compatibility
 /// allocator keeps serving the collector.
-pub const serves_gc_nodes = false;
 pub const block_magic: u64 = 0x5a4a53_424c4b_0001;
+
+/// Per-block sweep lifecycle (§8.7), the collector's only remaining consumer
+/// of the former logical-window sweep model.
+pub const SweepState = enum(u8) {
+    fresh,
+    active,
+    needs_sweep,
+    sweeping,
+    swept,
+};
 
 const max_bitmap_words: usize = (block_bytes / space.min_class_bytes + 63) / 64;
 
@@ -113,7 +129,6 @@ pub const Stats = struct {
     small_allocs: usize = 0,
     medium_allocs: usize = 0,
     large_allocs: usize = 0,
-    superblock_reserves: usize = 0,
     large_reserves: usize = 0,
     failed_reserves: usize = 0,
     /// Bytes handed back to the OS from fully-free blocks (cumulative), and
@@ -141,11 +156,6 @@ pub const Stats = struct {
     /// `rc` build too, and stage 3 must not move a single `rc` byte.
     passa_settled_cells: usize = 0,
 
-    pub fn committedLiveMilli(self: Stats) usize {
-        if (self.live_bytes == 0) return 0;
-        return (self.committed_bytes * 1000 + self.live_bytes - 1) / self.live_bytes;
-    }
-
     pub fn currentDecommittedBytes(self: Stats) usize {
         return self.decommitted_bytes -| self.recommitted_bytes;
     }
@@ -162,16 +172,34 @@ pub fn canAllocCellSize(n: usize) bool {
     return space.classIndexForPayload(n) != null;
 }
 
+/// Accounting twin of `allocCell`: map a requested physical cell payload to
+/// the block class that serves it, then exclude the metadata prefix. This pure
+/// calculation is the shared credit/debit authority; tests pin it against the
+/// actual block header without putting that cold read on production paths.
+pub inline fn accountedBodyBytesForRequest(n: usize, metadata_prefix_bytes: usize) ?usize {
+    if (n == 0 or n >= space.large_min_bytes) return null;
+    const class_idx = space.classIndexForPayload(n) orelse return null;
+    const cell_size = space.classes[class_idx];
+    std.debug.assert(cell_size >= metadata_prefix_bytes);
+    return cell_size - metadata_prefix_bytes;
+}
+
 comptime {
     // These counters live in every tracing Registry. Keep additions explicit:
     // a silent size drift here multiplies across tests and embedded runtimes.
     // 160 -> 168: `passa_settled_cells` (stage-3 Pass-A settlement).
-    if (@sizeOf(usize) == 8 and @sizeOf(Stats) != 168) {
+    // 168 -> 160: `superblock_reserves` (never read) removed, ablation batch 1.
+    if (@sizeOf(usize) == 8 and @sizeOf(Stats) != 160) {
         @compileError("gc block-heap Stats size changed; update the footprint pin deliberately");
     }
 }
 
 const SuperblockKind = enum { classed, medium };
+
+const CellLifecycle = struct {
+    state: carrier.LifecycleState = .free,
+    accounted_bytes: usize = 0,
+};
 
 const Superblock = struct {
     bytes: []align(block_bytes) u8,
@@ -183,10 +211,43 @@ const Superblock = struct {
     /// in both variants; sharing it by kind keeps the sparse condemnation
     /// index footprint-neutral.
     page_bits: [pages_per_superblock / 64]u64 = @splat(0),
+    /// Generation and lifecycle are separate components.  A generation-only
+    /// production switch cannot silently allocate/write lifecycle storage.
+    block_incarnations: if (block_generation_enabled) [blocks_per_superblock]u32 else void =
+        if (block_generation_enabled) @splat(0) else {},
+    cell_generations: if (block_generation_enabled) [blocks_per_superblock][]u32 else void =
+        if (block_generation_enabled) @splat(&.{}) else {},
+    cell_lifecycles: if (lifecycle_state_enabled) [blocks_per_superblock][]CellLifecycle else void =
+        if (lifecycle_state_enabled) @splat(&.{}) else {},
 };
 
+comptime {
+    // These pins are evaluated in enabled test/audit builds too.  Adding a
+    // field into tail padding is caught by the field-count assertion even if
+    // total size happens to remain unchanged.
+    if (@sizeOf(u32) != 4) @compileError("block generation cell budget changed");
+    if (@sizeOf(CellLifecycle) != 16) @compileError("block lifecycle cell budget changed");
+    if (@typeInfo(Superblock).@"struct".fields.len != 7) @compileError("Superblock field set changed");
+    const expected = 88 +
+        (if (block_generation_enabled) 640 else 0) +
+        (if (lifecycle_state_enabled) 512 else 0);
+    if (@sizeOf(Superblock) != expected) @compileError("Superblock component footprint budget changed");
+}
+
+/// Extent mark storage (TGC S2). Neither extent kind has a block bitmap, so
+/// the mark lives in the table entry: an extent is marked in the current
+/// major iff `mark_epoch == Heap.mark_epoch`. Epoch 0 is newborn/unmarked
+/// (the heap's epoch is even and only ever advanced by `beginMajor`).
+/// Only string extents exist -- Object never allocates an extent, ropes
+/// always fit a cell -- so no kind field is needed yet; the sweep below
+/// treats every entry as a string extent.
 const LargeMap = struct {
     bytes: []u8,
+    /// Requested size; `bytes.len` is the page-rounded mapping. The sweep
+    /// hands this to the destroy callback so accounting debits what was
+    /// credited.
+    user_bytes: usize,
+    mark_epoch: u64 = 0,
 };
 
 const MediumExtent = struct {
@@ -194,6 +255,7 @@ const MediumExtent = struct {
     page: u32,
     pages: u32,
     user_bytes: usize,
+    mark_epoch: u64 = 0,
 };
 
 pub const Block = extern struct {
@@ -208,7 +270,7 @@ pub const Block = extern struct {
     /// Physical block lifecycle marker. Observable blocks are active or
     /// empty/swept; condemnation and sliced destruction intentionally use the
     /// doomed bitmap/list rather than the historical five-state model.
-    sweep_state: sweep.SweepState = .fresh,
+    sweep_state: SweepState = .fresh,
     flags: u8 = 0,
     /// Intrusive doomed-block link (address; 0 = not linked; 1 = tail). A
     /// block joins at condemnation when its snapshot finds dead cells, and
@@ -255,9 +317,6 @@ pub const Block = extern struct {
     }
 
     pub const flag_young: u8 = 1 << 0;
-    const flag_remembered: u8 = 1 << 1;
-    const flag_overflow: u8 = 1 << 2;
-    const flag_bailout: u8 = 1 << 3;
     /// Stage-3 Pass-A settlement left holes that only the alloc bitmap
     /// records: `settleDoomedCellInPassA` clears a cell's alloc bit without
     /// writing a free link, so `free_list`/`bump` no longer enumerate every
@@ -281,10 +340,6 @@ pub const Block = extern struct {
     const flag_interval_allocator: u8 = 1 << 6;
     /// The populated block is linked through `next_free` on `Heap.hot_blocks`.
     const flag_hot_list: u8 = 1 << 7;
-
-    pub fn fromAddrChecked(addr: usize) ?*Block {
-        return fromAddr(addr);
-    }
 
     fn fromAddr(addr: usize) ?*Block {
         if (addr < block_bytes) return null;
@@ -361,16 +416,46 @@ pub const Block = extern struct {
         return @ptrFromInt(cell_addr & ~@as(usize, block_bytes - 1));
     }
 
-    /// Cell index for a KNOWN cell base (exact, not interior).
-    pub inline fn cellIndexTrusted(self: *const Block, cell_addr: usize) u32 {
-        return @intCast((cell_addr - (@intFromPtr(self) + self.cells_offset)) / self.cell_size);
-    }
-
     /// Unmark under the epoch scheme: a stale bitmap already reads unmarked
     /// for every cell, so only a current-epoch bit needs clearing.
     pub fn clearMark(self: *Block, index: u32, epoch: u64) void {
         if (@atomicLoad(u64, &self.mark_epoch, .acquire) != epoch) return;
         clearBit(self.bitmaps().mark, index);
+    }
+
+    /// Clear marks for this block's published young cells during a minor's
+    /// owner-thread stop-the-world window.
+    ///
+    /// The generic header path re-derives this block and cell index, reloads
+    /// the block epoch, then performs one atomic RMW for every young object.
+    /// Here the block is already known and marker lanes are excluded. Walk the
+    /// allocation bitmap a word at a time, retain old-cell marks, and issue at
+    /// most one plain mark-word update for 64 cells. The header walk is still
+    /// intentional: recycled cells can put old and young objects in the same
+    /// block, so clearing a whole mark word would destroy sticky old marks.
+    pub fn clearYoungMarksStw(self: *Block, epoch: u64) void {
+        if (self.mark_epoch != epoch) return;
+        const maps = self.bitmaps();
+        words: for (maps.alloc, 0..) |alloc_word, word_index| {
+            var candidates = alloc_word & maps.mark[word_index];
+            var young_marks: u64 = 0;
+            while (candidates != 0) {
+                const bit: u6 = @intCast(@ctz(candidates));
+                const index: u32 = @intCast(word_index * 64 + bit);
+                if (index >= self.cell_count) break :words;
+                const cell = self.cellBase(index);
+                const alloc_info = @as(*const u8, @ptrFromInt(cell + gc_representation.metadata_alloc_info_offset)).*;
+                const flags = @as(*const u8, @ptrFromInt(cell + gc_representation.metadata_flags_offset)).*;
+                if (alloc_info & gc_representation.alloc_info_heap_accounted_mask != 0 and
+                    flags & gc_representation.metadata_young_mask != 0 and
+                    !self.isDoomed(index))
+                {
+                    young_marks |= @as(u64, 1) << bit;
+                }
+                candidates &= candidates - 1;
+            }
+            if (young_marks != 0) maps.mark[word_index] &= ~young_marks;
+        }
     }
 
     pub inline fn isYoungListed(self: *const Block) bool {
@@ -427,6 +512,21 @@ pub const Block = extern struct {
     /// billion redundant loads. The cursor only ever moves forward within a
     /// drain because `snapshotDoomed` is the only thing that sets bits, and
     /// it runs at condemnation, not during destruction.
+    /// A cell that leaves the doomed set by a route other than the drain:
+    /// the last WeakRef to a resource-stripped husk frees it while the drain
+    /// is still walking the same block. Without this the allocator can hand
+    /// the cell out again and the drain then destroys the fresh object
+    /// (found by test262 FinalizationRegistry cases under `ZJS_GC_STRESS=1`).
+    /// Only meaningful while the block is on the doomed list; outside that
+    /// window `remember` holds remembered-set bits, which must stay.
+    pub fn forgetDoomedCell(self: *Block, index: u32) void {
+        if (self.doomed_link == 0) return;
+        const word_index = index / 64;
+        const mask = @as(u64, 1) << @as(u6, @intCast(index % 64));
+        self.bitmaps().remember[word_index] &= ~mask;
+        if (self.doomed_cursor == word_index) self.doomed_word &= ~mask;
+    }
+
     pub fn takeDoomedCell(self: *Block, start: u32) ?u32 {
         // Word-at-a-time. The cursor holds the current word and the bits of
         // it still to serve, so draining a full word costs one load and one
@@ -506,17 +606,6 @@ pub const Block = extern struct {
         self.ensureMarkEpoch(epoch);
         setBit(self.bitmaps().mark, index);
     }
-
-    /// Atomically claim the mark bit: returns true iff this caller flipped it
-    /// from clear to set. Parallel tracing uses the claim as its dedup -- the
-    /// winner alone walks the object's edges, so trace-time write-backs
-    /// (accessor sync stores) stay single-writer.
-    pub fn tryAcquireMark(self: *Block, index: u32, epoch: u64) bool {
-        self.ensureMarkEpoch(epoch);
-        const mask = @as(u64, 1) << @intCast(index % 64);
-        const old = @atomicRmw(u64, &self.bitmaps().mark[index / 64], .Or, mask, .monotonic);
-        return (old & mask) == 0;
-    }
 };
 
 // Block is embedded at the start of every 64 KiB block. Its size determines
@@ -594,6 +683,10 @@ pub const Heap = struct {
     /// the decommit policy needs only second-scale resolution.
     clock_ns: u64 = 0,
     last_decommit_ns: u64 = 0,
+    next_block_incarnation: if (block_generation_enabled) u32 else void =
+        if (block_generation_enabled) 1 else {},
+    block_generation_exhausted: if (block_generation_enabled) bool else void =
+        if (block_generation_enabled) false else {},
 
     pub fn init(backing: std.mem.Allocator) Heap {
         return .{ .backing = backing };
@@ -608,6 +701,12 @@ pub const Heap = struct {
         self.medium.deinit(self.backing);
         self.classed_blocks.deinit(self.backing);
         for (self.superblocks.items) |sb| {
+            if (comptime block_generation_enabled) {
+                for (sb.cell_generations) |generations| self.backing.free(generations);
+            }
+            if (comptime lifecycle_state_enabled) {
+                for (sb.cell_lifecycles) |lifecycles| self.backing.free(lifecycles);
+            }
             self.backing.free(sb.bytes);
         }
         self.superblocks.deinit(self.backing);
@@ -670,11 +769,11 @@ pub const Heap = struct {
             self.active[class_idx] = opened;
             break :blk opened;
         };
-        const index = popCell(block) orelse blk: {
+        const index = self.popTrackedCell(block) orelse blk: {
             self.active[class_idx] = null;
             block = try self.openBlock(class_idx, cell_size);
             self.active[class_idx] = block;
-            break :blk popCell(block).?;
+            break :blk self.popTrackedCell(block).?;
         };
         setBitPlain(block.bitmaps().alloc, index);
         if (block.allocated_count == 0) self.noteNonemptyBlock(block);
@@ -703,6 +802,116 @@ pub const Heap = struct {
         self.freeSmall(block, index, ptr);
     }
 
+    /// TGC S2 extent marking (spec §5.7 "extent"). `base` is the allocation
+    /// start (`Heap.alloc` result = body pointer - 8). The block-cell twins
+    /// are `Block.setMark` / `Block.isMarked`; extents keep their mark in the
+    /// table entry instead, reached by one hash probe on medium then large.
+    /// Cold path: only strings over the 128-byte cell ceiling live here.
+    ///
+    /// The receiver is const like `setHeaderMarked`'s Registry: the entry is
+    /// reached through the table's own storage pointer (as `Block.setMark`
+    /// reaches the bitmap through the block address), not through `self`.
+    /// Plain stores: extents are marked by the STW collector. Parallel
+    /// marking (default off) would need these to become atomics AND the
+    /// tables to be insert-free while marking runs.
+    /// Keys (allocation bases) of every live string extent, medium then
+    /// large. Audits use it to enumerate what no list or bitmap holds.
+    pub const ExtentKeyIterator = struct {
+        medium: std.AutoHashMapUnmanaged(usize, MediumExtent).KeyIterator,
+        large: std.AutoHashMapUnmanaged(usize, LargeMap).KeyIterator,
+
+        pub fn next(self: *ExtentKeyIterator) ?usize {
+            if (self.medium.next()) |key| return key.*;
+            if (self.large.next()) |key| return key.*;
+            return null;
+        }
+    };
+
+    pub fn extentKeys(self: *const Heap) ExtentKeyIterator {
+        return .{ .medium = self.medium.keyIterator(), .large = self.large.keyIterator() };
+    }
+
+    pub fn extentSetMark(self: *const Heap, base: usize, epoch: u64) void {
+        if (self.medium.getPtr(base)) |extent| {
+            extent.mark_epoch = epoch;
+            return;
+        }
+        if (self.large.getPtr(base)) |extent| {
+            extent.mark_epoch = epoch;
+            return;
+        }
+        unreachable; // not an extent base: the caller misclassified the header
+    }
+
+    pub fn extentIsMarked(self: *const Heap, base: usize, epoch: u64) bool {
+        const stamped = if (self.medium.getPtr(base)) |extent|
+            extent.mark_epoch
+        else if (self.large.getPtr(base)) |extent|
+            extent.mark_epoch
+        else
+            unreachable;
+        // Before the first major both sides are 0; a cell in that state reads
+        // an all-zero bitmap (unmarked), so answer the same for extents.
+        return epoch != 0 and stamped == epoch;
+    }
+
+    /// Conservative resolution: the extent base whose allocation contains
+    /// `addr` (one-past-end included, like `Occupant.hi`), or null. Linear
+    /// over both tables; that is acceptable for now because extents are the
+    /// rare tail of string allocation and this probe runs only for words the
+    /// block geometry did not own. Replace with a page-keyed index (the
+    /// address registry's `pages` shape) if the tables ever grow large.
+    pub fn extentContaining(self: *const Heap, addr: usize) ?usize {
+        if (self.medium.count() == 0 and self.large.count() == 0) return null;
+        var medium_it = self.medium.iterator();
+        while (medium_it.next()) |entry| {
+            const base = entry.key_ptr.*;
+            if (addr >= base and addr <= base + entry.value_ptr.user_bytes) return base;
+        }
+        var large_it = self.large.iterator();
+        while (large_it.next()) |entry| {
+            const base = entry.key_ptr.*;
+            if (addr >= base and addr <= base + entry.value_ptr.user_bytes) return base;
+        }
+        return null;
+    }
+
+    /// Bitmap sweep's twin for extents: every extent whose mark is not
+    /// `epoch` is dead. `destroy(ctx, base, user_bytes)` owns the body
+    /// teardown and returns the memory through `Heap.free`, so the entry is
+    /// removed from under the iterator. That is legal with std's hash map:
+    /// `removeByIndex` only tombstones the slot in place (entries never move
+    /// on removal; only inserts rehash), and the callback must not allocate
+    /// an extent -- it frees one. Returns the number destroyed.
+    pub fn sweepStringExtents(
+        self: *Heap,
+        epoch: u64,
+        ctx: *anyopaque,
+        destroy: *const fn (*anyopaque, usize, usize) void,
+    ) usize {
+        std.debug.assert(epoch != 0 and epoch & 1 == 0);
+        var destroyed: usize = 0;
+        var medium_it = self.medium.iterator();
+        while (medium_it.next()) |entry| {
+            if (entry.value_ptr.mark_epoch == epoch) continue;
+            const base = entry.key_ptr.*;
+            const user_bytes = entry.value_ptr.user_bytes;
+            destroy(ctx, base, user_bytes);
+            std.debug.assert(!self.medium.contains(base));
+            destroyed += 1;
+        }
+        var large_it = self.large.iterator();
+        while (large_it.next()) |entry| {
+            if (entry.value_ptr.mark_epoch == epoch) continue;
+            const base = entry.key_ptr.*;
+            const user_bytes = entry.value_ptr.user_bytes;
+            destroy(ctx, base, user_bytes);
+            std.debug.assert(!self.large.contains(base));
+            destroyed += 1;
+        }
+        return destroyed;
+    }
+
     /// Free a cell the caller KNOWS came from `allocCell`, skipping the
     /// large/medium hash probes `free` needs for an arbitrary pointer. The
     /// allocator stamped the already-known cell index into the first two
@@ -716,6 +925,228 @@ pub const Heap = struct {
         std.debug.assert(index < block.cell_count);
         std.debug.assert(block.cellBase(index) == addr);
         self.freeSmall(block, index, ptr);
+    }
+
+    fn generationFor(self: *Heap, block: *const Block, index: u32) *u32 {
+        comptime std.debug.assert(block_generation_enabled);
+        const sb = &self.superblocks.items[block.super_index];
+        const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
+        std.debug.assert(block_index < blocks_per_superblock);
+        std.debug.assert(index < sb.cell_generations[block_index].len);
+        return &sb.cell_generations[block_index][index];
+    }
+
+    fn generationForConst(self: *const Heap, block: *const Block, index: u32) *const u32 {
+        comptime std.debug.assert(block_generation_enabled);
+        const sb = &self.superblocks.items[block.super_index];
+        const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
+        std.debug.assert(block_index < blocks_per_superblock);
+        std.debug.assert(index < sb.cell_generations[block_index].len);
+        return &sb.cell_generations[block_index][index];
+    }
+
+    fn lifecycleFor(self: *Heap, block: *const Block, index: u32) *CellLifecycle {
+        comptime std.debug.assert(lifecycle_state_enabled);
+        const sb = &self.superblocks.items[block.super_index];
+        const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
+        std.debug.assert(block_index < blocks_per_superblock);
+        std.debug.assert(index < sb.cell_lifecycles[block_index].len);
+        return &sb.cell_lifecycles[block_index][index];
+    }
+
+    fn lifecycleForConst(self: *const Heap, block: *const Block, index: u32) *const CellLifecycle {
+        comptime std.debug.assert(lifecycle_state_enabled);
+        const sb = &self.superblocks.items[block.super_index];
+        const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
+        std.debug.assert(block_index < blocks_per_superblock);
+        std.debug.assert(index < sb.cell_lifecycles[block_index].len);
+        return &sb.cell_lifecycles[block_index][index];
+    }
+
+    fn blockIncarnation(self: *const Heap, block: *const Block) u32 {
+        comptime std.debug.assert(block_generation_enabled);
+        const sb = &self.superblocks.items[block.super_index];
+        const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
+        return sb.block_incarnations[block_index];
+    }
+
+    fn reserveCellGeneration(self: *Heap, block: *Block, index: u32) std.mem.Allocator.Error!u64 {
+        comptime std.debug.assert(block_generation_enabled);
+        const sequence = self.generationFor(block, index);
+        if (sequence.* == std.math.maxInt(u32)) return error.OutOfMemory;
+        sequence.* += 1;
+        return (@as(u64, self.blockIncarnation(block)) << 32) | sequence.*;
+    }
+
+    inline fn popTrackedCell(self: *Heap, block: *Block) ?u32 {
+        if (comptime !block_tracking_enabled) return popCell(block);
+        while (popCell(block)) |index| {
+            if (comptime block_generation_enabled) {
+                _ = self.reserveCellGeneration(block, index) catch continue;
+            }
+            if (comptime lifecycle_state_enabled) {
+                const lifecycle = self.lifecycleFor(block, index);
+                lifecycle.state = .constructing;
+                lifecycle.accounted_bytes = 0;
+            }
+            return index;
+        }
+        return null;
+    }
+
+    pub fn generationHandle(self: *const Heap, object_base: usize, prefix_bytes: usize) ?carrier.AllocationHandle {
+        comptime std.debug.assert(block_generation_enabled);
+        if (object_base < prefix_bytes) return null;
+        const cell_base = object_base - prefix_bytes;
+        const block = self.blockOf(@ptrFromInt(cell_base)) orelse return null;
+        const index = block.cellIndex(cell_base) orelse return null;
+        if (!block.cellAllocated(index)) return null;
+        return .{
+            .base = object_base,
+            .generation = (@as(u64, self.blockIncarnation(block)) << 32) |
+                self.generationForConst(block, index).*,
+        };
+    }
+
+    pub fn containsAllocatedCell(self: *const Heap, object_base: usize, prefix_bytes: usize) bool {
+        if (object_base < prefix_bytes) return false;
+        const cell_base = object_base - prefix_bytes;
+        const block = self.blockOf(@ptrFromInt(cell_base)) orelse return false;
+        const index = block.cellIndex(cell_base) orelse return false;
+        return block.cellAllocated(index);
+    }
+
+    pub const ResolvedCell = struct {
+        block: *Block,
+        index: u32,
+        state: carrier.LifecycleState,
+        generation: u64,
+    };
+
+    pub fn resolveExactHandle(
+        self: *const Heap,
+        handle: carrier.AllocationHandle,
+        prefix_bytes: usize,
+        allowed_states: carrier.StateMask,
+        skip_generation_check: bool,
+    ) carrier.ResolveError!ResolvedCell {
+        comptime std.debug.assert(block_generation_enabled and lifecycle_state_enabled);
+        if (handle.base < prefix_bytes) return error.NotFound;
+        const cell_base = handle.base - prefix_bytes;
+        const block = self.blockOf(@ptrFromInt(cell_base)) orelse return error.NotFound;
+        const index = block.cellIndex(cell_base) orelse return error.NotExactStart;
+        if (!block.cellAllocated(index)) return error.NotFound;
+        const generation = (@as(u64, self.blockIncarnation(block)) << 32) |
+            self.generationForConst(block, index).*;
+        if (!skip_generation_check and generation != handle.generation) return error.GenerationMismatch;
+        const lifecycle = self.lifecycleForConst(block, index);
+        if (!allowed_states.contains(lifecycle.state)) return error.StateMismatch;
+        return .{ .block = block, .index = index, .state = lifecycle.state, .generation = generation };
+    }
+
+    pub fn transitionCell(self: *Heap, object_base: usize, prefix_bytes: usize, state: carrier.LifecycleState) carrier.ResolveError!void {
+        comptime std.debug.assert(lifecycle_state_enabled);
+        if (object_base < prefix_bytes) return error.NotFound;
+        const cell_base = object_base - prefix_bytes;
+        const block = self.blockOf(@ptrFromInt(cell_base)) orelse return error.NotFound;
+        const index = block.cellIndex(cell_base) orelse return error.NotExactStart;
+        if (!block.cellAllocated(index)) return error.NotFound;
+        self.lifecycleFor(block, index).state = state;
+    }
+
+    pub fn publishCell(self: *Heap, object_base: usize, prefix_bytes: usize, accounted_bytes: usize) carrier.ResolveError!void {
+        comptime std.debug.assert(lifecycle_state_enabled);
+        try self.transitionCell(object_base, prefix_bytes, .published);
+        const cell_base = object_base - prefix_bytes;
+        const block = self.blockOf(@ptrFromInt(cell_base)) orelse return error.NotFound;
+        const index = block.cellIndex(cell_base) orelse return error.NotExactStart;
+        self.lifecycleFor(block, index).accounted_bytes = accounted_bytes;
+    }
+
+    pub fn stateForCell(self: *const Heap, object_base: usize, prefix_bytes: usize) ?carrier.LifecycleState {
+        comptime std.debug.assert(lifecycle_state_enabled);
+        if (object_base < prefix_bytes) return null;
+        const cell_base = object_base - prefix_bytes;
+        const block = self.blockOf(@ptrFromInt(cell_base)) orelse return null;
+        const index = block.cellIndex(cell_base) orelse return null;
+        if (!block.cellAllocated(index)) return null;
+        return self.lifecycleForConst(block, index).state;
+    }
+
+    pub fn rawBytesForCell(self: *const Heap, object_base: usize, prefix_bytes: usize) ?usize {
+        if (object_base < prefix_bytes) return null;
+        const block = self.blockOf(@ptrFromInt(object_base - prefix_bytes)) orelse return null;
+        if (block.cellIndex(object_base - prefix_bytes) == null) return null;
+        return block.cell_size;
+    }
+
+    pub fn setReuseSequenceForTest(self: *Heap, cell: Cell, sequence: u32) void {
+        comptime std.debug.assert(block_generation_enabled);
+        const block = Block.fromCellTrusted(@intFromPtr(cell.ptr));
+        self.generationFor(block, cell.index).* = sequence;
+    }
+
+    pub fn forEachOwnedIdentity(
+        self: *const Heap,
+        prefix_bytes: usize,
+        context: *anyopaque,
+        visit: *const fn (*anyopaque, carrier.AllocationHandle, carrier.LifecycleState) void,
+    ) void {
+        comptime std.debug.assert(block_generation_enabled and lifecycle_state_enabled);
+        for (self.superblocks.items) |sb| {
+            if (sb.kind != .classed) continue;
+            var block_index: usize = 0;
+            while (block_index < sb.used_blocks) : (block_index += 1) {
+                const block: *const Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + block_index * block_bytes);
+                var index: u32 = 0;
+                while (index < block.cell_count) : (index += 1) {
+                    const lifecycle = &sb.cell_lifecycles[block_index][index];
+                    if (lifecycle.state == .free) continue;
+                    visit(context, .{
+                        .base = block.cellBase(index) + prefix_bytes,
+                        .generation = (@as(u64, sb.block_incarnations[block_index]) << 32) |
+                            sb.cell_generations[block_index][index],
+                    }, lifecycle.state);
+                }
+            }
+        }
+    }
+
+    pub fn verifyGenerationAuthority(self: *const Heap) VerifyError!void {
+        comptime std.debug.assert(block_generation_enabled);
+        for (self.superblocks.items) |sb| {
+            if (sb.kind != .classed) continue;
+            var block_index: usize = 0;
+            while (block_index < sb.used_blocks) : (block_index += 1) {
+                const block: *const Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + block_index * block_bytes);
+                if (sb.block_incarnations[block_index] == 0 or
+                    sb.cell_generations[block_index].len != block.cell_count)
+                {
+                    return error.CarrierIdentityMismatch;
+                }
+                for (sb.cell_generations[block_index], 0..) |generation, index| {
+                    const allocated = @constCast(block).cellAllocated(@intCast(index));
+                    if (allocated and generation == 0) return error.CarrierIdentityMismatch;
+                }
+            }
+        }
+    }
+
+    pub fn verifyLifecycleAuthority(self: *const Heap) VerifyError!void {
+        comptime std.debug.assert(lifecycle_state_enabled);
+        for (self.superblocks.items) |sb| {
+            if (sb.kind != .classed) continue;
+            var block_index: usize = 0;
+            while (block_index < sb.used_blocks) : (block_index += 1) {
+                const block: *const Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + block_index * block_bytes);
+                if (sb.cell_lifecycles[block_index].len != block.cell_count) return error.CarrierIdentityMismatch;
+                for (sb.cell_lifecycles[block_index], 0..) |lifecycle, index| {
+                    const allocated = @constCast(block).cellAllocated(@intCast(index));
+                    if (allocated != (lifecycle.state != .free)) return error.CarrierIdentityMismatch;
+                    if (!allocated and lifecycle.accounted_bytes != 0) return error.CarrierIdentityMismatch;
+                }
+            }
+        }
     }
 
     /// Stage-3 (`docs/corpse-census-2026-08-29.md` §5.2): may a corpse in this
@@ -762,8 +1193,16 @@ pub const Heap = struct {
         // already freed it, at the site rather than at the next whole-heap
         // `AllocCountMismatch`.
         std.debug.assert(testBitPlain(block.bitmaps().alloc, index));
+        if (comptime lifecycle_state_enabled) {
+            self.lifecycleFor(block, index).state = .raw_free_in_progress;
+        }
         clearBitPlain(block.bitmaps().alloc, index);
         block.allocated_count -= 1;
+        if (comptime lifecycle_state_enabled) {
+            const lifecycle = self.lifecycleFor(block, index);
+            lifecycle.state = .free;
+            lifecycle.accounted_bytes = 0;
+        }
         block.flags |= Block.flag_bitmap_canonical;
         self.stats.passa_settled_cells +|= 1;
     }
@@ -775,24 +1214,6 @@ pub const Heap = struct {
         var set: u32 = 0;
         for (block.bitmaps().alloc) |word| set += @popCount(word);
         if (set != block.allocated_count) return error.AllocCountMismatch;
-    }
-
-    /// Census-only: the block-side facts that decide whether a corpse's
-    /// physical release is exactly {clear alloc bit, allocated_count,
-    /// MemoryAccount debit}. Never called from a measured build.
-    pub fn censusCellFacts(self: *const Heap, block: *Block, index: u32) struct {
-        interval_allocator: bool,
-        allocator_current: bool,
-        becomes_empty: bool,
-        cell_size: u32,
-    } {
-        return .{
-            .interval_allocator = block.flags & Block.flag_interval_allocator != 0,
-            .allocator_current = self.active[block.size_class] == block,
-            .becomes_empty = block.allocated_count == 1 and
-                testBitPlain(block.bitmaps().alloc, index),
-            .cell_size = block.cell_size,
-        };
     }
 
     pub fn owns(self: *const Heap, ptr: [*]u8) bool {
@@ -824,6 +1245,18 @@ pub const Heap = struct {
         }
         self.young_blocks = null;
         return cleared;
+    }
+
+    /// Batch the block-cell half of minor-entry mark clearing. The young-block
+    /// list is the exact structural index for blocks that may contain young
+    /// cells; non-block carriers remain on Registry's young suffix.
+    pub fn clearYoungBlockMarksStw(self: *Heap) void {
+        var cursor = self.young_blocks;
+        while (cursor) |block| {
+            block.clearYoungMarksStw(self.mark_epoch);
+            const link = block.young_link;
+            cursor = if (link <= 1) null else @ptrFromInt(link);
+        }
     }
 
     /// Maintain the classed-superblock nonempty index only on population
@@ -989,6 +1422,7 @@ pub const Heap = struct {
     /// but Object structs (and therefore their alloc bits) deliberately stay
     /// live until every doomed object's resource destructor has run.
     pub fn publishCompletedHotBlocks(self: *Heap, parked_frees: usize) void {
+        if (comptime builtin.is_test) publish_completed_hot_blocks_calls_for_test += 1;
         // This is a production guard, not merely an assertion: the block heap
         // cannot inspect Registry's parked queue itself, and publishing on a
         // caller's premature notification would make later Pass-B frees race
@@ -1008,11 +1442,47 @@ pub const Heap = struct {
         }
     }
 
+    const DoomedSnapshot = struct { count: usize = 0, bytes: usize = 0 };
+    const DoomedOrigin = enum { minor, major };
+
+    /// Finish the heap-owned half of condemning one block. Object corpses
+    /// never borrow a body word for list linkage: the doomed bitmap and this
+    /// block-level list are the complete side authority until destruction.
+    fn recordDoomedBlock(
+        self: *Heap,
+        block: *Block,
+        dead: u32,
+        result: *DoomedSnapshot,
+        comptime origin: DoomedOrigin,
+    ) void {
+        if (dead == 0) {
+            // Hot reuse is a major-lifecycle decision. A minor snapshot is
+            // only the side authority for Object condemnation; it must not
+            // change where the allocator obtains its next block.
+            if (origin == .major) self.publishHotBlock(block);
+            return;
+        }
+        // A block selected for interval reuse is unavailable until its final
+        // doomed destructor returns. Small-death active blocks keep the
+        // existing allocation policy; non-active blocks are private already.
+        if (origin == .major and
+            self.active[block.size_class] == block and
+            dead * 100 >= block.cell_count * hot_reuse_min_free_percent)
+        {
+            self.active[block.size_class] = null;
+        }
+        result.count += dead;
+        result.bytes += @as(usize, dead) * block.cell_size;
+        if (block.doomed_link == 0) {
+            block.doomed_link = if (self.doomed_blocks) |head| @intFromPtr(head) else 1;
+            self.doomed_blocks = block;
+        }
+    }
+
     /// Condemn every dead cell in the heap by bitmap snapshot. Blocks that
     /// hold any go on the doomed list. Returns total dead cells and bytes.
-    pub fn snapshotAllDoomed(self: *Heap, epoch: u64) struct { count: usize, bytes: usize } {
-        var count: usize = 0;
-        var bytes: usize = 0;
+    pub fn snapshotAllDoomed(self: *Heap, epoch: u64) DoomedSnapshot {
+        var result = DoomedSnapshot{};
         for (self.superblocks.items) |*sb| {
             if (sb.kind != .classed) continue;
             // Classed `page_bits` is the footprint-neutral nonempty index.
@@ -1027,28 +1497,27 @@ pub const Heap = struct {
                 std.debug.assert(block.magic == block_magic);
                 std.debug.assert(block.allocated_count != 0);
                 const dead = block.snapshotDoomed(epoch);
-                if (dead == 0) {
-                    self.publishHotBlock(block);
-                    continue;
-                }
-                // A block selected for interval reuse is unavailable until
-                // its final doomed destructor returns. Small-death active
-                // blocks keep the existing allocation policy; non-active
-                // blocks are private already.
-                if (self.active[block.size_class] == block and
-                    dead * 100 >= block.cell_count * hot_reuse_min_free_percent)
-                {
-                    self.active[block.size_class] = null;
-                }
-                count += dead;
-                bytes += @as(usize, dead) * block.cell_size;
-                if (block.doomed_link == 0) {
-                    block.doomed_link = if (self.doomed_blocks) |head| @intFromPtr(head) else 1;
-                    self.doomed_blocks = block;
-                }
+                self.recordDoomedBlock(block, dead, &result, .major);
             }
         }
-        return .{ .count = count, .bytes = bytes };
+        return result;
+    }
+
+    /// Minor twin of `snapshotAllDoomed`. Sticky old marks remain set, while
+    /// minor entry cleared only published young marks, so `alloc & ~mark` over
+    /// the young-block index names exactly the dead nursery cells. The link is
+    /// captured before snapshot because condemnation may reuse `doomed_link`
+    /// but never mutates the independent young chain.
+    pub fn snapshotYoungDoomed(self: *Heap, epoch: u64) DoomedSnapshot {
+        var result = DoomedSnapshot{};
+        var cursor = self.young_blocks;
+        while (cursor) |block| {
+            const young_link = block.young_link;
+            const dead = block.snapshotDoomed(epoch);
+            self.recordDoomedBlock(block, dead, &result, .minor);
+            cursor = if (young_link <= 1) null else @ptrFromInt(young_link);
+        }
+        return result;
     }
 
     /// How long a block must sit unused before its pages go back, and how
@@ -1157,6 +1626,7 @@ pub const Heap = struct {
         CellIndexStampMismatch,
         YoungCellUnlisted,
         SweepStateInvariant,
+        CarrierIdentityMismatch,
     };
 
     /// Cross-check the block heap's counters against its bitmaps.
@@ -1502,6 +1972,10 @@ pub const Heap = struct {
     pub const UnpublishedCellAllowance = struct {
         pub const Kind = enum {
             none,
+            /// A detached construction root is intentionally unpublished.
+            /// Heap-accounting audits may accept it before a collection marks
+            /// it; collector publication audits use the stricter next arm.
+            unmarked_construction,
             /// A detached construction root must have been marked by this
             /// collection before an unpublished cell can be accepted.
             marked_construction,
@@ -1511,16 +1985,16 @@ pub const Heap = struct {
             parked_finalizer,
         };
 
-        context: *anyopaque,
-        classify: *const fn (context: *anyopaque, cell_addr: usize) Kind,
+        context: *const anyopaque,
+        classify: *const fn (context: *const anyopaque, cell_addr: usize) Kind,
     };
 
     pub fn verifyPublishedCells(
-        self: *Heap,
+        self: *const Heap,
         block_cell_marker: u5,
         object_kind: u3,
     ) VerifyError!void {
-        return self.verifyPublishedCellsAllowing(block_cell_marker, object_kind, null);
+        return self.verifyCellsAllowing(block_cell_marker, object_kind, null, true);
     }
 
     /// Runtime audit variant. Detached generator shells require exact
@@ -1529,10 +2003,33 @@ pub const Heap = struct {
     /// membership instead: they are dead, so demanding a liveness mark would
     /// turn the audit itself into a false invariant.
     pub fn verifyPublishedCellsAllowing(
-        self: *Heap,
+        self: *const Heap,
         block_cell_marker: u5,
         object_kind: u3,
         allowance: ?UnpublishedCellAllowance,
+    ) VerifyError!void {
+        return self.verifyCellsAllowing(block_cell_marker, object_kind, allowance, true);
+    }
+
+    /// Heap-accounting needs the same alloc-bit/publication cross-check but is
+    /// also called at boundaries where young-list retirement is not complete.
+    /// Keep the publication proof while leaving generation membership to the
+    /// collector-boundary variant above.
+    pub fn verifyAccountingCellsAllowing(
+        self: *const Heap,
+        block_cell_marker: u5,
+        object_kind: u3,
+        allowance: ?UnpublishedCellAllowance,
+    ) VerifyError!void {
+        return self.verifyCellsAllowing(block_cell_marker, object_kind, allowance, false);
+    }
+
+    fn verifyCellsAllowing(
+        self: *const Heap,
+        block_cell_marker: u5,
+        object_kind: u3,
+        allowance: ?UnpublishedCellAllowance,
+        require_young_membership: bool,
     ) VerifyError!void {
         for (self.superblocks.items) |sb| {
             if (sb.kind != .classed) continue;
@@ -1549,9 +2046,13 @@ pub const Heap = struct {
                     const flags = @as(*const u8, @ptrFromInt(cell + 3)).*;
                     const accounted = alloc_info & gc_representation.alloc_info_heap_accounted_mask != 0;
                     const standalone = alloc_info & gc_representation.alloc_info_standalone_mask != 0;
+                    // TGC S2: string-family cells share the block heap once
+                    // `gc.string_tracer_owned` is on; they carry kind 6 in the
+                    // same prefix byte.
+                    const cell_kind = flags & 0x7;
                     const prefix_valid = !standalone and
                         alloc_info & gc_representation.alloc_info_class_mask == block_cell_marker and
-                        flags & 0x7 == object_kind;
+                        (cell_kind == object_kind or (gc.string_tracer_owned and cell_kind == gc_representation.string_kind_tag));
                     if (!accounted and prefix_valid) {
                         const allowed = if (allowance) |candidate|
                             candidate.classify(candidate.context, cell)
@@ -1559,6 +2060,7 @@ pub const Heap = struct {
                             UnpublishedCellAllowance.Kind.none;
                         switch (allowed) {
                             .none => {},
+                            .unmarked_construction => continue,
                             .marked_construction => if (block.isMarked(index, self.mark_epoch)) continue,
                             .parked_finalizer => continue,
                         }
@@ -1567,7 +2069,9 @@ pub const Heap = struct {
                         return error.AllocatedCellUnpublished;
                     }
                     const young = flags & (1 << 4) != 0;
-                    if (young and !block.cellPendingDoomed(index) and !block.isYoungListed()) {
+                    if (require_young_membership and young and
+                        !block.cellPendingDoomed(index) and !block.isYoungListed())
+                    {
                         std.debug.print(
                             "gc: BLOCK CELL AUDIT young cell 0x{x} index {d} in unlisted block 0x{x} (flags=0x{x}, block_flags=0x{x}, marked={any}, doomed=0x{x}, doomed_cursor={d}, doomed_word=0x{x})\n",
                             .{
@@ -1775,10 +2279,10 @@ pub const Heap = struct {
     fn allocSmall(self: *Heap, class_idx: usize, user_bytes: usize) std.mem.Allocator.Error![]u8 {
         const cell_size: u32 = @intCast(space.classes[class_idx]);
         var block = self.active[class_idx] orelse try self.openBlock(class_idx, cell_size);
-        const index = popCell(block) orelse blk: {
+        const index = self.popTrackedCell(block) orelse blk: {
             self.active[class_idx] = null;
             block = try self.openBlock(class_idx, cell_size);
-            break :blk popCell(block).?;
+            break :blk self.popTrackedCell(block).?;
         };
         self.active[class_idx] = block;
         setBitPlain(block.bitmaps().alloc, index);
@@ -1789,9 +2293,18 @@ pub const Heap = struct {
 
     fn freeSmall(self: *Heap, block: *Block, index: u32, cell: [*]u8) void {
         if (!testBitPlain(block.bitmaps().alloc, index)) return;
+        block.forgetDoomedCell(index);
+        if (comptime lifecycle_state_enabled) {
+            self.lifecycleFor(block, index).state = .raw_free_in_progress;
+        }
         clearBitPlain(block.bitmaps().alloc, index);
         pushCell(block, index, cell);
         block.allocated_count -= 1;
+        if (comptime lifecycle_state_enabled) {
+            const lifecycle = self.lifecycleFor(block, index);
+            lifecycle.state = .free;
+            lifecycle.accounted_bytes = 0;
+        }
         if (block.allocated_count == 0) {
             self.noteEmptyBlock(block);
             const class_idx = block.size_class;
@@ -1844,24 +2357,44 @@ pub const Heap = struct {
                 self.stats.committed_bytes += decommit_bytes;
             }
             const super_index = block.super_index;
-            self.resetBlock(block, class_idx, cell_size, super_index, true);
+            try self.resetBlock(block, class_idx, cell_size, super_index, true);
             block.sweep_state = .active;
             return block;
         }
-        const slot = try self.takeClassedBlock();
+        const slot = try self.takeClassedBlock(cell_size);
         const block: *Block = @ptrCast(@alignCast(slot.ptr));
-        self.resetBlock(block, class_idx, cell_size, slot.super_index, false);
+        try self.resetBlock(block, class_idx, cell_size, slot.super_index, false);
         block.sweep_state = .fresh;
         block.sweep_state = .active;
         return block;
     }
 
-    fn takeClassedBlock(self: *Heap) std.mem.Allocator.Error!struct { ptr: [*]u8, super_index: u32 } {
+    fn takeClassedBlock(self: *Heap, cell_size: u32) std.mem.Allocator.Error!struct { ptr: [*]u8, super_index: u32 } {
+        const geometry = blockGeometry(cell_size);
         for (self.superblocks.items, 0..) |*sb, super_index| {
             if (sb.kind != .classed) continue;
             if (sb.used_blocks >= blocks_per_superblock) continue;
             const off = sb.used_blocks * block_bytes;
             const base = @intFromPtr(sb.bytes.ptr + off);
+            const block_index: usize = sb.used_blocks;
+            if (comptime block_generation_enabled) {
+                std.debug.assert(sb.cell_generations[block_index].len == 0);
+                sb.cell_generations[block_index] = try self.backing.alloc(u32, geometry.cell_count);
+                @memset(sb.cell_generations[block_index], 0);
+                errdefer {
+                    self.backing.free(sb.cell_generations[block_index]);
+                    sb.cell_generations[block_index] = &.{};
+                }
+            }
+            if (comptime lifecycle_state_enabled) {
+                std.debug.assert(sb.cell_lifecycles[block_index].len == 0);
+                sb.cell_lifecycles[block_index] = try self.backing.alloc(CellLifecycle, geometry.cell_count);
+                @memset(sb.cell_lifecycles[block_index], .{});
+                errdefer {
+                    self.backing.free(sb.cell_lifecycles[block_index]);
+                    sb.cell_lifecycles[block_index] = &.{};
+                }
+            }
             try self.classed_blocks.put(self.backing, base, {});
             self.classed_block_filter |= base;
             sb.used_blocks += 1;
@@ -1883,6 +2416,31 @@ pub const Heap = struct {
             self.stats.failed_reserves += 1;
             return err;
         };
+        if (comptime block_generation_enabled) {
+            sb.cell_generations[0] = self.backing.alloc(u32, geometry.cell_count) catch |err| {
+                const bytes = sb.bytes;
+                self.superblocks.items.len -= 1;
+                self.backing.free(bytes);
+                self.stats.superblocks -= 1;
+                self.stats.committed_bytes -= superblock_bytes;
+                self.stats.failed_reserves += 1;
+                return err;
+            };
+            @memset(sb.cell_generations[0], 0);
+        }
+        if (comptime lifecycle_state_enabled) {
+            sb.cell_lifecycles[0] = self.backing.alloc(CellLifecycle, geometry.cell_count) catch |err| {
+                if (comptime block_generation_enabled) self.backing.free(sb.cell_generations[0]);
+                const bytes = sb.bytes;
+                self.superblocks.items.len -= 1;
+                self.backing.free(bytes);
+                self.stats.superblocks -= 1;
+                self.stats.committed_bytes -= superblock_bytes;
+                self.stats.failed_reserves += 1;
+                return err;
+            };
+            @memset(sb.cell_lifecycles[0], .{});
+        }
         const base = @intFromPtr(sb.bytes.ptr);
         self.classed_blocks.putAssumeCapacity(base, {});
         self.classed_block_filter |= base;
@@ -1891,7 +2449,22 @@ pub const Heap = struct {
     }
 
     fn reserveSuperblock(self: *Heap, kind: SuperblockKind) std.mem.Allocator.Error!*Superblock {
-        self.stats.superblock_reserves += 1;
+        var incarnations: if (block_generation_enabled) [blocks_per_superblock]u32 else void =
+            if (block_generation_enabled) @splat(0) else {};
+        if (comptime block_generation_enabled) {
+            if (kind == .classed) {
+                var i: usize = 0;
+                while (i < blocks_per_superblock) : (i += 1) {
+                    if (self.block_generation_exhausted or self.next_block_incarnation == std.math.maxInt(u32)) {
+                        self.block_generation_exhausted = true;
+                        self.stats.failed_reserves += 1;
+                        return error.OutOfMemory;
+                    }
+                    incarnations[i] = self.next_block_incarnation;
+                    self.next_block_incarnation += 1;
+                }
+            }
+        }
         const bytes = self.backing.alignedAlloc(u8, block_align, superblock_bytes) catch |err| {
             self.stats.failed_reserves += 1;
             return err;
@@ -1900,6 +2473,7 @@ pub const Heap = struct {
         try self.superblocks.append(self.backing, .{
             .bytes = bytes,
             .kind = kind,
+            .block_incarnations = if (block_generation_enabled) incarnations else {},
         });
         self.stats.superblocks += 1;
         self.stats.committed_bytes += superblock_bytes;
@@ -1913,7 +2487,7 @@ pub const Heap = struct {
         cell_size: u32,
         super_index: u32,
         reused: bool,
-    ) void {
+    ) std.mem.Allocator.Error!void {
         // Reinitialising a linked block overwrites the intrusive successor and
         // strands the rest of the young/doomed chain. This is the exact
         // resetBlock leak incident; fail at the destructive write, not at the
@@ -1928,6 +2502,15 @@ pub const Heap = struct {
         const geometry = blockGeometry(cell_size);
         std.debug.assert(geometry.cell_count >= space.min_cells_per_block);
         std.debug.assert(geometry.bitmap_words <= max_bitmap_words);
+        const sb = &self.superblocks.items[super_index];
+        const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
+        if (comptime block_generation_enabled) {
+            std.debug.assert(sb.cell_generations[block_index].len == geometry.cell_count);
+        }
+        if (comptime lifecycle_state_enabled) {
+            std.debug.assert(sb.cell_lifecycles[block_index].len == geometry.cell_count);
+            for (sb.cell_lifecycles[block_index]) |lifecycle| std.debug.assert(lifecycle.state == .free);
+        }
         block.* = .{
             .magic = block_magic,
             .mark_epoch = self.mark_epoch,
@@ -2013,7 +2596,7 @@ pub const Heap = struct {
             return err;
         };
         errdefer self.backing.free(bytes);
-        try self.large.put(self.backing, @intFromPtr(bytes.ptr), .{ .bytes = bytes });
+        try self.large.put(self.backing, @intFromPtr(bytes.ptr), .{ .bytes = bytes, .user_bytes = n });
         self.stats.live_bytes += bytes.len;
         self.stats.live_count += 1;
         self.stats.committed_bytes += bytes.len;
@@ -2023,7 +2606,101 @@ pub const Heap = struct {
     }
 };
 
+comptime {
+    const base_heap_size: usize = if (std.debug.runtime_safety) 512 else 488;
+    const expected_heap_size = base_heap_size + if (block_generation_enabled) 8 else 0;
+    if (@sizeOf(Heap) != expected_heap_size) {
+        @compileError(std.fmt.comptimePrint(
+            "block generation Heap budget changed: actual={d} expected={d}",
+            .{ @sizeOf(Heap), expected_heap_size },
+        ));
+    }
+}
+
 extern "c" fn malloc_trim(pad: usize) c_int;
+
+test "string extents: table-held marks, containment probe, epoch sweep" {
+    var heap = Heap.init(std.testing.allocator);
+    defer heap.deinit();
+    heap.beginMajor(); // epoch 2: extents born at 0 read unmarked
+
+    const medium = try heap.alloc(4096);
+    const large = try heap.alloc(space.large_min_bytes + 1);
+    const medium_base = @intFromPtr(medium.ptr);
+    const large_base = @intFromPtr(large.ptr);
+    try std.testing.expect(!heap.extentIsMarked(medium_base, heap.mark_epoch));
+    try std.testing.expect(!heap.extentIsMarked(large_base, heap.mark_epoch));
+
+    // Containment: base, interior, one-past-end; nothing past that.
+    try std.testing.expectEqual(medium_base, heap.extentContaining(medium_base).?);
+    try std.testing.expectEqual(medium_base, heap.extentContaining(medium_base + 100).?);
+    try std.testing.expectEqual(medium_base, heap.extentContaining(medium_base + 4096).?);
+    try std.testing.expectEqual(@as(?usize, null), heap.extentContaining(medium_base + 4097));
+    try std.testing.expectEqual(large_base, heap.extentContaining(large_base + space.large_min_bytes).?);
+
+    heap.extentSetMark(medium_base, heap.mark_epoch);
+    try std.testing.expect(heap.extentIsMarked(medium_base, heap.mark_epoch));
+    try std.testing.expect(!heap.extentIsMarked(medium_base, heap.mark_epoch + 2));
+
+    const Ctx = struct {
+        heap: *Heap,
+        freed: usize = 0,
+        last_base: usize = 0,
+        last_bytes: usize = 0,
+        fn destroy(ctx: *anyopaque, base: usize, user_bytes: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.freed += 1;
+            self.last_base = base;
+            self.last_bytes = user_bytes;
+            self.heap.free(@ptrFromInt(base));
+        }
+    };
+    var ctx = Ctx{ .heap = &heap };
+    try std.testing.expectEqual(@as(usize, 1), heap.sweepStringExtents(heap.mark_epoch, @ptrCast(&ctx), Ctx.destroy));
+    try std.testing.expectEqual(large_base, ctx.last_base);
+    try std.testing.expectEqual(space.large_min_bytes + 1, ctx.last_bytes);
+    try std.testing.expectEqual(@as(usize, 0), heap.large.count());
+    try std.testing.expectEqual(@as(usize, 1), heap.medium.count());
+
+    // Next major: last cycle's mark is stale, and several removals from
+    // under one iteration must all land (in-place tombstones).
+    heap.beginMajor();
+    try std.testing.expect(!heap.extentIsMarked(medium_base, heap.mark_epoch));
+    var extra: [3]usize = undefined;
+    for (&extra) |*slot| slot.* = @intFromPtr((try heap.alloc(page_bytes * 2)).ptr);
+    heap.extentSetMark(extra[1], heap.mark_epoch);
+    try std.testing.expectEqual(@as(usize, 3), heap.sweepStringExtents(heap.mark_epoch, @ptrCast(&ctx), Ctx.destroy));
+    try std.testing.expectEqual(@as(usize, 1), heap.medium.count());
+    try std.testing.expect(heap.medium.contains(extra[1]));
+    try std.testing.expectEqual(@as(usize, 0), heap.sweepStringExtents(heap.mark_epoch, @ptrCast(&ctx), Ctx.destroy));
+    try std.testing.expectEqual(@as(usize, 4), ctx.freed);
+}
+
+test "block-cell generation packs incarnation and non-wrapping reuse sequence" {
+    var heap = Heap.init(std.testing.allocator);
+    defer heap.deinit();
+
+    const first = (try heap.allocCell(80)).?;
+    const first_base = @intFromPtr(first.ptr) + gc_representation.metadata_size;
+    const first_handle = heap.generationHandle(first_base, gc_representation.metadata_size).?;
+    try std.testing.expect(first_handle.generation >> 32 != 0);
+    try std.testing.expect(@as(u32, @truncate(first_handle.generation)) != 0);
+    heap.freeSmallCell(first.ptr);
+
+    const block = Block.fromCellTrusted(@intFromPtr(first.ptr));
+    heap.generationFor(block, first.index).* = std.math.maxInt(u32);
+    // The exhausted cell is sealed and skipped, not wrapped or surfaced as a
+    // false heap-wide OOM while another cell in the block remains usable.
+    const next = (try heap.allocCell(80)).?;
+    defer heap.freeSmallCell(next.ptr);
+    try std.testing.expect(next.index != first.index);
+    try std.testing.expectEqual(carrier.LifecycleState.free, heap.lifecycleFor(block, first.index).state);
+    const next_handle = heap.generationHandle(
+        @intFromPtr(next.ptr) + gc_representation.metadata_size,
+        gc_representation.metadata_size,
+    ).?;
+    try std.testing.expectEqual(first_handle.generation >> 32, next_handle.generation >> 32);
+}
 
 pub fn processHeapTrimNeeded(current_decommitted: usize, released: usize) bool {
     return released != 0 and
@@ -2102,10 +2779,6 @@ fn pushCell(block: *Block, index: u32, cell: [*]u8) void {
         @as(*u32, @ptrCast(@alignCast(cell))).* = free_poison | (block.free_list & free_link_mask);
         block.free_list = index;
     }
-}
-
-fn bitWord(index: u32) usize {
-    return index / 64;
 }
 
 fn bitMask(index: u32) u64 {

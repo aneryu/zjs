@@ -10,6 +10,29 @@
 
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
+
+// F0b: the runtime matchers below keep their one-byte-compare shape (P1-1)
+// -- what changes is where the numbers come from. Burned-in operand values
+// and next_pc increments are derived from the declaration at comptime, so
+// the generated code is identical and a drifted declaration is a compile
+// error instead of a silent mis-decode.
+const Form = bytecode.opcode.logical.LogicalOpcode;
+inline fn sz(comptime form: Form) usize {
+    return bytecode.opcode.decode.sizeOfForm(form);
+}
+inline fn burned(comptime form: Form) u16 {
+    return bytecode.opcode.decode.burnedOperandOf(form, 0);
+}
+comptime {
+    // The sequence matchers (`canFinishUndefinedCompletionTail` and
+    // friends) walk adjacent instructions with `pc + 1` steps. That is
+    // only sound while every form they step over is one byte; this turns
+    // the assumption into a build error.
+    for ([_]Form{ .put_loc0, .get_loc0, .undefined, .drop, .return_undef, .return_async }) |f| {
+        if (bytecode.opcode.decode.sizeOfForm(f) != 1)
+            @compileError("sequence matcher step is no longer one byte: " ++ @tagName(f));
+    }
+}
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
@@ -120,20 +143,20 @@ pub fn decodeFalseBranch(code: []const u8, branch_pc: usize) ?DecodedFalseBranch
     if (branch_pc >= code.len) return null;
     return switch (code[branch_pc]) {
         op.if_false8 => blk: {
-            if (branch_pc + 2 > code.len) return null;
+            if (branch_pc + comptime sz(.if_false8) > code.len) return null;
             const operand_pc = branch_pc + 1;
             const diff: i8 = @bitCast(code[operand_pc]);
             const target_i64 = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
             if (target_i64 < 0) return null;
-            break :blk .{ .true_pc = operand_pc + 1, .false_pc = @intCast(target_i64) };
+            break :blk .{ .true_pc = branch_pc + comptime sz(.if_false8), .false_pc = @intCast(target_i64) };
         },
         op.if_false => blk: {
-            if (branch_pc + 5 > code.len) return null;
+            if (branch_pc + comptime sz(.if_false) > code.len) return null;
             const operand_pc = branch_pc + 1;
             const diff = readInt(i32, code[operand_pc..][0..4]);
             const target_i64 = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
             if (target_i64 < 0) return null;
-            break :blk .{ .true_pc = operand_pc + 4, .false_pc = @intCast(target_i64) };
+            break :blk .{ .true_pc = branch_pc + comptime sz(.if_false), .false_pc = @intCast(target_i64) };
         },
         else => null,
     };
@@ -142,21 +165,21 @@ pub fn decodeFalseBranch(code: []const u8, branch_pc: usize) ?DecodedFalseBranch
 pub fn decodeLocalGet(code: []const u8, pc: usize) ?LocalGet {
     if (pc >= code.len) return null;
     return switch (code[pc]) {
-        op.get_loc0 => .{ .idx = 0, .next_pc = pc + 1, .checked = false },
-        op.get_loc1 => .{ .idx = 1, .next_pc = pc + 1, .checked = false },
-        op.get_loc2 => .{ .idx = 2, .next_pc = pc + 1, .checked = false },
-        op.get_loc3 => .{ .idx = 3, .next_pc = pc + 1, .checked = false },
+        op.get_loc0 => .{ .idx = comptime burned(.get_loc0), .next_pc = pc + comptime sz(.get_loc0), .checked = false },
+        op.get_loc1 => .{ .idx = comptime burned(.get_loc1), .next_pc = pc + comptime sz(.get_loc1), .checked = false },
+        op.get_loc2 => .{ .idx = comptime burned(.get_loc2), .next_pc = pc + comptime sz(.get_loc2), .checked = false },
+        op.get_loc3 => .{ .idx = comptime burned(.get_loc3), .next_pc = pc + comptime sz(.get_loc3), .checked = false },
         op.get_loc8 => blk: {
-            if (pc + 2 > code.len) return null;
-            break :blk .{ .idx = code[pc + 1], .next_pc = pc + 2, .checked = false };
+            if (pc + comptime sz(.get_loc8) > code.len) return null;
+            break :blk .{ .idx = code[pc + 1], .next_pc = pc + comptime sz(.get_loc8), .checked = false };
         },
         op.get_loc => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3, .checked = false };
+            if (pc + comptime sz(.get_loc) > code.len) return null;
+            break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + comptime sz(.get_loc), .checked = false };
         },
         op.get_loc_check => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3, .checked = true };
+            if (pc + comptime sz(.get_loc_check) > code.len) return null;
+            break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + comptime sz(.get_loc_check), .checked = true };
         },
         else => null,
     };
@@ -171,6 +194,14 @@ pub fn localReadableBorrowed(frame: *const frame_mod.Frame, idx: u16, checked: b
 }
 
 pub fn decodeFieldAtom(code: []const u8, pc: usize, expected_op: u8) ?FieldAtom {
+    comptime {
+        // Callers pass get_field-family ops; the hard-coded stride is only
+        // sound while the whole family is atom-sized.
+        for ([_]Form{ .get_field, .get_field2, .put_field }) |f| {
+            if (bytecode.opcode.decode.sizeOfForm(f) != 5)
+                @compileError("decodeFieldAtom stride is stale for " ++ @tagName(f));
+        }
+    }
     if (pc + 5 > code.len or code[pc] != expected_op) return null;
     return .{
         .atom = readInt(u32, code[pc + 1 ..][0..4]),
@@ -204,7 +235,7 @@ pub fn localCompletionPutWritableForFastPath(function: *const bytecode.FunctionB
 pub fn decodeOptionalLocalCompletionTail(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, pc: usize) ?OptionalLocalCompletionTail {
     const code = function.byteCode();
     if (pc >= code.len) return null;
-    if (code[pc] == op.drop) return .{ .tail_pc = pc + 1 };
+    if (code[pc] == op.drop) return .{ .tail_pc = pc + comptime sz(.drop) };
 
     const completion_put = decodeLocalPut(code, pc) orelse return null;
     if (!localCompletionPutWritableForFastPath(function, frame, completion_put)) return null;
@@ -224,7 +255,7 @@ pub fn decodeGotoTarget(code: []const u8, goto_pc: usize) ?usize {
     if (goto_pc >= code.len) return null;
     return switch (code[goto_pc]) {
         op.goto8 => blk: {
-            if (goto_pc + 2 > code.len) return null;
+            if (goto_pc + comptime sz(.goto8) > code.len) return null;
             const operand_pc = goto_pc + 1;
             const diff: i8 = @bitCast(code[operand_pc]);
             const target_i64 = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
@@ -232,7 +263,7 @@ pub fn decodeGotoTarget(code: []const u8, goto_pc: usize) ?usize {
             break :blk @intCast(target_i64);
         },
         op.goto => blk: {
-            if (goto_pc + 5 > code.len) return null;
+            if (goto_pc + comptime sz(.goto) > code.len) return null;
             const operand_pc = goto_pc + 1;
             const diff = readInt(i32, code[operand_pc..][0..4]);
             const target_i64 = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
@@ -248,13 +279,13 @@ pub fn decodeLoopLimitGet(code: []const u8, pc: usize) ?struct { limit: LoopLimi
     if (immediateInt32Operand(code, pc)) |immediate| return .{ .limit = .{ .immediate = immediate.value }, .next_pc = immediate.next_pc };
     if (pc >= code.len) return null;
     return switch (code[pc]) {
-        op.get_arg0 => .{ .limit = .{ .arg = 0 }, .next_pc = pc + 1 },
-        op.get_arg1 => .{ .limit = .{ .arg = 1 }, .next_pc = pc + 1 },
-        op.get_arg2 => .{ .limit = .{ .arg = 2 }, .next_pc = pc + 1 },
-        op.get_arg3 => .{ .limit = .{ .arg = 3 }, .next_pc = pc + 1 },
+        op.get_arg0 => .{ .limit = .{ .arg = comptime burned(.get_arg0) }, .next_pc = pc + comptime sz(.get_arg0) },
+        op.get_arg1 => .{ .limit = .{ .arg = comptime burned(.get_arg1) }, .next_pc = pc + comptime sz(.get_arg1) },
+        op.get_arg2 => .{ .limit = .{ .arg = comptime burned(.get_arg2) }, .next_pc = pc + comptime sz(.get_arg2) },
+        op.get_arg3 => .{ .limit = .{ .arg = comptime burned(.get_arg3) }, .next_pc = pc + comptime sz(.get_arg3) },
         op.get_arg => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .limit = .{ .arg = readInt(u16, code[pc + 1 ..][0..2]) }, .next_pc = pc + 3 };
+            if (pc + comptime sz(.get_arg) > code.len) return null;
+            break :blk .{ .limit = .{ .arg = readInt(u16, code[pc + 1 ..][0..2]) }, .next_pc = pc + comptime sz(.get_arg) };
         },
         else => null,
     };
@@ -327,17 +358,17 @@ pub fn storeLocalCompletionBorrowedValue(
 pub fn decodeVarRefPut(code: []const u8, pc: usize) ?VarRefPut {
     if (pc >= code.len) return null;
     return switch (code[pc]) {
-        op.put_var_ref0 => .{ .idx = 0, .opc = op.put_var_ref0, .operand_pc = pc + 1, .consume = 0 },
-        op.put_var_ref1 => .{ .idx = 1, .opc = op.put_var_ref1, .operand_pc = pc + 1, .consume = 0 },
-        op.put_var_ref2 => .{ .idx = 2, .opc = op.put_var_ref2, .operand_pc = pc + 1, .consume = 0 },
-        op.put_var_ref3 => .{ .idx = 3, .opc = op.put_var_ref3, .operand_pc = pc + 1, .consume = 0 },
+        op.put_var_ref0 => .{ .idx = comptime burned(.put_var_ref0), .opc = op.put_var_ref0, .operand_pc = pc + 1, .consume = comptime (sz(.put_var_ref0) - 1) },
+        op.put_var_ref1 => .{ .idx = comptime burned(.put_var_ref1), .opc = op.put_var_ref1, .operand_pc = pc + 1, .consume = comptime (sz(.put_var_ref1) - 1) },
+        op.put_var_ref2 => .{ .idx = comptime burned(.put_var_ref2), .opc = op.put_var_ref2, .operand_pc = pc + 1, .consume = comptime (sz(.put_var_ref2) - 1) },
+        op.put_var_ref3 => .{ .idx = comptime burned(.put_var_ref3), .opc = op.put_var_ref3, .operand_pc = pc + 1, .consume = comptime (sz(.put_var_ref3) - 1) },
         op.put_var_ref, op.put_var_ref_check => blk: {
-            if (pc + 3 > code.len) return null;
+            if (pc + comptime sz(.put_var_ref) > code.len) return null;
             break :blk .{
                 .idx = readInt(u16, code[pc + 1 ..][0..2]),
                 .opc = code[pc],
                 .operand_pc = pc + 1,
-                .consume = 2,
+                .consume = comptime (sz(.put_var_ref) - 1),
             };
         },
         else => null,
@@ -347,15 +378,15 @@ pub fn decodeVarRefPut(code: []const u8, pc: usize) ?VarRefPut {
 pub fn decodeVarRefGet(code: []const u8, pc: usize) ?VarRefGet {
     if (pc >= code.len) return null;
     return switch (code[pc]) {
-        op.get_var_ref0 => .{ .idx = 0, .next_pc = pc + 1 },
-        op.get_var_ref1 => .{ .idx = 1, .next_pc = pc + 1 },
-        op.get_var_ref2 => .{ .idx = 2, .next_pc = pc + 1 },
-        op.get_var_ref3 => .{ .idx = 3, .next_pc = pc + 1 },
+        op.get_var_ref0 => .{ .idx = comptime burned(.get_var_ref0), .next_pc = pc + comptime sz(.get_var_ref0) },
+        op.get_var_ref1 => .{ .idx = comptime burned(.get_var_ref1), .next_pc = pc + comptime sz(.get_var_ref1) },
+        op.get_var_ref2 => .{ .idx = comptime burned(.get_var_ref2), .next_pc = pc + comptime sz(.get_var_ref2) },
+        op.get_var_ref3 => .{ .idx = comptime burned(.get_var_ref3), .next_pc = pc + comptime sz(.get_var_ref3) },
         op.get_var_ref, op.get_var_ref_check => blk: {
-            if (pc + 3 > code.len) return null;
+            if (pc + comptime sz(.get_var_ref) > code.len) return null;
             break :blk .{
                 .idx = readInt(u16, code[pc + 1 ..][0..2]),
-                .next_pc = pc + 3,
+                .next_pc = pc + comptime sz(.get_var_ref),
             };
         },
         else => null,
@@ -390,32 +421,32 @@ pub fn globalVarAtom(function: *const bytecode.FunctionBytecode, idx: u16) ?core
 
 pub fn decodeGlobalPut(function: *const bytecode.FunctionBytecode, pc: usize) ?GlobalBindingPut {
     const code = function.byteCode();
-    if (pc + 3 > code.len or code[pc] != op.put_var) return null;
+    if (pc + comptime sz(.put_var) > code.len or code[pc] != op.put_var) return null;
     const ref_idx = readInt(u16, code[pc + 1 ..][0..2]);
     return .{
         .atom = globalVarAtom(function, ref_idx) orelse return null,
-        .next_pc = pc + 3,
+        .next_pc = pc + comptime sz(.put_var),
     };
 }
 
 pub fn decodeLocalPut(code: []const u8, pc: usize) ?LocalPut {
     if (pc >= code.len) return null;
     return switch (code[pc]) {
-        op.put_loc0 => .{ .idx = 0, .operand_pc = pc + 1, .consume = 0, .checked = false },
-        op.put_loc1 => .{ .idx = 1, .operand_pc = pc + 1, .consume = 0, .checked = false },
-        op.put_loc2 => .{ .idx = 2, .operand_pc = pc + 1, .consume = 0, .checked = false },
-        op.put_loc3 => .{ .idx = 3, .operand_pc = pc + 1, .consume = 0, .checked = false },
+        op.put_loc0 => .{ .idx = comptime burned(.put_loc0), .operand_pc = pc + 1, .consume = comptime (sz(.put_loc0) - 1), .checked = false },
+        op.put_loc1 => .{ .idx = comptime burned(.put_loc1), .operand_pc = pc + 1, .consume = comptime (sz(.put_loc1) - 1), .checked = false },
+        op.put_loc2 => .{ .idx = comptime burned(.put_loc2), .operand_pc = pc + 1, .consume = comptime (sz(.put_loc2) - 1), .checked = false },
+        op.put_loc3 => .{ .idx = comptime burned(.put_loc3), .operand_pc = pc + 1, .consume = comptime (sz(.put_loc3) - 1), .checked = false },
         op.put_loc8 => blk: {
-            if (pc + 2 > code.len) return null;
-            break :blk .{ .idx = code[pc + 1], .operand_pc = pc + 1, .consume = 1, .checked = false };
+            if (pc + comptime sz(.put_loc8) > code.len) return null;
+            break :blk .{ .idx = code[pc + 1], .operand_pc = pc + 1, .consume = comptime (sz(.put_loc8) - 1), .checked = false };
         },
         op.put_loc => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .operand_pc = pc + 1, .consume = 2, .checked = false };
+            if (pc + comptime sz(.put_loc) > code.len) return null;
+            break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .operand_pc = pc + 1, .consume = comptime (sz(.put_loc) - 1), .checked = false };
         },
         op.put_loc_check => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .operand_pc = pc + 1, .consume = 2, .checked = true };
+            if (pc + comptime sz(.put_loc_check) > code.len) return null;
+            break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .operand_pc = pc + 1, .consume = comptime (sz(.put_loc_check) - 1), .checked = true };
         },
         else => null,
     };
@@ -714,12 +745,12 @@ pub fn backwardGotoTarget(code: []const u8, operand_pc: usize, goto_opc: u8) ?us
             break :blk @as(i64, @intCast(operand_pc)) + @as(i64, diff);
         },
         op.goto16 => blk: {
-            if (operand_pc + 2 > code.len) return null;
+            if (operand_pc + comptime (sz(.goto16) - 1) > code.len) return null;
             const diff = readInt(i16, code[operand_pc..][0..2]);
             break :blk @as(i64, @intCast(operand_pc)) + @as(i64, diff);
         },
         op.goto => blk: {
-            if (operand_pc + 4 > code.len) return null;
+            if (operand_pc + comptime (sz(.goto) - 1) > code.len) return null;
             const diff = readInt(i32, code[operand_pc..][0..4]);
             break :blk @as(i64, @intCast(operand_pc)) + @as(i64, diff);
         },
@@ -743,27 +774,27 @@ pub const StoredGlobalDataValue = struct {
 pub fn immediateInt32Operand(code: []const u8, pc: usize) ?ImmediateInt32 {
     if (pc >= code.len) return null;
     return switch (code[pc]) {
-        op.push_minus1 => .{ .value = -1, .next_pc = pc + 1 },
-        op.push_0 => .{ .value = 0, .next_pc = pc + 1 },
-        op.push_1 => .{ .value = 1, .next_pc = pc + 1 },
-        op.push_2 => .{ .value = 2, .next_pc = pc + 1 },
-        op.push_3 => .{ .value = 3, .next_pc = pc + 1 },
-        op.push_4 => .{ .value = 4, .next_pc = pc + 1 },
-        op.push_5 => .{ .value = 5, .next_pc = pc + 1 },
-        op.push_6 => .{ .value = 6, .next_pc = pc + 1 },
-        op.push_7 => .{ .value = 7, .next_pc = pc + 1 },
+        op.push_minus1 => .{ .value = comptime burned(.push_minus1), .next_pc = pc + comptime sz(.push_minus1) },
+        op.push_0 => .{ .value = comptime burned(.push_0), .next_pc = pc + comptime sz(.push_0) },
+        op.push_1 => .{ .value = comptime burned(.push_1), .next_pc = pc + comptime sz(.push_1) },
+        op.push_2 => .{ .value = comptime burned(.push_2), .next_pc = pc + comptime sz(.push_2) },
+        op.push_3 => .{ .value = comptime burned(.push_3), .next_pc = pc + comptime sz(.push_3) },
+        op.push_4 => .{ .value = comptime burned(.push_4), .next_pc = pc + comptime sz(.push_4) },
+        op.push_5 => .{ .value = comptime burned(.push_5), .next_pc = pc + comptime sz(.push_5) },
+        op.push_6 => .{ .value = comptime burned(.push_6), .next_pc = pc + comptime sz(.push_6) },
+        op.push_7 => .{ .value = comptime burned(.push_7), .next_pc = pc + comptime sz(.push_7) },
         op.push_i8 => blk: {
-            if (pc + 2 > code.len) return null;
+            if (pc + comptime sz(.push_i8) > code.len) return null;
             const value: i8 = @bitCast(code[pc + 1]);
-            break :blk .{ .value = value, .next_pc = pc + 2 };
+            break :blk .{ .value = value, .next_pc = pc + comptime sz(.push_i8) };
         },
         op.push_i16 => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .value = readInt(i16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 };
+            if (pc + comptime sz(.push_i16) > code.len) return null;
+            break :blk .{ .value = readInt(i16, code[pc + 1 ..][0..2]), .next_pc = pc + comptime sz(.push_i16) };
         },
         op.push_i32 => blk: {
-            if (pc + 5 > code.len) return null;
-            break :blk .{ .value = readInt(i32, code[pc + 1 ..][0..4]), .next_pc = pc + 5 };
+            if (pc + comptime sz(.push_i32) > code.len) return null;
+            break :blk .{ .value = readInt(i32, code[pc + 1 ..][0..4]), .next_pc = pc + comptime sz(.push_i32) };
         },
         else => null,
     };
@@ -774,13 +805,13 @@ const vm_property_ref = @import("vm_property_ref.zig");
 
 pub fn decodeGlobalDataGet(function: *const bytecode.FunctionBytecode, pc: usize) ?GlobalBindingGet {
     const code = function.byteCode();
-    if (pc + 3 > code.len) return null;
+    if (pc + comptime sz(.get_var) > code.len) return null;
     const opc = code[pc];
     if (opc != op.get_var and opc != op.get_var_undef) return null;
     const ref_idx = readInt(u16, code[pc + 1 ..][0..2]);
     return .{
         .atom = globalVarAtom(function, ref_idx) orelse return null,
-        .next_pc = pc + 3,
+        .next_pc = pc + comptime sz(.get_var),
     };
 }
 
@@ -822,10 +853,10 @@ pub fn decodeStringSliceConstLocalStore(
     const code = function.byteCode();
     const start_arg = immediateInt32Operand(code, arg_pc) orelse return null;
     const call_pc = start_arg.next_pc;
-    if (call_pc + 3 > code.len or code[call_pc] != op.call_method) return null;
+    if (call_pc + comptime sz(.call_method) > code.len or code[call_pc] != op.call_method) return null;
     if (readInt(u16, code[call_pc + 1 ..][0..2]) != 1) return null;
 
-    const store = decodeLocalPut(code, call_pc + 3) orelse return null;
+    const store = decodeLocalPut(code, call_pc + comptime sz(.call_method)) orelse return null;
     if (store.idx >= frame.locals.len) return null;
     if (frame.locals[store.idx].isUninitialized()) return null;
     if (store.idx < function.varDefs().len and function.varDefs()[store.idx].isConst()) return null;
@@ -883,12 +914,14 @@ pub fn stringFromCharCodeInt32Arg(
 
     const divisor = immediateInt32Operand(code, rhs_get.next_pc) orelse return null;
     if (divisor.value <= 0) return null;
-    if (divisor.next_pc + 2 > code.len or code[divisor.next_pc] != op.mod or code[divisor.next_pc + 1] != op.add) return null;
+    if (divisor.next_pc + comptime (sz(.mod) + sz(.add)) > code.len or
+        code[divisor.next_pc] != op.mod or
+        code[divisor.next_pc + sz(.mod)] != op.add) return null;
 
     const remainder = @rem(rhs_value, divisor.value);
     return .{
         .value = std.math.add(i32, first.value, remainder) catch return null,
-        .next_pc = divisor.next_pc + 2,
+        .next_pc = divisor.next_pc + comptime (sz(.mod) + sz(.add)),
     };
 }
 

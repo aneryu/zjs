@@ -90,7 +90,7 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
             var prototype = try reflectConstructPrototype(ctx, name, new_target);
             defer prototype.deinit(rt);
             const instance = try core.Object.create(rt, core.class.ids.object, prototype.object());
-            errdefer core.Object.destroyFromHeader(rt, &instance.header);
+            errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
             return instance.value();
         }
         if (std.mem.eql(u8, name, "Number")) {
@@ -119,7 +119,7 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
             var prototype = try reflectConstructPrototype(ctx, name, new_target);
             defer prototype.deinit(rt);
             const instance = try core.Object.createFinalizationRegistry(rt, ctx, prototype.object());
-            errdefer core.Object.destroyFromHeader(rt, &instance.header);
+            errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
             try instance.setOptionalValueSlot(rt, instance.finalizationRegistryCleanupCallbackSlot(), cleanup_callback.dup());
             return instance.value();
         }
@@ -154,7 +154,7 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
         var prototype = try reflectConstructPrototype(ctx, target_name orelse "Object", new_target);
         defer prototype.deinit(rt);
         const instance = try core.Object.create(rt, core.class.ids.object, prototype.object());
-        errdefer core.Object.destroyFromHeader(rt, &instance.header);
+        errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
         return instance.value();
     }
 }
@@ -285,11 +285,11 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
     _ = try expectObjectArg(rooted_args[1]);
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
 
     const proxy = try core.Object.create(rt, core.class.ids.proxy, null);
     var proxy_raw_owned = true;
-    errdefer if (proxy_raw_owned) core.Object.destroyFromHeader(rt, &proxy.header);
+    errdefer if (proxy_raw_owned) core.Object.destroyFromHeader(rt, proxy.gcHeader());
     try proxy.ensureProxyPayload(rt);
     try proxy.setOptionalValueSlot(rt, proxy.proxyTargetSlot(), rooted_args[0].dup());
     try proxy.setOptionalValueSlot(rt, proxy.proxyHandlerSlot(), rooted_args[1].dup());
@@ -668,7 +668,7 @@ pub fn reflectOwnKeysCall(
     const keys = try object_ops.objectRestOwnKeys(ctx, output, global, object);
     defer core.Object.freeKeys(ctx.runtime, keys);
     const out = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     for (keys) |key| {
         const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, key);
         defer key_value.free(ctx.runtime);

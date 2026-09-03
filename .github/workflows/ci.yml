@@ -36,6 +36,9 @@ jobs:
           node-version: "24"
       - run: zig build zjs --summary all
       - run: zig build checkpoint-gate --summary all
+      # The stress tier is excluded from checkpoint-gate and per-change close-out
+      # to keep local feedback fast; the primary-platform CI job pays for it here.
+      - run: zig build test-stress --summary all
       - run: node tools/architecture/check_compiler_stage_boundaries.js zig-out/bin/zjs
       # test262 is a zero-failure gate, so it is the sharpest semantic-regression
       # signal available. It runs on the primary development platform only:

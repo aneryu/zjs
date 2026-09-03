@@ -105,13 +105,13 @@ fn parkGeneratorExecutionState(
     // be kept in step with the frame layout; remembering the owner once is the
     // same guarantee, and is what the dense-array append choke point does for
     // the same reason.
-    rt.gc.rememberOwnerForBulkWrite(&generator.header);
+    rt.gc.rememberOwnerForBulkWrite(generator.gcHeader());
     // An open cell borrows pvalue from this frame. Once a published generator
     // is parked, retain that storage owner exactly once in the cell, matching
     // QuickJS's attached JSVarRef -> JSAsyncFunctionState edge. Initial
     // parameter setup uses a detached shell; finishGeneratorShell installs
     // these edges immediately after publishing its fresh rc==1 header.
-    if (generator.header.metaConst().alloc_info.heap_accounted) {
+    if (generator.gcHeader().metaConst().alloc_info.heap_accounted) {
         const generator_value = generator.value();
         for (frame.open_var_refs) |maybe_cell| {
             const cell = maybe_cell orelse continue;

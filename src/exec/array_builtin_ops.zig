@@ -299,7 +299,7 @@ fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Ob
     const stored = global.cachedRealmValue(rt, .array_prototype) orelse return null;
     if (!stored.isObject()) return null;
     const header = stored.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return core.Object.fromHeader(header);
 }
 
 /// Shared record handler for the `.array` domain. Mirrors the retired
@@ -532,7 +532,7 @@ pub fn constructConstructorWithPrototype(rt: *core.JSRuntime, args: []const core
     if (args.len == 1 and args[0].isNumber()) {
         const length = arrayLengthFromNumber(args[0]) orelse return error.RangeError;
         const object = try core.Object.createArray(rt, prototype);
-        errdefer core.Object.destroyFromHeader(rt, &object.header);
+        errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
         // new Array(n): fast array with count=0, length=n, slots [0,n) holes.
         // Faithful to js_array_constructor -> set_array_length (quickjs.c:9447-9455);
         // no sparse conversion. This is the holey-prealloc unblock.
@@ -552,7 +552,7 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue,
     defer root_frame.deactivate(rt);
 
     const object = try core.Object.createArray(rt, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
 
     try object.reserveDenseArrayElements(rt, @intCast(rooted.values.len));
     for (rooted.values, 0..) |value, index| {
@@ -706,7 +706,7 @@ fn arrayIterator(realm: *core.RealmContext, receiver: core.JSValue, kind: ArrayI
     if (!prototype_value.isObject()) return error.InvalidBuiltinRegistry;
     const prototype = try expectObject(prototype_value);
     const iterator = try core.Object.create(rt, core.class.ids.array_iterator, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &iterator.header);
+    errdefer core.Object.destroyFromHeader(rt, iterator.gcHeader());
     try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), receiver.dup());
     iterator.iteratorIndexSlot().* = 0;
     iterator.iteratorKindSlot().* = @intFromEnum(kind);
@@ -759,7 +759,7 @@ fn arrayIteratorValue(rt: *core.JSRuntime, target: *core.Object, index: u32, kin
         .value => if (buffer_ops.isTypedArrayObject(target)) try buffer_ops.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.atom.atomFromUInt32(index)),
         .key_value => blk: {
             const pair = try core.Object.createArray(rt, null);
-            errdefer core.Object.destroyFromHeader(rt, &pair.header);
+            errdefer core.Object.destroyFromHeader(rt, pair.gcHeader());
             const value = if (buffer_ops.isTypedArrayObject(target)) try buffer_ops.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.atom.atomFromUInt32(index));
             defer value.free(rt);
             try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
@@ -985,7 +985,7 @@ test "array concat roots direct function bytecode argument while creating output
 fn filterEven(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     const out = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
+    errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
     var out_index: u32 = 0;
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
@@ -1114,7 +1114,7 @@ fn slice(rt: *core.JSRuntime, array_value: core.JSValue, start_value: core.JSVal
     if (start < 0) start = @as(i32, @intCast(array.arrayLength())) + start;
     if (start < 0) start = 0;
     const out = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
+    errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
     var out_index: u32 = 0;
     var index: u32 = @intCast(start);
     while (index < array.arrayLength()) : (index += 1) {
@@ -1137,7 +1137,7 @@ fn splice(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSV
     defer root_frame.deactivate(rt);
 
     const removed = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &removed.header);
+    errdefer core.Object.destroyFromHeader(rt, removed.gcHeader());
     var i: u32 = 0;
     while (i < delete_count) : (i += 1) {
         const item = try array.getProperty(core.atom.atomFromUInt32(start + i));
@@ -1333,7 +1333,7 @@ fn concat(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValu
     defer args_root_frame.deactivate(rt);
 
     const out = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
+    errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
 
     var next_index: u32 = 0;
     try concatAppend(rt, out, &next_index, rooted_receiver);
@@ -1347,7 +1347,7 @@ fn concat(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValu
 fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value: core.JSValue) !void {
     if (value.isObject()) {
         const header = value.refHeader() orelse unreachable;
-        const object: *core.Object = @fieldParentPtr("header", header);
+        const object = core.Object.fromHeader(header);
         if (object.isArray()) {
             var index: u32 = 0;
             while (index < object.arrayLength()) : (index += 1) {

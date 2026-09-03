@@ -7,7 +7,8 @@
 #   - Even sample count. An odd count under ABBA leaves the order unbalanced.
 #   - Binary and case order are reversed on even samples, so every config sees a
 #     warm-predecessor and a cold-predecessor position equally often.
-#   - Pinned to CPU 19 (Cortex-X925, 3900MHz). This host is big.LITTLE with two
+#   - Pinned to the selected measurement field (B/CPU19 by default). This host
+#     is big.LITTLE with two
 #     PMUs; perf prints "<not counted>" for the PMU the pinned core is not on,
 #     and those rows are filtered rather than parsed.
 #
@@ -15,6 +16,9 @@
 set -u
 SAMPLES=$1; shift
 CASE_DIR="$(cd "$(dirname "$0")/cases" && pwd)"
+PERF_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+FIELD="${ZJS_MEASURE_FIELD:-b}"
+CPU="$(python3 "$PERF_DIR/measure_fields.py" cpus --field "$FIELD" --layer single)"
 CASES=(empty ctrl A_direct_call A2_direct_call_ret B_method_call \
        C_apply_array_literal C2_apply_array_hoisted D_apply_arguments \
        E0_arguments_zeroarg E1_arguments_length E2_arguments_index \
@@ -37,7 +41,7 @@ BINS=("$@")
 
 run_one() {
     local bin=$1 file=$2
-    taskset -c 19 perf stat -x, -e instructions,cycles,task-clock "$bin" "$file" 2>&1 >/dev/null \
+    taskset -c "$CPU" perf stat -x, -e instructions,cycles,task-clock "$bin" "$file" 2>&1 >/dev/null \
       | awk -F, '$1 != "<not counted>" && $1 != "" {
             if ($3 ~ /instructions/) ins=$1;
             else if ($3 ~ /cycles/) cyc=$1;

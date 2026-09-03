@@ -1,0 +1,48 @@
+NavierStokes: 4773
+----
+gc: collection entries total 0, major completed 0, minor completed 0, failed 0
+gc: collector counted objects freed 0 (excludes bytecode), zero-ref drains 0
+gc: heap live 306930 bytes, account peak 0 bytes
+gc: external bytes current 0, peak 0, token bytes 0 in 0 tokens, untracked bytes 0, allocations 0, frees 0, invalid releases 0, weighted debt 0
+gc: weak refs current 0, finalizer queue current 0
+gc: major pause p50 52576 ns, p95 52576 ns, p99 52576 ns, max 52576 ns, retained 1 of 1 pauses
+gc: allocation histogram publications 8111, payload bytes 717978, p50-below-large 64, p95-below-large 160, p99-below-large 272, max-small 128, covered-by-small 7632/8111 below-large, large 0
+gc: Object publications total 3350, slots2 2
+gc: slots2 payload attaches 0, live side entries 0
+gc: block heap committed 2097152 live 202528 committed/live-x1000 10355 superblocks 1 large maps 0
+gc: block heap topology classed superblocks 1, medium superblocks 0, initialized blocks 4, reserved-uninitialized blocks 28, nonempty blocks 4, partially-full blocks 2, empty-free blocks 0, empty-active blocks 0, decommitted-empty blocks 0, wholly-empty superblocks 0, hot-reuse blocks 0, interval-active blocks 0
+gc: block heap cell capacity live 202528, nonempty capacity 259968, empty capacity 0, within-nonempty-unused 57440
+gc: block heap class 48 bytes initialized 1, nonempty 1, empty-free 0, empty-active 0, live-cells 742, capacity-cells 1352
+gc: block heap class 64 bytes initialized 3, nonempty 3, empty-free 0, empty-active 0, live-cells 2608, capacity-cells 3048
+gc: block heap deferred block runs 0, hot reuse published 0, reopened 0, pass-A settled cells 0
+gc: major threshold resets growth 0, small-heap-floor 0
+gc: block heap page returns cumulative decommitted 0, recommitted 0
+gc: block heap decommit checks 0, released blocks cumulative 0, current bytes 0, max batch bytes 0
+gc: process heap trim attempts 0, successes 0
+gc: marked-set census not run (pass --gc-mark-footprint; it costs a whole-heap walk inside every final remark)
+gc: incremental subphase ns totals begin-clear 64, begin-precise-seed 4640, begin-conservative-seed 47328, begin-retire 48, finish-init 0, finish-remark-total 0, finish-conservative-seed-subset 0, finish-weak 0, finish-condemn 0, finish-tail 0
+gc: incremental subphase reconciliation begin STW 52576 - subphases 52080 = other 496 ns; finish STW 0 - subphases 0 = other 0 ns
+gc: incremental subphase work totals retired non-block headers 0, retired young blocks 2, retired remembered sets 0, clearMarks non-block headers 0
+gc: generation current young 4183, remembered owners 0
+gc: minor collections 0, reclaimed 0, promoted-by-minor 0, promoted-all 0, remembered without young 0, remembered drops 0, suspensions 0
+gc: major retirement commits 0, abandons 0, current state tracing
+gc: generational barrier calls 1992, exit young-owner 1992, exit old-target 0, remembered-owner 0
+gc: minor stw total 0 ns, mean 0 ns, max 0 ns
+gc: minor pause distribution unavailable, sample drops 0
+gc: minor phase totals clear 0, roots 0, conservative 0, remembered 0, trace 0, sweep+destroy 0, promote 0, other 0 ns
+gc: minor young-at-start mean 0, max 0
+gc: conservative-only young 0 over 0 verified minors
+gc: exact-target marking barrier calls 19217, exit marked-target 8714, exit unpublished-owner 0, exit unpublished-target 0, requeued-owner 10489, shaded-target 14
+gc: incremental doomed condemned headers 0, destroyed counted objects 0, parked entries drained 0, parked-drain slices 0
+gc: incremental major cycles completed 0, aborted 0, forced 0, mark steps 0, cycle STW last 0 ns max 0 ns
+gc: mark frontier segment bytes active 118784, cached 0, peak-active 118784, peak-owned 118784; segments allocated 29, freed 0, allocation failures 0
+gc: cycle envelope measured 0, skipped 1, max-P/T S 0, T 0, B 0, P 0, B/T-x1000000 0, P/T-x1000000 0, P/S-x1000000 0, forced 0
+gc: incremental STW phase-segment max ns begin 52576, increment 0, destroy 0, finish 0
+gc: incremental STW phase totals begin 52576 ns/1 segments, increment 0 ns/0 segments, destroy 0 ns/0 segments, finish 0 ns/0 segments
+gc: conservative-only census probes 0, direct 0 (young 0), transitive 0, dropped keys 0
+gc: conservative-only by source registers 0, stack<1K 0, <4K 0, <16K 0, <64K 0, >=64K 0; by pointer exact 0, prefix 0, interior 0
+gc: conservative-only by kind object 0 function_bytecode 0 var_ref 0 realm_context 0 module 0 shape 0 string 0 big_int 0
+gc: conservative-only registers none
+gc: conservative-only top 0 of 0 keys (function, kind/class, source, pointer, young, native)
+gc: endpoint doomed_pending false, doomed_buckets 0, doomed_headers 0, doomed_cursor false, doomed_blocks 0, parked_frees 0, deferred_finalizers 0, active_finalizer false
+exit=0

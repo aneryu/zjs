@@ -19,16 +19,71 @@ Status: **现行**(owner 裁决 2026-08-29:精简影响效率的门禁;验证摊
    `zig build test` 形态下做(默认 zjs 产物 safety 关闭会假通过),且确认
    开火的是自己的守卫(「触发别的守卫 ≠ 你的守卫有效」)。
 5. 性能刀附目标负载的指令数 ABBA(匹配 `armv8_pmuv3_1/instructions`);
-   **不要求**陪跑全负载矩阵。
+   足迹敏感刀(分配器/阈值/释放策略类)的 screen 必须另附
+   `cycles(user+kernel)` 与 `minflt` 两列硬证据,instructions 降为对照列
+   (退休指令数看不见缺页处理/stall/内核指令单价;依据
+   `docs/gc-architecture-review-2026-08-31.md` §3 与 REPORT5 实证)。历史仅按
+   insn 判死且内存收益大的刀获得一次新货币复审资格(先例:refill-v2);
+   **不要求**陪跑全负载矩阵。CPU、L3、锁、编译池与裁决等级统一服从
+   [`docs/perf/measurement-contracts.md`](perf/measurement-contracts.md):默认场 B
+   单核 CPU19,编译池 `0-4,10-14`;显式 `--field`/`ZJS_MEASURE_FIELD` 才可换场。
+   2026-09-01 校准的失败判定全部保留;补充裁决仅允许 `insn@B ∥ 编译` 与
+   `insn@B ∥ cycles@A` 作探索/粗筛,且每个结果必须显式标
+   `resolution >= 0.5% (coarse/concurrent)`。该结果只能决定是否值得静场复跑,
+   永不跨越任何预注册通过/失败线。预注册裁决一律回到串行/静场并维持 0.1%
+   精度制度;并发采到的 cycles 仍仅为归因诊断。不得把“有两个锁”解释成
+   “数据已有 verdict 权威”。
+
+## 分级验证金字塔(2026-09-02 owner 令「效率」后增补;实现片与性能刀一律遵守)
+
+**原则:最贵的仪器只用来确认 GO,不用来发现问题。** 2026-09-02 M 切换片实录:
+正式 2×2 冷构建 ABBA + 两轮 batch-gate 约 5 小时后才看到 +12% 回归,而一次
+`--gc-stats` 对比(10 分钟)就能暴露根因(minor 判死块误入 hot-reuse 门)。
+
+| 阶段 | 内容 | 成本 | 通过线 → 下一阶段 |
+|---|---|---:|---|
+| **Stage 0 快筛**(commit 后立刻,强制) | warm ReleaseFast 构建候选;`tools/perf/gc_stats_snapshot.py compare`(候选 vs 缓存的基线快照,阈值 ±10%:hot reuse/reopened/deferred runs/major+minor 次数/minor STW/committed/pass-A settled);`run_fixed_pmu.py --samples 2`(runner 最小合法 paired ABBA)候选 vs 基线二进制,场 A(CPU9,可与他人并行),标 `resolution>=0.5%` | ≤15 min | STOP 线:任一负载 **insn >+0.5%**,或 **cycles >+2%**(场 A 2 样本同 SHA 自比 EB 单腿可漂 +2.85%,cycles 在 Stage 0 只作粗指示;0.5%~2% 区间记「待正式」),或确定性指标越阈 → **先 perf 符号差分归因并修**(≤30 min),不进任何后续门禁;否则 → Stage 1 |
+| Stage 1 | `zig build test-core`(Debug) | ~5 min | 绿 → Stage 2 |
+| Stage 2 | 一次 `zig build test` + **一轮** `mise run batch-gate` | ~15 min | 绿 → Stage 3 |
+| Stage 3 正式 | **1×1** 冷构建 ABBA(CPU19 静场,0.1% 制度) | ~40 min | 全部过线 → GO;任一负载落在线 ±0.5% 内 → 才加 2×2 总中位裁布局噪声;明显超线 → NO-GO,不追加功率 |
+| 整合批 | 第二轮 batch-gate、settled 两轮 | — | 只在 integration 分支合并后做一次,不在每个 lane 迭代做 |
+
+配套纪律:
+- **锁与超时纪律**(2026-09-02 事故:一条 `zjs --gc-stats /dev/stdin` 等 stdin 挂起 8 分钟并持有 host 编译锁,全机构建队列停摆 12 分钟):
+  host 编译锁(`/tmp/zjs-host-heavy.lock`)**只包编译**,测量/校准/gc-stats 采集只走 measure_fields 的场锁;任何 lane 单条命令必须
+  `timeout <秒>` 包裹(构建 1200、单负载运行 600);fixed-work 一律用文件路径,禁止 `/dev/stdin`;driver 发现锁持有者 0% CPU 超过
+  5 分钟即 kill 并通报。
+- **基线产物缓存**:H_PRE 的 ReleaseFast 二进制(a/b 两冷构建)、gc-stats 快照、
+  单样本 PMU 表在 `~/worktrees/<lane>/.scratch/h_pre0/` 或共享目录冻结一次,各 lane
+  各迭代复用;禁止每次迭代重建基线臂。
+- **足迹列**:Stage 0/3 各一次 paired `/usr/bin/time`(minflt/maxrss)+ `--gc-stats`
+  committed 即可(实测 MAD≈0);不做 8 样本足迹 ABBA。
+- **预注册加一列**:性能片除 insn/cycles 线外,必须声明「生命周期指标不变」
+  或显式列出预期变化——表示/机制切换不得夹带策略变化。指标分两类:
+  **确定性指标**(minor 次数、pass-A settled cells、deferred block runs)硬线 ±10%;
+  **相位敏感指标**(major 次数、hot reuse published、reopened、committed、minor STW total〔ns,
+  wall-clock;同 SHA 自比可漂 −10.7%〕)受
+  wall-clock GC 预算混沌影响(同一基线两次 run major 22 vs 29),只报方向+幅度并标
+  `phase-sensitive`,不单独构成 STOP。
+- **设计对抗循环上限**:codex↔codex 对抗评审每份设计最多 **1 轮**,之后由 driver
+  亲自对源码复审并裁决(2026-09-02 实录:四轮 codex 循环 5 小时的混合终案被 driver
+  30 分钟源码核验推翻——前提「不可变 header 承重」无人质疑)。设计评审必须先答
+  「现状是否已满足目标合同」。
 
 ## 每合并批(driver 侧)做的
 
 1. 合并载荷审查(`git log trunk..candidate`,合并 commit = 合并其全部祖先);
 2. 批门禁一轮:`zig build test` + `tools/perf/gate_smoke.sh <显式二进制>` +
-   test262 + 至少一个负载的 `ZJS_GC_ARENA_AUDIT=1`;
+   test262 + 至少一个负载的 `ZJS_GC_ARENA_AUDIT=1`;(操作上一条命令:
+   `mise run batch-gate` = engine-production-gate 单构建图并行 + 并行
+   gate_smoke(每负载含一次 arena-audit run),实测 ~5-7 分钟);默认构建 affinity
+   为纯小核池 `0-4,10-14` 且构建阶段持 host 排他锁,批 runner 显式核集仍可按
+   正确性吞吐需要覆盖;
 3. 失败 → 按批内 commit bisect,只对肇事 commit 追加验证;
-4. cycles/L2D 终裁攒安静窗口一次做(全部 agent 停工、`pgrep -x zig`=0、
-   mpstat 空闲核)。
+4. cycles/L2D 终裁攒安静窗口一次做:用 measurement contract 的 field/host
+   锁作仲裁并保存 mpstat/进程诊断。当前校准没有批准任何跨场或编译重叠的
+   verdict;粗筛例外不构成终裁权限。因此同域外来计算使终裁腿无效;不得仅因
+   取得 field 锁就忽略未协调的同域负载。
 
 ## 明确废止的(勿再执行)
 
@@ -42,10 +97,13 @@ Status: **现行**(owner 裁决 2026-08-29:精简影响效率的门禁;验证摊
 
 - **预注册验收线**:性能刀开工前写下通过/失败判据(曾正确否决整把刀);
 - 设计文过审:仅限触碰对象表示层/GC 语义/公共 ABI 的大刀;
-- 测量合同:编译与测量分核、测量前 mpstat、指令数筛选/cycles 终裁两级仪器、
-  wall-clock 在并发场不可信;
-- 环境陷阱清单:worktree 的 test262 空 submodule(先 `rmdir` 再
-  `ln -s /home/aneryu/zjs/test262`,不进提交);scratch 一律 worktree 内
+- 测量合同:编译池固定 `0-4,10-14`,测量走 field registry/锁、测量前 mpstat、
+  指令数筛选/cycles 终裁两级仪器、wall-clock 在并发场不可信;CPU9 与 CPU19
+  的绝对数不可混腿,拓扑层只与同拓扑基线比较;并发粗筛显式标
+  `resolution >= 0.5%`,任何预注册裁决保持串行/静场 0.1% 制度;
+- 环境陷阱清单:linked worktree 的 test262 空 submodule 时先跑
+  `mise run worktree-init`;该任务复用主 worktree 的 corpus,且 symlink 不进提交。
+  scratch 一律 worktree 内
   `.scratch/`,严禁 /tmp 裸文件名(agent 间撞车实录)。
 
 ## 风险自认(owner 已知情)

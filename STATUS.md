@@ -45,12 +45,13 @@ reference binaries. The official yardstick was ruled 2026-08-26 (BASE-G0,
 owner-ratified): the GCC-16 reference build pinned in
 `reports/evidence/BASE-G0/manifest.json`.
 
-The 15-benchmark zoo suite stays as a standalone-file attribution
-instrument (usage: `tools/perf/zoo/README.md`). Its last baseline (geomean
-1.0304, v7 suite / GCC-13 reference) was removed from the active tree with
-the 2026-08-25 stale-doc cleanup; recover it from git history. The
-superseded version-7 headline records (2026-08-19 composite 1.0464) were
-removed the same way.
+The external-checkout zoo runner was retired 2026-08-29: the vendored
+bench-v8 suite covers the same Octane corpus, and fixed-work attribution
+moved to `tools/perf/bench_v8/run_fixed_pmu.py`. The last zoo baseline
+(geomean 1.0304, v7 suite / GCC-13 reference) was removed from the active
+tree with the 2026-08-25 stale-doc cleanup; recover it from git history.
+The superseded version-7 headline records (2026-08-19 composite 1.0464)
+were removed the same way.
 
 This is a maintainer single-machine measurement; there is no independent
 reproduction yet.

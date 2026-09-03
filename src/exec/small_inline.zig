@@ -396,7 +396,7 @@ const ApplyForwardPlan = struct {
 
 fn locIndexOf(opc: u8, src: []const u8, pc: usize) ?u16 {
     return switch (opc) {
-        op.get_loc0, op.put_loc0, op.get_loc0_field, op.put_loc0_get_loc0 => 0,
+        op.get_loc0, op.put_loc0, op.get_loc0_field => 0,
         op.get_loc1, op.put_loc1 => 1,
         op.get_loc2, op.put_loc2, op.get_loc2_field => 2,
         op.get_loc3, op.put_loc3 => 3,
@@ -408,7 +408,7 @@ fn locIndexOf(opc: u8, src: []const u8, pc: usize) ?u16 {
 
 fn isPutLoc(opc: u8) bool {
     return switch (opc) {
-        op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc8, op.put_loc, op.put_loc8_get_loc8, op.put_loc0_get_loc0 => true,
+        op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc8, op.put_loc, op.put_loc8_get_loc8 => true,
         else => false,
     };
 }
@@ -428,17 +428,12 @@ fn isPutArg(opc: u8) bool {
 }
 
 fn isForwardForbiddenOp(opc: u8) bool {
-    return switch (opc) {
-        op.apply,
-        op.apply_eval,
-        op.rest,
-        op.eval,
-        op.dyn_env_probe,
-        op.fclosure,
-        op.fclosure8,
-        => true,
-        else => false,
-    };
+    // F0b: policy travels with the declaration (invariant 5). The list this
+    // replaces was the second of the two hand-maintained identity tables
+    // that 5.2 clause 3 is about.
+    if (bytecode.opcode.physical.stateOf(opc) != .claimed) return true;
+    const form: bytecode.opcode.logical.LogicalOpcode = @enumFromInt(opc);
+    return bytecode.opcode.logical.traitsOf(form).forward_policy == .forbidden;
 }
 
 /// S1–S8 static predicate for L1 apply-arguments-forwarding. Dataflow only:
@@ -639,14 +634,19 @@ fn emitSlice(out: *Rewrite, bytes: []const u8) bool {
 }
 
 fn emitLocOp(out: *Rewrite, get: bool, slot: u16) bool {
-    const base: u8 = if (get) op.get_loc0 else op.put_loc0;
-    if (slot <= 3) return emitByte(out, base + @as(u8, @intCast(slot)));
-    if (slot <= 255) {
-        const opc: u8 = if (get) op.get_loc8 else op.put_loc8;
-        return emitByte(out, opc) and emitByte(out, @intCast(slot));
+    // Same selector as resolve_labels' putShortCode (contract 3): the
+    // shortened form comes from the declaration, not from `base + slot`
+    // id arithmetic, and payload presence is the selected row's fact.
+    const decode = bytecode.opcode.decode;
+    const wide: bytecode.opcode.logical.LogicalOpcode = if (get) .get_loc else .put_loc;
+    if (decode.selectSlotShortForm(wide, slot)) |short_form| {
+        const opc: u8 = @intCast(@intFromEnum(short_form));
+        if (!emitByte(out, opc)) return false;
+        if (decode.form_row[@intFromEnum(short_form)].size == 2)
+            return emitByte(out, @intCast(slot));
+        return true;
     }
-    const opc: u8 = if (get) op.get_loc else op.put_loc;
-    if (!emitByte(out, opc)) return false;
+    if (!emitByte(out, @intCast(@intFromEnum(wide)))) return false;
     var buf: [2]u8 = undefined;
     std.mem.writeInt(u16, &buf, slot, .little);
     return emitSlice(out, &buf);
@@ -801,8 +801,8 @@ fn rewriteBody(
             op.get_loc2_field => {
                 if (!emitLocOp(&out, true, var_base + 2)) return null;
             },
-            op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc0_get_loc0 => {
-                const idx: u16 = if (opc == op.put_loc0_get_loc0) 0 else @intCast(opc - op.put_loc0);
+            op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3 => {
+                const idx: u16 = @intCast(opc - op.put_loc0);
                 if (!emitLocOp(&out, false, var_base + idx)) return null;
             },
             op.push_this_put_loc0 => {

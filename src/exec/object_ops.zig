@@ -258,7 +258,7 @@ pub fn generatorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !
     if (cachedRealmObject(rt, global, .generator_prototype)) |stored| return stored;
     const object = try core.Object.create(rt, core.class.ids.object, iteratorPrototypeFromGlobal(rt, global) orelse objectPrototypeFromGlobal(rt, global));
     var object_raw_owned = true;
-    errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, &object.header);
+    errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, object.gcHeader());
     try installGeneratorPrototypeProperties(rt, global, object);
     const value = object.value();
     object_raw_owned = false;
@@ -537,7 +537,7 @@ fn createBytecodeFunctionObjectInternal(
     // length + name (+ lazy prototype later). qjs NewObjectClass then
     // js_function_set_properties (quickjs.c:17378 / 5853-5861).
     const object = try core.Object.createWithOwnPropertyCapacity(ctx.runtime, class_id, function_prototype, 3);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
     // Pool.get/fclosure hands this constructor an owned FunctionBytecode
     // value. Move that exact reference into the object; attachment performs no
     // allocation and consumes it even when validation fails.
@@ -625,7 +625,7 @@ fn installOrdinaryFunctionPrototype(
         objectPrototypeFromGlobal(ctx.runtime, global);
     const prototype = try core.Object.create(ctx.runtime, core.class.ids.object, generator_prototype);
     var prototype_raw_owned = true;
-    errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(ctx.runtime, &prototype.header);
+    errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(ctx.runtime, prototype.gcHeader());
     const prototype_value = prototype.value();
     prototype_raw_owned = false;
     defer prototype_value.free(ctx.runtime);
@@ -702,7 +702,7 @@ pub fn constructPrimitiveWrapperWithPrototype(
     defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, class_id, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
     return object.value();
 }
@@ -969,7 +969,7 @@ pub fn disposableStackConstructWithPrototype(
 ) !core.JSValue {
     _ = global;
     const stack = try core.Object.create(ctx.runtime, core.class.ids.disposable_stack, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &stack.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, stack.gcHeader());
     return stack.value();
 }
 pub fn errorConstructWithPrototype(
@@ -1084,7 +1084,7 @@ test "errorConstructWithPrototype preserves direct symbol cause" {
 
 pub fn createCallSiteObject(ctx: *core.JSContext, global: *core.Object, entry: core.BacktraceFrame) !core.JSValue {
     const object = try core.Object.create(ctx.runtime, core.class.ids.object, try callSitePrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
     const location = entry.location();
     const filename = if (entry.is_native)
         core.JSValue.nullValue()
@@ -1109,7 +1109,7 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
     if (cachedRealmObject(rt, global, .callsite_prototype)) |stored| return stored;
     const prototype = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     var prototype_raw_owned = true;
-    errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(rt, &prototype.header);
+    errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(rt, prototype.gcHeader());
     // Every step below allocates -- six native method objects, their shape
     // transitions, the property array growth -- and any of them can trigger a
     // collection. Until `storeRealmValue` publishes it, this half-built
@@ -1421,7 +1421,7 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
 
     const groups = try core.Object.create(rt, core.class.ids.object, null);
     var groups_raw_owned = true;
-    errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, &groups.header);
+    errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, groups.gcHeader());
     var capture_index: usize = 0;
     while (capture_index < found.capture_count) : (capture_index += 1) {
         const name = found.captureNameAt(capture_index) orelse continue;
@@ -1456,7 +1456,7 @@ pub fn defineRegExpGroupsProperty(rt: *core.JSRuntime, out: *core.Object, input_
 
     const groups = try core.Object.create(rt, core.class.ids.object, null);
     var groups_raw_owned = true;
-    errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, &groups.header);
+    errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, groups.gcHeader());
     var capture_index: usize = 0;
     while (capture_index < found.capture_count) : (capture_index += 1) {
         const name = found.captureNameAt(capture_index) orelse continue;
@@ -1496,7 +1496,7 @@ pub fn createRegExpGroupsValueFromValue(rt: *core.JSRuntime, input_value: core.J
     if (!found.has_named_captures) return core.JSValue.undefinedValue();
 
     const groups = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &groups.header);
+    errdefer core.Object.destroyFromHeader(rt, groups.gcHeader());
     var capture_index: usize = 0;
     while (capture_index < found.capture_count) : (capture_index += 1) {
         const name = found.captureNameAt(capture_index) orelse continue;
@@ -1652,7 +1652,7 @@ fn symbolPrimitiveValue(rt: *core.JSRuntime, this_value: core.JSValue) !core.JSV
     if (this_value.isSymbol()) return this_value.dup();
     if (!this_value.isObject()) return error.TypeError;
     const header = this_value.refHeader() orelse return error.TypeError;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.symbol) return error.TypeError;
     const primitive = (object.objectData() orelse return error.TypeError).dup();
     if (!primitive.isSymbol()) {
@@ -1823,7 +1823,7 @@ pub fn constructFinalizationRegistryWithPrototype(
     defer root_frame.deactivate(rt);
 
     const instance = try core.Object.createFinalizationRegistry(rt, ctx, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &instance.header);
+    errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
     try instance.setOptionalValueSlot(rt, instance.finalizationRegistryCleanupCallbackSlot(), rooted_cleanup_callback.dup());
     return instance.value();
 }
@@ -2144,7 +2144,7 @@ pub fn destructuringObjectRest(
     defer value.free(ctx.runtime);
 
     const out = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     out_value = out.value();
     const keys = try objectRestOwnKeys(ctx, output, global, source);
     defer core.Object.freeKeys(ctx.runtime, keys);
@@ -2283,7 +2283,7 @@ pub fn importMetaObject(
     if (record.import_meta) |value| return value.dup();
 
     const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
     // import.meta is a real null-prototype object (JS_GetImportMeta:
     // JS_NewObjectProto(ctx, JS_NULL), quickjs.c:30900); without the flag,
     // ToPrimitive fell through to %Object.prototype%.toString and
@@ -2361,7 +2361,7 @@ pub fn createGeneratorObject(
         try core.Object.create(ctx.runtime, class_id, null);
     var object_registered = !detached_shell;
     errdefer if (object_registered)
-        core.Object.destroyFromHeader(ctx.runtime, &object.header)
+        core.Object.destroyFromHeader(ctx.runtime, object.gcHeader())
     else
         object.destroyGeneratorShell(ctx.runtime);
     var prepared_frame: zjs_vm.PreparedEntryFrame = undefined;
@@ -2521,7 +2521,7 @@ pub fn wrapForValidIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) 
 
     const proto = try core.Object.create(rt, core.class.ids.object, iteratorPrototypeFromGlobal(rt, global));
     var proto_raw_owned = true;
-    errdefer if (proto_raw_owned) core.Object.destroyFromHeader(rt, &proto.header);
+    errdefer if (proto_raw_owned) core.Object.destroyFromHeader(rt, proto.gcHeader());
     try defineNativeDataMethod(rt, global, proto, "next", 0);
     try tagIteratorWrapPrototypeMethod(rt, global, proto, "next", 1);
     try defineNativeDataMethod(rt, global, proto, "return", 0);
@@ -2592,7 +2592,7 @@ noinline fn createMappedArgumentsObject(
         initial_shape,
         &entries,
     );
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
 
     if (args.len == 0) return object.value();
 
@@ -2671,7 +2671,7 @@ pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object
         };
         break :blk try core.Object.createArgumentsFromShape(ctx.runtime, core.class.ids.arguments, initial_shape, &entries);
     };
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
 
     var dense_elements: []core.JSValue = &.{};
     if (args.len != 0) {
@@ -3136,7 +3136,7 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
     const prototype = primitivePrototypeForAccess(rt, global, rooted_primitive) orelse return error.TypeError;
     if (rooted_primitive.isString()) {
         const object = try core.Object.create(rt, core.class.ids.string, prototype);
-        errdefer core.Object.destroyFromHeader(rt, &object.header);
+        errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
         try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
         const string_value = rooted_primitive.asStringBody() orelse return error.TypeError;
         try string_value.ensureFlat(rt);
@@ -3158,7 +3158,7 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
     else
         return error.TypeError;
     const object = try core.Object.create(rt, class_id, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
     return object.value();
 }
@@ -3486,7 +3486,7 @@ pub fn objectEnumerableOwnPropertiesCall(
     defer core.Object.freeKeys(ctx.runtime, keys);
 
     const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     var out_value = out.value();
 
     var element = core.JSValue.undefinedValue();
@@ -3723,7 +3723,7 @@ pub fn descriptorObjectFromDescriptor(rt: *core.JSRuntime, global: *core.Object,
     defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     if (desc.kind == .data and desc.value_present) {
         try defineValueProperty(rt, object, "value", desc_value);
     } else if (desc.kind == .accessor) {

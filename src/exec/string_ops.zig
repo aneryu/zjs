@@ -938,11 +938,11 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
         const site_value = try sites.getProperty(core.atom.atomFromUInt32(@intCast(index)));
         defer site_value.free(ctx.runtime);
         const site = objectFromValue(site_value) orelse continue;
-        if (!site.isCallSite()) continue;
+        if (!site.isCallSite(ctx.runtime)) continue;
         if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
         try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
         try appendCallSiteFunctionName(ctx.runtime, &bytes, site);
-        if (site.callSiteIsNative()) {
+        if (site.callSiteIsNative(ctx.runtime)) {
             try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
             emitted += 1;
             continue;
@@ -954,7 +954,7 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
         const suffix = try std.fmt.allocPrint(
             ctx.runtime.memory.allocator,
             " ({s}:{}:{})",
-            .{ filename_bytes.items, site.callSiteLine(), site.callSiteColumn() },
+            .{ filename_bytes.items, site.callSiteLine(ctx.runtime), site.callSiteColumn(ctx.runtime) },
         );
         defer ctx.runtime.memory.allocator.free(suffix);
         try bytes.appendSlice(ctx.runtime.memory.allocator, suffix);
@@ -1214,7 +1214,7 @@ pub fn regExpSymbolMatchAll(
     const iterator = try core.Object.create(ctx.runtime, core.class.ids.regexp_string_iterator, prototype);
     prototype.value().free(ctx.runtime);
     prototype_owned = false;
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &iterator.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, iterator.gcHeader());
     try iterator.setOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot(), matcher);
     matcher_owned = false;
     try iterator.setOptionalValueSlot(ctx.runtime, iterator.iteratorDataSlot(), string_value.dup());
@@ -1275,7 +1275,7 @@ pub fn stringMatchAll(
 
 pub fn regExpStringIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
     const proto = try iteratorPrototype(rt, global, "RegExp String Iterator");
-    errdefer core.Object.destroyFromHeader(rt, &proto.header);
+    errdefer core.Object.destroyFromHeader(rt, proto.gcHeader());
     const next = try core.function.nativeFunctionForGlobal(rt, global, "next", 0);
     defer next.free(rt);
     try proto.defineOwnProperty(rt, (comptime core.atom.predefinedId("next", .string)).?, core.Descriptor.data(next, true, false, true));
@@ -1387,7 +1387,7 @@ pub fn regExpSymbolSplitGeneric(
     const input_len = string_body.len();
 
     const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     var out_index: u32 = 0;
 
     if (input_len == 0) {
@@ -1509,7 +1509,7 @@ pub fn regExpSymbolMatchGeneric(
     try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
 
     const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     var count: u32 = 0;
     while (true) {
         const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
@@ -1540,7 +1540,7 @@ pub fn regExpSymbolMatchGeneric(
         // QJS frees the speculative result array before returning null when a
         // global match finds no entries. `errdefer` does not run on this
         // successful return, so release the owning object explicitly.
-        core.Object.destroyFromHeader(ctx.runtime, &out.header);
+        core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
         return core.JSValue.nullValue();
     }
     return out.value();
@@ -1552,6 +1552,47 @@ pub const ReplaceMatch = struct {
     index: usize,
     captures: []core.JSValue,
     groups: core.JSValue,
+};
+
+/// Precise root for the match list `regExpSymbolReplaceGeneric` builds
+/// before it runs a single replacement (spec step 14 "results"). The list
+/// lives on the Zig heap and its values are scattered inside structs, so
+/// neither a `ValueRootSlice` nor the conservative stack scan sees them;
+/// the replacer callback (or a user `exec`) runs JS with every earlier
+/// match's `groups` / captures unrooted. Found by test262
+/// `RegExp/named-groups/functional-replace-global.js` under
+/// `ZJS_GC_STRESS=1`: the minor condemned `groups` and the replacer then
+/// read a freed cell.
+const ReplaceMatchRoots = struct {
+    runtime: *core.JSRuntime,
+    list: *std.ArrayList(ReplaceMatch),
+    registered: bool = false,
+
+    fn traceRoots(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        const self: *ReplaceMatchRoots = @ptrCast(@alignCast(context));
+        for (self.list.items) |*match| {
+            try visitor.value(&match.result);
+            try visitor.value(&match.matched);
+            try visitor.values(match.captures);
+            try visitor.value(&match.groups);
+        }
+    }
+
+    fn provider(self: *ReplaceMatchRoots) core.runtime.RootProvider {
+        return .{ .context = @ptrCast(self), .trace = traceRoots };
+    }
+
+    fn activate(self: *ReplaceMatchRoots) !void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        try self.runtime.registerRootProvider(self.provider());
+        self.registered = true;
+    }
+
+    fn deactivate(self: *ReplaceMatchRoots) void {
+        if (!self.registered) return;
+        self.runtime.unregisterRootProvider(self.provider());
+        self.registered = false;
+    }
 };
 
 pub fn regExpSymbolReplaceGeneric(
@@ -1613,6 +1654,9 @@ pub fn regExpSymbolReplaceGeneric(
     defer {
         freeReplaceMatches(ctx.runtime, matches.items);
     }
+    var match_roots = ReplaceMatchRoots{ .runtime = ctx.runtime, .list = &matches };
+    try match_roots.activate();
+    defer match_roots.deactivate();
 
     while (true) {
         const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
@@ -2478,7 +2522,7 @@ pub fn stringIteratorCall(
     errdefer string_value.free(ctx.runtime);
     const prototype = try stringIteratorPrototypeFromContext(ctx, global);
     const object = try core.Object.create(ctx.runtime, core.class.ids.string_iterator, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
     try object.setOptionalValueSlot(ctx.runtime, object.iteratorTargetSlot(), string_value);
     string_value = core.JSValue.undefinedValue();
     object.iteratorIndexSlot().* = 0;
@@ -2493,7 +2537,7 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
     }
 
     const object = try iteratorPrototype(ctx.runtime, global, "String Iterator");
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
     try builtin_glue.defineNativeDataMethodWithNativeId(ctx.runtime, global, object, "next", 0, core.function.nativeBuiltinId(.string, @intFromEnum(method_ids.string.PrototypeMethod.iterator_next)));
 
     // %StringIteratorPrototype% inherits @@iterator from %IteratorPrototype%.
@@ -2504,7 +2548,7 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
         ctx.class_prototypes[slot] = value.dup();
         // Raw slot store, not `setClassPrototype`: see the same barrier on the
         // Array-iterator prototype in iterator_ops.
-        ctx.runtime.gc.generationalBarrier(&ctx.header, &object.header);
+        ctx.runtime.gc.generationalBarrier(&ctx.header, object.gcHeader());
         value.free(ctx.runtime);
     }
     return object;
@@ -2870,7 +2914,7 @@ pub noinline fn createRegExpMatchArrayFromValue(
     const groups_value = if (groups_object) |groups| groups.value() else core.JSValue.undefinedValue();
     defer groups_value.free(rt);
     const out = try core.Object.createRegExpMatchArrayFromShape(rt, template, @intCast(found.index), input_value, groups_value);
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
+    errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
 
     try initRegExpMatchArrayDenseElementsFromValue(rt, out, input_value, found, groups_object);
 

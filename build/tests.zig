@@ -4,6 +4,13 @@ const artifacts_mod = @import("artifacts.zig");
 
 pub const TestGraph = struct {
     test_step: *std.Build.Step,
+    // The long-running stress tier. Not part of test_step: per-change
+    // close-out (docs/verification-policy.md) runs `zig build test`, and the
+    // stress tier's cost belongs to the production/CI/merge-batch gates.
+    stress_step: *std.Build.Step,
+    /// The unified suite again under every GC diagnostic switch
+    /// (`test-gc-stress`). ~1 minute, so it rides checkpoint-gate.
+    gc_stress_step: *std.Build.Step,
     smoke_step: *std.Build.Step,
     smoke_dev_step: *std.Build.Step,
     embedding_step: *std.Build.Step,
@@ -27,6 +34,9 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const install_runtime_empty_plugin_fixture = artifacts.install_runtime_empty_plugin_fixture;
 
     // Unified tests (runs all tests in one single binary, using src/all_tests.zig as compile root)
+    // `-Dtest-filter=<substring>` narrows the unified run to matching test
+    // names (iteration aid: compile once, run the handful under repair).
+    const test_filter = b.option([]const u8, "test-filter", "Only run unified tests whose name contains this substring");
     const unified_tests = b.addTest(.{
         .name = "unified-tests",
         .root_module = b.createModule(.{
@@ -35,6 +45,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
             .optimize = optimize,
             .link_libc = true,
         }),
+        .filters = if (test_filter) |f| &.{f} else &.{},
     });
     forceLlvmBackendOnDebug(unified_tests);
     unified_tests.test_runner = .{
@@ -60,6 +71,67 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     run_unified_tests.step.dependOn(&install_runtime_plugin_fixture.step);
     run_unified_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
     if (b.args) |args| run_unified_tests.addArgs(args);
+
+    // TGC S0 safety net (docs/tracing-gc-s0-spec.md §L2): the same suite with
+    // the collector at every safepoint (`ZJS_GC_STRESS=1`, cadence 64), every
+    // minor's condemned set re-derived by a fresh full trace
+    // (`ZJS_GC_VERIFY_MINOR=fatal`: a precisely reachable corpse panics), and
+    // the old-owner edge audit (`ZJS_MINOR_AUDIT=fatal`: an unremembered
+    // old-to-condemned edge panics). The `fatal` spellings are what make this
+    // a gate rather than a log. Measured 55 s on 2026-09-03.
+    const run_gc_stress_tests = b.addRunArtifact(unified_tests);
+    run_gc_stress_tests.step.dependOn(&install_runtime_plugin_fixture.step);
+    run_gc_stress_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
+    run_gc_stress_tests.setEnvironmentVariable("ZJS_GC_STRESS", "1");
+    run_gc_stress_tests.setEnvironmentVariable("ZJS_GC_VERIFY_MINOR", "fatal");
+    run_gc_stress_tests.setEnvironmentVariable("ZJS_MINOR_AUDIT", "fatal");
+    if (b.args) |args| run_gc_stress_tests.addArgs(args);
+    const gc_stress_step = b.step("test-gc-stress", "Run the unified suite under ZJS_GC_STRESS=1 ZJS_GC_VERIFY_MINOR=fatal ZJS_MINOR_AUDIT=fatal (~1 min; part of checkpoint-gate)");
+    gc_stress_step.dependOn(&run_gc_stress_tests.step);
+
+    // Stress tier: the long-running tests split out of the unified run so
+    // checkpoint-gate and the per-change `zig build test` close-out keep
+    // fast feedback (they were ~47s of a ~53s unified run; see
+    // src/tests/stress.zig). Coverage is unchanged at the outer tiers: the
+    // engine-production gate, primary-platform CI, and the per-merge-batch
+    // gate run `test-stress`; the ReleaseSafe phase close should invoke
+    // `zig build test test-stress -Doptimize=ReleaseSafe`. Follows
+    // -Doptimize like the unified suite.
+    const stress_test_options = addEngineOptions(b, engine_option_inputs);
+    stress_test_options.addOption([]const u8, "runtime_plugin_fixture_path", b.getInstallPath(.lib, runtime_plugin_fixture.out_filename));
+    stress_test_options.addOption([]const u8, "runtime_empty_plugin_fixture_path", b.getInstallPath(.lib, runtime_empty_plugin_fixture.out_filename));
+    const stress_engine_mod = b.createModule(.{
+        .root_source_file = b.path("src/internal_root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    stress_engine_mod.addOptions("build_options", stress_test_options);
+    const stress_root = b.createModule(.{
+        .root_source_file = b.path("src/stress_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = stress_engine_mod },
+        },
+    });
+    stress_root.addOptions("build_options", stress_test_options);
+    const stress_tests = b.addTest(.{
+        .name = "test-stress",
+        .root_module = stress_root,
+        .filters = &.{"tests.stress."},
+    });
+    forceLlvmBackendOnDebug(stress_tests);
+    stress_tests.test_runner = .{
+        .path = b.path("tools/timing_test_runner.zig"),
+        .mode = .simple,
+    };
+    const run_stress_tests = b.addRunArtifact(stress_tests);
+    run_stress_tests.addArg("--require-tests");
+    if (b.args) |args| run_stress_tests.addArgs(args);
+    const stress_step = b.step("test-stress", "Run the long-running stress tier (stack exhaustion, bigint kernel sweeps)");
+    stress_step.dependOn(&run_stress_tests.step);
 
     // Production smoke tests retain the ReleaseFast CLI contract.
     const smoke_options = b.addOptions();
@@ -367,6 +439,8 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
 
     return .{
         .test_step = test_step,
+        .stress_step = stress_step,
+        .gc_stress_step = gc_stress_step,
         .smoke_step = smoke_step,
         .smoke_dev_step = smoke_dev_step,
         .embedding_step = embedding_step,

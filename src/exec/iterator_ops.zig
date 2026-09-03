@@ -185,7 +185,7 @@ pub fn createAsyncFromSyncIterator(
     defer if (owns_next_method) rooted_next_method.free(rt);
 
     const wrapper = try core.Object.create(rt, core.class.ids.async_from_sync_iterator, null);
-    errdefer core.Object.destroyFromHeader(rt, &wrapper.header);
+    errdefer core.Object.destroyFromHeader(rt, wrapper.gcHeader());
     try wrapper.setOptionalValueSlot(rt, wrapper.iteratorTargetSlot(), rooted_sync_iterator.dup());
     try wrapper.setOptionalValueSlot(rt, wrapper.iteratorNextSlot(), rooted_next_method.dup());
 
@@ -237,7 +237,7 @@ test "createAsyncFromSyncIterator roots direct function bytecode next method whi
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     defer global.value().free(rt);
     _ = try global.ensureGlobalPayload(rt);
-    core.gc.retain(&global.header);
+    core.gc.retain(global.gcHeader());
     ctx.global = global;
     const function_proto = try core.Object.create(rt, core.class.ids.object, null);
     ctx.cached_function_proto = function_proto;
@@ -873,7 +873,7 @@ fn buildCollectionEntryPair(rt: *core.JSRuntime, is_set: bool, entry: core.objec
     // GC sits between a dup and the adopt; the borrowed key/value meanwhile stay
     // alive via the collection (same liveness the key/value kinds rely on).
     const pair = try core.Object.createArray(rt, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &pair.header);
+    errdefer core.Object.destroyFromHeader(rt, pair.gcHeader());
     const elements = try rt.memory.alloc(core.JSValue, 2);
     elements[0] = entry.key.dup();
     elements[1] = if (is_set) entry.key.dup() else entry.value.dup();
@@ -1135,7 +1135,7 @@ pub fn arrayIteratorPrototypeFromContext(
     }
 
     const object = try iteratorPrototype(ctx.runtime, global, "Array Iterator");
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
     try builtin_glue.defineNativeDataMethodWithNativeId(
         ctx.runtime,
         global,
@@ -1162,7 +1162,7 @@ pub fn arrayIteratorPrototypeFromContext(
         // after the realm went old, and once the host create-ref is consumed
         // the realm is a heap object rather than a root -- so the minor's
         // sticky mark stops at it and the fresh prototype is condemned.
-        ctx.runtime.gc.generationalBarrier(&ctx.header, &object.header);
+        ctx.runtime.gc.generationalBarrier(&ctx.header, object.gcHeader());
         value.free(ctx.runtime);
     }
     return object;
@@ -1192,7 +1192,7 @@ pub fn arrayIteratorMethod(
     }
     const prototype = try arrayIteratorPrototypeFromContext(ctx, global);
     const iterator = try core.Object.create(ctx.runtime, core.class.ids.array_iterator, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &iterator.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, iterator.gcHeader());
     try iterator.setOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot(), rooted_object);
     rooted_object = core.JSValue.undefinedValue();
     iterator.iteratorIndexSlot().* = 0;
@@ -1255,7 +1255,7 @@ pub fn arrayIteratorValue(
             defer value.free(ctx.runtime);
 
             const pair = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
-            errdefer core.Object.destroyFromHeader(ctx.runtime, &pair.header);
+            errdefer core.Object.destroyFromHeader(ctx.runtime, pair.gcHeader());
             pair_value = pair.value();
             value = if (core.object.isTypedArrayObject(target))
                 try core.typed_array.typedArrayGetIndex(ctx.runtime, target, index)
@@ -1364,14 +1364,14 @@ pub fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []
 pub fn iteratorPrototype(rt: *core.JSRuntime, global: *core.Object, tag_name: []const u8) !*core.Object {
     var fallback_base = if (iteratorPrototypeFromGlobal(rt, global) == null) blk: {
         const base = try core.Object.create(rt, core.class.ids.object, null);
-        errdefer core.Object.destroyFromHeader(rt, &base.header);
+        errdefer core.Object.destroyFromHeader(rt, base.gcHeader());
         try defineToStringTag(rt, base, "Iterator");
         break :blk base;
     } else null;
     errdefer if (fallback_base) |base| base.value().free(rt);
     const base = iteratorPrototypeFromGlobal(rt, global) orelse fallback_base.?;
     const specific = try core.Object.create(rt, core.class.ids.object, base);
-    errdefer core.Object.destroyFromHeader(rt, &specific.header);
+    errdefer core.Object.destroyFromHeader(rt, specific.gcHeader());
     if (fallback_base) |owned_base| {
         fallback_base = null;
         owned_base.value().free(rt);
@@ -1502,14 +1502,13 @@ fn iteratorMethodsPrototype(
 
     const proto = try iteratorPrototype(rt, global, tag_name);
     var proto_raw_owned = true;
-    errdefer if (proto_raw_owned) core.Object.destroyFromHeader(rt, &proto.header);
+    errdefer if (proto_raw_owned) core.Object.destroyFromHeader(rt, proto.gcHeader());
     try installIteratorHelperMethod(rt, global, proto, "next", 1);
     try installIteratorHelperMethod(rt, global, proto, "return", 2);
     const value = proto.value();
     proto_raw_owned = false;
     defer value.free(rt);
-    const cached = try global.cachedRealmValueSlot(rt, slot);
-    try global.setOptionalValueSlot(rt, cached, value.dup());
+    try global.setCachedRealmValue(rt, slot, value.dup());
     return proto;
 }
 
@@ -1537,7 +1536,7 @@ pub fn iteratorConcatCall(
     comptime isCallableValue: anytype,
 ) !core.JSValue {
     const records = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &records.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, records.gcHeader());
 
     var rooted_records = records.value();
     var records_root_frame = core.runtime.rootValues(.{&rooted_records});
@@ -1563,7 +1562,7 @@ pub fn iteratorConcatCall(
 
     const prototype = try iteratorConcatPrototype(ctx.runtime, global);
     const helper = try core.Object.create(ctx.runtime, core.class.ids.iterator_helper, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &helper.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, helper.gcHeader());
     try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorTargetSlot(), rooted_records);
     rooted_records = core.JSValue.undefinedValue();
     helper.iteratorKindSlot().* = 6;
@@ -1602,15 +1601,14 @@ test "iteratorConcatCall roots direct function bytecode iterator method while cr
     defer global.value().free(rt);
     global.class_id = core.class.ids.global_object;
     _ = try global.ensureGlobalPayload(rt);
-    core.gc.retain(&global.header);
+    core.gc.retain(global.gcHeader());
     ctx.global = global;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
     defer iterator.value().free(rt);
 
     const concat_prototype = try core.Object.create(rt, core.class.ids.object, null);
     defer concat_prototype.value().free(rt);
-    const cached_concat_prototype = try global.cachedRealmValueSlot(rt, .iterator_concat_prototype);
-    try global.setOptionalValueSlot(rt, cached_concat_prototype, concat_prototype.value().dup());
+    try global.setCachedRealmValue(rt, .iterator_concat_prototype, concat_prototype.value().dup());
 
     const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
         .flags = .{ .func_kind = .generator },
@@ -1775,25 +1773,25 @@ pub fn iteratorZipCall(
     const iters = try core.Object.create(rt, core.class.ids.object, null);
     iters_val = iters.value();
     errdefer {
-        core.Object.destroyFromHeader(rt, &iters.header);
+        core.Object.destroyFromHeader(rt, iters.gcHeader());
         iters_val = core.JSValue.undefinedValue();
     }
     const nexts = try core.Object.create(rt, core.class.ids.object, null);
     nexts_val = nexts.value();
     errdefer {
-        core.Object.destroyFromHeader(rt, &nexts.header);
+        core.Object.destroyFromHeader(rt, nexts.gcHeader());
         nexts_val = core.JSValue.undefinedValue();
     }
     const pads = try core.Object.create(rt, core.class.ids.object, null);
     pads_val = pads.value();
     errdefer {
-        core.Object.destroyFromHeader(rt, &pads.header);
+        core.Object.destroyFromHeader(rt, pads.gcHeader());
         pads_val = core.JSValue.undefinedValue();
     }
     const keys = if (keyed) try core.Object.create(rt, core.class.ids.object, null) else null;
     if (keys) |k| keys_val = k.value();
     errdefer if (keys) |object| {
-        core.Object.destroyFromHeader(rt, &object.header);
+        core.Object.destroyFromHeader(rt, object.gcHeader());
         keys_val = core.JSValue.undefinedValue();
     };
 
@@ -2107,7 +2105,7 @@ pub fn iteratorZipCreateHelper(
 
     const prototype = try iteratorHelperPrototype(rt, global);
     const helper = try core.Object.create(rt, core.class.ids.iterator_helper, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &helper.header);
+    errdefer core.Object.destroyFromHeader(rt, helper.gcHeader());
     helper_value = helper.value();
     helper.iteratorKindSlot().* = @intFromEnum(if (keyed) IteratorZipHelperKind.zip_keyed else IteratorZipHelperKind.zip);
     helper.iteratorIndexSlot().* = count;
@@ -2442,7 +2440,7 @@ fn iteratorToArrayCall(
     );
 
     const out = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     var index: u32 = 0;
     while (true) : (index += 1) {
         const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
@@ -2737,7 +2735,7 @@ fn iteratorCreateHelper(
 
     const prototype = try iteratorHelperPrototype(ctx.runtime, global);
     const helper = try core.Object.create(ctx.runtime, core.class.ids.iterator_helper, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &helper.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, helper.gcHeader());
     try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorTargetSlot(), rooted_receiver.dup());
     helper.iteratorKindSlot().* = @intFromEnum(kind);
     helper.iteratorIndexSlot().* = limit orelse 0;
@@ -2756,7 +2754,7 @@ test "iteratorCreateHelper roots direct function bytecode callback while creatin
     defer global.value().free(rt);
     global.class_id = core.class.ids.global_object;
     _ = try global.ensureGlobalPayload(rt);
-    core.gc.retain(&global.header);
+    core.gc.retain(global.gcHeader());
     ctx.global = global;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
     defer iterator.value().free(rt);
@@ -2767,8 +2765,7 @@ test "iteratorCreateHelper roots direct function bytecode callback while creatin
 
     const helper_prototype = try core.Object.create(rt, core.class.ids.object, null);
     defer helper_prototype.value().free(rt);
-    const cached_helper_prototype = try global.cachedRealmValueSlot(rt, .iterator_helper_prototype);
-    try global.setOptionalValueSlot(rt, cached_helper_prototype, helper_prototype.value().dup());
+    try global.setCachedRealmValue(rt, .iterator_helper_prototype, helper_prototype.value().dup());
 
     const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
         .flags = .{ .func_kind = .generator },
@@ -3206,8 +3203,8 @@ fn iteratorHelperSetInnerFromIterator(
     // a one-time initialisation: `flatMap` re-points a long-lived helper at each
     // inner iterator the outer sequence yields, which is an old-to-young edge
     // every time the mapper returns a fresh iterable.
-    ctx.runtime.gc.generationalBarrier(&helper.header, next_inner_iterator.cycleMarkHeader());
-    ctx.runtime.gc.generationalBarrier(&helper.header, next_inner_next.cycleMarkHeader());
+    ctx.runtime.gc.generationalBarrier(helper.gcHeader(), next_inner_iterator.cycleMarkHeader());
+    ctx.runtime.gc.generationalBarrier(helper.gcHeader(), next_inner_next.cycleMarkHeader());
     if (old_inner_iterator) |stored| stored.free(ctx.runtime);
     if (old_inner_next) |stored| stored.free(ctx.runtime);
 }
@@ -3598,7 +3595,7 @@ pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: ?*core.Object,
         rt,
         if (global) |realm| object_ops.objectPrototypeFromGlobal(rt, realm) else null,
     );
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     try object.defineOwnPropertyAssumingNew(
         rt,
         core.atom.ids.value,

@@ -119,7 +119,7 @@ pub fn JSBytes(comptime Value: type) type {
                 const Object = @import("object.zig").Object;
                 const class_ids = @import("class.zig").ids;
                 const object = try Object.create(rt, class_ids.array_buffer, null);
-                errdefer Object.destroyFromHeader(rt, &object.header);
+                errdefer Object.destroyFromHeader(rt, object.gcHeader());
                 try object.installExternalByteStorage(rt, self.bytes, deinit_fn, self.context);
                 self.disarm();
                 return object.value();
@@ -132,7 +132,7 @@ pub fn JSBytes(comptime Value: type) type {
                 const store = try object_mod.SharedBufferStore.createExternal(rt, self.bytes, deinit_fn, self.context);
                 errdefer store.release();
                 const object = try Object.create(rt, class_ids.shared_array_buffer, null);
-                errdefer Object.destroyFromHeader(rt, &object.header);
+                errdefer Object.destroyFromHeader(rt, object.gcHeader());
                 object.installSharedByteStorage(rt, store);
                 self.disarm();
                 return object.value();
@@ -220,7 +220,7 @@ pub fn JSBytes(comptime Value: type) type {
             if (!value.isObject()) return null;
             const header = value.refHeader() orelse return null;
             if (header.meta().flags.kind != .object) return null;
-            return @fieldParentPtr("header", header);
+            return @import("object.zig").Object.fromHeader(header);
         }
 
         fn typedArrayBufferObject(object: anytype) ?*@import("object.zig").Object {
@@ -596,5 +596,5 @@ fn testObjectFromValue(comptime Value: type, value: Value) ?*@import("object.zig
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     if (header.meta().flags.kind != .object) return null;
-    return @fieldParentPtr("header", header);
+    return @import("object.zig").Object.fromHeader(header);
 }

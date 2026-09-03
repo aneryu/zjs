@@ -1,12 +1,10 @@
 //! Live address → allocation map for conservative candidate validation
 //! (tracing-gc-design.md §4.2 / §4.3 / §7.2).
 //!
-//! Page radix (4 KiB) plus per-page occupant lists. GC objects, flat strings,
-//! and rope nodes are intervals in the same table; string/rope registration
-//! does not change the 4-byte RC prefix. Large extents occupy every
-//! overlapping page. Candidates are never dereferenced as guessed headers.
-//!
-//! Default `rc` production does not compile this module.
+//! Block cells resolve by block geometry and slab objects by arena geometry;
+//! the page radix (4 KiB) with per-page occupant lists only holds the
+//! standalone-prefix allocations neither geometry can reach. Candidates are
+//! never dereferenced as guessed headers.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -27,12 +25,6 @@ pub const mutation_stats_enabled = builtin.is_test;
 pub const page_shift: u6 = 12;
 pub const page_size: usize = 1 << page_shift;
 
-pub const Kind = enum(u8) {
-    gc_object,
-    string,
-    rope,
-};
-
 pub const VerifyError = error{
     AddressIndexCountMismatch,
     AddressIndexMissingPage,
@@ -43,22 +35,16 @@ pub const VerifyError = error{
     AddressBoundsMissing,
 };
 
+/// A standalone-prefix GC allocation (over the slab's class ceiling or
+/// over-aligned) that the arena / block geometry cannot resolve.
 pub const Occupant = struct {
     lo: usize,
     hi: usize,
-    kind: Kind,
     ptr: usize,
 
-    pub fn gcHeader(self: Occupant) ?*gc.Header {
-        if (self.kind != .gc_object) return null;
+    pub fn gcHeader(self: Occupant) *gc.Header {
         return @ptrFromInt(self.ptr);
     }
-};
-
-pub const Hit = union(Kind) {
-    gc_object: *gc.Header,
-    string: *gc.StringHeader,
-    rope: *gc.StringHeader,
 };
 
 pub const Stats = struct {
@@ -74,7 +60,6 @@ pub const Stats = struct {
     /// a count of zero on a churning workload means the budget never fired.
     rehashes: usize = 0,
     live: usize = 0,
-    string_live: usize = 0,
     pages: usize = 0,
     register_calls: usize = 0,
     unregister_calls: usize = 0,
@@ -103,6 +88,11 @@ pub const ScanFilter = struct {
 };
 
 pub const Table = struct {
+    const arenas_incomplete_bit: usize = 1 << (@bitSizeOf(usize) - 1);
+    const occupants_incomplete_bit: usize = 1 << (@bitSizeOf(usize) - 2);
+    const state_bits: usize = arenas_incomplete_bit | occupants_incomplete_bit;
+    const removes_count_mask: usize = ~state_bits;
+
     pages: std.AutoHashMapUnmanaged(usize, PageBucket) = .empty,
     by_header: std.AutoHashMapUnmanaged(usize, Occupant) = .empty,
     stats: Stats = .{},
@@ -134,13 +124,18 @@ pub const Table = struct {
     /// Sticky. While set, some live objects may be unresolvable from a
     /// conservative candidate, so sweeping is unsound; the collector marks
     /// only. See `noteArenaCreated`.
-    arenas_incomplete: bool = false,
-
     /// The collector's block heap, for resolving candidates into its cells.
     /// Installed by `serveObjectCells`; null until then (and forever in
     /// builds without the block heap), which every block arm treats as "no
     /// such population".
     block_heap: if (gc.block_heap_enabled) ?*const block_heap_mod.Heap else void =
+        if (gc.block_heap_enabled) null else {},
+    /// Registry-owned non-block Object authority. Type-erased so this lower
+    /// address-index module stays independent of the collector's record type.
+    /// The two incomplete flags occupy the high bits of the cold tombstone
+    /// counter, so this pointer consumes their former tail padding without
+    /// changing Table or Registry size or adding work to candidate filtering.
+    nonblock_objects: if (gc.block_heap_enabled) ?*anyopaque else void =
         if (gc.block_heap_enabled) null else {},
     /// One-word bloom filter over every 4 KiB base a candidate could resolve
     /// through: arena bases OR'd with occupant-table page bases. `ruleOut` is
@@ -179,6 +174,30 @@ pub const Table = struct {
     /// appeared. Fixing the collection policy is what exposed this.
     removes_since_rehash: usize = 0,
 
+    pub inline fn arenasIncomplete(self: *const Table) bool {
+        return self.removes_since_rehash & arenas_incomplete_bit != 0;
+    }
+
+    pub inline fn setArenasIncomplete(self: *Table, value: bool) void {
+        if (value) {
+            self.removes_since_rehash |= arenas_incomplete_bit;
+        } else {
+            self.removes_since_rehash &= ~arenas_incomplete_bit;
+        }
+    }
+
+    pub inline fn occupantsIncomplete(self: *const Table) bool {
+        return self.removes_since_rehash & occupants_incomplete_bit != 0;
+    }
+
+    pub inline fn setOccupantsIncomplete(self: *Table, value: bool) void {
+        if (value) {
+            self.removes_since_rehash |= occupants_incomplete_bit;
+        } else {
+            self.removes_since_rehash &= ~occupants_incomplete_bit;
+        }
+    }
+
     /// A slab arena has been created. Its blocks become resolvable by mask.
     ///
     /// Failure here is not a lost statistic. An arena absent from the set is
@@ -191,7 +210,7 @@ pub const Table = struct {
     pub fn noteArenaCreated(self: *Table, allocator: std.mem.Allocator, base: usize) void {
         self.arenas.put(allocator, base, {}) catch {
             if (comptime mutation_stats_enabled) self.stats.arena_insert_failures += 1;
-            self.arenas_incomplete = true;
+            self.setArenasIncomplete(true);
             return;
         };
         // `+ 1` so that a one-past-end pointer to an object in the arena's last
@@ -232,7 +251,7 @@ pub const Table = struct {
         };
         var sync: Sync = .{ .table = self, .allocator = allocator };
         slab.forEachArena(&sync, Sync.visit);
-        if (sync.ok) self.arenas_incomplete = false;
+        if (sync.ok) self.setArenasIncomplete(false);
         if (comptime mutation_stats_enabled) self.stats.arena_resyncs += 1;
         return sync.ok;
     }
@@ -249,8 +268,8 @@ pub const Table = struct {
     /// Probes `addr` and `addr - 1`: a pointer one past the end of the object
     /// in the preceding block lands on this block's first byte, and that is a
     /// real reference to the preceding object. Reporting both is the same
-    /// choice `resolveAny`'s greatest-`lo` rule and JSC's ConservativeRoots
-    /// make, in the direction that retains rather than frees.
+    /// choice JSC's ConservativeRoots makes, in the direction that retains
+    /// rather than frees.
     ///
     /// Accepts an address anywhere in the owning block, including the slack
     /// between the object's end and the size class boundary. That is wider
@@ -281,29 +300,6 @@ pub const Table = struct {
             probe = addr - 1;
         }
         return hits;
-    }
-
-    /// Same geometry as `forEachGcObjectInArena`, single winner, for the
-    /// `resolveAny` shape. Only the block containing `addr` itself.
-    fn resolveInArena(self: *Table, addr: usize) ?*gc.Header {
-        if (self.arenas.count() == 0) return null;
-        // `addr` first, then `addr - 1`. Containment beats one-past-end, which
-        // is the same tie-break `resolveAny`'s greatest-`lo` rule makes: a
-        // pointer that is inside object B and also one past object A is a
-        // reference to B. Only when nothing owns `addr` itself does the
-        // preceding block get to claim it.
-        if (self.resolveExactlyInArena(addr)) |header| return header;
-        if (addr == 0) return null;
-        return self.resolveExactlyInArena(addr - 1);
-    }
-
-    fn resolveExactlyInArena(self: *Table, addr: usize) ?*gc.Header {
-        const base = addr & ~(Slab.arena_size - 1);
-        if (!self.arenas.contains(base)) return null;
-        const user = Slab.userPtrWithinArena(base, addr) orelse return null;
-        const header: *gc.Header = @ptrCast(@alignCast(user));
-        if (!header.metaConst().alloc_info.heap_accounted) return null;
-        return header;
     }
 
     /// Audit the invariant candidate validation rests on, over every arena.
@@ -361,7 +357,6 @@ pub const Table = struct {
     /// block set and TinyBloom bits. Called only by arena/runtime-safety audit.
     pub fn verifyIndex(self: *Table, verify_scan_cache: bool) VerifyError!void {
         var indexed: usize = 0;
-        var indexed_strings: usize = 0;
         var by_it = self.by_header.iterator();
         while (by_it.next()) |entry| {
             indexed += 1;
@@ -369,7 +364,6 @@ pub const Table = struct {
             if (entry.key_ptr.* != occupant.ptr or occupant.lo >= occupant.hi) {
                 return error.AddressIndexRangeMismatch;
             }
-            if (occupant.kind != .gc_object) indexed_strings += 1;
             if (occupant.lo < self.bounds_lo or occupant.hi > self.bounds_hi) {
                 return error.AddressBoundsMissing;
             }
@@ -391,7 +385,7 @@ pub const Table = struct {
         // an opt-in arena audit must keep validating the structural maps
         // without comparing them to an absent mirror.
         if (comptime mutation_stats_enabled) {
-            if (indexed != self.stats.live or indexed_strings != self.stats.string_live) {
+            if (indexed != self.stats.live) {
                 return error.AddressIndexCountMismatch;
             }
         }
@@ -484,20 +478,6 @@ pub const Table = struct {
         };
     }
 
-    /// Cold-path form uses the heap's persistent TinyBloom + exact block set;
-    /// `resolveAny`/`containsHeader` are called outside scan spans and cannot
-    /// use a register-local `ScanFilter` snapshot.
-    fn resolveInBlockCell(self: *const Table, addr: usize) ?*gc.Header {
-        if (comptime !gc.block_heap_enabled) return null;
-        const heap = self.block_heap orelse return null;
-        const block = heap.blockOf(@ptrFromInt(addr)) orelse return null;
-        const index = block.cellIndexInterior(addr) orelse return null;
-        if (!block.cellAllocated(index)) return null;
-        const header: *gc.Header = @ptrFromInt(block.cellBase(index) + gc.metadata_prefix_size);
-        if (!header.metaConst().alloc_info.heap_accounted) return null;
-        return header;
-    }
-
     /// Resolve `addr` (and its one-past-end neighbour) into block cells.
     /// The alloc bitmap answers "is this cell handed out"; the prefix's
     /// `heap_accounted` answers "is it a PUBLISHED object" -- the same two-
@@ -559,26 +539,11 @@ pub const Table = struct {
         const header_addr = @intFromPtr(header);
         const lo = header_addr - gc.metadata_prefix_size;
         const hi = header_addr + bytes + 1;
-        return .{ .lo = lo, .hi = hi, .kind = .gc_object, .ptr = header_addr };
-    }
-
-    pub fn rangeForBytes(kind: Kind, base: usize, bytes: usize, identity: usize) Occupant {
-        return .{ .lo = base, .hi = base + bytes + 1, .kind = kind, .ptr = identity };
+        return .{ .lo = lo, .hi = hi, .ptr = header_addr };
     }
 
     pub fn insert(self: *Table, allocator: std.mem.Allocator, header: *gc.Header, bytes: usize) std.mem.Allocator.Error!void {
         return self.insertOccupant(allocator, occupantFor(header, bytes));
-    }
-
-    pub fn insertRange(
-        self: *Table,
-        allocator: std.mem.Allocator,
-        kind: Kind,
-        base: usize,
-        bytes: usize,
-        identity: usize,
-    ) std.mem.Allocator.Error!void {
-        return self.insertOccupant(allocator, rangeForBytes(kind, base, bytes, identity));
     }
 
     fn insertOccupant(self: *Table, allocator: std.mem.Allocator, occupant: Occupant) std.mem.Allocator.Error!void {
@@ -609,10 +574,7 @@ pub const Table = struct {
             try gop.value_ptr.occupants.append(allocator, occupant);
             registered += 1;
         }
-        if (comptime mutation_stats_enabled) {
-            self.stats.live += 1;
-            if (occupant.kind != .gc_object) self.stats.string_live += 1;
-        }
+        if (comptime mutation_stats_enabled) self.stats.live += 1;
     }
 
     pub fn remove(self: *Table, allocator: std.mem.Allocator, header: *gc.Header) void {
@@ -640,10 +602,7 @@ pub const Table = struct {
                 if (comptime mutation_stats_enabled) self.stats.pages -= 1;
             }
         }
-        if (comptime mutation_stats_enabled) {
-            self.stats.live -= 1;
-            if (range.kind != .gc_object) self.stats.string_live -= 1;
-        }
+        if (comptime mutation_stats_enabled) self.stats.live -= 1;
         self.compactIfTombstoned();
     }
 
@@ -654,20 +613,15 @@ pub const Table = struct {
     /// would otherwise be O(capacity) each. Both maps are compacted together
     /// because `removePtr` deletes from both.
     fn compactIfTombstoned(self: *Table) void {
-        self.removes_since_rehash += 1;
+        const state = self.removes_since_rehash & state_bits;
+        const removes = (self.removes_since_rehash & removes_count_mask) + 1;
+        self.removes_since_rehash = state | removes;
         const budget = self.by_header.capacity() / 4;
-        if (budget == 0 or self.removes_since_rehash < budget) return;
-        self.removes_since_rehash = 0;
+        if (budget == 0 or removes < budget) return;
+        self.removes_since_rehash = state;
         self.by_header.rehash(std.hash_map.AutoContext(usize){});
         self.pages.rehash(std.hash_map.AutoContext(usize){});
         if (comptime mutation_stats_enabled) self.stats.rehashes += 1;
-    }
-
-    pub fn resolve(self: *Table, addr: usize) ?*gc.Header {
-        return switch (self.resolveAny(addr) orelse return null) {
-            .gc_object => |header| header,
-            .string, .rope => null,
-        };
     }
 
     /// Every occupant containing `addr`, not just the greatest-`lo` one.
@@ -677,16 +631,16 @@ pub const Table = struct {
     /// by `gc_conservative.scanWords`; updating shared diagnostics here made
     /// every stack word pay two extra read-modify-writes.
     ///
-    /// `resolveAny` has to pick a single winner, and picks the greatest `lo`
-    /// so that a metadata-prefix hit beats the neighbour whose one-past-end
-    /// coincides with it. For a conservative root scan that choice is unsafe
-    /// in the other direction: a native one-past-end pointer to object A is a
+    /// A single-winner resolution would pick the greatest `lo` so that a
+    /// metadata-prefix hit beats the neighbour whose one-past-end coincides
+    /// with it. For a conservative root scan that choice is unsafe in the
+    /// other direction: a native one-past-end pointer to object A is a
     /// real reference to A, and returning only B leaves A unshaded and
     /// sweepable. JSC probes and marks both sides for exactly this case
     /// (ConservativeRoots.cpp:135-146, and :162-166 refuses to return early
     /// for kinds that can be pointed past). Shading a few extra objects is
     /// the conservative direction; missing one is a use-after-free.
-    pub fn forEachGcObjectAt(
+    pub fn forEachTraceCandidateAt(
         self: *Table,
         addr: usize,
         scan_filter: ScanFilter,
@@ -703,6 +657,23 @@ pub const Table = struct {
             // address ranges; a word in one cannot resolve in the other.
             return block_result.hits;
         }
+        // TGC S2 extent strings (spec §5.7): medium page runs and large
+        // mappings are the block heap's too, but not classed blocks, so the
+        // geometry probe above disowns them. Their occupant entry usually
+        // resolves below as well; this probe is the authoritative answer
+        // (and the only one if that insert failed). Extent ranges are
+        // disjoint from arenas and other standalone pages, so a hit ends the
+        // resolution -- one visit, not two.
+        if (comptime gc.string_tracer_owned and gc.block_heap_enabled) {
+            if (self.block_heap) |heap| {
+                if (heap.extentContaining(addr)) |extent_base| {
+                    const header: *gc.Header = @ptrFromInt(extent_base + gc.metadata_prefix_size);
+                    if (!header.metaConst().alloc_info.heap_accounted) return 0;
+                    visit(context, header);
+                    return 1;
+                }
+            }
+        }
         const base = addr & ~(Slab.arena_size - 1);
         const prev_base = (addr -% 1) & ~(Slab.arena_size - 1);
         if (filterRulesOutBits(scan_filter.address_bits, base) and
@@ -716,53 +687,10 @@ pub const Table = struct {
         };
         for (bucket.occupants.items) |occupant| {
             if (addr < occupant.lo or addr >= occupant.hi) continue;
-            if (occupant.kind != .gc_object) continue;
             hits += 1;
             visit(context, @ptrFromInt(occupant.ptr));
         }
         return hits;
-    }
-
-    pub fn resolveAny(self: *Table, addr: usize) ?Hit {
-        self.stats.lookup_calls += 1;
-        // The block arm precedes the bounds window: bounds cover the arena
-        // and occupant populations, and a runtime whose objects all live in
-        // block cells may have no arenas at all, leaving the window empty.
-        if (comptime gc.block_heap_enabled) {
-            if (self.resolveInBlockCell(addr)) |header| {
-                self.stats.lookup_hits += 1;
-                return .{ .gc_object = header };
-            }
-            if (addr != 0) {
-                if (self.resolveInBlockCell(addr - 1)) |header| {
-                    self.stats.lookup_hits += 1;
-                    return .{ .gc_object = header };
-                }
-            }
-        }
-        if (addr < self.bounds_lo or addr >= self.bounds_hi) return null;
-        if (self.resolveInArena(addr)) |header| {
-            self.stats.lookup_hits += 1;
-            return .{ .gc_object = header };
-        }
-        const bucket = self.pages.getPtr(addr >> page_shift) orelse return null;
-        // One-past-end of object A can equal the metadata prefix of object B.
-        // Census snapshot lookup picked the last range with `lo <= addr`
-        // (greatest lo). First-match would shade A and let B be swept.
-        var best: ?Occupant = null;
-        for (bucket.occupants.items) |occupant| {
-            if (addr < occupant.lo or addr >= occupant.hi) continue;
-            if (best == null or occupant.lo > best.?.lo) best = occupant;
-        }
-        if (best) |occupant| {
-            self.stats.lookup_hits += 1;
-            return switch (occupant.kind) {
-                .gc_object => .{ .gc_object = @ptrFromInt(occupant.ptr) },
-                .string => .{ .string = @ptrFromInt(occupant.ptr) },
-                .rope => .{ .rope = @ptrFromInt(occupant.ptr) },
-            };
-        }
-        return null;
     }
 
     /// Is this a live, published GC object as far as candidate validation is
@@ -818,9 +746,10 @@ pub const Table = struct {
 
     pub inline fn noteFailedInsert(self: *Table) void {
         if (comptime mutation_stats_enabled) self.stats.failed_inserts += 1;
+        self.setOccupantsIncomplete(true);
     }
 };
 
 fn occupantsEqual(a: Occupant, b: Occupant) bool {
-    return a.lo == b.lo and a.hi == b.hi and a.kind == b.kind and a.ptr == b.ptr;
+    return a.lo == b.lo and a.hi == b.hi and a.ptr == b.ptr;
 }

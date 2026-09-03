@@ -1,5 +1,5 @@
 //! QCP-1 configuration signature: one canonical, deterministic string naming
-//! the six settings the switch ruling makes load-bearing, plus the comptime
+//! the seven settings the switch ruling makes load-bearing, plus the comptime
 //! assertion every engine-bearing artifact runs against it.
 //!
 //! WHY THIS EXISTS. The defect class it closes is "a gate reports green about
@@ -27,6 +27,9 @@
 //!     (compiler/root.zig).
 //!   * `repr` is derived from `@sizeOf(core.value.JSValue)`, the size JSValue
 //!     is actually laid out at.
+//!   * `gc_layout` is derived from Object's fixed-head size, its zero handle-to-
+//!     body displacement, and its slots2 tail offset. M has no runtime/build
+//!     toggle, but a pre-M and post-M binary must not attest the same layout.
 //!   * `optimize` is `builtin.mode` of the module this file was compiled
 //!     into — the engine module of the artifact asking. See the note below on
 //!     why the optimize mode belongs in a *correctness* signature at all.
@@ -65,17 +68,16 @@ const resolve_labels = @import("compiler/resolve_labels.zig");
 const core_atom = @import("core/atom.zig");
 const core_memory = @import("core/memory.zig");
 const core_value = @import("core/value.zig");
+const core_gc = @import("core/gc.zig");
+const core_object = @import("core/object.zig");
 
 /// Bumped when the component set or the encoding changes, so an old
 /// expectation can never silently match a new meaning.
 ///
-/// v1 -> v2 added `optimize`. The bump is deliberate rather than cosmetic: a
-/// historical `zjs-config-v1:...` string recorded in a report or a dossier
-/// named five settings and said nothing about the optimize mode, so it must
-/// not be readable as complete proof now that the field set has grown. A v1
-/// string handed to `-Dzjs_expect_config` fails on the version component
-/// instead of matching a v2 build on its first five fields.
-pub const version = "zjs-config-v2";
+/// v1 -> v2 added `optimize`; v2 -> v3 adds terminal `gc_layout`. The bump is
+/// deliberate: a pre-M binary has a resident Object TraceHeader and an 80B
+/// slots2 cell, so its six-field v2 statement is incomplete for post-M proof.
+pub const version = "zjs-config-v3";
 
 /// The canonical component order: the ruling's five (compiler, layout, value
 /// representation, force-GC, ownership audit) with `optimize` inserted after
@@ -85,6 +87,7 @@ pub const component_order = [_][]const u8{
     "compiler",
     "layout",
     "repr",
+    "gc_layout",
     "optimize",
     "force_gc",
     "ownership_audit",
@@ -105,6 +108,16 @@ pub const layout: []const u8 = @tagName(resolve_labels.default_layout);
 /// name behind in the signature.
 pub const repr: []const u8 = if (@sizeOf(core_value.JSValue) == 8) "nan_boxed" else "tagged";
 
+/// Terminal M layout, derived from the declarations the allocator and access
+/// paths consume. This is identity, not a selector: any future representation
+/// must deliberately rename it and bump the signature version again.
+pub const gc_layout: []const u8 = if (@sizeOf(core_object.Object) == 24 and
+    core_gc.bodyOffsetFromHeader(.object) == 0 and
+    core_object.Object.slots2_property_storage_offset == 24)
+    "obj64_m"
+else
+    "unknown";
+
 /// Optimize mode of the module this file was compiled into. Read from
 /// `builtin.mode` — the mode the compiler actually used — rather than from
 /// build.zig's resolved `-Doptimize` option, for the same reason as every
@@ -124,13 +137,14 @@ pub const component_values = [component_order.len][]const u8{
     compiler,
     layout,
     repr,
+    gc_layout,
     optimize,
     force_gc,
     ownership_audit,
 };
 
 /// The canonical signature of this artifact's configuration, e.g.
-/// `zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off`.
+/// `zjs-config-v3:compiler=v2,layout=short,repr=tagged,gc_layout=obj64_m,optimize=ReleaseFast,force_gc=off,ownership_audit=off`.
 pub const signature: []const u8 = blk: {
     var out: []const u8 = version;
     var sep: []const u8 = ":";
@@ -292,14 +306,14 @@ test "config_signature: drift diagnostics name the differing fields" {
     // calling it (it is a `@compileError`), but `differingFields` is the part
     // that has to stay readable.
     const wrong_compiler = comptime differingFields(
-        "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=Debug,force_gc=off,ownership_audit=off",
-        "zjs-config-v2:compiler=legacy,layout=short,repr=tagged,optimize=Debug,force_gc=off,ownership_audit=off",
+        "zjs-config-v3:compiler=v2,layout=short,repr=tagged,gc_layout=obj64_m,optimize=Debug,force_gc=off,ownership_audit=off",
+        "zjs-config-v3:compiler=legacy,layout=short,repr=tagged,gc_layout=obj64_m,optimize=Debug,force_gc=off,ownership_audit=off",
     );
     try std.testing.expectEqualStrings("\n    compiler: expected legacy, actual v2", wrong_compiler);
 
     const wrong_layout_and_mode = comptime differingFields(
-        "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=Debug,force_gc=off,ownership_audit=off",
-        "zjs-config-v2:compiler=v2,layout=plain,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+        "zjs-config-v3:compiler=v2,layout=short,repr=tagged,gc_layout=obj64_m,optimize=Debug,force_gc=off,ownership_audit=off",
+        "zjs-config-v3:compiler=v2,layout=plain,repr=tagged,gc_layout=obj64_m,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
     );
     try std.testing.expectEqualStrings(
         "\n    layout: expected plain, actual short" ++
@@ -307,13 +321,13 @@ test "config_signature: drift diagnostics name the differing fields" {
         wrong_layout_and_mode,
     );
 
-    const stale_v1 = comptime differingFields(
+    const stale_v2 = comptime differingFields(
+        "zjs-config-v3:compiler=v2,layout=short,repr=tagged,gc_layout=obj64_m,optimize=Debug,force_gc=off,ownership_audit=off",
         "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=Debug,force_gc=off,ownership_audit=off",
-        "zjs-config-v1:compiler=v2,layout=short,repr=tagged,force_gc=off,ownership_audit=off",
     );
     try std.testing.expectEqualStrings(
-        "\n    version: expected zjs-config-v1, actual zjs-config-v2" ++
-            "\n    optimize: expected <field absent>, actual Debug",
-        stale_v1,
+        "\n    version: expected zjs-config-v2, actual zjs-config-v3" ++
+            "\n    gc_layout: expected <field absent>, actual obj64_m",
+        stale_v2,
     );
 }

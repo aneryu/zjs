@@ -8,11 +8,13 @@ pub const metadata_size_class_offset: usize = 0;
 pub const metadata_alloc_info_offset: usize = 2;
 pub const metadata_flags_offset: usize = 3;
 pub const metadata_rc_offset: usize = 4;
+pub const metadata_young_mask: u8 = 1 << 4;
 
 /// The only GC kind admitted to the block heap. Kept here with the allocator
 /// representation rather than making `memory.zig` import the registry enum.
 /// `gc.zig` asserts that its public RefKind encoding still agrees.
 pub const object_kind_tag: u8 = 0;
+pub const string_kind_tag: u8 = 6;
 
 pub const alloc_info_class_mask: u8 = 0x1f;
 pub const alloc_info_large_mask: u8 = 1 << 5;
@@ -26,9 +28,11 @@ pub const block_cell_alloc_info: u8 = block_cell_size_class;
 
 /// A freed block cell retains its successor in the low 16 bits.  The entire
 /// high half is poison, chosen so reading the word as live metadata yields an
-/// unaccounted, non-block, cycle-visited prefix.
+/// unaccounted, non-block, cycle-visited prefix whose kind is `.string`
+/// (6) -- the one kind the tracer does not walk until S2, which must pick a
+/// new poison when strings join the list.
 pub const free_cell_link_mask: u32 = 0x0000_ffff;
-pub const free_cell_poison: u32 = 0x8700_0000;
+pub const free_cell_poison: u32 = 0x8600_0000;
 
 comptime {
     if (metadata_rc_offset + @sizeOf(i32) != metadata_size)

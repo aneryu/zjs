@@ -1,7 +1,8 @@
 """CPU pinning and affinity verification shared by the measurement runners.
 
-Both `zoo/run_zoo_compare.py` and `bench_v8/run_benchv8_compare.py` enforce the
-same rule: pinning must be EFFECTIVE, not merely requested. An allowed CPU set
+The measurement runners (`bench_v8/run_benchv8_compare.py` and its fixed-work
+sibling) enforce the same rule: pinning must be EFFECTIVE, not merely
+requested. An allowed CPU set
 that merely contains the requested CPUs is not pinning, and a runner that
 assumes its caller pinned correctly will silently produce numbers taken under
 scheduler migration.

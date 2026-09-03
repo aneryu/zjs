@@ -67,9 +67,10 @@ when needed.
 - [bench-v8 status](perf/bench-v8-status.md): the public performance claim
   (Octane 2.0, V8 suite v9, vendored since 2026-08-25) — the single
   authoritative score source.
-- [Zoo runner](../tools/perf/zoo/README.md): standalone-file attribution
-  instrument (bench-v8's Octane coverage now matches or exceeds it; the
-  last zoo baseline was removed 2026-08-25 — recover from git history).
+- Fixed-work PMU screening: `tools/perf/bench_v8/run_fixed_pmu.py`
+  (`mise run perf-screen`). The external-checkout zoo runner it replaced
+  was retired 2026-08-29; its last baseline was removed 2026-08-25 —
+  recover both from git history.
 - [GC baseline](perf/gc-baseline.md): refcounting-collector behavior
   baseline captured before the GC refactor.
 - [Pause baseline 2026-08-29](pause-baseline-2026-08-29.md): the current
@@ -78,6 +79,8 @@ when needed.
   number, and the record of which historical pause readings are void.
 - [Performance Workflow](perf/README.md): measurement contract, diagnostic
   benchmarks, profiling, PMU discipline.
+- [Measurement Fields And Contracts](perf/measurement-contracts.md): current
+  CPU/L3 fields, locks, concurrency matrix, and screen/verdict eligibility.
 - [Object And Shape Implementation](perf/object-shape-design.md): fixed
   layouts, invariants, and the no-inline-cache-today status.
 - [Refactor Tax Policy](refactor-policy.md): risk zones and identity gates;

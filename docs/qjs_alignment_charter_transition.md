@@ -55,8 +55,9 @@ native-heavy GUI runtime"(engine-evolution-plan §2.3)。原宪章中以
   未受契约约束的外部数字作裁决。**进展注(2026-08-25)**:五引擎
   串行快照已存在(zjs/qjs/Hermes/V8-jitless/JSC-jitless,
   bench-v8-status.md);其采集契约是否满足本条款要求待确认;
-- zoo 内部诊断口径(工具见 `tools/perf/zoo/README.md`;其冻结基线
-  文档已于 2026-08-25 移出树)继续作为归因工具。
+- zoo 内部诊断口径(其运行器已于 2026-08-29 退役,由 vendored bench-v8
+  套件与 `tools/perf/bench_v8/run_fixed_pmu.py` 接替;冻结基线文档已于
+  2026-08-25 移出树,均可从 git history 回溯)。
 
 ## 5. 历史地位声明
 

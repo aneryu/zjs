@@ -690,8 +690,7 @@ pub fn functionConstructorFromGlobal(rt: *core.JSRuntime, global: *core.Object) 
 }
 
 pub fn storeRealmValue(rt: *core.JSRuntime, global: *core.Object, slot: core.object.RealmValueSlot, value: core.JSValue) !void {
-    const cached = try global.cachedRealmValueSlot(rt, slot);
-    try global.setOptionalValueSlot(rt, cached, value.dup());
+    try global.setCachedRealmValue(rt, slot, value.dup());
 }
 
 pub fn defineNativeDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, name: []const u8, length: i32) !void {

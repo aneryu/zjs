@@ -229,7 +229,7 @@ pub fn length(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     }
     if (value.isObject()) {
         const header = value.refHeader() orelse return error.TypeError;
-        const object_value: *core.Object = @fieldParentPtr("header", header);
+        const object_value = core.Object.fromHeader(header);
         if (object_value.isArray()) {
             if (object_value.arrayLength() <= @as(u32, @intCast(std.math.maxInt(i32)))) {
                 return core.JSValue.int32(@intCast(object_value.arrayLength()));
@@ -620,7 +620,7 @@ pub fn isTruthy(value: core.JSValue) bool {
 pub fn isFunctionObject(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object = core.Object.fromHeader(header);
     if (object.proxyTarget() != null) return proxyTargetIsFunction(value);
     return object.class_id == core.class.ids.c_function or
         core.class.isBytecodeFunctionClass(object.class_id) or
@@ -632,7 +632,7 @@ pub fn isFunctionObject(value: core.JSValue) bool {
 fn proxyTargetIsFunction(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object = core.Object.fromHeader(header);
     const target = object.proxyTarget() orelse return false;
     return target.isFunctionBytecode() or isFunctionObject(target);
 }
@@ -704,18 +704,9 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
         }
     }
 
-    if (op == bytecode.opcode.op.add and a.isBigInt() and a.refHeader() != null and core.gc.headerRefCount(a.refHeader().?) == 1) {
-        const header = a.refHeader().?;
-        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        const rhs = try bigIntFromValueBorrowed(rt, b);
-        const rhs_is_owned = b.asShortBigInt() != null;
-        defer if (rhs_is_owned) {
-            var owned = rhs;
-            owned.deinit();
-        };
-        try big.addInPlaceExternal(rhs);
-        return a.dup();
-    }
+    // qjs adds into a uniquely-referenced (rc==1) heap BigInt in place. A
+    // tracer-owned BigInt has no count to prove uniqueness, so every heap
+    // add allocates its result (S1-c; revisit if bigint-heavy code shows it).
 
     // Single-allocation multiplication: the wrapper and the product's limbs
     // come from one createWithFam instead of mulAlloc's limb block plus
@@ -889,7 +880,7 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
     if (string_value.ropeBody()) |node| {
         if (node.len == 0) return try toStringValue(rt, core.JSValue.int32(int_value));
         if (position == .suffix) {
-            if (node.header().rc == 1 and !node.isLinearized()) {
+            if (core.string.ropeExclusivelyHeld(node) and !node.isLinearized()) {
                 var digits_buf: [16]u8 = undefined;
                 const digits = dtoa.formatInt32(&digits_buf, int_value);
                 if (try core.string.appendRopeTail(node, rt, .{ .latin1 = digits }, 1)) {
@@ -991,7 +982,7 @@ fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
             // zjs's measured add_loc extension: if the consumed lhs is truly
             // exclusive, preserve the O(1) private-tail win. A checked lexical
             // also has its binding owner, so it follows QJS's rope path below.
-            if (node.header().rc == 1) {
+            if (core.string.ropeExclusivelyHeld(node)) {
                 const appended = core.string.appendRopeTail(node, rt, b_string.resolveData(), 1) catch |err| {
                     a.free(rt);
                     b.free(rt);
@@ -1136,7 +1127,7 @@ pub fn tryAppendStringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.
     // inline in a fixed-size allocation (qjs `JSString` FAM), so there is no
     // spare capacity — the caller copies into a fresh string instead.
     const node = lhs.ropeBody() orelse return false;
-    if (@as(usize, @intCast(node.header().rc)) > max_ref_count) return false;
+    if (!core.string.ropeShareCountAtMost(node, max_ref_count)) return false;
     return appendRopeTailValue(rt, node, rhs, max_ref_count);
 }
 

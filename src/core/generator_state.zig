@@ -72,9 +72,6 @@ pub const SuspendedStackStorage = struct {
         }
         const next = try rt.memory.alloc(JSValue, next_capacity);
         errdefer rt.memory.free(JSValue, next);
-        if (comptime builtin.is_test) {
-            @import("gc_write_audit.zig").hit(.memcpy_bulk, .generator_values_memcpy);
-        }
         @memcpy(next[0..self.values.len], self.values);
         const old_values = self.values;
         const old_capacity = self.capacity;

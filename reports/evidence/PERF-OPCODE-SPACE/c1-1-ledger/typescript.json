@@ -1,0 +1,476 @@
+{
+ "tool": "zjs-benchv8-fixed-pmu",
+ "schemaVersion": 1,
+ "direction": "ratios are zjs/qjs; below 1.0 means zjs used fewer counters or wall time",
+ "workload": "per-benchmark scripts assembled from the vendored suite with doWarmup=false and doDeterministic=true appended; both engines execute identical deterministicIterations/minIterations batches",
+ "role": "screening instrument; score adjudication stays with run_benchv8_compare.py",
+ "iterationDivisor": 1,
+ "timestamp": "2026-08-30T11:44:58Z",
+ "samplesPerEnginePerBench": 8,
+ "samplingOrder": "paired ABBA by sample parity",
+ "firstPositionCounts": {
+  "qjs": 4,
+  "zjs": 4
+ },
+ "firstPositionBalanced": true,
+ "cpu": 16,
+ "effectiveAffinity": [
+  16
+ ],
+ "pmu": "armv8_pmuv3_1",
+ "events": [
+  "armv8_pmuv3_1/instructions/",
+  "armv8_pmuv3_1/cycles/",
+  "armv8_pmuv3_1/branch-instructions/",
+  "armv8_pmuv3_1/branch-misses/",
+  "armv8_pmuv3_1/cache-references/",
+  "armv8_pmuv3_1/cache-misses/"
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": "0xd87",
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/c1w-new-zjs",
+   "sha256": "f5113c3071c9615ba6333205d2ef948dbaf57f8d073661f5754c2a32ac9bd1e3",
+   "repo": "v0.1.0-167-gd020a6f6-dirty"
+  },
+  "qjs": {
+   "path": "/tmp/c1w-parent-zjs",
+   "sha256": "7b54d7d4316f36f01573ea149f5409cea61bd44056f3cb1a022bb4338e0a858d",
+   "repo": "unavailable"
+  }
+ },
+ "benchmarks": {
+  "typescript": {
+   "source": {
+    "suiteDir": "/home/aneryu/zjs/tools/perf/bench_v8/suite",
+    "files": [
+     {
+      "file": "base.js",
+      "sha256": "216612c2e7096a02b3e52b57e9cf9351bbaf180d60938d5c60b85fd756232733"
+     },
+     {
+      "file": "typescript.js",
+      "sha256": "fbc5ec16d9c60b1bdcca7e7b9f66fba2fe46c0e04da64088203052e47922ff21"
+     },
+     {
+      "file": "typescript-input.js",
+      "sha256": "e23d2fe7b3df9dc069c720ab3fb112006c235d0eb416556ecde7c3a2766a0396"
+     },
+     {
+      "file": "typescript-compiler.js",
+      "sha256": "9e99fe0ddfe48a2462eca622ade1e1ddd13bf49f8e461a6c53463bbbc1d5363a"
+     }
+    ],
+    "fixedWorkSha256": "dcfffa8a1636e73722bcb3c73ba0503e4fb28cf11d426fe52110466a50cc795e"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 83888979147,
+       "cycles": 20577895641,
+       "branch-instructions": 15497059661,
+       "branch-misses": 42451484,
+       "cache-references": 34435510435,
+       "cache-misses": 329660986
+      },
+      "wallSeconds": 5.361791038885713,
+      "stdout": "Typescript: 24195\n----",
+      "scores": {
+       "Typescript": 24195.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83894060225,
+       "cycles": 20577297898,
+       "branch-instructions": 15499221311,
+       "branch-misses": 42552469,
+       "cache-references": 34437456068,
+       "cache-misses": 337121999
+      },
+      "wallSeconds": 5.352511166129261,
+      "stdout": "Typescript: 24153\n----",
+      "scores": {
+       "Typescript": 24153.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83896729500,
+       "cycles": 20508443931,
+       "branch-instructions": 15500605159,
+       "branch-misses": 42568027,
+       "cache-references": 34464985534,
+       "cache-misses": 331498408
+      },
+      "wallSeconds": 5.337487009819597,
+      "stdout": "Typescript: 24241\n----",
+      "scores": {
+       "Typescript": 24241.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83897877734,
+       "cycles": 20561951738,
+       "branch-instructions": 15500347279,
+       "branch-misses": 42520122,
+       "cache-references": 34440121272,
+       "cache-misses": 333423812
+      },
+      "wallSeconds": 5.348005384206772,
+      "stdout": "Typescript: 24190\n----",
+      "scores": {
+       "Typescript": 24190.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83900245187,
+       "cycles": 20533128760,
+       "branch-instructions": 15501081146,
+       "branch-misses": 42413750,
+       "cache-references": 34455867656,
+       "cache-misses": 334920503
+      },
+      "wallSeconds": 5.339277625083923,
+      "stdout": "Typescript: 24241\n----",
+      "scores": {
+       "Typescript": 24241.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83903370166,
+       "cycles": 20645758699,
+       "branch-instructions": 15502408905,
+       "branch-misses": 42584576,
+       "cache-references": 34446128212,
+       "cache-misses": 337836275
+      },
+      "wallSeconds": 5.370835027657449,
+      "stdout": "Typescript: 24094\n----",
+      "scores": {
+       "Typescript": 24094.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83947828823,
+       "cycles": 20768945847,
+       "branch-instructions": 15509621170,
+       "branch-misses": 42788649,
+       "cache-references": 34485082633,
+       "cache-misses": 340484074
+      },
+      "wallSeconds": 5.400090471375734,
+      "stdout": "Typescript: 23958\n----",
+      "scores": {
+       "Typescript": 23958.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 84173577297,
+       "cycles": 20738496742,
+       "branch-instructions": 15550492959,
+       "branch-misses": 42997655,
+       "cache-references": 34533568234,
+       "cache-misses": 349178511
+      },
+      "wallSeconds": 5.433925040997565,
+      "stdout": "Typescript: 23945\n----",
+      "scores": {
+       "Typescript": 23945.0
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 83905163646,
+       "cycles": 20556452694,
+       "branch-instructions": 15501534448,
+       "branch-misses": 42618743,
+       "cache-references": 34441397771,
+       "cache-misses": 339449319
+      },
+      "wallSeconds": 5.345088887959719,
+      "stdout": "Typescript: 24199\n----",
+      "scores": {
+       "Typescript": 24199.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83924431168,
+       "cycles": 20697515014,
+       "branch-instructions": 15502531990,
+       "branch-misses": 42618424,
+       "cache-references": 34471194346,
+       "cache-misses": 337578644
+      },
+      "wallSeconds": 5.382565116044134,
+      "stdout": "Typescript: 24040\n----",
+      "scores": {
+       "Typescript": 24040.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 84158685437,
+       "cycles": 20659512434,
+       "branch-instructions": 15547424529,
+       "branch-misses": 42915228,
+       "cache-references": 34523498295,
+       "cache-misses": 346652421
+      },
+      "wallSeconds": 5.395454506855458,
+      "stdout": "Typescript: 24071\n----",
+      "scores": {
+       "Typescript": 24071.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83894128492,
+       "cycles": 20482693217,
+       "branch-instructions": 15499046263,
+       "branch-misses": 42202546,
+       "cache-references": 34423369509,
+       "cache-misses": 322505592
+      },
+      "wallSeconds": 5.332360218279064,
+      "stdout": "Typescript: 24268\n----",
+      "scores": {
+       "Typescript": 24268.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83885723238,
+       "cycles": 20546326733,
+       "branch-instructions": 15484071390,
+       "branch-misses": 41985977,
+       "cache-references": 34412702703,
+       "cache-misses": 343101589
+      },
+      "wallSeconds": 5.358415477909148,
+      "stdout": "Typescript: 24208\n----",
+      "scores": {
+       "Typescript": 24208.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 84123756334,
+       "cycles": 20770828579,
+       "branch-instructions": 15535637121,
+       "branch-misses": 42598519,
+       "cache-references": 34520407089,
+       "cache-misses": 331823513
+      },
+      "wallSeconds": 5.409562036860734,
+      "stdout": "Typescript: 23963\n----",
+      "scores": {
+       "Typescript": 23963.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83898470890,
+       "cycles": 20483100508,
+       "branch-instructions": 15500606365,
+       "branch-misses": 42343168,
+       "cache-references": 34447818609,
+       "cache-misses": 327675987
+      },
+      "wallSeconds": 5.331432271748781,
+      "stdout": "Typescript: 24278\n----",
+      "scores": {
+       "Typescript": 24278.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 84160633318,
+       "cycles": 20615287369,
+       "branch-instructions": 15547816824,
+       "branch-misses": 42752009,
+       "cache-references": 34505065483,
+       "cache-misses": 328449051
+      },
+      "wallSeconds": 5.384805989917368,
+      "stdout": "Typescript: 24112\n----",
+      "scores": {
+       "Typescript": 24112.0
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 83899061460.5,
+     "zjsMedian": 83914797407.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0001929275950734,
+      1.0003620154146615,
+      1.0031223617244818,
+      0.9999553118374235,
+      0.9998269141053446,
+      1.0026266664564722,
+      0.9994120403863682,
+      0.9998462227766045
+     ],
+     "ratioMedian": 1.0000741197162484,
+     "ratioMAD": 0.00026755065465844385
+    },
+    "cycles": {
+     "qjsMedian": 20577596769.5,
+     "zjsMedian": 20585870031.5,
+     "pairedRatiosZjsOverQjs": [
+      0.9989579621077834,
+      1.0058422207131328,
+      1.0073661611533409,
+      0.9961453794848898,
+      1.0006427648291822,
+      1.0060578970152383,
+      0.9862368874614169,
+      0.994058905303851
+     ],
+     "ratioMedian": 0.9998003634684829,
+     "ratioMAD": 0.005891657704640896
+    },
+    "branch-instructions": {
+     "qjsMedian": 15500843152.5,
+     "zjsMedian": 15502033219.0,
+     "pairedRatiosZjsOverQjs": [
+      1.000288750711289,
+      1.000213602924532,
+      1.0030204865887327,
+      0.9999160653644346,
+      0.9989026729271469,
+      1.0021434227547232,
+      0.9994187604647986,
+      0.9998279067417956
+     ],
+     "ratioMedian": 1.0000648341444833,
+     "ratioMAD": 0.00044150054118624604
+    },
+    "branch-misses": {
+     "qjsMedian": 42560248.0,
+     "zjsMedian": 42608471.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0039400036050565,
+      1.0015499688161456,
+      1.00815637990457,
+      0.992531159717745,
+      0.9899142848722408,
+      1.0003274190166882,
+      0.9895888042644206,
+      0.9942869907672872
+     ],
+     "ratioMedian": 0.9973072048919878,
+     "ratioMAD": 0.00570442194365578
+    },
+    "cache-references": {
+     "qjsMedian": 34450997934.0,
+     "zjsMedian": 34459506477.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0001709670025398,
+      1.0009796971626876,
+      1.0016977451199647,
+      0.9995135974444544,
+      0.9987472394127193,
+      1.002156378114337,
+      0.9989194161314162,
+      0.9991746363767895
+     ],
+     "ratioMedian": 0.9998422822234971,
+     "ratioMAD": 0.0010089544514294002
+    },
+    "cache-misses": {
+     "qjsMedian": 336021251.0,
+     "zjsMedian": 334701078.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0296921183145402,
+      1.0013545393102632,
+      1.045713682582753,
+      0.9672542283812651,
+      1.0244269488631457,
+      0.9822021421471095,
+      0.9623827133835341,
+      0.9406336319476429
+     ],
+     "ratioMedian": 0.9917783407286864,
+     "ratioMAD": 0.031022117739805788
+    },
+    "wallSeconds": {
+     "qjsMedian": 5.357151102507487,
+     "zjsMedian": 5.370490296976641,
+     "pairedRatiosZjsOverQjs": [
+      0.9968849679510329,
+      1.0056149252158602,
+      1.0108604474220202,
+      0.9970745792489458,
+      1.0035843524478507,
+      1.0072106123170528,
+      0.9872857316019261,
+      0.9909606682628843
+     ],
+     "ratioMedian": 1.0003294658483983,
+     "ratioMAD": 0.006083302918058142
+    }
+   },
+   "derived": {
+    "qjsIPC": 4.077204077827724,
+    "zjsIPC": 4.076329894174772,
+    "ipcRatioZjsOverQjs": 0.9997855923725512
+   }
+  }
+ },
+ "orderLog": [
+  {
+   "bench": "typescript",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 7,
+   "order": "zjs->qjs"
+  }
+ ]
+}

@@ -232,7 +232,7 @@ pub fn appendBacktraceFunctionName(
 }
 
 pub fn appendCallSiteFunctionName(rt: *core.JSRuntime, bytes: *std.ArrayList(u8), site: *core.Object) !void {
-    const name_value = site.callSiteFunctionName() orelse {
+    const name_value = site.callSiteFunctionName(rt) orelse {
         try bytes.appendSlice(rt.memory.allocator, "<anonymous>");
         return;
     };
@@ -244,7 +244,7 @@ pub fn appendCallSiteFunctionName(rt: *core.JSRuntime, bytes: *std.ArrayList(u8)
 }
 
 pub fn appendCallSiteFileName(rt: *core.JSRuntime, bytes: *std.ArrayList(u8), site: *core.Object) !void {
-    const file_value = site.callSiteFile() orelse {
+    const file_value = site.callSiteFile(rt) orelse {
         try bytes.appendSlice(rt.memory.allocator, "<anonymous>");
         return;
     };
@@ -263,9 +263,9 @@ pub fn errorStackGetter(
 ) !core.JSValue {
     const object = object_ops.objectFromValue(this_value) orelse return error.TypeError;
     if (object.class_id != core.class.ids.error_) return core.JSValue.undefinedValue();
-    if (object.errorStack()) |stack| return stack.dup();
-    if (object.errorStackSites()) |sites| {
-        const stack = try error_stack_ops.formatCapturedErrorStackValue(ctx, output, global, this_value, sites, object.errorStackSiteCount());
+    if (object.errorStack(ctx.runtime)) |stack| return stack.dup();
+    if (object.errorStackSites(ctx.runtime)) |sites| {
+        const stack = try error_stack_ops.formatCapturedErrorStackValue(ctx, output, global, this_value, sites, object.errorStackSiteCount(ctx.runtime));
         errdefer stack.free(ctx.runtime);
         try object.setErrorStack(ctx.runtime, stack);
         return stack;

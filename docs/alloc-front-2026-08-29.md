@@ -66,12 +66,14 @@ trace-only(rc 下几乎全部 comptime 消解)。
 | **同一字节写后重读** | `strb [hdr+2]`(heap_accounted)之后 `ldrb [hdr+2]` 供 `isBlockCellHeader`,其后 `bics` 占 **40.1%** 自身周期 | **可删**(K1) |
 | **同一字节写后重读** | `strb [hdr+3]`(young 位)之后再 `ldrb [hdr+2]`,其后 `mov/bics` 占 **7.0%** | **可删**(K1) |
 | 必要语义 | `orr #0x40` + `strb` 发布位 | 保留(登记审计 §3.1:唯一不可退的逐对象写) |
-| 必要语义 | `old_space.recordAlloc` 的 ldr/add/str | 保留 |
+| 历史记账（已 superseded） | `old_space.recordAlloc` 的 ldr/add/str | P1 于 2026-08-31 从 ReleaseFast 删除；公开统计改为 cold ownership census，test/audit 构建另有独立影子字节 oracle |
 | 冷 | `Table.insert` / concurrent 灰化 / large 臂 | 未执行 |
 
-编译器为什么不敢复用寄存器:`old_space.recordAlloc` 与
-`recordLargeSpaceAllocCold` 都经 `self` 写内存,可能与 header 别名,所以
-store 之后的每一次 `alloc_info` 读都必须重新装载。
+以下别名分析记录的是 **2026-08-29 当时的实现**：`old_space.recordAlloc` 与
+`recordLargeSpaceAllocCold` 都经 `self` 写内存,可能与 header 别名,所以当时
+store 之后的每一次 `alloc_info` 读都必须重新装载。当前 ReleaseFast 已无这两个
+ledger 更新；审计独立性由仅在 test/ownership-audit 构建编译的影子字节 oracle
+维持，不应再把本段读作现行热路径描述。
 
 ### 1.4 硬件证据:trace 的 miss 是真的
 

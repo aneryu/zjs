@@ -276,17 +276,17 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     inline for ([_]u8{ op.get_loc_check, op.get_loc_checkthis, op.put_loc_check, op.set_loc_check, op.put_loc_check_init, op.set_loc_uninitialized }) |o| t[o] = h_checkedloc;
 
     // --- names ---
-    t[op.to_propkey] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try vm_property_field.toPropKeyVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
-        }
-    }.b);
+    // C0 closed (2026-08-30): to_propkey's direct id 112 is
+    // quarantined_unused; execution reaches toPropKeyVm only through the
+    // `using` carrier's sub dispatch. No entry here -- a quarantined byte
+    // in a stream must fall to the invalid handler.
     t[op.set_name] = coldStd(struct {
         fn b(vm: *Vm, pc: [*]const u8) HostError!void {
             try vm_property_field.setName(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, pc[0]);
         }
     }.b);
-    t[op.set_name_computed] = t[op.set_name];
+    // set_name_computed: C1-1 closed; the quarantined byte 75 falls to
+    // the invalid handler, execution goes through the ext0 carrier.
     t[op.nip_catch] = h(struct {
         fn b(vm: *Vm) HostError!void {
             switch (try vm_value.nipCatch(vm.ctx.runtime, vm.stack)) {
@@ -529,7 +529,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             try vm_literal.specialObject(vm.ctx, vm.stack, vm.function, vm.frame, vm.global);
         }
     }.b);
-    t[op.using] = h(struct {
+    t[op.ext0] = h(struct {
         fn b(vm: *Vm) HostError!void {
             _ = try using_ops.execVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
@@ -815,7 +815,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.eq_if_false8] = dispatch.op_eq_if_false8_cold;
     t[op.put_loc8_get_loc8] = dispatch.op_put_loc8_get_loc8_cold;
     t[op.push_this_put_loc0] = dispatch.op_push_this_put_loc0_cold;
-    t[op.put_loc0_get_loc0] = dispatch.op_put_loc0_get_loc0_cold;
     t[op.push_0_or] = dispatch.op_push_0_or_cold;
     t[op.sar_get_array_el] = dispatch.op_sar_get_array_el_cold;
     t[op.push_2_sar] = dispatch.op_push_2_sar_cold;
@@ -955,7 +954,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.inc_loc] = dispatch.op_update_loc;
     t[op.put_loc8_get_loc8] = dispatch.op_put_loc8_get_loc8;
     t[op.push_this_put_loc0] = dispatch.op_push_this_put_loc0;
-    t[op.put_loc0_get_loc0] = dispatch.op_put_loc0_get_loc0;
     t[op.dec_loc] = dispatch.op_update_loc;
     t[op.get_field] = dispatch.op_get_field; // inline-cache fast path; IC miss → cold h_field
     t[op.get_loc0_field] = dispatch.op_get_loc0_field;
@@ -964,7 +962,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.get_field_field2] = dispatch.op_get_field_field2;
     t[op.get_var_field] = dispatch.op_get_var_field;
     t[op.get_field2_call_method] = dispatch.op_get_field2_call_method;
-    t[op.using] = dispatch.op_using;
+    t[op.ext0] = dispatch.op_using;
     t[op.get_field2] = dispatch.op_get_field2; // primitive-string method resolution; else → cold h_field
     t[op.put_field] = dispatch.op_put_field; // inline-cache put; IC miss → cold h_field
     t[op.get_array_el] = dispatch.op_get_array_el; // dense fast path; miss → cold h_get_array_element

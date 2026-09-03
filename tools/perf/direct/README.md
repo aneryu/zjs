@@ -11,7 +11,7 @@ Driver options are passed after `--`, for example:
 
 ```sh
 zig build perf-direct -- \
-  --cpu 19 --samples 6 --iterations 200000 --warmup 10000 \
+  --field b --samples 6 --iterations 200000 --warmup 10000 \
   --output .zig-cache/perf/qjs-align/direct/manual.json
 ```
 

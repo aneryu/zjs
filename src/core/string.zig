@@ -10,6 +10,7 @@
 
 const atom_mod = @import("atom.zig");
 const gc = @import("gc.zig");
+const gc_block_heap = @import("gc_block_heap.zig");
 const unicode = @import("../libs/unicode.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
@@ -87,21 +88,27 @@ pub const StringRope = struct {
     /// aligned. The rc word lives in the LAST 4 bytes of the prefix, i.e. at
     /// `nodePtr - 4`, so `header()` returns the same fixed-offset RC word a flat
     /// string would.
-    pub const rc_prefix_size: usize = std.mem.alignForward(usize, gc.string_rc_prefix_size, @alignOf(StringRope));
+    pub const rc_prefix_size: usize = std.mem.alignForward(usize, gc.string_prefix_size, @alignOf(StringRope));
 
     /// Pointer to the 4-byte refcount word sitting immediately before this rope
     /// node (`ropePtr - 4`), mirroring `String.header()` and QuickJS `__js_rc`.
     pub inline fn header(self: *const StringRope) *gc.StringHeader {
         const base: [*]u8 = @ptrCast(@constCast(self));
-        return @ptrCast(@alignCast(base - gc.string_rc_prefix_size));
+        return @ptrCast(@alignCast(base - gc.ref_count_offset_from_payload));
     }
 
     /// Recover a rope node from its refcount-word pointer (inverse of
-    /// `header()`). The rc word sits `string_rc_prefix_size` (4) bytes before
-    /// the node, exactly like a flat string.
+    /// `header()`). The rc word sits four bytes before the node (the
+    /// Metadata prefix's lifetime tail), exactly like a flat string.
     pub inline fn fromHeader(hdr: *gc.StringHeader) *StringRope {
         const base: [*]u8 = @ptrCast(hdr);
-        return @ptrCast(@alignCast(base + gc.string_rc_prefix_size));
+        return @ptrCast(@alignCast(base + gc.ref_count_offset_from_payload));
+    }
+
+    /// The `Metadata` word at the allocation base (`nodePtr - 8`).
+    pub inline fn metadata(self: *const StringRope) *gc.Metadata {
+        const base: [*]u8 = @ptrCast(@constCast(self));
+        return @ptrCast(@alignCast(base - rc_prefix_size));
     }
 
     /// A `Tag.string_rope` JSValue pointing at this node.
@@ -185,6 +192,11 @@ pub const StringRope = struct {
         };
         const old_left = self.left;
         const old_right = self.right;
+        // Tracer-owned strings: the rope is a heap owner adopting a fresh
+        // (young / possibly unmarked) child.
+        if (comptime gc.string_tracer_owned) {
+            rt.gc.generationalBarrierValue(@ptrCast(@alignCast(self)), flat.value());
+        }
         self.left = flat.value();
         self.right = JSValue.undefinedValue();
         freeRopeTail(rt, self);
@@ -279,14 +291,20 @@ pub const String = struct {
     /// every GC-backed refcounted value.
     pub inline fn header(self: *const String) *gc.StringHeader {
         const base: [*]u8 = @ptrCast(@constCast(self));
-        return @ptrCast(@alignCast(base - gc.string_rc_prefix_size));
+        return @ptrCast(@alignCast(base - gc.ref_count_offset_from_payload));
     }
 
     /// Recover a `*String` from its refcount prefix pointer (inverse of
     /// `header()`; replaces the old `@fieldParentPtr("header", …)`).
     pub inline fn fromHeader(hdr: *gc.StringHeader) *String {
         const base: [*]u8 = @ptrCast(hdr);
-        return @ptrCast(@alignCast(base + gc.string_rc_prefix_size));
+        return @ptrCast(@alignCast(base + gc.ref_count_offset_from_payload));
+    }
+
+    /// The `Metadata` word at the allocation base (`stringPtr - 8`).
+    pub inline fn metadata(self: *const String) *gc.Metadata {
+        const base: [*]u8 = @ptrCast(@constCast(self));
+        return @ptrCast(@alignCast(base - gc.string_prefix_size));
     }
 
     /// Returns an owned runtime string. The runtime releases it through
@@ -822,6 +840,9 @@ pub const String = struct {
     }
 
     pub fn destroyFromHeader(rt: *JSRuntime, hdr: *gc.StringHeader) void {
+        // rc-zero path only: under the tracer-owned build `JSValue.free` is a
+        // no-op for string tags and death goes through `destroyCellFromHeader`.
+        std.debug.assert(!gc.string_tracer_owned);
         const self: *String = String.fromHeader(hdr);
         // `atom_id` is a weak back-pointer: it holds no atom reference.
         // A string bound to a live dynamic atom cannot be destroyed (the
@@ -839,6 +860,7 @@ pub const String = struct {
     }
 
     pub fn destroyWeakSymbolBody(rt: *JSRuntime, self: *String) void {
+        std.debug.assert(!gc.string_tracer_owned);
         std.debug.assert(self.header().rc == 0);
         self.atom_id = no_atom_id;
         destroyFlat(rt, self);
@@ -852,15 +874,41 @@ pub const String = struct {
         // compare bounds all string construction.
         if (unit_count > max_length) return error.StringTooLong;
         const inline_layout = inlineAllocationLayout(tag, unit_count) orelse return error.OutOfMemory;
-        // Reserve a 4-byte refcount prefix ahead of the struct so `String`
-        // itself stays exactly 12B (qjs `JSString`). The block base is
-        // 4-aligned; the rc prefix is 4 bytes, so the struct at `base + 4` keeps
-        // `String`'s 4-byte alignment and the inline char FAM stays u16-aligned.
+        // Reserve the eight-byte Metadata prefix ahead of the struct so
+        // `String` itself stays exactly 12B (qjs `JSString`). The block base
+        // is 8-aligned (Metadata), so the struct at `base + 8` keeps `String`'s
+        // 4-byte alignment and the inline char FAM stays u16-aligned. The
+        // prefix's lifetime tail is the refcount word (`header()`).
+        if (comptime gc.string_tracer_owned) {
+            if (try rt.memory.createStringCell(inline_layout.total_size)) |base| {
+                const self: *String = @ptrCast(@alignCast(base + gc.string_prefix_size));
+                self.* = .{
+                    .len_meta = .{ .len = @intCast(unit_count), .is_wide = (tag == .utf16) },
+                    .hash_meta = .{},
+                    .atom_id = no_atom_id,
+                };
+                rt.gc.addInitializedWithSizeNoFail(@ptrCast(@alignCast(self)), gc_block_heap.accountedBodyBytesForRequest(inline_layout.total_size, gc.string_prefix_size).?);
+                return self;
+            }
+            // Extent route (spec §5.7): over the cell ceiling the body lives
+            // in a medium page run / large mapping of the same heap, behind a
+            // standalone prefix. Publication stamps the encoded size and
+            // registers the address; the extent table is its enumeration.
+            const bytes = try rt.memory.createStringExtent(inline_layout.total_size);
+            const self: *String = @ptrCast(@alignCast(bytes.ptr + gc.string_prefix_size));
+            self.* = .{
+                .len_meta = .{ .len = @intCast(unit_count), .is_wide = (tag == .utf16) },
+                .hash_meta = .{},
+                .atom_id = no_atom_id,
+            };
+            rt.gc.addInitializedWithSizeNoFail(@ptrCast(@alignCast(self)), inline_layout.total_size - gc.string_prefix_size);
+            return self;
+        }
         const bytes = try rt.allocStringAlignedBytes(inline_layout.total_size, inline_layout.allocation_alignment);
         errdefer rt.memory.freeAlignedBytes(bytes, inline_layout.allocation_alignment);
-        const rc_ptr: *gc.StringHeader = @ptrCast(@alignCast(bytes.ptr));
-        rc_ptr.* = .{};
-        const self: *String = @ptrCast(@alignCast(bytes.ptr + gc.string_rc_prefix_size));
+        const meta: *gc.Metadata = @ptrCast(@alignCast(bytes.ptr));
+        meta.* = string_prefix_init;
+        const self: *String = @ptrCast(@alignCast(bytes.ptr + gc.string_prefix_size));
         self.* = .{
             .len_meta = .{ .len = @intCast(unit_count), .is_wide = (tag == .utf16) },
             .hash_meta = .{},
@@ -875,9 +923,19 @@ pub const String = struct {
             .latin1 => inlineAllocationLayout(.latin1, self.len_meta.len) orelse unreachable,
             .utf16 => inlineAllocationLayout(.utf16, self.len_meta.len) orelse unreachable,
         };
-        // Free from the refcount prefix base (`stringPtr - 4`), the true
+        if (comptime gc.string_tracer_owned) {
+            if (gc.Registry.isBlockCellHeader(@ptrCast(@alignCast(self)))) {
+                rt.memory.destroyStringCell(self, inline_layout.total_size);
+                return;
+            }
+            if (self.metadata().alloc_info.standalone) {
+                rt.memory.destroyStringExtent(self, inline_layout.total_size);
+                return;
+            }
+        }
+        // Free from the Metadata prefix base (`stringPtr - 8`), the true
         // allocation start whose size includes the prefix.
-        const base: [*]u8 = @ptrCast(self.header());
+        const base: [*]u8 = @ptrCast(self.metadata());
         const bytes = base[0..inline_layout.total_size];
         rt.memory.freeAlignedBytes(bytes, inline_layout.allocation_alignment);
     }
@@ -892,10 +950,11 @@ comptime {
     // The u16 payload must be reachable at a u16-aligned address so `utf16()`
     // can `@alignCast` safely.
     std.debug.assert(payload_offset % @alignOf(u16) == 0);
-    // The flat `String` refcount prefix is exactly `@alignOf(String)` bytes, so
-    // the struct at `base + prefix` keeps `String`'s alignment (and thus the
-    // u16 FAM stays aligned). Guard the invariant the layout math relies on.
-    std.debug.assert(gc.string_rc_prefix_size % @alignOf(String) == 0);
+    // The flat `String` prefix is a multiple of `@alignOf(String)`, so the
+    // struct at `base + prefix` keeps `String`'s alignment (and thus the u16
+    // FAM stays aligned). Guard the invariant the layout math relies on.
+    std.debug.assert(gc.string_prefix_size % @alignOf(String) == 0);
+    std.debug.assert(gc.string_prefix_size == @sizeOf(gc.Metadata));
     std.debug.assert(@sizeOf(String) == 12);
     std.debug.assert(@alignOf(String) == 4);
     std.debug.assert(@offsetOf(String, "len_meta") == 0);
@@ -1399,6 +1458,23 @@ fn rebalanceRope(rt: *JSRuntime, rope: JSValue) !JSValue {
 /// new-node linking (materialized rope). Aliasing is the caller's contract,
 /// exactly like the flat `append*InPlace` family (reference-count accounting at
 /// the call site). On allocation failure the rope is left untouched.
+/// "Nobody but the caller holds this rope": the guard behind every in-place
+/// rope mutation (tail append / accumulator reuse). The refcount answers it
+/// exactly; a tracer-owned rope (TGC S2) has no share count at all, so the
+/// answer is a conservative `false` and the caller takes the fresh-node path
+/// (spec §5.7 "value_ops": in-place append is dropped and measured later).
+pub inline fn ropeExclusivelyHeld(node: *const StringRope) bool {
+    if (comptime gc.string_tracer_owned) return false;
+    return node.header().rc == 1;
+}
+
+/// `ropeExclusivelyHeld` generalized to a caller-known alias count `n` (the
+/// fused `add_loc` path holds the local slot plus its transient dup = 2).
+pub inline fn ropeShareCountAtMost(node: *const StringRope, n: usize) bool {
+    if (comptime gc.string_tracer_owned) return false;
+    return @as(usize, @intCast(node.header().rc)) <= n;
+}
+
 pub fn appendRopeTail(node: *StringRope, rt: *JSRuntime, suffix: String.ResolvedData, max_ref_count: usize) !bool {
     std.debug.assert(node.rt == rt);
     if (node.isLinearized()) return false;
@@ -1411,7 +1487,7 @@ pub fn appendRopeTail(node: *StringRope, rt: *JSRuntime, suffix: String.Resolved
     // reference beyond that is an independent observer, so appending in place
     // would corrupt it — bail. This is the refcount analogue of the old
     // `rope_child` snapshot bit, generalized to the caller's known-alias count.
-    if (node.header().rc > max_ref_count) return false;
+    if (!ropeShareCountAtMost(node, max_ref_count)) return false;
     const add_len = suffix.len();
     if (add_len == 0) return true;
     const new_total = checkedAddLength(node.len_(), add_len) orelse return false;
@@ -1471,7 +1547,7 @@ comptime {
     // struct that follows it stays aligned, and it must be large enough to hold
     // the 4-byte rc word that sits at `nodePtr - 4`.
     std.debug.assert(StringRope.rc_prefix_size % @alignOf(StringRope) == 0);
-    std.debug.assert(StringRope.rc_prefix_size >= gc.string_rc_prefix_size);
+    std.debug.assert(StringRope.rc_prefix_size == gc.string_prefix_size);
     std.debug.assert(@sizeOf(StringRope) % @alignOf(?*RopeTailState) == 0);
 }
 
@@ -1480,10 +1556,22 @@ comptime {
 /// word lives at `nodePtr - 4` and is reached through `node.header()`.
 fn allocRopeNode(rt: *JSRuntime, with_accumulator_tail_slot: bool) !*StringRope {
     const alloc_size = if (with_accumulator_tail_slot) accumulator_rope_node_alloc_size else rope_node_alloc_size;
+    // Ropes never take the extent route: both node sizes fit a cell.
+    comptime std.debug.assert(gc_block_heap.canAllocCellSize(accumulator_rope_node_alloc_size));
+    if (comptime gc.string_tracer_owned) {
+        if (try rt.memory.createStringCell(alloc_size)) |base| {
+            const node: *StringRope = @ptrCast(@alignCast(base + StringRope.rc_prefix_size));
+            rt.gc.addInitializedWithSizeNoFail(@ptrCast(node), gc_block_heap.accountedBodyBytesForRequest(alloc_size, StringRope.rc_prefix_size).?);
+            // Rope discriminator: the prefix `mark` flag is free for strings
+            // (cell bitmaps and extent tables hold the mark authority).
+            node.metadata().flags.mark = true;
+            return node;
+        }
+    }
     const bytes = try rt.allocStringAlignedBytes(alloc_size, rope_node_alignment);
     errdefer rt.memory.freeAlignedBytes(bytes, rope_node_alignment);
     const node: *StringRope = @ptrCast(@alignCast(bytes.ptr + StringRope.rc_prefix_size));
-    node.header().* = .{};
+    node.metadata().* = string_prefix_init_rope;
     return node;
 }
 
@@ -1491,6 +1579,12 @@ fn allocRopeNode(rt: *JSRuntime, with_accumulator_tail_slot: bool) !*StringRope 
 fn freeRopeNode(rt: *JSRuntime, node: *StringRope) void {
     const base: [*]u8 = @as([*]u8, @ptrCast(node)) - StringRope.rc_prefix_size;
     const alloc_size = if (node.supportsTail()) accumulator_rope_node_alloc_size else rope_node_alloc_size;
+    if (comptime gc.string_tracer_owned) {
+        if (gc.Registry.isBlockCellHeader(@ptrCast(node))) {
+            rt.memory.destroyStringCell(node, alloc_size);
+            return;
+        }
+    }
     const bytes = base[0..alloc_size];
     rt.memory.freeAlignedBytes(bytes, rope_node_alignment);
 }
@@ -1606,6 +1700,9 @@ fn copyResolvedUnits(comptime T: type, out: []T, resolved: String.ResolvedData) 
 /// bounds the recursive release chain, so the generic node needs no intrusive
 /// destroy link.
 pub fn destroyRope(rt: *JSRuntime, node: *StringRope) void {
+    // rc-zero path only (see `String.destroyFromHeader`); sweep-time death of
+    // a tracer-owned rope is `destroyCellFromHeader`.
+    std.debug.assert(!gc.string_tracer_owned);
     if (node.isLinearized()) {
         std.debug.assert(!node.hasTail());
         node.left.free(rt);
@@ -1623,23 +1720,187 @@ const InlineAllocationLayout = struct {
     allocation_alignment: std.mem.Alignment,
 };
 
+/// Initial Metadata for a freshly allocated flat string or rope node: kind
+/// `.string`, no list membership or registry publication (both still absent
+/// until S2-a2), count 1 in the lifetime tail.
+const string_prefix_init: gc.Metadata = .{
+    .flags = .{ .kind = .string },
+    .lifetime = .{ .rc = 1 },
+};
+
+/// Rope nodes set the prefix `mark` flag as their discriminator: for the
+/// string family that bit carries no mark authority (block bitmaps / extent
+/// tables do), so it is free to tell a 48-byte rope from a flat body.
+const string_prefix_init_rope: gc.Metadata = .{
+    .flags = .{ .kind = .string, .mark = true },
+    .lifetime = .{ .rc = 1 },
+};
+
+pub inline fn metaIsRope(meta: *const gc.Metadata) bool {
+    return meta.flags.mark;
+}
+
+/// Registry-side size query for a string-family carrier (TGC S2). `header`
+/// is the body pointer the JSValue payload names (String or StringRope);
+/// the prefix sits eight bytes before it.
+pub fn accountedAllocationSizeFromHeader(header: *const gc.GCObjectHeader) usize {
+    const meta: *const gc.Metadata = @ptrFromInt(@intFromPtr(header) - gc.string_prefix_size);
+    const total = if (metaIsRope(meta)) blk: {
+        const node: *const StringRope = @ptrCast(@alignCast(header));
+        break :blk if (node.supportsTail()) accumulator_rope_node_alloc_size else rope_node_alloc_size;
+    } else blk: {
+        const body: *const String = @ptrCast(@alignCast(header));
+        const layout = if (body.len_meta.is_wide)
+            inlineAllocationLayout(.utf16, body.len_meta.len) orelse unreachable
+        else
+            inlineAllocationLayout(.latin1, body.len_meta.len) orelse unreachable;
+        break :blk layout.total_size;
+    };
+    if (gc.Registry.isBlockCellHeader(header)) {
+        return gc_block_heap.accountedBodyBytesForRequest(total, gc.string_prefix_size).?;
+    }
+    return total - gc.string_prefix_size;
+}
+
+/// Sweep-time death of a condemned string-family BLOCK CELL (TGC S2 §5.7
+/// "sweep dispatch"). `header` is the body pointer (cell base + 8, the same
+/// convention `traceStringEdges` uses); the prefix at `header - 8` tells a
+/// rope from a flat body. Nothing here touches a refcount and nothing calls
+/// `JSValue.free`: a rope's `left`/`right` are traced values the sweep
+/// reclaims on their own, and only the native pieces (rope tail buffer, atom
+/// table entry) need an explicit hand-off before the cell goes back.
+pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.GCObjectHeader) void {
+    comptime std.debug.assert(gc.string_tracer_owned);
+    std.debug.assert(gc.Registry.isBlockCellHeader(header));
+    const meta: *const gc.Metadata = @ptrFromInt(@intFromPtr(header) - gc.string_prefix_size);
+    if (metaIsRope(meta)) {
+        const node: *StringRope = @ptrCast(@alignCast(header));
+        // A linearized rope never has a tail (see `destroyRope`); for the
+        // rest the tail is a private native buffer with no GC edges.
+        freeRopeTail(rt, node);
+        const alloc_size = if (node.supportsTail()) accumulator_rope_node_alloc_size else rope_node_alloc_size;
+        rt.gc.unpublishStringCell(header, gc_block_heap.accountedBodyBytesForRequest(alloc_size, StringRope.rc_prefix_size).?);
+        rt.memory.destroyStringCell(node, alloc_size);
+        return;
+    }
+    const body: *String = @ptrCast(@alignCast(header));
+    // Symbol bodies carry a dynamic atom id: the table must drop (or weaken)
+    // its entry before the body's memory is recycled. A string-kind atom body
+    // cannot be condemned while its entry lives (`AtomTable.traceRoots`
+    // reports it), so `onSymbolBodyDead` only ever sees symbols.
+    const atom_id = body.atom_id;
+    if (atom_id != String.no_atom_id and !atom_mod.isConst(atom_id) and !atom_mod.isTaggedInt(atom_id)) {
+        rt.atoms.onSymbolBodyDead(atom_id, body);
+    }
+    const layout = if (body.len_meta.is_wide)
+        inlineAllocationLayout(.utf16, body.len_meta.len) orelse unreachable
+    else
+        inlineAllocationLayout(.latin1, body.len_meta.len) orelse unreachable;
+    rt.gc.unpublishStringCell(header, gc_block_heap.accountedBodyBytesForRequest(layout.total_size, gc.string_prefix_size).?);
+    rt.memory.destroyStringCell(body, layout.total_size);
+}
+
+/// TGC S2 extent sweep (spec §5.7): destroy every string extent the major
+/// did not mark. The collector calls this after the bitmap sweep (the block
+/// cells' twin is `destroyCellFromHeader`); returns the count destroyed.
+/// Runtime teardown twin of the sweep: every remaining string cell and
+/// extent is dead by definition. Cells are collected first so freeing does
+/// not disturb the bitmap walk.
+pub fn destroyAllStringCarriersForDeinit(rt: *JSRuntime) void {
+    comptime std.debug.assert(gc.string_tracer_owned);
+    var cells = std.ArrayList(*gc.GCObjectHeader).empty;
+    defer cells.deinit(std.heap.page_allocator);
+    var it = rt.gc.objectIterator();
+    while (it.next()) |header| {
+        if (header.metaConst().flags.kind != .string) continue;
+        if (!gc.Registry.isBlockCellHeader(header)) continue;
+        cells.append(std.heap.page_allocator, header) catch @panic("gc: deinit string carrier list");
+    }
+    for (cells.items) |header| destroyCellFromHeader(rt, header);
+    const heap = &rt.gc.block_heap;
+    // Major epochs are even; the next one matches no recorded extent mark.
+    _ = heap.sweepStringExtents(heap.mark_epoch +% 2, @ptrCast(rt), destroyDeadStringExtent);
+}
+
+pub fn sweepStringExtents(rt: *JSRuntime) usize {
+    comptime std.debug.assert(gc.string_tracer_owned);
+    const heap = &rt.gc.block_heap;
+    return heap.sweepStringExtents(heap.mark_epoch, @ptrCast(rt), destroyDeadStringExtent);
+}
+
+/// `Heap.sweepStringExtents` callback: the same handshake a condemned flat
+/// cell performs, then the registry unpublish and the memory return.
+/// `base` is the allocation start (prefix), `user_bytes` the request.
+fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize) void {
+    const rt: *JSRuntime = @ptrCast(@alignCast(ctx));
+    const meta: *const gc.Metadata = @ptrFromInt(base);
+    std.debug.assert(meta.flags.kind == .string and meta.alloc_info.standalone);
+    // Ropes always fit a cell (`allocRopeNode`), so an extent is a flat body.
+    std.debug.assert(!metaIsRope(meta));
+    const header: *gc.GCObjectHeader = @ptrFromInt(base + gc.string_prefix_size);
+    const body: *String = @ptrCast(@alignCast(header));
+    std.debug.assert(accountedAllocationSizeFromHeader(header) == user_bytes - gc.string_prefix_size);
+    // Symbol-body handshake: a dynamic atom whose body just died must drop
+    // or weaken its entry (spec §5.7 atom ownership rule). Const and
+    // tagged-int ids have no entry to tell.
+    const atom_id = body.atom_id;
+    if (atom_id != String.no_atom_id and !atom_mod.isConst(atom_id) and !atom_mod.isTaggedInt(atom_id)) {
+        rt.atoms.onSymbolBodyDead(atom_id, body);
+    }
+    rt.gc.unpublishStringExtent(header, user_bytes - gc.string_prefix_size);
+    rt.memory.destroyStringExtent(body, user_bytes);
+}
+
+comptime {
+    // The extent sweep is wired by the collector; until that call lands, keep
+    // its body analysed in switch-on builds so it cannot rot unnoticed.
+    if (gc.string_tracer_owned) _ = &sweepStringExtents;
+}
+
+/// Child edges of a string-family carrier: flat bodies are leaves, ropes own
+/// `left`/`right`. Reached from `traceHeaderEdges` for both block cells and
+/// (later) extents.
+pub fn traceStringEdges(rt: *JSRuntime, visitor: anytype, header: *gc.GCObjectHeader) !void {
+    _ = rt;
+    const meta: *const gc.Metadata = @ptrFromInt(@intFromPtr(header) - gc.string_prefix_size);
+    if (!metaIsRope(meta)) return;
+    const node: *StringRope = @ptrCast(@alignCast(header));
+    try callVisitValue(visitor, &node.left);
+    try callVisitValue(visitor, &node.right);
+}
+
+/// Visitors come in two shapes (`visitValue` returning void or an error
+/// union); mirror shape.zig's helper so one trace body serves both.
+inline fn callVisitValue(vis: anytype, slot: *JSValue) !void {
+    const VisType = @TypeOf(vis);
+    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
+    const ReturnType = @typeInfo(@TypeOf(CleanType.visitValue)).@"fn".return_type.?;
+    if (comptime @typeInfo(ReturnType) == .error_union) {
+        try vis.visitValue(slot);
+    } else {
+        vis.visitValue(slot);
+    }
+}
+
 fn inlineAllocationLayout(comptime tag: String.StorageTag, unit_count: usize) ?InlineAllocationLayout {
     const unit_size = switch (tag) {
         .latin1 => @sizeOf(u8),
         .utf16 => @sizeOf(u16),
     };
-    const string_alignment = std.mem.Alignment.of(String);
+    // The allocation base carries the Metadata prefix, so it is 8-aligned;
+    // that covers `String` (4) and the u16 FAM.
+    const string_alignment = std.mem.Alignment.of(gc.Metadata);
     const payload_units = switch (tag) {
         // latin1 keeps a trailing NUL terminator (qjs `str8` is NUL-terminated).
         .latin1 => finalLatin1AllocationLen(unit_count) orelse return null,
         .utf16 => unit_count,
     };
     const payload_size = std.math.mul(usize, unit_size, payload_units) catch return null;
-    // Layout: [rc prefix (4B)] [String struct] [char FAM]. `payload_offset` is
-    // measured from the struct base to the FAM; the allocation additionally
-    // carries the leading rc prefix, so the total starts with it.
+    // Layout: [Metadata prefix (8B)] [String struct] [char FAM]. `payload_offset`
+    // is measured from the struct base to the FAM; the allocation additionally
+    // carries the leading prefix, so the total starts with it.
     const struct_and_payload = std.math.add(usize, payload_offset, payload_size) catch return null;
-    const total_size = std.math.add(usize, gc.string_rc_prefix_size, struct_and_payload) catch return null;
+    const total_size = std.math.add(usize, gc.string_prefix_size, struct_and_payload) catch return null;
     return .{
         .total_size = total_size,
         .allocation_alignment = string_alignment,

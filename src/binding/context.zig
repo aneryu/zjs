@@ -584,7 +584,7 @@ pub const JSContext = struct {
         store.retain();
         errdefer store.release();
         const object = try Object.create(self.core.runtime, class.ids.shared_array_buffer, null);
-        errdefer Object.destroyFromHeader(self.core.runtime, &object.header);
+        errdefer Object.destroyFromHeader(self.core.runtime, object.gcHeader());
         object.installSharedByteStorage(self.core.runtime, store);
         object.arrayBufferMaxByteLengthSlot().* = ref.max_byte_length;
         return object.value();
@@ -713,7 +713,7 @@ pub const JSContext = struct {
         const rt = self.core.runtime;
         if (exc.isObject()) {
             const header = exc.refHeader() orelse return error.InvalidEngineState;
-            const object: *Object = @fieldParentPtr("header", header);
+            const object = Object.fromHeader(header);
 
             const name_opt = try getPropertyString(rt, object, "name", allocator);
             errdefer if (name_opt) |n| allocator.free(n);

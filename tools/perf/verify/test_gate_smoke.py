@@ -20,45 +20,137 @@ def stats_output(
     *,
     abandons: int = 0,
     state: str = "clean",
-    doomed_pending: bool = False,
+    endpoint_pending: bool = False,
+    endpoint_buckets: int = 0,
+    endpoint_headers: int = 0,
+    endpoint_cursor: bool = False,
+    endpoint_blocks: int = 0,
+    endpoint_parked: int = 0,
+    endpoint_finalizers: int = 0,
+    endpoint_active_finalizer: bool = False,
+    settled_pending: bool = False,
+    settled_buckets: int = 0,
+    settled_headers: int = 0,
+    settled_cursor: bool = False,
+    settled_blocks: int = 0,
+    settled_parked: int = 0,
+    settled_finalizers: int = 0,
+    settled_active_finalizer: bool = False,
     committed: int = 4096,
     live: int = 1024,
     milli: int = 4000,
 ) -> str:
+    def doomed_line(
+        layer: str,
+        pending: bool,
+        buckets: int,
+        headers: int,
+        cursor: bool,
+        blocks: int,
+        parked: int,
+        finalizers: int,
+        active_finalizer: bool,
+    ) -> str:
+        return (
+            f"gc: {layer} doomed_pending {'true' if pending else 'false'}, "
+            f"doomed_buckets {buckets}, doomed_headers {headers}, "
+            f"doomed_cursor {'true' if cursor else 'false'}, "
+            f"doomed_blocks {blocks}, parked_frees {parked}, "
+            f"deferred_finalizers {finalizers}, "
+            f"active_finalizer {'true' if active_finalizer else 'false'}"
+        )
+
     return "\n".join(
         [
             "Fixture: 7",
+            doomed_line(
+                "endpoint",
+                endpoint_pending,
+                endpoint_buckets,
+                endpoint_headers,
+                endpoint_cursor,
+                endpoint_blocks,
+                endpoint_parked,
+                endpoint_finalizers,
+                endpoint_active_finalizer,
+            ),
             f"gc: block heap committed {committed} live {live} committed/live-x1000 {milli} "
             "superblocks 1 large maps 0",
             f"gc: major retirement commits 3, abandons {abandons}, current state {state}",
-            "gc: terminal doomed_pending "
-            f"{'true' if doomed_pending else 'false'}",
+            doomed_line(
+                "settled",
+                settled_pending,
+                settled_buckets,
+                settled_headers,
+                settled_cursor,
+                settled_blocks,
+                settled_parked,
+                settled_finalizers,
+                settled_active_finalizer,
+            ),
             "",
         ]
     )
 
 
 class GateSmokeCheckTests(unittest.TestCase):
-    def test_required_terminal_invariants_accept_clean_output(self) -> None:
+    def test_required_settled_invariants_accept_clean_output(self) -> None:
         values, result = parse_output(stats_output(), 8000)
         self.assertEqual(0, values["retirement_abandons"])
         self.assertEqual("clean", values["retirement_state"])
-        self.assertFalse(values["doomed_pending"])
+        self.assertFalse(values["endpoint_doomed_pending"])
+        self.assertFalse(values["settled_doomed_pending"])
         self.assertEqual(4000, values["committed_live_milli"])
         self.assertEqual("Fixture: 7", result)
 
-    def test_each_required_terminal_invariant_turns_red(self) -> None:
+    def test_endpoint_state_and_open_retirement_are_diagnostic(self) -> None:
+        values, _ = parse_output(
+            stats_output(
+                state="tracing",
+                endpoint_pending=True,
+                endpoint_buckets=1,
+                endpoint_headers=7,
+                endpoint_cursor=True,
+                endpoint_blocks=2,
+                endpoint_parked=3,
+                endpoint_finalizers=4,
+                endpoint_active_finalizer=True,
+            ),
+            8000,
+        )
+        self.assertEqual("tracing", values["retirement_state"])
+        self.assertTrue(values["endpoint_doomed_pending"])
+        self.assertEqual(7, values["endpoint_doomed_headers"])
+
+    def test_each_required_settled_invariant_turns_red(self) -> None:
         bad_outputs = [
             stats_output(abandons=1),
-            stats_output(state="abandoned"),
-            stats_output(doomed_pending=True),
+            stats_output(settled_pending=True),
+            stats_output(settled_buckets=1),
+            stats_output(settled_headers=1),
+            stats_output(settled_cursor=True),
+            stats_output(settled_blocks=1),
+            stats_output(settled_parked=1),
+            stats_output(settled_finalizers=1),
+            stats_output(settled_active_finalizer=True),
             stats_output(milli=3999),
-            stats_output(committed=33000, live=1000, milli=33000),
+            stats_output(committed=70_000_000, live=1000, milli=70_000_000),
         ]
         for output in bad_outputs:
             with self.subTest(output=output):
                 with self.assertRaises(CheckFailure):
                     parse_output(output, 32000)
+
+    def test_additive_superblock_allowance_is_continuous_at_raytrace_phase(self) -> None:
+        committed = 86_261_760
+        live = 2_117_248
+        raw_milli = (committed * 1000 + live - 1) // live
+        values, _ = parse_output(
+            stats_output(committed=committed, live=live, milli=raw_milli),
+            32000,
+        )
+        self.assertEqual(40743, values["committed_live_milli"])
+        self.assertEqual(20469, values["committed_live_checked_milli"])
 
     def test_exit_zero_without_result_or_with_harness_error_turns_red(self) -> None:
         clean = stats_output()
@@ -93,7 +185,7 @@ class GateSmokeCheckTests(unittest.TestCase):
                                 "gc": {
                                     "retirement_commits": {"min": 1},
                                     "committed_live_milli": {"max": 4500},
-                                    "doomed_pending": False,
+                                    "settled_doomed_pending": False,
                                 },
                             }
                         }
@@ -135,13 +227,14 @@ class GateSmokeCheckTests(unittest.TestCase):
             fake.write_text(
                 "#!/usr/bin/env bash\n"
                 "set -eu\n"
-                "printf '%s|%s\\n' \"${ZJS_GC_ARENA_AUDIT:-0}\" \"$*\" >>\"$FAKE_LOG\"\n"
-                "if [[ \"${1:-}\" == --gc-stats ]]; then\n"
-                "  [[ \"${ZJS_GC_ARENA_AUDIT:-0}\" == 1 ]]\n"
+                "affinity=$(awk '/Cpus_allowed_list/ {print $2}' /proc/self/status)\n"
+                "printf '%s|%s|%s\\n' \"${ZJS_GC_ARENA_AUDIT:-0}\" \"$affinity\" \"$*\" >>\"$FAKE_LOG\"\n"
+                "if [[ \"$*\" == *'--gc-gate-settle --gc-stats'* ]]; then\n"
                 "  printf '%s\\n' 'Fixture: 7' \\\n"
+                "    'gc: endpoint doomed_pending true, doomed_buckets 1, doomed_headers 7, doomed_cursor true, doomed_blocks 2, parked_frees 3, deferred_finalizers 4, active_finalizer false' \\\n"
                 "    'gc: block heap committed 4096 live 1024 committed/live-x1000 4000 superblocks 1 large maps 0' \\\n"
                 "    'gc: major retirement commits 3, abandons 0, current state clean' \\\n"
-                "    'gc: terminal doomed_pending false'\n"
+                "    'gc: settled doomed_pending false, doomed_buckets 0, doomed_headers 0, doomed_cursor false, doomed_blocks 0, parked_frees 0, deferred_finalizers 0, active_finalizer false'\n"
                 "fi\n"
             )
             fake.chmod(0o755)
@@ -179,9 +272,28 @@ class GateSmokeCheckTests(unittest.TestCase):
             )
             self.assertEqual(0, process.returncode, process.stderr)
             calls = log.read_text().splitlines()
-            self.assertEqual(2, len(calls))
-            self.assertTrue(calls[0].startswith("0|"), calls)
-            self.assertTrue(calls[1].startswith("1|--gc-stats "), calls)
+            self.assertEqual(3, len(calls))
+            self.assertTrue(calls[0].startswith("0|0|--gc-gate-settle --gc-stats "), calls)
+            self.assertTrue(calls[1].startswith("0|0|"), calls)
+            self.assertTrue(calls[2].startswith("1|0|--gc-gate-settle --gc-stats "), calls)
+
+            log.write_text("")
+            env["ZJS_MEASURE_FIELD"] = "a"
+            process = subprocess.run(
+                [
+                    "bash",
+                    str(PERF_DIR / "gate_smoke.sh"),
+                    str(fake),
+                    str(corpus),
+                ],
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            self.assertEqual(0, process.returncode, process.stderr)
+            field_calls = log.read_text().splitlines()
+            self.assertEqual(5, len(field_calls))
+            self.assertTrue(all(call.split("|", 2)[1] == "9" for call in field_calls))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,13 @@
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=var_ref
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=var_ref
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=var_ref
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=var_ref
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=var_ref
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=var_ref
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=var_ref
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=var_ref
+VERIFY-STICKY scope=full: 0 precise, 96 conservative-only condemned-but-reachable
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=object
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=object
+VERIFY-STICKY scope=full: 0 precise, 2 conservative-only condemned-but-reachable
+wall=58.07 rss=305360

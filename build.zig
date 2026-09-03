@@ -72,32 +72,18 @@ pub fn build(b: *std.Build) void {
         std.debug.print("error: invalid -Dzjs_gc value '{s}': expected trace_stw\n", .{zjs_gc_base});
         std.process.exit(1);
     }
-    const zjs_experimental_gc = b.option([]const u8, "zjs_experimental_gc", "accepted-but-redundant compat alias from the experimental phase: off or trace_stw; the tracer is the only collector since 2026-08-29") orelse "off";
-    if (!std.mem.eql(u8, zjs_experimental_gc, "off") and !std.mem.eql(u8, zjs_experimental_gc, "trace_stw")) {
-        std.debug.print("error: invalid -Dzjs_experimental_gc value '{s}': expected off or trace_stw\n", .{zjs_experimental_gc});
-        std.process.exit(1);
-    }
     const zjs_gc = zjs_gc_base;
-    const experimental_sticky_major_option = b.option(
+    // TGC R3 roots diagnosis (docs/tracing-gc-s0-spec.md §L4). Links scalar
+    // ValueRootFrames in production, attributes every object the conservative
+    // scan alone kept alive (`--gc-stats` "conservative-only census"), and
+    // arms the L3 unbarriered-store probe in the ReleaseFast binary. Never on
+    // in a shipped or measured artifact.
+    const gc_roots_diag_option = b.option(
         bool,
-        "zjs_experimental_gc_sticky_major",
-        "EXPERIMENTAL trace_stw full-every-2 sticky-major arm (default off)",
+        "zjs_gc_roots_diag",
+        "DIAGNOSTIC precise-scalar-root linking + conservative-only root census (default off)",
     );
-    // The "valid only in trace_stw builds" guard that used to sit here is
-    // gone with the other collectors: `zjs_gc` can no longer hold anything
-    // else, so the check could not fire.
-    const experimental_sticky_major = experimental_sticky_major_option orelse false;
-    // Pass-B corpse census. Pure measurement: it classifies every parked
-    // corpse so the block-drain design's stage-2/stage-3 conditions can be
-    // priced. Default off and comptime-erased when off, because the thing it
-    // measures IS the per-entry cost -- a runtime flag test inside the drain
-    // would be part of the quantity under measurement.
-    const experimental_corpse_census_option = b.option(
-        bool,
-        "zjs_experimental_gc_corpse_census",
-        "EXPERIMENTAL trace_stw Pass-B corpse census (measurement only, default off)",
-    );
-    const experimental_corpse_census = experimental_corpse_census_option orelse false;
+    const gc_roots_diag = gc_roots_diag_option orelse false;
 
     // ===== QCP-1 configuration signature =====
     // The defect class this closes is "a gate reports green about a
@@ -110,7 +96,8 @@ pub fn build(b: *std.Build) void {
     // This is the build graph's BELIEF about the configuration. The compiled
     // code computes the same string independently, in src/config_signature.zig,
     // from the declarations it actually consumes (resolve_labels.default_layout,
-    // @sizeOf(core.value.JSValue), builtin.mode,
+    // @sizeOf(core.value.JSValue), Object's terminal handle/body geometry,
+    // builtin.mode,
     // core.memory.force_gc_on_allocation_enabled,
     // core.atom.ownership_audit_enabled) and fails its own COMPILATION when the
     // two disagree (`config_signature.attest`). `zig build
@@ -185,8 +172,7 @@ pub fn build(b: *std.Build) void {
         .ownership_audit = zjs_ownership_audit,
         .dossier_layout_pad = zjs_dossier_layout_pad,
         .zjs_gc = zjs_gc,
-        .experimental_gc_sticky_major = experimental_sticky_major,
-        .experimental_gc_corpse_census = experimental_corpse_census,
+        .gc_roots_diag = gc_roots_diag,
     };
     // Follows -Doptimize: the public engine module and the OOM corpus engine.
     const engine_options = config.addEngineOptions(b, engine_option_inputs);

@@ -2,10 +2,12 @@
 //! makes it sound (§8.4, §7.4).
 //!
 //! The barrier is incremental-update and shades the *exact new target* of a
-//! strong write. It deliberately reads no owner colour and keeps no
-//! owner-rescan bit: a write through an unreachable owner may preserve
-//! floating garbage for the cycle, which is the price of not paying for owner
-//! state on every store.
+//! strong write. That common target-shading arm deliberately reads no owner
+//! colour and keeps no owner-rescan bit: a write through an unreachable owner
+//! may preserve floating garbage for the cycle, which is the price of not
+//! paying for owner state on every store. The two rare owner-requeue arms are
+//! different: retracing is necessary only after the owner has already been
+//! claimed black, so they verify that prior mark and skip a still-white owner.
 //!
 //! What makes it correct is not the shading alone but its pairing with the
 //! safepoint protocol. The heap store and the shading happen inside one
@@ -27,6 +29,9 @@ pub const Stats = struct {
     barrier_marked_target: usize = 0,
     barrier_unpublished_owner: usize = 0,
     barrier_unpublished_target: usize = 0,
+    /// Shape/Realm target writes that reached the owner-requeue arm. A white
+    /// owner is counted here but skipped: only an already-black owner is
+    /// actually appended to the frontier.
     barrier_requeued_owner: usize = 0,
     /// Times a mutator observed a safepoint request while inside a critical
     /// scope and had to finish the scope first. A high count means scopes are
@@ -81,6 +86,13 @@ pub const Stats = struct {
     phase_finish_conservative_seed_ns: u64 = 0,
     phase_finish_weak_ns: u64 = 0,
     phase_finish_condemn_ns: u64 = 0,
+    /// Finish-pause time before the remark starts (collector setup).
+    phase_finish_init_ns: u64 = 0,
+    /// Finish-pause time after condemnation (young-state retirement, sweep
+    /// model close, safety-build invariants). With `init`, `remark`, `weak`
+    /// and `condemn` this makes the subphase row sum to the STW `finish` row
+    /// up to the two `nowNanos` reads on either side of the pause.
+    phase_finish_tail_ns: u64 = 0,
     phase_retired_nonblock_headers: usize = 0,
     phase_retired_young_blocks: usize = 0,
     phase_retired_remembered_sets: usize = 0,
@@ -90,7 +102,7 @@ pub const Stats = struct {
 comptime {
     // This state lives in every tracing Registry. Keep diagnostic growth
     // deliberate instead of silently widening every runtime.
-    if (@sizeOf(usize) == 8 and @sizeOf(Stats) != 376) {
+    if (@sizeOf(usize) == 8 and @sizeOf(Stats) != 392) {
         @compileError("gc concurrent Stats size changed; update the footprint pin deliberately");
     }
 }

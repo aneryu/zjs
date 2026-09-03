@@ -33,8 +33,13 @@ QuickJS 2026-06-04（`/home/aneryu/quickjs`）。日期：2026-08-27。
 **目标只有一个**：减少 final-form 物理 opcode id；不以减少动态指令数、
 切换寄存器 VM 或追平其他引擎的编号数为成功标准。
 
-**现状**：工作开始时 254 在用 / 2 空闲；已经回收 9 个，现为
-**245 在用 / 11 空闲**（§2.1、§2.5）。需求侧复审只把 FNABI 的首发需求
+**现状**：工作开始时 254 在用 / 2 空闲；现为
+**243 在用 / 13 空闲**（C0 回收 112、C1-1 回收 75,均 2026-08-30 关账;
+对齐 `src/bytecode.zig` 的 source-generated 账本钉)。**本线处于干净停点**:
+无在途窗口、无 alias 欠账、demand 侧(FNABI 修正后首发需求 2–3)已被
+现有空闲覆盖;C1 续航(还需 14 条到 228/28 检查点)按 D6 精神等 demand
+ledger 或 owner 指令再开,停在这里不留任何回滚债(§11 末段「随时可停」
+条款的字面情形)。需求侧复审只把 FNABI 的首发需求
 从约 25 修正为 2–3；typed 文档的 20–40 尚未被自己的证据门修订。因此
 保守容量预算是 **22–43 个**，不是早期的 45–65，也不是无依据的 10–25
 （§9.1）。
@@ -69,13 +74,14 @@ opcode 做 late-encoding 试点；试点通过后单独切换剩余声明派生�
 这一步也过门，才扩大候选池。
 
 **状态（owner 二轮复审 2026-08-27，D1–D12）**：架构原则**已批准**（D1）；
-**立即可实施的只有 R0 与 F0a0（物理表镜像、编号账、现表等价断言）**（D9）。
-F0a1（LogicalOpcode/Operand/Effects/fingerprint 声明）暂缓：**§10.8 尚未
-冻结**，必须先闭合四个基础模型——lowered form → final form（D10）、
+**R0 与 F0a0 已落地**（`6ea4c927` / `e9aaf765`，244/12；2026-08-29 rebase 注：main 侧 obj64 S1 新增 `object_slots2` 占用原 no-row 槽 254，现行账本为 **245/11**，pin 见 `src/bytecode.zig` 的 ledger 测试）。**§10.8 已于
+2026-08-27 冻结**（P0-1…P0-6 + 不变量 5、6 逐条确认，外加合同 5a
+`Effects.branch_stack`），**F0a1 由此解除暂停并成为当前工作**。冻结前需
+先闭合的四个基础模型——lowered form → final form（D10）、
 logical operand → 物理编码（P0-2）、纯 spec → exec handler 绑定（P0-3）、
-物理槽位 alias/quarantine/free 生命周期（D11）。F0b–F0d 暂缓并按 §10.8
-的逐片 gate 评审；F0e 只批设计方向；C0 及以后继续暂停。裁决 4 的“暂停
-执行”仅对 R0/F0a0 解除。机器模型证据线（§6.2–§6.4、§9.2–§9.5）继续
+物理槽位 alias/quarantine/free 生命周期（D11）。F0b–F0d 仍按 §10.8 的逐片 gate 评审；
+F0e 只批设计方向；C0 及以后继续暂停。裁决 4 的“暂停执行”现对 R0/F0a0/
+F0a1 解除。机器模型证据线（§6.2–§6.4、§9.2–§9.5）继续
 缓议（D8），且不是本方案前置。
 
 ---
@@ -89,12 +95,15 @@ logical operand → 物理编码（P0-2）、纯 spec → exec handler 绑定（
 | 3 | qjs 代码级忠实对齐 | **降为工具**；qjs 仍是性能尺与差分参照，不约束内部编码 |
 | 4 | 增量回收 | **部分解除**：R0 与 F0a0 获准实施（D3/D9）；其余包按 §11.7 逐项开闸，不得把“目标确认”解读为整体实现授权 |
 | 5 | 架构复审 D1–D8（2026-08-27） | **已裁**，全文见 §11.7；§10.8 合同冻结是 F0a1+ 的硬前置（D2/D9） |
-| 6 | 二轮复审 D9–D12（2026-08-27） | **已裁**：F0a 收窄为 F0a0/F0a1；final form selection 与 physical encoding 拆分；alias 成为正式槽位状态；profile 以 form 为主键。**§10.8 判未冻结**——P0-1…P0-6 修订（已并入本文）经 owner 确认后才冻结 |
+| 6 | 二轮复审 D9–D12（2026-08-27） | **已裁**：F0a 收窄为 F0a0/F0a1；final form selection 与 physical encoding 拆分；alias 成为正式槽位状态；profile 以 form 为主键。**§10.8 已于 2026-08-27 冻结**——P0-1…P0-6 与不变量 5、6 经 owner 逐条确认，外加冻结时补入的合同 5a（`Effects.branch_stack`）。F0a1 由此解除暂停 |
 
-现行次序：**R0 ∥ F0a0 → §10.8 冻结（P0-1…P0-6 确认）→ F0a1 →
-F0b–F0d（逐片评审，gate 见 §10.8 末表）→ C0 → G0（§10 阶段 5 的声明源
-切换，净 0）→ C1 → 28 个空闲检查点（强制复盘）→（demand ledger 触发后）
-44 个空闲容量目标**。F0e 只批设计方向，实现后置到新增逻辑指令或 28 检查点
+现行次序：**R0 ✅ ∥ F0a0 ✅ → §10.8 冻结 ✅（2026-08-27）→ F0a1 ✅ →
+F0b–F0d ✅（2026-08-28 全部关账）→ C0 ✅（2026-08-30：落地 →
+cycle-ledger 中立 → alias 删除，账本 **244/12**）→ G0 ✅（2026-08-30
+同日：`opcode_info` 生成化、发射常量互证、carrier 改名 `ext0`、
+legacy 表删除；C1 parent 冻结于 G0 关账 commit）→ **C1（当前;
+按 §11.7 逐条审计,到 228/28 检查点强制复盘 D5）** →（demand ledger
+触发后）44 个空闲容量目标**。F0e 只批设计方向，实现后置到新增逻辑指令或 28 检查点
 之前，不是 C0 前置。60 不进 normative 里程碑。裁决 2 不在这条路径上。
 以下小节保留裁决时的论证；与本段冲突时，本段为准。
 
@@ -970,6 +979,13 @@ ECMA-262/test262 为准。
 
 **(3) 按 opcode 身份匹配的扫描器。← 最隐蔽，因为它不会让测试变红**
 
+> **✅ 已于 F0b 结构性消灭（2026-08-27）。**两张手写名单
+> （`scanSmallInlineEligible` 的拒绝表、`isForwardForbiddenOp`）都已改为
+> 消费声明里的 `inline_policy` / `forward_policy`；冷平面居民各自声明自己
+> 的 policy，载体被问的是**它的居民**而不是被特判。删名单前先用 comptime
+> 断言证明「派生集合与手写名单逐条相同」，三条注入验证该断言会开火。
+> **以下保留为该缺陷的病历，不再是待办。**
+
 `bytecode.zig` 的 `scanSmallInlineEligible` 走一遍字节码，**按 opcode
 身份**拒绝含某些指令的函数参与小函数内联，`put_super_value` 在那张拒绝
 表里。一旦它被降级成 `{using, sub}`，身份匹配就看不见它了——含
@@ -1672,7 +1688,15 @@ const LegacyEmbeddedEncoding = struct {
 const Effects = struct {
     // §10.8 不变量 5：这些缺省只是草案示意。可执行 row 逐项显式；迁移期
     // 由旧表生成 mirror，G0 后缺项编译失败（断言 16）。
+    /// fall-through 的栈效应。
     stack: StackEffectExpr,
+    /// 合同 5a（冻结时补入，owner 确认 2026-08-27）：**跳转边目标处的栈高
+    /// 相对 fall-through 的差**。绝大多数跳转在目标处与 fall-through 同高
+    /// （`null`），但实测有两条不是——`gosub` 是常量 +1，`dyn_env_probe`
+    /// 是取决于操作数的三值（read/delete +1、get_ref/make_ref +2、put −1）。
+    /// 冻结前的模型没有地方放它，F0a1/F0b 实现时必然撞上。复用同一套封闭
+    /// 表达式，因此是补充不是新机制。
+    branch_stack: ?StackEffectExpr = null,
     control: ControlFlow = .fallthrough,
     catch: CatchEffect = .none,
     continuation: bool = false,   // `ret` 可同时 terminal + continuation
@@ -1881,7 +1905,7 @@ F0 是伞形前置，不是一笔 mega-diff。按 D4/D9 的批准粒度拆成六
 |---|---|---|---|
 | **F0a0** | **物理** opcode 表镜像、机械生成编号账、现表等价断言（不含 logical 层新概念） | 阶段 1（物理半） | **已批准，立即可做（D9）** |
 | **F0a1** | LogicalOpcode/Operand/Effects/fingerprint 声明 | 阶段 1（logical 半） | 暂缓；gate = 合同 1 + 不变量 5、6 |
-| **F0b** | `DecodedHeader`/`DecodedInstruction` 与全部 reader 迁移 | 阶段 2（reader） | 暂缓；gate = 合同 1、2 + 不变量 5 |
+| **F0b** | `DecodedHeader`/`DecodedInstruction` 与全部 reader 迁移 | 阶段 2（reader） | **进行中**：decode 层已落地（`headerAt`/`operandAt`/`targetOfLabel`/`stackEffect`/`matchesFormAt`），已完整迁移的 consumer = `pipeline_stack_size`、`FinalArtifactValidator`（两者现共用同一个 header）。gate = 合同 1、2 + 不变量 5 |
 | **F0c** | `selectFinalForm` + `planPhysicalEncoding` 与所有 final writer 收口；final carrier registry 与 synthetic final-carrier fixture | 阶段 2/3（writer） | 暂缓；gate = 合同 1、3、4 + 不变量 5 |
 | **F0d** | logical profiler sidecar（form 主键，D12）、runtime lookahead 迁移、raw-access CI gate | 阶段 2（runtime 切片） | 暂缓；gate = 合同 1、2 + 不变量 5 |
 | **F0e** | parser/lowered `compiler_ext`：u16 logical tag、per-logical payload decode | 阶段 3（独立于 C0 前置） | 设计方向已批（D9）；实现暂不开始，须在新增逻辑指令或 28 空闲检查点前落地；gate = 合同 1、2 + 不变量 5 |
@@ -1964,13 +1988,27 @@ artifact_cache_key =
 SER-ARTIFACT 的完整缓存有效性还需要两侧 semantic epoch 纪律，不得仅凭
 ISA 哈希宣称已解决。
 
-### 10.8 实施合同 addendum（D2/D9；**未冻结**）
+### 10.8 实施合同 addendum（D2/D9；**已冻结 2026-08-27**）
 
 一轮复审（D2）要求先补全并冻结本节，F0b 起的实现才获批。二轮复审
 （D9–D12）进一步裁定：本节由**四个核心 ABI 合同**加**两个跨切面不变量**
-组成（P1-4，不再笼统称“四个合同”）；本节判 **未冻结**——P0-1…P0-6 的
-修订已并入下文，owner 逐条确认后才冻结，冻结前 F0a1 亦不得开始。必须
-先闭合的四个基础模型：
+组成（P1-4，不再笼统称“四个合同”）。
+
+> **冻结记录（owner 确认 2026-08-27）**：P0-1…P0-6 与不变量 5、6 **逐条
+> 确认，本节冻结**，外加冻结前提出的一处补充——**`Effects` 增加
+> `branch_stack`**（见合同 5a）。**F0a1 由此解除暂停**；F0b–F0e 仍按本节
+> 末表逐片评审。冻结**不**解冻 C0 及以后、不承诺 44 空闲容量目标、不重开
+> 机器模型（D8 停议不变）。
+>
+> 确认时逐条核实的证据：P0-2 的 53 条（22%）零字节指令为本仓实测；P0-3
+> 的 import 方向为实测（49 个 `src/exec/*.zig` 导入 `bytecode.zig`，反向
+> 为 0，环成立）；P0-5 的同族冷热差为本仓普查（`push_const` 25,524 vs
+> `push_const8` 9,550,185）；P0-6 的封闭表达式充分性为实测（引擎中全部
+> 动态栈效应形态——`npop`/`npop_u16`/`npopx`/`using` sub/`dyn_env_probe`
+> ——均可归约为 `fixed`/`operand_table`/`affine`）；不变量 5 由 F0a0 实测
+> 的「嵌套容器惰性分析导致断言只在 test 构建开火」直接支持。
+
+必须先闭合的四个基础模型：
 
 ```
 lowered form    → final form                  （合同 3，D10）
@@ -2041,6 +2079,11 @@ const DecodedHeader = struct {
 };
 
 fn decodeHeaderAt(domain: Domain, code: []const u8, pc: u32) !DecodedHeader;
+// parser 域单列（2026-08-28 修订，见下方实现回报）：混合流的 temp/final
+// 消歧需要 atom ledger 作为输入，域所需的外部状态是签名的一部分。
+// 严格 phase-1 视图（lowered + label/line_num 拒绝 + atom 验证）同座。
+fn headerAtParser(code: []const u8, atoms: []const Atom, pc: u32, atom_index: u32) !DecodedHeader;
+fn headerAtPhase1(code: []const u8, atoms: []const Atom, pc: u32, atom_index: u32) !DecodedHeader;
 /// burned-in（OperandSource.fixed）与被 tag 吸收的 operand 均由此还原。
 fn decodeOperand(h: DecodedHeader, comptime index: usize, comptime T: type) !T;
 
@@ -2060,6 +2103,79 @@ tag；热路径（matcher、lookahead、stack walker）只用 `DecodedHeader` +
 - alias 命中必须可识别，不得与 canonical 混同；
 - 验收即“没有半迁移”：接了 decoder 却仍手工读 payload 的 consumer 记
   F0b 失败。
+
+> **实现回报（F0b，2026-08-28）：header 的字段表与「一次查表」硬约束**
+>
+> 上面的 `DecodedHeader` 有九个字段。按字面实现，F0b 在编译路上**多执行
+> 4.44% 指令，CodeLoad 掉 3.95%**。归因做完后要改两处，都是量出来的。
+>
+> **（一）字段表收缩为三个，其余降为访问器或 comptime 参数。**
+> 实现为 `{ form, instruction_pc, size }` 共 8 字节；`domain` 是 comptime
+> 参数（consumer 静态知道自己在哪个域），`payload_pc`/`next_pc`/`canonical`/
+> `family`/`layout` 是访问器，各自一次算术或一次查表。理由不是简洁：九
+> 字段的 header 在遍历循环里全程活着，编译器把它**溢出到栈**——`perf
+> annotate` 在迁移后的栈计算里看到 `str x9,[sp,#32]` 和 `ldr x2,[sp,#40]`
+> 位列最热，而未迁移版本一条溢出都没有（它只保持一个字节和一个指针活着）。
+> 被去掉的字段全部可由一次算术还原，所以失去的只有溢出。
+>
+> **（二）新增硬约束：每条指令一次查表。**
+> 这是回归的主体。被替换的面向字节的代码从**一行**紧凑行上读走 `size`、
+> `n_pop`、`n_push`；迁移后的路径取了**四张表**——`headerAt` 里
+> `finalCompactInfo` 加 `physical.stateOf`，`stackEffect` 里
+> `dynamic_by_form` 再加一次 `finalCompactInfo`。其中最贵的是
+> `dynamic_by_form`：它是「可选 tagged union」的数组、按最宽形态定尺寸，
+> 于是**常见情形付一次宽加载，只为得知自己无事可做**。
+>
+> 修法不动 F0b 的性质，键仍是 form：按 form 建一张 4 字节窄行表
+> （`size`/`pop`/`push`/`flags`，`flags` 携带 claimed 与 dynamic 两位），
+> 一次加载答完 header 与静态栈效应两个问题，胖表只在 `flags` 说它动态时
+> 才查。附带结果是 `stackEffect` 的 `domain` 参数变成死参数并被删除——
+> **form 已经携带了域**（lowered 专属 form 住在 300+），这本身是「form
+> 而非物理 id 才是正确主键」的一个小确证。
+>
+> 另有三个放大器，各自独立且都已修：验证器从内联变为独立函数（单独占
+> 72M 指令，而内联的旧版量不出来）⇒ 标 `inline`，且注明这是承重的不是
+> 提示；验证器对每条指令跑一遍 slot 循环，只为问旧版用两次 fmt 比较就
+> 答完的两个问题 ⇒ 答案在 comptime 预算进 layout（`atom_slot`/
+> `var_ref_slot`），问题仍以 form 为键；`headerAt` 读的是 24 字节的诊断行
+> `Info` 而非 4 字节的 `CompactInfo`——而 `Info` 自己的注释就写着别让
+> 验证器为这四个字段跨它跨步。
+>
+> **结果**（core 8，交错 ABBA，三轮独立复现）：
+>
+> | | 编译路定工作量指令 | CodeLoad | Richards |
+> |---|---|---|---|
+> | F0b 前 | 3149.7M | — | — |
+> | F0b 按字面实现 | 3289.7M（+4.44%） | −3.95% | −0.93% |
+> | 修复后 | 3177.6M（+0.89%） | −1.64% | +0.12%（持平） |
+>
+> 残余可归因的只有栈遍历那一趟的 +14M（+0.44%），分数上的 −1.64% 大于
+> 它，按已登记的规矩（单建 A/B 差 <300M 先疑布局）余量主要是代码布局。
+> **代价局限在编译路**：运行时重的基准已回到持平。CodeLoad 是全套里编译
+> 最密集的一个，所以这 1.64% 是最坏情形而非典型值。
+>
+> **实现回报（F0b resolve_labels 之后，2026-08-28）：parser 域的签名
+> 装不进本合同。** CFG 迁移摸底发现，parser 域消费的是**混合流**——
+> Builder 阶段的 temp id 范围（178–196）里可以合法地混着已选定的 final
+> short opcode，现行 `cfg.tempInstruction` 靠 **atom-ledger 比对**消歧
+> （temp 解释的操作数与账本游标处的 atom 相等 ⇒ temp，否则 final）。
+> 因此 parser 域的 decode 需要 `(code, atoms_ledger, pc, atom_index)`
+> 四个输入，`decodeHeaderAt(domain, code, pc)` 的统一签名对它不成立——
+> **消歧所需的外部状态是域定义的一部分，不是实现细节**。CFG/
+> resolve_variables 迁移（F0b 剩余）动工前，需先把 parser 域入口的形状
+> 定进本合同：建议 `headerAtParser(code, ledger, pc, atom_index)` 单列，
+> 且两张私有表（`temp_decode_info`/`phase1_decode_info`，现从
+> `sizeOf`/`formatOf` 生成）改由声明派生。
+>
+> 归因过程中的两条附带记录：
+>
+> - 我假设「有解码行 ⇒ 槽已认领」并写断言去验，**断言把假设证伪了**：
+>   十个已回收槽按设计保留着「规范死形状」的行（§F0a0 账本第 1150 行的
+>   要求），所以 `finalCompactInfo(id) != null` 只等于 `id < op_count`，
+>   `stateOf` 那次检查是唯一挡住这十个 id 的东西，不能当冗余删掉。
+> - 重排 `headerAt` 时把 `@enumFromInt` 挪到了校验之前。已回收 id 在
+>   `LogicalOpcode` 里没有 tag，于是**恰好在不变量 5 要拒绝的那批输入上**
+>   构成非法行为。单测抓住了。现在索引以数值算出、行验过之后才转枚举。
 
 #### 合同 3：final form selection 与 physical encoding 是两个阶段（D10）
 
@@ -2164,6 +2280,38 @@ key；carrier adapter key（`CarrierDecl.adapter_key`）与 direct key 分开。
 5. direct handler 与 carrier semantic helper 的分离逐条发生；
    `BuiltTable.keep`（回收槽位后保留 handler geometry）先例沿用。
 
+#### 合同 5a：跳转边栈高（冻结时补入，owner 确认 2026-08-27）
+
+冻结前的 `Effects` 只有 fall-through 的 `stack`，没有位置放**跳转边目标处
+的栈高**。扫过栈计算的全部 `seed` 调用后：8 条跳转（`goto`/`goto8`/
+`goto16`/`if_true`/`if_false`/`if_true8`/`if_false8`/`catch`）在目标处与
+fall-through 同高，但**两条不是**——
+
+| opcode | 目标处栈高 | 形态 |
+|---|---|---|
+| `gosub` | `stack_len + 1` | 常量 |
+| `dyn_env_probe` | +1 / +2 / −1 | **取决于操作数**（read/delete、get_ref/make_ref、put） |
+
+所以 `Effects` 增加 `branch_stack: ?StackEffectExpr`：`gosub` 是
+`fixed(+1)`，`dyn_env_probe` 是 `operand_table`，同高的跳转是 `null`。
+**复用 P0-6 的同一套封闭表达式，是补充不是新机制。**
+
+不补的后果是确定的：F0a1/F0b 实现时撞上，届时「已冻结」的合同要重开。
+
+> **实现回报（F0a1 第三部分，2026-08-27）**：`operand_table` 的「覆盖全部
+> 取值」在两条动态指令上含义不同，冻结时没写清，实现时才显形——
+>
+> - **`using` 的 sub 操作数是范围语义**：`sub >= add_base`(64) 一律 pop 2，
+>   不是枚举。手写表要 256 行且与权威重复。⇒ 覆盖 = 全部 256 个取值，
+>   **行由 comptime 从权威生成**，迁移期不写进声明，G0 时移入。
+> - **`dyn_env_probe` 的 flags 只有 10 个取值可解码**，其余 246 个被
+>   decoder 拒绝。⇒ 覆盖 = **decoder 接受的取值集**，断言形式是「decoder
+>   与 effect 表在『哪十个』上必须一致」。
+>
+> 结论：**断言 17 的「全部取值」应读作「该操作数的*接受集*」**，接受集由
+> decoder 定义（有 decoder 时）或为整个宽度空间（无 decoder 时）。这不改
+> P0-6 的封闭集，只是把它的覆盖语义讲准。
+
 #### 不变量 5：fail-closed —— 忘写声明必须编译失败
 
 `traits: Traits = .{}` 与 effect 隐式缺省会部分重现本文正在修的缺陷类：
@@ -2189,7 +2337,7 @@ emit + 全部 executable alias；完整 cache key 另需 producer/consumer
 
 | 片 | 需要冻结的合同/不变量 |
 |---|---|
-| F0a1 | 1、5、6 |
+| F0a1 | 1、5a、5、6 |
 | F0b | 1、2、5 |
 | F0c | 1、3、4、5 |
 | F0d | 1、2、5 |
@@ -2209,12 +2357,27 @@ emit + 全部 executable alias；完整 cache key 另需 producer/consumer
 | 期界 | 在用/空闲 | 状态 |
 |---|---:|---|
 | 基线 | **245/11** | 已由 final opcode 表核对 |
-| R0 后 | **244/12** | `put_loc0_get_loc0` 退役，设计已核，待实施 |
+| R0 后 | **244/12** | **已实施**（`6ea4c927`）；套件 2367/0、test262 0/49778；bench 见下注 |
 | C0 后 | **243/13** | 一个 late-encoding carrier 试点 |
 | G0 后 | **243/13** | 声明源最终切换；净 0，与 C1 性能分开计 |
 | 第一检查点 | **≤228/≥28** | **已批准（D5）**：验证机制并覆盖已审计近端需求；到达后强制复盘 |
 | 容量目标（条件性） | **≤212/≥44** | **暂缓（D6）**：typed/FNABI 提交具名 `OpcodeDemandLedger` 并证明未来两个 milestone 需求超过现有空位后，才继续推进 |
 | 设计上界（非规范） | **≤196/≥60** | 仅保留为 rationale envelope，不进 normative 里程碑；逐条审计前不得承诺 |
+
+> **R0 落地注（2026-08-27）**：§11.4 要求的「首轮保留不可达 handler 本体
+> 以维持 island 几何」**做不到**——comptime 引用只强制分析不强制保留（实测
+> 链接器剥离，island `0x284a0`→`0x28260`），改用被引用的 Handler 数组 +
+> `doNotOptimizeAway` 仍未保住，且会在冷表构建里塞进循环（为保对照反而给
+> 热路径加活）。故本体明删，源码与二进制一致，island −576 B。
+>
+> 因 island 已变，§11.5 第 6 条的 bench 从「以后再决定」变为当下必需。
+> **已按 owner「简单跑一下」的口径做冒烟对照**（n=10，绑核 19，双向交错，
+> 未做 A/A 噪声区间、未加 flock、未查孤儿）：**两个顺序给出相反符号**
+> ——P 先跑得 −0.51%、C 先跑得 +0.65%，合并中位数比 1.0018（+0.18%），
+> 而 parent 臂自身极差 2.49%。⇒ **无可检出效应**，且这轮数据本身是
+> 「只跑单向会得出假结论」的实例（单跑任一轮都会报出 ±0.5% 的假效应）。
+> ⚠️ 这是冒烟检查，**不构成 §11.5 第 6 条的正式验收**（缺 A/A 噪声区间、
+> 缺对 245/11 project-root 的比较、缺测量合同的 flock/孤儿检查）。
 
 **停止规则**：到达 28 个空闲后**强制复盘并暂停**；向 44 推进只由具名
 demand ledger 触发（D6），不是本项的无条件完成定义。若继续只为追平其他
@@ -2549,6 +2712,522 @@ epoch 提升或重配空位。每个包都必须满足：
     编译耗时；峰值临时内存；compiler `.text`/`.rodata` 增量；Zig
     comptime/build time 增量。opcode runtime bench 全绿不能替代这组数字；
     判定同样以第 6 条的 A/A 噪声区间为单位。
+
+#### F0b 关账（2026-08-28）
+
+第 6 条要求 bench-v8 **对 immediate parent 与 project-root 两个口径都**
+交错测量。下面两小节按这两个口径分列；先是对 immediate parent
+（`ef7fc62a`）的单基准账，再是对 project-root 的全套账。
+
+##### 口径一：对 immediate parent（`ef7fc62a`）
+
+按第 6 条先做 A/A：同一构建两份拷贝、core 8 交错、各 n=12，中位偏差
+**±0.29%**，合并 CV 0.21%，臂内极差 0.75%——带宽在 1% 以内，测量方法
+按第 6 条可用，不需要先收敛。
+
+| 条 | 项 | 结果 |
+|---|---|---|
+| 6 | 运行时（Richards，交错 n=10/臂） | **+0.12%**，在 ±0.29% 带内 = 统计零 ✅ |
+| 11 | 编译路（CodeLoad，交错 n=12/臂，三轮独立复现） | **−1.64%**，**带外 5.6 倍** → **owner 接受（2026-08-28，见下）** |
+| 11 | 编译路定工作量指令 | +0.89%（未修版 +4.44%） |
+| 5 | `zig build test` | 2371 通过 / 0 失败 ✅ |
+| 5 | `zig build test262-check` | 0/49778 错误，44584 通过 ✅ |
+| 7 | corpus 字节码 delta | **0**（F0b 不改发射，artifact 逐字节相同） |
+| 10 | handler island | 164448→164512（+64B，非 F0b 目标区） |
+
+第 11 条的判定单位是 A/A 噪声区间，而 −1.64% 明确在带外。**这不是一个
+可以由实施者自行吸收的数**，按第 6 条「超出噪声区间即失败」的字面，F0b
+的编译器开销项未过门，需 owner 就以下事实作一次裁定：
+
+- 代价**只落在编译路**，且 CodeLoad 是全套里编译最密集的一个，即 1.64%
+  是最坏情形而非典型值；运行时基准已回到统计零。
+- 换到的是 §5.2(3) 缺陷类的结构性关闭：三张手写身份名单撤销、三个
+  consumer 不可能再对指令布局各执一词，而这一条是 §11.0 记的 F0b 全部
+  收益所在。
+- 残余里可归因到工作量的只有 +0.44%（栈遍历那一趟的 +14M 指令），其余
+  按已登记的规矩先疑代码布局。继续磨的边际收益低，且第 6 条明言本方案
+  设计收益为 0、1% 不是可花费的预算——所以不应把它当作「还能优化掉」
+  而先合入。
+
+另需记入：合同 2 的 header 字段表与「每条指令一次查表」硬约束按实现回报
+修订（见 §10.8 合同 2），修订本身是这次归因的产物。
+
+###### 残余的微架构归因，与五次归零的尝试（2026-08-28 第二轮）
+
+第一轮把残余记成「按已登记规矩先疑代码布局」。第二轮把它量了出来，
+**推测升级为测量**（core 16，`perf stat -r3`，定工作量编译负载）：
+
+| 事件 | parent | 当前 | Δ |
+|---|---|---|---|
+| instructions | 3149.8M | 3175.2M | +0.81% |
+| cycles | 943.9M | 956.9M | +1.38% |
+| branch-misses | 17.879M | 17.897M | **持平** |
+| **L1-icache-load-misses** | **22.91M** | **24.28M** | **+6.0%** |
+| L1-dcache-load-misses | 8.73M | 8.94M | +2.4% |
+
+**+1.14M 次 icache 缺失 × 约 10 周期 ≈ 11M 周期，正好覆盖 10.6M 的周期
+缺口。** 分支预测持平排除了「form 上的 switch 变差」这一假设。足迹来源
+用 `nm -S` 定位：`computeStackSizeForCurrentBytecode` 从 **2976 → 4596
+字节（+54%）**，另有新增的 `layout_table` 26.8KB（数据，不进 icache）。
+
+**结论：残余不是「做多了工作」，是「多了代码」。** 编译路是 I-cache
+受限的，所以对这条路而言**加代码比加指令更贵**——这也解释了为什么分数
+差（−1.6%）是指令差（+0.8%）的两倍。
+
+五次尝试，全部归零或变差，逐条记下以免重试：
+
+| # | 尝试 | 结果 |
+|---|---|---|
+| 1 | 内联 `headerAt` | **+21.3M 指令**（多调用点膨胀） |
+| 2 | 内联 `stackEffect` | 指令 −2.4M 而**周期 +5.9M、icache +0.92M** |
+| 3 | 取消验证器的 `inline` | +20.5M 指令、+6.8M 周期 |
+| 4 | 用行表位门控那 26.8KB 的 layout 查表 | 周期**逐 M 相同**（该表本就常驻 L1D） |
+| 5 | 把 `invalid` 检查折进行表位 | 周期相同，且**破坏直接形态往返（P0-1）** |
+
+第 2 条是**指令幻影定律的反向实例**：省了指令却付了周期，机制是 icache。
+已登记的先例都是「减指令收益为零」，这是第一次量到「减指令为负」，
+所以本条线此后的判定一律**以周期与 icache 为准，不以指令数**。
+
+第 5 条不是性能问题而是分层问题：`invalid`（id 0）是往返测试的成员，
+解码器的职责是**如实报告字节里是什么**，判断它允不允许是验证器的事。
+那个改动让解码器对它撒谎，收益为零而代价是 F0b 存在的理由之一，
+按设计理由撤回，不是按测试失败撤回。
+
+**这是本设计的地板。** 再压需要让解码层比它替换掉的字节查表**更小**，
+而它在做严格更多的事——结构上做不到。第 11 条那笔编译路代价因此是
+**要么接受、要么放弃 F0b 的结构收益**，不存在「再优化掉」的第三条路。
+
+###### owner 裁决（2026-08-28）：接受，附边界条件
+
+owner 在完整评估（真实价格 = 编译路最坏情形 −1.3~−1.6%、运行时 0；
+综合 0.9996 中的抵消是布局噪声的偶然，不作为接受依据）后裁定**接受**，
+理由按权重：价格封顶、已知、到底；买到的是 C 包 id 迁移的安全前置
+（`put_super_value` 前科：身份匹配失明是测试原理上抓不到的缺陷类）；
+产品暴露面小且随 AOT/eval-cache 路线单调缩小；回退的代价不对称。
+
+**接受范围只覆盖 F0b parts 1–4 已迁的三个消费者。** 附带三条边界：
+
+1. **后续每个消费者迁移各自付费过门**：定工作量 cycles + L1i（不以
+   指令数——本关账「五次归零」一节的直接教训），交错 ABBA，A/A 带为尺。
+2. **累计停止线：CodeLoad 对 `b1ab5200` 累计不得超过 −2.5%**，触线即
+   停在上一个消费者。§11.5 明文「停在 F0b 是特性不是失败」，部分迁移
+   是合法终态。
+3. **运行时 lookahead 的迁移性质不同**（碰解释器热路径），P1-1 的
+   反汇编 fixture（direct 目标保持一次 byte compare）是硬门，合同文本
+   不能替代对生成代码的核对。
+
+`resolve_labels.walk` 本身是编译路最热函数之一（~140M 指令），其迁移
+**不在本次接受的价格内**，按上述第 1、2 条单独关账。
+
+###### resolve_labels 迁移关账（2026-08-28，`727ea835`）
+
+按上述条件过门。判据读数（定工作量，同场交错 A/A 带，n=16/臂）：
+**cycles −0.12%（带 ±0.07%，方向为好）**；L1i +1.24%（带 ±0.25%，真实）
+但周期账闭合——+0.30M 缺失 ≈ +3M 周期，对面指令 −8M ≈ −2.4M 周期，净
+−1.1M 正是读数；指令 −0.25%（comptime 派生偏移删掉了 readU32At 每跳转
+一次的 checked-add + 边界证明）。**结论：本迁移在编译路上是净零到微赚，
+不占用余量。**
+
+**停止线当日不可判，以周期代账**：CodeLoad 分数仪器下午失去分辨率——
+**基线臂自身一分钟内漂 3.3%**（36103→34906）、迁移前臂与自己早晨的
+定值矛盾 5pp，而同窗口周期计数 CV 0.32%；频率钉在 3.89 GHz，非热降频。
+按测量合同，分辨不了效应的仪器不出裁决数字。周期代账：F0b 关账 −1.64%
++ 本次 −0.12% ≈ **累计 −1.5%，在 −2.5% 线内**。⚠️ **分数复测挂起**：
+下一个干净窗口跑三臂 ABBA 收口，若与周期账矛盾再升级。
+
+###### CFG/resolve_variables 迁移关账（2026-08-28，`9225f1d7`）
+
+parser/phase-1 两域按修订后的合同 2 落地（签名带 atom ledger）。过门读数
+（**同树对照臂**，n=16/臂交错）：**cycles ±0.00%（带 ±0.03%，完全持平）**、
+insn +0.35%（Header→TempInstruction 接缝的真实成本）、L1i +5.63% 出带但
+**零周期代价**——按 resolve_labels 先例判通过（周期是度量，L1i 是解释）。
+
+三条方法记录，都够资格进档案：
+
+1. **F0b 教训的微缩重演**：cfg 的手写表快，是因为重映射/side-table 拒绝/
+   claimed 判定全部**烧在表里**；第一版实现把它们展开成逐指令运算，
+   `resolve_variables.run` +29M 指令。修法=按物理 id 烧 4 字节 DomainRow
+   域表，决策 comptime 从声明解出。「一次查表」硬约束适用于**每个域**。
+2. **对照臂必须同树构建**：最初三次修复追的 +27M 指令有 16M 根本不存在
+   ——「迁移前」臂用的是历史二进制，与被测臂还差着当天 decode 层的全部
+   改动。同树对照（只回退 cfg.zig 重建）给出真实差 +11M、周期死平。
+   **对照臂永远从同一棵树构建，不从当天早些时候捞。**
+3. **不变量 5 的 comptime 版**：域表生成先 `@enumFromInt` 再判断，
+   在 id 16（reclaimed）上构建期爆炸。判断改按数值比较。同一缺陷第三次
+   出现（headerAt 运行时版、此处 comptime 版），模式固定：**先验证、
+   后转枚举**。
+
+两张手写表按「删除前证明」规矩处理：comptime 断言逐 id 证明派生视图与
+手写表相同（注入两类故障均开火），表降级为断言的对照基线，G0 时撤。
+
+###### 反汇编器与运行时 lookahead 关账（2026-08-28，`d1df1cf8`/`1ef2c53b`）——**F0b 消费者清单至此闭合**
+
+**反汇编器**：decode-first + 单字节容错回退（反汇编器必须能渲染损坏流，
+回退恰好在 decoder 正确拒绝处继续走）。fmt 巨 switch（约 110 行 20 个
+格式）换成 layout 逐槽循环，且**打得更多**——烧入操作数（`get_loc0` 的
+slot 0）从前没有字节可读，现在从声明打出。冷路径无性能门；`.text`
+净 −4KB。
+
+**运行时 lookahead**（P1-1 硬门）：全部集中在 `vm_property.zig`。
+**形状分毫未动**——direct 匹配保持一次 byte compare，结构化 decode
+不进这些路径。改变的是数字的出处：**72 处手写魔数**（烧入 idx、next_pc
+步长、边界 size、consume 宽度）改为 comptime 从声明派生
+（`sizeOfForm`/`burnedOperandOf`）。数字全都是对的，但从前没有任何东西
+把它们连到定义它们的声明上——重编码一个 form 会把每个 matcher 变成
+静默错解码器；现在变成编译错误。两个注释级假设升格为构建断言
+（序列匹配的 pc+1 步进依赖六个 form 恒 1 字节；`decodeFieldAtom` 步长
+依赖 get_field 族恒 atom 尺寸）。
+
+P1-1 证据（裁决要求生成代码核对，合同文本不算）：
+**`.text.zjs.op_handlers` 逐字节相同（164448 == 164448）**、定工作量
+指令 −0.005%（统计零）、周期 +0.29% 在指令零 + handler island 不变下
+判为布局（.text 因 dump 重写移动了 4KB）。
+
+**F0b 消费者清单闭合**：栈遍历、验证器、内联扫描器、resolve_labels、
+CFG、resolve_variables、反汇编器、运行时 lookahead 全部就位。余项一条：
+CFG 的身份谓词（isUnconditionalTerminal 等）仍收物理 id——它们匹配的
+是控制流 op（最不可能降级的集合），form 化留作 F0c 生成 matcher 的
+输入，不作为 F0b 未完成项。
+
+###### F0c parts 1–3 关账（2026-08-28，`7de7943b`/`21296aa6`/`b41de758`）
+
+合同 3 的阶段 A 对**全部现役发射决策**落地，三张声明派生的选择表：
+
+1. **槽位短化**（`shortSelectionOf`/`short_selection_table`）：wide form
+   → burned 变体（0-3）/byte 变体，由族轴 + 烧入值派生。替换掉的
+   `shortSlotOp` 是 `base + idx` 的 **id 算术**——P0-2 要消灭的正是它：
+   重分配 run 里一个 id，算术就静默发出另一个族的 opcode。
+   `putShortCodeSize` 与 `putShortCode` 从此消费**同一个** selector，
+   size 取自选中行——合同 3「容量与发射不得各自维护条件分支」按构造
+   成立。发射器里「是否带 byte payload」的身份名单换成
+   `form_row[selected].size == 2`。
+2. **小整数 push**（`selectPushIntForm`）：替换 `push_0 + value` id
+   算术；i8/i16/i32 宽度阶梯保持显式（那是语言整数极限，不是声明事实）。
+3. **跳转 relaxation**（`jump_selection_table`）：族 + label 槽声明宽度
+   派生三档（wide=4 字节 label、medium=i16、narrow=i8）。基线断言除
+   等价外还钉住**负空间**——条件跳转不得静默获得 16 位档。
+   ⭐ 断言首用即抓真错：wide 判定写成 `width == .u32` 而声明是 **.i32**
+   （S4 相对偏移），整张表为空——运行时将全部 relaxation 报
+   InvalidBytecode，comptime 则是一条指名的消息。
+4. **small_inline.emitLocOp**（`shortSlotOp` 的双胞胎 id 算术）接同一
+   selector——编译器与内联重写器从此不可能对短化各执一词。
+
+三片门全过：part1 cyc −0.07%（带内）、part2 cyc **−0.23%**（带外方向
+为好）、part3 运行时逐分不动。每片 2371/0 + test262 0/49778。
+
+**F0c 余量**（等 C 包授权同步）：`planPhysicalEncoding` 的 carrier 臂、
+carrier registry 与 43 synthetic fixture、`CopyDisposition` 正式化、
+relaxJumps 里 lt/eq→cmp_if_false8 融合回写的 writer 自查。direct-only
+现状下 planPhysicalEncoding 是平凡的（id=form 值、layout=row），提前
+搭 carrier 架子没有验收对象。
+
+**挂账更新（CodeLoad 分数停止线）**：第三次复测（安静场，A/A 偏差仅
++0.06%）读出 **+3.53%**，与下午的 −2.65%/−3.14% 方向相反；基线臂自身
+CV 1.44% 且呈双峰（36k/34.9k 两模式，前已录得同一二进制一分钟内
+36103→34906）。三轮复测方向不一致而同窗周期计数恒 CV<0.35% ⇒
+**判定：本机 CodeLoad 分数对 1% 级效应不是合格仪器（进程级双峰，疑
+分配器布局敏感），停止线永久改由周期账承载**：F0b −1.64% + rl −0.12%
++ F0c −0.30% ≈ **累计 −1.2~−1.5%，线内**。
+
+###### F0d 关账（2026-08-28，`edcd70f8`）——**F0 系列全部闭合**
+
+三项交付：runtime lookahead 已在 F0b 内落地（见上）；另两项——
+
+**logical profiler（D12）**：抓到并修复一个现行违规——`using` 平面的
+19 个居民在 profile 里被糊成一行，正是 §11.5 第 3 条禁止的聚合；现在
+按 sub tag 分行计数（居民名由 `subForm` 从声明取），并加 family rollup
+作为**生成的聚合视图**、永不替代 per-form 行。musttail 路径上只做内存
+写（前科是 clock_gettime 的栈帧，不是 store）。发布构建编译剔除，
+handler island 逐字节不变。
+
+**raw-access CI gate**（§10.5 四规则的机器可执行形态，
+`tools/lint/raw_access_gate.py`）：**状态扫描不是 diff 扫描**（diff 门
+会漏掉违规搬进新文件）。六个流消费文件、三类模式（raw emit /
+物理身份比较 / `code[pc+N]` 读），解释器 handler 本体按设计不在
+扫描集（执行 `pc[0]` 是它的本职）。**374 处既有访问冻结进 allowlist，
+每项带原因与移除阶段**（F0c encoder / generated matcher / 合同 4 /
+decoder 永久），增即红、减提示收紧。注入验证：cfg.zig 加一处
+`code[0] == op.goto` 即 23 > 22 红。
+
+**至此 F0a0 / F0a1 / F0b / F0c（现役范围）/ F0d 全部关账。** C0 的
+F0 前置除 carrier 专属件（registry/fixture/encoder carrier 臂，与
+demand 证据同步）外均已就位。
+
+###### C0 落地——迁移窗口开启（2026-08-30，owner「开工」批复后实施）
+
+D7 默认候选 `to_propkey` 的 late-encoding 试点落地，**处于 D11 迁移
+窗口内**：final 流全部改发 `{using, sub.to_propkey}`（sub=19，重开
+19..63 缺口中的第一格），direct id 112 转 **executable_alias**——
+decoder/validator/dispatch 三方照收，encoder 永不选择（由 join 断言
+「alias 必须在 registry 有 carrier 编码」承载）。**账本不动
+（245/11），净 +1 只在删 alias 时记**；届时按现基线为 244/12（§11 表
+的 243/13 写于 object_slots2 落地之前，需按 source-generated 账本
+重读）。
+
+交付件与其归属：
+
+- **final carrier registry**（F0 遗留件之一）：
+  `logical.final_carrier_residents`（form/carrier/slot），subForm 表并入
+  registry 居民；`decode.finalEncodingOf` 是合同 3 编码轴的唯一选择器。
+- **encoder carrier 臂**（F0 遗留件之二）：`resolve_labels.emitFinalCarrier`,
+  两个字节都取自选择器的值，无 `op.X` 字面量（raw-access 门保持 374 冻结值）。
+- **decode fingerprint（§10.7 首次可执行化）**：256 槽状态 + 行名 +
+  alias 记录 + carrier 受理 tag 集 + add_base 的 comptime Wyhash，钉
+  `0xaa64770df7f61e2f`；删 alias 必然改变它。
+- **validator 收紧（D7）**：`using` 的 tag 不在受理集（居民槽 ∪ add 区）
+  即 InvalidFinalArtifact；add 区 hint 值仍归 DisposalHint 权威在执行层拒。
+- **join 四方一致断言**：registry ↔ using_sub 常量 ↔ direct 行栈效应 ↔
+  alias 列表,任意一方单独漂移即编译失败。
+- 「不占生产 id 的 synthetic fixture」由**试点本身的生产 fixture 群取代**
+  （机器已由真居民在门禁下证明,合成件不再有独立价值）,在此记为关闭。
+
+D7 语义门 fixture（`src/tests/exec.zig` C0 组 + `tests/parser.zig` 改
+carrier 匹配）：primitive/Symbol、`@@toPrimitive`（hint=string）、
+toString 重入（重入体自身含计算键）、coercion 抛错入本函数 catch、
+backtrace 帧归位到 carrier 指令的 source pc（`c0tpk.js:2:` 精确到行）、
+计算类元素名（实例+static）、计算解构（含 rest 排除与嵌套 pattern）、
+super 复合赋值 lvalue 路径、**alias 与 carrier 双臂逐字节同语义执行**、
+malformed tag=20 被 artifact 证明与 dispatch 双层拒绝、artifact 形状
+（carrier 对=1、direct 112=0）。inline policy 经 traits 走 form,
+小内联资格扫描通过 subForm 照见居民（5.2 条款 3 的结构性修复照常生效）。
+
+门禁记录：`zig build test` **2486/0**（含全部 C0 fixture 与指纹钉）,
+raw-access 门 374 冻结值不变,batch gate（engine-production-gate 含
+test262 + fixed-work gate_smoke）见本次提交信息。**删 alias 前仍欠**：
+干净窗口的 cycle-ledger 读数(编码尺寸 +1B/处,全部在冷路径,预期
+中立)与 owner 对官方读数的复核;任一门红即按 §11.5 恢复 direct 为
+canonical。
+
+**cycle-ledger 读数（2026-08-30 同日,窗口欠账①清偿）**。仪器
+`run_fixed_pmu.py`,C0 臂(C0 落地源;压缩后谱系见
+`backup/pre-squash-2026-08-30-opcode`)vs 父臂(`3ce92f99`),七基准
+**并行各占一颗空闲大核、核内 ABBA×8**(安静窗口协议;被中止的串行
+单核跑在三个已完成基准上给出 0.9944/0.9988/0.9996,与并行读数差
+≤0.2pp,两口径互证)。证据:`reports/evidence/PERF-OPCODE-SPACE/c0-ledger/`。
+
+| bench | insn C0/parent | cycles | 备注 |
+|---|---|---|---|
+| code-load | 1.0008 | 0.9945 | 编译路径:多发 1 字节可见于 insn(+0.08%),cycles 反向 |
+| typescript | 1.0000 | 0.9977 | |
+| deltablue | 0.9999 | 0.9976 | |
+| raytrace | 0.9997 | 0.9993 | |
+| earley-boyer | 0.9995 | 1.0058 | 臂内极差 1.6/2.6%,带内 |
+| regexp | 1.0000 | 1.0056 | 臂内极差 2.2/1.7%,带内 |
+| splay | 0.9999 | 0.9992 | |
+| **geomean** | **1.0000** | **0.9999** | |
+
+**判定:C0 中立**——insn 逐基准 ±0.08% 以内(布局免疫的那一列),
+cycles geomean 0.9999、无一项越出臂内极差;opcode 线累计账维持 F0 的
+−1.2~−1.5%,距 −2.5% 停线不变。附注:两次同源 ReleaseFast 构建
+md5 不同(Δ54KB)复证了 layout-lineage 合同第 4 条在本项目失效的旧账,
+因此本读数以 insn 列为主锚。
+
+###### C0 关账——alias 删除,净 +1 落账(2026-08-30,owner「继续」批复)
+
+id 112 的 executable_alias 删除,**账本 245/11 → 244/12**(11.0 生命周期
+`quarantined_unused`,行转 `unused_112` canonical 死形)。指纹钉
+`0xaa64…` → **`0x448c0e3f71b7798e`**(alias 记录消失 + 槽状态翻转,
+按 §10.7 设计必变)。enum `to_propkey` 112 → **419**(carrier 平面,
+slot 19,保留本名与本 family——与被降级的 `using_*` 不同)。
+
+删除步暴露并落定了一个此前未成文的域事实,**这正是试点该挖出的东西**:
+
+- **S3 流(resolve_variables 输出、resolve_labels 输入)此前一直借用
+  `.final` 域解码**,靠「S3 的 id 就是 final id」的巧合成立。C0 终态下
+  这一巧合破裂:lowered-direct 字节(112)在 S3 合法、在 S4 必须被拒。
+  `decode.Domain` 因此获得第三个成员 **`.s3`**(恒等映射 + lowered-direct
+  重映射,无 temp 重映射——对旧流逐字节保持原校验语义),
+  `resolve_labels.decodeInstruction` 是唯一消费者;全部 S4 走线
+  (stack pass、artifact validator、small-inline 扫描)维持 `.final` 并
+  实测拒收 112。
+- **`logical.lowered_direct`**:§0「parser/lowered 沿用旧 direct id」条款
+  的首个可执行形态——form/byte 对照声明,join 断言:final 槽必须
+  reclaimed、phase-1 行名与 form 一致、栈效应与 sub 表一致、必须是
+  registry 居民、`op.<name>` 发射常量与声明同值。phase-1/parser 两套
+  domain row 与 CFG ownership 审计的 row 重建全部改从同一
+  `lowered_index_table` 取映射(审计原本自行重算 temp 算术,byte 112
+  直接整型下溢——共享权威后此类漂移在编译期就不可能)。
+- 行表 [112] 转 canonical 死行,lowered 视图行追加于 [274]
+  (`op_info_len` 274→275);`phase1Info` 对 lowered-direct id 返回后者。
+
+门禁:`zig build test` **2486/0**(含终态断言:`.lowered` 域 112→
+to_propkey、`.final` 域 112 拒收、makeFunction 直连流拒收、carrier 臂
+照常执行),raw-access 374 冻结值不变,batch gate 见提交信息。
+**C0 全流程关账;主线下一格 G0**(声明源最终切换,净 0)。
+
+###### G0a/G0b-lite 落地——`opcode_info` 转生成产物 + emit 常量全量互证(2026-08-30)
+
+**G0a**:`opcode_info` 不再手写。声明源补齐最后一轴——
+`logical.form_decls`(264 行:form + fmt + pop/push;**size 故意不声明**,
+由 operand template 派生,与 F0a1 起 join 一直断言的算术同源,声明出的
+size 能漂移、派生出的不能)。生成器以 **enum 为槽位图**(op_count 内无
+<300 成员的 id = reclaimed,自动得 canonical 死行 `unused_<id>`),温层
+300+ 按固定偏移落 178..196,lowered-direct 行追加尾部;`op_info_len`
+改为派生和(255+19+1)。**旧手写表降级为 `legacy_opcode_info`,只被
+逐字段等价 comptime 证明引用**(G0 关账时同删)。
+
+**G0b-lite**:~263 个 `op.<name>` 发射常量与 enum 全量 comptime 互证
+(final=值本身、temp=固定偏移、lowered-direct 已有专项),常量漂移或
+「加了 form 忘了常量」从此编译即红。完整的常量派生(decl 无法在 Zig
+里迭代生成)暂以互证形态封顶,是否值得 @Type 实例化重构留给 G0 关账
+复盘。
+
+**门禁读数**:
+- 逐字段等价:comptime 证明(generated == legacy,275 行全对);
+- objdump:`.text`/`.rodata` 尺寸逐字节相同(0x3425a4/0x413d8),
+  反汇编指令行数两臂同为 **900,835**,残差 diff 全部为「函数在 .text 内
+  重排 + rodata 偏移位移」(comptime 实例化编号变化的已知副作用),
+  指令多重集相同;
+- bench(七基准并行 ABBA×8,证据
+  `reports/evidence/PERF-OPCODE-SPACE/g0a-ledger/`):**insn geomean
+  0.9997、cycles geomean 1.0002**,splay +0.60% 落在臂内极差
+  1.35/1.92% 内——布局彩票读数,无机制;
+- `zig build test` 2486/0,raw-access 374 冻结值不变。
+
+**G0 余项**:direct-handler/scanner 集合的派生化核查、物理 carrier 中性
+改名(`using`→`ext0`,logical 居民名不动)、删除 `legacy_opcode_info`
+并关账。
+
+###### G0 关账(2026-08-30)——三余项闭合,**C1 parent 冻结于本 commit**
+
+**派生化核查(余项①)结论:无未证明的手写身份表残留。** 走查四类:
+(a) exec dispatch 表以 `op.<name>` 常量为键,常量已被 G0b-lite 全量
+comptime 互证,handler↔form 的绑定本身是 P0-3 钦定的手写层,不在派生
+范围;(b) cfg 的 temp/phase1 镜像表带既有 comptime 等价证明,其 shell
+退役记为 post-G0 清理项,非 G0 范围;(c) scanner 政策已全部走
+traits/subForm(F0b/F0d);(d) 其余 374 处 raw 访问冻结在 allowlist,
+逐项带原因与移除阶段。**终态语义类(terminal/control)仍在手写谓词
+(如 `isUnconditionalTerminal`),归 Effects.control 轴,属 F0e 后续,
+不阻塞 G0。**
+
+**中性改名(余项②)**:物理 carrier `using`→**`ext0`**(op 常量、
+LogicalOpcode 成员、`using_sub`→`ext0_sub` 命名空间、SemanticFamily
+成员、profile 字段,共 ~190 处纯机械替换);**id 244 与字节编码不变**,
+ERM 居民 logical 名(`using_create`…)不动。行名随 @tagName 自动变
+"ext0" ⇒ 指纹钉更新为 **`0x9434a7c30b9fef2b`**。
+
+**删表(余项③)**:`legacy_opcode_info` 与逐字段等价证明删除(证明
+留存于压缩前的 G0a commit,谱系在 `backup/pre-squash-2026-08-30-opcode`)。
+
+**门禁读数**(七基准并行 ABBA×8 + splay 单核 ABBA×16 复测,证据
+`reports/evidence/PERF-OPCODE-SPACE/g0-close-ledger/`):
+
+- insn geomean **0.9997**,cycles geomean **1.0021**;
+- **splay +1.16%(复测确认)**:insn +0.05%、IPC −1.24%、cache-miss
+  +4.2%、branch-miss +5.9%——**纯布局位移签名,无指令机制**。本臂
+  .text −1364B 分散在 netLookup/uri/lexer 等与 opcode 无关的函数
+  (comptime decl 序扰动优化器的已知彩票类,合同第 10 条口径:不把
+  地址重排噪声计入判定);splay 记分裕量(1.1724 vs 停线 1.2675)
+  完全吸收;
+- `zig build test` 2486/0,raw-access 374 冻结值不变,batch gate 见
+  提交信息。
+
+**至此 G0 关账。C1 的 parent 基线 = 本 commit;自此每条 demotion 的
+ISA 接线只改 logical/carrier declaration(enum 成员 + form_decls 行 +
+op 常量镜像,三者任一不一致即编译红),不再维护平行手写表。C1 开工
+条件维持 §11.7:按「1. 0 执行、cold-only、fallthrough」次序逐条审计,
+到 228/28 检查点强制复盘(D5)。**
+
+###### C1 开工——八负载执行数普查 + 首批四候选审计 + C1-1 窗口开启(2026-08-30)
+
+**普查**(F0d logical profiler,`ZJS_PROFILE_ALL=1`,八负载并行各占一核:
+六个 fixed-work GC 基准 + code-load + typescript 组装脚本;证据
+`reports/evidence/PERF-OPCODE-SPACE/c1-census/`):244 个 claimed form 中
+**166 个有执行、79 个零执行**(profiler 明确剔除零计数行,缺席即为零)。
+零执行池远超到检查点所需的 15 条,但其中大量属规则 4 排除类
+(control/catch:gosub/ret/throw/yield 族;私有字段/brand 族)或
+代表性缺口类。
+
+**首批四候选逐条裁定**(§11.7 明言这是审计对象不是预判,裁定如下):
+
+| 候选 | census | 裁定 | 依据 |
+|---|---|---|---|
+| `set_name_computed` | 0 执行 | **迁(C1-1,本节)** | 计算名函数命名在任何时代语料都罕见;唯一生产者是 builder 的 trailing set_name 重写(lowered 域,不受影响);无 final 域身份匹配;fallthrough、无 payload |
+| `is_undefined_or_null` | 0 执行 | **缓议——代表性缺口** | `??`/nullish 是现代 JS 高频构造,Octane 时代语料测不出真温度;二级分派税会落在产品代码上 |
+| `append` | 0 执行 | **缓议——代表性缺口** | spread 同理 |
+| `define_array_el` | 0 执行 | **缓议——代表性缺口** | 计算键/解构同理 |
+
+缺口三条的复活条件:产品级语料(而非 Octane)证实其冷,或 28 检查点
+复盘裁定接受该税。
+
+**C1-1(`set_name_computed`,slot 20)窗口开启**:与 C0 完全同构——
+registry+`ext0_sub.set_name_computed=20`(栈效应 2/2 与行一致,join
+断言)、direct id 75 转 executable_alias、writer 加 emitFinalCarrier
+臂、carrier 分派臂传**常量字节**(共享 setName 按它选臂,永不读流字节)、
+指纹重钉 **`0x82e3ba9cb207dc97`**、未知 tag 探针移至 21。fixture:
+名字推断语义(字符串/派生串/Symbol 键 `[sy]`)+ artifact 形状
+(carrier 对=1、direct 75=0)。**账本不动(244/12);关窗欠:本成员
+ledger 读数 + 删 alias(届时 243/13)。**
+
+###### C1-1 关账(2026-08-30 同日)——**243/13**
+
+成员 ledger 读数(窗口臂 vs 其父,七基准并行 ABBA×8,证据
+`reports/evidence/PERF-OPCODE-SPACE/c1-1-ledger/`):**insn geomean
+1.0000、cycles geomean 0.9977**,七基准全部落在臂内极差内(最偏的
+regexp −0.98% 对臂内 2.72/2.39%)——中立,窗关。
+
+删除步(照 C0 配方,全程只碰声明与钉子):enum 75→**420**、
+`lowered_direct` += {set_name_computed, 75}(builder 重写继续产 75,
+phase-1/parser/s3 三域照解;生成器自动补 [275] lowered 行、
+`op_info_len` 派生和自动 276)、alias 表复空、direct dispatch 项删除
+(75 落 invalid handler)、行转 `unused_75`、账本 **244/12 → 243/13**、
+指纹重钉 **`0x166cb5a2882d5cd6`**、终态断言补 75 双域探针。
+门禁:`zig build test` 2487/0,batch gate 见提交信息。
+
+**C1 进度:1/15;下一步 = 继续按次序审计零执行池**(tier 1 尚有
+候选如 `push_0_shr`/`sar_get_array_el`/`rot3l`/`perm4`/`nip`/`nop`/
+`pow`/`push_bigint_i32` 等,各须单独过「无 final 匹配面 + 无缺口」
+核查;control/catch 族与 private/brand 族按规则 4 不进本包)。
+
+迁移本身的两条附带产出：`FormRow` 新增 atom/label/index-width 三类
+声明派生位（`label_bit` 让 validateProductCode 拒绝「未获准的整类带
+label form」而非手维护格式黑名单）；语义收紧——旧 reader 接受任何有
+表行的 id（含十个已回收 id 的规范死行），headerAt 拒绝之，S3/S4 流里
+的退役 opcode 现在是 InvalidBytecode。
+
+##### 口径二：对 project-root —— **opcode 线整体持平**
+
+第 6 条的第二个口径问的是累计账，而这才是判定这条线有没有变坏的那个数。
+基线取 **`b1ab5200`**（= `78d77089^`，opcode 线第一个代码改动之前）；
+`git log -- src/ tools/` 核过，`b1ab5200..94063da6` 区间内**每一个改动代码
+的提交都是 opcode 工作**，没有其他线掺入。仪器用仓库自己的
+`tools/perf/bench_v8/run_benchv8_compare.py --baseline`（serial 协议、
+core 18、ABBA、8 样本/引擎），不自造。证据：
+`reports/evidence/PERF-OPCODE-SPACE/`。
+
+**综合 Score（version 9）比值 0.9996**，而同仪器同构建的 A/A 给出
+**0.9986（带 ±0.14%）**——A/B 偏差 −0.04% 在带内。**判持平：opcode 线
+整体没有性能退化。**
+
+| 基准 | A/B | A/A 噪声带 | 判定 |
+|---|---|---|---|
+| CodeLoad | **0.9866** | ±0.49% | 带外，**有机制**（口径一那笔） |
+| RegExp | 0.9873 | ±0.28% | 带外，但复测不稳（见下） |
+| DeltaBlue | 0.9879 | ±0.28% | 带外，约 −0.4%，无机制 |
+| EarleyBoyer | 1.0109 | ±0.38% | 带外**正向**，无机制 |
+| Typescript | 1.0077 | ±0.05% | 带外**正向**，无机制 |
+| PdfJS | 1.0065 | ±0.13% | 带外**正向**，无机制 |
+| SplayLatency | 1.0146 | ±4.69% | 带内（该指标双峰，噪声本就大） |
+| 其余九项 | 0.999–1.005 | — | 带内 |
+
+**只有 CodeLoad 一条既超带又有机制。** 其余超带项按第 10 条处理——它正是
+为「不把地址重排噪声混进判定」而写的：
+
+- **DeltaBlue** 用三臂 n=20/臂、含同轮 A/A 对照（A/A −0.07%）复测为
+  −0.54%，再以 `ef7fc62a` 切段，**−0.34% 落在前半段**（回收 id、
+  with 族 5→1、R0、F0a），F0b 只占 −0.03%。
+- **RegExp 在这个效应尺度上超出仪器分辨率**：两次独立复测给出 −0.89% 与
+  −1.66%，切段读数是「前半段 +1.88%、F0b −3.47%」。**记为未解决，不记为
+  一个数**——已登记的先例是同一改动两个顺序给出相反符号。
+- 同一次 A/B 里另有四项**往上**走了 0.65~1.46%，同样说不出机制。
+  **正负混杂、无机制、在综合分上相抵归零，是 handler island 的布局签名**：
+  前半段的改动全在删或并 handler（退役 nip1、降级 set_proto、回收 5 个
+  id、with 族 5→1、R0 删融合），每删一个，其余 handler 的地址就整体移位。
+
+这一口径**改变了口径一那笔账的分量而不改变它的判定**：CodeLoad 的
+−1.34%（本口径）/ −1.64%（对 parent）仍然超带、仍然有机制、仍然是第 11 条
+未过门的那一项；但它在整条线的累计账上被其余基准抵消，综合持平。
+两件事都要摆给 owner，不能只报其中一件。
 
 F0 额外证明 production artifact（新增 logical profile section 除外）逐字段
 不变；R0 额外证明“不再发射”；C0 额外遍历所有 final-phase consumer；G0

@@ -3784,10 +3784,19 @@ pub const parser_core = struct {
             errdefer parsed.deinit();
             if (negate and !parsed.isZero()) parsed.negative = !parsed.negative;
 
+            // Reserved (unregistered) heap BigInt: no GC list membership until
+            // the owning FunctionBytecode is published
+            // (`BigInt.registerReservedValue`), so a collection during the rest
+            // of the parse can neither sweep nor need to trace it. The parser
+            // may run without a runtime, so allocation and the failure-path
+            // free both go through the function's own account.
             const big = self.function.memory.create(core_bigint.BigInt) catch return Error.OutOfMemory;
             big.initExternalFromOwned(parsed);
             parsed = .{ .allocator = self.function.memory.persistent_allocator };
+            var big_owned = true;
+            errdefer if (big_owned) big.destroyWithAccount(self.function.memory);
             try Emitter.pushConstOwned(self, big.valueRef());
+            big_owned = false;
         }
 
         fn appendBytes(self: *State, bytes: []const u8) Error!void {
@@ -4587,7 +4596,7 @@ pub const parser_core = struct {
         }
 
         if (lvalue.depth == 3) {
-            try emitterOpU8(s, opcode.op.using, opcode.using_sub.insert4);
+            try emitterOpU8(s, opcode.op.ext0, opcode.ext0_sub.insert4);
         } else {
             try Emitter.opNoSource(s, switch (lvalue.depth) {
                 0 => opcode.op.dup,
@@ -4752,7 +4761,7 @@ pub const parser_core = struct {
             .array_element => emitOpNoSourceAssumeCapacity(s, opcode.op.get_array_el3),
             .super_value => {
                 emitOpNoSourceAssumeCapacity(s, opcode.op.to_propkey);
-                emitOpU8NoSourceAssumeCapacity(s, opcode.op.using, opcode.using_sub.dup3);
+                emitOpU8NoSourceAssumeCapacity(s, opcode.op.ext0, opcode.ext0_sub.dup3);
                 emitOpNoSourceAssumeCapacity(s, opcode.op.get_super_value);
             },
             .ref_value => emitOpNoSourceAssumeCapacity(s, opcode.op.get_ref_value),
@@ -4788,7 +4797,7 @@ pub const parser_core = struct {
                 // qjs get_lvalue (quickjs.c:26027-26030): preserve the super
                 // receiver/base/key triple around the value load.
                 try emitterOpNoSource(s, opcode.op.to_propkey);
-                try emitterOpU8(s, opcode.op.using, opcode.using_sub.dup3);
+                try emitterOpU8(s, opcode.op.ext0, opcode.ext0_sub.dup3);
                 try emitterOpNoSource(s, opcode.op.get_super_value);
             },
             .ref_value => {
@@ -4994,11 +5003,11 @@ pub const parser_core = struct {
         // preservation shuffle before emitting the setter. insert4 was
         // reclaimed for fusion v4 and emits as using+sub.
         if (lvalue.opcode == .super_value and mode == .keep_top)
-            try emitterOpU8(s, opcode.op.using, opcode.using_sub.insert4)
+            try emitterOpU8(s, opcode.op.ext0, opcode.ext0_sub.insert4)
         else if (lvalue.opcode == .super_value and mode == .keep_second)
-            try emitterOpU8(s, opcode.op.using, opcode.using_sub.perm5)
+            try emitterOpU8(s, opcode.op.ext0, opcode.ext0_sub.perm5)
         else if (lvalue.opcode == .super_value and mode == .no_keep_bottom)
-            try emitterOpU8(s, opcode.op.using, opcode.using_sub.rot4l)
+            try emitterOpU8(s, opcode.op.ext0, opcode.ext0_sub.rot4l)
         else if (shuffle_op) |op_id| try emitterOpNoSource(s, op_id);
 
         switch (lvalue.opcode) {
@@ -5032,7 +5041,7 @@ pub const parser_core = struct {
             .super_value => {
                 // qjs put_lvalue (quickjs.c:26187-26189): store through the
                 // preserved super receiver/base/key triple.
-                try emitterOpU8NoSource(s, opcode.op.using, opcode.using_sub.put_super_value);
+                try emitterOpU8NoSource(s, opcode.op.ext0, opcode.ext0_sub.put_super_value);
             },
         }
     }
@@ -7088,9 +7097,9 @@ pub const parser_core = struct {
             // `strings.map` in assert.deepEqual.format a TypeError.
             const prototype = realmArrayPrototype(rt);
             const template_object = core.Object.createArray(rt, prototype) catch return Error.OutOfMemory;
-            errdefer core.Object.destroyFromHeader(rt, &template_object.header);
+            errdefer core.Object.destroyFromHeader(rt, template_object.gcHeader());
             const raw_array = core.Object.createArray(rt, prototype) catch return Error.OutOfMemory;
-            errdefer core.Object.destroyFromHeader(rt, &raw_array.header);
+            errdefer core.Object.destroyFromHeader(rt, raw_array.gcHeader());
 
             const raw_value = raw_array.value();
             const raw_atom = try rt.internAtom("raw");
@@ -7216,7 +7225,7 @@ pub const parser_core = struct {
         }
         try expectPunct(s, ']');
         if (spread_active) {
-            try Emitter.opU8(s, opcode.op.using, opcode.using_sub.dup1);
+            try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.dup1);
             try Emitter.opAtom(s, opcode.op.put_field, atom_module.ids.length);
         } else if (!sparse_active) {
             try Emitter.opU16(s, opcode.op.array_from, count);
@@ -7406,7 +7415,7 @@ pub const parser_core = struct {
                 if (name_info.is_proto) {
                     if (proto_field_seen.*) return s.failUnexpectedToken();
                     proto_field_seen.* = true;
-                    try Emitter.opU8(s, opcode.op.using, opcode.using_sub.set_proto);
+                    try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.set_proto);
                 } else {
                     capacity_hint.noteStaticProperty(name);
                     try setObjectName(s, name);
@@ -9193,7 +9202,7 @@ pub const parser_core = struct {
         const stack_loc = try appendAnonymousTempLocal(s);
         // zjs-only explicit-resource-management lowering: mirror the
         // legacy stack creation and local-store sequence exactly.
-        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.create);
+        try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.create);
         try Emitter.opU16(s, opcode.op.put_loc, stack_loc);
         return stack_loc;
     }
@@ -9211,7 +9220,7 @@ pub const parser_core = struct {
         // legacy stack/resource operand order and disposal hint.
         try Emitter.opU16(s, opcode.op.get_loc, stack_loc);
         try Emitter.opU16(s, opcode.op.get_loc, resource_loc);
-        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.add(@intFromEnum(kind)));
+        try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.add(@intFromEnum(kind)));
     }
 
     fn emitUsingAwaitIfNeeded(s: *State, may_be_async: bool) Error!void {
@@ -9219,7 +9228,7 @@ pub const parser_core = struct {
         // zjs-only explicit-resource-management lowering: the optional
         // await continuation is born and bound as a label.
         try Emitter.op(s, opcode.op.dup);
-        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.is_undefined);
+        try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.is_undefined);
         var skip_await: Label = .{};
         try Emitter.newLabel(s, &skip_await);
         try Emitter.jump(s, opcode.op.if_true, &skip_await);
@@ -9231,7 +9240,7 @@ pub const parser_core = struct {
         // zjs-only explicit-resource-management lowering: mirror the
         // normal-completion disposal prefix exactly.
         try Emitter.opU16(s, opcode.op.get_loc, stack_loc);
-        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.dispose);
+        try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.dispose);
         try emitUsingAwaitIfNeeded(s, may_be_async);
         try Emitter.op(s, opcode.op.drop);
     }
@@ -9241,7 +9250,7 @@ pub const parser_core = struct {
         // thrown value beneath the disposable stack before suppression.
         try Emitter.opU16(s, opcode.op.get_loc, stack_loc);
         try Emitter.op(s, opcode.op.swap);
-        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.dispose_throw);
+        try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.dispose_throw);
         try emitUsingAwaitIfNeeded(s, may_be_async);
         try Emitter.op(s, opcode.op.drop);
     }
@@ -11135,7 +11144,7 @@ pub const parser_core = struct {
         if (s.in_constructor and s.class_has_extends) {
             if (value_on_stack) {
                 // qjs emit_return derived constructor (quickjs.c:28453-28472): if_false skips this substitution.
-                try Emitter.opU8(s, opcode.op.using, opcode.using_sub.check_ctor_return);
+                try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.check_ctor_return);
                 var return_value: Label = .{};
                 try Emitter.newLabel(s, &return_value);
                 try Emitter.jump(s, opcode.op.if_false, &return_value);
@@ -11599,7 +11608,7 @@ pub const parser_core = struct {
         };
         // qjs TOK_WITH lowering (quickjs.c:29553-29570): coerce the
         // expression and store the with-object binding at the same source.
-        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.to_object);
+        try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.to_object);
         try Emitter.opU16(s, opcode.op.put_loc, with_idx);
 
         const saved_with_atom = s.active_with_atom;
@@ -12358,7 +12367,7 @@ pub const parser_core = struct {
                             // qjs js_parse_function_decl2: keep an already-supplied
                             // argument, otherwise evaluate and store its initializer.
                             try Emitter.opU16(s, opcode.op.get_arg, @intCast(arg_index));
-                            try Emitter.opU8(s, opcode.op.using, opcode.using_sub.is_undefined);
+                            try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.is_undefined);
                             var keep_value: Label = .{};
                             try Emitter.newLabel(s, &keep_value);
                             try Emitter.jump(s, opcode.op.if_false, &keep_value);
@@ -13296,7 +13305,7 @@ pub const parser_core = struct {
                             // qjs js_parse_function_decl2: arrow parameters use
                             // the same supplied-value/default-value merge.
                             try Emitter.opU16(s, opcode.op.get_arg, @intCast(arg_index));
-                            try Emitter.opU8(s, opcode.op.using, opcode.using_sub.is_undefined);
+                            try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.is_undefined);
                             var keep_value: Label = .{};
                             try Emitter.newLabel(s, &keep_value);
                             try Emitter.jump(s, opcode.op.if_false, &keep_value);
@@ -13767,7 +13776,7 @@ pub const parser_core = struct {
             0 => {},
             1 => try Emitter.op(s, opcode.op.swap),
             2 => try Emitter.op(s, opcode.op.rot3l),
-            3 => try Emitter.opU8(s, opcode.op.using, opcode.using_sub.rot4l),
+            3 => try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.rot4l),
             else => unreachable,
         }
     }
@@ -13775,11 +13784,11 @@ pub const parser_core = struct {
     fn rotateComputedSourcePastTarget(s: *State, depth: u8) Error!void {
         switch (depth) {
             0 => {},
-            1 => try Emitter.opU8(s, opcode.op.using, opcode.using_sub.rot3r),
-            2 => try Emitter.opU8(s, opcode.op.using, opcode.using_sub.swap2),
+            1 => try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.rot3r),
+            2 => try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.swap2),
             3 => {
-                try emitterOpU8(s, opcode.op.using, opcode.using_sub.rot5l);
-                try emitterOpU8(s, opcode.op.using, opcode.using_sub.rot5l);
+                try emitterOpU8(s, opcode.op.ext0, opcode.ext0_sub.rot5l);
+                try emitterOpU8(s, opcode.op.ext0, opcode.ext0_sub.rot5l);
             },
             else => unreachable,
         }
@@ -13923,7 +13932,7 @@ pub const parser_core = struct {
                     try Emitter.op(s, opcode.op.drop);
                 } else {
                     // qjs emit_return iterator cleanup (quickjs.c:28441-28444): rotate value, add dummy catch offset, close.
-                    try Emitter.opU8(s, opcode.op.using, opcode.using_sub.rot3r);
+                    try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.rot3r);
                     try Emitter.op(s, opcode.op.undefined);
                     try Emitter.op(s, opcode.op.iterator_close);
                 }
@@ -13999,7 +14008,7 @@ pub const parser_core = struct {
 
     fn parseObjectPatternBody(s: *State, mode: PatternMode, has_rest: bool) Error!void {
         try s.expectToken('{');
-        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.to_object);
+        try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.to_object);
         if (has_rest) {
             try Emitter.op(s, opcode.op.object);
             try Emitter.op(s, opcode.op.swap);
@@ -14074,7 +14083,7 @@ pub const parser_core = struct {
                     } else {
                         try Emitter.op(s, opcode.op.to_propkey);
                     }
-                    try Emitter.opU8(s, opcode.op.using, opcode.using_sub.dup1);
+                    try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.dup1);
                 } else {
                     const property = property_info orelse return Error.ParserInvariant;
                     if (has_rest) try addNamedObjectRestExclusion(s, property.atom);

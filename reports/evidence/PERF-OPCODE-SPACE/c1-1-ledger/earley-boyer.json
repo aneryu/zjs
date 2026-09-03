@@ -1,0 +1,468 @@
+{
+ "tool": "zjs-benchv8-fixed-pmu",
+ "schemaVersion": 1,
+ "direction": "ratios are zjs/qjs; below 1.0 means zjs used fewer counters or wall time",
+ "workload": "per-benchmark scripts assembled from the vendored suite with doWarmup=false and doDeterministic=true appended; both engines execute identical deterministicIterations/minIterations batches",
+ "role": "screening instrument; score adjudication stays with run_benchv8_compare.py",
+ "iterationDivisor": 1,
+ "timestamp": "2026-08-30T11:49:47Z",
+ "samplesPerEnginePerBench": 8,
+ "samplingOrder": "paired ABBA by sample parity",
+ "firstPositionCounts": {
+  "qjs": 4,
+  "zjs": 4
+ },
+ "firstPositionBalanced": true,
+ "cpu": 19,
+ "effectiveAffinity": [
+  19
+ ],
+ "pmu": "armv8_pmuv3_1",
+ "events": [
+  "armv8_pmuv3_1/instructions/",
+  "armv8_pmuv3_1/cycles/",
+  "armv8_pmuv3_1/branch-instructions/",
+  "armv8_pmuv3_1/branch-misses/",
+  "armv8_pmuv3_1/cache-references/",
+  "armv8_pmuv3_1/cache-misses/"
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": "0xd87",
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/c1w-new-zjs",
+   "sha256": "f5113c3071c9615ba6333205d2ef948dbaf57f8d073661f5754c2a32ac9bd1e3",
+   "repo": "v0.1.0-167-gd020a6f6-dirty"
+  },
+  "qjs": {
+   "path": "/tmp/c1w-parent-zjs",
+   "sha256": "7b54d7d4316f36f01573ea149f5409cea61bd44056f3cb1a022bb4338e0a858d",
+   "repo": "unavailable"
+  }
+ },
+ "benchmarks": {
+  "earley-boyer": {
+   "source": {
+    "suiteDir": "/home/aneryu/zjs/tools/perf/bench_v8/suite",
+    "files": [
+     {
+      "file": "base.js",
+      "sha256": "216612c2e7096a02b3e52b57e9cf9351bbaf180d60938d5c60b85fd756232733"
+     },
+     {
+      "file": "earley-boyer.js",
+      "sha256": "8dd28a505f7e705642f86816232b012fd3c770ec8afc9f719ce89ce772dab347"
+     }
+    ],
+    "fixedWorkSha256": "b7cb20cb6e9c2fc3ef59bda0951761e9a3c19d4fef9f4be054194de9d32c93f9"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 464362958621,
+       "cycles": 91679728641,
+       "branch-instructions": 89446916935,
+       "branch-misses": 164089021,
+       "cache-references": 189002482876,
+       "cache-misses": 900537846
+      },
+      "wallSeconds": 23.548628161661327,
+      "stdout": "EarleyBoyer: 4017\n----",
+      "scores": {
+       "EarleyBoyer": 4017.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 463706610484,
+       "cycles": 91145196011,
+       "branch-instructions": 89242763133,
+       "branch-misses": 165531518,
+       "cache-references": 188456884352,
+       "cache-misses": 972776505
+      },
+      "wallSeconds": 23.403522254899144,
+      "stdout": "EarleyBoyer: 4037\n----",
+      "scores": {
+       "EarleyBoyer": 4037.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 463755757411,
+       "cycles": 90937796750,
+       "branch-instructions": 89258679192,
+       "branch-misses": 162669970,
+       "cache-references": 188440872004,
+       "cache-misses": 905947556
+      },
+      "wallSeconds": 23.334688930772245,
+      "stdout": "EarleyBoyer: 4050\n----",
+      "scores": {
+       "EarleyBoyer": 4050.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 463696494263,
+       "cycles": 91090702856,
+       "branch-instructions": 89246353462,
+       "branch-misses": 163257425,
+       "cache-references": 188536796523,
+       "cache-misses": 1045174839
+      },
+      "wallSeconds": 23.373497729189694,
+      "stdout": "EarleyBoyer: 4043\n----",
+      "scores": {
+       "EarleyBoyer": 4043.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 463935585043,
+       "cycles": 91415765844,
+       "branch-instructions": 89315863955,
+       "branch-misses": 164178714,
+       "cache-references": 188480526041,
+       "cache-misses": 951929748
+      },
+      "wallSeconds": 23.458077257033437,
+      "stdout": "EarleyBoyer: 4029\n----",
+      "scores": {
+       "EarleyBoyer": 4029.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 464522398461,
+       "cycles": 90737071743,
+       "branch-instructions": 89552147420,
+       "branch-misses": 163341371,
+       "cache-references": 188768482640,
+       "cache-misses": 944103977
+      },
+      "wallSeconds": 23.28388529177755,
+      "stdout": "EarleyBoyer: 4058\n----",
+      "scores": {
+       "EarleyBoyer": 4058.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 464278576092,
+       "cycles": 90745149304,
+       "branch-instructions": 89444537672,
+       "branch-misses": 164379964,
+       "cache-references": 188631513160,
+       "cache-misses": 913687004
+      },
+      "wallSeconds": 23.28490731306374,
+      "stdout": "EarleyBoyer: 4057\n----",
+      "scores": {
+       "EarleyBoyer": 4057.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 463917233403,
+       "cycles": 90931208262,
+       "branch-instructions": 89310591364,
+       "branch-misses": 162949202,
+       "cache-references": 188483010864,
+       "cache-misses": 912410832
+      },
+      "wallSeconds": 23.342140804976225,
+      "stdout": "EarleyBoyer: 4049\n----",
+      "scores": {
+       "EarleyBoyer": 4049.0
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 463891709802,
+       "cycles": 91462568241,
+       "branch-instructions": 89274285684,
+       "branch-misses": 166637300,
+       "cache-references": 188628932582,
+       "cache-misses": 940840043
+      },
+      "wallSeconds": 23.482251398265362,
+      "stdout": "EarleyBoyer: 4025\n----",
+      "scores": {
+       "EarleyBoyer": 4025.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 465131097177,
+       "cycles": 92433969128,
+       "branch-instructions": 89740710325,
+       "branch-misses": 166962832,
+       "cache-references": 190528199857,
+       "cache-misses": 933043600
+      },
+      "wallSeconds": 23.73702898528427,
+      "stdout": "EarleyBoyer: 3982\n----",
+      "scores": {
+       "EarleyBoyer": 3982.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 463808683769,
+       "cycles": 90794702405,
+       "branch-instructions": 89270109852,
+       "branch-misses": 164918843,
+       "cache-references": 188525141008,
+       "cache-misses": 937601673
+      },
+      "wallSeconds": 23.30648764502257,
+      "stdout": "EarleyBoyer: 4056\n----",
+      "scores": {
+       "EarleyBoyer": 4056.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 463806937077,
+       "cycles": 91055381402,
+       "branch-instructions": 89294092784,
+       "branch-misses": 163968758,
+       "cache-references": 188901022812,
+       "cache-misses": 948809173
+      },
+      "wallSeconds": 23.365262585692108,
+      "stdout": "EarleyBoyer: 4044\n----",
+      "scores": {
+       "EarleyBoyer": 4044.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 463984431631,
+       "cycles": 91578495006,
+       "branch-instructions": 89323177582,
+       "branch-misses": 166152333,
+       "cache-references": 189677228880,
+       "cache-misses": 917680675
+      },
+      "wallSeconds": 23.499864204786718,
+      "stdout": "EarleyBoyer: 4023\n----",
+      "scores": {
+       "EarleyBoyer": 4023.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 464631780305,
+       "cycles": 91599478834,
+       "branch-instructions": 89568741372,
+       "branch-misses": 166696859,
+       "cache-references": 188800061494,
+       "cache-misses": 933026400
+      },
+      "wallSeconds": 23.504899414256215,
+      "stdout": "EarleyBoyer: 4021\n----",
+      "scores": {
+       "EarleyBoyer": 4021.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 463728850708,
+       "cycles": 91033909655,
+       "branch-instructions": 89236378484,
+       "branch-misses": 164628303,
+       "cache-references": 188657810392,
+       "cache-misses": 929867734
+      },
+      "wallSeconds": 23.353694811929017,
+      "stdout": "EarleyBoyer: 4046\n----",
+      "scores": {
+       "EarleyBoyer": 4046.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 463965882564,
+       "cycles": 91115247627,
+       "branch-instructions": 89333479657,
+       "branch-misses": 165108644,
+       "cache-references": 189030320828,
+       "cache-misses": 943742901
+      },
+      "wallSeconds": 23.3754562321119,
+      "stdout": "EarleyBoyer: 4041\n----",
+      "scores": {
+       "EarleyBoyer": 4041.0
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 463926409223.0,
+     "zjsMedian": 463928796183.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9989851713831795,
+      1.0030719568382112,
+      1.0001141255006634,
+      1.0002381791006971,
+      1.0001052874355294,
+      1.0002354716249688,
+      0.9988159578918604,
+      1.0001048660353553
+     ],
+     "ratioMedian": 1.0001097064680964,
+     "ratioMAD": 0.00012711889473659976
+    },
+    "cycles": {
+     "qjsMedian": 91014249803.0,
+     "zjsMedian": 91288907934.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9976313149785777,
+      1.0141397810680495,
+      0.9984264590729707,
+      0.9996122386490327,
+      1.0017800995320403,
+      1.0095044624477485,
+      1.0031821023295981,
+      1.0020239406087041
+     ],
+     "ratioMedian": 1.0019020200703723,
+     "ratioMAD": 0.0028826712093706353
+    },
+    "branch-instructions": {
+     "qjsMedian": 89313227659.5,
+     "zjsMedian": 89308635183.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9980700145190532,
+      1.0055796926778018,
+      1.0001280621683344,
+      1.0005349162195218,
+      1.000081884971786,
+      1.0001852993197602,
+      0.9976727568455512,
+      1.0002562774767296
+     ],
+     "ratioMedian": 1.0001566807440474,
+     "ratioMAD": 0.00023891610407833497
+    },
+    "branch-misses": {
+     "qjsMedian": 163715196.0,
+     "zjsMedian": 165630488.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0155298568086404,
+      1.00864677625925,
+      1.013824758189849,
+      1.004357124951591,
+      1.0120211624997866,
+      1.0205427931665885,
+      1.0015107619806998,
+      1.0132522404129356
+     ],
+     "ratioMedian": 1.012636701456361,
+     "ratioMAD": 0.0034415402746952317
+    },
+    "cache-references": {
+     "qjsMedian": 188509903693.5,
+     "zjsMedian": 188850542153.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9980235693821806,
+      1.0109909251239195,
+      1.0004471906922519,
+      1.0019318578426974,
+      1.006349212112978,
+      1.0001672888056223,
+      1.0001394105977282,
+      1.0029037628457396
+     ],
+     "ratioMedian": 1.0011895242674747,
+     "ratioMAD": 0.0013821761240057073
+    },
+    "cache-misses": {
+     "qjsMedian": 928895490.5,
+     "zjsMedian": 935322636.5,
+     "pairedRatiosZjsOverQjs": [
+      1.044753473914521,
+      0.9591551555822166,
+      1.0349403415135434,
+      0.9077994777484306,
+      0.9640214279762166,
+      0.9882665709817257,
+      1.0177092701649064,
+      1.0343398696082118
+     ],
+     "ratioMedian": 1.002987920573316,
+     "ratioMAD": 0.03545945676866341
+    },
+    "wallSeconds": {
+     "qjsMedian": 23.35781926708296,
+     "zjsMedian": 23.42885381518863,
+     "pairedRatiosZjsOverQjs": [
+      0.9971812895876444,
+      1.0142502793704615,
+      0.9987914436814076,
+      0.9996476717522983,
+      1.0017813458151499,
+      1.0094921496008535,
+      1.0029541667458854,
+      1.0014272652801655
+     ],
+     "ratioMedian": 1.0016043055476578,
+     "ratioMAD": 0.002384747830804834
+    }
+   },
+   "derived": {
+    "qjsIPC": 5.097294217412844,
+    "zjsIPC": 5.081984292313048,
+    "ipcRatioZjsOverQjs": 0.9969964603872588
+   }
+  }
+ },
+ "orderLog": [
+  {
+   "bench": "earley-boyer",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 7,
+   "order": "zjs->qjs"
+  }
+ ]
+}

@@ -72,7 +72,7 @@ pub fn createForInIterator(
     defer source_val.free(rt);
 
     const iterator = try core.Object.create(rt, core.class.ids.for_in_iterator, null);
-    errdefer core.Object.destroyFromHeader(rt, &iterator.header);
+    errdefer core.Object.destroyFromHeader(rt, iterator.gcHeader());
     iterator_val = iterator.value();
 
     // it->is_array = FALSE; it->obj = obj; it->idx = 0; it->tab_atom = NULL;

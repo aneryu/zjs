@@ -997,7 +997,7 @@ pub fn updateRegExpLegacyStaticsNoCaptures(rt: *core.JSRuntime, global: *core.Ob
 
 pub fn createRegExpIndexPair(rt: *core.JSRuntime, global: *core.Object, start: usize, end: usize) !core.JSValue {
     const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
+    errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
     try defineSplitValueElement(rt, out, 0, core.JSValue.int32(@intCast(start)));
     try defineSplitValueElement(rt, out, 1, core.JSValue.int32(@intCast(end)));
     return out.value();

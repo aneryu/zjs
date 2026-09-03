@@ -108,9 +108,9 @@ pub fn reclaimNow(rt: *core.JSRuntime) void {
 /// Under the tracer the count is not maintained at all for the kinds it owns
 /// (`core.gc.refCountRemoved`), so there is no arithmetic left to check and the
 /// assertion is skipped rather than deleted -- the refcounting build still
-/// guards exactly what it always did. Kinds the tracer does not own (strings,
-/// ropes, BigInt, and also shapes and realms, which keep their counts for
-/// copy-on-write and host-handle reasons) are checked in both builds.
+/// guards exactly what it always did. Every `gc.Header` kind is tracer-owned
+/// since S1 (only the string family, which has its own StringHeader, still
+/// counts), so for list headers this is always the skip.
 pub fn expectRefCount(expected: i32, header: *const core.gc.Header) !void {
     if (core.gc.refCountRemoved(header.metaConst().flags.kind)) return;
     try std.testing.expectEqual(expected, core.gc.headerRefCount(header));
@@ -248,7 +248,7 @@ const ExceptionInfo = struct {
         const value = self.value.get();
         if (value.isObject()) {
             const header = value.refHeader() orelse return error.InvalidEngineState;
-            const object: *core.Object = @fieldParentPtr("header", header);
+            const object = core.Object.fromHeader(header);
 
             const name_opt = try getPropertyString(rt, object, "name", allocator);
             errdefer if (name_opt) |n| allocator.free(n);
@@ -278,7 +278,7 @@ const ExceptionInfo = struct {
         const value = self.value.get();
         if (!value.isObject()) return null;
         const header = value.refHeader() orelse return null;
-        const object: *core.Object = @fieldParentPtr("header", header);
+        const object = core.Object.fromHeader(header);
         return try getPropertyString(rt, object, "stack", allocator);
     }
 };
@@ -978,4 +978,35 @@ pub fn finishGcCycles(rt: anytype) void {
         std.debug.assert(polls < 100_000);
         _ = rt.pollGC(null, .safepoint) catch return;
     }
+}
+
+/// Publishes a hand-assembled bytecode function fixture on the runtime and
+/// returns a rooted function object for it. Shared by the exec suite and the
+/// stress tier raw tail-call test.
+pub fn createTailOpcodeFixture(
+    js: *TestEngine,
+    name_bytes: []const u8,
+    code: []const u8,
+    stack_size: u16,
+) !core.JSValue {
+    const name = try js.runtime.internAtom(name_bytes);
+    defer js.runtime.atoms.free(name);
+    const fb = try zjs.bytecode.FunctionBytecode.createFixture(js.runtime, .{
+        .name = name,
+        .realm = js.context,
+        .flags = .{
+            .has_simple_parameter_list = true,
+            .func_kind = .normal,
+        },
+        .stack_size = stack_size,
+        .byte_code = code,
+    });
+    fb.publishFixtureNoFail(js.runtime);
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    return zjs.exec.object_ops.createRootBytecodeFunctionObject(
+        js.context,
+        global,
+        core.JSValue.functionBytecode(&fb.header),
+        .root_global,
+    );
 }

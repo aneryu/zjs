@@ -1293,6 +1293,13 @@ fn traceWaitAsyncRoots(rt_opaque: *anyopaque, visitor: *core.runtime.RootVisitor
     cursor = atomics_ops.atomics_waiters;
     while (cursor) |waiter| : (cursor = waiter.next) {
         if (atomicsAsyncWaiterRuntime(waiter) != rt) continue;
+        // The waiter's realm is a plain traced edge now; report it here
+        // (under the list lock) since the waiter itself is native memory.
+        if (waiter.realm.borrow()) |ctx| {
+            atomics_ops.atomics_waiter_mutex.unlock(io);
+            try visitor.constHeader(&ctx.header);
+            atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
+        }
         const promise = waiter.promise orelse continue;
         if (filled == buf.len) break;
         buf[filled] = promise.dup();
@@ -1311,7 +1318,7 @@ pub fn atomicsWaitAsyncResult(ctx: *core.JSContext, is_async: bool, value: core.
     defer root_frame.deactivate(ctx.runtime);
 
     const result = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &result.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, result.gcHeader());
     try defineValueProperty(ctx.runtime, result, "async", core.JSValue.boolean(is_async));
     try defineValueProperty(ctx.runtime, result, "value", rooted_value);
     return result.value();

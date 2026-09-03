@@ -1,0 +1,52 @@
+Splay: 360
+SplayLatency: 44.5
+----
+gc: collection entries total 14, major completed 8, minor completed 5, failed 0
+gc: collector counted objects freed 6490706 (excludes bytecode), zero-ref drains 0
+gc: heap live 262740515 bytes, account peak 788888051 bytes
+gc: external bytes current 0, peak 0, token bytes 0 in 0 tokens, untracked bytes 0, allocations 0, frees 0, invalid releases 0, weighted debt 0
+gc: weak refs current 0, finalizer queue current 0
+gc: major pause p50 1003108 ns, p95 1012756 ns, p99 66011150 ns, max 532364592 ns, retained 544 of 544 pauses
+gc: allocation histogram publications 18409426, payload bytes 1232937843, p50-below-large 64, p95-below-large 96, p99-below-large 112, max-small 128, covered-by-small 18409320/18409426 below-large, large 0
+gc: Object publications total 12097452, slots2 7560002
+gc: slots2 payload attaches 0, live side entries 0
+gc: block heap committed 362438656 live 300584624 committed/live-x1000 1206 superblocks 173 large maps 0
+gc: block heap topology classed superblocks 173, medium superblocks 0, initialized blocks 5521, reserved-uninitialized blocks 15, nonempty blocks 5515, partially-full blocks 1200, empty-free blocks 6, empty-active blocks 0, decommitted-empty blocks 6, wholly-empty superblocks 0, hot-reuse blocks 0, interval-active blocks 0
+gc: block heap cell capacity live 300584624, nonempty capacity 358571392, empty capacity 389376, within-nonempty-unused 57986768
+gc: block heap class 48 bytes initialized 287, nonempty 281, empty-free 6, empty-active 0, live-cells 159197, capacity-cells 388024
+gc: block heap class 64 bytes initialized 5234, nonempty 5234, empty-free 0, empty-active 0, live-cells 4577237, capacity-cells 5317744
+gc: block heap deferred block runs 2820, hot reuse published 6776, reopened 4667, pass-A settled cells 7356329
+gc: major threshold resets growth 15, small-heap-floor 0
+gc: block heap page returns cumulative decommitted 163799040, recommitted 163430400
+gc: block heap decommit checks 7, released blocks cumulative 2666, current bytes 368640, max batch bytes 90316800
+gc: process heap trim attempts 0, successes 0
+gc: marked-set census not run (pass --gc-mark-footprint; it costs a whole-heap walk inside every final remark)
+gc: incremental subphase ns totals begin-clear 122352, begin-precise-seed 95360, begin-conservative-seed 2232090, begin-retire 1253446, finish-init 1504, finish-remark-total 1613973870, finish-conservative-seed-subset 2250872, finish-weak 3648, finish-condemn 1542965, finish-tail 274907198
+gc: incremental subphase reconciliation begin STW 3711040 - subphases 3703248 = other 7792 ns; finish STW 1905325036 - subphases 1890429185 = other 14895851 ns
+gc: incremental subphase work totals retired non-block headers 0, retired young blocks 10151, retired remembered sets 8, clearMarks non-block headers 0
+gc: generation current young 381894, remembered owners 5814
+gc: minor collections 5, reclaimed 8433, promoted-by-minor 200348, promoted-all 200348, remembered without young 2378, remembered drops 0, suspensions 2
+gc: major retirement commits 9, abandons 0, current state clean
+gc: generational barrier calls 31836567, exit young-owner 29785204, exit old-target 790024, remembered-owner 1261339
+gc: minor stw total 26511038977 ns, mean 5302207795 ns, max 26099136899 ns
+gc: minor pause p50 142333058 ns, p95 26099136899 ns, p99 26099136899 ns, max 26099136899 ns over 5 retained of 5 samples
+gc: minor phase totals clear 47537, roots 86160, conservative 477907, remembered 1278454, trace 5865317, sweep+destroy 26289947919, promote 1470036, other 211865647 ns
+gc: minor young-at-start mean 41756, max 136352
+gc: conservative-only young 1 over 5 verified minors
+gc: exact-target marking barrier calls 7654284, exit marked-target 5695647, exit unpublished-owner 0, exit unpublished-target 0, requeued-owner 1929709, shaded-target 28928
+gc: incremental doomed condemned headers 10481572, destroyed counted objects 7352929, parked entries drained 2815, parked-drain slices 3
+gc: incremental major cycles completed 8, aborted 0, forced 1, mark steps 248, cycle STW last 618153905 ns max 618153905 ns
+gc: mark frontier segment bytes active 0, cached 32768, peak-active 2752512, peak-owned 2752512; segments allocated 6706, freed 6698, allocation failures 0
+gc: cycle envelope measured 7, skipped 1, max-P/T S 6234059, T 12468118, B 12468171, P 23509987, B/T-x1000000 1000005, P/T-x1000000 1885609, P/S-x1000000 3771217, forced 1
+gc: incremental STW phase-segment max ns begin 1329589, increment 1046628, destroy 1209637, finish 531827694
+gc: incremental STW phase totals begin 3711040 ns/9 segments, increment 244827763 ns/247 segments, destroy 286639509 ns/288 segments, finish 1905325036 ns/9 segments
+gc: conservative-only census probes 14, direct 3 (young 1), transitive 0, dropped keys 0
+gc: conservative-only by source registers 1, stack<1K 0, <4K 2, <16K 0, <64K 0, >=64K 0; by pointer exact 2, prefix 0, interior 1
+gc: conservative-only by kind object 3 function_bytecode 0 var_ref 0 realm_context 0 module 0 shape 0 string 0 big_int 0
+gc: conservative-only registers q4.lo 1
+gc: conservative-only top 3 of 3 keys (function, kind/class, source, pointer, young, native)
+gc: conservative-only #1 1 fn=GeneratePayloadTree kind=object class=2 src=register ptr=exact young=0 native=0
+gc: conservative-only #2 1 fn=GeneratePayloadTree kind=object class=1 src=stack_lt_4k ptr=exact young=0 native=0
+gc: conservative-only #3 1 fn=GeneratePayloadTree kind=object class=1 src=stack_lt_4k ptr=interior young=1 native=0
+gc: endpoint doomed_pending true, doomed_buckets 0, doomed_headers 0, doomed_cursor false, doomed_blocks 3570, parked_frees 344, deferred_finalizers 0, active_finalizer false
+exit=0

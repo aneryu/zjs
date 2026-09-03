@@ -383,7 +383,6 @@ pub const JSContext = struct {
         std.debug.assert(@offsetOf(@This(), "global") == 288);
         // Lifetime state occupies the compact layout's existing 15-byte tail
         // hole; no declared field may perturb it.
-        std.debug.assert(trace_ref_count_offset == 2164);
         std.debug.assert(trace_list_previous_offset == 2168);
         std.debug.assert(trace_list_previous_offset + @sizeOf(?*gc.Header) == @sizeOf(@This()));
     }
@@ -457,22 +456,10 @@ pub const JSContext = struct {
     eval_function: JSValue = JSValue.nullValue(),
     host_event_loop: ?HostEventLoop = null,
 
-    const trace_ref_count_offset: usize = 2164;
     const trace_list_previous_offset: usize = 2168;
 
-    /// Trace-only Realm RC lives in tail padding so default RC field layout is
-    /// bit-for-bit unchanged. The offsets above are pinned against the compact
-    /// layout's last real field and total size.
-    pub inline fn traceRefCountPtr(self: *JSContext) *i32 {
-        return @ptrFromInt(@intFromPtr(self) + trace_ref_count_offset);
-    }
-
-    pub inline fn traceRefCountPtrConst(self: *const JSContext) *const i32 {
-        return @ptrFromInt(@intFromPtr(self) + trace_ref_count_offset);
-    }
-
-    /// O(1) predecessor for the only trace list carrier besides Shape that
-    /// retains mutator RC; also stored wholly inside the existing tail hole.
+    /// O(1) list predecessor stored in the compact layout's tail hole (the
+    /// 4 bytes at 2164 that held the trace-build Realm refcount are free).
     pub inline fn traceListPreviousPtr(self: *JSContext) *?*gc.Header {
         return @ptrFromInt(@intFromPtr(self) + trace_list_previous_offset);
     }
@@ -521,7 +508,6 @@ pub const JSContext = struct {
             .modules = module.Registry.init(&rt.memory, &rt.atoms, &rt.gc),
             .random_state = runtime_mod.newRealmRandomSeed(),
         };
-        self.traceRefCountPtr().* = 1;
         self.traceListPreviousPtr().* = null;
         const initial_len = rt.classes.records.len;
         if (initial_len <= self.class_prototypes_inline.len) {
@@ -722,7 +708,7 @@ pub const JSContext = struct {
         // the realm itself went old. Once the host create-ref is consumed the
         // realm is a heap object, not a root, so the minor's sticky mark stops
         // the trace at it and the fresh prototype is condemned.
-        self.runtime.gc.generationalBarrier(&self.header, &prototype.header);
+        self.runtime.gc.generationalBarrier(&self.header, prototype.gcHeader());
         old.free(self.runtime);
     }
 
@@ -742,7 +728,7 @@ pub const JSContext = struct {
         if (!value.isObject()) return null;
         const header = value.refHeader() orelse return null;
         if (header.meta().flags.kind != .object) return null;
-        return @fieldParentPtr("header", header);
+        return Object.fromHeader(header);
     }
 
     pub fn setNativeErrorPrototype(self: *JSContext, kind: NativeErrorKind, prototype: *Object) void {
@@ -751,7 +737,7 @@ pub const JSContext = struct {
         const slot = &self.native_error_prototypes[@intFromEnum(kind)];
         const old = slot.*;
         slot.* = prototype.value().dup();
-        self.runtime.gc.generationalBarrier(&self.header, &prototype.header);
+        self.runtime.gc.generationalBarrier(&self.header, prototype.gcHeader());
         old.free(self.runtime);
     }
 
@@ -761,7 +747,7 @@ pub const JSContext = struct {
         if (!value.isObject()) return null;
         const header = value.refHeader() orelse return null;
         if (header.meta().flags.kind != .object) return null;
-        return @fieldParentPtr("header", header);
+        return Object.fromHeader(header);
     }
 
     pub fn initializeInitialShapes(
@@ -800,28 +786,41 @@ pub const JSContext = struct {
         };
 
         const array_shape = try self.runtime.shapes.createInitialShape(array_prototype, &.{});
-        errdefer self.runtime.shapes.release(array_shape);
         const arguments_shape = try self.runtime.shapes.createInitialShape(object_prototype, &arguments_properties);
-        errdefer self.runtime.shapes.release(arguments_shape);
         const mapped_arguments_shape = try self.runtime.shapes.createInitialShape(object_prototype, &mapped_arguments_properties);
-        errdefer self.runtime.shapes.release(mapped_arguments_shape);
         const regexp_shape = try self.runtime.shapes.createInitialShape(regexp_prototype, &regexp_properties);
-        errdefer self.runtime.shapes.release(regexp_shape);
         const regexp_result_shape = try self.runtime.shapes.createInitialShape(array_prototype, &regexp_result_properties);
-        errdefer self.runtime.shapes.release(regexp_result_shape);
 
         self.array_shape = array_shape;
         self.arguments_shape = arguments_shape;
         self.mapped_arguments_shape = mapped_arguments_shape;
         self.regexp_shape = regexp_shape;
         self.regexp_result_shape = regexp_result_shape;
+        // Filled lazily, like the class prototypes above: the first Array /
+        // arguments / RegExp literal can land long after the realm went old
+        // (or after an incremental major already blackened it). Without the
+        // barrier the next minor condemns the five young shapes while the
+        // realm still points at them; the S0 `-Dzjs_gc_roots_diag` unit-test
+        // run caught exactly that as a shape rc underflow at realm teardown.
+        // Only once the realm is published: a barrier on an unpublished
+        // owner remembers a half-built realm and the next minor traces its
+        // uninitialised fields (gc-invariants.md "Write barriers"). During
+        // construction the publication trace covers these edges.
+        if (self.header.metaConst().alloc_info.heap_accounted) {
+            const gc_registry = &self.runtime.gc;
+            gc_registry.generationalBarrier(&self.header, &array_shape.header);
+            gc_registry.generationalBarrier(&self.header, &arguments_shape.header);
+            gc_registry.generationalBarrier(&self.header, &mapped_arguments_shape.header);
+            gc_registry.generationalBarrier(&self.header, &regexp_shape.header);
+            gc_registry.generationalBarrier(&self.header, &regexp_result_shape.header);
+        }
     }
 
     fn releaseInitialShape(self: *JSContext, slot: *?*shape.Shape) void {
         const owned = slot.* orelse return;
         slot.* = null;
-        if (gc.phaseIsTwoPassTeardown(self.runtime.gc.phase) and owned.header.metaConst().flags.cycle_visited) return;
-        self.runtime.shapes.release(owned);
+        // Never adopted by an object: free now. Otherwise the sweep owns it.
+        self.runtime.shapes.dropUnshared(owned);
     }
 
     fn clearIntrinsicBootstrapValues(self: *JSContext) void {
@@ -903,18 +902,20 @@ pub const JSContext = struct {
         self.deinitClassPrototypeSlots();
     }
 
+    /// Drop the host create-ref. The realm is tracer-owned: it stays alive
+    /// while any heap edge (function realm, job, auto-init slot, ...) reaches
+    /// it and is torn down by the next major that finds it unreachable, or
+    /// by `gc.deinit` at runtime teardown.
     pub fn destroy(self: *JSContext) void {
         self.runtime.assertOwnerThread();
         self.consumeHostApiRelease();
-        gc.release(self.runtime, &self.header);
     }
 
     /// Checked release entry for hosts that cannot statically guarantee the
-    /// Runtime owner thread. A wrong-thread call does not decrement the Realm.
+    /// Runtime owner thread. A wrong-thread call does not drop the root.
     pub fn tryDestroy(self: *JSContext) runtime_mod.RuntimeMutationError!void {
         try self.runtime.requireOwnerThread();
         self.consumeHostApiRelease();
-        gc.release(self.runtime, &self.header);
     }
 
     fn consumeHostApiRelease(self: *JSContext) void {
@@ -1438,13 +1439,14 @@ pub const RealmRef = extern struct {
         return .{ .ptr = ctx };
     }
 
+    /// Realm is tracer-owned: a RealmRef is a plain traced edge. The holder
+    /// must be reachable from a root provider or a traced parent (see
+    /// gc-invariants.md, "Realm holders").
     pub fn retain(ctx: *RealmContext) RealmRef {
-        gc.retain(&ctx.header);
         return .{ .ptr = ctx };
     }
 
     pub fn clone(self: RealmRef) RealmRef {
-        if (self.ptr) |ctx| gc.retain(&ctx.header);
         return self;
     }
 
@@ -1453,8 +1455,6 @@ pub const RealmRef = extern struct {
     }
 
     pub fn deinit(self: *RealmRef) void {
-        const ctx = self.ptr orelse return;
         self.ptr = null;
-        gc.release(ctx.runtime, &ctx.header);
     }
 };

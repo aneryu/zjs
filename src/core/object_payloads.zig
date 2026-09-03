@@ -727,10 +727,18 @@ pub const RegExpPayload = extern struct {
     }
 
     pub fn traceChildEdges(self: *const RegExpPayload, visitor: anytype) !void {
-        _ = self;
-        _ = visitor;
-        // source / compiled_bytecode are JSString leaves, excluded from
-        // cycleMarkHeader (JS_MarkValue drops strings).
+        // Until TGC S2 flips, source / compiled_bytecode are refcounted
+        // JSString leaves excluded from cycleMarkHeader (JS_MarkValue drops
+        // strings). Tracer-owned strings are real child edges.
+        if (comptime !gc.string_tracer_owned) return;
+        if (self.source) |body| {
+            var slot = body.value();
+            try callVisitValue(visitor, &slot);
+        }
+        if (self.compiled_bytecode) |body| {
+            var slot = body.value();
+            try callVisitValue(visitor, &slot);
+        }
     }
 
     comptime {
@@ -738,9 +746,7 @@ pub const RegExpPayload = extern struct {
     }
 };
 
-/// Cold Function.prototype.bind payload. Heap JSValue fields are written
-/// through `gc_slot.HeapValueSlot` / `GcBuffer` (Stage 2 Slot-under-RC
-/// pilot). Layout stays `?JSValue` / `[]JSValue`.
+/// Cold Function.prototype.bind payload.
 pub const BoundFunctionPayload = struct {
     target: ?JSValue = null, // gc-slot: heap
     this_value: ?JSValue = null, // gc-slot: heap

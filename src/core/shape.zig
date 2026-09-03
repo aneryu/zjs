@@ -67,11 +67,18 @@ fn famRegionBytes(prop_capacity: usize, bucket_count: usize) usize {
     return @sizeOf(Property) * prop_capacity + @sizeOf(u32) * bucket_count;
 }
 
-/// Reuses Shape's historical `is_hashed + 3B padding` word to hold the true
-/// ownership count as a native aligned i32: retain/release are property
-/// transition hot paths and must not unpack a bitfield for every operation.
+/// Reuses Shape's historical `is_hashed + 3B padding` word for the
+/// copy-on-write uniqueness record. The tracer owns Shape lifetime; this word
+/// only answers "may the holder mutate in place?" (qjs `sh->header.ref_count
+/// == 1` after `js_dup_shape`).
+///
+/// `shared` is set the moment a second holder adopts the shape (hash-table
+/// hit, cached transition hit, template/initial-shape adoption) and is never
+/// cleared: a holder dying does not make the survivor unique again. The cost
+/// is one extra clone for a shape that was shared once and later became
+/// unique; the clone itself starts unshared.
 pub const ShapeOwnership = extern struct {
-    trace_ref_count: i32 = 1,
+    shared: u32 = 0,
 };
 
 /// Arbitrary-unlink acceleration for the main GC list. Header pointers are at
@@ -79,34 +86,34 @@ pub const ShapeOwnership = extern struct {
 /// cold hash-registry membership without taxing the hot deleted-property
 /// count.
 pub const ShapeTraceListState = extern struct {
-        tagged_previous: usize = 0,
+    tagged_previous: usize = 0,
 
-        const is_hashed_mask: usize = 1;
+    const is_hashed_mask: usize = 1;
 
-        pub inline fn init(is_hashed: bool) @This() {
-            return .{ .tagged_previous = @intFromBool(is_hashed) };
-        }
+    pub inline fn init(is_hashed: bool) @This() {
+        return .{ .tagged_previous = @intFromBool(is_hashed) };
+    }
 
-        pub inline fn previous(self: *const @This()) ?*gc.Header {
-            const address = self.tagged_previous & ~is_hashed_mask;
-            if (address == 0) return null;
-            return @ptrFromInt(address);
-        }
+    pub inline fn previous(self: *const @This()) ?*gc.Header {
+        const address = self.tagged_previous & ~is_hashed_mask;
+        if (address == 0) return null;
+        return @ptrFromInt(address);
+    }
 
-        pub inline fn setPrevious(self: *@This(), preceding: ?*gc.Header) void {
-            const address = if (preceding) |header| @intFromPtr(header) else 0;
-            std.debug.assert(address & is_hashed_mask == 0);
-            self.tagged_previous = address | (self.tagged_previous & is_hashed_mask);
-        }
+    pub inline fn setPrevious(self: *@This(), preceding: ?*gc.Header) void {
+        const address = if (preceding) |header| @intFromPtr(header) else 0;
+        std.debug.assert(address & is_hashed_mask == 0);
+        self.tagged_previous = address | (self.tagged_previous & is_hashed_mask);
+    }
 
-        pub inline fn isHashed(self: *const @This()) bool {
-            return self.tagged_previous & is_hashed_mask != 0;
-        }
+    pub inline fn isHashed(self: *const @This()) bool {
+        return self.tagged_previous & is_hashed_mask != 0;
+    }
 
-        pub inline fn setHashed(self: *@This(), value: bool) void {
-            self.tagged_previous = (self.tagged_previous & ~is_hashed_mask) |
-                @as(usize, @intFromBool(value));
-        }
+    pub inline fn setHashed(self: *@This(), value: bool) void {
+        self.tagged_previous = (self.tagged_previous & ~is_hashed_mask) |
+            @as(usize, @intFromBool(value));
+    }
 };
 
 /// Deleted-property count participates in every property-append capacity
@@ -164,7 +171,7 @@ pub const Shape = extern struct {
             std.debug.assert(@offsetOf(ShapeTraceListState, "tagged_previous") == 0);
             std.debug.assert(@alignOf(gc.Header) >= 2);
             std.debug.assert(@alignOf(ShapeOwnership) == @alignOf(i32));
-            std.debug.assert(@offsetOf(ShapeOwnership, "trace_ref_count") == 0);
+            std.debug.assert(@offsetOf(ShapeOwnership, "shared") == 0);
             std.debug.assert(@offsetOf(ShapeColdState, "deleted_prop_count") == 0);
         }
     }
@@ -238,14 +245,14 @@ pub const Shape = extern struct {
         return memory.MemoryAccount.gcSlabAccountedPayload(self) orelse self.allocationSize();
     }
 
-    pub inline fn retain(self: *Shape) void {
-        const old = self.ownership.trace_ref_count;
-        std.debug.assert(old > 0 and old < std.math.maxInt(i32));
-        self.ownership.trace_ref_count = old + 1;
+    /// A second holder adopted this shape: from now on every mutation must
+    /// clone first (qjs clone-before-mutate on `ref_count != 1`).
+    pub inline fn markShared(self: *Shape) void {
+        self.ownership.shared = 1;
     }
 
-    pub inline fn refCount(self: *const Shape) usize {
-        return @intCast(self.ownership.trace_ref_count);
+    pub inline fn isShared(self: *const Shape) bool {
+        return self.ownership.shared != 0;
     }
 
     pub inline fn isHashed(self: *const Shape) bool {
@@ -381,7 +388,7 @@ pub const Registry = struct {
         while (current) |found| : (current = found.registry_hash_next) {
             if (found.hash != expected_hash) continue;
             if (found.proto != proto or found.prop_count != 0) continue;
-            found.retain();
+            found.markShared();
             return found;
         }
         return self.createShape(proto);
@@ -399,7 +406,7 @@ pub const Registry = struct {
         while (current) |found| : (current = found.registry_hash_next) {
             if (found.hash != expected_hash) continue;
             if (found.proto != proto or found.prop_count != 0) continue;
-            found.retain();
+            found.markShared();
             return found;
         }
         return self.createShapeReserved(proto);
@@ -416,7 +423,7 @@ pub const Registry = struct {
             // the real buffer length, corrupting later appends and teardown.
             // qjs shape transition reuse likewise requires equal prop_size.
             if (found.prop_count != 0 or found.proto != proto or found.prop_size != property_capacity) continue;
-            found.retain();
+            found.markShared();
             return found;
         }
         return self.createShapeWithPropertyCapacity(proto, property_capacity);
@@ -433,7 +440,7 @@ pub const Registry = struct {
             // the real buffer length, corrupting later appends and teardown.
             // qjs shape transition reuse likewise requires equal prop_size.
             if (found.prop_count != 0 or found.proto != proto or found.prop_size != property_capacity) continue;
-            found.retain();
+            found.markShared();
             return found;
         }
         return self.createShapeWithPropertyCapacityReserved(proto, property_capacity);
@@ -445,11 +452,9 @@ pub const Registry = struct {
         // Preserve the object/value-buffer invariant used by mutation clones:
         // every non-empty shape has at least `initial_prop_size` slots.
         var result = try self.createObjectRootWithPropertyCapacity(proto, propertyCapacityForNeeded(properties.len));
-        var owned = true;
-        errdefer if (owned) self.release(result);
+        errdefer self.dropUnshared(result);
         try self.prepareUpdate(&result);
         for (properties) |prop| try self.addProperty(&result, prop.atom_id, prop.flags);
-        owned = false;
         return result;
     }
 
@@ -476,7 +481,7 @@ pub const Registry = struct {
         // `@sizeOf(Shape) + fam_bytes == allocationSize()` bit-for-bit; skip
         // the recompute (registerObjectWithBytes precedent, runtime.zig).
         self.gc_registry.addInitializedShape(&shape.header, shape.accountedAllocationSize());
-        if (proto) |object| gc.retain(&object.header);
+        if (proto) |object| gc.retain(object.gcHeader());
         return shape;
     }
 
@@ -494,7 +499,7 @@ pub const Registry = struct {
         @memset(shape.hashBuckets(), no_property_index);
         try self.link(shape, true);
         errdefer self.unlink(shape);
-        if (proto) |object| gc.retain(&object.header);
+        if (proto) |object| gc.retain(object.gcHeader());
         return shape;
     }
 
@@ -521,7 +526,7 @@ pub const Registry = struct {
         try self.link(shape, true);
         errdefer self.unlink(shape);
         self.gc_registry.addInitializedShape(&shape.header, shape.accountedAllocationSize());
-        if (proto) |object| gc.retain(&object.header);
+        if (proto) |object| gc.retain(object.gcHeader());
         return shape;
     }
 
@@ -547,7 +552,7 @@ pub const Registry = struct {
         }
         try self.link(shape, true);
         errdefer self.unlink(shape);
-        if (proto) |object| gc.retain(&object.header);
+        if (proto) |object| gc.retain(object.gcHeader());
         return shape;
     }
 
@@ -558,27 +563,27 @@ pub const Registry = struct {
     /// per-property call boundary on a hit (only the parent's rc==0 teardown
     /// leaves via the outlined destroyShape). Returns false on a miss with the
     /// shape untouched; the caller falls to `transitionPropertyUncached` for
-    /// the shared-clone / rc==1 in-place legs.
+    /// the shared-clone / unshared in-place legs.
     pub inline fn tryCachedTransition(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) bool {
         const parent = shape_ptr.*;
         const cached = self.findHashedShapeProperty(parent, atom_id, flags, property_capacity) orelse return false;
-        cached.retain();
+        cached.markShared();
         shape_ptr.* = cached;
-        self.release(parent);
+        self.dropUnshared(parent);
         return true;
     }
 
     /// Apply a named-property transition after a `tryCachedTransition` miss.
     ///
     /// Mirrors the qjs `add_property` miss legs (quickjs.c:9223-9236): clone a
-    /// shared shape, and append to an rc==1 shape in place. `shape_ptr` is
+    /// shared shape, and append to an unshared shape in place. `shape_ptr` is
     /// threaded through the operation because either the clone branch or
     /// inline-FAM growth can replace the allocation. This function owns every
     /// old-shape release required by a replacement; the in-place branch never
     /// releases the shape whose ownership merely moved during relocation.
     pub fn transitionPropertyUncached(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) !void {
         const parent = shape_ptr.*;
-        if (parent.refCount() != 1) {
+        if (parent.isShared()) {
             // `prop_size` is not merely this Shape's own array capacity: it IS
             // the record of the owning object's value-array capacity, which is
             // all `Object.propertyStorageCapacity` reads. Sizing the child to
@@ -596,8 +601,6 @@ pub const Registry = struct {
             // because the caller grew it to at least `prop_count + 1`.
             std.debug.assert(property_capacity >= parent.prop_count + 1);
             var child = try self.cloneShape(parent, parent.proto, property_capacity, true);
-            var child_owned = true;
-            errdefer if (child_owned) self.release(child);
             // appendProperty may relocate `child` (inline FAM grow moves the
             // shape); thread &child so the fresh pointer flows back before hash.
             try self.appendProperty(&child, atom_id, flags);
@@ -605,8 +608,6 @@ pub const Registry = struct {
             child.hash = transitionHash(parent.hash, atom_id, flags);
             self.rehashShape(child, old_hash);
             shape_ptr.* = child;
-            child_owned = false;
-            self.release(parent);
             return;
         }
 
@@ -657,17 +658,16 @@ pub const Registry = struct {
 
     pub fn prepareUpdate(self: *Registry, shape_ptr: **Shape) !void {
         const current = shape_ptr.*;
-        if (current.isHashed() and current.refCount() == 1) {
+        if (current.isHashed() and !current.isShared()) {
             self.removeShapeHash(current);
             current.setHashed(false);
             std.debug.assert(self.shape_hash_count != 0);
             self.shape_hash_count -= 1;
             return;
         }
-        if (current.refCount() == 1) return;
+        if (!current.isShared()) return;
         const clone = try self.cloneForMutation(current);
         shape_ptr.* = clone;
-        self.release(current);
     }
 
     pub fn replacePrototypeAssumePrepared(self: *Registry, shape: *Shape, proto: ?*Object) ?*Object {
@@ -680,7 +680,7 @@ pub const Registry = struct {
         // relocated Shape, where the owner is young and the barrier is a
         // no-op; this one retargets a Shape that may have been old for a long
         // time, and the minor's sticky marks stop the trace at it.
-        if (proto) |p| self.gc_registry.generationalBarrier(&shape.header, &p.header);
+        if (proto) |p| self.gc_registry.generationalBarrier(&shape.header, p.gcHeader());
         const old_hash = shape.hash;
         shape.hash = initialHash(proto);
         for (shape.props()[0..shape.prop_count]) |prop| {
@@ -701,12 +701,12 @@ pub const Registry = struct {
     /// shape — the old shape stays fully live and reachable until the swap.
     ///
     /// PRECONDITION (clone-before-mutate, qjs add_property:9223): the shape is
-    /// rc==1 with a single `Object.shape_ref` owner = `shape_ptr.*`. Enforced by
+    /// unshared with a single `Object.shape_ref` owner = `shape_ptr.*`. Enforced by
     /// the callers' `ensureUniqueShapeForMutation` / `prepareUpdate` gating, so
     /// only that one pointer (plus the GC list + shape-hash chain) needs fixing.
     fn relocateShape(self: *Registry, shape_ptr: **Shape, new_prop_size: u32, new_bucket_count: usize) !void {
         const old = shape_ptr.*;
-        std.debug.assert(old.refCount() == 1);
+        std.debug.assert(!old.isShared());
         const old_prop_count = old.prop_count;
         const old_bucket_count = old.bucketCount();
         const old_fam_bytes = old.famByteSize();
@@ -823,7 +823,7 @@ pub const Registry = struct {
     /// the inline descriptor/hash layout and the object's parallel value array.
     pub fn compactProperties(self: *Registry, object: *Object) !void {
         const old = object.shape_ref;
-        std.debug.assert(old.refCount() == 1);
+        std.debug.assert(!old.isShared());
         std.debug.assert(!old.isHashed());
         std.debug.assert(old.deletedPropCount() != 0);
 
@@ -846,7 +846,7 @@ pub const Registry = struct {
         const new_shape = try self.memory.createWithFam(Shape, new_fam_bytes);
         errdefer self.memory.destroyWithFam(Shape, new_shape, new_fam_bytes);
         const Entry = property.Entry;
-        const compact_to_tail = object.hasTrailingPropertyAllocation() and
+        const compact_to_tail = object.hasSlots2Layout() and
             new_prop_size <= Object.trailing_property_capacity;
         var new_values: []Entry = &.{};
         var new_values_owned = false;
@@ -859,6 +859,14 @@ pub const Registry = struct {
             object.trailingPropertyStorageEntries()[0..new_prop_size]
         else
             new_values;
+        // Capture the selected source representation before writing the inline
+        // destination. In spilled slots2 the first word of that destination
+        // is also the external-pointer carrier; the first copied Entry would
+        // otherwise overwrite the pointer and make the second source load
+        // dereference property data as an address.
+        const old_prop_size = old.prop_size;
+        const old_storage = object.propertyStorageBase();
+        const old_values = object.propertyStorageEntries(old_prop_size);
 
         new_shape.* = .{
             .header = .{},
@@ -884,7 +892,7 @@ pub const Registry = struct {
                 .flags = old_prop.flags,
                 .atom_id = old_prop.atom_id,
             };
-            destination_values[destination] = object.propertyEntry(source).*;
+            destination_values[destination] = old_values[source];
             self.linkPropertyHash(new_shape, destination);
             destination += 1;
         }
@@ -894,9 +902,6 @@ pub const Registry = struct {
         // compact arrays, then the old raw storage is discarded without cleanup.
         const old_fam_bytes = old.famByteSize();
         const old_accounted_size = old.accountedAllocationSize();
-        const old_prop_size = old.prop_size;
-        const old_storage = object.prop_values;
-        const old_values = object.propertyStorageEntries(old_prop_size);
         self.gc_registry.unlinkObjectWithBytes(&old.header, old_accounted_size);
         self.gc_registry.addInitializedShape(&new_shape.header, new_shape.accountedAllocationSize());
         object.shape_ref = new_shape;
@@ -905,11 +910,11 @@ pub const Registry = struct {
         // lines above, so this is an old-to-young edge even though the object
         // itself did not change: the minor's sticky mark stops the trace at the
         // object and the new Shape is condemned under it.
-        self.gc_registry.generationalBarrier(&object.header, &new_shape.header);
-        object.prop_values = if (compact_to_tail)
-            object.trailingPropertyStorageBase()
+        self.gc_registry.generationalBarrier(object.gcHeader(), &new_shape.header);
+        if (compact_to_tail)
+            object.setPropertyStorageInline()
         else
-            new_values.ptr;
+            object.setPropertyStorageExternal(new_values.ptr);
         new_values_owned = false;
         self.memory.destroyWithFam(Shape, old, old_fam_bytes);
         if (object.propertyStoragePointerIsExternal(old_storage)) self.memory.free(Entry, old_values);
@@ -926,7 +931,7 @@ pub const Registry = struct {
         const old = shape_ptr.*;
         // The relocation updates only this single owner's pointer (shape_ptr),
         // so the layout being restored must not be shared (qjs clone-before-mutate).
-        std.debug.assert(old.refCount() == 1);
+        std.debug.assert(!old.isShared());
         var target_capacity: usize = if (old.prop_size == 0) initial_prop_size else old.prop_size;
         while (target_capacity < baseline_props.len) : (target_capacity *= 2) {}
         // Keep bucket_count >= prop_size (qjs resize_properties invariant): size the
@@ -1039,19 +1044,18 @@ pub const Registry = struct {
         return shape.hasPropertyHash() and minimum <= shape.prop_hash_mask + 1;
     }
 
-    pub fn release(self: *Registry, shape: *Shape) void {
-        const old = shape.ownership.trace_ref_count;
-        std.debug.assert(old > 0);
-        shape.ownership.trace_ref_count = old - 1;
-        if (old != 1) return;
-
-        // During runtime teardown, shapes are destroyed in a single dedicated
-        // pass by `gc.Registry.deinit` (which walks the GC object list). If we
-        // freed the shape here too, that pass — operating on a snapshot of the
-        // list taken before this release — would double-free it. Mirror the
-        // deinit guard in `gc.releaseAndDestroy`: only decrement, defer the free.
+    /// A holder drops its shape. An UNSHARED shape has exactly one holder
+    /// (every second adoption goes through `markShared`), so the drop may free
+    /// it at once -- qjs `js_free_shape` on `--ref_count == 0`, and the only
+    /// way an unpublished `*Reserved` shape (on no GC list) ever gets freed.
+    /// A shared shape is tracer-owned garbage-or-not: leave it to the sweep.
+    /// Skips mirror the old release guards: during `gc.deinit` the teardown
+    /// pass owns every shape, and a condemned (cycle-visited) shape is freed
+    /// by the morgue's shape pass after all its objects.
+    pub fn dropUnshared(self: *Registry, shape: *Shape) void {
+        if (shape.isShared()) return;
         if (self.gc_registry.phase == .deinit) return;
-
+        if (shape.header.metaConst().flags.cycle_visited) return;
         self.destroyShape(shape);
     }
 
@@ -1141,7 +1145,7 @@ pub const Registry = struct {
         // Same-value passthrough: fam_bytes derives from the capacity fields
         // stored above, so this equals allocationSize() bit-for-bit.
         self.gc_registry.addInitializedShape(&shape.header, shape.accountedAllocationSize());
-        if (proto) |object| gc.retain(&object.header);
+        if (proto) |object| gc.retain(object.gcHeader());
         return shape;
     }
 

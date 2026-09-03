@@ -82,6 +82,18 @@ pub const opcode = struct {
 
     comptime {
         if (@sizeOf(CompactInfo) != 4) @compileError("CompactInfo must mirror production QuickJS JSOpCode");
+        // Force `physical` to be analyzed here. Zig analyses nested
+        // containers lazily, so its assertions would otherwise fire only in
+        // builds that happen to reference it -- verified: without this line
+        // an id/name mismatch injected into the table compiles clean under
+        // `zig build zjs` and is caught only by `zig build test`. An
+        // assertion that runs in one build configuration is not a guard.
+        _ = physical.ledger;
+        // Same lazy-analysis trap as `physical`, hit a second time: without
+        // this, `decode.layout_table` is never evaluated in a build that does
+        // not use it, and a declaration hole injected into the legacy runs
+        // compiles clean under `zig build zjs`. Verified by injection.
+        _ = decode.layout_table.len;
     }
 
     /// Flags byte (operand offset 9) of `dyn_env_probe`, the single opcode
@@ -282,6 +294,11 @@ pub const opcode = struct {
         pub const gosub: u8 = 108;
         pub const ret: u8 = 109;
         pub const nip_catch: u8 = 110;
+        /// C0 end state: LOWERED-ONLY direct byte (see
+        /// `logical.lowered_direct`). The final id 112 is reclaimed --
+        /// final streams carry `{using, ext0_sub.to_propkey}` -- but the
+        /// parser still emits this byte and the phase-1/parser decoders
+        /// still resolve it to the form.
         pub const to_propkey: u8 = 112;
         pub const dyn_env_probe: u8 = 113;
         pub const make_loc_ref: u8 = 118;
@@ -417,9 +434,12 @@ pub const opcode = struct {
         pub const get_var_field: u8 = 242;
         /// `get_loc2` + leftover `get_field2`. Size/stack match `get_loc2`.
         pub const get_loc2_field2: u8 = 243;
-        /// zjs-only ERM prefix. Operand is `using_sub` (create/dispose/
-        /// dispose_throw, or `add_base+hint`). Frees 245–247 for fusion v2.
-        pub const using: u8 = 244;
+        /// The neutral cold-plane carrier (G0 rename; was `using`, id and
+        /// byte encoding unchanged). Operand is `ext0_sub`: the ERM
+        /// residents keep their `using_*` logical names, the demoted colds
+        /// and late-encoding residents live alongside them, and
+        /// `add_base+hint` is add_resource.
+        pub const ext0: u8 = 244;
         /// Emit-time fusion: `get_field2` + `call_method`. Size/stack match
         /// `get_field2`; the following `call_method` stays in the stream (poll
         /// lives in `op_call_method`).
@@ -446,9 +466,6 @@ pub const opcode = struct {
         /// Emit-time fusion: `push_this` + `put_loc0`. Size/stack match
         /// `push_this`; the following `put_loc0` stays in the stream.
         pub const push_this_put_loc0: u8 = 252;
-        /// Emit-time fusion: `put_loc0` + `get_loc0`. Size/stack match
-        /// `put_loc0`; the following `get_loc0` stays in the stream.
-        pub const put_loc0_get_loc0: u8 = 253;
         /// zjs-only object-literal capacity hint. The parser emits this only
         /// when all keys are static and the final unique named-property count
         /// is one or two, allowing a Shape-sized two-entry trailing allocation.
@@ -492,8 +509,8 @@ pub const opcode = struct {
         pub const op_temp_count: u8 = 19;
     };
 
-    /// Operand of `op.using` (244). `add_base + DisposalHint` is add_resource.
-    pub const using_sub = struct {
+    /// Operand of `op.ext0` (244). `add_base + DisposalHint` is add_resource.
+    pub const ext0_sub = struct {
         pub const create: u8 = 0;
         pub const dispose: u8 = 1;
         pub const dispose_throw: u8 = 2;
@@ -521,6 +538,18 @@ pub const opcode = struct {
         pub const set_proto: u8 = 16;
         pub const put_super_value: u8 = 17;
         pub const to_object: u8 = 18;
+
+        /// C0 late-encoding pilot (11.7 D7): unlike the residents above,
+        /// `to_propkey` keeps its direct id 112 as an executable alias for
+        /// the migration window; the parser and every compiler pass still
+        /// see the direct form, and only the final writer encodes the
+        /// carrier. Registered in `logical.final_carrier_residents`.
+        pub const to_propkey: u8 = 19;
+        /// C1-1 (closed 2026-08-30): computed-name function naming. Zero
+        /// executions in the eight-workload census; the reclaimed final
+        /// id 75 survives only as the lowered-direct byte the builder
+        /// rewrite emits.
+        pub const set_name_computed: u8 = 20;
 
         /// Add-resource hints occupy everything from here up, so the free
         /// sub-slots are the gap below it. Raised from 16 to 64 to open that
@@ -557,6 +586,8 @@ pub const opcode = struct {
                 set_proto => 2,
                 put_super_value => 4,
                 to_object => 1,
+                to_propkey => 1,
+                set_name_computed => 2,
                 else => 0,
             };
         }
@@ -577,293 +608,85 @@ pub const opcode = struct {
                 set_proto => 1,
                 put_super_value => 0,
                 to_object => 1,
+                to_propkey => 1,
+                set_name_computed => 2,
                 else => 0,
             };
         }
     };
 
-    pub const op_info_len: usize = 274;
+    /// Derived, not declared: final ids + the temp block + the
+    /// lowered-direct rows. A new row class changes this sum, never a
+    /// hand-updated literal.
+    pub const op_info_len: usize = @as(usize, op.op_count) + op.op_temp_count + logical.lowered_direct.len;
 
-    /// Merged metadata table in quickjs-opcode.h file order (see header
-    /// comment for the index layout).
-    pub const opcode_info: [op_info_len]Info = .{
-        .{ .name = "invalid", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [0] id 0
-        .{ .name = "push_i32", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .i32 }, // [1] id 1
-        .{ .name = "push_const", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .@"const" }, // [2] id 2
-        .{ .name = "fclosure", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .@"const" }, // [3] id 3
-        .{ .name = "push_atom_value", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .atom }, // [4] id 4
-        .{ .name = "private_symbol", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .atom }, // [5] id 5
-        .{ .name = "undefined", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [6] id 6
-        .{ .name = "null", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [7] id 7
-        .{ .name = "push_this", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [8] id 8
-        .{ .name = "push_false", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [9] id 9
-        .{ .name = "push_true", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [10] id 10
-        .{ .name = "object", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [11] id 11
-        .{ .name = "special_object", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .u8 }, // [12] id 12
-        .{ .name = "rest", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .u16 }, // [13] id 13
-        .{ .name = "drop", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none }, // [14] id 14
-        .{ .name = "nip", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [15] id 15
-        .{ .name = "unused_16", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [16] id 16 -- RETIRED 2026-08-27 (no emission site, 0 executions in 41.9e9), available
-        .{ .name = "dup", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [17] id 17
-        .{ .name = "get_loc8_push_i8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [18] id 18
-        .{ .name = "push_0_or", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [19] id 19
-        .{ .name = "push_i8_add", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .i8 }, // [20] id 20
-        .{ .name = "insert2", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [21] id 21
-        .{ .name = "insert3", .size = 1, .n_pop = 3, .n_push = 4, .fmt = .none }, // [22] id 22
-        .{ .name = "push_2_sar", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [23] id 23
-        .{ .name = "perm3", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [24] id 24
-        .{ .name = "perm4", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [25] id 25
-        .{ .name = "sar_get_array_el", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [26] id 26
-        .{ .name = "swap", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [27] id 27
-        .{ .name = "push_0_shr", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [28] id 28
-        .{ .name = "rot3l", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [29] id 29
-        .{ .name = "get_loc8_push_1", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [30] id 30
-        .{ .name = "get_var_ref0_get_loc8", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [31] id 31
-        .{ .name = "get_loc8_push_2", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [32] id 32
-        .{ .name = "call_constructor", .size = 3, .n_pop = 2, .n_push = 1, .fmt = .npop }, // [33] id 33
-        .{ .name = "call", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .npop }, // [34] id 34
-        .{ .name = "tail_call", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .npop }, // [35] id 35
-        .{ .name = "call_method", .size = 3, .n_pop = 2, .n_push = 1, .fmt = .npop }, // [36] id 36
-        .{ .name = "tail_call_method", .size = 3, .n_pop = 2, .n_push = 0, .fmt = .npop }, // [37] id 37
-        .{ .name = "array_from", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .npop }, // [38] id 38
-        .{ .name = "apply", .size = 3, .n_pop = 3, .n_push = 1, .fmt = .u16 }, // [39] id 39
-        .{ .name = "return", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none }, // [40] id 40
-        .{ .name = "return_undef", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [41] id 41
-        .{ .name = "unused_42", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [42] id 42 -- RECLAIMED 2026-08-27, available
-        .{ .name = "check_ctor", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [43] id 43
-        .{ .name = "init_ctor", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [44] id 44
-        .{ .name = "check_brand", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [45] id 45
-        .{ .name = "add_brand", .size = 1, .n_pop = 2, .n_push = 0, .fmt = .none }, // [46] id 46
-        .{ .name = "return_async", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none }, // [47] id 47
-        .{ .name = "throw", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none }, // [48] id 48
-        .{ .name = "throw_error", .size = 6, .n_pop = 0, .n_push = 0, .fmt = .atom_u8 }, // [49] id 49
-        .{ .name = "eval", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .npop_u16 }, // [50] id 50
-        .{ .name = "apply_eval", .size = 3, .n_pop = 2, .n_push = 1, .fmt = .u16 }, // [51] id 51
-        .{ .name = "regexp", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [52] id 52
-        .{ .name = "get_super", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [53] id 53
-        .{ .name = "import", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [54] id 54
-        .{ .name = "get_var_undef", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [55] id 55
-        .{ .name = "get_var", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [56] id 56
-        .{ .name = "put_var", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .var_ref }, // [57] id 57
-        .{ .name = "put_var_init", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .var_ref }, // [58] id 58
-        .{ .name = "get_ref_value", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [59] id 59
-        .{ .name = "put_ref_value", .size = 1, .n_pop = 3, .n_push = 0, .fmt = .none }, // [60] id 60
-        .{ .name = "get_field", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [61] id 61
-        .{ .name = "get_field2", .size = 5, .n_pop = 1, .n_push = 2, .fmt = .atom }, // [62] id 62
-        .{ .name = "put_field", .size = 5, .n_pop = 2, .n_push = 0, .fmt = .atom }, // [63] id 63
-        .{ .name = "get_private_field", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [64] id 64
-        .{ .name = "put_private_field", .size = 1, .n_pop = 3, .n_push = 0, .fmt = .none }, // [65] id 65
-        .{ .name = "define_private_field", .size = 1, .n_pop = 3, .n_push = 1, .fmt = .none }, // [66] id 66
-        .{ .name = "get_array_el", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [67] id 67
-        .{ .name = "get_array_el2", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [68] id 68
-        .{ .name = "get_array_el3", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [69] id 69
-        .{ .name = "put_array_el", .size = 1, .n_pop = 3, .n_push = 0, .fmt = .none }, // [70] id 70
-        .{ .name = "get_super_value", .size = 1, .n_pop = 3, .n_push = 1, .fmt = .none }, // [71] id 71
-        .{ .name = "unused_72", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [72] id 72 -- RECLAIMED 2026-08-27 (cold plane; 3/3 engines have no super-write opcode), available
-        .{ .name = "define_field", .size = 5, .n_pop = 2, .n_push = 1, .fmt = .atom }, // [73] id 73
-        .{ .name = "set_name", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [74] id 74
-        .{ .name = "set_name_computed", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [75] id 75
-        .{ .name = "unused_76", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [76] id 76 -- RECLAIMED 2026-08-27 (cold plane), available
-        .{ .name = "set_home_object", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [77] id 77
-        .{ .name = "define_array_el", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [78] id 78
-        .{ .name = "append", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [79] id 79
-        .{ .name = "copy_data_properties", .size = 2, .n_pop = 3, .n_push = 3, .fmt = .u8 }, // [80] id 80
-        .{ .name = "define_method", .size = 6, .n_pop = 2, .n_push = 1, .fmt = .atom_u8 }, // [81] id 81
-        .{ .name = "define_method_computed", .size = 2, .n_pop = 3, .n_push = 1, .fmt = .u8 }, // [82] id 82
-        .{ .name = "define_class", .size = 6, .n_pop = 2, .n_push = 2, .fmt = .atom_u8 }, // [83] id 83
-        .{ .name = "define_class_computed", .size = 6, .n_pop = 3, .n_push = 3, .fmt = .atom_u8 }, // [84] id 84
-        .{ .name = "get_loc", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .loc }, // [85] id 85
-        .{ .name = "put_loc", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .loc }, // [86] id 86
-        .{ .name = "set_loc", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .loc }, // [87] id 87
-        .{ .name = "get_arg", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .arg }, // [88] id 88
-        .{ .name = "put_arg", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .arg }, // [89] id 89
-        .{ .name = "set_arg", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .arg }, // [90] id 90
-        .{ .name = "get_var_ref", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [91] id 91
-        .{ .name = "put_var_ref", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .var_ref }, // [92] id 92
-        .{ .name = "set_var_ref", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .var_ref }, // [93] id 93
-        .{ .name = "set_loc_uninitialized", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .loc }, // [94] id 94
-        .{ .name = "get_loc_check", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .loc }, // [95] id 95
-        .{ .name = "put_loc_check", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .loc }, // [96] id 96
-        .{ .name = "set_loc_check", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .loc }, // [97] id 97
-        .{ .name = "put_loc_check_init", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .loc }, // [98] id 98
-        .{ .name = "get_loc_checkthis", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .loc }, // [99] id 99
-        .{ .name = "get_var_ref_check", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [100] id 100
-        .{ .name = "put_var_ref_check", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .var_ref }, // [101] id 101
-        .{ .name = "put_var_ref_check_init", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .var_ref }, // [102] id 102
-        .{ .name = "close_loc", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .loc }, // [103] id 103
-        .{ .name = "if_false", .size = 5, .n_pop = 1, .n_push = 0, .fmt = .label }, // [104] id 104
-        .{ .name = "if_true", .size = 5, .n_pop = 1, .n_push = 0, .fmt = .label }, // [105] id 105
-        .{ .name = "goto", .size = 5, .n_pop = 0, .n_push = 0, .fmt = .label }, // [106] id 106
-        .{ .name = "catch", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .label }, // [107] id 107
-        .{ .name = "gosub", .size = 5, .n_pop = 0, .n_push = 0, .fmt = .label }, // [108] id 108
-        .{ .name = "ret", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none }, // [109] id 109
-        .{ .name = "nip_catch", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [110] id 110
-        .{ .name = "unused_111", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [111] id 111 -- RECLAIMED 2026-08-27 (cold plane), available
-        .{ .name = "to_propkey", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [112] id 112
-        // The row carries the non-put stack effect; the put form's 2/1 comes
-        // from the flags byte, like the `using` cold plane's sub table.
-        .{ .name = "dyn_env_probe", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [113] id 113
-        .{ .name = "unused_114", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [114] id 114 -- MERGED 2026-08-27 into dyn_env_probe (was with_put_var), available
-        .{ .name = "unused_115", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [115] id 115 -- MERGED 2026-08-27 into dyn_env_probe (was with_delete_var), available
-        .{ .name = "unused_116", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [116] id 116 -- MERGED 2026-08-27 into dyn_env_probe (was with_make_ref), available
-        .{ .name = "unused_117", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [117] id 117 -- MERGED 2026-08-27 into dyn_env_probe (was with_get_ref), available
-        .{ .name = "make_loc_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [118] id 118
-        .{ .name = "make_arg_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [119] id 119
-        .{ .name = "make_var_ref_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [120] id 120
-        .{ .name = "make_var_ref", .size = 5, .n_pop = 0, .n_push = 2, .fmt = .atom }, // [121] id 121
-        .{ .name = "for_in_start", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [122] id 122
-        .{ .name = "for_of_start", .size = 1, .n_pop = 1, .n_push = 3, .fmt = .none }, // [123] id 123
-        .{ .name = "for_await_of_start", .size = 1, .n_pop = 1, .n_push = 3, .fmt = .none }, // [124] id 124
-        .{ .name = "for_in_next", .size = 1, .n_pop = 1, .n_push = 3, .fmt = .none }, // [125] id 125
-        .{ .name = "for_of_next", .size = 2, .n_pop = 3, .n_push = 5, .fmt = .u8 }, // [126] id 126
-        .{ .name = "for_await_of_next", .size = 1, .n_pop = 3, .n_push = 4, .fmt = .none }, // [127] id 127
-        .{ .name = "iterator_check_object", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [128] id 128
-        .{ .name = "iterator_get_value_done", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [129] id 129
-        .{ .name = "iterator_close", .size = 1, .n_pop = 3, .n_push = 0, .fmt = .none }, // [130] id 130
-        .{ .name = "iterator_next", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [131] id 131
-        .{ .name = "iterator_call", .size = 2, .n_pop = 4, .n_push = 5, .fmt = .u8 }, // [132] id 132
-        .{ .name = "initial_yield", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [133] id 133
-        .{ .name = "yield", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [134] id 134
-        .{ .name = "yield_star", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [135] id 135
-        .{ .name = "async_yield_star", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [136] id 136
-        .{ .name = "await", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [137] id 137
-        .{ .name = "neg", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [138] id 138
-        .{ .name = "to_number", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [139] id 139
-        .{ .name = "dec", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [140] id 140
-        .{ .name = "inc", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [141] id 141
-        .{ .name = "post_dec", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [142] id 142
-        .{ .name = "post_inc", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [143] id 143
-        .{ .name = "dec_loc", .size = 2, .n_pop = 0, .n_push = 0, .fmt = .loc8 }, // [144] id 144
-        .{ .name = "inc_loc", .size = 2, .n_pop = 0, .n_push = 0, .fmt = .loc8 }, // [145] id 145
-        .{ .name = "add_loc", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .loc8 }, // [146] id 146
-        .{ .name = "not", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [147] id 147
-        .{ .name = "lnot", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [148] id 148
-        .{ .name = "typeof", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [149] id 149
-        .{ .name = "delete", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [150] id 150
-        .{ .name = "delete_var", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .atom }, // [151] id 151
-        .{ .name = "mul", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [152] id 152
-        .{ .name = "div", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [153] id 153
-        .{ .name = "mod", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [154] id 154
-        .{ .name = "add", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [155] id 155
-        .{ .name = "sub", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [156] id 156
-        .{ .name = "pow", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [157] id 157
-        .{ .name = "shl", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [158] id 158
-        .{ .name = "sar", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [159] id 159
-        .{ .name = "shr", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [160] id 160
-        .{ .name = "lt", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [161] id 161
-        .{ .name = "lte", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [162] id 162
-        .{ .name = "gt", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [163] id 163
-        .{ .name = "gte", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [164] id 164
-        .{ .name = "instanceof", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [165] id 165
-        .{ .name = "in", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [166] id 166
-        .{ .name = "eq", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [167] id 167
-        .{ .name = "neq", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [168] id 168
-        .{ .name = "strict_eq", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [169] id 169
-        .{ .name = "strict_neq", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [170] id 170
-        .{ .name = "and", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [171] id 171
-        .{ .name = "xor", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [172] id 172
-        .{ .name = "or", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [173] id 173
-        .{ .name = "is_undefined_or_null", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [174] id 174
-        .{ .name = "private_in", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [175] id 175
-        .{ .name = "push_bigint_i32", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .i32 }, // [176] id 176
-        .{ .name = "nop", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [177] id 177
-        .{ .name = "enter_scope", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .u16 }, // [178] id 178 (temp)
-        .{ .name = "leave_scope", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .u16 }, // [179] id 179 (temp)
-        .{ .name = "label", .size = 5, .n_pop = 0, .n_push = 0, .fmt = .label }, // [180] id 180 (temp)
-        .{ .name = "scope_get_var_undef", .size = 7, .n_pop = 0, .n_push = 1, .fmt = .atom_u16 }, // [181] id 181 (temp)
-        .{ .name = "scope_get_var", .size = 7, .n_pop = 0, .n_push = 1, .fmt = .atom_u16 }, // [182] id 182 (temp)
-        .{ .name = "scope_put_var", .size = 7, .n_pop = 1, .n_push = 0, .fmt = .atom_u16 }, // [183] id 183 (temp)
-        .{ .name = "scope_delete_var", .size = 7, .n_pop = 0, .n_push = 1, .fmt = .atom_u16 }, // [184] id 184 (temp)
-        .{ .name = "scope_make_ref", .size = 11, .n_pop = 0, .n_push = 2, .fmt = .atom_label_u16 }, // [185] id 185 (temp)
-        .{ .name = "scope_get_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [186] id 186 (temp)
-        .{ .name = "scope_put_var_init", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [187] id 187 (temp)
-        .{ .name = "scope_get_var_checkthis", .size = 7, .n_pop = 0, .n_push = 1, .fmt = .atom_u16 }, // [188] id 188 (temp)
-        .{ .name = "scope_get_private_field", .size = 7, .n_pop = 1, .n_push = 1, .fmt = .atom_u16 }, // [189] id 189 (temp)
-        .{ .name = "scope_get_private_field2", .size = 7, .n_pop = 1, .n_push = 2, .fmt = .atom_u16 }, // [190] id 190 (temp)
-        .{ .name = "scope_put_private_field", .size = 7, .n_pop = 2, .n_push = 0, .fmt = .atom_u16 }, // [191] id 191 (temp)
-        .{ .name = "scope_in_private_field", .size = 7, .n_pop = 1, .n_push = 1, .fmt = .atom_u16 }, // [192] id 192 (temp)
-        .{ .name = "get_field_opt_chain", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [193] id 193 (temp)
-        .{ .name = "get_array_el_opt_chain", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [194] id 194 (temp)
-        .{ .name = "set_class_name", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .u32 }, // [195] id 195 (temp)
-        .{ .name = "line_num", .size = 5, .n_pop = 0, .n_push = 0, .fmt = .u32 }, // [196] id 196 (temp)
-        .{ .name = "push_minus1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [197] id 178 (short, shifted)
-        .{ .name = "push_0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [198] id 179 (short, shifted)
-        .{ .name = "push_1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [199] id 180 (short, shifted)
-        .{ .name = "push_2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [200] id 181 (short, shifted)
-        .{ .name = "push_3", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [201] id 182 (short, shifted)
-        .{ .name = "push_4", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [202] id 183 (short, shifted)
-        .{ .name = "push_5", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [203] id 184 (short, shifted)
-        .{ .name = "push_6", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [204] id 185 (short, shifted)
-        .{ .name = "push_7", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [205] id 186 (short, shifted)
-        .{ .name = "push_i8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .i8 }, // [206] id 187 (short, shifted)
-        .{ .name = "push_i16", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .i16 }, // [207] id 188 (short, shifted)
-        .{ .name = "push_const8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .const8 }, // [208] id 189 (short, shifted)
-        .{ .name = "fclosure8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .const8 }, // [209] id 190 (short, shifted)
-        .{ .name = "push_empty_string", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [210] id 191 (short, shifted)
-        .{ .name = "get_loc8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [211] id 192 (short, shifted)
-        .{ .name = "put_loc8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .loc8 }, // [212] id 193 (short, shifted)
-        .{ .name = "set_loc8", .size = 2, .n_pop = 1, .n_push = 1, .fmt = .loc8 }, // [213] id 194 (short, shifted)
-        .{ .name = "get_loc0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [214] id 195 (short, shifted)
-        .{ .name = "get_loc1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [215] id 196 (short, shifted)
-        .{ .name = "get_loc2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [216] id 197 (short, shifted)
-        .{ .name = "get_loc3", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [217] id 198 (short, shifted)
-        .{ .name = "put_loc0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [218] id 199 (short, shifted)
-        .{ .name = "put_loc1", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [219] id 200 (short, shifted)
-        .{ .name = "put_loc2", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [220] id 201 (short, shifted)
-        .{ .name = "put_loc3", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [221] id 202 (short, shifted)
-        .{ .name = "set_loc0", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_loc }, // [222] id 203 (short, shifted)
-        .{ .name = "set_loc1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_loc }, // [223] id 204 (short, shifted)
-        .{ .name = "set_loc2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_loc }, // [224] id 205 (short, shifted)
-        .{ .name = "set_loc3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_loc }, // [225] id 206 (short, shifted)
-        .{ .name = "get_arg0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_arg }, // [226] id 207 (short, shifted)
-        .{ .name = "get_arg1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_arg }, // [227] id 208 (short, shifted)
-        .{ .name = "get_arg2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_arg }, // [228] id 209 (short, shifted)
-        .{ .name = "get_arg3", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_arg }, // [229] id 210 (short, shifted)
-        .{ .name = "put_arg0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_arg }, // [230] id 211 (short, shifted)
-        .{ .name = "put_arg1", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_arg }, // [231] id 212 (short, shifted)
-        .{ .name = "put_arg2", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_arg }, // [232] id 213 (short, shifted)
-        .{ .name = "put_arg3", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_arg }, // [233] id 214 (short, shifted)
-        .{ .name = "set_arg0", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_arg }, // [234] id 215 (short, shifted)
-        .{ .name = "set_arg1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_arg }, // [235] id 216 (short, shifted)
-        .{ .name = "set_arg2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_arg }, // [236] id 217 (short, shifted)
-        .{ .name = "set_arg3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_arg }, // [237] id 218 (short, shifted)
-        .{ .name = "get_var_ref0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [238] id 219 (short, shifted)
-        .{ .name = "get_var_ref1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [239] id 220 (short, shifted)
-        .{ .name = "get_var_ref2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [240] id 221 (short, shifted)
-        .{ .name = "get_var_ref3", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [241] id 222 (short, shifted)
-        .{ .name = "put_var_ref0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [242] id 223 (short, shifted)
-        .{ .name = "put_var_ref1", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [243] id 224 (short, shifted)
-        .{ .name = "put_var_ref2", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [244] id 225 (short, shifted)
-        .{ .name = "put_var_ref3", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [245] id 226 (short, shifted)
-        .{ .name = "set_var_ref0", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_var_ref }, // [246] id 227 (short, shifted)
-        .{ .name = "set_var_ref1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_var_ref }, // [247] id 228 (short, shifted)
-        .{ .name = "set_var_ref2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_var_ref }, // [248] id 229 (short, shifted)
-        .{ .name = "set_var_ref3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_var_ref }, // [249] id 230 (short, shifted)
-        .{ .name = "get_length", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [250] id 231 (short, shifted)
-        .{ .name = "if_false8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .label8 }, // [251] id 232 (short, shifted)
-        .{ .name = "if_true8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .label8 }, // [252] id 233 (short, shifted)
-        .{ .name = "goto8", .size = 2, .n_pop = 0, .n_push = 0, .fmt = .label8 }, // [253] id 234 (short, shifted)
-        .{ .name = "goto16", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .label16 }, // [254] id 235 (short, shifted)
-        .{ .name = "call0", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [255] id 236 (short, shifted)
-        .{ .name = "call1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [256] id 237 (short, shifted)
-        .{ .name = "call2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [257] id 238 (short, shifted)
-        .{ .name = "call3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [258] id 239 (short, shifted)
-        .{ .name = "get_field_field2", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [259] id 240
-        .{ .name = "is_null", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [260] id 241 (short, shifted)
-        .{ .name = "get_var_field", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [261] id 242
-        .{ .name = "get_loc2_field2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [262] id 243
-        .{ .name = "using", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .u8 }, // [263] id 244
-        .{ .name = "get_field2_call_method", .size = 5, .n_pop = 1, .n_push = 2, .fmt = .atom }, // [264] id 245
-        .{ .name = "get_loc2_field", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [265] id 246
-        .{ .name = "eq_if_false8", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [266] id 247
-        .{ .name = "call_method_apply_fwd", .size = 3, .n_pop = 2, .n_push = 1, .fmt = .npop }, // [267] id 248
-        .{ .name = "get_loc0_field", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [268] id 249
-        .{ .name = "cmp_if_false8", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [269] id 250
-        .{ .name = "put_loc8_get_loc8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .loc8 }, // [270] id 251
-        .{ .name = "push_this_put_loc0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [271] id 252
-        .{ .name = "put_loc0_get_loc0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [272] id 253
-        .{ .name = "object_slots2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [273] id 254
+    /// G0: the metadata table is GENERATED from the declaration source --
+    /// the enum is the slot map (an id below op_count with no <300 enum
+    /// field is a reclaimed slot and gets the canonical dead row), and
+    /// `logical.form_decls` carries each form's format and stack
+    /// constants; size derives from the operand templates. The retired
+    /// hand-written table was proven equal field for field before its
+    /// deletion (the pre-squash G0a commit carries the proof; lineage on
+    /// backup/pre-squash-2026-08-30-opcode).
+    pub const opcode_info: [op_info_len]Info = blk: {
+        @setEvalBranchQuota(400000);
+        var t: [op_info_len]Info = undefined;
+        // Final ids: claimed slots take their form's generated row at the
+        // shifted index; reclaimed slots take the dead row.
+        for (0..op.op_count) |raw| {
+            const id: u8 = @intCast(raw);
+            const idx: usize = if (id >= op.op_temp_start) @as(usize, id) + op.op_temp_count else id;
+            t[idx] = if (formForId(id)) |form|
+                generatedRow(form)
+            else
+                .{ .name = std.fmt.comptimePrint("unused_{d}", .{id}), .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none };
+        }
+        // Temp forms occupy the overlap range at their raw position.
+        for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            if (f.value < 300 or f.value >= 400) continue;
+            t[op.op_temp_start + (f.value - 300)] = generatedRow(@enumFromInt(f.value));
+        }
+        // Lowered-direct rows append in declaration order.
+        for (logical.lowered_direct, 0..) |e, k| {
+            t[@as(usize, op.op_count) + op.op_temp_count + k] = generatedRow(e.form);
+        }
+        break :blk t;
     };
+
+    /// The <300 form claiming a final id, if any. The enum IS the slot
+    /// map: this replaces the row-name-prefix classification as the
+    /// authority (stateOf still reads the generated names, and the ledger
+    /// assertions prove the two agree).
+    fn formForId(comptime id: u8) ?logical.LogicalOpcode {
+        comptime {
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                if (f.value < 300 and f.value == id) return @enumFromInt(f.value);
+            }
+            return null;
+        }
+    }
+
+    fn generatedRow(comptime form: logical.LogicalOpcode) Info {
+        comptime {
+            for (logical.form_decls) |d| {
+                if (d.form != form) continue;
+                const fmt: Format = @enumFromInt(@intFromEnum(d.fmt));
+                var size: usize = 1;
+                for (logical.operandsOf(form, d.fmt)) |operand| {
+                    switch (operand.source) {
+                        .payload => |pl| size += switch (pl.width) {
+                            .u8, .i8 => 1,
+                            .u16, .i16 => 2,
+                            .u32, .i32 => 4,
+                        },
+                        .fixed => {},
+                    }
+                }
+                return .{ .name = @tagName(form), .size = size, .n_pop = d.pop, .n_push = d.push, .fmt = fmt };
+            }
+            @compileError("form has no form_decls row: " ++ @tagName(form));
+        }
+    }
 
     /// Name-free production view of `opcode_info`, matching QuickJS's
     /// non-DUMP_BYTECODE table layout. Generated from the single authoritative
@@ -957,6 +780,12 @@ pub const opcode = struct {
     fn phase1Info(op_id: u8) ?*const Info {
         if (op_id >= op.op_temp_start and op_id < op.op_temp_end)
             return &opcode_info[op_id];
+        // C0 end state: a lowered-direct id keeps its real row in the
+        // phase-1 view while its final view is the reclaimed dead row.
+        inline for (logical.lowered_direct, 0..) |entry, k| {
+            if (op_id == entry.id)
+                return &opcode_info[@as(usize, op.op_count) + op.op_temp_count + k];
+        }
         return finalInfo(op_id);
     }
 
@@ -1013,6 +842,1817 @@ pub const opcode = struct {
     /// Stack push count in phase-1 streams.
     pub fn nPushOfPhase1(op_id: u8) u8 {
         return if (phase1Info(op_id)) |info| info.n_push else 0;
+    }
+
+    /// F0a0 (§11.7 D9): the physical half of the declaration source — a
+    /// derived mirror of the id space, a mechanically generated ledger, and
+    /// comptime assertions that both agree with `opcode_info`.
+    ///
+    /// **Scope boundary, and it is checkable**: everything here must stay
+    /// expressible in the vocabulary the table already has. The moment this
+    /// needs a `LogicalOpcode` it has crossed into F0a1, which is blocked on
+    /// the §10.8 freeze. `PhysicalSlotState` from the design carries a
+    /// `LogicalOpcode` payload for exactly that reason and is deliberately
+    /// NOT used here.
+    ///
+    /// The ledger exists because the id budget was previously a number
+    /// people re-derived by hand and quoted from memory. It is now a single
+    /// derived fact that cannot drift from the table without failing to
+    /// compile.
+    pub const physical = struct {
+        /// Slot classification in today's terms only.
+        pub const SlotState = enum {
+            /// A final-form opcode claims this id and the row names it.
+            claimed,
+            /// The row survives as `unused_<id>` so table indices do not
+            /// shift, but the id itself has been reclaimed and is available.
+            reclaimed,
+            /// No row at all: the id is past `op_count`.
+            no_row,
+        };
+
+        const unused_prefix = "unused_";
+
+        fn isReclaimedName(name: []const u8) bool {
+            return name.len > unused_prefix.len and
+                std.mem.eql(u8, name[0..unused_prefix.len], unused_prefix);
+        }
+
+        /// Comptime table, not a per-call classification. The naming
+        /// convention is the declaration, but reading it at run time meant a
+        /// seven-byte compare for every instruction the decoder touched --
+        /// measured as -4.08% on CodeLoad, the benchmark that exercises the
+        /// compile path. Classify once.
+        const state_table: [256]SlotState = blk: {
+            @setEvalBranchQuota(8000);
+            var t: [256]SlotState = undefined;
+            for (&t, 0..) |*slot, raw| {
+                const info = finalInfo(@intCast(raw));
+                slot.* = if (info) |row|
+                    (if (isReclaimedName(row.name)) .reclaimed else .claimed)
+                else
+                    .no_row;
+            }
+            break :blk t;
+        };
+
+        pub inline fn stateOf(op_id: u8) SlotState {
+            return state_table[op_id];
+        }
+
+        pub const Ledger = struct {
+            /// Ids a final-form opcode still claims.
+            claimed: u16,
+            /// Reclaimed ids that keep an `unused_<id>` row.
+            reclaimed: u16,
+            /// Ids with no row at all (past `op_count`).
+            no_row: u16,
+
+            /// What the roadmap calls "free": reclaimed plus never-claimed.
+            pub fn free(self: Ledger) u16 {
+                return self.reclaimed + self.no_row;
+            }
+
+            pub fn total(self: Ledger) u16 {
+                return self.claimed + self.reclaimed + self.no_row;
+            }
+        };
+
+        pub const ledger: Ledger = blk: {
+            @setEvalBranchQuota(4000);
+            var acc = Ledger{ .claimed = 0, .reclaimed = 0, .no_row = 0 };
+            for (0..256) |raw| {
+                switch (stateOf(@intCast(raw))) {
+                    .claimed => acc.claimed += 1,
+                    .reclaimed => acc.reclaimed += 1,
+                    .no_row => acc.no_row += 1,
+                }
+            }
+            break :blk acc;
+        };
+
+        comptime {
+            @setEvalBranchQuota(20000);
+            // Every id classifies, exactly once.
+            if (ledger.total() != 256)
+                @compileError("physical ledger does not cover the 8-bit id space");
+
+            // A row exists iff the id is below op_count.
+            for (0..256) |raw| {
+                const id: u8 = @intCast(raw);
+                const has_row = finalInfo(id) != null;
+                if (has_row != (id < op.op_count))
+                    @compileError("row presence disagrees with op_count");
+            }
+
+            // A reclaimed row must name its own id. Renaming a row to
+            // `unused_N` with the wrong N is a silent way to lose track of
+            // which id was actually freed, and nothing else would catch it.
+            for (0..op.op_count) |raw| {
+                const id: u8 = @intCast(raw);
+                const info = finalInfo(id).?;
+                if (!isReclaimedName(info.name)) continue;
+                const digits = info.name[unused_prefix.len..];
+                var parsed: u16 = 0;
+                for (digits) |c| {
+                    if (c < '0' or c > '9')
+                        @compileError("reclaimed row name is not `unused_<decimal>`");
+                    parsed = parsed * 10 + (c - '0');
+                }
+                if (parsed != id)
+                    @compileError("reclaimed row names an id other than its own");
+
+                // A reclaimed row must also carry the canonical dead shape.
+                // Without this, renaming a live opcode's row to `unused_<its
+                // own id>` is self-consistent and compiles clean, silently
+                // marking an id free while its handler and emit sites are
+                // still there. The shape is the only physical-layer signal
+                // available at F0a0 scope -- whether an opcode is still
+                // emitted is logical-layer knowledge (F0a1).
+                if (info.size != 1 or info.n_pop != 0 or info.n_push != 0 or info.fmt != .none)
+                    @compileError("reclaimed row does not carry the canonical dead shape (size 1, 0/0, fmt none)");
+            }
+
+            // The temp/short overlap is the structure that makes a naive
+            // "count the rows" wrong, so pin it: in that range the phase-1
+            // view and the final view must resolve to different rows.
+            for (op.op_temp_start..op.op_temp_end) |raw| {
+                const id: u8 = @intCast(raw);
+                if (phase1Info(id).? == finalInfo(id).?)
+                    @compileError("temp/short overlap range does not actually overlap");
+            }
+        }
+
+        /// D11 / 11.0: ids whose logical form has moved to a carrier FINAL
+        /// encoding but whose direct encoding stays executable for the
+        /// migration window. Decoder, validator and dispatch all still
+        /// accept the id; the encoder never selects it (`finalEncodingOf`
+        /// answers carrier for the canonical form, and the join below
+        /// requires that registration). The id still counts as `claimed`
+        /// in the ledger -- the net -1 is only booked when the alias is
+        /// deleted, which also changes the decode fingerprint pinned in
+        /// the tests.
+        ///
+        /// This crosses the F0a0 scope boundary documented above by
+        /// design: the 10.8 freeze that blocked LogicalOpcode from this
+        /// namespace has been closed since 2026-08-27.
+        pub const ExecutableAlias = struct {
+            id: u8,
+            canonical: @import("opcode_logical.zig").LogicalOpcode,
+        };
+
+        pub const executable_aliases: []const ExecutableAlias = &.{
+            // Empty: C0's window over 112 and C1-1's over 75 both closed
+            // on 2026-08-30 after their ledger readings. Every demotion
+            // opens its window by adding a row here and closes it by
+            // deleting the row.
+        };
+
+        pub fn aliasOf(op_id: u8) ?@import("opcode_logical.zig").LogicalOpcode {
+            inline for (executable_aliases) |a| {
+                if (a.id == op_id) return a.canonical;
+            }
+            return null;
+        }
+    };
+
+    /// F0a1 (§10.8 合同 1 + 5a、不变量 5/6；gate 见 §10.8 末表): the logical
+    /// half of the declaration source lives in `src/opcode_logical.zig`,
+    /// which imports nothing from here so the dependency stays
+    /// exec -> bytecode -> logical (P0-3). This block is the join: it proves
+    /// the logical declaration and the physical table describe the same
+    /// instruction set.
+    pub const logical = @import("opcode_logical.zig");
+
+    comptime {
+        @setEvalBranchQuota(40000);
+
+        // Format mirror agrees field for field. Ownership of Format moves to
+        // the declaration source at G0; until then a reorder here must break
+        // the build rather than silently re-map every operand template.
+        const mine = @typeInfo(Format).@"enum".fields;
+        const theirs = @typeInfo(logical.Format).@"enum".fields;
+        if (mine.len != theirs.len)
+            @compileError("logical.Format has a different field count than opcode.Format");
+        for (mine, theirs) |a, b| {
+            if (!std.mem.eql(u8, a.name, b.name) or a.value != b.value)
+                @compileError("logical.Format disagrees with opcode.Format field for field");
+        }
+
+        // Every final logical form names a claimed physical id, and every
+        // claimed id has exactly one final form. This is what makes the two
+        // halves one instruction set rather than two lists.
+        var seen = [_]bool{false} ** 256;
+        for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            if (f.value >= 300) continue; // compiler-only or cold-plane form
+            if (f.value > 255)
+                @compileError("final logical form has a value outside the 8-bit id space");
+            const id: u8 = @intCast(f.value);
+            if (physical.stateOf(id) != .claimed)
+                @compileError("final logical form names an id that is not claimed");
+            const info = finalInfo(id).?;
+            if (!std.mem.eql(u8, info.name, f.name))
+                @compileError("final logical form and physical row disagree on the name");
+            if (seen[id]) @compileError("two final logical forms claim the same id");
+            seen[id] = true;
+        }
+        for (0..256) |raw| {
+            const id: u8 = @intCast(raw);
+            if (physical.stateOf(id) == .claimed and !seen[id])
+                @compileError("a claimed physical id has no final logical form");
+        }
+
+        // Contract 1: operand declaration and physical row must agree on
+        // size. Payload widths sum to `size - 1`; burned-in operands add
+        // nothing. This is what proves the templates describe the encoding
+        // that actually ships, and it is why kind and width are separate
+        // axes -- `loc8` is a local in one byte, `loc` a local in two.
+        for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            // Three ranges: final forms below 300 own a physical id;
+            // compiler-only forms at 300+ have their row at their temp id in
+            // the phase-1 view (four of the operand overrides are temp forms,
+            // so skipping them would leave a quarter of the override table
+            // unproven); cold-plane residents at 400+ own no id at all and
+            // are checked separately -- except the lowered-direct ones,
+            // whose phase-1 row must agree with the declaration like any
+            // other lowered form's.
+            if (f.value >= 400 and decode.loweredDirectIdOf(f.value) == null) continue;
+            const id: u8 = if (f.value >= 400)
+                decode.loweredDirectIdOf(f.value).?
+            else if (f.value >= 300)
+                op.op_temp_start + @as(u8, @intCast(f.value - 300))
+            else
+                @intCast(f.value);
+            const info = if (f.value >= 300) phase1Info(id).? else finalInfo(id).?;
+            const form: logical.LogicalOpcode = @enumFromInt(f.value);
+            const fmt: logical.Format = @enumFromInt(@intFromEnum(info.fmt));
+            const operands = logical.operandsOf(form, fmt);
+            var payload: usize = 0;
+            for (operands) |operand| {
+                switch (operand.source) {
+                    .payload => |pl| payload += switch (pl.width) {
+                        .u8, .i8 => 1,
+                        .u16, .i16 => 2,
+                        .u32, .i32 => 4,
+                    },
+                    .fixed => {},
+                }
+                // Assertion 15: addressing operands carry a dataflow
+                // direction, everything else must not pretend to.
+                const addressing = switch (operand.kind) {
+                    .local_slot, .arg_slot, .var_ref_slot => true,
+                    else => false,
+                };
+                if (addressing and operand.flow == null)
+                    @compileError("slot operand is missing its flow");
+                if (!addressing and operand.flow != null)
+                    @compileError("non-addressing operand declares a flow");
+            }
+            if (payload + 1 != info.size)
+                @compileError("declared operand widths do not sum to the physical row size");
+        }
+
+        // Invariant 5 applied to the override table: exactly one source of
+        // truth per form. A format that is ambiguous must be overridden; a
+        // format that is not must not be.
+        for (logical.operand_overrides) |o| {
+            const raw: u16 = @intFromEnum(o.form);
+            if (raw >= 400) @compileError("cold-plane form cannot use an operand override yet");
+            const id: u8 = if (raw >= 300)
+                op.op_temp_start + @as(u8, @intCast(raw - 300))
+            else
+                @intCast(raw);
+            const info = if (raw >= 300) phase1Info(id).? else finalInfo(id).?;
+            const fmt: logical.Format = @enumFromInt(@intFromEnum(info.fmt));
+            if (logical.operandTemplate(fmt) != null)
+                @compileError("operand override shadows an unambiguous format template");
+        }
+
+        // Contract 5a / P0-6. The affine expressions must reproduce the
+        // physical row's constant part, and the operand tables must cover
+        // exactly the operand's accepted value set (assertion 17).
+        for (logical.dynamic_stack) |d| {
+            const id: u8 = @intCast(@intFromEnum(d.form));
+            const info = finalInfo(id).?;
+            switch (d.shape) {
+                .affine => |expr| switch (expr) {
+                    .affine => |a| {
+                        // The fixed part of the expression is the row's own
+                        // pop/push; only the scaled part is new information.
+                        if (a.pop_base != info.n_pop or a.push_base != info.n_push)
+                            @compileError("affine stack expression disagrees with the physical row's constant part");
+                    },
+                    else => @compileError("dynamic_stack .affine shape must hold an affine expression"),
+                },
+                .operand_table_from_legacy => {},
+            }
+        }
+
+        // `using`: every one of the 256 sub values is accepted (the switch
+        // has an `else` arm and the add range is open), so coverage means
+        // all 256. This is why the rows are generated rather than listed.
+        {
+            var covered: usize = 0;
+            for (0..256) |raw| {
+                const sub: u8 = @intCast(raw);
+                _ = ext0_sub.stackPop(sub);
+                _ = ext0_sub.stackPush(sub);
+                covered += 1;
+            }
+            if (covered != 256)
+                @compileError("using sub table does not cover its whole operand space");
+        }
+
+        // `dyn_env_probe`: only ten of the 256 flag bytes decode. Coverage is
+        // over the ACCEPTED set, so the assertion is that the decoder and the
+        // effect agree on exactly which bytes those are -- a byte the decoder
+        // rejects must have no effect defined, and one it accepts must.
+        {
+            var accepted: usize = 0;
+            for (0..256) |raw| {
+                const byte: u8 = @intCast(raw);
+                if (dyn_env.decode(byte)) |flags| {
+                    accepted += 1;
+                    // Fall-through and branch effects must both be defined.
+                    _ = flags.stackPop();
+                    _ = flags.stackPush();
+                    _ = flags.branchStackDelta();
+                }
+            }
+            if (accepted != 10)
+                @compileError("dyn_env_probe accepts a different number of flag bytes than its effect table covers");
+        }
+
+        // Contract 5a, cross-checked against the shipping stack pass rather
+        // than restated: the branch edge of `dyn_env_probe` must equal the
+        // fall-through effect plus the declared delta, for every accepted
+        // kind. This is the check that would catch the declaration drifting
+        // away from `computeStackSize`.
+        for (0..256) |raw| {
+            const byte: u8 = @intCast(raw);
+            const flags = dyn_env.decode(byte) orelse continue;
+            const fall_through: i32 = @as(i32, flags.stackPush()) - @as(i32, flags.stackPop());
+            const branch: i32 = fall_through + flags.branchStackDelta();
+            const expected: i32 = switch (flags.kind) {
+                .read, .delete => 0, // drops the object, pushes the result
+                .get_ref, .make_ref => 1, // keeps the object underneath
+                .put => -2, // consumes both the object and the stored value
+            };
+            if (branch != expected)
+                @compileError("dyn_env_probe branch-edge height disagrees with contract 5a");
+        }
+
+        // The declared cold-plane slot must be the slot the carrier actually
+        // uses. Without this the sixteen demoted opcodes are declared but
+        // unanchored, which is the same blindness the demotion caused in the
+        // first place -- a name in one place and a number in another.
+        for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            if (f.value < 400) continue;
+            const form: logical.LogicalOpcode = @enumFromInt(f.value);
+            const plane = logical.planeOf(form);
+            switch (plane) {
+                .sub => |sub| {
+                    if (sub.carrier != .ext0)
+                        @compileError("only the `ext0` carrier exists today");
+                    // The slot must match the `ext0_sub` constant of the
+                    // form's name: demoted opcodes are `using_<sub>`,
+                    // late-encoding residents keep their own name.
+                    const bare = if (std.mem.startsWith(u8, f.name, "using_"))
+                        f.name["using_".len..]
+                    else
+                        f.name;
+                    var matched = false;
+                    for (@typeInfo(ext0_sub).@"struct".decls) |d| {
+                        if (!std.mem.eql(u8, d.name, bare)) continue;
+                        if (@field(ext0_sub, d.name) != sub.slot)
+                            @compileError("declared cold-plane slot disagrees with ext0_sub");
+                        matched = true;
+                    }
+                    if (!matched)
+                        @compileError("cold-plane form names a sub that ext0_sub does not declare");
+                },
+                .main => @compileError("a 400+ logical id must be a cold-plane resident"),
+            }
+        }
+
+        // C0 (D7/D11): late-encoding residents. A resident is in one of two
+        // states, and the assertions differ per state:
+        //   window   -- form still owns its final id (<256); the id must be
+        //               on record as an executable alias, and the direct row
+        //               must agree with the sub table on the stack effect.
+        //   end      -- form lives on the carrier plane (400+); the alias is
+        //               gone, and if the form keeps a lowered-direct byte
+        //               that byte's phase-1 row is the agreeing authority
+        //               while its final slot must read reclaimed.
+        for (logical.final_carrier_residents) |r| {
+            if (r.carrier != .ext0)
+                @compileError("only the `ext0` carrier exists today");
+            if (!@hasDecl(ext0_sub, @tagName(r.form)))
+                @compileError("late-encoding resident has no ext0_sub slot constant");
+            if (@field(ext0_sub, @tagName(r.form)) != r.slot)
+                @compileError("late-encoding resident slot disagrees with ext0_sub");
+            if (r.slot >= ext0_sub.add_base)
+                @compileError("late-encoding resident slot collides with the add range");
+            if (logical.subForm(r.slot) != r.form)
+                @compileError("subForm does not round-trip the late-encoding resident");
+            var aliased = false;
+            for (physical.executable_aliases) |a| {
+                if (a.canonical == r.form) aliased = true;
+            }
+            if (@intFromEnum(r.form) < 256) {
+                // Window state.
+                const id: u8 = @intCast(@intFromEnum(r.form));
+                const info = finalInfo(id).?;
+                if (ext0_sub.stackPop(r.slot) != info.n_pop or
+                    ext0_sub.stackPush(r.slot) != info.n_push)
+                    @compileError("carrier-resident stack effect disagrees with the direct row");
+                if (!aliased)
+                    @compileError("late-encoding resident has no executable alias for its direct id");
+            } else if (@intFromEnum(r.form) >= 400) {
+                // End state.
+                if (aliased)
+                    @compileError("closed late-encoding resident still has an executable alias");
+                if (decode.loweredDirectIdOf(@intFromEnum(r.form))) |lowered_id| {
+                    const info = phase1Info(lowered_id).?;
+                    if (!std.mem.eql(u8, info.name, @tagName(r.form)))
+                        @compileError("lowered-direct row and its form disagree on the name");
+                    if (ext0_sub.stackPop(r.slot) != info.n_pop or
+                        ext0_sub.stackPush(r.slot) != info.n_push)
+                        @compileError("carrier-resident stack effect disagrees with the lowered row");
+                    if (physical.stateOf(lowered_id) != .reclaimed)
+                        @compileError("lowered-direct byte's final slot must be reclaimed");
+                }
+            } else {
+                @compileError("late-encoding resident in the compiler-only range makes no sense");
+            }
+        }
+        // G0: every emit constant is a proven mirror of the declaration.
+        // Final forms carry their id as the enum value; compiler-only
+        // forms carry their temp id through the fixed 300+ offset. A
+        // constant that drifts -- or a form added without its constant --
+        // stops compiling here instead of emitting a neighbouring opcode.
+        for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            if (f.value >= 400) continue; // lowered-direct asserted below
+            if (!@hasDecl(op, f.name))
+                @compileError("form has no op emit constant: " ++ f.name);
+            const expected: u8 = if (f.value >= 300)
+                op.op_temp_start + @as(u8, @intCast(f.value - 300))
+            else
+                @intCast(f.value);
+            if (@field(op, f.name) != expected)
+                @compileError("op constant disagrees with the declaration: " ++ f.name);
+        }
+
+        // Every lowered-direct entry must belong to a late-encoding
+        // resident: a form with a lowered byte but no final encoding would
+        // be unwritable by the final writer.
+        for (logical.lowered_direct) |e| {
+            var registered = false;
+            for (logical.final_carrier_residents) |r| {
+                if (r.form == e.form) registered = true;
+            }
+            if (!registered)
+                @compileError("lowered-direct form has no final carrier encoding");
+            // The parser's emit constant and the declaration are one fact.
+            if (!@hasDecl(op, @tagName(e.form)) or @field(op, @tagName(e.form)) != e.id)
+                @compileError("op constant disagrees with the lowered-direct declaration");
+        }
+        for (physical.executable_aliases) |a| {
+            if (physical.stateOf(a.id) != .claimed)
+                @compileError("executable alias over an unclaimed id");
+            if (!std.mem.eql(u8, finalInfo(a.id).?.name, @tagName(a.canonical)))
+                @compileError("executable alias and its row disagree on the name");
+            var registered = false;
+            for (logical.final_carrier_residents) |r| {
+                if (r.form == a.canonical) registered = true;
+            }
+            if (!registered)
+                @compileError("executable alias without a carrier encoding: the encoder would still emit it");
+        }
+
+        // Invariant 5 migration mirror, proved rather than assumed: the
+        // derived inline policy must reproduce the hand-written reject list
+        // exactly, form for form, before that list is deleted. A silent
+        // difference here is precisely the defect class this replaces --
+        // nothing else would notice, because the only observable effect is
+        // which bodies get inlined.
+        {
+            const hand_written = [_]u8{
+                op.eval,              op.apply_eval,            op.special_object,
+                op.fclosure,          op.fclosure8,             op.apply,
+                op.rest,              op.initial_yield,         op.yield,
+                op.yield_star,        op.async_yield_star,      op.await,
+                op.return_async,      op.get_super,             op.get_super_value,
+                op.get_private_field, op.put_private_field,     op.define_private_field,
+                op.define_class,      op.define_class_computed, op.import,
+                op.dyn_env_probe,     op.make_loc_ref,          op.make_arg_ref,
+                op.make_var_ref_ref,  op.make_var_ref,          op.gosub,
+                op.@"catch",          op.nip_catch,             op.tail_call,
+                op.tail_call_method,
+            };
+            for (0..256) |raw| {
+                const id: u8 = @intCast(raw);
+                if (physical.stateOf(id) != .claimed) continue;
+                var in_list = false;
+                for (hand_written) |listed| {
+                    if (listed == id) in_list = true;
+                }
+                const form: logical.LogicalOpcode = @enumFromInt(id);
+                const declared = logical.traitsOf(form).inline_policy == .forbidden;
+                if (in_list != declared)
+                    @compileError("declared inline policy disagrees with the hand-written reject list");
+            }
+            // The carrier resident the old list could only reach through a
+            // special case must be declared forbidden on the form itself.
+            if (logical.traitsOf(.using_put_super_value).inline_policy != .forbidden)
+                @compileError("demoted put_super_value lost its inline policy");
+
+            // Same proof for the second hand-written table, which lived in
+            // exec/small_inline.zig.
+            const forward_list = [_]u8{
+                op.apply,         op.apply_eval, op.rest,      op.eval,
+                op.dyn_env_probe, op.fclosure,   op.fclosure8,
+            };
+            for (0..256) |raw| {
+                const id: u8 = @intCast(raw);
+                if (physical.stateOf(id) != .claimed) continue;
+                var in_list = false;
+                for (forward_list) |listed| {
+                    if (listed == id) in_list = true;
+                }
+                const form: logical.LogicalOpcode = @enumFromInt(id);
+                const declared = logical.traitsOf(form).forward_policy == .forbidden;
+                if (in_list != declared)
+                    @compileError("declared forward policy disagrees with the hand-written list");
+            }
+        }
+
+        // P0-2 authority direction: the declaration states the burned-in
+        // value and this checks `direct_id - base_id` against it. Never the
+        // reverse -- an id that is aliased or moved to a carrier would leave
+        // the reverse derivation undefined.
+        for (logical.legacy_embedded) |run| {
+            const base_id: u16 = @intFromEnum(run.first);
+            if (base_id >= 300) @compileError("legacy embedded run starts at a compiler-only form");
+            var k: u8 = 0;
+            while (k < run.count) : (k += 1) {
+                const id: u16 = base_id + k;
+                if (id > 255) @compileError("legacy embedded run leaves the id space");
+                const member_id: u8 = @intCast(id);
+                if (physical.stateOf(member_id) != .claimed)
+                    @compileError("legacy embedded run covers an unclaimed id");
+                // direct_id - base_id must equal the declared step.
+                if (@as(i33, id) - @as(i33, base_id) != @as(i33, k))
+                    @compileError("legacy embedded run is not contiguous");
+                // Contiguity alone is too weak: ids 195..203 are get_loc0..3
+                // then put_loc0..3, so a run declared four too long stays
+                // claimed and contiguous while silently spilling into the
+                // next family. Verified by injection -- without this check
+                // `get_loc0 count = 9` compiles clean.
+                const member: logical.LogicalOpcode = @enumFromInt(member_id);
+                if (logical.familyOf(member) != logical.familyOf(run.first))
+                    @compileError("legacy embedded run spills into another semantic family");
+            }
+        }
+    }
+
+    /// F0b (§10.8 合同 2): the structured decode layer. Consumers stop
+    /// reading `code[pc + 1]` and stop switching on the physical id.
+    ///
+    /// Two layers, per P1-1: hot consumers take a `Header` and reach for
+    /// `operandAt` only when they need a value; the fully expanded view is
+    /// for cold consumers (disassembler, validator, diff tooling) and is
+    /// composed from these two. Zero allocation, no ledger copying, and the
+    /// layout is resolved through a comptime table so nothing is recomputed
+    /// per call.
+    pub const decode = struct {
+        /// `lowered` is the phase-1/parser-adjacent view (temp remap plus
+        /// the lowered-direct residents); `s3` is the resolve_variables
+        /// output that resolve_labels consumes -- final ids, no temps, but
+        /// the lowered-direct bytes still present (D10's "lowered form");
+        /// `final` is the S4 artifact, where a lowered-direct byte is a
+        /// reclaimed id and must be rejected.
+        pub const Domain = enum { lowered, s3, final };
+
+        pub const Encoding = union(enum) {
+            direct: u8,
+            carrier: struct { carrier: u8, tag: u8 },
+        };
+
+        pub const OperandSlot = struct {
+            kind: logical.OperandKind,
+            flow: ?logical.Flow,
+            /// Byte offset from `payload_pc`, or null for a burned-in value.
+            offset: ?u8,
+            width: ?logical.Width,
+            fixed: i33,
+        };
+
+        pub const max_operands = blk: {
+            var m: usize = 0;
+            for (@typeInfo(logical.Format).@"enum".fields) |f| {
+                const fmt: logical.Format = @enumFromInt(f.value);
+                if (logical.operandTemplate(fmt)) |t| {
+                    if (t.len > m) m = t.len;
+                }
+            }
+            for (logical.operand_overrides) |o| {
+                if (o.operands.len > m) m = o.operands.len;
+            }
+            break :blk m;
+        };
+
+        pub const OperandLayout = struct {
+            len: u8,
+            slots: [max_operands]OperandSlot,
+
+            /// Precomputed answers to the two questions the final-artifact
+            /// validator asks of every instruction it walks.
+            ///
+            /// Without them the validator loops over slots once per
+            /// instruction. That loop -- not the checks inside it -- was the
+            /// entire cost of the F0b migration: profiling the CodeLoad
+            /// compile path on 2026-08-28 put the migrated validator at 72M
+            /// instructions where the unmigrated one had been inlined into
+            /// the walk and cost nothing measurable, which is the whole of
+            /// the +69M regression. The unmigrated validator asked two
+            /// questions of a format byte; asking the same two questions of
+            /// a slot list means iterating it. So the answers move to
+            /// comptime, and the questions stay form-keyed.
+            atom_slot: ?u8,
+            var_ref_slot: ?u8,
+        };
+
+        const layout_table_len = blk: {
+            var m: usize = 0;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                if (f.value > m) m = f.value;
+            }
+            break :blk m + 1;
+        };
+
+        /// The lowered-direct byte of a carrier-plane form, or null for the
+        /// residents whose only home is the carrier (C0 end state).
+        pub fn loweredDirectIdOf(comptime value: u16) ?u8 {
+            comptime {
+                for (logical.lowered_direct) |e| {
+                    if (@intFromEnum(e.form) == value) return e.id;
+                }
+                return null;
+            }
+        }
+
+        /// Sparse but stable: indexed by the logical id so `layoutOf` hands
+        /// back a pointer rather than rebuilding a layout per decode.
+        const layout_table: [layout_table_len]?OperandLayout = blk: {
+            @setEvalBranchQuota(60000);
+            var table = [_]?OperandLayout{null} ** layout_table_len;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                // Carrier residents have no row of their own -- except the
+                // lowered-direct ones, whose phase-1 row is theirs.
+                if (f.value >= 400 and loweredDirectIdOf(f.value) == null) continue;
+                const id: u8 = if (f.value >= 400)
+                    loweredDirectIdOf(f.value).?
+                else if (f.value >= 300)
+                    op.op_temp_start + @as(u8, @intCast(f.value - 300))
+                else
+                    @intCast(f.value);
+                const info = if (f.value >= 300) phase1Info(id).? else finalInfo(id).?;
+                const form: logical.LogicalOpcode = @enumFromInt(f.value);
+                const fmt: logical.Format = @enumFromInt(@intFromEnum(info.fmt));
+                const operands = logical.operandsOf(form, fmt);
+                var layout = OperandLayout{ .len = @intCast(operands.len), .slots = undefined, .atom_slot = null, .var_ref_slot = null };
+                var offset: u8 = 0;
+                for (operands, 0..) |operand, i| {
+                    switch (operand.source) {
+                        .payload => |pl| {
+                            const w: u8 = switch (pl.width) {
+                                .u8, .i8 => 1,
+                                .u16, .i16 => 2,
+                                .u32, .i32 => 4,
+                            };
+                            layout.slots[i] = .{
+                                .kind = operand.kind,
+                                .flow = operand.flow,
+                                .offset = offset,
+                                .width = pl.width,
+                                .fixed = 0,
+                            };
+                            offset += w;
+                        },
+                        .fixed => {
+                            // The template's fixed value is a placeholder --
+                            // `.none_loc` cannot know whether it is get_loc0
+                            // or get_loc2. The real value comes from the
+                            // legacy run (P0-2's authority direction:
+                            // declaration states base, member value is
+                            // base + step). A burned-in operand with no run
+                            // covering it is a declaration hole, so this
+                            // fails closed rather than defaulting to zero.
+                            var resolved: ?i33 = null;
+                            for (logical.legacy_embedded) |run| {
+                                if (run.operand_index != i) continue;
+                                const base: u16 = @intFromEnum(run.first);
+                                if (f.value < base or f.value >= base + run.count) continue;
+                                resolved = run.base_value + @as(i33, f.value - base);
+                            }
+                            const value = resolved orelse
+                                @compileError("burned-in operand has no legacy embedded run: " ++ f.name);
+                            // Cross-check against an authority that is not
+                            // the legacy table: the opcode's own name, which
+                            // comes from the physical row. `get_loc2`'s slot
+                            // must be 2 whatever the run declares. Without
+                            // this a wrong base_value is self-consistent and
+                            // nothing catches it -- verified by injection.
+                            if (nameEncodedOperand(f.name)) |from_name| {
+                                if (from_name != value)
+                                    @compileError("burned-in value disagrees with the opcode name: " ++ f.name);
+                            }
+                            layout.slots[i] = .{
+                                .kind = operand.kind,
+                                .flow = operand.flow,
+                                .offset = null,
+                                .width = null,
+                                .fixed = value,
+                            };
+                        },
+                    }
+                }
+                var j = operands.len;
+                while (j < max_operands) : (j += 1) {
+                    layout.slots[j] = .{ .kind = .imm, .flow = null, .offset = null, .width = null, .fixed = 0 };
+                }
+                for (0..layout.len) |i| {
+                    switch (layout.slots[i].kind) {
+                        .atom => layout.atom_slot = @intCast(i),
+                        .var_ref_slot => layout.var_ref_slot = @intCast(i),
+                        else => {},
+                    }
+                }
+                table[f.value] = layout;
+            }
+            break :blk table;
+        };
+
+        /// The value a burned-in operand carries according to the opcode's
+        /// own name: `get_loc2` -> 2, `push_3` -> 3, `call1` -> 1,
+        /// `push_minus1` -> -1, `get_loc2_field` -> 2. Null when the name
+        /// encodes nothing, which is the honest answer for the forms whose
+        /// fixed value is not in their name.
+        fn nameEncodedOperand(name: []const u8) ?i33 {
+            if (std.mem.eql(u8, name, "push_minus1")) return -1;
+            const markers = [_][]const u8{ "_var_ref", "_loc", "_arg", "push_", "call" };
+            for (markers) |marker| {
+                const at = std.mem.indexOf(u8, name, marker) orelse continue;
+                const rest = name[at + marker.len ..];
+                if (rest.len == 0 or rest[0] < '0' or rest[0] > '9') continue;
+                var value: i33 = 0;
+                var i: usize = 0;
+                while (i < rest.len and rest[i] >= '0' and rest[i] <= '9') : (i += 1)
+                    value = value * 10 + (rest[i] - '0');
+                return value;
+            }
+            return null;
+        }
+
+        /// One row per form, four bytes, one load per question.
+        ///
+        /// The F0b migration cost 3.68% of the CodeLoad score, and this is
+        /// where nearly all of it was: the byte-oriented code it replaced
+        /// took ONE table -- it read `size`, `n_pop` and `n_push` off a
+        /// single compact row -- while the migrated path took four, two in
+        /// `headerAt` (`finalCompactInfo`, `stateOf`) and two more in
+        /// `stackEffect` (`dynamic_by_form`, `finalCompactInfo` again). The
+        /// second of those is the worst: `dynamic_by_form` is an array of
+        /// optional tagged unions sized for the widest shape, so the common
+        /// case paid a wide load to learn it had nothing to do.
+        ///
+        /// Nothing about F0b required that. The key stays the form; only
+        /// the number of tables changes.
+        pub const FormRow = extern struct {
+            size: u8,
+            pop: u8,
+            push: u8,
+            flags: u8,
+
+            pub const claimed_bit: u8 = 1;
+            pub const dynamic_bit: u8 = 2;
+            /// The form carries an atom operand. Every atom slot sits at
+            /// payload offset 0 (asserted below at table-build time), so a
+            /// consumer holding this bit may read the atom at pc+1 without
+            /// consulting the wide layout. Replaces the five-way format
+            /// comparison `hasAtomFormat` that reader passes carried.
+            pub const atom_bit: u8 = 4;
+            /// The form carries a label operand (any width). Lets a
+            /// validator reject the whole class of label-bearing forms it
+            /// did not explicitly admit, instead of maintaining a rejection
+            /// list of formats that must be extended by hand when a form is
+            /// added.
+            pub const label_bit: u8 = 32;
+            /// Bits 3-4: width in bytes (0, 1 or 2) of the leading index
+            /// operand -- the slot/argc/const-pool immediates the shortening
+            /// matchers compare. Derived from the same format whitelist the
+            /// readers previously switched on, so the mapping lives in ONE
+            /// comptime place instead of per consumer.
+            pub const index_width_shift: u3 = 3;
+
+            pub inline fn isClaimed(self: FormRow) bool {
+                return self.flags & claimed_bit != 0;
+            }
+            pub inline fn isDynamic(self: FormRow) bool {
+                return self.flags & dynamic_bit != 0;
+            }
+            pub inline fn hasAtom(self: FormRow) bool {
+                return self.flags & atom_bit != 0;
+            }
+            pub inline fn hasLabel(self: FormRow) bool {
+                return self.flags & label_bit != 0;
+            }
+            pub inline fn indexWidth(self: FormRow) u8 {
+                return (self.flags >> index_width_shift) & 3;
+            }
+        };
+
+        pub const form_row: [layout_table_len]FormRow = blk: {
+            @setEvalBranchQuota(60000);
+            var t = [_]FormRow{.{ .size = 0, .pop = 0, .push = 0, .flags = 0 }} ** layout_table_len;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                // Same exception as layout_table: a lowered-direct resident
+                // keeps a live row (the phase-1 view of its byte).
+                if (f.value >= 400 and loweredDirectIdOf(f.value) == null) continue;
+                const id: u8 = if (f.value >= 400)
+                    loweredDirectIdOf(f.value).?
+                else if (f.value >= 300)
+                    op.op_temp_start + @as(u8, @intCast(f.value - 300))
+                else
+                    @intCast(f.value);
+                const info = if (f.value >= 300) phase1Info(id).? else finalCompactInfo(id).?;
+                var flags: u8 = 0;
+                if (f.value >= 300 or physical.stateOf(id) == .claimed)
+                    flags |= FormRow.claimed_bit;
+                if (dynamic_by_form[f.value] != null) flags |= FormRow.dynamic_bit;
+                switch (info.fmt) {
+                    .atom, .atom_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => {
+                        flags |= FormRow.atom_bit;
+                        // The atom_bit contract: pc+1 is the atom. Check it
+                        // against the layout rather than assuming it.
+                        const lay = layout_table[f.value].?;
+                        if (lay.atom_slot == null or
+                            lay.slots[lay.atom_slot.?].offset != 0)
+                            @compileError("atom operand not at payload offset 0 for " ++ f.name);
+                    },
+                    else => {},
+                }
+                switch (info.fmt) {
+                    .label, .label8, .label16, .label_u16, .atom_label_u8, .atom_label_u16 => {
+                        flags |= FormRow.label_bit;
+                        // Consumers derive the label's offset as
+                        // 1 + (hasAtom ? 4 : 0); prove the layout agrees.
+                        const lay = layout_table[f.value].?;
+                        var found = false;
+                        for (0..lay.len) |slot_i| {
+                            if (lay.slots[slot_i].kind == .label) {
+                                const want: u8 = if (flags & FormRow.atom_bit != 0) 4 else 0;
+                                if (lay.slots[slot_i].offset != want)
+                                    @compileError("label operand offset breaks the 1+4*atom rule for " ++ f.name);
+                                found = true;
+                            }
+                        }
+                        if (!found) @compileError("label format without a label slot for " ++ f.name);
+                    },
+                    else => {},
+                }
+                const index_width: u8 = switch (info.fmt) {
+                    .u8, .i8, .loc8, .const8 => 1,
+                    .u16, .npop, .loc, .arg, .var_ref => 2,
+                    else => 0,
+                };
+                if (index_width != 0) {
+                    // The indexWidth contract mirrors atom_bit's: the index
+                    // operand is the LEADING operand, so holders of a nonzero
+                    // width may read at pc+1 without the wide layout.
+                    const lay = layout_table[f.value].?;
+                    if (lay.len == 0 or lay.slots[0].offset != 0)
+                        @compileError("index operand not at payload offset 0 for " ++ f.name);
+                }
+                flags |= index_width << FormRow.index_width_shift;
+                t[f.value] = .{
+                    .size = info.size,
+                    .pop = info.n_pop,
+                    .push = info.n_push,
+                    .flags = flags,
+                };
+            }
+            break :blk t;
+        };
+
+        /// Domain rows for the two full-stream compiler walks, indexed by
+        /// the PHYSICAL id so a decode is one load. The remapping (temp
+        /// range -> 300+), the side-table rejections (label/line_num) and
+        /// the claimed test are baked into the row at comptime -- this is
+        /// the same lesson the F0b regression taught at the final domain:
+        /// the hand table these replace was fast precisely because those
+        /// decisions were baked, and expanding them into per-instruction
+        /// arithmetic measured +29M instructions in resolve_variables.run.
+        /// Size zero is the reject sentinel (unclaimed, reclaimed, or a
+        /// side-table entity in this domain).
+        pub const DomainRow = extern struct {
+            size: u8,
+            flags: u8,
+            form_index: u16,
+        };
+
+        fn domainRowFor(index: u16, reject: bool) DomainRow {
+            const row = form_row[index];
+            const ok = !reject and row.isClaimed() and row.size != 0;
+            return .{
+                .size = if (ok) row.size else 0,
+                .flags = row.flags,
+                .form_index = index,
+            };
+        }
+
+        pub const phase1_row: [256]DomainRow = blk: {
+            @setEvalBranchQuota(20000);
+            var t: [256]DomainRow = undefined;
+            for (0..256) |i| {
+                const id: u8 = @intCast(i);
+                if (id >= op.op_count) {
+                    t[i] = .{ .size = 0, .flags = 0, .form_index = 0 };
+                    continue;
+                }
+                const index: u16 = if (id >= op.op_temp_start and id < op.op_temp_end)
+                    @as(u16, 300) + (id - op.op_temp_start)
+                else
+                    id;
+                // Compare by value: a reclaimed id has no enum tag, so the
+                // conversion is illegal exactly on the inputs the sentinel
+                // exists to reject (invariant 5, comptime edition).
+                const side_table = index == @intFromEnum(logical.LogicalOpcode.label) or
+                    index == @intFromEnum(logical.LogicalOpcode.line_num);
+                t[i] = domainRowFor(index, side_table);
+            }
+            // C0 end state: a lowered-direct id decodes as its carrier-plane
+            // form in this domain, not as its reclaimed final slot.
+            for (logical.lowered_direct) |e|
+                t[e.id] = domainRowFor(@intFromEnum(e.form), false);
+            break :blk t;
+        };
+
+        /// Parser-domain candidate rows: the temp interpretation of the
+        /// overlap range, with atom-less temps marked forced. Everything
+        /// else falls back to `final_parser_row`.
+        pub const parser_temp_row: [256]DomainRow = blk: {
+            @setEvalBranchQuota(20000);
+            var t: [256]DomainRow = undefined;
+            for (0..256) |i| {
+                const id: u8 = @intCast(i);
+                if (id < op.op_temp_start or id >= op.op_temp_end) {
+                    t[i] = .{ .size = 0, .flags = 0, .form_index = 0 };
+                    continue;
+                }
+                const index: u16 = @as(u16, 300) + (id - op.op_temp_start);
+                const side_table = index == @intFromEnum(logical.LogicalOpcode.label) or
+                    index == @intFromEnum(logical.LogicalOpcode.line_num);
+                t[i] = domainRowFor(index, side_table);
+            }
+            break :blk t;
+        };
+
+        pub const final_parser_row: [256]DomainRow = blk: {
+            @setEvalBranchQuota(20000);
+            var t: [256]DomainRow = undefined;
+            for (0..256) |i| {
+                const id: u8 = @intCast(i);
+                if (id >= op.op_count) {
+                    t[i] = .{ .size = 0, .flags = 0, .form_index = 0 };
+                    continue;
+                }
+                t[i] = domainRowFor(id, false);
+            }
+            // C0 end state: the parser's mixed stream carries the
+            // lowered-direct byte, and this row set is where a non-temp id
+            // resolves -- so the byte maps to the carrier-plane form here
+            // too, never to the reclaimed final slot.
+            for (logical.lowered_direct) |e|
+                t[e.id] = domainRowFor(@intFromEnum(e.form), false);
+            break :blk t;
+        };
+
+        /// Parser-domain decode, for the MIXED Builder stream (contract 2,
+        /// 2026-08-28 revision). In that stream an id in the temp range may
+        /// be either the temp instruction or an already-selected final
+        /// short opcode, and the only thing that can tell them apart is the
+        /// atom ledger: the temp interpretation of an atom-carrying temp id
+        /// must find its own atom at the ledger cursor. The ledger is
+        /// therefore an INPUT of this domain, not state a caller threads
+        /// around the decoder -- which is why this entry does not share
+        /// `headerAt`'s signature.
+        ///
+        /// Classification is derived from the declaration, not listed:
+        /// a temp form with an atom operand is a candidate (disambiguate),
+        /// `label`/`line_num` are rejected (side-table entities in the v2
+        /// Builder), and every other temp form IS the temp interpretation.
+        /// The retired hand-written tables in cfg.zig enumerated the same
+        /// three classes by id; a comptime assertion there proved the
+        /// derived view identical before they were deleted.
+        pub inline fn headerAtParser(
+            code: []const u8,
+            atoms_ledger: []const u32,
+            pc: u32,
+            atom_index: u32,
+        ) Error!Header {
+            if (pc >= code.len) return error.BytecodeOverflow;
+            const id = code[pc];
+            const trow = parser_temp_row[id];
+            if (trow.size != 0) {
+                const form: logical.LogicalOpcode = @enumFromInt(trow.form_index);
+                if (trow.flags & FormRow.atom_bit != 0) {
+                    // Candidate: the temp interpretation must find its own
+                    // atom at the ledger cursor; otherwise fall through to
+                    // the final interpretation of the same byte.
+                    const end = @as(usize, pc) + trow.size;
+                    if (end <= code.len and atom_index < atoms_ledger.len) {
+                        const operand = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+                        if (operand == atoms_ledger[atom_index])
+                            return .{ .form = form, .instruction_pc = pc, .size = trow.size, .flags = trow.flags };
+                    }
+                } else {
+                    const end = @as(usize, pc) + trow.size;
+                    if (end > code.len) return error.BytecodeOverflow;
+                    return .{ .form = form, .instruction_pc = pc, .size = trow.size, .flags = trow.flags };
+                }
+            } else if (id >= op.op_temp_start and id < op.op_temp_end) {
+                // A temp-range id with a zero temp row is a side-table
+                // entity (label/line_num): corruption in this stream.
+                return error.InvalidOpcode;
+            }
+            const row = final_parser_row[id];
+            if (row.size == 0) return error.InvalidOpcode;
+            const next = @as(usize, pc) + row.size;
+            if (next > code.len) return error.BytecodeOverflow;
+            return .{ .form = @enumFromInt(row.form_index), .instruction_pc = pc, .size = row.size, .flags = row.flags };
+        }
+
+        /// Strict phase-1 decode: temp-range ids are ALWAYS the temp
+        /// interpretation (no mixing), and an atom-carrying instruction is
+        /// only valid if its operand matches the ledger cursor -- the check
+        /// both validates the stream and authorizes the caller to consume
+        /// the ledger entry without re-reading the operand.
+        pub inline fn headerAtPhase1(
+            code: []const u8,
+            atoms_ledger: []const u32,
+            pc: u32,
+            atom_index: u32,
+        ) Error!Header {
+            if (pc >= code.len) return error.BytecodeOverflow;
+            const row = phase1_row[code[pc]];
+            if (row.size == 0 or row.size > code.len - pc)
+                return error.InvalidOpcode;
+            if (row.flags & FormRow.atom_bit != 0) {
+                if (row.size < 5 or atom_index >= atoms_ledger.len)
+                    return error.InvalidOpcode;
+                const operand = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+                if (operand != atoms_ledger[atom_index]) return error.InvalidOpcode;
+            }
+            return .{ .form = @enumFromInt(row.form_index), .instruction_pc = pc, .size = row.size, .flags = row.flags };
+        }
+
+        /// Contract 3, stage A for the slot/argc families: which SHORTER
+        /// form encodes `wide` with operand value `idx`, or null to stay
+        /// wide. Derived at comptime from the declaration's two axes -- the
+        /// semantic family (get_loc0/get_loc8/get_loc are one family) and
+        /// the burned-in operand values (legacy_embedded) -- so the
+        /// shortening table cannot drift from the forms it selects among.
+        /// The hand-written `shortSlotOp` arithmetic this replaces adds idx
+        /// to a base id; that is exactly the id-derived semantics P0-2
+        /// exists to remove from the compiler.
+        pub const ShortSelection = struct {
+            /// burned[i] is the form whose sole operand is burned in as i.
+            burned: [4]?logical.LogicalOpcode,
+            /// The u8-payload variant, if the family has one.
+            byte: ?logical.LogicalOpcode,
+        };
+
+        pub fn shortSelectionOf(comptime wide: logical.LogicalOpcode) ShortSelection {
+            comptime {
+                @setEvalBranchQuota(200000);
+                var sel = ShortSelection{ .burned = .{ null, null, null, null }, .byte = null };
+                const fam = logical.familyOf(wide);
+                for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                    const form: logical.LogicalOpcode = @enumFromInt(f.value);
+                    if (form == wide or logical.familyOf(form) != fam) continue;
+                    if (f.value >= 300) continue; // final forms only
+                    const lay = layout_table[f.value] orelse continue;
+                    if (lay.len != 1) continue;
+                    const slot = lay.slots[0];
+                    if (slot.offset == null) {
+                        // burned variant
+                        if (slot.fixed >= 0 and slot.fixed < 4)
+                            sel.burned[@intCast(slot.fixed)] = form;
+                    } else if (slot.width == .u8) {
+                        if (sel.byte != null)
+                            @compileError("two byte-wide variants in family " ++ @tagName(fam));
+                        sel.byte = form;
+                    }
+                }
+                return sel;
+            }
+        }
+
+        /// Stage-A selection for jump relaxation: the same jump at a
+        /// narrower label width, derived from the family + the label
+        /// slot's declared width. goto has both rungs (goto8/goto16);
+        /// the conditionals have only the byte rung.
+        pub const JumpSelection = struct {
+            narrow: ?logical.LogicalOpcode, // 1-byte label
+            medium: ?logical.LogicalOpcode, // 2-byte label
+        };
+
+        pub const jump_selection_table: [layout_table_len]JumpSelection = blk: {
+            @setEvalBranchQuota(400000);
+            var t = [_]JumpSelection{.{ .narrow = null, .medium = null }} ** layout_table_len;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |wf| {
+                if (wf.value >= 300) continue;
+                const wide: logical.LogicalOpcode = @enumFromInt(wf.value);
+                const wlay = layout_table[wf.value] orelse continue;
+                // The wide rung is the family key: a four-byte label
+                // operand. Declared as i32 (the S4 relative offset); an
+                // equality test against u32 here was the assertion's first
+                // catch -- it left the whole table empty.
+                var wide_has_label = false;
+                for (0..wlay.len) |i| {
+                    const w = wlay.slots[i].width orelse continue;
+                    if (wlay.slots[i].kind == .label and (w == .i32 or w == .u32))
+                        wide_has_label = true;
+                }
+                if (!wide_has_label) continue;
+                const fam = logical.familyOf(wide);
+                for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                    if (f.value >= 300 or f.value == wf.value) continue;
+                    const form: logical.LogicalOpcode = @enumFromInt(f.value);
+                    if (logical.familyOf(form) != fam) continue;
+                    const lay = layout_table[f.value] orelse continue;
+                    for (0..lay.len) |i| {
+                        const slot = lay.slots[i];
+                        if (slot.kind != .label) continue;
+                        switch (slot.width orelse continue) {
+                            .i8 => t[wf.value].narrow = form,
+                            .i16 => t[wf.value].medium = form,
+                            else => {},
+                        }
+                    }
+                }
+            }
+            break :blk t;
+        };
+
+        pub inline fn selectJumpForm(
+            wide: logical.LogicalOpcode,
+            rung: enum { narrow, medium },
+        ) ?logical.LogicalOpcode {
+            const sel = jump_selection_table[@intFromEnum(wide)];
+            return switch (rung) {
+                .narrow => sel.narrow,
+                .medium => sel.medium,
+            };
+        }
+
+        /// Stage-A selection for small integer pushes: the form whose
+        /// burned-in immediate IS the value, derived from the push_int
+        /// family's declarations. Replaces the writer's `push_0 + value`
+        /// id arithmetic -- the same P0-2 id-derived semantics the slot
+        /// shortener carried.
+        pub const push_int_selection: [9]?logical.LogicalOpcode = blk: {
+            @setEvalBranchQuota(200000);
+            var t = [_]?logical.LogicalOpcode{null} ** 9;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                if (f.value >= 300) continue;
+                const form: logical.LogicalOpcode = @enumFromInt(f.value);
+                if (logical.familyOf(form) != .push_int) continue;
+                const lay = layout_table[f.value] orelse continue;
+                if (lay.len != 1 or lay.slots[0].offset != null) continue;
+                const v = lay.slots[0].fixed;
+                if (v >= -1 and v <= 7) t[@intCast(v + 1)] = form;
+            }
+            break :blk t;
+        };
+
+        pub inline fn selectPushIntForm(value: i32) ?logical.LogicalOpcode {
+            if (value < -1 or value > 7) return null;
+            return push_int_selection[@intCast(value + 1)];
+        }
+
+        /// 10.7: one number over every executable final encoding -- the
+        /// 256 physical slot states (claimed rows by name, alias records
+        /// by canonical form) plus the carrier's accepted tag set and add
+        /// range. Deleting an alias, demoting a form or moving a resident
+        /// necessarily changes it; the pinned test is the conscious-update
+        /// point for every such step of the 11.0 lifecycle.
+        pub const fingerprint: u64 = blk: {
+            @setEvalBranchQuota(200000);
+            var h: u64 = 0x10_7;
+            for (0..256) |raw| {
+                const id: u8 = @intCast(raw);
+                const state: u8 = switch (physical.stateOf(id)) {
+                    .claimed => 1,
+                    .reclaimed => 2,
+                    .no_row => 3,
+                };
+                h = std.hash.Wyhash.hash(h, &.{ id, state });
+                if (state == 1) h = std.hash.Wyhash.hash(h, finalInfo(id).?.name);
+                if (physical.aliasOf(id)) |canonical| {
+                    h = std.hash.Wyhash.hash(h, &.{0xA5});
+                    h = std.hash.Wyhash.hash(h, @tagName(canonical));
+                }
+            }
+            for (0..256) |raw| {
+                const tag: u8 = @intCast(raw);
+                if (logical.subForm(tag)) |resident|
+                    h = std.hash.Wyhash.hash(h, @tagName(resident))
+                else
+                    h = std.hash.Wyhash.hash(h, &.{ 0xFF, tag });
+            }
+            h = std.hash.Wyhash.hash(h, &.{ext0_sub.add_base});
+            break :blk h;
+        };
+
+        /// C0 (contract 3, encoding axis): the one place a final writer
+        /// learns whether a logical form is written as its direct id or as
+        /// a carrier tag. Comptime per form like the shortening selectors,
+        /// so a writer's capacity side and emission side cannot consult
+        /// different answers. The encoder never selects an executable
+        /// alias: a form registered in `final_carrier_residents` answers
+        /// carrier here even while its direct id still decodes (D11).
+        pub fn finalEncodingOf(comptime form: logical.LogicalOpcode) Encoding {
+            comptime {
+                for (logical.final_carrier_residents) |r| {
+                    if (r.form == form)
+                        return .{ .carrier = .{
+                            .carrier = @intCast(@intFromEnum(r.carrier)),
+                            .tag = r.slot,
+                        } };
+                }
+                if (@intFromEnum(form) >= 300)
+                    @compileError("finalEncodingOf asked about a non-final form");
+                return .{ .direct = @intCast(@intFromEnum(form)) };
+            }
+        }
+
+        /// The same selection, table-driven for callers whose wide form is
+        /// a runtime value (the writer helpers take the op to emit as a
+        /// parameter). One row per form, built from `shortSelectionOf`.
+        pub const short_selection_table: [layout_table_len]ShortSelection = blk: {
+            @setEvalBranchQuota(400000);
+            var t = [_]ShortSelection{.{ .burned = .{ null, null, null, null }, .byte = null }} ** layout_table_len;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                const form: logical.LogicalOpcode = @enumFromInt(f.value);
+                t[f.value] = shortSelectionOf(form);
+            }
+            break :blk t;
+        };
+
+        /// Stage-A selection as one call: the burned variant if the value
+        /// fits, else the byte variant, else null (stay wide). `size` of
+        /// the selected form comes from `form_row`, which is what makes the
+        /// capacity precomputation and the writer consume the same plan
+        /// (contract 3: encodedSize and emitInstruction may not each keep
+        /// their own conditional ladder).
+        pub inline fn selectSlotShortForm(
+            wide: logical.LogicalOpcode,
+            idx: u16,
+        ) ?logical.LogicalOpcode {
+            const sel = short_selection_table[@intFromEnum(wide)];
+            if (idx < 4) {
+                if (sel.burned[@intCast(idx)]) |short_form| return short_form;
+            }
+            if (idx < 256) {
+                if (sel.byte) |byte_form| return byte_form;
+            }
+            return null;
+        }
+
+        /// The instruction's total size for a statically-known form.
+        /// Runtime matchers use it for their `next_pc` arithmetic so the
+        /// increment cannot drift from the declaration.
+        pub inline fn sizeOfForm(comptime form: logical.LogicalOpcode) u8 {
+            const size = comptime form_row[@intFromEnum(form)].size;
+            comptime if (size == 0) @compileError("no size for " ++ @tagName(form));
+            return size;
+        }
+
+        /// The declared value of a burned-in operand (`get_loc0`'s slot is
+        /// 0, `push_2` is 2). Runtime matchers previously hard-coded these;
+        /// the numbers were correct, but nothing connected them to the
+        /// declaration that defines them.
+        pub inline fn burnedOperandOf(
+            comptime form: logical.LogicalOpcode,
+            comptime index: usize,
+        ) comptime_int {
+            comptime {
+                const lay = layout_table[@intFromEnum(form)] orelse
+                    @compileError("no layout for " ++ @tagName(form));
+                if (index >= lay.len)
+                    @compileError("operand index out of range for " ++ @tagName(form));
+                const slot = lay.slots[index];
+                if (slot.offset != null)
+                    @compileError("operand of " ++ @tagName(form) ++ " is in the payload, not burned in");
+                return slot.fixed;
+            }
+        }
+
+        /// Byte offset of operand `index` within the instruction (i.e.
+        /// relative to the opcode byte), resolved at comptime for call
+        /// sites that just matched the form and therefore know it
+        /// statically. `T` is checked against the declared width, so a
+        /// caller cannot silently read four bytes out of a two-byte slot.
+        ///
+        /// This is how a reader pass satisfies contract 2's "offsets come
+        /// from the declaration" without paying for it: the generated code
+        /// is identical to the hand-written `position + 1` / `position + 5`
+        /// it replaces -- the magic number is simply derived instead of
+        /// asserted-by-comment.
+        pub inline fn operandOffsetOf(
+            comptime form: logical.LogicalOpcode,
+            comptime index: usize,
+            comptime T: type,
+        ) u8 {
+            comptime {
+                const lay = layout_table[@intFromEnum(form)] orelse
+                    @compileError("no layout for " ++ @tagName(form));
+                if (index >= lay.len)
+                    @compileError("operand index out of range for " ++ @tagName(form));
+                const slot = lay.slots[index];
+                const offset = slot.offset orelse
+                    @compileError("operand of " ++ @tagName(form) ++ " is burned into the id, not in the payload");
+                const width: usize = switch (slot.width orelse
+                    @compileError("operand of " ++ @tagName(form) ++ " has no payload width")) {
+                    .u8, .i8 => 1,
+                    .u16, .i16 => 2,
+                    .u32, .i32 => 4,
+                };
+                if (width != @sizeOf(T))
+                    @compileError("width mismatch reading operand of " ++ @tagName(form));
+                return 1 + offset;
+            }
+        }
+
+        pub fn layoutOf(form: logical.LogicalOpcode) *const OperandLayout {
+            return &(layout_table[@intFromEnum(form)].?);
+        }
+
+        /// Eight bytes, and that is the whole design constraint.
+        ///
+        /// Contract 2 lists domain, encoding, canonical, payload_pc, next_pc
+        /// and layout as header fields. They are a comptime parameter and
+        /// accessors instead, because a struct that size stays live across a
+        /// decode loop body and the compiler spills it: `perf annotate` on
+        /// the migrated stack pass showed `str x9, [sp, #32]` and
+        /// `ldr x2, [sp, #40]` among its hottest instructions, where the
+        /// unmigrated pass had none -- it kept one byte and one pointer live.
+        /// Everything dropped here is derivable in a single arithmetic op,
+        /// so nothing is lost but the spill.
+        pub const Header = struct {
+            form: logical.LogicalOpcode,
+            instruction_pc: u32,
+            size: u8,
+            /// The row's flag byte, carried because it fills the byte the
+            /// struct was already padding to eight: `headerAt` has the row
+            /// in hand, so this costs neither a field's worth of size nor a
+            /// second table load at the consumer.
+            flags: u8,
+
+            pub inline fn hasAtom(self: Header) bool {
+                return self.flags & FormRow.atom_bit != 0;
+            }
+            pub inline fn hasLabel(self: Header) bool {
+                return self.flags & FormRow.label_bit != 0;
+            }
+            /// True for compiler-only (phase-1 / temp) forms. The form
+            /// value ranges are the declaration's plane encoding: final
+            /// forms sit at their physical id, lowered-only forms at 300+.
+            pub inline fn isLowered(self: Header) bool {
+                return @intFromEnum(self.form) >= 300;
+            }
+            /// 0, 1 or 2 -- see `FormRow.index_width_shift`.
+            pub inline fn indexWidth(self: Header) u8 {
+                return (self.flags >> FormRow.index_width_shift) & 3;
+            }
+
+            pub inline fn payload_pc(self: Header) u32 {
+                return self.instruction_pc + 1;
+            }
+
+            pub inline fn next_pc(self: Header) u32 {
+                return self.instruction_pc + self.size;
+            }
+
+            /// Aliases are never emitted, so today this is always true; it
+            /// becomes real when F0c introduces them.
+            pub inline fn canonical(self: Header) bool {
+                _ = self;
+                return true;
+            }
+
+            /// Contract 2 lists `family` and `layout` as header fields. They
+            /// are accessors instead, because building them eagerly is what
+            /// a decode costs: `familyOf` is a 263-arm switch and the layout
+            /// is a ~50-byte struct, and the compile path now decodes every
+            /// instruction about three times (stack pass, artifact
+            /// validator, inline scanner). Measured, not assumed.
+            pub inline fn family(self: Header) logical.SemanticFamily {
+                return logical.familyOf(self.form);
+            }
+
+            pub inline fn layout(self: Header) *const OperandLayout {
+                return layoutOf(self.form);
+            }
+        };
+
+        pub const Error = error{ InvalidOpcode, BytecodeOverflow };
+
+        // A reclaimed slot keeps a row -- the canonical dead shape, which
+        // the ledger asserts -- so "the row table has an entry" does NOT
+        // mean "the slot is claimed"; it only means `id < op_count`. Ten
+        // slots are reclaimed today, and `headerAt`'s `stateOf` call is the
+        // only thing that rejects them. Recorded because the reverse was
+        // assumed once, and the assertion that tested the assumption is
+        // what disproved it.
+        comptime {
+            @setEvalBranchQuota(20000);
+            var reclaimed_with_row: usize = 0;
+            for (0..op.op_count) |i| {
+                const id: u8 = @intCast(i);
+                if (finalCompactInfo(id) != null and physical.stateOf(id) != .claimed)
+                    reclaimed_with_row += 1;
+            }
+            if (reclaimed_with_row != physical.ledger.reclaimed)
+                @compileError("a reclaimed slot lost its canonical dead row");
+        }
+
+        /// Lowered-domain index per physical byte: identity, except the
+        /// temp/short overlap range (300+) and the lowered-direct residents
+        /// of the carrier plane (C0 end state). Public because the CFG
+        /// ownership audit rebuilds rows from bytes and must share this
+        /// mapping rather than re-deriving the temp arithmetic.
+        pub const lowered_index_table: [256]u16 = blk: {
+            var t: [256]u16 = undefined;
+            for (0..256) |i| {
+                const id: u8 = @intCast(i);
+                t[i] = if (id >= op.op_temp_start and id < op.op_temp_end)
+                    @as(u16, 300) + (id - op.op_temp_start)
+                else
+                    id;
+            }
+            for (logical.lowered_direct) |e| t[e.id] = @intFromEnum(e.form);
+            break :blk t;
+        };
+
+        /// S3-domain index per physical byte: identity -- S3 carries final
+        /// ids and no temps -- except the lowered-direct residents.
+        const s3_index_table: [256]u16 = blk: {
+            var t: [256]u16 = undefined;
+            for (0..256) |i| t[i] = @intCast(i);
+            for (logical.lowered_direct) |e| t[e.id] = @intFromEnum(e.form);
+            break :blk t;
+        };
+
+        pub fn headerAt(comptime domain: Domain, code: []const u8, pc: u32) Error!Header {
+            if (pc >= code.len) return error.BytecodeOverflow;
+            const id = code[pc];
+            if (id >= op.op_count) return error.InvalidOpcode;
+            // The index is computed as a number and the row is consulted
+            // BEFORE `@enumFromInt`. A reclaimed id has no tag in
+            // `LogicalOpcode`, so converting first and validating after
+            // would be illegal behaviour on exactly the inputs invariant 5
+            // exists to reject -- which is how the unit suite caught it.
+            //
+            // Carrier members are F0c: the sub space has no layout yet, so a
+            // carrier decodes as itself and the tag is read as its operand.
+            const index: u16 = switch (domain) {
+                .final => id,
+                // S3 keeps final ids byte for byte; only the lowered-direct
+                // residents remap (their final slot is reclaimed, their S3
+                // byte is still the old direct id).
+                .s3 => s3_index_table[id],
+                // One comptime-baked load: the temp remap and the
+                // lowered-direct residents (C0 end state) are both in the
+                // table, replacing the old range branch.
+                .lowered => lowered_index_table[id],
+            };
+            // One row, one load: size and the claimed test come off the same
+            // four bytes. See `FormRow` for why that is the whole point.
+            const row = form_row[index];
+            if (!row.isClaimed()) return error.InvalidOpcode;
+            const form: logical.LogicalOpcode = @enumFromInt(index);
+            const next = @as(usize, pc) + row.size;
+            if (next > code.len) return error.BytecodeOverflow;
+            return .{ .form = form, .instruction_pc = pc, .size = row.size, .flags = row.flags };
+        }
+
+        /// Burned-in operands are restored to their declared value, so a
+        /// consumer never has to know which forms carry payload bytes.
+        pub fn operandAt(h: Header, code: []const u8, index: usize, comptime T: type) Error!T {
+            if (index >= h.layout().len) return error.InvalidOpcode;
+            const slot = h.layout().slots[index];
+            const offset = slot.offset orelse return @intCast(slot.fixed);
+            const at = h.payload_pc() + offset;
+            return switch (slot.width.?) {
+                .u8 => @intCast(code[at]),
+                .i8 => @intCast(@as(i8, @bitCast(code[at]))),
+                .u16 => @intCast(std.mem.readInt(u16, code[at..][0..2], .little)),
+                .i16 => @intCast(std.mem.readInt(i16, code[at..][0..2], .little)),
+                .u32 => @intCast(std.mem.readInt(u32, code[at..][0..4], .little)),
+                .i32 => @intCast(std.mem.readInt(i32, code[at..][0..4], .little)),
+            };
+        }
+
+        pub const StackEffect = struct { pop: u32, push: u32 };
+
+        /// The fall-through stack effect, resolved through the declaration.
+        /// Dynamic forms evaluate their declared expression; everything else
+        /// mirrors the physical row, which is the sanctioned migration path
+        /// (invariant 5: at G0 the mirror goes away and a form without a
+        /// declared effect stops compiling).
+        /// Comptime index, not a scan. The declaration is a list because
+        /// that is how it reads; consulting it per instruction is not.
+        const dynamic_by_form: [512]?logical.DynamicStack.Shape = blk: {
+            @setEvalBranchQuota(20000);
+            var t = [_]?logical.DynamicStack.Shape{null} ** 512;
+            for (logical.dynamic_stack) |d| t[@intFromEnum(d.form)] = d.shape;
+            break :blk t;
+        };
+
+        /// No domain parameter: the form already carries it, because the
+        /// lowered-only opcodes live at 300+ and the row table is keyed by
+        /// form. That the parameter became dead is a small confirmation
+        /// that form, not the physical id, is the right key.
+        pub fn stackEffect(h: Header, code: []const u8) Error!StackEffect {
+            const row = form_row[@intFromEnum(h.form)];
+            if (!row.isDynamic()) return .{ .pop = row.pop, .push = row.push };
+            if (dynamic_by_form[@intFromEnum(h.form)]) |shape| {
+                switch (shape) {
+                    .affine => |expr| switch (expr) {
+                        .affine => |a| {
+                            const v = try operandAt(h, code, a.operand_index, i64);
+                            return .{
+                                .pop = @intCast(@as(i64, a.pop_base) + @as(i64, a.pop_scale) * v),
+                                .push = @intCast(@as(i64, a.push_base) + @as(i64, a.push_scale) * v),
+                            };
+                        },
+                        .fixed => |f| return .{ .pop = f.pop, .push = f.push },
+                        .operand_table => return error.InvalidOpcode,
+                    },
+                    .operand_table_from_legacy => |t| {
+                        const raw = try operandAt(h, code, t.operand_index, u8);
+                        return switch (h.form) {
+                            .ext0 => .{ .pop = ext0_sub.stackPop(raw), .push = ext0_sub.stackPush(raw) },
+                            .dyn_env_probe => blk2: {
+                                const flags = dyn_env.decode(raw) orelse return error.InvalidOpcode;
+                                break :blk2 .{ .pop = flags.stackPop(), .push = flags.stackPush() };
+                            },
+                            else => error.InvalidOpcode,
+                        };
+                    },
+                }
+            }
+            return .{ .pop = row.pop, .push = row.push };
+        }
+
+        /// A jump target is a decoded value, not an offset the consumer
+        /// recomputes. The base is the label operand's own address, which is
+        /// exactly the arithmetic every hand-rolled site had to repeat.
+        pub fn targetOfLabel(h: Header, code: []const u8, index: usize) Error!u32 {
+            if (index >= h.layout().len) return error.InvalidOpcode;
+            const slot = h.layout().slots[index];
+            if (slot.kind != .label) return error.InvalidOpcode;
+            const offset = slot.offset orelse return error.InvalidOpcode;
+            const diff = try operandAt(h, code, index, i64);
+            const base: i64 = @as(i64, h.payload_pc()) + offset;
+            const target = base + diff;
+            if (target < 0 or target > code.len) return error.BytecodeOverflow;
+            return @intCast(target);
+        }
+
+        /// One byte compare for a direct form -- the hot matcher must not
+        /// pay for the structured path (P1-1).
+        pub inline fn matchesFormAt(code: []const u8, pc: u32, form: logical.LogicalOpcode) bool {
+            const raw = @intFromEnum(form);
+            if (raw >= 300) return false;
+            return pc < code.len and code[pc] == @as(u8, @intCast(raw));
+        }
+    };
+
+    test "a demoted opcode keeps its scanner policy (5.2 clause 3)" {
+        // The defect this replaces: `put_super_value` was demoted behind the
+        // `using` carrier, and the scanner matched on opcode identity, so a
+        // body containing `super.x = v` silently became inlinable. No test
+        // went red then, because the only observable difference is which
+        // bodies get optimised. Policy now travels with the form, so the
+        // carrier is asked about its resident.
+        const resident = logical.subForm(ext0_sub.put_super_value).?;
+        try std.testing.expectEqual(logical.LogicalOpcode.using_put_super_value, resident);
+        try std.testing.expectEqual(
+            logical.InlinePolicy.forbidden,
+            logical.traitsOf(resident).inline_policy,
+        );
+
+        // Every resident is reachable from its tag, and a tag no resident
+        // claims decodes to null rather than to something plausible.
+        inline for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            if (f.value >= 400) {
+                const tag: u8 = @intCast(f.value - 400);
+                try std.testing.expectEqual(
+                    @as(?logical.LogicalOpcode, @enumFromInt(f.value)),
+                    logical.subForm(tag),
+                );
+            }
+        }
+        try std.testing.expectEqual(@as(?logical.LogicalOpcode, null), logical.subForm(200));
+    }
+
+    test "decode layer round-trips every direct form against the raw reads" {
+        // The decoder must agree with the hand-written reads it replaces, on
+        // every form, or migrating a consumer is a coin flip. Build a
+        // one-instruction stream per form and compare.
+        @setEvalBranchQuota(200000);
+        var buf: [16]u8 = undefined;
+        inline for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+            if (f.value < 300) {
+                const id: u8 = @intCast(f.value);
+                const info = finalInfo(id).?;
+                @memset(&buf, 0);
+                buf[0] = id;
+                // Distinguishable payload so an off-by-one offset shows up.
+                for (1..info.size) |i| buf[i] = @intCast(0x10 + i);
+                const h = try opcode.decode.headerAt(.final, buf[0..info.size], 0);
+                try std.testing.expectEqual(@as(u32, info.size), h.next_pc());
+                try std.testing.expectEqual(@as(u32, 1), h.payload_pc());
+                try std.testing.expect(h.canonical());
+                try std.testing.expectEqual(f.value, @intFromEnum(h.form));
+
+                // Every payload operand must read back exactly what a raw
+                // read at the same offset would give.
+                for (0..h.layout().len) |i| {
+                    const slot = h.layout().slots[i];
+                    const offset = slot.offset orelse continue;
+                    const at = 1 + @as(usize, offset);
+                    const expected: i64 = switch (slot.width.?) {
+                        .u8 => buf[at],
+                        .i8 => @as(i8, @bitCast(buf[at])),
+                        .u16 => std.mem.readInt(u16, buf[at..][0..2], .little),
+                        .i16 => std.mem.readInt(i16, buf[at..][0..2], .little),
+                        .u32 => std.mem.readInt(u32, buf[at..][0..4], .little),
+                        .i32 => std.mem.readInt(i32, buf[at..][0..4], .little),
+                    };
+                    try std.testing.expectEqual(expected, try opcode.decode.operandAt(h, buf[0..info.size], i, i64));
+                }
+            }
+        }
+    }
+
+    test "decode layer restores burned-in operands and rejects bad input" {
+        var buf = [_]u8{0} ** 4;
+
+        // A burned-in operand has no payload byte; the decoder must hand back
+        // the declared value so consumers need not know which forms are
+        // which. get_loc2's slot is 2, push_3's immediate is 3.
+        buf[0] = op.get_loc2;
+        var h = try opcode.decode.headerAt(.final, buf[0..1], 0);
+        try std.testing.expectEqual(@as(u16, 2), try opcode.decode.operandAt(h, buf[0..1], 0, u16));
+        try std.testing.expectEqual(logical.OperandKind.local_slot, h.layout().slots[0].kind);
+        try std.testing.expectEqual(logical.Flow.read_write, h.layout().slots[0].flow.?);
+
+        buf[0] = op.push_3;
+        h = try opcode.decode.headerAt(.final, buf[0..1], 0);
+        try std.testing.expectEqual(@as(i32, 3), try opcode.decode.operandAt(h, buf[0..1], 0, i32));
+
+        // A reclaimed id is not decodable, and a truncated instruction is an
+        // overflow rather than a silent short read.
+        buf[0] = 114; // reclaimed by the with_* merge
+        try std.testing.expectError(error.InvalidOpcode, opcode.decode.headerAt(.final, buf[0..1], 0));
+        buf[0] = op.push_i32; // size 5
+        try std.testing.expectError(error.BytecodeOverflow, opcode.decode.headerAt(.final, buf[0..3], 0));
+
+        // The hot matcher stays a byte compare and never claims a
+        // compiler-only form.
+        buf[0] = op.get_loc2;
+        try std.testing.expect(decode.matchesFormAt(buf[0..1], 0, .get_loc2));
+        try std.testing.expect(!decode.matchesFormAt(buf[0..1], 0, .get_loc3));
+        try std.testing.expect(!decode.matchesFormAt(buf[0..1], 0, .enter_scope));
+    }
+
+    test "logical forms and physical rows are one instruction set" {
+        // 264 forms: 244 final (one per claimed id), 19 compiler-only and
+        // 20 carrier-plane residents (19 demoted using_* plus to_propkey,
+        // whose final id 112 was reclaimed when the C0 window closed).
+        const counts = comptime blk: {
+            var final_count: usize = 0;
+            var temp_count: usize = 0;
+            var sub_count: usize = 0;
+            for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
+                if (f.value >= 400) sub_count += 1 else if (f.value >= 300) temp_count += 1 else final_count += 1;
+            }
+            break :blk .{ .final = final_count, .temp = temp_count, .sub = sub_count };
+        };
+        // Comptime so `zig build check` (~70s sema) catches a drift; the
+        // 2026-08-30 rebase found these pins at the test tier, one full
+        // 2.5-minute test cycle later than necessary.
+        comptime {
+            if (counts.final != 243) @compileError(std.fmt.comptimePrint("final form count drifted: expected 243, found {d}", .{counts.final}));
+            if (counts.temp != 19) @compileError(std.fmt.comptimePrint("temp form count drifted: expected 19, found {d}", .{counts.temp}));
+        }
+        // The `using` carrier's residents: three of its own operations plus
+        // the sixteen opcodes demoted into it. Declaring them is what keeps
+        // the demoted set inside the single source rather than outside it.
+        comptime {
+            if (counts.sub != 21) @compileError(std.fmt.comptimePrint("sub form count drifted: expected 21, found {d}", .{counts.sub}));
+        }
+        try std.testing.expectEqual(logical.SemanticFamily.ext0_sub, logical.familyOf(.using_set_proto));
+        try std.testing.expect(logical.planeOf(.using_set_proto) == .sub);
+        try std.testing.expect(logical.planeOf(.get_loc0) == .main);
+        comptime {
+            if (physical.ledger.claimed != 243) @compileError(std.fmt.comptimePrint("ledger.claimed drifted: expected 243, found {d}", .{physical.ledger.claimed}));
+        }
+
+        // Family is a rollup, never an identity: the width variants of one
+        // family must share it while remaining distinct forms.
+        try std.testing.expectEqual(logical.SemanticFamily.get_loc, logical.familyOf(.get_loc0));
+        try std.testing.expectEqual(logical.SemanticFamily.get_loc, logical.familyOf(.get_loc8));
+        try std.testing.expectEqual(logical.SemanticFamily.get_loc, logical.familyOf(.get_loc));
+        try std.testing.expect(logical.LogicalOpcode.get_loc0 != logical.LogicalOpcode.get_loc8);
+
+        // The rollup must not collapse the frequency asymmetry that makes it
+        // unusable as an identity key (push_const 25,524 vs push_const8
+        // 9,550,185 in the census).
+        try std.testing.expectEqual(logical.familyOf(.push_const), logical.familyOf(.push_const8));
+        try std.testing.expect(logical.LogicalOpcode.push_const != logical.LogicalOpcode.push_const8);
+    }
+
+    test "C0 closed: late-encoding end state, reclaimed id and decode fingerprint" {
+        // The pilot resident's final encoding is the carrier tag.
+        comptime {
+            const enc = decode.finalEncodingOf(.to_propkey);
+            if (enc.carrier.carrier != @intFromEnum(logical.LogicalOpcode.ext0) or
+                enc.carrier.tag != ext0_sub.to_propkey)
+                @compileError("C0 pilot final encoding drifted");
+            const direct = decode.finalEncodingOf(.to_number);
+            if (direct.direct != @intFromEnum(logical.LogicalOpcode.to_number))
+                @compileError("direct final encoding drifted");
+        }
+        // subForm round-trips the residents and stays closed after them:
+        // 21 is the first tag of the reopened gap below the add range.
+        try std.testing.expectEqual(@as(?logical.LogicalOpcode, .to_propkey), logical.subForm(ext0_sub.to_propkey));
+        try std.testing.expectEqual(@as(?logical.LogicalOpcode, .set_name_computed), logical.subForm(ext0_sub.set_name_computed));
+        try std.testing.expectEqual(@as(?logical.LogicalOpcode, null), logical.subForm(21));
+        // End state (11.0): the alias is gone, the final slot is
+        // quarantined (reclaimed in ledger terms), and the net id is
+        // booked: 244 claimed / 12 free.
+        try std.testing.expectEqual(@as(?logical.LogicalOpcode, null), physical.aliasOf(112));
+        try std.testing.expectEqual(physical.SlotState.reclaimed, physical.stateOf(112));
+        // The lowered domain still resolves the direct bytes to their
+        // forms; the final domain must reject them.
+        {
+            const stream = [_]u8{112};
+            const lowered = try decode.headerAt(.lowered, &stream, 0);
+            try std.testing.expectEqual(logical.LogicalOpcode.to_propkey, lowered.form);
+            try std.testing.expectError(error.InvalidOpcode, decode.headerAt(.final, &stream, 0));
+        }
+        {
+            const stream = [_]u8{75};
+            const lowered = try decode.headerAt(.lowered, &stream, 0);
+            try std.testing.expectEqual(logical.LogicalOpcode.set_name_computed, lowered.form);
+            try std.testing.expectError(error.InvalidOpcode, decode.headerAt(.final, &stream, 0));
+            try std.testing.expectEqual(physical.SlotState.reclaimed, physical.stateOf(75));
+            try std.testing.expectEqual(@as(?logical.LogicalOpcode, null), physical.aliasOf(75));
+        }
+        // Scanner policy rides the form, so the resident stays visible to
+        // the small-inline eligibility walk through subForm (5.2 clause 3).
+        try std.testing.expectEqual(logical.InlinePolicy.allowed, logical.traitsOf(.to_propkey).inline_policy);
+        // 10.7 pin: reassigning the quarantined id, moving a resident or
+        // changing any slot state must consciously update this number in
+        // the same commit that earns it.
+        try std.testing.expectEqual(@as(u64, 0x166cb5a2882d5cd6), decode.fingerprint);
+    }
+
+    test "physical ledger is derived, not asserted by hand" {
+        // The three facts the roadmap and the design documents quote. They are
+        // pinned here so a reclaim lands as one declaration edit and the
+        // budget follows, instead of being restated in prose.
+        // Comptime for the same reason as the count pins above: `zig build
+        // check` is the cheapest tier that can see a ledger drift.
+        comptime {
+            if (physical.ledger.claimed != 243) @compileError(std.fmt.comptimePrint("ledger.claimed drifted: expected 243, found {d}", .{physical.ledger.claimed}));
+            if (physical.ledger.reclaimed != 12) @compileError(std.fmt.comptimePrint("ledger.reclaimed drifted: expected 12, found {d}", .{physical.ledger.reclaimed}));
+            if (physical.ledger.no_row != 1) @compileError(std.fmt.comptimePrint("ledger.no_row drifted: expected 1, found {d}", .{physical.ledger.no_row}));
+            if (physical.ledger.free() != 13) @compileError(std.fmt.comptimePrint("ledger.free drifted: expected 13, found {d}", .{physical.ledger.free()}));
+            if (physical.ledger.total() != 256) @compileError(std.fmt.comptimePrint("ledger.total drifted: expected 256, found {d}", .{physical.ledger.total()}));
+        }
+
+        // Spot-check the classification against ids verified by hand.
+        try std.testing.expectEqual(physical.SlotState.claimed, physical.stateOf(op.dyn_env_probe));
+        try std.testing.expectEqual(physical.SlotState.reclaimed, physical.stateOf(114));
+        try std.testing.expectEqual(physical.SlotState.no_row, physical.stateOf(255));
     }
 
     test "dyn_env_probe flags round-trip and reject undefined encodings" {
@@ -1195,6 +2835,7 @@ pub const format = struct {
 pub const constant = struct {
     const memory = @import("core/memory.zig");
     const atom = @import("core/atom.zig");
+    const bigint_mod = @import("core/bigint.zig");
     const JSValue = @import("core/value.zig").JSValue;
 
     fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
@@ -1209,6 +2850,9 @@ pub const constant = struct {
 
     fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
         _ = atoms;
+        // A constant-pool BigInt that never reached a published
+        // FunctionBytecode is still reserved: nothing else will free it.
+        if (bigint_mod.BigInt.destroyIfReservedValue(rt, value)) return;
         value.free(rt);
     }
 
@@ -3072,6 +4716,7 @@ pub const function_def = struct {
 
     const std = @import("std");
     const atom = @import("core/atom.zig");
+    const bigint_mod = @import("core/bigint.zig");
     const function_bytecode_mod = function_bytecode;
     const memory = @import("core/memory.zig");
     const JSValue = @import("core/value.zig").JSValue;
@@ -3089,6 +4734,9 @@ pub const function_def = struct {
 
     fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
         _ = atoms;
+        // A constant-pool BigInt that never reached a published
+        // FunctionBytecode is still reserved: nothing else will free it.
+        if (bigint_mod.BigInt.destroyIfReservedValue(rt, value)) return;
         value.free(rt);
     }
 
@@ -5608,8 +7256,8 @@ pub const binding_rules = struct {
                     writePrivateAccessor(ctx, output, out_idx, setter);
                     output[out_idx.*] = opcode.op.swap;
                     out_idx.* += 1;
-                    output[out_idx.*] = opcode.op.using;
-                    output[out_idx.* + 1] = opcode.using_sub.rot3r;
+                    output[out_idx.*] = opcode.op.ext0;
+                    output[out_idx.* + 1] = opcode.ext0_sub.rot3r;
                     out_idx.* += 2;
                     output[out_idx.*] = opcode.op.check_brand;
                     out_idx.* += 1;
@@ -7870,51 +9518,67 @@ pub const pipeline_stack_size = struct {
         pc: usize = 0,
         owner_index: usize = 0,
 
-        fn validateKnownInstruction(
+        /// F0b: driven by the decoded header. The operand kinds carry what
+        /// this used to rediscover from the format, and the two closure-slot
+        /// arms collapse into one -- a `var_ref_slot` is a `var_ref_slot`
+        /// whether its value sits in a payload byte or in the opcode.
+        ///
+        /// The arm that went away is the one P0-2 rules out by name: the old
+        /// `none_var_ref` case recovered the slot as `op_id - get_var_ref0`,
+        /// deriving a semantic operand from the physical id. That derivation
+        /// loses its definition the moment an id is aliased or moved behind a
+        /// carrier, which is exactly what this work does to ids.
+        /// `inline` is load-bearing, not a hint. The unmigrated validator was
+        /// small enough that LLVM inlined it into both walkers; the migrated
+        /// one is not, and the per-instruction call was measured at 72M
+        /// instructions on the CodeLoad compile path (2026-08-28).
+        inline fn validateKnownInstruction(
             self: *FinalArtifactValidator,
             bytecode: []const u8,
-            meta: *const opcode.CompactInfo,
+            h: opcode.decode.Header,
         ) Error!void {
-            const pos = self.pc;
-            const size: usize = meta.size;
-            if (size == 0 or size > bytecode.len - pos)
+            const size: usize = h.size;
+            if (size == 0 or size > bytecode.len - self.pc)
                 return error.InvalidFinalArtifact;
 
-            const has_atom = meta.fmt == .atom or meta.fmt == .atom_u8 or
-                meta.fmt == .atom_u16 or meta.fmt == .atom_label_u8 or
-                meta.fmt == .atom_label_u16;
-            if (has_atom) {
-                if (size < 5 or self.owner_index >= self.config.atom_owners.len)
+            // C0 / D7: a carrier tag outside the accepted set -- a
+            // resident's slot or the add range -- must fail the artifact
+            // proof rather than reach dispatch. The add range's hint
+            // values have their own authority (DisposalHint) and stay the
+            // executor's check, as before.
+            if (h.form == .ext0) {
+                const tag = opcode.decode.operandAt(h, bytecode, 0, u8) catch
                     return error.InvalidFinalArtifact;
-                const encoded_atom = std.mem.readInt(u32, bytecode[pos + 1 ..][0..4], .little);
-                if (encoded_atom != self.config.atom_owners[self.owner_index])
+                if (opcode.logical.subForm(tag) == null and !opcode.ext0_sub.isAdd(tag))
+                    return error.InvalidFinalArtifact;
+            }
+
+            const lay = h.layout();
+            if (lay.atom_slot) |i| {
+                if (self.owner_index >= self.config.atom_owners.len)
+                    return error.InvalidFinalArtifact;
+                const encoded = opcode.decode.operandAt(h, bytecode, i, u32) catch
+                    return error.InvalidFinalArtifact;
+                if (encoded != self.config.atom_owners[self.owner_index])
                     return error.InvalidFinalArtifact;
                 self.owner_index += 1;
             }
-
-            switch (meta.fmt) {
-                .var_ref => {
-                    if (size < 3) return error.InvalidFinalArtifact;
-                    const idx = std.mem.readInt(u16, bytecode[pos + 1 ..][0..2], .little);
-                    if (idx >= self.config.closure_var_count)
-                        return error.InvalidFinalArtifact;
-                },
-                .none_var_ref => {
-                    const op_id = bytecode[pos];
-                    const idx: usize = switch (op_id) {
-                        opcode.op.get_var_ref0...opcode.op.get_var_ref3 => op_id - opcode.op.get_var_ref0,
-                        opcode.op.put_var_ref0...opcode.op.put_var_ref3 => op_id - opcode.op.put_var_ref0,
-                        opcode.op.set_var_ref0...opcode.op.set_var_ref3 => op_id - opcode.op.set_var_ref0,
-                        else => return error.InvalidFinalArtifact,
-                    };
-                    if (idx >= self.config.closure_var_count)
-                        return error.InvalidFinalArtifact;
-                },
-                else => {},
+            if (lay.var_ref_slot) |i| {
+                const idx = opcode.decode.operandAt(h, bytecode, i, u32) catch
+                    return error.InvalidFinalArtifact;
+                if (idx >= self.config.closure_var_count)
+                    return error.InvalidFinalArtifact;
             }
             self.pc += size;
         }
 
+        /// F0b behaviour change, deliberate: `headerAt` rejects an id that
+        /// the ledger says is reclaimed, where the old metadata lookup would
+        /// hand back the `unused_N` row and walk it as a one-byte
+        /// instruction. A reclaimed id must never appear in a final artifact
+        /// (11.5 clause 2), so failing validation is the correct reading; the
+        /// old path could have let one through.
+        ///
         /// Validate physical instructions before `limit`. Overshooting `limit`
         /// is intentional: a malformed jump into an operand remains the stack
         /// verifier's diagnosis, while the linear proof still consumes the
@@ -7925,9 +9589,9 @@ pub const pipeline_stack_size = struct {
             limit: usize,
         ) Error!void {
             while (self.pc < limit) {
-                const meta = opcode.finalCompactInfo(bytecode[self.pc]) orelse
+                const h = opcode.decode.headerAt(.final, bytecode, @intCast(self.pc)) catch
                     return error.InvalidFinalArtifact;
-                try self.validateKnownInstruction(bytecode, meta);
+                try self.validateKnownInstruction(bytecode, h);
             }
         }
 
@@ -7989,62 +9653,50 @@ pub const pipeline_stack_size = struct {
             const pos = pending_pc[pending_len];
             var stack_len = stack_level_tab[pos];
             var catch_pos = catch_pos_tab[pos];
-            const op = bytecode[pos];
-            var frontier_meta: ?*const opcode.CompactInfo = null;
+            // F0b: one structured decode per instruction. Nothing below reads
+            // a payload byte by hand, and the control-flow switch keys on the
+            // logical form rather than the physical id -- which is the point:
+            // a reclaimed or re-encoded id must not silently change what this
+            // pass believes an instruction is.
+            const h = opcode.decode.headerAt(.final, bytecode, pos) catch |err| switch (err) {
+                error.InvalidOpcode => return error.InvalidOpcode,
+                error.BytecodeOverflow => return error.BytecodeOverflow,
+            };
             if (!final_artifact_invalid) {
                 if (final_validator) |*validator| {
                     validator.validateBefore(bytecode, pos) catch |err| switch (err) {
                         error.InvalidFinalArtifact => final_artifact_invalid = true,
                         else => return err,
                     };
-                    if (!final_artifact_invalid and validator.pc == pos) {
-                        // Let the stack verifier diagnose an invalid opcode.
-                        // On the valid production path this is still the one
-                        // metadata lookup shared by both proofs.
-                        frontier_meta = opcode.finalCompactInfo(op);
-                    }
                 }
             }
-            if (op == 0) return error.InvalidOpcode;
-            // QuickJS takes one `short_opcode_info(op)` pointer and consumes
-            // all metadata fields from that row. Keep the same one-lookup
-            // shape: the previous size/name/pop/push/format helpers each
-            // repeated the final-opcode index calculation.
-            const meta = frontier_meta orelse
-                (opcode.finalCompactInfo(op) orelse return error.InvalidOpcode);
-            const pos_next = pos + meta.size;
-            if (pos_next > bytecode.len) return error.BytecodeOverflow;
+            if (h.form == .invalid) return error.InvalidOpcode;
+            // Both proofs now share the one decoded header instead of a
+            // separately looked-up metadata row.
+            const pos_next = h.next_pc();
 
-            // Compute n_pop, accounting for npop/npop_u16/npopx variable forms.
-            var n_pop: u32 = meta.n_pop;
-            var n_push: u32 = meta.n_push;
-            switch (meta.fmt) {
-                .npop, .npop_u16 => {
-                    if (pos + 1 + 2 > bytecode.len) return error.BytecodeOverflow;
-                    n_pop += std.mem.readInt(u16, bytecode[pos + 1 ..][0..2], .little);
-                },
-                .npopx => {
-                    // OP_call0..call3: extra args = (op - OP_call0).
-                    n_pop += @as(u32, op) - @as(u32, opcode.op.call0);
-                },
-                else => {},
-            }
+            // Effects come from the declaration, not from a format switch
+            // here. `npop`, `npop_u16` and `npopx` (call0..3, whose count is
+            // burned into the opcode) all evaluate the same affine
+            // expression, and `using`/`dyn_env_probe` read their operand
+            // table -- the three special cases this pass used to carry are
+            // now one call.
+            const effect = opcode.decode.stackEffect(h, bytecode) catch |err| switch (err) {
+                error.InvalidOpcode => return error.InvalidOpcode,
+                error.BytecodeOverflow => return error.BytecodeOverflow,
+            };
+            const n_pop: u32 = effect.pop;
+            const n_push: u32 = effect.push;
             // Two opcodes carry their stack effect in an operand byte instead
             // of the table: the `using` cold plane's sub-opcode, and
             // `dyn_env_probe`'s kind.
             var dyn_env_flags: ?opcode.dyn_env.Flags = null;
-            if (op == opcode.op.using) {
-                if (pos + 2 > bytecode.len) return error.BytecodeOverflow;
-                const sub = bytecode[pos + 1];
-                n_pop = opcode.using_sub.stackPop(sub);
-                n_push = opcode.using_sub.stackPush(sub);
-            } else if (op == opcode.op.dyn_env_probe) {
-                if (pos + 10 > bytecode.len) return error.BytecodeOverflow;
-                const flags = opcode.dyn_env.decode(bytecode[pos + 9]) orelse
-                    return error.InvalidOpcode;
-                dyn_env_flags = flags;
-                n_pop = flags.stackPop();
-                n_push = flags.stackPush();
+            // Only the branch edge still needs the decoded flags; the
+            // fall-through effect already came from `stackEffect`.
+            if (h.form == .dyn_env_probe) {
+                const raw = opcode.decode.operandAt(h, bytecode, 2, u8) catch
+                    return error.BytecodeOverflow;
+                dyn_env_flags = opcode.dyn_env.decode(raw) orelse return error.InvalidOpcode;
             }
 
             if (stack_len < n_pop) {
@@ -8059,7 +9711,7 @@ pub const pipeline_stack_size = struct {
             if (!final_artifact_invalid) {
                 if (final_validator) |*validator| {
                     if (validator.pc == pos) {
-                        validator.validateKnownInstruction(bytecode, meta) catch |err| switch (err) {
+                        validator.validateKnownInstruction(bytecode, h) catch |err| switch (err) {
                             error.InvalidFinalArtifact => final_artifact_invalid = true,
                             else => return err,
                         };
@@ -8070,84 +9722,64 @@ pub const pipeline_stack_size = struct {
             // QuickJS dispatches directly on the numeric opcode. Apart from
             // avoiding string comparisons, this keeps all control-flow
             // classification auditable against compute_stack_size's switch.
-            switch (op) {
-                opcode.op.@"return", opcode.op.return_undef => {
+            switch (h.form) {
+                .@"return", .return_undef => {
                     // `stack_len` already includes the return-value pop.
                     if (stack_len != 0) {
                         if (options.returns_balanced_out) |out| out.* = false;
                     }
                     continue;
                 },
-                opcode.op.return_async,
-                opcode.op.throw,
-                opcode.op.throw_error,
-                opcode.op.tail_call,
-                opcode.op.tail_call_method,
-                opcode.op.ret,
+                .return_async,
+                .throw,
+                .throw_error,
+                .tail_call,
+                .tail_call_method,
+                .ret,
                 => continue,
-                opcode.op.goto => {
-                    const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
-                    const target = relTarget(pos, 1, diff);
+                .goto, .goto16, .goto8 => {
+                    const target = try opcode.decode.targetOfLabel(h, bytecode, 0);
                     try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
                     continue;
                 },
-                opcode.op.goto16 => {
-                    const diff = std.mem.readInt(i16, bytecode[pos + 1 ..][0..2], .little);
-                    const target = relTarget(pos, 1, @intCast(diff));
-                    try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
-                    continue;
-                },
-                opcode.op.goto8 => {
-                    const diff: i8 = @bitCast(bytecode[pos + 1]);
-                    const target = relTarget(pos, 1, @intCast(diff));
-                    try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
-                    continue;
-                },
-                opcode.op.if_true, opcode.op.if_false => {
-                    const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
-                    const target = relTarget(pos, 1, diff);
+                .if_true, .if_false, .if_true8, .if_false8 => {
+                    const target = try opcode.decode.targetOfLabel(h, bytecode, 0);
                     try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
                 },
-                opcode.op.if_true8, opcode.op.if_false8 => {
-                    const diff: i8 = @bitCast(bytecode[pos + 1]);
-                    const target = relTarget(pos, 1, @intCast(diff));
-                    try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
-                },
-                opcode.op.gosub => {
-                    const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
-                    const target = relTarget(pos, 1, diff);
+                .gosub => {
+                    const target = try opcode.decode.targetOfLabel(h, bytecode, 0);
                     try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len + 1, catch_pos);
                 },
-                opcode.op.dyn_env_probe => {
-                    const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
-                    const target = relTarget(pos, 5, diff);
+                .dyn_env_probe => {
+                    const target = try opcode.decode.targetOfLabel(h, bytecode, 1);
                     const delta = (dyn_env_flags orelse return error.InvalidOpcode).branchStackDelta();
                     const branch_level = @as(i32, stack_len) + delta;
                     if (branch_level < 0) return error.StackUnderflow;
                     if (branch_level > JS_STACK_SIZE_MAX) return error.StackOverflow;
                     try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, @intCast(branch_level), catch_pos);
                 },
-                opcode.op.@"catch" => {
-                    const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
-                    const target = relTarget(pos, 1, diff);
+                .@"catch" => {
+                    const target = try opcode.decode.targetOfLabel(h, bytecode, 0);
                     try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
                     catch_pos = @intCast(pos);
                 },
-                opcode.op.for_of_start, opcode.op.for_await_of_start => catch_pos = @intCast(pos),
-                opcode.op.drop, opcode.op.nip, opcode.op.iterator_close => {
-                    const catch_level = if (op == opcode.op.iterator_close)
-                        stack_len + 2
-                    else if (op == opcode.op.nip) blk: {
-                        if (stack_len == 0) return error.StackUnderflow;
-                        break :blk stack_len - 1;
-                    } else stack_len;
+                .for_of_start, .for_await_of_start => catch_pos = @intCast(pos),
+                .drop, .nip, .iterator_close => {
+                    const catch_level = switch (h.form) {
+                        .iterator_close => stack_len + 2,
+                        .nip => blk: {
+                            if (stack_len == 0) return error.StackUnderflow;
+                            break :blk stack_len - 1;
+                        },
+                        else => stack_len,
+                    };
                     catch_pos = maybePopCatchPos(bytecode, stack_level_tab, catch_pos_tab, catch_pos, catch_level);
                 },
-                opcode.op.nip_catch => {
+                .nip_catch => {
                     if (catch_pos < 0) return error.InvalidOpcode;
                     const catch_idx: usize = @intCast(catch_pos);
                     stack_len = stack_level_tab[catch_idx];
-                    if (bytecode[catch_idx] != opcode.op.@"catch") stack_len += 1;
+                    if (!opcode.decode.matchesFormAt(bytecode, @intCast(catch_idx), .@"catch")) stack_len += 1;
                     stack_len += 1;
                     catch_pos = catch_pos_tab[catch_idx];
                 },
@@ -8585,6 +10217,7 @@ pub const pipeline_finalize = struct {
 
     const std = @import("std");
     const atom = @import("core/atom.zig");
+    const bigint_mod = @import("core/bigint.zig");
     const runtime_mod = @import("core/runtime.zig");
     const fb_mod = function_bytecode;
     const bytecode_function = function_mod;
@@ -9175,6 +10808,10 @@ pub const pipeline_finalize = struct {
             fd.is_module,
         );
 
+        // Reserved constant-pool BigInts join the heap now; the FB published
+        // on the next line owns the edge that keeps them alive. Nothing
+        // allocates between the two registrations.
+        for (cpool) |*slot| bigint_mod.BigInt.registerReservedValue(rt, slot.*);
         shell_owned = false;
         rt.gc.addInitializedWithSizeNoFail(&fb.header, fb.heapByteSizeWithLayout(layout));
 
@@ -10312,59 +11949,23 @@ const function_mod = struct {
         if (@as(usize, fb.arg_count) + @as(usize, fb.var_count) > small_inline_max_slots) return false;
         if (fb.stack_size > small_inline_max_stack) return false;
 
-        var pc: usize = 0;
+        // F0b: the reject set is derived from the declaration, so a form
+        // that moves behind a carrier keeps its policy. The hand-written
+        // list this replaces matched on opcode identity and therefore could
+        // not see a carrier resident at all -- which is how demoting
+        // `put_super_value` silently made `super.x = v` bodies inlinable,
+        // with no test turning red (5.2 clause 3). A carrier is now asked
+        // about its resident instead of being special-cased.
+        var pc: u32 = 0;
         while (pc < code.len) {
-            const op_id = code[pc];
-            const size: usize = opcode.sizeOf(op_id);
-            if (size == 0 or pc + size > code.len) return false;
-            switch (op_id) {
-                opcode.op.eval,
-                opcode.op.apply_eval,
-                opcode.op.special_object,
-                opcode.op.fclosure,
-                opcode.op.fclosure8,
-                opcode.op.apply,
-                opcode.op.rest,
-                opcode.op.initial_yield,
-                opcode.op.yield,
-                opcode.op.yield_star,
-                opcode.op.async_yield_star,
-                opcode.op.await,
-                opcode.op.return_async,
-                opcode.op.get_super,
-                opcode.op.get_super_value,
-                opcode.op.get_private_field,
-                opcode.op.put_private_field,
-                opcode.op.define_private_field,
-                opcode.op.define_class,
-                opcode.op.define_class_computed,
-                opcode.op.import,
-                opcode.op.dyn_env_probe,
-                opcode.op.make_loc_ref,
-                opcode.op.make_arg_ref,
-                opcode.op.make_var_ref_ref,
-                opcode.op.make_var_ref,
-                opcode.op.gosub,
-                opcode.op.@"catch",
-                opcode.op.nip_catch,
-                opcode.op.tail_call,
-                opcode.op.tail_call_method,
-                => return false,
-                // Cold-plane carrier: a demoted opcode is invisible to an
-                // identity match, so the scanner has to look at the sub byte.
-                // Demoting an opcode into the plane silently widens every
-                // scanner that pattern-matches on opcode identity unless this
-                // is kept in step (docs/perf/opcode-audit.md).
-                opcode.op.using => {
-                    if (pc + 1 >= code.len) return false;
-                    switch (code[pc + 1]) {
-                        opcode.using_sub.put_super_value => return false,
-                        else => {},
-                    }
-                },
-                else => {},
+            const h = opcode.decode.headerAt(.final, code, pc) catch return false;
+            if (opcode.logical.traitsOf(h.form).inline_policy == .forbidden) return false;
+            if (h.form == .ext0) {
+                const sub = opcode.decode.operandAt(h, code, 0, u8) catch return false;
+                const resident = opcode.logical.subForm(sub) orelse return false;
+                if (opcode.logical.traitsOf(resident).inline_policy == .forbidden) return false;
             }
-            pc += size;
+            pc = h.next_pc();
         }
         return true;
     }
@@ -10522,157 +12123,93 @@ pub const dump = struct {
         try writer.print("constants   : {d}\n", .{constant_count});
         try writer.print("--- instructions ---\n", .{});
 
+        // Decode-first with a raw fallback: a disassembler must render a
+        // CORRUPT stream too, so a failed decode falls back to one raw byte
+        // and keeps going where the decoder would (correctly) refuse. On the
+        // decoded path the operands come from the layout, which prints
+        // strictly more than the format switch it replaced could: burned-in
+        // operands (`get_loc0`'s slot) have no bytes for a format-driven
+        // printer to read, but the declaration knows their values.
         var pc: usize = 0;
         while (pc < code.len) {
-            const op_id = code[pc];
-            const reported_size = opcode.sizeOf(op_id);
-            const size: usize = if (reported_size == 0) 1 else @intCast(reported_size);
-            const end = @min(pc + size, code.len);
-
             if (opts.show_offsets) {
                 try writer.print("{d:>5}: ", .{pc});
             }
 
-            const op_name = opcode.nameOf(op_id);
-            if (op_name.len == 0) {
-                try writer.print("?<{d}>", .{op_id});
-            } else {
-                try writer.print("{s}", .{op_name});
-            }
+            const h = opcode.decode.headerAt(.final, code, @intCast(pc)) catch {
+                const op_id = code[pc];
+                const op_name = opcode.nameOf(op_id);
+                if (op_name.len == 0) {
+                    try writer.print("?<{d}>", .{op_id});
+                } else {
+                    try writer.print("{s}", .{op_name});
+                }
+                if (opts.show_raw_bytes) {
+                    try writer.print("    ; raw={x:0>2} ", .{code[pc]});
+                }
+                try writer.print("\n", .{});
+                pc += 1;
+                continue;
+            };
+            const end: usize = h.next_pc();
 
-            const fmt = opcode.formatOf(op_id);
-            try printOperands(writer, atoms, fmt, code[pc..end]);
+            try writer.print("{s}", .{opcode.nameOf(code[pc])});
+            try printOperandsFromLayout(writer, atoms, h, code);
 
             if (opts.show_raw_bytes) {
                 try writer.print("    ; raw=", .{});
                 for (code[pc..end]) |b| try writer.print("{x:0>2} ", .{b});
             }
             try writer.print("\n", .{});
-
-            if (size == 0) break; // safety
-            pc += size;
+            pc = end;
         }
 
         try writer.print("--- end ---\n", .{});
     }
 
-    fn printOperands(
+    fn printOperandsFromLayout(
         writer: *std.Io.Writer,
         atoms: *atom.AtomTable,
-        fmt: opcode.Format,
-        body: []const u8,
+        h: opcode.decode.Header,
+        code: []const u8,
     ) !void {
-        switch (fmt) {
-            .none, .none_int, .none_loc, .none_arg, .none_var_ref => {},
-
-            .u8, .npopx => {
-                if (body.len >= 2) try writer.print(" {d}", .{body[1]});
-            },
-            .i8, .label8 => {
-                if (body.len >= 2) try writer.print(" {d}", .{@as(i8, @bitCast(body[1]))});
-            },
-            .loc8, .const8 => {
-                if (body.len >= 2) try writer.print(" {d}", .{body[1]});
-            },
-
-            .u16, .loc, .arg, .var_ref, .npop, .label16 => {
-                if (body.len >= 3) {
-                    const v = std.mem.readInt(u16, body[1..][0..2], .little);
-                    try writer.print(" {d}", .{v});
-                }
-            },
-            .i16 => {
-                if (body.len >= 3) {
-                    const v = std.mem.readInt(i16, body[1..][0..2], .little);
-                    try writer.print(" {d}", .{v});
-                }
-            },
-            .npop_u16 => {
-                if (body.len >= 5) {
-                    const a = std.mem.readInt(u16, body[1..][0..2], .little);
-                    const b = std.mem.readInt(u16, body[3..][0..2], .little);
-                    try writer.print(" {d},{d}", .{ a, b });
-                }
-            },
-
-            .u32, .label, .@"const" => {
-                if (body.len >= 5) {
-                    const v = std.mem.readInt(u32, body[1..][0..4], .little);
-                    try writer.print(" {d}", .{v});
-                }
-            },
-            .i32 => {
-                if (body.len >= 5) {
-                    const v = std.mem.readInt(i32, body[1..][0..4], .little);
-                    try writer.print(" {d}", .{v});
-                }
-            },
-            .atom => {
-                try writeAtomOperand(writer, atoms, body);
-            },
-            .atom_u8 => {
-                try writeAtomOperand(writer, atoms, body);
-                if (body.len >= 6) try writer.print(", {d}", .{body[5]});
-            },
-            .atom_u16 => {
-                try writeAtomOperand(writer, atoms, body);
-                if (body.len >= 7) {
-                    const v = std.mem.readInt(u16, body[5..][0..2], .little);
-                    try writer.print(", {d}", .{v});
-                }
-            },
-            .atom_label_u8 => {
-                try writeAtomOperand(writer, atoms, body);
-                if (body.len >= 10) {
-                    const lbl = std.mem.readInt(u32, body[5..][0..4], .little);
-                    if (body[0] == opcode.op.dyn_env_probe) {
-                        if (opcode.dyn_env.decode(body[9])) |flags| {
-                            try writer.print(", L{d}, {s}{s}", .{
-                                lbl,
+        const lay = h.layout();
+        for (0..lay.len) |i| {
+            const slot = lay.slots[i];
+            try writer.writeAll(if (i == 0) " " else ", ");
+            const value: i64 = if (slot.offset == null)
+                @intCast(slot.fixed)
+            else
+                opcode.decode.operandAt(h, code, i, i64) catch {
+                    try writer.print("<trunc>", .{});
+                    return;
+                };
+            switch (slot.kind) {
+                .atom => {
+                    const a: u32 = @intCast(value);
+                    if (atoms.name(a)) |name_str| {
+                        try writer.print("\"{s}\"", .{name_str});
+                    } else {
+                        try writer.print("atom#{d}", .{a});
+                    }
+                },
+                .label => try writer.print("L{d}", .{value}),
+                .sub_opcode => {
+                    // dyn_env_probe's kind byte decodes to a probe shape;
+                    // showing it beats showing the raw flag byte.
+                    if (h.form == .dyn_env_probe) {
+                        if (opcode.dyn_env.decode(@intCast(value))) |flags| {
+                            try writer.print("{s}{s}", .{
                                 @tagName(flags.kind),
                                 if (flags.is_with) ",with" else "",
                             });
-                            return;
+                            continue;
                         }
                     }
-                    try writer.print(", L{d}, {d}", .{ lbl, body[9] });
-                }
-            },
-            .atom_label_u16 => {
-                try writeAtomOperand(writer, atoms, body);
-                if (body.len >= 11) {
-                    const lbl = std.mem.readInt(u32, body[5..][0..4], .little);
-                    const v = std.mem.readInt(u16, body[9..][0..2], .little);
-                    try writer.print(", L{d}, {d}", .{ lbl, v });
-                }
-            },
-            .label_u16 => {
-                if (body.len >= 7) {
-                    const lbl = std.mem.readInt(u32, body[1..][0..4], .little);
-                    const v = std.mem.readInt(u16, body[5..][0..2], .little);
-                    try writer.print(" L{d}, {d}", .{ lbl, v });
-                }
-            },
-        }
-    }
-
-    fn writeAtomOperand(
-        writer: *std.Io.Writer,
-        atoms: *atom.AtomTable,
-        body: []const u8,
-    ) !void {
-        // The atom is the 4-byte operand at `body[1..5]` in every atom format;
-        // read it inline rather than from a side array (the finalized FB no
-        // longer keeps one).
-        if (body.len < 5) {
-            try writer.print(" <atom?>", .{});
-            return;
-        }
-        const a = std.mem.readInt(u32, body[1..][0..4], .little);
-        if (atoms.name(a)) |s| {
-            try writer.print(" \"{s}\"", .{s});
-        } else {
-            try writer.print(" <atom#{d}>", .{a});
+                    try writer.print("{d}", .{value});
+                },
+                else => try writer.print("{d}", .{value}),
+            }
         }
     }
 };

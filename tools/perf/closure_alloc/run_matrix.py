@@ -40,6 +40,8 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 CASES = os.path.join(REPO, "tools", "perf", "same_runtime", "cases")
+sys.path.insert(0, os.path.dirname(HERE))
+from measure_fields import field_metadata, lock_attested, single_cpu
 
 SHAPES = [
     "reuse",
@@ -166,7 +168,9 @@ def main():
                         metavar="LABEL=PATH")
     parser.add_argument("--qjs", action="append", required=True,
                         metavar="LABEL=PATH")
-    parser.add_argument("--cpu", type=int, default=19)
+    parser.add_argument("--field", choices=("a", "b", "host"), default=None)
+    parser.add_argument("--cpu", type=int, default=None,
+                        help="legacy CPU override; noncanonical values are diagnostic-only")
     parser.add_argument("--wall-samples", type=int, default=6)
     parser.add_argument("--wall-iterations", type=int, default=40)
     parser.add_argument("--warmup", type=int, default=8)
@@ -182,6 +186,11 @@ def main():
     parser.add_argument("--tmpdir", default=os.environ.get("TMPDIR", "/tmp"))
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
+
+    try:
+        measure_field, args.cpu, field_conforming = single_cpu(args.field, args.cpu)
+    except ValueError as error:
+        parser.error(str(error))
 
     if args.wall_samples % 2 != 0:
         raise SystemExit("--wall-samples must be even to balance ABBA")
@@ -216,6 +225,11 @@ def main():
     results = {
         "line": "P7-50",
         "cpu": args.cpu,
+        "measurement_field": {
+            **field_metadata(measure_field, "single"),
+            "fieldConforming": field_conforming,
+            "lockAttested": lock_attested(measure_field),
+        },
         "pmu_device": pmu_device,
         "inner_loop_n": args.inner,
         "warmup": args.warmup,

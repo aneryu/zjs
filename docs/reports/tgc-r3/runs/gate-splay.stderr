@@ -1,0 +1,10 @@
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=object
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=object
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=object
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=object
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=object
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=object
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=object
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=object
+VERIFY-STICKY scope=full: 0 precise, 11 conservative-only condemned-but-reachable
+wall=33.42 rss=900188

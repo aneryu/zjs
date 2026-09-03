@@ -1010,4 +1010,3 @@ test "EventLoop roots one-shot function bytecode timer callback after dequeue" {
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
-

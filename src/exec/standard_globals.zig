@@ -1548,57 +1548,48 @@ fn installStandardConstructorWithPrototype(
     switch (kind) {
         .object => {
             const object_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            const cached = try global.cachedRealmValueSlot(rt, .object_prototype);
-            try global.setOptionalValueSlot(rt, cached, object_proto.value().dup());
+            try global.setCachedRealmValue(rt, .object_prototype, object_proto.value().dup());
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.object, @intFromEnum(object_builtin.ConstructorMethod.call)));
         },
         .symbol => {
             const symbol_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            const cached = try global.cachedRealmValueSlot(rt, .symbol_prototype);
-            try global.setOptionalValueSlot(rt, cached, symbol_proto.value().dup());
+            try global.setCachedRealmValue(rt, .symbol_prototype, symbol_proto.value().dup());
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.primitive, primitive_symbol_ctor_call_id));
             try installSymbolExtras(rt, global, constructor);
         },
         .boolean => {
             const boolean_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            const cached = try global.cachedRealmValueSlot(rt, .boolean_prototype);
-            try global.setOptionalValueSlot(rt, cached, boolean_proto.value().dup());
+            try global.setCachedRealmValue(rt, .boolean_prototype, boolean_proto.value().dup());
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.primitive, primitive_boolean_ctor_call_id));
         },
         .proxy => {},
         .array => {
             (try constructor.arrayBuiltinMarkerSlot(rt)).* = .constructor;
             const array_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            const cached = try global.cachedRealmValueSlot(rt, .array_prototype);
-            try global.setOptionalValueSlot(rt, cached, array_proto.value().dup());
+            try global.setCachedRealmValue(rt, .array_prototype, array_proto.value().dup());
             try installArrayPrototypeSymbols(rt, global, constructor);
             const values_key = (comptime core.atom.predefinedId("values", .string)) orelse return error.InvalidBuiltinRegistry;
             const values = try array_proto.getProperty(values_key);
             defer values.free(rt);
-            const cached_values = try global.cachedRealmValueSlot(rt, .array_prototype_values);
-            try global.setOptionalValueSlot(rt, cached_values, values.dup());
+            try global.setCachedRealmValue(rt, .array_prototype_values, values.dup());
         },
         .string => {
             const string_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            const cached = try global.cachedRealmValueSlot(rt, .string_prototype);
-            try global.setOptionalValueSlot(rt, cached, string_proto.value().dup());
+            try global.setCachedRealmValue(rt, .string_prototype, string_proto.value().dup());
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.string, @intFromEnum(string_builtin.ConstructorMethod.call)));
             try installStringPrototypeAliases(rt, global, constructor);
         },
         .number => {
             const number_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            const cached = try global.cachedRealmValueSlot(rt, .number_prototype);
-            try global.setOptionalValueSlot(rt, cached, number_proto.value().dup());
+            try global.setCachedRealmValue(rt, .number_prototype, number_proto.value().dup());
         },
         .bigint => {
             const bigint_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            const cached = try global.cachedRealmValueSlot(rt, .bigint_prototype);
-            try global.setOptionalValueSlot(rt, cached, bigint_proto.value().dup());
+            try global.setCachedRealmValue(rt, .bigint_prototype, bigint_proto.value().dup());
         },
         .regexp => {
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.regexp, @intFromEnum(regexp_builtin.ConstructorMethod.construct)));
-            const cached = try global.cachedRealmValueSlot(rt, .regexp_constructor);
-            try global.setOptionalValueSlot(rt, cached, constructor.value().dup());
+            try global.setCachedRealmValue(rt, .regexp_constructor, constructor.value().dup());
             try installRegExpExtras(rt, global, constructor);
         },
         .promise => try installPromiseExtras(rt, global, constructor),
@@ -2891,8 +2882,7 @@ fn installPromiseExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.O
     // Mirror qjs ctx->promise_ctor (JS_AddIntrinsicPromise quickjs.c:54663):
     // the realm retains the intrinsic constructor so await / the default
     // species never depend on the mutable globalThis.Promise binding.
-    const cached_ctor = try global.cachedRealmValueSlot(rt, .promise_constructor);
-    try global.setOptionalValueSlot(rt, cached_ctor, ctor.value().dup());
+    try global.setCachedRealmValue(rt, .promise_constructor, ctor.value().dup());
 }
 
 fn installIteratorExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
@@ -3485,7 +3475,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     const map_ctor = try intrinsics.global.getProperty(map_atom);
     defer map_ctor.free(rt);
     try std.testing.expect(map_ctor.isObject());
-    const map_ctor_object: *core.Object = @fieldParentPtr("header", map_ctor.refHeader().?);
+    const map_ctor_object = core.Object.fromHeader(map_ctor.refHeader().?);
     try std.testing.expectEqual(core.class.ids.c_function, map_ctor_object.class_id);
 
     const prototype_atom = try rt.internAtom("prototype");
@@ -3496,7 +3486,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     try std.testing.expectEqual(false, prototype_desc.enumerable.?);
     try std.testing.expectEqual(false, prototype_desc.configurable.?);
     try std.testing.expect(prototype_desc.value.isObject());
-    const map_proto: *core.Object = @fieldParentPtr("header", prototype_desc.value.refHeader().?);
+    const map_proto = core.Object.fromHeader(prototype_desc.value.refHeader().?);
     try std.testing.expectEqual(core.class.ids.object, map_proto.class_id);
 
     const set_atom = try rt.internAtom("set");
@@ -3507,7 +3497,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     try std.testing.expectEqual(false, set_desc.enumerable.?);
     try std.testing.expectEqual(true, set_desc.configurable.?);
     try std.testing.expect(set_desc.value.isObject());
-    const set_func_obj: *core.Object = @fieldParentPtr("header", set_desc.value.refHeader().?);
+    const set_func_obj = core.Object.fromHeader(set_desc.value.refHeader().?);
     try std.testing.expectEqual(core.class.ids.c_function, set_func_obj.class_id);
 }
 

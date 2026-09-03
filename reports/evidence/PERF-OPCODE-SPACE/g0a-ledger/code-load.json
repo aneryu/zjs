@@ -1,0 +1,468 @@
+{
+ "tool": "zjs-benchv8-fixed-pmu",
+ "schemaVersion": 1,
+ "direction": "ratios are zjs/qjs; below 1.0 means zjs used fewer counters or wall time",
+ "workload": "per-benchmark scripts assembled from the vendored suite with doWarmup=false and doDeterministic=true appended; both engines execute identical deterministicIterations/minIterations batches",
+ "role": "screening instrument; score adjudication stays with run_benchv8_compare.py",
+ "iterationDivisor": 1,
+ "timestamp": "2026-08-30T07:54:15Z",
+ "samplesPerEnginePerBench": 8,
+ "samplingOrder": "paired ABBA by sample parity",
+ "firstPositionCounts": {
+  "qjs": 4,
+  "zjs": 4
+ },
+ "firstPositionBalanced": true,
+ "cpu": 15,
+ "effectiveAffinity": [
+  15
+ ],
+ "pmu": "armv8_pmuv3_1",
+ "events": [
+  "armv8_pmuv3_1/instructions/",
+  "armv8_pmuv3_1/cycles/",
+  "armv8_pmuv3_1/branch-instructions/",
+  "armv8_pmuv3_1/branch-misses/",
+  "armv8_pmuv3_1/cache-references/",
+  "armv8_pmuv3_1/cache-misses/"
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": "0xd87",
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/g0a-new-zjs",
+   "sha256": "05026e8e550cede89a2621f44f6291ff57c4ee7a9e77c52c7c19c55ca23fcb3b",
+   "repo": "v0.1.0-164-g74629969-dirty"
+  },
+  "qjs": {
+   "path": "/tmp/g0a-baseline-zjs",
+   "sha256": "c29cc4080420e6c57b82b1dabe1a3cb7086da1f9af3e9cdb6a54f56f43515bcc",
+   "repo": "unavailable"
+  }
+ },
+ "benchmarks": {
+  "code-load": {
+   "source": {
+    "suiteDir": "/home/aneryu/zjs/tools/perf/bench_v8/suite",
+    "files": [
+     {
+      "file": "base.js",
+      "sha256": "216612c2e7096a02b3e52b57e9cf9351bbaf180d60938d5c60b85fd756232733"
+     },
+     {
+      "file": "code-load.js",
+      "sha256": "32fd38d49bb8794b40e947c70c0c51276bfc2588833a8451a25b1b2bfccad96c"
+     }
+    ],
+    "fixedWorkSha256": "329e103b2da6af946a621e3475564a2d3eda91640e40c0e9e5446951a16f7c97"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 15162586762,
+       "cycles": 4047665908,
+       "branch-instructions": 3229048789,
+       "branch-misses": 47170738,
+       "cache-references": 5713048729,
+       "cache-misses": 45700049
+      },
+      "wallSeconds": 1.0880875582806766,
+      "stdout": "CodeLoad: 35204\n----",
+      "scores": {
+       "CodeLoad": 35204.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15151734953,
+       "cycles": 4032848835,
+       "branch-instructions": 3227024999,
+       "branch-misses": 47178271,
+       "cache-references": 5709719259,
+       "cache-misses": 45504110
+      },
+      "wallSeconds": 1.06299845315516,
+      "stdout": "CodeLoad: 35303\n----",
+      "scores": {
+       "CodeLoad": 35303.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15160031789,
+       "cycles": 4036903813,
+       "branch-instructions": 3228964387,
+       "branch-misses": 47199209,
+       "cache-references": 5714421871,
+       "cache-misses": 45866756
+      },
+      "wallSeconds": 1.0633952100761235,
+      "stdout": "CodeLoad: 35327\n----",
+      "scores": {
+       "CodeLoad": 35327.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15160319814,
+       "cycles": 4032484764,
+       "branch-instructions": 3228971984,
+       "branch-misses": 47161243,
+       "cache-references": 5712118868,
+       "cache-misses": 45051854
+      },
+      "wallSeconds": 1.0635776682756841,
+      "stdout": "CodeLoad: 35303\n----",
+      "scores": {
+       "CodeLoad": 35303.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15161670117,
+       "cycles": 4027099994,
+       "branch-instructions": 3229684487,
+       "branch-misses": 47224409,
+       "cache-references": 5713977031,
+       "cache-misses": 46104423
+      },
+      "wallSeconds": 1.0602791858837008,
+      "stdout": "CodeLoad: 35385\n----",
+      "scores": {
+       "CodeLoad": 35385.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15158955388,
+       "cycles": 4049797995,
+       "branch-instructions": 3228415526,
+       "branch-misses": 47064745,
+       "cache-references": 5710457695,
+       "cache-misses": 45786975
+      },
+      "wallSeconds": 1.068008410744369,
+      "stdout": "CodeLoad: 35187\n----",
+      "scores": {
+       "CodeLoad": 35187.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15160321234,
+       "cycles": 4047881657,
+       "branch-instructions": 3228898064,
+       "branch-misses": 47148682,
+       "cache-references": 5712117039,
+       "cache-misses": 45456989
+      },
+      "wallSeconds": 1.067210697568953,
+      "stdout": "CodeLoad: 35175\n----",
+      "scores": {
+       "CodeLoad": 35175.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15159530929,
+       "cycles": 4057446361,
+       "branch-instructions": 3228693703,
+       "branch-misses": 47154240,
+       "cache-references": 5713591627,
+       "cache-misses": 45368670
+      },
+      "wallSeconds": 1.0703424541279674,
+      "stdout": "CodeLoad: 35048\n----",
+      "scores": {
+       "CodeLoad": 35048.0
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 15158771105,
+       "cycles": 4020937371,
+       "branch-instructions": 3228438843,
+       "branch-misses": 47233088,
+       "cache-references": 5712387704,
+       "cache-misses": 45808966
+      },
+      "wallSeconds": 1.0581543687731028,
+      "stdout": "CodeLoad: 35498\n----",
+      "scores": {
+       "CodeLoad": 35498.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15160787991,
+       "cycles": 4014222670,
+       "branch-instructions": 3229272661,
+       "branch-misses": 47145671,
+       "cache-references": 5712042645,
+       "cache-misses": 45523182
+      },
+      "wallSeconds": 1.0583974928595126,
+      "stdout": "CodeLoad: 35498\n----",
+      "scores": {
+       "CodeLoad": 35498.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15160757131,
+       "cycles": 4037593182,
+       "branch-instructions": 3229148984,
+       "branch-misses": 47265642,
+       "cache-references": 5715242851,
+       "cache-misses": 45988617
+      },
+      "wallSeconds": 1.0640458413399756,
+      "stdout": "CodeLoad: 35303\n----",
+      "scores": {
+       "CodeLoad": 35303.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15151132036,
+       "cycles": 4026366439,
+       "branch-instructions": 3226953394,
+       "branch-misses": 47206806,
+       "cache-references": 5708219027,
+       "cache-misses": 45644520
+      },
+      "wallSeconds": 1.0611308659426868,
+      "stdout": "CodeLoad: 35373\n----",
+      "scores": {
+       "CodeLoad": 35373.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15158972743,
+       "cycles": 4036178811,
+       "branch-instructions": 3228539472,
+       "branch-misses": 47203364,
+       "cache-references": 5710693738,
+       "cache-misses": 45517273
+      },
+      "wallSeconds": 1.0640871967189014,
+      "stdout": "CodeLoad: 35310\n----",
+      "scores": {
+       "CodeLoad": 35310.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15154743594,
+       "cycles": 4034500380,
+       "branch-instructions": 3228010981,
+       "branch-misses": 47190050,
+       "cache-references": 5709754721,
+       "cache-misses": 45367797
+      },
+      "wallSeconds": 1.062993512954563,
+      "stdout": "CodeLoad: 35303\n----",
+      "scores": {
+       "CodeLoad": 35303.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15158509178,
+       "cycles": 4045827029,
+       "branch-instructions": 3228321790,
+       "branch-misses": 47120187,
+       "cache-references": 5711723218,
+       "cache-misses": 45144790
+      },
+      "wallSeconds": 1.073178336955607,
+      "stdout": "CodeLoad: 35216\n----",
+      "scores": {
+       "CodeLoad": 35216.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15158895377,
+       "cycles": 4038606428,
+       "branch-instructions": 3228430938,
+       "branch-misses": 47169487,
+       "cache-references": 5710576628,
+       "cache-misses": 45319675
+      },
+      "wallSeconds": 1.0653873481787741,
+      "stdout": "CodeLoad: 35233\n----",
+      "scores": {
+       "CodeLoad": 35233.0
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 15160175801.5,
+     "zjsMedian": 15158833241.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9997483505248879,
+      1.0005974918402467,
+      1.0000478456780366,
+      0.9993939588272066,
+      0.9998220925545019,
+      0.9997221580318566,
+      0.9998804737728159,
+      0.9999580757476616
+     ],
+     "ratioMedian": 0.9998512831636589,
+     "ratioMAD": 0.00011795885790250038
+    },
+    "cycles": {
+     "qjsMedian": 4042284860.5,
+     "zjsMedian": 4035339595.5,
+     "pairedRatiosZjsOverQjs": [
+      0.9933965555439809,
+      0.9953813877578677,
+      1.0001707667638204,
+      0.9984827407025512,
+      1.0022544304868333,
+      0.9962226227039258,
+      0.9994924189553697,
+      0.9953567018947955
+     ],
+     "ratioMedian": 0.9973526817032385,
+     "ratioMAD": 0.00206785853028707
+    },
+    "branch-instructions": {
+     "qjsMedian": 3228931225.5,
+     "zjsMedian": 3228434890.5,
+     "pairedRatiosZjsOverQjs": [
+      0.9998111066013998,
+      1.0006965121127653,
+      1.0000571691037359,
+      0.9993748505685394,
+      0.9996454715608881,
+      0.999874692400423,
+      0.9998215261093483,
+      0.9999186156928557
+     ],
+     "ratioMedian": 0.9998481092548857,
+     "ratioMAD": 0.00013657206598377547
+    },
+    "branch-misses": {
+     "qjsMedian": 47165990.5,
+     "zjsMedian": 47196707.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0013217940325632,
+      0.999309003926829,
+      1.0014075024011526,
+      1.000966111092534,
+      0.9995543618131886,
+      1.0026623962373535,
+      0.9993956352799003,
+      1.0003233431394505
+     ],
+     "ratioMedian": 1.0006447271159922,
+     "ratioMAD": 0.0009265702939820208
+    },
+    "cache-references": {
+     "qjsMedian": 5712583798.5,
+     "zjsMedian": 5711208478.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9998842955781833,
+      1.0004069177300334,
+      1.0001436680767597,
+      0.9993172689346772,
+      0.999425392684957,
+      0.9998768970829404,
+      0.9999310551591798,
+      0.9994723110791202
+     ],
+     "ratioMedian": 0.9998805963305618,
+     "ratioMAD": 0.0003356784988197692
+    },
+    "cache-misses": {
+     "qjsMedian": 45602079.5,
+     "zjsMedian": 45520227.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0023833016021493,
+      1.0004191269755633,
+      1.0026568480229996,
+      1.0131551966762566,
+      0.9872647793466583,
+      0.9908450383542481,
+      0.9931319912104165,
+      0.9989200697309398
+     ],
+     "ratioMedian": 0.9996695983532515,
+     "ratioMAD": 0.004762428406291541
+    },
+    "wallSeconds": {
+     "qjsMedian": 1.0653941829223186,
+     "zjsMedian": 1.0635196771472692,
+     "pairedRatiosZjsOverQjs": [
+      0.9724900911881832,
+      0.9956717149662909,
+      1.0006118433275673,
+      0.9976994605979607,
+      1.0035915171078518,
+      0.9953044397971446,
+      1.005591809939919,
+      0.9953705415214701
+     ],
+     "ratioMedian": 0.9966855877821258,
+     "ratioMAD": 0.002653701765211347
+    }
+   },
+   "derived": {
+    "qjsIPC": 3.7503976895939988,
+    "zjsIPC": 3.7565198373649493,
+    "ipcRatioZjsOverQjs": 1.0016323996220287
+   }
+  }
+ },
+ "orderLog": [
+  {
+   "bench": "code-load",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 7,
+   "order": "zjs->qjs"
+  }
+ ]
+}

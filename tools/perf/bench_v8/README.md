@@ -5,8 +5,10 @@ performance metric of zjs (owner ruling; the 15-benchmark zoo suite remained
 an internal diagnostic). As of 2026-08-25 `suite/` was expanded to the full
 Octane 2.0 suite (17 named results across 15 `BenchmarkSuite` registrations,
 plus a `Score (version 9)` composite) — the same suite the internal zoo
-runner (`tools/perf/zoo/`) already exercises, now vendored directly into
-this repository instead of only via the external `javascript-zoo` checkout.
+runner (`tools/perf/zoo/`, retired 2026-08-29) exercised via the external
+`javascript-zoo` checkout, now vendored directly into this repository.
+Fixed-work PMU screening lives here too (`run_fixed_pmu.py`,
+`mise run perf-screen`).
 
 **This breaks direct comparability with QuickJS's published bench.html
 numbers**, which report version 7's narrower 8-benchmark suite — Octane's
@@ -61,10 +63,10 @@ Official comparison against QuickJS — the published metric. Serial, pinned,
 ABBA-interleaved, medians; refuses to run unpinned:
 
 ```bash
-flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
+python3 tools/perf/measure_fields.py run --field b --layer single -- \
   python3 tools/perf/bench_v8/run_benchv8_compare.py \
     --zjs zig-out/bin/zjs --qjs /home/aneryu/quickjs/qjs \
-    --samples 8 --output /tmp/benchv8.json
+    --field b --samples 8 --output /tmp/benchv8.json
 ```
 
 Refactor-policy rule 2 A/B — two-cluster parallel, about two minutes instead
@@ -100,14 +102,14 @@ which stays pairwise (zjs vs exactly one reference) by design; use it for
 snapshots, not for the published metric or refactor A/B.
 
 ```bash
-flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
+python3 tools/perf/measure_fields.py run --field b --layer single -- \
   python3 tools/perf/bench_v8/run_benchv8_multiengine.py \
     --zjs zig-out/bin/zjs \
     --qjs /home/aneryu/quickjs/qjs \
     --hermes /home/aneryu/hermes/build_release/bin/hermes \
     --v8 /home/aneryu/v8/out/arm64.release/d8 \
     --jsc /home/aneryu/WebKit/WebKitBuild/JSCOnly/Release/bin/jsc \
-    --samples 8 --output /tmp/benchv8-multiengine.json
+    --field b --samples 8 --output /tmp/benchv8-multiengine.json
 ```
 
 Every named engine is optional except `--zjs`; V8 always runs with

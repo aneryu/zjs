@@ -157,9 +157,9 @@ before this accounting closed.
 ## 5. Performance evidence must fail closed
 
 The active workflow is documented in [Performance Workflow](../perf/README.md)
-and the Zoo-specific runner contract in
-[the Zoo README](../../tools/perf/zoo/README.md). Read those files before using
-a remembered command.
+and the bench-v8 runner contract in
+[the bench-v8 README](../../tools/perf/bench_v8/README.md). Read those files
+before using a remembered command.
 
 For any decision-relevant result, retain:
 
@@ -337,7 +337,7 @@ partial evidence is more useful than a polished but unsupported success claim.
 - Source ownership and layering: [architecture.md](../architecture.md)
 - Contribution scope: [CONTRIBUTING.md](../../CONTRIBUTING.md)
 - Performance contracts: [Performance Workflow](../perf/README.md)
-- Current public performance snapshot: [bench-v8 status](../perf/bench-v8-status.md); zoo attribution instrument: [zoo runner](../../tools/perf/zoo/README.md)
+- Current public performance snapshot: [bench-v8 status](../perf/bench-v8-status.md); fixed-work screening instrument: `tools/perf/bench_v8/run_fixed_pmu.py` (`mise run perf-screen`)
 - Historical subsystem baseline and evidence vocabulary: the frozen
   2026-07-27 subsystem difference baseline
   (`docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md`, removed

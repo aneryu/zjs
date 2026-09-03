@@ -1,9 +1,8 @@
-//! Sticky-mark generational state for the stop-the-world tracer.
+//! Sticky-mark generational state for the tracer.
 //!
-//! Stage 5 needs to tell young objects from old ones, and the object header
-//! cannot carry that bit: `BlockFlags` is a full `u8` whose layout `memory.zig`
-//! writes by position, and §4.5 keeps header changes in their own tranche. So
-//! generation lives beside the heap instead of inside it.
+//! The `young` header bit says whether an object has survived a collection;
+//! the young block list, the young list suffix and the remembered-owner map
+//! here are the collector-side structures a minor walks.
 //!
 //! The sticky rule (§8.2) within one mark epoch is `allocated && !marked` is
 //! young, `allocated && marked` is old: a young object that survives one minor

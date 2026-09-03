@@ -1,7 +1,7 @@
 # Tracing GC: pause-first execution plan
 
-**Status (2026-08-26): Phases 0-2 and Phase 3's first tranche (sliced
-destruction, §4b) executed and landed on `gc/tracing`; every outcome,
+**Status (2026-08-26, updated 2026-09-03): Phases 0-2 and Phase 3's first tranche (sliced
+destruction, §4b) executed, landed on `gc/tracing` and merged to `main` on 2026-08-29; every outcome,
 including the two missed lines, is recorded in its section. Standing against
 §1.3: minor pauses mean 1.0 ms / max 2.8 ms; major-ring p50 1.00 ms, p95
 1.007 ms, p99 33.6 ms, max 34.8 ms -- the tail is now exactly the two O(heap)
@@ -71,17 +71,20 @@ This hole exists for **single-threaded incremental marking too**, not just for
 a concurrent thread: an object traced in increment N and mutated in the
 mutator window is not re-examined in increment N+1.
 
-Fix: shade the **target grey** -- mark it AND push it onto the barrier queue
-(`gc_mark_queue.zig`); the remark drains the queue, tracing each entry, with
-queue overflow downgrading to one pass over every marked object.
+Fix: shade the **target grey** -- mark it AND push it onto the mark frontier
+(`gc_mark_queue.zig`); the remark drains the frontier and traces every accepted
+entry. The original bounded queue used a marked-object rescan on overflow;
+S1a replaced that contract with a growing segmented frontier whose allocation
+failure aborts the incomplete cycle before sweep.
 
 Decision record: the first draft of this plan prescribed JSC's shape instead
 (`Heap::addToRememberedSet` appends the **owner** to `m_mutatorMarkStack`,
 Heap.cpp:1266-1268). JSC can afford owner-append because `CellState` gives it
 a grey state that deduplicates it -- the second barrier on a remembered owner
 takes the fast path. Our header has one mark bit and no free flag, so
-owner-append would re-push the same hot owner on every store, flood the
-4096-entry ring, and force the coarse overflow rescan every cycle. Shading
+owner-append would re-push the same hot owner on every store and flood the
+then-current 4096-entry ring, forcing its coarse overflow rescan every cycle.
+Shading
 the target dedups for free (the mark bit IS the already-queued test), at the
 documented cost of more floating garbage. `markAssist` was deleted rather
 than kept: under grey-queue semantics an entry's presence in the queue is the
@@ -462,8 +465,9 @@ Decisions settled by the design review against §8.6 (2026-08-26):
   draft the violation.
 - **Cycle state:** `major_marking_active` alone carries "a cycle is open";
   `gc.phase` stays `.none` between increments so every existing phase guard
-  keeps its meaning. The grey queue IS the persistent frontier (capacity
-  raised 4096 -> 65536; overflow still downgrades to the marked-rescan).
+  keeps its meaning. The grey queue IS the persistent frontier. S1a replaced
+  its fixed 65,536-entry storage and marked-rescan overflow with 4 KiB segments;
+  a backing OOM invalidates and aborts the cycle before any sweep.
 - **Explicit collections abort, never join.** `runObjectCycleRemoval`,
   `forceGC` and urgent polls abort an open cycle (reset queue, drop
   marking_active) and run the untouched STW `collectCycles`. Finishing the
@@ -479,7 +483,7 @@ Decisions settled by the design review against §8.6 (2026-08-26):
 - **Termination:** the poll that finds the queue empty runs the final remark:
   re-seed all roots (stack slots are not barriered, so the rescan is what
   catches white objects referenced only from native frames), drain, then the
-  barrier-queue drain with its overflow path, ephemerons, weak, sweep.
+  shared-frontier drain, ephemerons, weak, sweep.
 - **Safety valve:** if the account grows past 1.5x the threshold while a
   cycle is open, the next poll finishes it regardless of budget -- one big
   pause, counted and reported, instead of an unbounded heap.
@@ -799,7 +803,8 @@ bought back only about a third of the gap while pushing splay's RSS to
 with the world stopped, so inside it the object graph is frozen. Helper
 threads only read object fields and claim mark bits. There is no
 snapshot protocol to build (design Appendix A stays dormant) and no new
-interaction with the write barrier: barrier greys land in the same ring the
+interaction with the write barrier: barrier greys land in the same segmented
+frontier the
 lanes already drain.
 
 **Substrate, in three commits.**
@@ -814,20 +819,23 @@ lanes already drain.
    claims a mark atomically and reports whether this caller won; the
    winner alone walks the object's edges, which also keeps the trace's
    rare write-backs single-writer.
-2. *MPMC ring + owner-private stack.* The ring became a Vyukov bounded
-   MPMC queue (the old SPSC head/tail let two poppers advance past each
-   other's item), with protocol-compatible single-threaded variants so
-   the owner's uncontended path stays CAS-free -- the all-CAS version
-   cost 3.4% of fixed-work splay. The tracing hot loop then moved OFF
-   the ring onto a per-lane fixed-capacity LIFO stack; the ring carries
-   only seeds, barrier greys, and spill. **This alone was +12% on
-   fixed-work splay**, most of it from LIFO making the trace
-   depth-first over freshly shaded (cache-hot) objects.
+2. *Shared frontier + owner-private stack.* The first parallel substrate used
+   a Vyukov bounded MPMC ring (the old SPSC head/tail let two poppers advance
+   past each other's item), with protocol-compatible single-threaded variants
+   so the owner's uncontended path stayed CAS-free -- the all-CAS version cost
+   3.4% of fixed-work splay. The tracing hot loop moved off that ring onto a
+   per-lane LIFO stack; **this alone was +12% on fixed-work splay**, most of it
+   from depth-first traversal over freshly shaded (cache-hot) objects. S1a then
+   made both sides segmented: a lane donates complete old 4 KiB segments to a
+   shared chain and helpers steal complete segments, eliminating the fixed
+   capacity and per-entry ring traffic.
 3. *The pool.* Owner plus up to three helpers, sized from the affinity
    mask at first spawn, woken by condition variable. Slices end either
-   on the budget (helpers spill their stacks to the ring and park, so
-   the frontier survives to the next slice) or on a busy-count-and-
-   empty-ring termination.
+   on the budget (helpers donate their remaining segments to the shared chain,
+   so the frontier survives to the next slice) or when the shared chain is
+   empty and no tracer is busy. S1a V2 adds a generation-scoped quiescence
+   handshake: expected helper count is fixed before generation publication,
+   and the owner waits for every helper's arrival/completion ack before return.
 
 **Work distribution is the part that has to follow JSC.** The first
 build gained nothing: an up-front feed is useless because depth-first
@@ -1089,8 +1097,8 @@ collector decides.
   atomics because lanes claim mark bits in a shared 64-cell word; the
   alloc bitmap has no such reader -- written only by allocation and
   freeing on the owner thread, read only inside stop-the-world windows.
-* **The mark ring stops rewriting 65,536 sequence numbers per cycle.**
-  A regression the MPMC conversion introduced: positions are monotonic,
+* **The then-current mark ring stopped rewriting 65,536 sequence numbers per
+  cycle.** A regression the MPMC conversion introduced: positions are monotonic,
   so an empty ring is already reset. 509 M stores and 3.8 GiB through L2
   per earley-boyer run, restoring a state the ring was already in.
 * **`takeDoomedCell` gets a cursor.** It restarted its bitmap scan at
@@ -1436,9 +1444,9 @@ on.
 The prerequisite is the one Appendix A names: a mutator running during payload
 enumeration needs the snapshot protocol, and this collector's barrier is
 already the Dijkstra direction it would need. The pause work of §4 built most
-of the machinery -- incremental slices, a barrier that shades targets, an
-overflow contract, and now atomic mark claims and a work-donating pool that
-already runs marking on threads other than the owner's.
+of the machinery -- incremental slices, a barrier that shades targets, a
+segmented fail-closed frontier, atomic mark claims, and a work-donating pool
+that already runs marking on threads other than the owner's.
 
 ## 4k. Destruction, and the point where the knives run out (2026-08-27)
 

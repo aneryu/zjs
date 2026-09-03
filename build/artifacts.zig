@@ -191,6 +191,27 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
     const zjs_dev_step = b.step("zjs-dev", "Build and install the Debug zjs used by inner-loop checks");
     zjs_dev_step.dependOn(&install_zjs_dev.step);
 
+    // FNABI header regenerator. `zig build gen-abi-header` rewrites
+    // src/abi/fun_native_abi.h from the comptime schema text;
+    // src/tests/abi_layout.zig pins the checked-in copy against that same
+    // text, so a stale header fails the unified suite. Registered as a
+    // build-graph root in tools/architecture/check_deps.js.
+    const gen_abi_header_exe = b.addExecutable(.{
+        .name = "gen-abi-header",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/abi/gen_header.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    forceLlvmBackendOnDebug(gen_abi_header_exe);
+    const run_gen_abi_header = b.addRunArtifact(gen_abi_header_exe);
+    run_gen_abi_header.setCwd(b.path("."));
+    // Mutates a checked-in source file by design; never treat as cached.
+    run_gen_abi_header.has_side_effects = true;
+    const gen_abi_header_step = b.step("gen-abi-header", "Regenerate src/abi/fun_native_abi.h from the FNABI schema");
+    gen_abi_header_step.dependOn(&run_gen_abi_header.step);
+
     const run_test262_exe = b.addExecutable(.{
         .name = "run-test262",
         .root_module = b.createModule(.{

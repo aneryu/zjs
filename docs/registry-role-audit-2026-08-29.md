@@ -123,7 +123,7 @@ shape 2,563),对 16,615,467 个 block header。
 | `isLargeAllocation` | :2600 | 记账 | 可 comptime 消解(block cell 恒非 large),但只是一次 compare |
 | standalone `size_class` 戳记 | :2607 | 记账 | block cell 不进入该分支 |
 | `heap_accounted = true` | :2608 | **发布身份** | **不可退**,见下 |
-| `old_space.recordAlloc(bytes)` | :2622 | 记账(GC 调度) | 理论可从块占用推导,但账本刻意记**对象尺寸**而非 cell 尺寸(memory.zig:1212-1216),`verifyHeapAccounting` 的期望值也由 `allocationSize` 导出;换算面很大,收益是两条标量指令 |
+| `old_space.recordAlloc(bytes)`（历史，已 superseded） | :2622 | 记账 | P1 于 2026-08-31 从 ReleaseFast 删除；stats 由 cold ownership census 派生，`verifyHeapAccounting` 在 test/ownership-audit 构建对照独立生命周期影子账本 |
 | `isCycleCandidate` | :2630 | 分类 | 一次 kind 比较 |
 | `if (tracked and !isBlockCellHeader(h))` | :2632 | 链表 | **block cell 已排除** |
 | `registerLiveAddress` | :2633 | 登记 | 非 standalone 立即返回(:4122) |
@@ -247,8 +247,10 @@ lane-a/b 在途的「屏障 bit7」契约(含正在建的 bit⇒map coherence �
 ```
 
 `isBlockCellHeader` 读的是 `block_size_idx`(低 5 位),而中间那次 `strb` 只动
-bit6;两者不冲突,值在 `w10` 里本来就有。编译器因为中间隔了
-`old_space.recordAlloc` / `recordLargeSpaceAllocCold` 的可能别名而不敢复用。
+bit6;两者不冲突,值在 `w10` 里本来就有。这里的反汇编归因是 2026-08-29 的
+历史证据：当时编译器因中间隔着 `old_space.recordAlloc` /
+`recordLargeSpaceAllocCold` 的可能别名而不敢复用；当前 ReleaseFast 已删除这两个
+ledger 更新。
 把 block-cell 判定改为从存储前的字节值算出,可以去掉这次「刚写完就重读」。
 
 **本轮不实现**,理由是它无法在本任务的仪器下验收:每次发布省 1 条 load,

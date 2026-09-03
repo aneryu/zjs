@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const platform_clock = @import("../platform_clock.zig");
 
 const memory = @import("memory.zig");
@@ -497,8 +498,11 @@ pub const HeaderRootValue = struct {
 pub const value_root_frames_enabled = true;
 
 /// Production (non-test) does not list-link scalar Zig locals; those wait for
-/// conservative stack/register capture. Tests link every activate.
-pub const value_root_link_containers_only = !builtin.is_test;
+/// conservative stack/register capture. Tests link every activate, and so
+/// does the R3 roots-diagnosis build (`-Dzjs_gc_roots_diag=true`), whose
+/// whole point is to measure what the conservative scan still has to cover
+/// once every declared scalar root is honoured.
+pub const value_root_link_containers_only = !builtin.is_test and !build_options.zjs_gc_roots_diag;
 
 /// Scalar scope helpers exist only when scalar frames can actually be linked.
 /// In production tracing builds the policy above rejects them, so keeping their
@@ -581,6 +585,10 @@ pub const ValueRootFrame = struct {
         if (comptime value_root_frames_enabled) {
             if (comptime value_root_link_containers_only) {
                 if (rt.active_value_roots != self) return;
+            } else if (comptime build_options.zjs_gc_roots_diag) {
+                // The diag binary is ReleaseFast: a LIFO slip on a CLI-only
+                // path must trap, not silently corrupt the root chain.
+                if (rt.active_value_roots != self) @panic("ValueRootFrame LIFO violation under -Dzjs_gc_roots_diag");
             } else {
                 std.debug.assert(rt.active_value_roots == self);
             }
@@ -1203,10 +1211,12 @@ pub const JSRuntime = struct {
     memory: memory.MemoryAccount,
     compact_state: RuntimeCompactState = .{},
     gc: gc.Registry,
-    /// Parallel STW mark pool. Lazy: threads spawn on the first slice whose
-    /// frontier crosses the parallel threshold, so runtimes that never build a
-    /// big heap never pay.
-    gc_mark_pool: @import("gc_parallel_mark.zig").Pool = .{},
+    /// Incremental-major state that outlives one cycle: the mark-footprint
+    /// census and the settled-live estimate the next cycle's threshold uses.
+    gc_mark_pool: @import("gc_trace_stw.zig").IncrementalMarkState = .{},
+    /// Allocation-debt pacing for object-boundary incremental mark/destruction
+    /// assists. Scheduler/callback/idle polls bypass this counter.
+    gc_assist_debt_bytes: usize = 0,
     atoms: atom.AtomTable,
     classes: class.Table,
     shapes: shape.Registry,
@@ -1295,6 +1305,10 @@ pub const JSRuntime = struct {
     /// identity and weak lookups are O(1) instead of a full heap scan.
     weak_object_ids: std.AutoHashMapUnmanaged(usize, usize) = .empty,
     weak_id_objects: std.AutoHashMapUnmanaged(usize, *Object) = .empty,
+    /// Cold owner-only payload slot for the slots2 Object layout, whose body
+    /// spends offset 24 onward on Entry[2] instead of a class-payload arm.
+    slots2_payloads: std.AutoHashMapUnmanaged(*Object, class.Payload) = .empty,
+    slots2_payload_attach_count: usize = 0,
     next_weak_id: usize = 1,
     borrowed_weak_cleanup_realm_identities: []usize = &.{},
     borrowed_weak_cleanup_realm_identities_capacity: usize = 0,
@@ -1410,12 +1424,6 @@ pub const JSRuntime = struct {
         return rt;
     }
 
-    /// Returns an owned runtime with optional allocation tracing.
-    /// Caller must release it with `destroy`.
-    pub fn createWithTrace(allocator: std.mem.Allocator, trace_writer: ?*std.Io.Writer) !*JSRuntime {
-        return createWithOptions(allocator, .{ .trace_writer = trace_writer });
-    }
-
     fn initWithAccount(rt: *JSRuntime, account: memory.MemoryAccount, options: RuntimeOptions, owns_self_allocation: bool) !void {
         rt.owner_thread_id = std.Thread.getCurrentId();
         rt.memory = account;
@@ -1436,7 +1444,7 @@ pub const JSRuntime = struct {
         // installed after the registry reaches its stable field address, for
         // the same reason `activateRuntimeAccounting` waits above.
         rt.gc.observeSlabArenas(&rt.memory.small_slab);
-        rt.gc.serveObjectCells(&rt.memory);
+        try rt.gc.serveObjectCells(&rt.memory);
         rt.atoms = atom.AtomTable.init(&rt.memory);
         rt.atoms.runtime = rt;
         try rt.classes.initInPlace(&rt.memory, &rt.atoms);
@@ -1495,6 +1503,8 @@ pub const JSRuntime = struct {
         rt.borrowed_weak_cleanup_identity_set = .empty;
         rt.weak_object_ids = .empty;
         rt.weak_id_objects = .empty;
+        rt.slots2_payloads = .empty;
+        rt.slots2_payload_attach_count = 0;
         rt.next_weak_id = 1;
         rt.borrowed_weak_cleanup_realm_identities = &.{};
         rt.borrowed_weak_cleanup_realm_identities_capacity = 0;
@@ -1630,7 +1640,6 @@ pub const JSRuntime = struct {
         self.assertNoOutstandingValueHandles();
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
-        self.releaseNativeFunctionRealmsForTeardown();
         self.gc.host_quiescent = true;
         _ = self.runObjectCycleRemoval();
         self.drainDeferredWeakValueFrees();
@@ -1657,12 +1666,12 @@ pub const JSRuntime = struct {
         // until phase 3 of gc.deinit.
         self.atoms.releaseCachedStrings(self);
         // The context list is borrowed enumeration, never a teardown owner.
-        // Named host/harness owners are released above; public RealmRefs must
-        // be released by their callers before destroying the Runtime.
-        std.debug.assert(self.context_head == null);
-        std.debug.assert(self.context_tail == null);
-        std.debug.assert(self.constructing_context_head == null);
-        std.debug.assert(self.constructing_context_tail == null);
+        // Every host create-ref must have been dropped (`JSContext.destroy`)
+        // before the Runtime goes; realms still on the list are heap nodes
+        // the teardown cycle passes could not prove dead (conservative
+        // residue, pinned holders) and `gc.deinit` tears them down with the
+        // rest of the graph.
+        self.assertNoHostRealmRefsForTeardown();
         self.gc.deinit(self);
         std.debug.assert(self.weak_reference_holder_head == null);
         std.debug.assert(self.weak_reference_holder_tail == null);
@@ -1678,6 +1687,8 @@ pub const JSRuntime = struct {
         self.borrowed_weak_cleanup_identity_set.deinit(self.memory.persistent_allocator);
         self.weak_object_ids.deinit(self.memory.persistent_allocator);
         self.weak_id_objects.deinit(self.memory.persistent_allocator);
+        std.debug.assert(self.slots2_payloads.count() == 0);
+        self.slots2_payloads.deinit(self.memory.persistent_allocator);
         for (self.auto_init_descriptors.items) |stored| self.destroyRuntime(property.AutoInit, stored);
         self.auto_init_descriptors.deinit(self.memory.persistent_allocator);
         self.shapes.deinit();
@@ -1736,7 +1747,6 @@ pub const JSRuntime = struct {
 
     pub fn destroy(self: *JSRuntime) void {
         self.assertOwnerThread();
-        self.gc_mark_pool.shutdown();
         self.deinit();
         var account = self.memory;
         account.destroy(JSRuntime, self);
@@ -1844,9 +1854,9 @@ pub const JSRuntime = struct {
     /// check was the single largest cost of this boundary (~18 insns: a cached
     /// TLS `getCurrentId` read pair + compare, plus the panic arm's `bl`
     /// forcing a callee-saved frame on an otherwise leaf function).
-    pub fn registerObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) !void {
+    pub inline fn registerObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) !void {
         std.debug.assert(self.isOwnerThread());
-        try self.gc.addInitializedWithSize(&object.header, bytes);
+        try self.gc.addInitializedWithSize(object.gcHeader(), bytes);
     }
 
     /// GC-list unlink + free-byte accounting boundary of an object teardown,
@@ -1887,11 +1897,11 @@ pub const JSRuntime = struct {
         // rediscover facts already established by condemnation; retain its
         // mandatory byte debit without paying the outlined call. RC does not
         // compile this arm.
-        if (object.header.metaConst().flags.cycle_visited) {
-            self.gc.recordDetachedHeapFreeWithBytes(&object.header, bytes);
+        if (object.gcHeaderConst().metaConst().flags.cycle_visited) {
+            self.gc.recordDetachedHeapFreeWithBytes(object.gcHeader(), bytes);
             return;
         }
-        self.gc.unlinkObjectWithBytes(&object.header, bytes);
+        self.gc.unlinkObjectWithBytes(object.gcHeader(), bytes);
     }
 
     /// Link a weak-capable payload for its full object lifetime. This is
@@ -2061,40 +2071,15 @@ pub const JSRuntime = struct {
         return self.context_head;
     }
 
-    /// Runtime destruction invalidates every remaining JS object, so finalize
-    /// true C_FUNCTION realm owners before the last cycle passes. This mirrors
-    /// QuickJS's runtime-final GC driving `js_c_function_finalizer`, which calls
-    /// `JS_FreeContext` (quickjs.c:2405-2424, 6222-6227). Retaining one context
-    /// at a time keeps its object graph stable until that context's scan ends;
-    /// releasing the guard then runs the ordinary JSContext resource ordering.
-    fn releaseNativeFunctionRealmsForTeardown(self: *JSRuntime) void {
-        var live_owner = if (self.context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
-        defer live_owner.deinit();
-        while (live_owner.borrow()) |ctx| {
-            var next_owner = if (ctx.runtime_next) |next| context_mod.RealmRef.retain(next) else context_mod.RealmRef{};
-            self.releaseNativeFunctionRealmsForContext(ctx);
-            live_owner.deinit();
-            live_owner = next_owner;
-            next_owner = .{};
+    fn assertNoHostRealmRefsForTeardown(self: *JSRuntime) void {
+        if (comptime !std.debug.runtime_safety) return;
+        var current = self.context_head;
+        while (current) |ctx| : (current = ctx.runtime_next) {
+            std.debug.assert(ctx.host_api_release_consumed);
         }
-
-        var constructing_owner = if (self.constructing_context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
-        defer constructing_owner.deinit();
-        while (constructing_owner.borrow()) |ctx| {
-            var next_owner = if (ctx.construction_next) |next| context_mod.RealmRef.retain(next) else context_mod.RealmRef{};
-            self.releaseNativeFunctionRealmsForContext(ctx);
-            constructing_owner.deinit();
-            constructing_owner = next_owner;
-            next_owner = .{};
-        }
-    }
-
-    fn releaseNativeFunctionRealmsForContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
-        var iter = self.gc.objectIterator();
-        while (iter.next()) |header| {
-            if (header.metaConst().flags.kind != .object) continue;
-            const candidate: *Object = @alignCast(@fieldParentPtr("header", header));
-            candidate.releaseNativeFunctionRealmForRuntimeTeardown(ctx);
+        var constructing = self.constructing_context_head;
+        while (constructing) |ctx| : (constructing = ctx.construction_next) {
+            std.debug.assert(ctx.host_api_release_consumed);
         }
     }
 
@@ -2332,6 +2317,27 @@ pub const JSRuntime = struct {
         for (self.root_providers) |provider| {
             try provider.trace(provider.context, visitor);
         }
+        if (comptime gc.string_tracer_owned) try self.traceStringCacheRoots(visitor);
+    }
+
+    /// TGC S2: the runtime's interned/cached flat strings are roots while the
+    /// string family is tracer-owned (they used to hold a +1 count each).
+    fn traceStringCacheRoots(self: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
+        for (self.single_byte_strings) |cached| {
+            if (cached) |stored| try visitor.constValue(JSValue.string(stored.header()));
+        }
+        for (self.percent_hex_strings) |cached| {
+            if (cached) |stored| try visitor.constValue(JSValue.string(stored.header()));
+        }
+        for (self.small_int_strings) |cached| {
+            if (cached) |stored| try visitor.constValue(JSValue.string(stored.header()));
+        }
+        if (self.empty_string) |stored| try visitor.constValue(JSValue.string(stored.header()));
+        if (self.recent_two_unit_string) |cached| try visitor.constValue(JSValue.string(cached.string.header()));
+        for (self.recent_atom_strings) |cached| {
+            if (cached) |stored| try visitor.constValue(JSValue.string(stored.string.header()));
+        }
+        try self.atoms.traceRoots(visitor);
     }
 
     pub fn traceActiveRoots(self: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
@@ -2361,7 +2367,6 @@ pub const JSRuntime = struct {
     /// This is called only behind `gc.invariantChecksEnabled`; the shipped
     /// non-audit ReleaseFast path does not walk payload roots.
     pub fn verifyDeferredClassPayloadRootLiveness(self: *JSRuntime) gc.InvariantError!void {
-
         const Audit = struct {
             rt: *JSRuntime,
             failure: ?gc.InvariantError = null,
@@ -2399,7 +2404,7 @@ pub const JSRuntime = struct {
 
             fn visitObject(context: *anyopaque, slot: *?*Object) RootTraceError!void {
                 const audit: *@This() = @ptrCast(@alignCast(context));
-                if (slot.*) |object| audit.checkHeader(&object.header);
+                if (slot.*) |object| audit.checkHeader(object.gcHeader());
             }
 
             fn visitHeader(context: *anyopaque, header: *const gc.Header) RootTraceError!void {
@@ -2696,7 +2701,7 @@ pub const JSRuntime = struct {
             // The last WeakRef is what finally frees the struct. trace_stw has
             // an explicit husk bit; RC keeps its historical rc==0 + !mark
             // distinction between a finished husk and in-progress teardown.
-            const husk_dead = gc.headerIsReclaimableWeakHusk(&object.header);
+            const husk_dead = gc.headerIsReclaimableWeakHusk(object.gcHeader());
             if (object.weakReferenceCount() == 0 and husk_dead) {
                 Object.destroyDeadWeakHusk(self, object);
             }
@@ -2740,7 +2745,7 @@ pub const JSRuntime = struct {
     pub fn liveObjectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
         if ((identity & 1) != 0) return null;
         const object = self.objectFromWeakIdentity(identity) orelse return null;
-        if (gc.headerRefCountIsZeroOrHusk(&object.header)) return null;
+        if (gc.headerRefCountIsZeroOrHusk(object.gcHeader())) return null;
         return object;
     }
 
@@ -2752,7 +2757,7 @@ pub const JSRuntime = struct {
     /// Returns the encoded weak identity for `object`, allocating a fresh
     /// monotonically increasing weak id on first registration.
     pub fn registerWeakObjectIdentity(self: *JSRuntime, object: *Object) !usize {
-        const address = @intFromPtr(&object.header) & ~@as(usize, 1);
+        const address = @intFromPtr(object.gcHeaderConst()) & ~@as(usize, 1);
         if (object.flags.has_weak_id) {
             const weak_id = self.weak_object_ids.get(address) orelse unreachable;
             return weak_id << 1;
@@ -2771,7 +2776,7 @@ pub const JSRuntime = struct {
     /// Returns the encoded weak identity for `object` without registering one.
     pub fn peekWeakObjectIdentity(self: *const JSRuntime, object: *const Object) ?usize {
         if (!object.flags.has_weak_id) return null;
-        const address = @intFromPtr(&object.header) & ~@as(usize, 1);
+        const address = @intFromPtr(object.gcHeaderConst()) & ~@as(usize, 1);
         const weak_id = self.weak_object_ids.get(address) orelse return null;
         return weak_id << 1;
     }
@@ -2781,7 +2786,7 @@ pub const JSRuntime = struct {
     pub fn takeWeakObjectIdentity(self: *JSRuntime, object: *Object) ?usize {
         if (!object.flags.has_weak_id) return null;
         object.flags.has_weak_id = false;
-        const address = @intFromPtr(&object.header) & ~@as(usize, 1);
+        const address = @intFromPtr(object.gcHeader()) & ~@as(usize, 1);
         const weak_id = self.weak_object_ids.get(address) orelse return null;
         _ = self.weak_object_ids.remove(address);
         _ = self.weak_id_objects.remove(weak_id);
@@ -3028,14 +3033,6 @@ pub const JSRuntime = struct {
         self.gc.recordSuccess(result);
         self.gc.finishMajorCycle();
         self.resetGCThreshold();
-        self.gc.noteFullCollectionSettled(
-            self.memory.allocated_bytes,
-            self.malloc_gc_threshold,
-            if (comptime gc.sticky_major_enabled)
-                !@import("gc_trace_stw.zig").last_report.skipped_sweep_incomplete_arenas
-            else
-                true,
-        );
         // Full STW majors free the same block cells as incremental majors.
         // Service the same aged-decommit policy here; otherwise explicit GC,
         // urgent pressure collections, and small-heap floor collections can
@@ -3158,8 +3155,7 @@ pub const JSRuntime = struct {
             .allocation_slow_path, .idle, .urgent => self.requestGCForProcessMemoryPressure(),
             .callback_boundary, .safepoint => {},
         }
-        const over_full_pressure = self.gc.stickyMajorFullPressureExceeded();
-        const over_collection_threshold = over_threshold or over_full_pressure;
+        const over_collection_threshold = over_threshold;
         const run_major = self.gc.shouldRunMajorAt(scheduler_point, over_collection_threshold);
         if (!run_major) return .{};
 
@@ -3189,6 +3185,7 @@ pub const JSRuntime = struct {
                 major_request.?.urgency != .urgent);
         if (mode != .urgent and self_paced) {
             self.gc_running = true;
+            self.gc_assist_debt_bytes = 0;
             self.gc.beginCycleEnvelope(self.malloc_gc_threshold);
             const began = profile.nowNanos();
             @import("gc_trace_stw.zig").beginIncrementalCycle(self, null, mode.rootScan()) catch |err| {
@@ -3367,14 +3364,6 @@ pub const JSRuntime = struct {
         self.gc.doomed_destroyed = 0;
         self.gc.recordIncrementalCycleSuccess(result);
         self.resetGCThreshold();
-        self.gc.noteIncrementalCollectionSettled(
-            self.memory.allocated_bytes,
-            self.malloc_gc_threshold,
-            if (comptime gc.sticky_major_enabled)
-                !@import("gc_trace_stw.zig").last_report.skipped_sweep_incomplete_arenas
-            else
-                true,
-        );
         if (comptime gc.block_heap_enabled) _ = self.gc.block_heap.releaseFreeBlockPages(profile.nowNanos());
         return result;
     }
@@ -3509,7 +3498,7 @@ pub const JSRuntime = struct {
             .atom_count = atom.predefined_count + live_dynamic_atoms,
             .atom_bytes = dynamic_atom_bytes,
             .object_count = object_count,
-            .object_bytes = object_count * Object.objectBodyBytes(class.ids.object),
+            .object_bytes = object_count * Object.objectBodyBytes(class.ids.object, false),
             .shape_count = shape_count,
             .shape_bytes = shape_count * @sizeOf(shape.Shape),
             .module_count = module_count,
@@ -3581,7 +3570,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn ownsObject(self: *const JSRuntime, object: *const Object) bool {
-        return self.gc.containsHeader(&object.header);
+        return self.gc.containsHeader(object.gcHeaderConst());
     }
 
     /// Sampling process memory costs three `openat` plus a `read` and a `close`
@@ -3619,7 +3608,7 @@ pub const JSRuntime = struct {
         var gc_iter = self.gc.objectIterator();
         while (gc_iter.next()) |header| {
             if (header.meta().flags.kind == .object) {
-                const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+                const obj = Object.fromHeader(header);
                 count +|= obj.weakCollectionEntries().len;
                 count +|= obj.finalizationRegistryCells().len;
             }
@@ -3675,12 +3664,21 @@ pub const JSRuntime = struct {
         _ = self.runObjectCycleRemoval();
     }
 
-    pub inline fn requestGCForAllocation(self: *JSRuntime, size: usize) void {
+    inline fn prospectiveAllocationTotal(self: *const JSRuntime, size: usize) usize {
+        return self.memory.allocated_bytes +| size;
+    }
+
+    /// Queue an allocation-threshold request and return the exact prospective
+    /// total used for that decision. Object allocation immediately consumes
+    /// the same total to retire a stale threshold request; returning it keeps
+    /// `gc.requestGC`'s writes from forcing a second allocated-bytes load and
+    /// overflow-checked add on every object construction.
+    inline fn requestGCForAllocationTotal(self: *JSRuntime, size: usize) usize {
         if (comptime builtin.is_test) {
             if (self.memory.trigger_gc_fn) |trigger| {
                 if (trigger != JSRuntime.triggerGCOnAllocation) {
                     trigger(self.memory.trigger_gc_ctx, size);
-                    return;
+                    return self.prospectiveAllocationTotal(size);
                 }
             }
         }
@@ -3688,24 +3686,29 @@ pub const JSRuntime = struct {
         // queue is in its decref phase, but starting a nested major collection
         // is not. `gc_running` covers the major driver; the explicit phase guard
         // also covers outer zero-ref drains that run without that flag.
-        if (self.gc_running or self.gc.phase != .none) return;
+        if (self.gc_running or self.gc.phase != .none) return self.prospectiveAllocationTotal(size);
         if (comptime memory.force_gc_on_allocation_enabled) {
-            if (self.memory.trigger_gc_fn == null) return;
+            if (self.memory.trigger_gc_fn == null) return self.prospectiveAllocationTotal(size);
             // The force-GC build option is diagnostic instrumentation, not a
             // scheduling-policy change. Preserve an explicitly configured
             // threshold across the synthetic pre-allocation collection.
             const saved_threshold = self.malloc_gc_threshold;
             defer self.malloc_gc_threshold = saved_threshold;
             _ = self.forceGC(null) catch {};
-            return;
+            return self.prospectiveAllocationTotal(size);
         }
         // qjs js_trigger_gc (quickjs.c:1780-1788):
         //   force_gc = (malloc_size + size) > malloc_gc_threshold
         // malloc_size is allocated_bytes (usable+MALLOC_OVERHEAD, quickjs.c:2168).
-        const total = std.math.add(usize, self.memory.allocated_bytes, size) catch std.math.maxInt(usize);
+        const total = self.prospectiveAllocationTotal(size);
         if (total > self.malloc_gc_threshold) {
             self.gc.requestGC(.allocation_threshold, .soon);
         }
+        return total;
+    }
+
+    pub inline fn requestGCForAllocation(self: *JSRuntime, size: usize) void {
+        _ = self.requestGCForAllocationTotal(size);
     }
 
     /// QuickJS `JS_NewObjectFromShape` runs its threshold GC before entering
@@ -3713,27 +3716,53 @@ pub const JSRuntime = struct {
     /// of merely leaving a pending request for post-registration service: a
     /// memory-limit check must be allowed to reuse space from reclaimable
     /// cycles before rejecting the replacement object.
-    pub fn collectBeforeObjectAllocation(self: *JSRuntime, size: usize) void {
+    pub fn collectBeforeObjectAllocation(self: *JSRuntime, size: usize) align(64) void {
         // Plugin callbacks are forbidden inside tracer_destroy. The first
         // object-allocation boundary after the collector becomes idle drains
         // them before publishing another object. Allocations made by a callback
         // reenter this function with `draining_...` set: they may request the
         // next GC, but cannot recursively drain the same queue.
+        if (self.deferred_class_payload_finalizers.len != 0 and
+            !self.gc_running and self.gc.phase == .none and
+            !self.draining_deferred_class_payload_finalizers)
+        {
+            @branchHint(.unlikely);
+            return self.collectBeforeObjectAllocationAfterDeferredDrain(size);
+        }
+        self.collectBeforeObjectAllocationAfterFinalizerCheck(size);
+    }
+
+    /// Cold continuation for the callback-delivery boundary. Re-enter the
+    /// allocation decision after draining, but skip the queue-ready test: a
+    /// callback may have queued another job while `draining_...` was set, and
+    /// recursively trying to drain it at the same boundary is forbidden.
+    noinline fn collectBeforeObjectAllocationAfterDeferredDrain(self: *JSRuntime, size: usize) void {
         self.drainDeferredClassPayloadFinalizersAtSafeBoundary();
-        self.requestGCForAllocation(size);
+        self.collectBeforeObjectAllocationAfterFinalizerCheck(size);
+    }
+
+    /// Cold tail that owns `pollGC`'s error-union return area. The common
+    /// below-threshold allocation path can then remain a leaf with no saved
+    /// registers or stack frame.
+    noinline fn pollGCBeforeObjectAllocation(self: *JSRuntime) void {
+        _ = self.pollGC(null, .normal) catch {};
+    }
+
+    inline fn collectBeforeObjectAllocationAfterFinalizerCheck(self: *JSRuntime, size: usize) void {
+        const prospective = self.requestGCForAllocationTotal(size);
         // Scratch allocation can cross the threshold and queue a request, then
         // fall back below it before the next qjs-style object boundary. The
         // threshold condition is level-triggered: discard only that ordinary
         // stale request. Registry request coalescing preserves manual/external/
         // pressure reasons so they cannot be cancelled here.
-        const prospective = std.math.add(usize, self.memory.allocated_bytes, size) catch std.math.maxInt(usize);
         if (prospective <= self.malloc_gc_threshold) {
             _ = self.gc.clearStaleAllocationThresholdRequest();
         }
-        // §8.6: allocation debt buys a bounded slice of the marker's work.
-        // Bounded is the whole point -- an unbounded assist turns one
-        // allocation into an arbitrary pause, which is what a concurrent
-        // collector exists to prevent.
+        // §8.6: allocation debt buys bounded slices of the collector's work.
+        // The time budget bounds one slice; the byte interval below also
+        // bounds how many allocation-boundary slices one burst can concatenate
+        // into a mutator-visible operation. Scheduler/callback/idle polls call
+        // pollGC directly and remain unpaced.
         if (self.gc_running or self.gc.phase != .none) return;
         // While marking is open the account is over the (not yet reset)
         // threshold, so each boundary re-records `.allocation_threshold` above
@@ -3742,7 +3771,17 @@ pub const JSRuntime = struct {
         // the account may be UNDER it while the morgue still holds memory --
         // the explicit `doomed_pending` term is what keeps the slices moving.
         if (!self.gc.doomed_pending and !self.gc.hasPendingMajorRequest()) return;
-        _ = self.pollGC(null, .normal) catch {};
+        const cycle_open = self.gc.doomed_pending or self.gc.concurrent.markingActive();
+        if (cycle_open) {
+            self.gc_assist_debt_bytes +|= size;
+            if (self.gc_assist_debt_bytes < gc.incremental_assist_interval_bytes) return;
+            self.gc_assist_debt_bytes -|= gc.incremental_assist_interval_bytes;
+        } else {
+            // A pending threshold request is about to open a fresh cycle. Its
+            // first boundary is immediate; later assists start from zero debt.
+            self.gc_assist_debt_bytes = 0;
+        }
+        return self.pollGCBeforeObjectAllocation();
     }
 
     fn triggerGCOnAllocation(ctx: ?*anyopaque, size: usize) void {
@@ -3783,34 +3822,20 @@ pub const JSRuntime = struct {
         // geomean 0.9867, peak RSS +10-13%; docs/slab-reuse-2026-08-29.md).
         // Steady-state cycle peak/live equals this factor by construction,
         // so the constant and the §1.3 cap must move together.
-        const grown = grown_blk: {
-            const live_now = self.memory.allocated_bytes;
-            if (gc.growth_percent_override != 0) {
-                // The parser refuses anything below 100. Without that floor
-                // the subtraction wraps and `grown` lands *under* the live
-                // set, which the `@max` with `floored` would hide -- the
-                // threshold would look sane while the growth rule had
-                // silently stopped existing.
-                std.debug.assert(gc.growth_percent_override >= 100);
-                const extra = live_now / 100 * (gc.growth_percent_override - 100);
-                break :grown_blk std.math.add(usize, live_now, extra) catch std.math.maxInt(usize);
-            }
-            break :grown_blk std.math.add(usize, live_now, live_now) catch std.math.maxInt(usize);
-        };
+        const live_now = self.memory.allocated_bytes;
+        const grown = std.math.add(usize, live_now, live_now) catch std.math.maxInt(usize);
         // ...plus room for one nursery. Half of a small live set is less than
         // a nursery, and since the threshold is tested before a minor is
         // offered, such a threshold would be crossed first every time and
         // every collection would be a major. raytrace lives in 288KB, so the
         // qjs rule alone gives it 144KB of headroom to fill a nursery that
         // wants an order of magnitude more.
-        const headroom = if (gc.headroom_override != 0) gc.headroom_override else gc.small_heap_major_headroom_bytes;
+        const headroom = gc.small_heap_major_headroom_bytes;
         const floored = std.math.add(usize, self.memory.allocated_bytes, headroom) catch std.math.maxInt(usize);
         self.malloc_gc_threshold = @max(grown, floored);
         // Both rules add to the live set, so the threshold can never sit below
-        // it. Stated here because the growth arm is now arithmetic on a
-        // runtime-supplied percentage: a threshold under `allocated_bytes`
-        // would make the very next allocation trigger a collection, which
-        // reads as a pathologically slow build rather than as a broken rule.
+        // it: a threshold under `allocated_bytes` would make the very next
+        // allocation trigger a collection.
         std.debug.assert(self.malloc_gc_threshold >= self.memory.allocated_bytes);
         // Which rule set the cadence. Without this the claim "raytrace's
         // majors are paced by the floor, not by growth" stays an inference
@@ -3820,8 +3845,6 @@ pub const JSRuntime = struct {
         } else {
             self.gc.stats.threshold_growth_hits +|= 1;
         }
-        // Diagnostic only; zero in every shipped configuration.
-        self.malloc_gc_threshold = @max(self.malloc_gc_threshold, gc.min_major_threshold);
         // A pending morgue uses a provisional threshold net of doomed bytes;
         // no new cycle may begin before destruction completes, and the final
         // reset below will publish the actual settled pair.
@@ -4024,7 +4047,7 @@ pub const JSRuntime = struct {
             while (candidate) |ctx| : (candidate = ctx.runtime_next) {
                 if (ctx.global != null) continue;
                 global.class_id = class.ids.global_object;
-                gc.retain(&global.header);
+                gc.retain(global.gcHeader());
                 ctx.global = global;
                 _ = global.ensureGlobalPayload(self) catch |err| {
                     ctx.rollbackIntrinsicBootstrap();
@@ -4657,6 +4680,29 @@ pub const JSRuntime = struct {
         }
     }
 };
+
+/// Gate-only settlement boundary used after the CLI has finished draining
+/// jobs. It is a module function rather than a JSRuntime method so this
+/// internal diagnostic does not enlarge the public embedder API. It does not
+/// start a fresh collection or hide an open marking cycle; it only completes
+/// an irreversible destruction transaction so the gate can assert the
+/// morgue's real exit invariant separately from the naturally timed endpoint.
+pub fn settlePendingDestructionForGateStats(rt: *JSRuntime) void {
+    rt.assertOwnerThread();
+    rt.assertIdleForTeardown();
+    std.debug.assert(!rt.gc_running);
+    std.debug.assert(rt.gc.phase == .none);
+    std.debug.assert(rt.active_deferred_class_payload_finalizer == null);
+    if (!rt.gc.doomed_pending) {
+        @import("gc_trace_stw.zig").auditDoomedExitInvariant(rt);
+        return;
+    }
+
+    rt.gc_running = true;
+    defer rt.gc_running = false;
+    @import("gc_trace_stw.zig").finishPendingDestruction(rt);
+    _ = rt.finishDoomedCompletion(0);
+}
 
 fn appendRuntimeObject(account: *memory.MemoryAccount, slice: *[]*Object, capacity: *usize, item: *Object) !void {
     if (slice.*.len == capacity.*) {

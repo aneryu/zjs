@@ -15,7 +15,6 @@ Same discipline as the P7-40 collector:
 """
 
 import argparse
-import fcntl
 import json
 import os
 import statistics
@@ -25,7 +24,8 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CASES = os.path.join(HERE, "cases")
-LOCK = "/tmp/zjs-host-heavy.lock"
+sys.path.insert(0, os.path.dirname(HERE))
+from measure_fields import field_metadata, measurement_lock, single_cpu
 
 
 def parse_perf(stderr_text, events):
@@ -64,7 +64,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--zjs", required=True)
     ap.add_argument("--qjs", default="/home/aneryu/quickjs/qjs")
-    ap.add_argument("--cpu", type=int, default=19)
+    ap.add_argument("--field", choices=("a", "b", "host"), default=None)
+    ap.add_argument("--cpu", type=int, default=None,
+                    help="legacy CPU override; noncanonical values are diagnostic-only")
     ap.add_argument("--samples", type=int, default=6)
     ap.add_argument("--pmu", default="armv8_pmuv3_1")
     ap.add_argument("--cases", default=None,
@@ -72,6 +74,11 @@ def main():
     ap.add_argument("--label", default="A")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+
+    try:
+        measure_field, args.cpu, field_conforming = single_cpu(args.field, args.cpu)
+    except ValueError as error:
+        ap.error(str(error))
 
     if args.samples % 2 != 0:
         sys.exit("samples must be even (ABBA balance)")
@@ -91,19 +98,15 @@ def main():
         script = os.path.join(CASES, name + ".js")
         samples = {"qjs": [], "zjs": []}
         outputs = {"qjs": set(), "zjs": set()}
-        with open(LOCK, "a") as lock_fh:
-            fcntl.flock(lock_fh, fcntl.LOCK_EX)
-            try:
-                for s in range(args.samples):
-                    order = ("qjs", "zjs") if s % 2 == 0 else ("zjs", "qjs")
-                    first_positions[order[0]] += 1
-                    for eng in order:
-                        binary = qjs if eng == "qjs" else zjs
-                        v = run_once(binary, script, args.cpu, events)
-                        outputs[eng].add(v.pop("stdout"))
-                        samples[eng].append(v)
-            finally:
-                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        with measurement_lock(measure_field):
+            for s in range(args.samples):
+                order = ("qjs", "zjs") if s % 2 == 0 else ("zjs", "qjs")
+                first_positions[order[0]] += 1
+                for eng in order:
+                    binary = qjs if eng == "qjs" else zjs
+                    v = run_once(binary, script, args.cpu, events)
+                    outputs[eng].add(v.pop("stdout"))
+                    samples[eng].append(v)
 
         rec = {"case": name,
                "iterations": meta["iterations"].get(name, 1),
@@ -141,9 +144,14 @@ def main():
         "collector": "tools/perf/builtin_bridge/run_bridge.py",
         "build_label": args.label,
         "cpu": args.cpu,
+        "measurement_field": {
+            **field_metadata(measure_field, "single"),
+            "fieldConforming": field_conforming,
+            "lockAttested": True,
+        },
         "pmu": args.pmu,
         "samples_per_case_per_engine": args.samples,
-        "sampling_order": "ABBA, per case, exclusive host lock held per case",
+        "sampling_order": "ABBA, per case, canonical measurement-field lock held per case",
         "first_position_counts": first_positions,
         "first_position_balanced":
             first_positions["qjs"] == first_positions["zjs"],

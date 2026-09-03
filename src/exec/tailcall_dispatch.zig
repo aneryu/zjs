@@ -277,6 +277,7 @@ const PropertyTailSlot = enum(usize) {
     get_array_el_atom_key_proxy,
     get_field_cached_getter,
     get_field_property,
+    get_field_after_own_miss,
     get_static_cached_proxy,
     get_length_property,
     get_field_typed_property,
@@ -314,7 +315,7 @@ inline fn residentTailHandler(vm: *const Vm, comptime slot: ResidentTailSlot) Ha
 fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     if (comptime builtin.mode == .Debug)
         std.debug.assert(@intFromPtr(pc) < @intFromPtr(vm.function.byteCode().ptr + vm.function.byteCode().len));
-    if (comptime vm_profile.enabled) vm_profile.noteDispatch(vm.ctx.runtime, pc[0]);
+    if (comptime vm_profile.enabled) vm_profile.noteDispatch(vm.ctx.runtime, pc);
     return @call(.always_tail, vm.active_dispatch_tbl[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
@@ -1748,7 +1749,12 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
         // bytecode inline path gets the same object it would have unpacked inside
         // resolveInlineFunction; the extracted resolveInlineFunctionFromObject
         // skips the re-unpack.
-        if (object_ops.objectFromValue(method)) |method_obj| {
+        // `method` is an evaluated property/call expression.  Compiler stack
+        // discipline excludes the internal VarRef wrapper that shares the
+        // object tag, so mirror qjs's tag+pointer conversion and avoid a GC
+        // header-kind reload on every method call.  Debug keeps the invariant
+        // checked in objectFromValueTrustedExpression.
+        if (object_ops.objectFromValueTrustedExpression(method)) |method_obj| {
             if (method_obj.class_id == core.class.ids.bytecode_function) {
                 if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_obj)) |resolved| {
                     vm.frame.pc += 2;
@@ -2694,7 +2700,7 @@ fn op_add_strings(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
 /// additionally Debug-asserts `pc < code_end` and remains the driver/jump entry
 /// point.
 inline fn cont(npc: [*]const u8, nsp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
-    if (comptime vm_profile.enabled) vm_profile.noteDispatch(vm.ctx.runtime, npc[0]);
+    if (comptime vm_profile.enabled) vm_profile.noteDispatch(vm.ctx.runtime, npc);
     return @call(.always_tail, dispatch_table[npc[0]], .{ npc, nsp, var_buf, vm });
 }
 
@@ -3272,10 +3278,11 @@ pub fn opArgStore(comptime kind: ArgStoreKind) Handler {
     }.h;
 }
 
-// Hot get_field mirrors qjs GET_FIELD_INLINE: ordinary objects walk shape data
-// properties in this handler, while misses and primitive receivers tail-dispatch to
-// a separate ordinary-property walker so their uncommon qualification code does not
-// inflate the object data path. Exotics keep the full cold resolver.
+// Hot get_field mirrors qjs GET_FIELD_INLINE: the receiver's own shape-data
+// probe stays in this handler, while own misses and primitive receivers
+// tail-dispatch to separate prototype/property walkers so their uncommon
+// qualification code does not inflate the own-hit path. Exotics keep the full
+// cold resolver.
 // 5-byte op (atom u32).
 fn op_get_field_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
@@ -3377,6 +3384,41 @@ fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+/// Prototype/exotic continuation after `op_get_field` has already completed
+/// the shape probe of `property_holder` (the receiver, or its direct
+/// prototype). The receiver stays in `(sp - 1)` and roots the chain.
+fn op_get_field_after_own_miss_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    const atom_id = readInt(u32, pc + 1);
+    var absent = false;
+    if (vm_property_field.getFieldFastSlotOrAbsentAfterOwnMiss(
+        vm.ctx.runtime,
+        vm.property_holder,
+        atom_id,
+        &absent,
+    )) |slot| {
+        const value = loadValueAsIntPair(slot);
+        _ = value.dup();
+        storeValueAsIntPair(&(sp - 1)[0], value);
+        if (receiver.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(vm.ctx.runtime)) {
+            // The continuation may have started at a prototype.  The release
+            // tail must always own the original receiver, never the holder
+            // whose slot supplied the result.
+            vm.property_holder = object_ops.objectFromValueTrustedExpression(receiver) orelse unreachable;
+            return @call(.always_tail, propertyTailHandler(vm, .get_field_release_receiver), .{ pc, sp, var_buf, vm });
+        }
+        return cont(pc + 5, sp, var_buf, vm);
+    }
+    if (absent) return @call(.always_tail, propertyTailHandler(vm, .get_field_absent), .{ pc, sp, var_buf, vm });
+    if (vm_property_field.isTypedArrayPayloadAtomForFastPath(atom_id)) {
+        if (vm_property_field.typedArrayReceiverForFastPath(receiver)) |object| {
+            vm.property_holder = object;
+            return @call(.always_tail, propertyTailHandler(vm, .get_field_typed_property), .{ pc, sp, var_buf, vm });
+        }
+    }
+    return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
+}
+
 /// Rare-leg tail for the hot get_field hit: the receiver's refcount reached
 /// one, so decrement it and enter the phase-aware zero-ref destroy here before
 /// resuming at the next opcode. Keeping the destroy call out of op_get_field's
@@ -3449,8 +3491,9 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     // qjs's own hit is an integer load pair straight off pr->u.value
     // (quickjs.c:19131).
     const rt = vm.ctx.runtime;
-    var absent = false;
-    if (vm_property_field.getFieldFastSlotOrAbsent(rt, receiver, atom_id, &absent)) |slot| {
+    const object = object_ops.objectFromValueTrustedExpression(receiver) orelse unreachable;
+    var slow_property = false;
+    if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| {
         const value = loadValueAsIntPair(slot);
         // dup() returns `value` bitwise (it only bumps the refcount when the
         // tag requires one); discarding the result keeps the pushed value a
@@ -3470,20 +3513,36 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         }
         return cont(pc + 5, sp, var_buf, vm);
     }
-    // Chain exhausted with every link absence-authoritative: the answer is
-    // `undefined` and no resolver can say otherwise — qjs GET_FIELD_INLINE ends
-    // the same walk with `p = p->shape->proto; if (!p) { val = JS_UNDEFINED;
-    // break; }` (quickjs.c:19141-19143). Routed to a tail so the receiver
-    // release (which needs the destroy call) stays out of this leaf handler's
-    // frame, exactly like the hit path's get_field_release_receiver.
-    if (absent) return @call(.always_tail, propertyTailHandler(vm, .get_field_absent), .{ pc, sp, var_buf, vm });
-    if (vm_property_field.isTypedArrayPayloadAtomForFastPath(atom_id)) {
-        if (vm_property_field.typedArrayReceiverForFastPath(receiver)) |object| {
-            vm.property_holder = object;
-            return @call(.always_tail, propertyTailHandler(vm, .get_field_typed_property), .{ pc, sp, var_buf, vm });
+    if (slow_property)
+        return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
+    // The common miss is a plain instance reading a method or default value
+    // from its direct prototype. Keep that one authoritative link in the
+    // resident handler: sending every prototype hit through an indirect tail
+    // reduced instructions but lost more IPC than it saved. Deeper chains and
+    // every exotic class still take the split continuation below.
+    if (object.class_id == core.class.ids.object or object.isGlobal()) {
+        if (object.hasExoticMethods())
+            return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
+        const prototype = object.getPrototype() orelse
+            return @call(.always_tail, propertyTailHandler(vm, .get_field_absent), .{ pc, sp, var_buf, vm });
+        var prototype_slow = false;
+        if (prototype.findOwnDataSlotFast(atom_id, &prototype_slow)) |slot| {
+            const value = loadValueAsIntPair(slot);
+            _ = value.dup();
+            storeValueAsIntPair(&(sp - 1)[0], value);
+            if (receiver.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
+                vm.property_holder = object;
+                return @call(.always_tail, propertyTailHandler(vm, .get_field_release_receiver), .{ pc, sp, var_buf, vm });
+            }
+            return cont(pc + 5, sp, var_buf, vm);
         }
+        if (prototype_slow)
+            return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
+        vm.property_holder = prototype;
+        return @call(.always_tail, propertyTailHandler(vm, .get_field_after_own_miss), .{ pc, sp, var_buf, vm });
     }
-    return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
+    vm.property_holder = object;
+    return @call(.always_tail, propertyTailHandler(vm, .get_field_after_own_miss), .{ pc, sp, var_buf, vm });
 }
 
 // Primitive get_field2 keeps the raw receiver on the stack and pushes the resolved
@@ -3640,7 +3699,7 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
                         // own barrier: `a[i] = obj` on a long-lived array is an
                         // old-to-young edge, and the minor's sticky marks stop
                         // the trace at the array.
-                        rt.gc.generationalBarrier(&object.header, (sp - 1)[0].cycleMarkHeader());
+                        rt.gc.generationalBarrier(object.gcHeader(), (sp - 1)[0].cycleMarkHeader());
                         if (old_value.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {
                             // Park the dying element in the now-dead value
                             // slot so the tail completes both releases off
@@ -3667,7 +3726,7 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
                         {
                             const slot = object.fastArraySlotAssumeCapacity(index);
                             storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
-                            vm.ctx.runtime.gc.generationalBarrier(&object.header, (sp - 1)[0].cycleMarkHeader());
+                            vm.ctx.runtime.gc.generationalBarrier(object.gcHeader(), (sp - 1)[0].cycleMarkHeader());
                             object.arrayArm().*.count = new_count;
                             if (new_count > object.arrayArm().*.length)
                                 object.arrayArm().*.length = new_count;
@@ -3844,7 +3903,7 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         // not even the receiver re-extraction.
         if (comptime core.gc.generation_enabled) {
             if (object_ops.objectFromValueTrustedExpression(receiver)) |owner| {
-                rt.gc.generationalBarrierValue(&owner.header, (sp - 1)[0]);
+                rt.gc.generationalBarrierValue(owner.gcHeader(), (sp - 1)[0]);
             }
         }
         if (old_value.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {
@@ -4182,6 +4241,21 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
         if (object_ops.objectFromValueTrustedExpression(obj)) |object| {
             if (object.class_id == core.class.ids.array) {
                 @branchHint(.likely);
+                // qjs keeps the ARRAY+INT+bounds arm inside the class switch.
+                // The generic helper below must also serve unmapped arguments;
+                // entering it after proving ARRAY would repeat the object-tag
+                // and class-id tests on every dense read.
+                if (key.asInt32()) |index_i32| {
+                    const index: u32 = @bitCast(index_i32);
+                    if (object.fastArrayElementDup(index)) |value| {
+                        if (obj.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
+                            (sp - 1)[0] = value;
+                            return @call(.always_tail, zjs_op_get_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
+                        }
+                        (sp - 2)[0] = value;
+                        return cont(pc + 1, sp - 1, var_buf, vm);
+                    }
+                }
             } else if (key.isInt() and core.class.isNumericTypedArrayClass(object.class_id)) {
                 return @call(.always_tail, zjs_op_get_array_el_ta, .{ pc, sp, var_buf, vm });
             } else if (key.isInt() and object.class_id == core.class.ids.mapped_arguments) {
@@ -5902,39 +5976,6 @@ pub fn op_push_this_put_loc0_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]J
     return coldNext(var_buf, vm);
 }
 
-/// `put_loc0` then musttail `get_loc0`. Last-ref overwrite tails to cold.
-pub fn op_put_loc0_get_loc0(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
-    const old = var_buf[0];
-    if (old.requiresRefCount()) {
-        if (old.isTracerOwned()) {
-            var_buf[0] = (sp - 1)[0];
-            return @call(.always_tail, opLoc(.get, .c0), .{ pc + 1, sp - 1, var_buf, vm });
-        }
-        if (old.refCountHeader()) |header| {
-            if (core.gc.headerRefCount(header) == 1)
-                return @call(.always_tail, op_put_loc0_get_loc0_cold, .{ pc, sp, var_buf, vm });
-            var_buf[0] = (sp - 1)[0];
-            _ = core.gc.decrementHeaderRefCount(header);
-        } else if (old.stringHeader()) |header| {
-            if (header.rc == 1)
-                return @call(.always_tail, op_put_loc0_get_loc0_cold, .{ pc, sp, var_buf, vm });
-            var_buf[0] = (sp - 1)[0];
-            header.rc -= 1;
-        } else {
-            return @call(.always_tail, op_put_loc0_get_loc0_cold, .{ pc, sp, var_buf, vm });
-        }
-    } else {
-        var_buf[0] = (sp - 1)[0];
-    }
-    return @call(.always_tail, opLoc(.get, .c0), .{ pc + 1, sp - 1, var_buf, vm });
-}
-
-pub fn op_put_loc0_get_loc0_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.put_loc0) catch |e| return vm.fail(e);
-    return coldNext(var_buf, vm);
-}
-
 /// Dedicated cold handler for OP_inc_loc/OP_dec_loc's non-int32 operand (float /
 /// BigInt / object counter — the `for (var x=0.5; …; x++)` shape). Installed as the
 /// cold_table entry for inc_loc/dec_loc, so op_update_loc reaches it via the same
@@ -6310,7 +6351,7 @@ noinline fn pushBorrowedIteratorMiss(vm: *Vm, resolved: *const inline_calls.Reso
 /// Profiling builds count in `cont`/`next` — the same two table-dispatch
 /// sites — so handler bodies stay identical to the default binary.
 const dispatch_table: [256]Handler = colds.buildTable(specials, true).table;
-const property_tail_table = [16]Handler{
+const property_tail_table = [17]Handler{
     op_get_field_primitive,
     op_get_field2_primitive,
     op_get_array_el_atom_key,
@@ -6318,6 +6359,7 @@ const property_tail_table = [16]Handler{
     op_get_array_el_atom_key_proxy,
     op_get_field_cached_getter,
     op_get_field_property_tail,
+    op_get_field_after_own_miss_tail,
     op_get_static_cached_proxy,
     op_get_length_property_tail,
     op_get_field_typed_property_tail,
@@ -6501,15 +6543,15 @@ pub fn runDispatchLoop(vm: *Vm) HostError!JSValue {
 // island. Source order inside the main section is not LLVM-stable.
 // ---------------------------------------------------------------------------
 
-/// Fast `op.using` (244): type-test subs `b` into the tail leaves below;
+/// Fast `op.ext0` (244): type-test subs `b` into the tail leaves below;
 /// ERM subs stay on the existing cold using shell.
 pub fn op_using(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
     const sub = pc[1];
-    if (sub == bytecode.opcode.using_sub.is_undefined)
+    if (sub == bytecode.opcode.ext0_sub.is_undefined)
         return @call(.always_tail, op_using_is_undefined, .{ pc, sp, var_buf, vm });
-    if (sub == bytecode.opcode.using_sub.typeof_is_undefined)
+    if (sub == bytecode.opcode.ext0_sub.typeof_is_undefined)
         return @call(.always_tail, op_using_typeof_is_undefined, .{ pc, sp, var_buf, vm });
-    if (sub == bytecode.opcode.using_sub.typeof_is_function)
+    if (sub == bytecode.opcode.ext0_sub.typeof_is_function)
         return @call(.always_tail, op_using_typeof_is_function, .{ pc, sp, var_buf, vm });
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }

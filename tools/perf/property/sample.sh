@@ -8,7 +8,8 @@
 #     which has voided headline numbers twice in this campaign.
 #   - Config order is reversed on even samples, so every config sees both a
 #     warm-predecessor and a cold-predecessor position equally often.
-#   - Pinned to CPU 19. This host is big.LITTLE with two PMUs; perf prints
+#   - Pinned to the selected measurement field (B/CPU19 by default). This host
+#     is big.LITTLE with two PMUs; perf prints
 #     "<not counted>" for the PMU the pinned core is not on, and those rows are
 #     filtered rather than parsed.
 #   - Caller is responsible for holding the exclusive host lock.
@@ -17,6 +18,9 @@
 set -u
 SAMPLES=$1; shift
 CASE_DIR="$(cd "$(dirname "$0")/cases" && pwd)"
+PERF_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+FIELD="${ZJS_MEASURE_FIELD:-b}"
+CPU="$(python3 "$PERF_DIR/measure_fields.py" cpus --field "$FIELD" --layer single)"
 CASES=(read_toplevel read_local write_toplevel write_local binding_toplevel binding_local)
 
 if [ $((SAMPLES % 2)) -ne 0 ]; then
@@ -28,7 +32,7 @@ BINS=("$@")
 
 run_one() {
     local bin=$1 file=$2
-    taskset -c 19 perf stat -x, -e instructions,cycles,task-clock "$bin" "$file" 2>&1 >/dev/null \
+    taskset -c "$CPU" perf stat -x, -e instructions,cycles,task-clock "$bin" "$file" 2>&1 >/dev/null \
       | awk -F, '$1 != "<not counted>" && $1 != "" {
             if ($3 ~ /instructions/) ins=$1;
             else if ($3 ~ /cycles/) cyc=$1;

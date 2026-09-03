@@ -31,8 +31,8 @@ fn kindContract(comptime kind: gc.GcKind) []const u8 {
 
 fn objectLayout() []const u8 {
     return std.fmt.comptimePrint(
-        "object head={d} align={d} header={d} weakref_count={d} class_id={d} flags={d} shape_ref={d} prop_values={d} arm_narrow={d} arm_wide={d}\n",
-        .{ @sizeOf(core.Object), @alignOf(core.Object), @offsetOf(core.Object, "header"), @offsetOf(core.Object, "weakref_count"), @offsetOf(core.Object, "class_id"), @offsetOf(core.Object, "flags"), @offsetOf(core.Object, "shape_ref"), @offsetOf(core.Object, "prop_values"), core.Object.arm_min_bytes, core.Object.arm_max_bytes },
+        "object head={d} align={d} body_from_handle={d} weakref_count={d} class_id={d} flags={d} shape_ref={d} prop_values={d} slots2_entries={d} slots2_body={d} physical={d} release_slots2_body=56 release_physical=64 arm_narrow={d} arm_wide={d}\n",
+        .{ @sizeOf(core.Object), @alignOf(core.Object), gc.bodyOffsetFromHeader(.object), @offsetOf(core.Object, "weakref_count"), @offsetOf(core.Object, "class_id"), @offsetOf(core.Object, "flags"), @offsetOf(core.Object, "shape_ref"), @offsetOf(core.Object, "prop_values"), core.Object.slots2_property_storage_offset, core.Object.objectBodyBytes(core.class.ids.object, true), gc.metadata_prefix_size + core.Object.objectBodyBytes(core.class.ids.object, true), core.Object.arm_min_bytes, core.Object.arm_max_bytes },
     );
 }
 
@@ -76,7 +76,7 @@ fn stringLayouts() []const u8 {
         "string_flat size={d} align={d} rc_prefix={d} len_meta={d} hash_meta={d} atom_id={d} fam={d}\n" ++
             "string_rope size={d} align={d} rc_prefix={d} left={d} right={d} rt={d} len={d} depth={d} wide={d} flags={d}\n",
         .{
-            @sizeOf(core.string.String),                @alignOf(core.string.String),              core.gc.string_rc_prefix_size,              @offsetOf(core.string.String, "len_meta"), @offsetOf(core.string.String, "hash_meta"), @offsetOf(core.string.String, "atom_id"), @sizeOf(core.string.String),
+            @sizeOf(core.string.String),                @alignOf(core.string.String),              core.gc.string_prefix_size,              @offsetOf(core.string.String, "len_meta"), @offsetOf(core.string.String, "hash_meta"), @offsetOf(core.string.String, "atom_id"), @sizeOf(core.string.String),
             @sizeOf(core.string.StringRope),            @alignOf(core.string.StringRope),          core.string.StringRope.rc_prefix_size,      @offsetOf(core.string.StringRope, "left"), @offsetOf(core.string.StringRope, "right"), @offsetOf(core.string.StringRope, "rt"),  @offsetOf(core.string.StringRope, "len"),
             @offsetOf(core.string.StringRope, "depth"), @offsetOf(core.string.StringRope, "wide"), @offsetOf(core.string.StringRope, "flags"),
         },
@@ -106,8 +106,8 @@ fn metadataLayout() []const u8 {
 
 fn activeHeaderLayout() []const u8 {
     return std.fmt.comptimePrint(
-        "TraceHeader size={d} align={d} next={d}\n",
-        .{ @sizeOf(gc.TraceHeader), @alignOf(gc.TraceHeader), @offsetOf(gc.TraceHeader, "next") },
+        "TraceHeader size={d} align={d} next_non_object={d}\n",
+        .{ @sizeOf(gc.TraceHeader), @alignOf(gc.TraceHeader), @offsetOf(gc.TraceHeader, "next_non_object") },
     );
 }
 
@@ -146,7 +146,7 @@ pub const snapshot_text =
     "alloc_info.block_size_idx block-cell=0x1f; slab=0..30; standalone=0\n" ++
     "alloc_info.large valid-only-when heap_accounted; logical space class independent of physical carrier\n" ++
     "alloc_info.heap_accounted registry-publication-bit; false for string/big_int and construction shell\n" ++
-    "flags.kind valid for Metadata kinds; string uses JSValue tag plus refcount-only prefix\n" ++
+    "flags.kind valid for Metadata kinds; string uses JSValue tag; its Metadata prefix keeps the count in the lifetime tail\n" ++
     "flags.mark/young/finalizing/pinned/cycle_visited valid for registry kinds only\n" ++
     lifetimeSemantics() ++
     "\n[kind-contracts]\n" ++

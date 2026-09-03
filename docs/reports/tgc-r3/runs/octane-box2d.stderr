@@ -1,0 +1,115 @@
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR 3 of 13135 condemned objects are reachable by a full trace (0 precise, 3 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 17174 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 16691 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR 3 of 11244 condemned objects are reachable by a full trace (0 precise, 3 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR 1 of 13719 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 16416 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR 1 of 11039 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR 1 of 20491 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=none
+VERIFY-MINOR 1 of 17255 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=object
+VERIFY-STICKY scope=full: 0 precise, 1 conservative-only condemned-but-reachable
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR 3 of 17192 condemned objects are reachable by a full trace (0 precise, 3 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 17411 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 12823 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 16274 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR 3 of 11800 condemned objects are reachable by a full trace (0 precise, 3 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=none
+VERIFY-MINOR 2 of 14002 condemned objects are reachable by a full trace (0 precise, 2 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR 3 of 16472 condemned objects are reachable by a full trace (0 precise, 3 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR 1 of 14967 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR 3 of 16756 condemned objects are reachable by a full trace (0 precise, 3 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR 1 of 13071 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 14865 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 11152 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 14199 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR 3 of 10294 condemned objects are reachable by a full trace (0 precise, 3 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 11314 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR 1 of 15607 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=none
+VERIFY-MINOR 1 of 15711 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR 3 of 11756 condemned objects are reachable by a full trace (0 precise, 3 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 17349 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR 1 of 11776 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=none
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=none
+VERIFY-MINOR 2 of 15271 condemned objects are reachable by a full trace (0 precise, 2 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 17395 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 17384 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 17441 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 12732 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 17177 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 16685 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR 1 of 10172 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 12774 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 17735 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 17258 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 17743 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=var_ref
+VERIFY-MINOR 3 of 16336 condemned objects are reachable by a full trace (0 precise, 3 conservative-only)
+VERIFY-STICKY condemned-but-reachable scope=full source=conservative_only kind=object
+VERIFY-STICKY scope=full: 0 precise, 1 conservative-only condemned-but-reachable
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 13909 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=9 payload=none
+VERIFY-MINOR 1 of 16125 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR 1 of 12725 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+wall=291.53 rss=42000

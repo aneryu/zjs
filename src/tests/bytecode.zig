@@ -21,10 +21,10 @@ test "constant pool retains and releases values" {
     const value = text.value();
     const index = try pool.append(value);
     try std.testing.expectEqual(@as(u32, 0), index);
-    try std.testing.expectEqual(@as(i32, 2), text.header().rc);
+    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 2), text.header().rc);
 
     const loaded = pool.get(0).?;
-    try std.testing.expectEqual(@as(i32, 3), text.header().rc);
+    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 3), text.header().rc);
     loaded.free(rt);
     value.free(rt);
 }
@@ -40,7 +40,7 @@ test "constant pool appendOwned transfers refcounted values" {
     const value = text.value();
     _ = try pool.appendOwned(value);
 
-    try std.testing.expectEqual(@as(i32, 1), text.header().rc);
+    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 1), text.header().rc);
 }
 
 test "constant pool retains owned unique symbol atoms until release" {
@@ -1057,7 +1057,7 @@ test "FunctionDef: cpool transfers refcounted owned values" {
     const text = try core.string.String.createAscii(rt, "function-def-owned");
     _ = try fd.appendCpoolOwned(text.value());
 
-    try std.testing.expectEqual(@as(i32, 1), text.header().rc);
+    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 1), text.header().rc);
 }
 
 test "FunctionDef: cpool retains unique symbol atoms until release" {
@@ -2922,9 +2922,9 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
 
     core.JSValue.functionBytecode(&fb.header).free(rt);
     fb_alive = false;
-    // Large-space accounting is unwound by the FB's teardown, which the tracer
-    // defers to a collection. `fd` handed its owners to the FB and holds no
-    // heap bytes of its own, so the ledger is expected to reach zero here.
+    // The tracer defers FB teardown to a collection. `fd` handed its owners to
+    // the FB and holds no heap bytes of its own, so the cold live-object census
+    // is expected to reach zero here.
     helpers.reclaimNow(rt);
     const after_free = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 0), after_free.total_allocated_bytes);

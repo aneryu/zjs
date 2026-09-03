@@ -8,16 +8,24 @@
 # A gate that cannot see the states the measurements run in is not a gate.
 #
 # Usage: gate_smoke.sh [binary] [corpus] [cpu] [ordinary-runs] [expectations.json]
+# ZJS_MEASURE_FIELD=a|b|host selects the default CPU when [cpu] is omitted;
+# field B / CPU19 remains the default. Explicit [cpu] is retained for batch
+# correctness sweeps and historical callers.
 # The JSON schema and supported exact/range fields live in gate_smoke_check.py.
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+FIELD="${ZJS_MEASURE_FIELD:-b}"
+if ! FIELD_CPU=$(python3 "$SCRIPT_DIR/measure_fields.py" cpus --field "$FIELD" --layer single); then
+    echo "fixed-work smoke: invalid ZJS_MEASURE_FIELD: $FIELD" >&2
+    exit 2
+fi
 BIN="${1:-zig-out/bin/zjs}"
 CORPUS="${2:-/tmp/gcgap-fixed}"
-CPU="${3:-0}"
+CPU="${3:-$FIELD_CPU}"
 RUNS="${4:-3}"
 EXPECTATIONS="${5:-}"
 MAX_COMMITTED_LIVE_MILLI="${ZJS_GATE_MAX_COMMITTED_LIVE_MILLI:-32000}"
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 # The default binary is whatever happens to sit in zig-out, and this script does
 # not build. On 2026-08-28 that produced a red gate against a binary three
@@ -60,18 +68,19 @@ if [[ -n "$EXPECTATIONS" && ! -f "$EXPECTATIONS" ]]; then
     exit 2
 fi
 
-# The checker's stats contract (exactly one retirement line, doomed_pending
-# terminal state) belongs to the tracing collector. It survived an era when a
-# second collector could occupy zig-out: on 2026-08-29 an rc rebuild produced a
+# The checker's stats contract (exactly one retirement line plus endpoint and
+# explicitly settled doomed state) belongs to the tracing collector. It
+# survived an era when a second collector could occupy zig-out: on 2026-08-29 an rc rebuild produced a
 # red gate whose message ("expected exactly one retirement line, found 0") read
 # like a stats regression when the real problem was the wrong variant under
 # test. The rc collector is gone, but the probe stays -- it is one `--gc-stats`
 # run, and it also catches "you passed a stale or non-zjs binary as $1".
 variant_probe=$(mktemp --suffix=.js)
 echo "0;" > "$variant_probe"
-variant_out=$("$BIN" --gc-stats "$variant_probe" 2>/dev/null || true)
+variant_out=$(taskset -c "$CPU" "$BIN" --gc-gate-settle --gc-stats "$variant_probe" 2>/dev/null || true)
 rm -f "$variant_probe"
-if ! grep -q "^gc: terminal doomed_pending" <<< "$variant_out"; then
+if ! grep -q "^gc: endpoint doomed_pending" <<< "$variant_out" ||
+   ! grep -q "^gc: settled doomed_pending" <<< "$variant_out"; then
     echo "fixed-work smoke: $BIN does not emit the collector stats lines this gate reads" >&2
     echo "  (expected a current zjs build; pass it explicitly as \$1)" >&2
     exit 2
@@ -86,27 +95,57 @@ fi
 
 outputs=$(mktemp -d)
 trap 'rm -rf -- "$outputs"' EXIT
-fail=0
-for js in "${scripts[@]}"; do
-    name=$(basename "$js" .js)
+
+# One benchmark's full treatment: the ordinary runs, then one deliberately
+# expensive pass with the whole-heap arena/invariant audit and --gc-stats so
+# the gate proves completion state, not merely exit status.
+run_bench() {
+    local name="$1" js="$2" cpu="$3" run
     for ((run = 1; run <= RUNS; run += 1)); do
-        if ! taskset -c "$CPU" "$BIN" "$js" >/dev/null 2>&1; then
+        if ! taskset -c "$cpu" "$BIN" "$js" >/dev/null 2>&1; then
             echo "FAIL $name ordinary run $run"
-            fail=$((fail + 1))
-            break
+            return 1
         fi
     done
-
-    # One additional full-corpus pass is deliberately expensive: it enables
-    # the whole-heap arena/invariant audit and captures --gc-stats so the gate
-    # proves completion state, not merely exit status.
-    if ! env ZJS_GC_ARENA_AUDIT=1 taskset -c "$CPU" \
-        "$BIN" --gc-stats "$js" >"$outputs/$name.stdout" 2>"$outputs/$name.stderr"; then
+    if ! env ZJS_GC_ARENA_AUDIT=1 taskset -c "$cpu" \
+        "$BIN" --gc-gate-settle --gc-stats "$js" >"$outputs/$name.stdout" 2>"$outputs/$name.stderr"; then
         echo "FAIL $name arena-audit stats run"
         tail -n 20 "$outputs/$name.stderr" >&2 || true
-        fail=$((fail + 1))
+        return 1
     fi
-done
+    return 0
+}
+
+fail=0
+if [[ -n "${ZJS_GATE_PARALLEL_CPUS:-}" ]]; then
+    # Parallel mode: one benchmark per CPU from the list, all at once. This is
+    # a crash/invariant smoke, not a measurement -- shared-cache contention
+    # cannot fake a pass, and every per-benchmark artifact is still written
+    # and checked. Serial remains the default; the 2026-08-30 batch-gate
+    # accounting found the serial sweep dominating the whole gate (~8 of ~12
+    # minutes).
+    if [[ ! "$ZJS_GATE_PARALLEL_CPUS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        echo "fixed-work smoke: ZJS_GATE_PARALLEL_CPUS must be a comma-separated CPU list" >&2
+        exit 2
+    fi
+    IFS=',' read -r -a parallel_cpus <<< "$ZJS_GATE_PARALLEL_CPUS"
+    pids=()
+    idx=0
+    for js in "${scripts[@]}"; do
+        name=$(basename "$js" .js)
+        run_bench "$name" "$js" "${parallel_cpus[idx % ${#parallel_cpus[@]}]}" &
+        pids+=($!)
+        idx=$((idx + 1))
+    done
+    for pid in "${pids[@]}"; do
+        if ! wait "$pid"; then fail=$((fail + 1)); fi
+    done
+else
+    for js in "${scripts[@]}"; do
+        name=$(basename "$js" .js)
+        if ! run_bench "$name" "$js" "$CPU"; then fail=$((fail + 1)); fi
+    done
+fi
 
 if (( fail != 0 )); then
     echo "fixed-work smoke: $fail benchmark run(s) failed"

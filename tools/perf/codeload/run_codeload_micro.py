@@ -9,7 +9,7 @@ zjs-vs-qjs for normalization) on one of two fixed-workload modes:
   atom     fixed-width salted identifier renames, same runtime; adds intern
            miss + free-slot churn on top (cut B)
 
-Design contracts (same lineage as run_zoo_compare.py and
+Design contracts (same lineage as the retired run_zoo_compare.py and
 reports/perf/qjs-align/measurement-contracts.md):
 
   * paired ABBA order: pair i runs [a,b] when i is even, [b,a] when i is odd,
@@ -28,10 +28,10 @@ reports/perf/qjs-align/measurement-contracts.md):
     two cold-cache builds per side (see README.md).
 
 Usage:
-  flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
+  python3 tools/perf/measure_fields.py run --field b --layer single -- \
     python3 tools/perf/codeload/run_codeload_micro.py \
       --a <binary-before> --b <binary-after> --mode compile \
-      --samples 8 --cpu 19 --output <artifact.json>
+      --samples 8 --field b --output <artifact.json>
 """
 
 from __future__ import annotations
@@ -52,6 +52,8 @@ from pathlib import Path
 TOOL_DIR = Path(__file__).resolve().parent
 PAYLOAD = TOOL_DIR / "payload_octane_codeload.js"
 MODES = {"compile": TOOL_DIR / "mode_compile.js", "atom": TOOL_DIR / "mode_atom.js"}
+sys.path.insert(0, str(TOOL_DIR.parent))
+from measure_fields import field_metadata, lock_attested, single_cpu
 
 
 def fail(message: str, code: int = 2) -> "NoReturn":  # type: ignore[valid-type]
@@ -164,10 +166,17 @@ def main() -> int:
     ap.add_argument("--b", required=True, help="binary B (candidate)")
     ap.add_argument("--mode", required=True, choices=sorted(MODES))
     ap.add_argument("--samples", type=int, default=8, help="paired samples, must be even (default: 8)")
-    ap.add_argument("--cpu", type=int, default=19)
+    ap.add_argument("--field", choices=("a", "b", "host"), default=None)
+    ap.add_argument("--cpu", type=int, default=None,
+                    help="legacy CPU override; noncanonical values are diagnostic-only")
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--output")
     args = ap.parse_args()
+
+    try:
+        measure_field, args.cpu, field_conforming = single_cpu(args.field, args.cpu)
+    except ValueError as error:
+        fail(str(error))
 
     if args.samples % 2 != 0:
         fail(
@@ -246,6 +255,11 @@ def main() -> int:
         "order": "ABBA by pair parity",
         "cpu": args.cpu,
         "effectiveAffinity": sorted(affinity),
+        "measurementField": {
+            **field_metadata(measure_field, "single"),
+            "fieldConforming": field_conforming,
+            "lockAttested": lock_attested(measure_field),
+        },
         "kernel": platform.release(),
         "cpuModel": cpu_model(),
         "checksum": checksums.pop(),

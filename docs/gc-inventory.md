@@ -38,13 +38,14 @@ Authority for cycle collection:
 - objects: `Object.traceChildEdgesFallible` (`src/core/object.zig`) plus each
   payload's `traceChildEdges` (beside its `destroy` in
   `src/core/object_payloads.zig` and `src/core/generator_state.zig`);
-- other `gc.RefKind`s: `markChildrenCold` (`src/core/object_gc.zig`), which
-  calls `Shape.traceChildEdgesNoFail`, `JSContext.traceChildEdgesNoFail`,
+- other `gc.RefKind`s: `traceHeaderEdges` (`src/core/gc_trace_stw.zig`),
+  which calls `Shape.traceChildEdgesNoFail`, `JSContext.traceChildEdgesNoFail`,
   `ModuleRecord.traceChildEdgesNoFail`, and inlines bytecode / var-ref walks.
 
-Hot copies (must stay in lockstep with the authority; guarded in
-`src/tests/core.zig`): `markOrdinaryObjectHot`, `markFastArrayHot`,
-`markShapeHot`.
+There are no hot copies any more: the rc-era `markOrdinaryObjectHot` /
+`markFastArrayHot` / `markShapeHot` arms in `object_gc.zig` were test-only
+after the trial-deletion collector went and were deleted in TGC S0
+(2026-09-03). `object_gc.zig` now holds only death-side helpers.
 
 `JSValue.cycleMarkHeader` (`src/core/value.zig`) only returns a header for
 tags in `[Tag.module, Tag.object]`. Strings, ropes, and BigInts are never
@@ -84,13 +85,13 @@ Defined in `src/core/gc.zig` `RefKind`. Cycle-candidate range is
 | Kind | Authority | Strong child edges | Weak / external | Risk |
 |---|---|---|---|---|
 | `object` | `Object.traceChildEdgesFallible` | shape, properties, payload family, dense elements, class-payload mark | weak identities, view lists, holder links — see 1.2 | MED (dynamic layout + class mark) |
-| `function_bytecode` | `markChildrenCold` `.function_bytecode` — **no** `traceChildEdges` on the type | `FunctionBytecode.realm` (`RealmRef`); `cpoolSlice()` (`JSValue` FAM) | atoms (`func_name`, vardefs, closure names) are atom-table RC, not GC edges; `byte_code` / debug FAM are non-GC | MED: authority is collector-local, unlike Object/Shape/Module |
-| `var_ref` | `markChildrenCold` `.var_ref` — **no** `traceChildEdges` on the type | `VarRef.value` only | `pvalue` is a borrowed frame alias when `is_open`; tracing it would double-count the frame slot (comment in `markChildrenCold`) | HIGH for Slot rewrite: `pvalue` is not a heap Slot |
+| `function_bytecode` | `traceHeaderEdges` `.function_bytecode` — **no** `traceChildEdges` on the type | `FunctionBytecode.realm` (`RealmRef`); `cpoolSlice()` (`JSValue` FAM) | atoms (`func_name`, vardefs, closure names) are atom-table RC, not GC edges; `byte_code` / debug FAM are non-GC | MED: authority is collector-local, unlike Object/Shape/Module |
+| `var_ref` | `traceHeaderEdges` `.var_ref` — **no** `traceChildEdges` on the type | `VarRef.value` only | `pvalue` is a borrowed frame alias when `is_open`; tracing it would double-count the frame slot (comment in `traceHeaderEdges`) | HIGH for Slot rewrite: `pvalue` is not a heap Slot |
 | `realm_context` | `JSContext.traceChildEdgesNoFail` | module registry, unhandled rejections, eval function, OOM error, class/native-error prototypes, cached function/promise protos, five initial shapes, `cached_values`, regexp legacy statics, `global`, `lexicals` | `host_event_loop` is **not** a child edge (it is a root; §3); runtime/construction list links are membership | MED: `traceRoots` and `traceChildEdges` are not the same set |
 | `module` | `ModuleRecord.traceChildEdgesFallible` | retained export cells, `func_obj`, `module_ns`, `import_meta`, `eval_exception` | `RequestEntry.module` is a borrowed registry pointer, **not** traced; atoms are atom RC | HIGH: borrowed request graph is invisible to both cycle mark and `traceRoots` |
 | `shape` | `Shape.traceChildEdgesFallible` | `proto: ?*Object` | `registry_hash_next` is hashed-shape membership, not a GC edge; property atoms are atom RC; FAM props/buckets are non-GC | LOW after publish (hashed shapes are immutable) |
-| `string` | `markChildrenCold` `.string` is empty | flat `String`: none. `StringRope.left` / `.right` (`src/core/string.zig`) are owned `JSValue` children **not walked by the cycle collector** (`JS_MarkValue` drops strings) | 4-byte `StringHeader` prefix; not on `gc_obj_list` | HIGH for tracing: ropes must gain an explicit child descriptor; they are not in the current registry census |
-| `big_int` | `markChildrenCold` `.big_int` is empty | none (limbs are non-GC) | `BigInt.create*` never calls `addInitialized*`; RC-only, off the cycle list | LOW for edges; MED for `HeapCensus` (kind exists, objects are not in the intrusive registry) |
+| `string` | `traceHeaderEdges` `.string` is empty | flat `String`: none. `StringRope.left` / `.right` (`src/core/string.zig`) are owned `JSValue` children **not walked by the cycle collector** (`JS_MarkValue` drops strings) | 4-byte `StringHeader` prefix; not on `gc_obj_list` | HIGH for tracing: ropes must gain an explicit child descriptor; they are not in the current registry census |
+| `big_int` | `traceHeaderEdges` `.big_int` is empty | none (limbs are non-GC) | `BigInt.create*` never calls `addInitialized*`; RC-only, off the cycle list | LOW for edges; MED for `HeapCensus` (kind exists, objects are not in the intrusive registry) |
 
 ### 1.2 Object payload families
 
@@ -171,8 +172,9 @@ gate). Heap `JSValue` / `*Object` / `*Shape` / `*VarRef` / `*FunctionBytecode`
 (`baseline_count` is the recorded seed). Bulk Slot APIs live in
 `src/core/gc_slot.zig` with Stage 6 barrier comments on copy/move/resize/
 destroy/property-install; they are not wired to `Object.prop_values` or dense
-elements (§6.4). Shadow write audit (`src/core/gc_write_audit.zig`, printed by
-`--gc-shadow-check`) records those lint-invisible stores at runtime; hits are
+elements (§6.4). Shadow write audit (`src/core/gc_write_audit.zig`; the `--gc-shadow-check`
+CLI flag was removed with the shadow collector on 2026-08-29, the audit is
+now test-only via `root.zig`) records those lint-invisible stores at runtime; hits are
 the Stage 6 barrier candidate list, not a failure. Plugin-opaque DSO payload
 stores are outside the engine ABI and stay uninstrumented.
 
@@ -256,8 +258,13 @@ is a correctness bug, not a style miss (design §2.1).
 ### 3.1 `value_root_frames_enabled`
 
 ```zig
-pub const value_root_frames_enabled = builtin.is_test or gc.shadow_tracer_enabled;
-pub const value_root_link_containers_only = gc.shadow_tracer_enabled and !builtin.is_test;
+// 2026-09-03 current definitions (runtime.zig:497-501); the shadow collector
+// and `gc.shadow_tracer_enabled` were removed on 2026-08-29.
+pub const value_root_frames_enabled = true;
+pub const value_root_link_containers_only = !builtin.is_test;
+// Production therefore links only container/window frames; scalar
+// `rootValues`/`rootObjects` sites are compiled out and rely on the
+// conservative scan. See tracing-gc-completion-plan.md F8 and lane R3.
 ```
 
 Default `rc` production still erases activate/deactivate at compile time. Tests

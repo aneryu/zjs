@@ -9,8 +9,7 @@ the artifact; use run_benchv8_compare.py for the published zjs/QuickJS
 metric and for refactor-policy A/B, where its pairwise fail-closed checks
 and parallel-cluster protocol apply.
 
-Discipline (same spirit as run_benchv8_compare.py and
-tools/perf/zoo/run_zoo_compare.py):
+Discipline (same spirit as run_benchv8_compare.py):
   * refuses to run unless outer affinity is already exactly {--cpu};
   * every engine invocation re-pins via taskset;
   * samples round-robin forward then reverse across all engines each pair
@@ -25,19 +24,20 @@ user-configurable, so the "jitless" label in the output is always true of
 what actually ran.
 
 Usage:
-  flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
+  python3 tools/perf/measure_fields.py run --field b --layer single -- \
     python3 tools/perf/bench_v8/run_benchv8_multiengine.py \
       --zjs zig-out/bin/zjs \
       --qjs /home/aneryu/quickjs/qjs \
       --hermes /home/aneryu/hermes/build_release/bin/hermes \
       --v8 /home/aneryu/v8/out/arm64.release/d8 \
       --jsc /home/aneryu/WebKit/WebKitBuild/JSCOnly/Release/bin/jsc \
-      --samples 8 --output /tmp/benchv8-multiengine.json
+      --field b --samples 8 --output /tmp/benchv8-multiengine.json
 """
 
 import argparse
 import hashlib
 import json
+import os
 import statistics
 import subprocess
 import sys
@@ -49,6 +49,7 @@ import run_benchv8_compare as bv8  # noqa: E402  (path set above)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import measurement_pinning  # noqa: E402  (path set above)
+from measure_fields import field_metadata, lock_attested, single_cpu  # noqa: E402
 
 # Engine-specific flags needed to reach the comparison's declared
 # configuration (jitless for v8 and jsc). Not exposed as CLI options: the
@@ -114,9 +115,23 @@ def main() -> int:
     ap.add_argument("--v8", help="V8 d8 binary (run with --jitless)")
     ap.add_argument("--jsc", help="JavaScriptCore jsc binary (run with --useJIT=false)")
     ap.add_argument("--samples", type=int, default=8, help="samples per engine (default: 8)")
-    ap.add_argument("--cpu", type=int, default=19, help="CPU for the serial protocol")
+    ap.add_argument(
+        "--field",
+        choices=("a", "b", "host"),
+        default=None,
+        help="measurement field (default: ZJS_MEASURE_FIELD or b)",
+    )
+    ap.add_argument("--cpu", type=int, default=None, help="compatibility CPU override")
     ap.add_argument("--output", help="write the JSON artifact here")
     args = ap.parse_args()
+
+    try:
+        measure_field, args.cpu, field_conforming = single_cpu(
+            args.field, args.cpu
+        )
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
 
     engines: dict[str, Path] = {"zjs": Path(args.zjs).resolve()}
     for name, val in (("qjs", args.qjs), ("hermes", args.hermes), ("v8", args.v8), ("jsc", args.jsc)):
@@ -190,6 +205,11 @@ def main() -> int:
                 "cpu": args.cpu,
             },
             "cpu": args.cpu,
+            "measurementField": {
+                **field_metadata(measure_field, "single"),
+                "fieldConforming": field_conforming,
+                "lockAttested": lock_attested(measure_field),
+            },
             "samples": args.samples,
             "engines": {n: ENGINE_LABELS[n] for n in names},
             "binaries": {n: {"path": str(engines[n]), "md5": hashes_before[n]} for n in names},

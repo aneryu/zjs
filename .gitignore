@@ -19,6 +19,11 @@ __pycache__/
 
 # Local test262 output (`zig build test262-check` writes -R here)
 reports/test262-latest/
+# `mise run test262-stress` writes its -R products here; ad-hoc runner
+# output dirs from gate work use the same prefix
+reports/test262-stress/
+reports/test262-stress-*/
+reports/test262-s0-*/
 
 # Local runtime-profile output. Scripts stay tracked; opcode scope is
 # currently disconnected so these artifacts are not a gate.
@@ -30,3 +35,4 @@ reports/perf/current/runtime/
 .build-a/
 .build-b/
 .zig-global-cache/
+reports/test262-s1*/

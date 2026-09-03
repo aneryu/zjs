@@ -1,14 +1,13 @@
-//! Stop-the-world reclaiming tracer (tracing-gc-design.md §13 Stage 3).
-//!
-//! Mark/sweep over the compatibility heap: current registry and layouts, no
-//! new header, no block heap, no generations, no concurrent marker. Strong
-//! edges walk `traceChildEdges*` (the same authority as the shadow observer).
-//! WeakMap/WeakSet values are NOT marked during the strong walk;
-//! `visitWeakCollectionEntry` stays a no-op. A separate ephemeron fixed
-//! point then marks a value only when both its table and key are live.
-//!
-//! Compiled only when `-Dzjs_experimental_gc=trace_stw`. Default `rc` never imports this
-//! module. Failure returns to the caller; it does not fall back to RC.
+//! The collector: non-moving, generational (sticky mark bit), incrementally
+//! marking, stop-the-world at every step (tracing-gc-design.md, current
+//! state in gc-invariants.md). Majors mark from precise + conservative roots
+//! into block bitmaps / header epochs and condemn from the bitmaps; minors
+//! trace the young set from roots plus the remembered owners. Strong edges
+//! walk `traceChildEdges*`; WeakMap/WeakSet values are NOT marked during the
+//! strong walk (`visitWeakCollectionEntry` is a no-op) -- a separate
+//! ephemeron fixed point marks a value only when both its table and key are
+//! live. A collection failure returns to the caller; the runtime aborts the
+//! cycle and retries from fresh marks.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -26,16 +25,35 @@ const BlockHeapMod = @import("gc_block_heap.zig");
 const runtime_mod = @import("runtime.zig");
 const property = @import("property.zig");
 const shape = @import("shape.zig");
+const string_mod = @import("string.zig");
 const var_ref_mod = @import("var_ref.zig");
+const bigint_mod = @import("bigint.zig");
 const function_bytecode_mod = @import("../bytecode.zig").function_bytecode;
 const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 const Object = object_mod.Object;
 
-pub const enabled = true;
-
 const CollectError = std.mem.Allocator.Error || error{PayloadMarkFailed};
+
+fn checkFrontierFailure(queue: *const gc.mark_queue.Queue) CollectError!void {
+    switch (queue.failure()) {
+        .none => {},
+        .out_of_memory => return error.OutOfMemory,
+        .unqueueable_barrier => return error.PayloadMarkFailed,
+    }
+}
+
+fn popSegmentedFrontier(
+    stack: *gc.MarkStack,
+    queue: *gc.mark_queue.Queue,
+    comptime prefetch: bool,
+) ?*gc.Header {
+    while (true) {
+        if (if (prefetch) stack.popPrefetch() else stack.pop()) |entry| return entry.header();
+        if (!queue.steal(stack)) return null;
+    }
+}
 
 /// Edge enumeration for one object, generic over the visitor so the
 /// single-threaded `Collector` and the parallel tracer share one authority.
@@ -49,7 +67,11 @@ pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) Co
     // and object-kind construction invariant; the debug assertion names it
     // sooner.
     if (gc.Registry.isBlockCellHeader(header)) {
-        std.debug.assert(header.metaConst().flags.kind == .object);
+        const cell_kind = header.metaConst().flags.kind;
+        std.debug.assert(cell_kind == .object or (gc.string_tracer_owned and cell_kind == .string));
+        if (comptime gc.string_tracer_owned) {
+            if (cell_kind == .string) return string_mod.traceStringEdges(rt, visitor, header);
+        }
     } else switch (header.meta().flags.kind) {
         // Fall through to the one shared object body below. Keeping a single
         // hot entry matters: spelling the fast path as an early object return
@@ -81,84 +103,30 @@ pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) Co
             try record.traceChildEdgesFallible(rt, visitor);
             return;
         },
-        .string, .big_int => return,
+        .string => return if (comptime gc.string_tracer_owned) string_mod.traceStringEdges(rt, visitor, header) else {},
+        .big_int => return,
     }
 
-    const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+    const obj = Object.fromHeader(header);
     try obj.traceChildEdgesFallible(rt, visitor);
 }
 
-pub const SurvivorClass = enum {
-    matching,
-    floating_garbage,
-    rc_side_leak,
-    semantic_diff,
-};
-
+/// What a collection leaves behind for tests and the census deduction; the
+/// collector's own control flow reads only `skipped_sweep_incomplete_arenas`
+/// and the ephemeron counters.
 pub const Report = struct {
-    allocated_before: usize = 0,
-    marked_exact: usize = 0,
+    /// Objects the conservative arm marked beyond the precise trace
+    /// (detailed reports only).
     marked_conservative_extra: usize = 0,
     swept: usize = 0,
-    /// Minor-collection outcome; zero on a major.
-    minor_reclaimed: usize = 0,
-    minor_young_before: usize = 0,
-    remaining: usize = 0,
     ephemeron_rounds: usize = 0,
     ephemeron_values_shaded: usize = 0,
-    weak_entries_dropped: usize = 0,
-    weakrefs_cleared: usize = 0,
-    finalization_enqueued: usize = 0,
     conservative: conservative.Metrics = .{},
-    mark_debt: usize = 0,
-    sweep_debt: usize = 0,
-    /// Bytes the sweep actually returned, from the space account's delta.
-    reclaimed_bytes: usize = 0,
     /// Of this collection's wall time, how much went on census walks.
     census_ns: u64 = 0,
     /// The round marked but did not sweep: an arena was unregistered, so a
     /// conservative candidate into it could not have been resolved.
     skipped_sweep_incomplete_arenas: bool = false,
-    soft_headroom: usize = 0,
-    hard_headroom: usize = 0,
-    windows_active: usize = 0,
-    trans_fresh_to_active: usize = 0,
-    trans_active_to_needs_sweep: usize = 0,
-    trans_needs_sweep_to_sweeping: usize = 0,
-    trans_sweeping_to_swept: usize = 0,
-    trans_swept_to_active: usize = 0,
-    mark_epoch: u64 = 0,
-    committed_bytes: usize = 0,
-    block_live_bytes: usize = 0,
-    committed_live_milli: usize = 0,
-    drained_sweep_debt: usize = 0,
-
-    pub fn format(self: Report, writer: anytype) !void {
-        try writer.print(
-            \\trace-stw
-            \\  allocated_before: {d}  marked_exact: {d}  conservative_extra: {d}  swept: {d}  remaining: {d}
-            \\  ephemeron_rounds: {d}  ephemeron_values_shaded: {d}
-            \\  weak_entries_dropped: {d}  weakrefs_cleared: {d}  finalization_enqueued: {d}
-            \\  debt mark: {d} sweep: {d} soft: {d} hard: {d} windows_active: {d}
-            \\
-        , .{
-            self.allocated_before,
-            self.marked_exact,
-            self.marked_conservative_extra,
-            self.swept,
-            self.remaining,
-            self.ephemeron_rounds,
-            self.ephemeron_values_shaded,
-            self.weak_entries_dropped,
-            self.weakrefs_cleared,
-            self.finalization_enqueued,
-            self.mark_debt,
-            self.sweep_debt,
-            self.soft_headroom,
-            self.hard_headroom,
-            self.windows_active,
-        });
-    }
 };
 
 /// Static storage footprint of the final marked set.  This is intentionally a
@@ -197,6 +165,14 @@ pub const MarkStorageAggregate = struct {
     allocation_touches: usize = 0,
     allocated_bytes: usize = 0,
     touched_cache_lines: usize = 0,
+};
+
+/// Per-runtime incremental-major state that survives across cycles.
+pub const IncrementalMarkState = struct {
+    footprint: MarkFootprint = .{},
+    /// Settled live estimate after the last major, in account bytes; the
+    /// threshold for the next cycle is priced off it.
+    last_settled_live_bytes: usize = 0,
 };
 
 pub const MarkFootprint = struct {
@@ -402,8 +378,21 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReach
             }
         }
     }
+    const diag_direct_before: usize = if (comptime gc.roots_diag_enabled) rt.gc.roots_diag.direct else 0;
     if (probe.conservative_on) {
-        try probe.seedConservativeRoots();
+        if (comptime gc.roots_diag_enabled) {
+            // Same scan, but the callback records every header this arm
+            // marks that the precise arm did not (R3 census).
+            conservative.spillRegistersAndScan(
+                rt,
+                &probe.report.conservative,
+                Collector.recordConservativeCandidate,
+                @ptrCast(&probe),
+            );
+            if (probe.err) |err| return err;
+        } else {
+            try probe.seedConservativeRoots();
+        }
         try probe.drain();
     }
     // `processWeak` is deliberately NOT run: it clears weak references, and a
@@ -412,14 +401,21 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReach
     const all_young = probe.countMarkedYoung();
     rt.gc.generation.stats.conservative_only_young +|= all_young -| precise_young;
 
+    var conservative_only_count: usize = 0;
     {
         var it = rt.gc.objectIterator();
         while (it.next()) |header| {
             if (rt.gc.headerMarked(header)) {
                 const result = try reachable.entries.getOrPut(allocator, @intFromPtr(header));
-                if (!result.found_existing) result.value_ptr.* = .conservative_only;
+                if (!result.found_existing) {
+                    result.value_ptr.* = .conservative_only;
+                    conservative_only_count += 1;
+                }
             }
         }
+    }
+    if (comptime gc.roots_diag_enabled) {
+        if (probe.conservative_on) rt.gc.roots_diag.noteProbe(conservative_only_count, rt.gc.roots_diag.direct - diag_direct_before);
     }
 
     probe.clearMarks();
@@ -431,21 +427,15 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReach
 /// trace that started from freshly cleared marks.
 ///
 /// Fail-closed on PRECISE disagreements only, and that asymmetry is the whole
-/// design. The direction being defended is "sticky may keep too much, never too
-/// little": a condemned object the fresh precise roots reach is a kill, full
+/// design: a condemned object the fresh precise roots reach is a kill, full
 /// stop, so the caller aborts before weak state or object storage is mutated.
 /// A conservative-only disagreement is a different animal. This oracle runs on
 /// a deeper native frame than the cycle it audits, so pointer residue can exist
 /// in one scan and not the other -- `computeFullReachable`'s own contract has
 /// said so since the minor verifier. Counting it as a kill would abort healthy
 /// cycles; ignoring it silently would hide a real signal. So it is counted,
-/// separately, and read against the full-scope control (`ZJS_GC_VERIFY_MAJOR_ALL`)
-/// where the same number must appear even though a full scope cannot under-mark.
-fn verifyStickyCondemnation(
-    rt: *JSRuntime,
-    scope: gc.IncrementalMajorScope,
-    reachable: *const FullReachable,
-) CollectError!void {
+/// separately (`ZJS_GC_VERIFY_MAJOR_ALL`, roots-diag builds).
+fn verifyFullCondemnation(rt: *JSRuntime, reachable: *const FullReachable) CollectError!void {
     var precise_violations: usize = 0;
     var conservative_violations: usize = 0;
     var reported: usize = 0;
@@ -459,17 +449,14 @@ fn verifyStickyCondemnation(
         }
         if (reported < 8) {
             reported += 1;
-            std.debug.print("VERIFY-STICKY condemned-but-reachable scope={s} source={s} kind={s}\n", .{
-                @tagName(scope),
+            std.debug.print("VERIFY-MAJOR condemned-but-reachable source={s} kind={s}\n", .{
                 @tagName(source),
                 @tagName(header.metaConst().flags.kind),
             });
         }
     }
-    rt.gc.noteStickyMajorOracle(scope, precise_violations, conservative_violations);
     if (precise_violations + conservative_violations == 0) return;
-    std.debug.print("VERIFY-STICKY scope={s}: {d} precise, {d} conservative-only condemned-but-reachable\n", .{
-        @tagName(scope),
+    std.debug.print("VERIFY-MAJOR {d} precise, {d} conservative-only condemned-but-reachable\n", .{
         precise_violations,
         conservative_violations,
     });
@@ -481,10 +468,10 @@ fn verifyStickyCondemnation(
 ///
 /// A major over the compatibility heap needs `clearMarks` before the trace and
 /// `sweepUnmarked` after it, plus `clearYoungState` to retire the young set.
-/// `collectCycles` was doing eight passes; five of the extra ones exist only to
-/// produce numbers -- `allocated_before`, `marked_exact`,
-/// `marked_conservative_extra`, and two `liveCount()` calls feeding
-/// `report.remaining` and the `promoted` counter.
+/// `collectCycles` used to do eight passes; the census-only ones (object
+/// counts before/after marking, two `liveCount()` walks) are gone with the
+/// fields they fed. Only `marked_conservative_extra` survives, and only under
+/// detailed reports.
 ///
 /// "Only to produce numbers" is not the same as "no effect", and the first
 /// version of this comment claimed it was. `countMarked` runs immediately
@@ -606,12 +593,6 @@ fn verifyCollectorInvariants(
         std.debug.print("gc: INTRUSIVE LIST AUDIT: {s}\n", .{@errorName(err)});
         @panic("intrusive list invariant violated");
     };
-    if (comptime gc.sweep_model_enabled) {
-        rt.gc.sweep_model.verify() catch |err| {
-            std.debug.print("gc: SWEEP MODEL AUDIT: {s}\n", .{@errorName(err)});
-            @panic("sweep model invariant violated");
-        };
-    }
     if (comptime gc.block_heap_enabled) {
         rt.gc.block_heap.verify() catch |err| {
             std.debug.print("gc: BLOCK HEAP AUDIT: {s}\n", .{@errorName(err)});
@@ -639,22 +620,18 @@ fn verifyCollectorInvariants(
             @panic("young retirement incomplete");
         };
     }
-    // Non-block corpses leave the object iterator while sliced destruction is
-    // pending but remain in the byte account until their destructor runs.
-    if (!rt.gc.doomed_pending) {
-        rt.gc.verifyHeapAccounting(rt) catch |err| {
-            std.debug.print("gc: HEAP ACCOUNTING AUDIT: {s}\n", .{@errorName(err)});
-            @panic("heap accounting invariant violated");
-        };
-    }
+    // The accounting population includes both block doom bitmaps and the
+    // non-block morgue, so an open destruction transaction is now auditable
+    // instead of becoming a blind interval for lost owner links.
+    rt.gc.verifyHeapAccounting(rt) catch |err| {
+        std.debug.print("gc: HEAP ACCOUNTING AUDIT: {s}\n", .{@errorName(err)});
+        @panic("heap accounting invariant violated");
+    };
 }
 
 /// Record one major's final marked set after root/edge/ephemeron closure and
 /// before weak processing or condemnation mutates the heap. This is the only
-/// denominator suitable for cross-workload "per marked object" pricing:
-/// `gc_parallel_mark.Stats.owner_marked/worker_marked` count successful claims
-/// only on slices that actually entered the parallel pool, so a CPU-0 run can
-/// legitimately report both as zero while marking a large graph.
+/// denominator suitable for cross-workload "per marked object" pricing.
 /// Gated on `mark_footprint_census`, not on `detailed_reports`: this walk runs
 /// inside the final-remark stop and is the one census big enough to move the
 /// benchmark scores the panel is used to read (see `mark_footprint_census`).
@@ -671,7 +648,7 @@ fn recordFinalMarkFootprint(rt: *JSRuntime) void {
         footprint.noteMarkedHeader(header);
 
         if (header.metaConst().flags.kind == .object) {
-            const object: *const Object = @alignCast(@fieldParentPtr("header", header));
+            const object = Object.fromHeaderConst(header);
             object.recordTraceStorageFootprint(rt, footprint);
         } else {
             footprint.beginTraceClass(.non_object);
@@ -689,15 +666,6 @@ fn recordFinalMarkFootprint(rt: *JSRuntime) void {
 
 pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
     last_census_ns = 0;
-    var drained_sweep_debt: usize = 0;
-    if (comptime gc.sweep_model_enabled) {
-        if (rt.gc.sweep_model.debt.sweep_debt != 0) {
-            drained_sweep_debt = rt.gc.sweep_model.debt.sweep_debt;
-            rt.gc.sweep_model.beginSweep();
-            rt.gc.sweep_model.endSweep();
-        }
-        std.debug.assert(rt.gc.sweep_model.debt.sweep_debt == 0);
-    }
     rt.gc.stats.collections += 1;
     if (comptime gc.block_heap_enabled) rt.gc.block_heap.beginMajor();
     var collector = try Collector.init(rt, extra_roots, scan);
@@ -712,8 +680,8 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
     errdefer rt.gc.generation.abandonMajorRetirement();
     const swept = try collector.run();
     clearYoungState(rt);
-    // `Collector.run` returns 0 without sweeping when the arena set is not
-    // whole. That is an exit from the transaction, not a completion of it:
+    // `Collector.run` returns 0 without sweeping when the conservative address
+    // set is not whole. That is an exit from the transaction, not a completion:
     // committing there would reopen minors over a population the trace had
     // already half-promoted.
     if (collector.report.skipped_sweep_incomplete_arenas) {
@@ -727,12 +695,6 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
     rt.gc.generation.decayLowYieldStreak();
     last_report = collector.report;
     last_report.swept = swept;
-    if (detailed_reports) {
-        const t = censusStart();
-        last_report.remaining = rt.gc.liveCount();
-        censusEnd(t);
-    } else last_report.remaining = 0;
-    last_report.drained_sweep_debt = drained_sweep_debt;
     last_report.census_ns = last_census_ns;
     if (gc.invariantChecksEnabled()) {
         verifyCollectorInvariants(
@@ -740,12 +702,6 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
             collector.conservative_on,
             !collector.report.skipped_sweep_incomplete_arenas,
         );
-    }
-    if (comptime gc.block_heap_enabled) {
-        last_report.mark_epoch = rt.gc.block_heap.mark_epoch;
-        last_report.committed_bytes = rt.gc.block_heap.stats.committed_bytes;
-        last_report.block_live_bytes = rt.gc.block_heap.liveBytes();
-        last_report.committed_live_milli = rt.gc.block_heap.committedLiveMilli();
     }
     return swept;
 }
@@ -837,10 +793,10 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     if (young_before > rt.gc.generation.stats.young_at_start_max) {
         rt.gc.generation.stats.young_at_start_max = young_before;
     }
-    // Same requirement as the major: a sweep is only sound when every arena is
-    // registered, because an unregistered one hides its objects from the
-    // conservative scan that decides what is live.
-    if (!rt.gc.arenaSetWhole()) {
+    // Same requirement as the major: a sweep is only sound when every arena
+    // and standalone occupant is registered, because a missing range hides
+    // its objects from the conservative scan that decides what is live.
+    if (!rt.gc.addressSetWhole(rt)) {
         if (phase_stats) {
             rt.gc.generation.stats.minor_sweep_ns_total +|= profile.nowNanos() -| phase_started;
         }
@@ -869,91 +825,7 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     if (phase_stats) {
         rt.gc.generation.stats.minor_promote_ns_total +|= profile.nowNanos() -| phase_started;
     }
-    last_report.minor_reclaimed = reclaimed;
-    last_report.minor_young_before = young_before;
     return reclaimed;
-}
-
-/// Three-phase concurrent major (§8.6), driven to completion on the owner
-/// thread.
-///
-/// The phases are real and so is the protocol: initial mark stops the mutator
-/// and seeds roots, the concurrent phase drains with the barrier live so
-/// mutator writes shade their targets, and final remark stops again to rescan
-/// roots and drain what the barrier produced. What is not here yet is a
-/// separate marker thread -- the drain runs on the owner. That keeps the
-/// phase transitions, the barrier handshake and the remark obligations
-/// testable before a second thread is introduced, which is the order the
-/// litmus argued for: validate the protocol, then parallelise it.
-pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
-    if (comptime !gc.concurrent_enabled) return error.PayloadMarkFailed;
-
-    var collector = try Collector.init(rt, extra_roots, scan);
-    defer collector.deinit();
-
-    // Initial mark, mutator stopped. The barrier queue gets its ring before
-    // marking is published: a queue with no buffer reports every push as
-    // overflow, which is sound but downgrades every cycle to the rescan.
-    rt.gc.concurrent_mark_queue.ensureCapacity(gc.Registry.markQueueAllocator());
-    collector.clearMarks();
-    var live = rt.gc.objectIterator();
-    while (live.next()) |_| collector.report.allocated_before += 1;
-    try collector.seedRoots();
-    if (collector.conservative_on) try collector.seedConservativeRoots();
-
-    // Publish that marking is live before resuming: from here every strong
-    // write shades its target GREY -- marked and queued -- instead of taking
-    // the generational path.
-    rt.gc.setMajorMarkingActive(true, .release);
-
-    // Concurrent phase. The mutator is logically running here; the barrier is
-    // what keeps its writes visible to this drain, and what it queued is part
-    // of this drain's work.
-    try collector.drain();
-    _ = try collector.drainBarrierQueue();
-    collector.report.marked_exact = collector.countMarked();
-
-    // Final remark, mutator stopped again. Roots are rescanned because they
-    // moved while the mutator ran, and the drain repeats because rescanning
-    // and the barrier both produce work. The barrier queue is drained to
-    // empty HERE, under the stopped mutator: entries are grey -- their
-    // children have never been traced -- and leaving one behind is exactly
-    // the black-without-tracing hole this queue exists to close.
-    try collector.seedRoots();
-    if (collector.conservative_on) try collector.seedConservativeRoots();
-    try collector.drain();
-    _ = try collector.drainBarrierQueue();
-    try collector.ephemeronFixedPoint();
-    recordFinalMarkFootprint(rt);
-
-    // Marking is over before anything is freed: a mutator that resumes mid
-    // sweep must not still be shading into a set being torn down.
-    rt.gc.setMajorMarkingActive(false, .release);
-
-    collector.processWeak();
-    const swept = collector.sweepUnmarked();
-    last_report = collector.report;
-    last_report.swept = swept;
-    if (detailed_reports) {
-        const t = censusStart();
-        last_report.remaining = rt.gc.liveCount();
-        censusEnd(t);
-    } else last_report.remaining = 0;
-    if (comptime gc.generation_enabled) {
-        // Everything that survived a major is old, and the remembered set it
-        // was built from is stale (§8.2). This retires the authoritative map,
-        // its object-local cache bits, and the suffix cursor. A survivor that
-        // kept its young bit would be swept by the next minor on the strength
-        // of a trace that never looked at its incoming edges.
-        clearYoungState(rt);
-        // The argument feeds the `promoted` counter and nothing else, and
-        // `liveCount` is a whole-heap walk. After a major every survivor is
-        // old, so with the counter unread there is nothing to count.
-        const t = censusStart();
-        rt.gc.generation.noteMinorPromotion(if (detailed_reports) rt.gc.liveCount() else 0);
-        censusEnd(t);
-    }
-    return swept;
 }
 
 /// Retire the young set after a whole-heap collection.
@@ -970,20 +842,18 @@ pub fn collectConcurrentMajor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
 /// surviving young bit is a corruption report.
 fn clearYoungState(rt: *JSRuntime) void {
     if (comptime !gc.generation_enabled) return;
-    var cursor = rt.gc.young_head;
-    while (cursor) |h| {
-        if (h == &rt.gc.gc_obj_list.sentinel) break;
-        const next = h.next;
+    // Intrusive carriers use the young suffix; non-block Objects use their
+    // side authority and are filtered by the same young bit.
+    var young_nonblock = rt.gc.youngListIterator();
+    while (young_nonblock.next()) |h| {
         std.debug.assert(h.metaConst().flags.young);
         h.meta().flags.young = false;
-        cursor = next;
     }
     // Block-population young bits: walk the young-block list, not the heap.
     // This also retires sweep-time allocations -- a block that received one
     // is on the list like any other.
     if (comptime gc.block_heap_enabled) {
-        var young = rt.gc.youngIterator();
-        young.cursor = null;
+        var young = rt.gc.youngBlockIterator();
         while (young.next()) |h| h.meta().flags.young = false;
         _ = rt.gc.block_heap.clearYoungBlocks();
     }
@@ -994,23 +864,25 @@ fn clearYoungState(rt: *JSRuntime) void {
 /// Open an incremental major cycle (§8.6 initial mark, mutator stopped for
 /// this call only).
 ///
-/// A full scope clears marks. The experimental sticky scope preserves old
-/// marks and force-traces the remembered owners before retiring that set.
-/// Both scopes seed every precise and conservative root GREY and publish
+/// Clears marks, seeds every precise and conservative root GREY and publishes
 /// `major_marking_active`; the frontier drains at subsequent polls.
 pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!void {
     std.debug.assert(!rt.gc.concurrent.markingActive());
     rt.gc.concurrent_mark_queue.ensureCapacity(gc.Registry.markQueueAllocator());
+    rt.gc.mark_stack.ensure(rt.gc.concurrent_mark_queue.segmentPool());
+    rt.gc.mark_stack.reset();
     rt.gc.concurrent_mark_queue.reset();
-    rt.gc.mark_stack.ensure();
-    rt.gc.mark_stack.len = 0;
-    rt.gc_mark_pool.slice_in_cycle = 0;
-    rt.gc_mark_pool.cycle_hot = false;
+    errdefer {
+        rt.gc.mark_stack.reset();
+        rt.gc.concurrent_mark_queue.reset();
+    }
+    // Freeze the decision at major start. The settled account is the live
+    // estimate that set this cycle's threshold; current allocation bytes also
+    // include the garbage whose threshold crossing requested this major.
 
     var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
     collector.shade_to_queue = true;
-    const scope = rt.gc.prepareIncrementalMajorScope();
 
     // Open the retirement transaction BEFORE anything can shade: the first
     // root seeded is already eligible to be retired by the trace.
@@ -1021,35 +893,12 @@ pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.Va
     errdefer rt.gc.generation.abandonMajorRetirement();
     const t0 = profile.nowNanos();
     const remembered_clears_before = rt.gc.generation.stats.remembered_clears;
-    switch (scope) {
-        .full => collector.clearMarks(),
-        .sticky => {
-            // Copy before clearing: the set is the only owner of these
-            // addresses, but tracing one owner may itself allocate. The world
-            // is stopped, so the snapshot remains valid until it is consumed.
-            var remembered = rt.gc.generation.rememberedIterator();
-            while (remembered.next()) |addr| {
-                const header: *gc.Header = @ptrFromInt(addr.*);
-                try collector.work.append(collector.allocator(), header);
-            }
-
-            // Old owners already carry a sticky mark, so ordinary root
-            // shading would skip their children. Expand them explicitly; the
-            // young targets they expose enter the persistent frontier.
-            //
-            // `sticky_inject_skip` drops the first N owners on purpose. That
-            // is exactly the shape of a lost write barrier, and it is what the
-            // fresh-trace oracle downstream must refuse. It is zero unless the
-            // operator sets `ZJS_GC_STICKY_INJECT_SKIP`.
-            const expand_from = @min(gc.sticky_inject_skip, collector.work.items.len);
-            for (collector.work.items[expand_from..]) |header| try collector.traceHeader(header);
-            collector.work.clearRetainingCapacity();
-        },
-    }
+    collector.clearMarks();
     const t1 = profile.nowNanos();
     try collector.seedRoots();
     const t1b = profile.nowNanos();
     if (collector.conservative_on) try collector.seedConservativeRoots();
+    try checkFrontierFailure(&rt.gc.concurrent_mark_queue);
     const t2 = profile.nowNanos();
     rt.gc.concurrent.stats.phase_begin_clear_ns +|= t1 -| t0;
     rt.gc.concurrent.stats.phase_begin_precise_seed_ns +|= t1b -| t1;
@@ -1089,40 +938,10 @@ pub fn incrementalMarkStep(rt: *JSRuntime, budget_ns: u64) CollectError!bool {
 
     const queue = &rt.gc.concurrent_mark_queue;
     const stack = &rt.gc.mark_stack;
-    // A frontier worth sharing goes to the parallel pool (owner + helpers,
-    // each a claim-dedup tracer lane); anything smaller stays on this exact
-    // single-threaded path, as does every configuration whose affinity mask
-    // yields zero workers.
-    {
-        const parallel = @import("gc_parallel_mark.zig");
-        const pool = &rt.gc_mark_pool;
-        defer pool.slice_in_cycle += 1;
-        // First-slice admission uses the frontier; every later slice in the
-        // same cycle qualifies unconditionally.
-        //
-        // Requiring the threshold on EVERY slice looks obviously right --
-        // waking three threads costs tens of microseconds and a narrow
-        // frontier is worth a few hundred nanoseconds of marking -- and it
-        // cost splay 10% on four cores. The frontier is an instantaneous
-        // reading of a depth-first traversal: it dips below any threshold
-        // repeatedly in the middle of a cycle that still has millions of
-        // objects to go, and each dip parks the helpers for the rest of that
-        // slice. What a slice is worth is a property of the cycle, not of
-        // the frontier at the instant the slice opens. (Measured 2026-08-27;
-        // the suggestion was sound in principle and the threshold is simply
-        // the wrong instrument for it.)
-        if (pool.slice_in_cycle >= 1 or stack.len + queue.len() >= 512) {
-            pool.ensureSpawned(rt);
-            if (pool.available()) {
-                const done = parallel.parallelMarkStep(rt, pool, budget_ns);
-                rt.gc.concurrent.stats.increments += 1;
-                return done;
-            }
-        }
-    }
+    try checkFrontierFailure(queue);
     const started = profile.nowNanos();
     var since_clock: usize = 0;
-    while (stack.popPrefetch() orelse queue.popSingle()) |header| {
+    while (popSegmentedFrontier(stack, queue, true)) |header| {
         // No validation needed: rc-managed kinds never enter the queue
         // (see `shade`), and everything that can is freeable only by the
         // collector itself, which does not run inside its own mutator
@@ -1131,6 +950,7 @@ pub fn incrementalMarkStep(rt: *JSRuntime, budget_ns: u64) CollectError!bool {
         // hazard only shapes had.
         try collector.traceHeader(header);
         if (collector.err) |err| return err;
+        try checkFrontierFailure(queue);
         since_clock += 1;
         if (since_clock == 64) {
             since_clock = 0;
@@ -1138,7 +958,8 @@ pub fn incrementalMarkStep(rt: *JSRuntime, budget_ns: u64) CollectError!bool {
         }
     }
     rt.gc.concurrent.stats.increments += 1;
-    return stack.len == 0 and queue.len() == 0;
+    try checkFrontierFailure(queue);
+    return stack.len == 0 and queue.isEmpty();
 }
 
 /// Final remark and sweep (§8.6, mutator stopped). Re-seeds every root --
@@ -1148,6 +969,7 @@ pub fn incrementalMarkStep(rt: *JSRuntime, budget_ns: u64) CollectError!bool {
 pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
     std.debug.assert(rt.gc.concurrent.markingActive());
     rt.gc.stats.collections += 1;
+    const t_enter = profile.nowNanos();
 
     var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
@@ -1157,6 +979,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // this pause with whatever the previous collection's walks cost.
     last_census_ns = 0;
     const t_remark = profile.nowNanos();
+    rt.gc.concurrent.stats.phase_finish_init_ns +|= t_remark -| t_enter;
     try collector.seedRoots();
     const t_remark_cons = profile.nowNanos();
     if (collector.conservative_on) try collector.seedConservativeRoots();
@@ -1166,34 +989,26 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     try collector.ephemeronFixedPoint();
     recordFinalMarkFootprint(rt);
 
-    // The sticky marks are not their own correctness proof. Before they can
-    // authorize condemnation, an opt-in oracle re-derives reachability from
-    // a fresh mark epoch and compares the exact would-be-doomed set. Keep the
-    // set collection-local: Runtime allocator lifetimes may not be mixed.
+    // Roots-diag oracle: re-derive reachability from a fresh mark epoch and
+    // compare the exact would-be-doomed set. Keep the set collection-local:
+    // Runtime allocator lifetimes may not be mixed.
     var full_reachable: ?FullReachable = null;
     defer if (full_reachable) |*reachable| reachable.deinit();
-    if (comptime gc.sticky_major_enabled) {
-        const scope = rt.gc.incrementalMajorScope();
-        // `verify_major_all` extends the audit to full-scope cycles. A full
-        // scope re-derives everything from cleared marks and so cannot be the
-        // thing under suspicion -- which is precisely why it is worth auditing:
-        // it turns the sticky arm's violation count into a rate against a
-        // control that is known-good.
-        const audit = gc.verify_major_all or (scope == .sticky and gc.verify_sticky_major);
-        if (audit) {
+    if (comptime gc.roots_diag_enabled) {
+        if (gc.verify_major_all) {
             full_reachable = try computeFullReachable(rt, scan);
-            if (full_reachable) |*reachable| try verifyStickyCondemnation(rt, scope, reachable);
+            if (full_reachable) |*reachable| try verifyFullCondemnation(rt, reachable);
         }
     }
 
     // Marking is over before anything is freed (§8.6 step 12 before 13).
     rt.gc.setMajorMarkingActive(false, .monotonic);
+    rt.gc.assertFrontierDrainedBeforeReclaim();
 
     const t_weak = profile.nowNanos();
     collector.processWeak();
     const t_sweep = profile.nowNanos();
-    collector.beginSweepModelSweep();
-    if (!rt.gc.arenaSetWhole()) {
+    if (!rt.gc.addressSetWhole(rt)) {
         // Declining to sweep is safe for memory -- one round leaks -- but it
         // is an exit from the retirement transaction, and block cells the
         // trace already promoted make the young structures inconsistent.
@@ -1226,16 +1041,21 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     var condemned: usize = 0;
     var doomed_bytes: usize = 0;
     if (comptime gc.block_heap_enabled) {
+        rt.gc.assertFrontierAllowsReclaimKind(.object);
         const snap = rt.gc.block_heap.snapshotAllDoomed(rt.gc.block_heap.mark_epoch);
         condemned += snap.count;
         // Ledger parity: the account carries object sizes, not cell sizes.
         doomed_bytes +|= snap.bytes -| (snap.count * gc.metadata_prefix_size);
+        // Unmarked string extents are dead at finish and referenced by
+        // nothing; free them now (rare, so the pause cost is negligible)
+        // rather than teaching the sliced morgue a table-backed kind.
+        if (comptime gc.string_tracer_owned) condemned += string_mod.sweepStringExtents(rt);
     }
     var previous_node: *gc.Header = &rt.gc.gc_obj_list.sentinel;
-    var cursor_node = previous_node.next;
+    var cursor_node = previous_node.next_non_object;
     while (cursor_node) |header| {
         if (header == &rt.gc.gc_obj_list.sentinel) break;
-        const next_node = header.next;
+        const next_node = header.nextNonObject();
         if (rt.gc.headerMarked(header)) {
             header.meta().flags.young = false;
             previous_node = header;
@@ -1264,6 +1084,25 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
         condemned += 1;
         cursor_node = next_node;
     }
+    // Non-block Objects have no live-list node. Their unordered side authority
+    // is consumed in place: condemnation swap-removes, so the replacement at
+    // this index must be examined before advancing.
+    var object_index: usize = 0;
+    while (object_index < rt.gc.nonBlockObjectCount()) {
+        const header = rt.gc.nonBlockObjectAt(object_index);
+        if (rt.gc.headerMarked(header) or header.metaConst().flags.is_pinned) {
+            header.meta().flags.young = false;
+            object_index += 1;
+            continue;
+        }
+        doomed_bytes +|= gc.Registry.heapByteSizeFromHeader(rt, header);
+        rt.gc.condemnNonBlockObject(header, false);
+        condemned += 1;
+    }
+    // Reuse the pacing contract's settled-live estimate. `doomed_bytes` has
+    // already converted block cell bytes to MemoryAccount units above, so this
+    // subtraction does not mix physical cells with logical payload sizes.
+    rt.gc_mark_pool.last_settled_live_bytes = rt.memory.allocated_bytes -| doomed_bytes;
     // Every pre-existing list survivor was retired by tracing/condemnation.
     // From here on a non-null anchor belongs to a post-mark publication, so a
     // forward walk is the exact replacement for the old header.prev tail walk.
@@ -1296,7 +1135,6 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     rt.gc.concurrent.stats.phase_finish_remark_ns +|= raw_remark_ns -| census_ns;
     rt.gc.concurrent.stats.phase_finish_weak_ns +|= t_sweep -| t_weak;
     rt.gc.concurrent.stats.phase_finish_condemn_ns +|= t_end -| t_sweep;
-    collector.endSweepModelSweep();
 
     // Commit the retirement transaction. Condemnation retired surviving
     // list carriers; `clearYoungState` catches allocations published during
@@ -1311,6 +1149,11 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     if (gc.invariantChecksEnabled()) {
         verifyCollectorInvariants(rt, collector.conservative_on, true);
     }
+    // Everything after condemnation: the sweep-model close, the young-state
+    // retirement walk and (safety builds only) the invariant sweep. Timed so
+    // the subphase row reconciles with the STW `finish` row instead of
+    // leaving a residual nobody can name.
+    rt.gc.concurrent.stats.phase_finish_tail_ns +|= profile.nowNanos() -| t_end;
     return condemned;
 }
 
@@ -1319,7 +1162,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
 /// can resume where its budget ran out. Objects first; realms, modules and
 /// function bytecode after; cells and shapes last, because earlier
 /// destructors still read them.
-const doomed_phase_kinds = [_]gc.GcKind{ .object, .realm_context, .module, .function_bytecode, .var_ref };
+const doomed_phase_kinds = [_]gc.GcKind{ .object, .realm_context, .module, .function_bytecode, .var_ref, .big_int };
 
 /// Destroy up to `budget_ns` of the morgue. Returns true when it is empty.
 ///
@@ -1348,27 +1191,69 @@ const doomed_phase_kinds = [_]gc.GcKind{ .object, .realm_context, .module, .func
 /// gate and is measured, not asserted.
 const destroy_clock_cadence: usize = 256;
 
-/// Destruction-slice decomposition. The slice costs far more than the
-/// destructors it runs -- on raytrace the profile puts `destroyFromHeader`
-/// at 1.75% while the slice's stopped time is 5.4% of the run -- so the
-/// difference is the machinery around them, and naming it needs a probe
-/// rather than a guess. Off unless `ZJS_GC_DESTROY_PROBE` is set: the
-/// timestamp per corpse would otherwise BE the cost.
-pub var destroy_probe: bool = false;
-pub var destroy_probe_dtor_ns: u64 = 0;
-pub var destroy_probe_drain_ns: u64 = 0;
-pub var destroy_probe_corpses: u64 = 0;
-
 fn morgueIsEmpty(rt: *const JSRuntime) bool {
     if (rt.gc.doomed_cursor != null) return false;
     if (rt.gc.cycle_deferred_frees.count != 0) return false;
     if (comptime gc.block_heap_enabled) {
         if (rt.gc.block_heap.doomed_blocks != null) return false;
     }
+    if (rt.gc.doomedNonBlockObjectCount() != 0) return false;
+    if (rt.gc.temporaryNonBlockObjectCount() != 0) return false;
     for (&rt.gc.doomed_by_kind) |*bucket| {
         if (!gc.listEmpty(bucket)) return false;
     }
     return true;
+}
+
+/// Read-only endpoint/settled census for the fixed-work gate. These counts
+/// deliberately come from the representations that keep the morgue open,
+/// rather than from lifetime collection counters: the gate needs to
+/// distinguish one unserved destruction slice from a closed transaction that
+/// accidentally retained state.
+pub const DoomedStateSnapshot = struct {
+    pending: bool,
+    nonempty_buckets: usize,
+    bucket_headers: usize,
+    cursor_present: bool,
+    doomed_blocks: usize,
+    parked_frees: usize,
+    deferred_finalizers: usize,
+    active_finalizer: bool,
+};
+
+pub fn doomedStateSnapshot(rt: *const JSRuntime) DoomedStateSnapshot {
+    var nonempty_buckets: usize = if (rt.gc.doomedNonBlockObjectCount() != 0) 1 else 0;
+    var bucket_headers: usize = rt.gc.doomedNonBlockObjectCount();
+    for (&rt.gc.doomed_by_kind) |*bucket| {
+        if (!gc.listEmpty(bucket)) nonempty_buckets += 1;
+        var header = bucket.sentinel.next_non_object;
+        while (header) |current| {
+            if (current == &bucket.sentinel) break;
+            bucket_headers += 1;
+            header = current.nextNonObject();
+        }
+    }
+
+    var doomed_blocks: usize = 0;
+    if (comptime gc.block_heap_enabled) {
+        var block = rt.gc.block_heap.doomed_blocks;
+        while (block) |current| {
+            doomed_blocks += 1;
+            const link = current.doomed_link;
+            block = if (link <= 1) null else @ptrFromInt(link);
+        }
+    }
+
+    return .{
+        .pending = rt.gc.doomed_pending,
+        .nonempty_buckets = nonempty_buckets,
+        .bucket_headers = bucket_headers,
+        .cursor_present = rt.gc.doomed_cursor != null,
+        .doomed_blocks = doomed_blocks,
+        .parked_frees = rt.gc.cycle_deferred_frees.count,
+        .deferred_finalizers = rt.deferred_class_payload_finalizers.len,
+        .active_finalizer = rt.active_deferred_class_payload_finalizer != null,
+    };
 }
 
 /// Cross-lane publication contract for deferred plugin payload roots. Block
@@ -1407,10 +1292,6 @@ fn assertMorgueEmptyBeforeCondemnation(rt: *const JSRuntime) void {
 pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
     std.debug.assert(rt.gc.doomed_pending);
     const started = profile.nowNanos();
-    // Read once per slice. The environment switch is fixed at Runtime init;
-    // reloading it around every destructor made the disabled probe part of
-    // the path it was meant to observe.
-    const probe_enabled = destroy_probe;
     var destroyed: usize = 0;
     var since_clock: usize = 0;
 
@@ -1433,16 +1314,16 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
             const cell_size: usize = block.cell_size;
             while (block.takeDoomedCell(0)) |index| {
                 const header: *gc.Header = @ptrFromInt(cells_base + @as(usize, index) * cell_size);
-                std.debug.assert(header.meta().flags.kind == .object);
                 // The alloc bit and heap-accounted stamp remain live through
                 // every payload callback, so containsHeader's block iterator
                 // already publishes this object. Standalone/list objects need
                 // sweep_current below because condemnation delisted them.
-                const d0 = if (probe_enabled) profile.nowNanos() else 0;
-                Object.destroyFromHeader(rt, header);
-                if (probe_enabled) {
-                    destroy_probe_dtor_ns +|= profile.nowNanos() -| d0;
-                    destroy_probe_corpses +|= 1;
+                switch (header.meta().flags.kind) {
+                    .object => Object.destroyFromHeader(rt, header),
+                    // String-family cells (TGC S2) share the block heap; the
+                    // string side frees the rope tail / atom entry itself.
+                    .string => if (comptime gc.string_tracer_owned) string_mod.destroyCellFromHeader(rt, header) else unreachable,
+                    else => unreachable,
                 }
                 destroyed += 1;
                 since_clock += 1;
@@ -1478,11 +1359,31 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
     while (rt.gc.doomed_phase < doomed_phase_kinds.len + 1) {
         const final_pass = rt.gc.doomed_phase == doomed_phase_kinds.len;
         const phase_kind: gc.GcKind = if (final_pass) .shape else doomed_phase_kinds[rt.gc.doomed_phase];
+        if (phase_kind == .object) {
+            while (rt.gc.popDoomedNonBlockObject()) |h| {
+                rt.gc.sweep_current = h;
+                Object.destroyFromHeader(rt, h);
+                rt.gc.sweep_current = null;
+                destroyed += 1;
+                since_clock += 1;
+                if (since_clock == destroy_clock_cadence) {
+                    since_clock = 0;
+                    if (profile.nowNanos() -| started >= budget_ns) {
+                        rt.gc.doomed_destroyed += destroyed;
+                        rt.gc.concurrent.stats.doomed_destroyed_objects +|= destroyed;
+                        return destroyed;
+                    }
+                }
+            }
+            rt.gc.doomed_phase += 1;
+            rt.gc.doomed_cursor = null;
+            continue;
+        }
         const bucket = &rt.gc.doomed_by_kind[@intFromEnum(phase_kind)];
-        var cursor = rt.gc.doomed_cursor orelse bucket.sentinel.next;
+        var cursor = rt.gc.doomed_cursor orelse bucket.sentinel.next_non_object;
         while (cursor) |h| {
             if (h == &bucket.sentinel) break;
-            const next = h.next;
+            const next = h.nextNonObject();
             const kind = h.meta().flags.kind;
             // The bucket only holds this phase's kind, so the test is an
             // assertion rather than a filter now.
@@ -1492,7 +1393,6 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
                 // the head, including after a budgeted resume.
                 gc.listDelAfterTraversalOwned(bucket, &bucket.sentinel, h);
                 rt.gc.sweep_current = h;
-                const d0 = if (destroy_probe) profile.nowNanos() else 0;
                 switch (kind) {
                     .object => Object.destroyFromHeader(rt, h),
                     .realm_context => {
@@ -1511,14 +1411,14 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
                         rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                         var_ref_mod.VarRef.destroyFromHeader(rt, h);
                     },
+                    .big_int => {
+                        rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                        bigint_mod.BigInt.destroyFromHeader(rt, h);
+                    },
                     .shape => {
                         if (!h.meta().flags.finalizing) rt.shapes.destroyFromHeader(h);
                     },
                     else => unreachable,
-                }
-                if (destroy_probe) {
-                    destroy_probe_dtor_ns +|= profile.nowNanos() -| d0;
-                    destroy_probe_corpses +|= 1;
                 }
                 rt.gc.sweep_current = null;
                 if (kind != .function_bytecode) destroyed += 1;
@@ -1553,10 +1453,6 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
     // but not this).
     rt.gc.doomed_destroyed += destroyed;
     rt.gc.concurrent.stats.doomed_destroyed_objects +|= destroyed;
-    const drain0 = if (probe_enabled) profile.nowNanos() else 0;
-    defer if (probe_enabled) {
-        destroy_probe_drain_ns +|= profile.nowNanos() -| drain0;
-    };
     const pending_finalizers = rt.hasPendingDeferredClassPayloadFinalizers();
     const parked_before = rt.gc.cycle_deferred_frees.count;
     const drain_complete = !pending_finalizers and
@@ -1609,10 +1505,10 @@ pub fn finishPendingDestruction(rt: *JSRuntime) void {
 }
 
 /// Drain the concurrent barrier queue the way the final remark does, for
-/// tests that construct the mutator interleaving `collectConcurrentMajor`
-/// cannot express (it drains to completion in one call, so nothing mutates
-/// between its phases). Returns the number of grey entries traced.
+/// tests that construct a mutator interleaving between marking phases.
+/// Returns the number of grey entries traced.
 pub fn remarkBarrierQueueForTest(rt: *JSRuntime) CollectError!usize {
+    rt.gc.mark_stack.ensure(rt.gc.concurrent_mark_queue.segmentPool());
     var collector = try Collector.init(rt, null, .declared_only);
     defer collector.deinit();
     return collector.drainBarrierQueue();
@@ -1695,21 +1591,11 @@ const Collector = struct {
 
     fn run(self: *Collector) CollectError!usize {
         self.clearMarks();
-        if (detailed_reports) {
-            const t = censusStart();
-            var live = self.rt.gc.objectIterator();
-            while (live.next()) |_| self.report.allocated_before += 1;
-            censusEnd(t);
-        }
-
-        self.beginSweepModelMark();
-
         try self.seedRoots();
         try self.drain();
         if (detailed_reports) {
             const t = censusStart();
             self.exact_mark_count = self.countMarked();
-            self.report.marked_exact = self.exact_mark_count;
             censusEnd(t);
         }
 
@@ -1727,79 +1613,17 @@ const Collector = struct {
         try self.ephemeronFixedPoint();
         recordFinalMarkFootprint(self.rt);
         self.processWeak();
-        self.endSweepModelMark();
-        self.beginSweepModelSweep();
         // Sweeping requires that every live object be reachable from a
-        // conservative candidate, which requires every arena to be registered.
+        // conservative candidate, which requires every owned range to be registered.
         // If one is not, mark and stop: the marks are still correct, nothing is
-        // reclaimed this round, and the objects stay alive until the arena set
-        // can be repaired. Leaking a round is recoverable; freeing a live
+        // reclaimed this round, and the objects stay alive until the address
+        // set can be repaired. Leaking a round is recoverable; freeing a live
         // object is not.
-        if (!self.rt.gc.arenaSetWhole()) {
+        if (!self.rt.gc.addressSetWhole(self.rt)) {
             self.report.skipped_sweep_incomplete_arenas = true;
             return 0;
         }
-        const live_before_sweep = self.liveHeapBytes();
-        const swept = self.sweepUnmarked();
-        self.report.reclaimed_bytes = live_before_sweep -| self.liveHeapBytes();
-        if (comptime gc.sweep_model_enabled) {
-            self.rt.gc.sweep_model.last_sweep_debt = self.report.reclaimed_bytes;
-        }
-        self.endSweepModelSweep();
-        return swept;
-    }
-
-    fn liveHeapBytes(self: *Collector) usize {
-        return self.rt.gc.old_space.live_bytes +| self.rt.gc.large_space.live_bytes;
-    }
-
-    fn beginSweepModelMark(self: *Collector) void {
-        if (comptime !gc.sweep_model_enabled) return;
-        self.rt.gc.sweep_model.beginMark(self.liveHeapBytes());
-    }
-
-    fn endSweepModelMark(self: *Collector) void {
-        if (comptime !gc.sweep_model_enabled) return;
-        // Zero, deliberately: the whole-heap walk that used to produce a figure
-        // here is gone.
-        //
-        // It visited every object and asked `heapByteSizeFromHeader` for each,
-        // to compute the bytes the sweep was about to reclaim, and nothing
-        // could read the answer -- `endSweep` zeroes `debt.sweep_debt` before
-        // `refreshHeadroom` consumes it (gc_sweep_model.zig:94,99), and the
-        // panel prints that same zeroed field. The number is worth having, so
-        // it now comes from the space account instead: live bytes before the
-        // sweep minus live bytes after. That is exact and free, because every
-        // free already debits it.
-        //
-        // The window transitions `endMark` drives do not depend on the value.
-        self.rt.gc.sweep_model.endMark(0);
-    }
-
-    fn beginSweepModelSweep(self: *Collector) void {
-        if (comptime !gc.sweep_model_enabled) return;
-        self.rt.gc.sweep_model.beginSweep();
-    }
-
-    fn endSweepModelSweep(self: *Collector) void {
-        if (comptime !gc.sweep_model_enabled) return;
-        self.rt.gc.sweep_model.endSweep();
-        self.rt.gc.sweep_model.refreshHeadroom(
-            self.liveHeapBytes(),
-            self.rt.gc.policy.major_debt_threshold,
-            self.rt.gc.stats.external_bytes,
-        );
-        const model = self.rt.gc.sweep_model;
-        self.report.mark_debt = model.debt.mark_debt;
-        self.report.sweep_debt = model.debt.sweep_debt;
-        self.report.soft_headroom = model.debt.soft_headroom;
-        self.report.hard_headroom = model.debt.hard_headroom;
-        self.report.windows_active = model.active;
-        self.report.trans_fresh_to_active = model.trans_fresh_to_active;
-        self.report.trans_active_to_needs_sweep = model.trans_active_to_needs_sweep;
-        self.report.trans_needs_sweep_to_sweeping = model.trans_needs_sweep_to_sweeping;
-        self.report.trans_sweeping_to_swept = model.trans_sweeping_to_swept;
-        self.report.trans_swept_to_active = model.trans_swept_to_active;
+        return self.sweepUnmarked();
     }
 
     /// Whole-heap unmark: one epoch bump for block bitmaps and one for the
@@ -1819,11 +1643,12 @@ const Collector = struct {
     /// and clearing the whole heap would make a nursery collection cost
     /// O(heap) -- which is how a large live set turns frequent minors
     /// quadratic.
-    fn clearYoungMarks(self: *Collector) void {
-        var iterator = self.rt.gc.youngIterator();
+    inline fn clearYoungMarks(self: *Collector) void {
+        var iterator = self.rt.gc.youngListIterator();
         while (iterator.next()) |header| {
             self.rt.gc.setHeaderUnmarked(header);
         }
+        self.rt.gc.clearYoungBlockMarksStw();
     }
 
     fn countMarked(self: *Collector) usize {
@@ -1879,25 +1704,31 @@ const Collector = struct {
             // inside its own windows, so the queue needs no validation at
             // all.
             const kind = header.meta().flags.kind;
-            if (kind == .shape or kind == .realm_context) {
-                // Mark BEFORE tracing: the mark is both this object's
-                // survival (an unmarked shape here was condemned alive -- the
-                // first build of this branch forgot the store and test262
-                // found what macro-check missed) and the recursion's
-                // deduplication, since a re-shade of the same shape now takes
-                // the marked early-return above.
-                self.rt.gc.setHeaderMarked(header);
-                self.traceHeader(header) catch |err| {
-                    self.err = err;
-                };
-                return;
+            if (!gc.frontierEpochSafe(kind)) {
+                if (kind != .shape and kind != .realm_context)
+                    @panic("gc: FRONTIER SAFETY: non-tracing kind reached shade");
+                {
+                    // Mark BEFORE tracing: the mark is both this object's
+                    // survival (an unmarked shape here was condemned alive -- the
+                    // first build of this branch forgot the store and test262
+                    // found what macro-check missed) and the recursion's
+                    // deduplication, since a re-shade of the same shape now takes
+                    // the marked early-return above.
+                    self.rt.gc.setHeaderMarked(header);
+                    self.traceHeader(header) catch |err| {
+                        self.err = err;
+                    };
+                    return;
+                }
             }
-            // Owner-private stack first: the hot loop pops it with plain
-            // array ops. Full or missing -> the shared ring; a failed ring
-            // push is the overflow contract (object marked, flag set, the
-            // remark's rescan finds it).
-            if (!self.rt.gc.mark_stack.push(header)) {
-                _ = self.rt.gc.concurrent_mark_queue.pushSingle(header);
+            // Owner-private segments first. If local growth hits OOM, route
+            // this address to the shared segmented chain; if that allocation
+            // also fails, fail the cycle closed before sweep.
+            const frontier_header = self.rt.gc.frontierSafeHeaderAfterMarkClaim(header);
+            if (!self.rt.gc.mark_stack.push(frontier_header)) {
+                if (!self.rt.gc.concurrent_mark_queue.push(frontier_header)) {
+                    self.err = error.OutOfMemory;
+                }
             }
             return;
         }
@@ -1908,7 +1739,7 @@ const Collector = struct {
 
     fn shadeOptionalObject(self: *Collector, obj: ?*Object) void {
         const object = obj orelse return;
-        self.shadeExact(&object.header);
+        self.shadeExact(object.gcHeader());
     }
 
     pub fn visitValue(self: *Collector, val: *JSValue) void {
@@ -1920,6 +1751,7 @@ const Collector = struct {
     }
 
     pub fn visitShape(self: *Collector, shape_ref: *shape.Shape) void {
+        if (self.rt.gc.headerMarkedKnownNonBlock(&shape_ref.header)) return;
         self.shadeExact(&shape_ref.header);
     }
 
@@ -1957,7 +1789,7 @@ const Collector = struct {
             // cell directly and trace only its initialized payload.
             if (self.rt.gc.pinEntryIsConstructionRoot(entry)) {
                 self.rt.gc.setHeaderMarked(entry.header);
-                const object: *Object = @alignCast(@fieldParentPtr("header", entry.header));
+                const object = Object.fromHeader(entry.header);
                 try object.traceDetachedGeneratorShellEdges(self);
                 continue;
             }
@@ -2010,6 +1842,24 @@ const Collector = struct {
         self.shadeExact(header);
     }
 
+    /// R3 census variant of `shadeConservativeCandidate`: same filters and
+    /// the same `shadeExact`, plus a record when the shade is what marked the
+    /// header. Used only by `computeFullReachable`'s conservative arm, where
+    /// the precise trace has already run to a fixed point.
+    fn recordConservativeCandidate(context: *anyopaque, header: *gc.Header) void {
+        const self: *Collector = @ptrCast(@alignCast(context));
+        if (self.err != null) return;
+        const addr = @intFromPtr(header);
+        if (addr < 4096 or !std.mem.isAligned(addr, @alignOf(gc.Header))) return;
+        const was_marked = self.rt.gc.headerMarked(header);
+        self.shadeExact(header);
+        if (comptime gc.roots_diag_enabled) {
+            if (!was_marked and self.rt.gc.headerMarked(header)) {
+                self.rt.gc.roots_diag.noteDirect(self.rt, header, conservative.diagCurrentWord());
+            }
+        }
+    }
+
     fn seedConservativeRoots(self: *Collector) CollectError!void {
         conservative.spillRegistersAndScan(
             self.rt,
@@ -2020,37 +1870,22 @@ const Collector = struct {
         if (self.err) |err| return err;
     }
 
-    /// Trace everything the marking barrier shaded grey, then handle
-    /// overflow by the coarse route.
-    ///
-    /// A queue entry is marked with untraced children; tracing it and
-    /// draining makes it genuinely black. Overflow does not lose work -- the
-    /// object stays marked and the flag stays set -- but it does lose the
-    /// ADDRESS, so the downgrade is one pass over every marked object,
-    /// tracing each. That is strictly more scanning and strictly no less
-    /// discovery (`gc_mark_queue.zig`'s contract). One pass suffices: any
-    /// object the pass shades goes onto the ordinary work list and is traced
-    /// transitively by the drain before the pass moves on.
+    /// Trace everything the marking barrier shaded grey. Shared segments are
+    /// stolen whole; exhaustion is an explicit collection failure, never an
+    /// address-losing overflow followed by a whole-heap rescan.
     fn drainBarrierQueue(self: *Collector) CollectError!usize {
         if (comptime !gc.concurrent_enabled) return 0;
         const queue = &self.rt.gc.concurrent_mark_queue;
+        try checkFrontierFailure(queue);
         var drained: usize = 0;
-        while (self.rt.gc.mark_stack.pop() orelse queue.popSingle()) |header| {
+        while (popSegmentedFrontier(&self.rt.gc.mark_stack, queue, false)) |header| {
             drained += 1;
             try self.traceHeader(header);
             if (self.err) |err| return err;
             try self.drain();
+            try checkFrontierFailure(queue);
         }
-        if (queue.hasOverflowed()) {
-            var it = self.rt.gc.objectIterator();
-            while (it.next()) |header| {
-                if (!self.rt.gc.headerMarked(header)) continue;
-                try self.traceHeader(header);
-                if (self.err) |err| return err;
-                try self.drain();
-            }
-            queue.clearOverflow();
-        }
+        try checkFrontierFailure(queue);
         return drained;
     }
 
@@ -2076,7 +1911,7 @@ const Collector = struct {
             var holder = self.rt.weak_reference_holder_head;
             while (holder) |object| {
                 const next = object.weakReferenceHolderNext();
-                if (self.rt.gc.headerMarked(&object.header)) {
+                if (self.rt.gc.headerMarked(object.gcHeader())) {
                     if (object.collectionPayloadForCycleGc()) |payload| {
                         for (payload.weak_entries) |*entry| {
                             if (!keyIsMarked(self.rt, entry.key_identity)) continue;
@@ -2097,8 +1932,9 @@ const Collector = struct {
     }
 
     fn processWeak(self: *Collector) void {
-        self.rt.gc.beginDecrefPhase();
-        defer self.rt.gc.endDecrefPhase(self.rt);
+        var zero_ref_scratch: gc.ZeroRefScratch = .{};
+        self.rt.gc.beginDecrefPhase(&zero_ref_scratch);
+        defer self.rt.gc.endDecrefPhase(self.rt, &zero_ref_scratch);
 
         for (self.rt.weak_root_slots) |slot| {
             const identity = slot.identity orelse continue;
@@ -2111,7 +1947,7 @@ const Collector = struct {
         var current = self.rt.weak_reference_holder_head;
         while (current) |holder| {
             const next = holder.weakReferenceHolderNext();
-            if (self.rt.gc.headerMarked(&holder.header)) {
+            if (self.rt.gc.headerMarked(holder.gcHeader())) {
                 self.sweepHolder(holder, &finalization_enqueue_blocked);
             }
             current = next;
@@ -2123,7 +1959,6 @@ const Collector = struct {
             if (payload.weak_target_identity) |identity| {
                 if (!keyIsMarked(self.rt, identity)) {
                     self.rt.clearWeakIdentitySlot(&payload.weak_target_identity);
-                    self.report.weakrefs_cleared += 1;
                 }
             }
         }
@@ -2142,7 +1977,6 @@ const Collector = struct {
                 self.rt.releaseWeakIdentity(entry.key_identity);
                 entry.value.free(self.rt);
                 removed = true;
-                self.report.weak_entries_dropped += 1;
             }
             if (removed) {
                 payload.weak_entries = payload.weak_entries.ptr[0..write_index];
@@ -2187,7 +2021,6 @@ const Collector = struct {
             object_gc.enqueueFinalizationCleanup(self.rt, finalization_payload, cell.held_value);
             cell.state = .queued;
             cell.destroy(self.rt);
-            self.report.finalization_enqueued += 1;
         }
         finalization_payload.cells = finalization_payload.cells.ptr[0..write_index];
         holder.pruneBorrowedReferenceHolderIfEmpty(self.rt);
@@ -2221,25 +2054,24 @@ const Collector = struct {
                 if (header.metaConst().flags.is_pinned) continue;
                 doomed.append(self.allocator(), header) catch return 0;
             }
-            var young_cursor = self.rt.gc.young_head;
-            while (young_cursor) |header| {
-                if (header == &self.rt.gc.gc_obj_list.sentinel) break;
-                young_cursor = header.next;
+            var young_nonblock = self.rt.gc.youngListIterator();
+            while (young_nonblock.next()) |header| {
                 if (self.rt.gc.headerMarked(header)) continue;
                 if (header.metaConst().flags.is_pinned) continue;
                 doomed.append(self.allocator(), header) catch return 0;
             }
         } else {
-            // Block cells must be parked before the generic list population.
-            // LIFO reversal then gives Pass B its generic-prefix/block-suffix
-            // topology without a per-entry descriptor.
+            // Stamp every block corpse before publishing the bitmap snapshot.
+            // Object owns no intrusive successor; block doomed bits are the
+            // complete condemnation authority until Pass A destroys it.
             var young_blocks = self.rt.gc.youngBlockIterator();
             while (young_blocks.next()) |header| {
                 if (self.rt.gc.headerMarked(header)) continue;
                 if (header.metaConst().flags.is_pinned) continue;
-                self.rt.gc.detachCycleCandidate(header);
-                gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
+                self.rt.gc.detachBlockObjectCandidate(header);
             }
+            if (comptime gc.block_heap_enabled)
+                _ = self.rt.gc.block_heap.snapshotYoungDoomed(self.rt.gc.block_heap.mark_epoch);
             // The list population is a young suffix. Its predecessor was
             // captured at the first publication, so deletion is O(young).
             if (self.rt.gc.young_head) |young_head| {
@@ -2247,7 +2079,7 @@ const Collector = struct {
                 var cursor: ?*gc.Header = young_head;
                 while (cursor) |header| {
                     if (header == &self.rt.gc.gc_obj_list.sentinel) break;
-                    const next = header.next;
+                    const next = header.nextNonObject();
                     if (self.rt.gc.headerMarked(header) or header.metaConst().flags.is_pinned) {
                         previous = header;
                         cursor = next;
@@ -2257,6 +2089,22 @@ const Collector = struct {
                     gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
                     cursor = next;
                 }
+            }
+            // Side-authoritative Objects are unordered rather than a suffix.
+            // Removing one swap-fills its slot, so only survivors advance the
+            // cursor.
+            var object_index: usize = 0;
+            while (object_index < self.rt.gc.nonBlockObjectCount()) {
+                const header = self.rt.gc.nonBlockObjectAt(object_index);
+                if (!header.metaConst().flags.young) {
+                    object_index += 1;
+                    continue;
+                }
+                if (self.rt.gc.headerMarked(header) or header.metaConst().flags.is_pinned) {
+                    object_index += 1;
+                    continue;
+                }
+                self.rt.gc.condemnNonBlockObject(header, true);
             }
         }
         if (full_reachable) |reachable| {
@@ -2268,13 +2116,15 @@ const Collector = struct {
                 if (reachability == .precise) precise_violations += 1;
                 const kind = header.metaConst().flags.kind;
                 if (kind == .object) {
-                    const o: *Object = @alignCast(@fieldParentPtr("header", header));
+                    const o = Object.fromHeader(header);
                     std.debug.print("VERIFY-MINOR condemned-but-reachable source={s} kind=object class={d} payload={s}\n", .{ @tagName(reachability), o.class_id, @tagName(o.flags.class_payload_kind) });
                 } else {
                     std.debug.print("VERIFY-MINOR condemned-but-reachable source={s} kind={s}\n", .{ @tagName(reachability), @tagName(kind) });
                 }
             }
             if (violations != 0) {
+                defer if (gc.verify_minor_fatal and precise_violations != 0)
+                    @panic("VERIFY-MINOR: precisely reachable object condemned by a minor");
                 std.debug.print("VERIFY-MINOR {d} of {d} condemned objects are reachable by a full trace ({d} precise, {d} conservative-only)\n", .{
                     violations,
                     doomed.items.len,
@@ -2286,9 +2136,21 @@ const Collector = struct {
         if (gc.minor_audit) self.auditCondemnedYoung(doomed.items);
         if (snapshot_doomed) {
             for (doomed.items) |header| {
-                self.rt.gc.detachCycleCandidate(header);
-                gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
+                const doomed_kind = header.metaConst().flags.kind;
+                if (doomed_kind == .object or (gc.string_tracer_owned and doomed_kind == .string)) {
+                    // String cells share the block route; a string is never a
+                    // list carrier (extents are not young-listed).
+                    if (gc.Registry.isBlockCellHeader(header))
+                        self.rt.gc.detachBlockObjectCandidate(header)
+                    else
+                        self.rt.gc.condemnNonBlockObject(header, true);
+                } else {
+                    self.rt.gc.detachCycleCandidate(header);
+                    gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
+                }
             }
+            if (comptime gc.block_heap_enabled)
+                _ = self.rt.gc.block_heap.snapshotYoungDoomed(self.rt.gc.block_heap.mark_epoch);
         }
 
         const old_phase = self.rt.gc.phase;
@@ -2307,7 +2169,9 @@ const Collector = struct {
         // `allocated_bytes` that had not moved, ratcheting it up by half on
         // every minor. Drain inside the `.remove_cycles` scope, on the same
         // pending-finalizer condition the major uses.
-        if (!self.rt.hasPendingDeferredClassPayloadFinalizers()) object_gc.drainCycleDeferredFrees(self.rt);
+        if (!self.rt.hasPendingDeferredClassPayloadFinalizers()) {
+            object_gc.drainCycleDeferredFrees(self.rt);
+        }
 
         // Survivors keep their marks: that is what makes them old.
         return reclaimed;
@@ -2316,28 +2180,26 @@ const Collector = struct {
     fn sweepUnmarked(self: *Collector) usize {
         gc.listInit(&self.rt.gc.tmp_obj_list);
 
-        // Block cells are appended first so the object Pass-A walk parks them
-        // before standalone/list objects. LIFO reversal is then the same as the
-        // incremental major: optional generic prefix, contiguous block suffix.
-        // Both populations are `.object` in this pass, so this changes no
-        // destructor-kind ordering.
+        // Block Object corpses are stamped first, then published only through
+        // the block doomed bitmap. No Object body word is list authority.
         var block_iterator = self.rt.gc.deadBlockCandidateIterator();
         while (block_iterator.next()) |header| {
             if (header.metaConst().flags.is_pinned) {
                 header.meta().flags.young = false;
                 continue;
             }
-            self.rt.gc.detachCycleCandidate(header);
-            gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
+            self.rt.gc.detachBlockObjectCandidate(header);
         }
+        if (comptime gc.block_heap_enabled)
+            _ = self.rt.gc.block_heap.snapshotAllDoomed(self.rt.gc.block_heap.mark_epoch);
 
         // List carriers are singly linked in trace. Walk them with an explicit
         // predecessor so every condemnation is an O(1) splice.
         var previous: *gc.Header = &self.rt.gc.gc_obj_list.sentinel;
-        var cursor = previous.next;
+        var cursor = previous.next_non_object;
         while (cursor) |header| {
             if (header == &self.rt.gc.gc_obj_list.sentinel) break;
-            const next = header.next;
+            const next = header.nextNonObject();
             if (self.rt.gc.headerMarked(header)) {
                 // The mark STAYS. §8.2's sticky rule is `allocated && marked`
                 // is old, and the survivor's mark is what tells the next
@@ -2367,6 +2229,24 @@ const Collector = struct {
             self.rt.gc.detachCycleCandidateAfter(previous, header);
             gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
             cursor = next;
+        }
+
+        // The rare non-block Object population is side-authoritative, not an
+        // intrusive suffix. Retire survivors and swap-remove corpses in place.
+        var object_index: usize = 0;
+        while (object_index < self.rt.gc.nonBlockObjectCount()) {
+            const header = self.rt.gc.nonBlockObjectAt(object_index);
+            if (self.rt.gc.headerMarked(header)) {
+                header.meta().flags.young = false;
+                object_index += 1;
+                continue;
+            }
+            if (header.metaConst().flags.is_pinned) {
+                header.meta().flags.young = false;
+                object_index += 1;
+                continue;
+            }
+            self.rt.gc.condemnNonBlockObject(header, true);
         }
 
         // The compact trace header has no predecessor.  Close the retired
@@ -2416,9 +2296,9 @@ const Collector = struct {
                 const child = h orelse return;
                 for (a.doomed) |d| {
                     if (d != child) continue;
-                    const c: *Object = @alignCast(@fieldParentPtr("header", child));
+                    const c = Object.fromHeader(child);
                     if (a.owner_kind == .object) {
-                        const o: *Object = @alignCast(@fieldParentPtr("header", a.owner_ptr));
+                        const o = Object.fromHeader(a.owner_ptr);
                         var where: []const u8 = "unknown";
                         var hit_atom: u32 = 0;
                         if (o.promisePayload()) |pp| {
@@ -2440,6 +2320,34 @@ const Collector = struct {
                                 if (v.cycleMarkHeader() == child) where = "dense";
                             }
                         }
+                        if (o.ordinaryPayloadForAudit(a.rt)) |op| {
+                            const fields = .{
+                                .{ "ordinary.callsite_file", op.callsite_file },
+                                .{ "ordinary.callsite_function", op.callsite_function },
+                                .{ "ordinary.promise_reaction_on_fulfilled", op.promise_reaction_on_fulfilled },
+                                .{ "ordinary.promise_reaction_on_rejected", op.promise_reaction_on_rejected },
+                                .{ "ordinary.promise_reaction_resolve", op.promise_reaction_resolve },
+                                .{ "ordinary.promise_reaction_reject", op.promise_reaction_reject },
+                                .{ "ordinary.promise_capability_resolve", op.promise_capability_resolve },
+                                .{ "ordinary.promise_capability_reject", op.promise_capability_reject },
+                                .{ "ordinary.promise_combinator_resolve", op.promise_combinator_resolve },
+                                .{ "ordinary.promise_combinator_reject", op.promise_combinator_reject },
+                                .{ "ordinary.promise_combinator_values", op.promise_combinator_values },
+                                .{ "ordinary.promise_combinator_keys", op.promise_combinator_keys },
+                                .{ "ordinary.error_stack", op.error_stack },
+                                .{ "ordinary.error_stack_sites", op.error_stack_sites },
+                            };
+                            inline for (fields) |field| {
+                                if (field[1]) |v| if (v.cycleMarkHeader() == child) {
+                                    where = field[0];
+                                };
+                            }
+                        }
+                        if (o.cachedIteratorNextSlotForCycleGc(a.rt)) |slot| {
+                            if (slot.*) |v| if (v.cycleMarkHeader() == child) {
+                                where = "iterator_next_cache";
+                            };
+                        }
                         for (o.propertyEntries(), 0..) |*e, pi| {
                             const pf = property.Flags.fromBits(o.shape_ref.props()[pi].flags);
                             if (pf.deleted) continue;
@@ -2459,12 +2367,13 @@ const Collector = struct {
                                 else => {},
                             }
                         }
-                        std.debug.print("MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d} owner_marked={}\n", .{ o.class_id, @tagName(o.flags.class_payload_kind), where, a.rt.atoms.name(@intCast(hit_atom)) orelse "?", o.shape_ref.prop_count, a.rt.gc.headerMarked(&o.header) });
+                        std.debug.print("MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d} owner_marked={}\n", .{ o.class_id, @tagName(o.flags.class_payload_kind), where, a.rt.atoms.name(@intCast(hit_atom)) orelse "?", o.shape_ref.prop_count, a.rt.gc.headerMarked(o.gcHeader()) });
                     }
                     std.debug.print("MINOR-AUDIT owner={s}/ptr{x} owner_young={} owner_remembered={} -> child class={d}/{s} child_young={} child_marked={}\n", .{
                         @tagName(a.owner_kind), @intFromPtr(a.owner_ptr),             a.owner_young,                 a.owner_remembered,
                         c.class_id,             @tagName(c.flags.class_payload_kind), child.metaConst().flags.young, a.rt.gc.headerMarked(child),
                     });
+                    if (gc.minor_audit_fatal) @panic("MINOR-AUDIT: live owner holds an unremembered edge into the condemned young set");
                     return;
                 }
             }
@@ -2472,7 +2381,7 @@ const Collector = struct {
                 a.hit(val.cycleMarkHeader());
             }
             pub fn visitObject(a: *@This(), obj_ptr: *?*Object) void {
-                if (obj_ptr.*) |o| a.hit(&o.header);
+                if (obj_ptr.*) |o| a.hit(o.gcHeader());
             }
             pub fn visitShape(a: *@This(), sh: *shape.Shape) void {
                 a.hit(&sh.header);
@@ -2512,7 +2421,7 @@ const Collector = struct {
             };
             switch (h.metaConst().flags.kind) {
                 .object => {
-                    const owner: *Object = @alignCast(@fieldParentPtr("header", h));
+                    const owner = Object.fromHeader(h);
                     audit.owner_class = owner.class_id;
                     owner.traceChildEdgesFallible(self.rt, &audit) catch {};
                 },
@@ -2562,11 +2471,11 @@ const Collector = struct {
     /// gate is worth anything.
     fn assertCondemnedKindAbsent(self: *Collector, kind: gc.GcKind) void {
         if (comptime !std.debug.runtime_safety) return;
-        var cursor = self.rt.gc.tmp_obj_list.sentinel.next;
+        var cursor = self.rt.gc.tmp_obj_list.sentinel.next_non_object;
         while (cursor) |h| {
             if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
             std.debug.assert(h.metaConst().flags.kind != kind);
-            cursor = h.next;
+            cursor = h.nextNonObject();
         }
     }
 
@@ -2601,31 +2510,60 @@ const Collector = struct {
     fn destroyCondemned(self: *Collector) usize {
         self.rt.gc.beginDeferredFreeProducerSequence();
         var garbage_count: usize = 0;
+
+        // Object is the first destruction kind. Block cells are owned by the
+        // doomed bitmap and standalone Objects by the temporary side lane;
+        // neither population ever enters `tmp_obj_list`.
+        if (comptime gc.block_heap_enabled) {
+            while (self.rt.gc.block_heap.doomed_blocks) |block| {
+                const cells_base = @intFromPtr(block) + block.cells_offset + gc.metadata_prefix_size;
+                const cell_size: usize = block.cell_size;
+                while (block.takeDoomedCell(0)) |index| {
+                    const header: *gc.Header = @ptrFromInt(cells_base + @as(usize, index) * cell_size);
+                    switch (header.metaConst().flags.kind) {
+                        .object => Object.destroyFromHeader(self.rt, header),
+                        .string => if (comptime gc.string_tracer_owned) string_mod.destroyCellFromHeader(self.rt, header) else unreachable,
+                        else => unreachable,
+                    }
+                    garbage_count += 1;
+                }
+                if (gc.invariantChecksEnabled()) {
+                    BlockHeapMod.Heap.verifyBlockAllocCount(block) catch
+                        @panic("STW Object destruction left block allocation accounting inconsistent");
+                }
+                const link = block.doomed_link;
+                block.doomed_link = 0;
+                self.rt.gc.block_heap.doomed_blocks = if (link <= 1) null else @ptrFromInt(link);
+            }
+            // String extents (>128B bodies) live in the block heap's medium /
+            // large tables, not in any list or bitmap: sweep them here, after
+            // the cells, with the same handshake a condemned cell performs.
+            if (comptime gc.string_tracer_owned) garbage_count += string_mod.sweepStringExtents(self.rt);
+        }
+        while (self.rt.gc.popTemporaryNonBlockObject()) |header| {
+            self.rt.gc.sweep_current = header;
+            Object.destroyFromHeader(self.rt, header);
+            self.rt.gc.sweep_current = null;
+            garbage_count += 1;
+        }
+
         var residual_kinds: KindSet = 0;
         var previous: *gc.Header = &self.rt.gc.tmp_obj_list.sentinel;
-        var cursor = self.rt.gc.tmp_obj_list.sentinel.next;
+        var cursor = self.rt.gc.tmp_obj_list.sentinel.next_non_object;
         while (cursor) |h| {
             if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
-            const next = h.next;
             const kind = h.meta().flags.kind;
-            if (kind == .object) {
-                gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
-                garbage_count += 1;
-                self.rt.gc.sweep_current = h;
-                Object.destroyFromHeader(self.rt, h);
-                self.rt.gc.sweep_current = null;
-            } else {
-                residual_kinds |= kindBit(kind);
-                previous = h;
-            }
-            cursor = next;
+            std.debug.assert(kind != .object);
+            residual_kinds |= kindBit(kind);
+            previous = h;
+            cursor = h.nextNonObject();
         }
         if (residual_kinds & kindBit(.realm_context) != 0) {
             previous = &self.rt.gc.tmp_obj_list.sentinel;
-            cursor = self.rt.gc.tmp_obj_list.sentinel.next;
+            cursor = self.rt.gc.tmp_obj_list.sentinel.next_non_object;
             while (cursor) |h| {
                 if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
-                const next = h.next;
+                const next = h.nextNonObject();
                 if (h.meta().flags.kind == .realm_context) {
                     gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
                     garbage_count += 1;
@@ -2641,10 +2579,10 @@ const Collector = struct {
         } else self.assertCondemnedKindAbsent(.realm_context);
         if (residual_kinds & kindBit(.module) != 0) {
             previous = &self.rt.gc.tmp_obj_list.sentinel;
-            cursor = self.rt.gc.tmp_obj_list.sentinel.next;
+            cursor = self.rt.gc.tmp_obj_list.sentinel.next_non_object;
             while (cursor) |h| {
                 if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
-                const next = h.next;
+                const next = h.nextNonObject();
                 if (h.meta().flags.kind == .module) {
                     gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
                     garbage_count += 1;
@@ -2660,10 +2598,10 @@ const Collector = struct {
         } else self.assertCondemnedKindAbsent(.module);
         if (residual_kinds & kindBit(.function_bytecode) != 0) {
             previous = &self.rt.gc.tmp_obj_list.sentinel;
-            cursor = self.rt.gc.tmp_obj_list.sentinel.next;
+            cursor = self.rt.gc.tmp_obj_list.sentinel.next_non_object;
             while (cursor) |h| {
                 if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
-                const next = h.next;
+                const next = h.nextNonObject();
                 if (h.meta().flags.kind == .function_bytecode) {
                     gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
                     self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
@@ -2686,6 +2624,11 @@ const Collector = struct {
                     var_ref_mod.VarRef.destroyFromHeader(self.rt, h);
                     self.rt.gc.sweep_current = null;
                 },
+                .big_int => {
+                    garbage_count += 1;
+                    self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
+                    bigint_mod.BigInt.destroyFromHeader(self.rt, h);
+                },
                 .shape => {
                     garbage_count += 1;
                     if (!h.meta().flags.finalizing) self.rt.shapes.destroyFromHeader(h);
@@ -2705,5 +2648,5 @@ fn keyIsMarked(rt: *const JSRuntime, identity: usize) bool {
         return rt.atoms.kind(@intCast(atom_id)) == .symbol;
     }
     const object = rt.liveObjectFromWeakIdentity(identity) orelse return false;
-    return rt.gc.headerMarked(&object.header);
+    return rt.gc.headerMarked(object.gcHeader());
 }

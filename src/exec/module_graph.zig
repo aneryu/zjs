@@ -48,7 +48,6 @@ pub const ModuleEvalStep = union(enum) {
     },
 };
 
-
 /// A module continuation list holds JSValues inside a native array, which a
 /// declared-roots trace cannot see. Under refcounting that was harmless --
 /// the stored values carried counts -- but the tracing collector is the
@@ -64,6 +63,7 @@ const ContinuationRoots = struct {
     fn traceRoots(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
         const self: *ContinuationRoots = @ptrCast(@alignCast(context));
         for (self.list.items) |*entry| {
+            if (entry.realm.borrow()) |ctx| try visitor.constHeader(&ctx.header);
             try visitor.value(&entry.continuation);
             try visitor.value(&entry.awaited);
         }
@@ -87,7 +87,6 @@ const ContinuationRoots = struct {
     }
 };
 
-
 /// Sibling of `ContinuationRoots` for the evaluation-waiter lists, which hold
 /// their `resolve`/`reject` functions in the same kind of native array.
 const WaiterRoots = struct {
@@ -98,6 +97,7 @@ const WaiterRoots = struct {
     fn traceRoots(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
         const self: *WaiterRoots = @ptrCast(@alignCast(context));
         for (self.list.items) |*entry| {
+            if (entry.realm.borrow()) |ctx| try visitor.constHeader(&ctx.header);
             try visitor.value(&entry.resolve);
             try visitor.value(&entry.reject);
         }

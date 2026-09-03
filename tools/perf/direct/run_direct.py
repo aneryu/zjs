@@ -16,6 +16,9 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from measure_fields import field_metadata, lock_attested, single_cpu
+
 
 EXPECTED_QJS_HEAD = "04be246001599f5995fa2f2d8c91a0f198d3f34c"
 EXPECTED_QJS_VERSION = "2026-06-04"
@@ -112,7 +115,9 @@ def parse_args(repo: Path) -> argparse.Namespace:
         description="Run ABBA-interleaved zjs/QuickJS direct-core benchmarks."
     )
     parser.add_argument("--output", type=Path, default=default_output)
-    parser.add_argument("--cpu", type=int, default=19)
+    parser.add_argument("--field", choices=("a", "b", "host"), default=None)
+    parser.add_argument("--cpu", type=int, default=None,
+                        help="legacy CPU override; noncanonical values are diagnostic-only")
     parser.add_argument("--samples", type=positive_int, default=6)
     parser.add_argument(
         "--iterations", "--iters", dest="iterations", type=positive_int, default=100_000
@@ -2091,6 +2096,10 @@ def main() -> int:
     script = Path(__file__).resolve()
     repo = script.parents[3]
     args = parse_args(repo)
+    try:
+        measure_field, args.cpu, field_conforming = single_cpu(args.field, args.cpu)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
     cases = tuple(args.selected_cases or CASES)
     qjs_dir = args.qjs_dir.resolve()
     output = args.output
@@ -2285,6 +2294,11 @@ def main() -> int:
             "cpu_model_by_id": cpu_model_by_id,
             "pinned_cpu_model": cpu_model_by_id.get(str(args.cpu)),
             "cpu_id": args.cpu,
+            "measurement_field": {
+                **field_metadata(measure_field, "single"),
+                "fieldConforming": field_conforming,
+                "lockAttested": lock_attested(measure_field),
+            },
             "warmup": args.warmup,
             "iterations": args.iterations,
             "baseline_iterations": 1,

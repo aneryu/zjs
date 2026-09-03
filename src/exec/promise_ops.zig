@@ -169,7 +169,7 @@ pub fn asyncIteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
     if (cachedRealmObject(rt, global, .async_iterator_prototype)) |stored| return stored;
     const object = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     var object_raw_owned = true;
-    errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, &object.header);
+    errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, object.gcHeader());
     const method = try core.function.nativeFunctionForGlobal(rt, global, "[Symbol.asyncIterator]", 0);
     defer method.free(rt);
     const async_iterator_atom = core.atom.predefinedId("Symbol.asyncIterator", .symbol) orelse return error.TypeError;
@@ -193,7 +193,7 @@ pub fn asyncGeneratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Obje
     const async_iterator_prototype = try asyncIteratorPrototypeFromGlobal(rt, global);
     const object = try core.Object.create(rt, core.class.ids.object, async_iterator_prototype);
     var object_raw_owned = true;
-    errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, &object.header);
+    errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, object.gcHeader());
     try installAsyncGeneratorPrototypeProperties(rt, global, object);
     const value = object.value();
     object_raw_owned = false;
@@ -507,7 +507,7 @@ pub fn appendPromiseReaction(rt: *core.JSRuntime, promise: *core.Object, reactio
     // The reaction list lives in the promise's payload, so the promise is the
     // owner. A pending promise is usually the older of the two -- it is what
     // the subscriber is attaching to.
-    rt.gc.generationalBarrier(&promise.header, reaction.cycleMarkHeader());
+    rt.gc.generationalBarrier(promise.gcHeader(), reaction.cycleMarkHeader());
 }
 
 pub fn promiseReactionRecord(
@@ -531,7 +531,7 @@ pub fn promiseReactionRecord(
     defer root_frame.deactivate(rt);
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &record.header);
+    errdefer core.Object.destroyFromHeader(rt, record.gcHeader());
     try record.setPromiseReactionOnFulfilled(rt, rooted_on_fulfilled.dup());
     try record.setPromiseReactionOnRejected(rt, rooted_on_rejected.dup());
     try record.setPromiseReactionResolve(rt, rooted_resolve.dup());
@@ -580,10 +580,10 @@ test "promiseReactionRecord roots direct symbol fields while allocating slots" {
     try std.testing.expect(rt.atoms.name(on_rejected_symbol) != null);
     try std.testing.expect(rt.atoms.name(resolve_symbol) != null);
     try std.testing.expect(rt.atoms.name(reject_symbol) != null);
-    try std.testing.expectEqual(on_fulfilled_symbol, record.promiseReactionOnFulfilled().?.asSymbolAtom().?);
-    try std.testing.expectEqual(on_rejected_symbol, record.promiseReactionOnRejected().?.asSymbolAtom().?);
-    try std.testing.expectEqual(resolve_symbol, record.promiseReactionResolve().?.asSymbolAtom().?);
-    try std.testing.expectEqual(reject_symbol, record.promiseReactionReject().?.asSymbolAtom().?);
+    try std.testing.expectEqual(on_fulfilled_symbol, record.promiseReactionOnFulfilled(rt).?.asSymbolAtom().?);
+    try std.testing.expectEqual(on_rejected_symbol, record.promiseReactionOnRejected(rt).?.asSymbolAtom().?);
+    try std.testing.expectEqual(resolve_symbol, record.promiseReactionResolve(rt).?.asSymbolAtom().?);
+    try std.testing.expectEqual(reject_symbol, record.promiseReactionReject(rt).?.asSymbolAtom().?);
 
     record_value.free(rt);
     record_value_alive = false;
@@ -820,13 +820,13 @@ pub fn promiseSettleValue(
     // `Object.setPromiseResult`, so it takes the barrier itself: a promise
     // that has been pending for a while is old, and the value it settles with
     // was just produced.
-    ctx.runtime.gc.generationalBarrier(&promise.header, next_result.cycleMarkHeader());
+    ctx.runtime.gc.generationalBarrier(promise.gcHeader(), next_result.cycleMarkHeader());
     promise.promiseIsRejectedSlot().* = rejected;
     if (old_result) |stored| stored.free(ctx.runtime);
     if (next_reaction_arg) |reaction_arg| {
         const old_reaction_arg = reaction_arg_slot.*;
         reaction_arg_slot.* = reaction_arg;
-        ctx.runtime.gc.generationalBarrier(&promise.header, reaction_arg.cycleMarkHeader());
+        ctx.runtime.gc.generationalBarrier(promise.gcHeader(), reaction_arg.cycleMarkHeader());
         next_reaction_arg = null;
         if (old_reaction_arg) |stored| stored.free(ctx.runtime);
     }
@@ -860,7 +860,7 @@ test "promiseSettleValue handles result self-assignment" {
     const current = promise.promiseResult().?;
     try promiseSettleValue(ctx, global, promise, current, false);
 
-    try std.testing.expectEqual(&result.header, promise.promiseResult().?.refHeader().?);
+    try std.testing.expectEqual(result.gcHeader(), promise.promiseResult().?.refHeader().?);
 }
 
 test "promiseSettleValue roots direct symbol result while preparing reaction jobs" {
@@ -1027,7 +1027,7 @@ pub fn promiseResolvingFunctionCall(
     const state_value = function_object.functionPromiseResolvingState() orelse return error.TypeError;
     const state = objectFromValue(state_value) orelse return error.TypeError;
     if (target.promiseResult() != null) return core.JSValue.undefinedValue();
-    if (state.promiseAlreadyResolved()) {
+    if (state.promiseAlreadyResolved(ctx.runtime)) {
         // A prior call won the shared once-guard. Any allocation-sensitive
         // completion that could not settle synchronously is owned by the
         // Runtime FIFO, so later calls are true no-ops rather than an
@@ -1397,7 +1397,7 @@ test "Promise resolving OOM keeps FIFO owner after then getter and resolver coll
     const direct_result = (try promiseResolvingFunctionCall(ctx, null, global, resolve_object, &.{thenable.value()}, null, null)).?;
     direct_result.free(rt);
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
-    try std.testing.expect(state.promiseAlreadyResolved());
+    try std.testing.expect(state.promiseAlreadyResolved(rt));
     try std.testing.expect(target.promiseResult() == null);
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
@@ -1640,12 +1640,12 @@ pub fn promiseReactionJobCall(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
     const reaction = objectFromValue(payload.reaction) orelse return error.TypeError;
-    const resolve_value = reaction.promiseReactionResolve() orelse return error.TypeError;
-    const reject_value = reaction.promiseReactionReject() orelse return error.TypeError;
+    const resolve_value = reaction.promiseReactionResolve(ctx.runtime) orelse return error.TypeError;
+    const reject_value = reaction.promiseReactionReject(ctx.runtime) orelse return error.TypeError;
 
     invoke: {
         if (payload.phase == .invoke) {
-            const handler_value = if (payload.rejected) reaction.promiseReactionOnRejected() else reaction.promiseReactionOnFulfilled();
+            const handler_value = if (payload.rejected) reaction.promiseReactionOnRejected(ctx.runtime) else reaction.promiseReactionOnFulfilled(ctx.runtime);
             const handler = handler_value orelse core.JSValue.undefinedValue();
 
             // perform_promise_then canonicalizes non-callable handlers to
@@ -1767,8 +1767,8 @@ pub const PromiseCapabilityVm = struct {
 pub fn promiseCapabilityExecutorCall(ctx: *core.JSContext, function_object: *core.Object, args: []const core.JSValue) !?core.JSValue {
     const slot_value = function_object.functionPromiseCapabilitySlot() orelse return null;
     const slot = objectFromValue(slot_value) orelse return error.TypeError;
-    const current_resolve = slot.promiseCapabilityResolve();
-    const current_reject = slot.promiseCapabilityReject();
+    const current_resolve = slot.promiseCapabilityResolve(ctx.runtime);
+    const current_reject = slot.promiseCapabilityReject(ctx.runtime);
     if ((current_resolve != null and !current_resolve.?.isUndefined()) or
         (current_reject != null and !current_reject.?.isUndefined()))
     {
@@ -1806,7 +1806,7 @@ pub fn promiseCombinatorElementCall(
 
     const state_value = function_object.functionPromiseCombinatorState() orelse return error.TypeError;
     const state = objectFromValue(state_value) orelse return error.TypeError;
-    const values_value = state.promiseCombinatorValues() orelse return error.TypeError;
+    const values_value = state.promiseCombinatorValues(ctx.runtime) orelse return error.TypeError;
     const values = objectFromValue(values_value) orelse return error.TypeError;
 
     const index = function_object.functionPromiseCombinatorIndex();
@@ -1823,13 +1823,13 @@ pub fn promiseCombinatorElementCall(
         .any_reject => try promiseSetArrayIndex(ctx.runtime, values, index, payload),
     }
 
-    const remaining = state.promiseCombinatorRemaining();
+    const remaining = state.promiseCombinatorRemaining(ctx.runtime);
     const next_remaining = remaining - 1;
     (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
     if (next_remaining != 0) return core.JSValue.undefinedValue();
 
-    const resolve_value = state.promiseCombinatorResolve() orelse return error.TypeError;
-    const reject_value = state.promiseCombinatorReject() orelse return error.TypeError;
+    const resolve_value = state.promiseCombinatorResolve(ctx.runtime) orelse return error.TypeError;
+    const reject_value = state.promiseCombinatorReject(ctx.runtime) orelse return error.TypeError;
     switch (mode) {
         .all_resolve, .all_settled_fulfill, .all_settled_reject => {
             const result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{values_value}, caller_function, caller_frame) catch |err| {
@@ -1841,7 +1841,7 @@ pub fn promiseCombinatorElementCall(
             result.free(ctx.runtime);
         },
         .all_keyed_resolve, .all_settled_keyed_fulfill, .all_settled_keyed_reject => {
-            const keys_value = state.promiseCombinatorKeys() orelse return error.TypeError;
+            const keys_value = state.promiseCombinatorKeys(ctx.runtime) orelse return error.TypeError;
             const keys = objectFromValue(keys_value) orelse return error.TypeError;
             const keyed_result = try promiseKeyedResult(ctx.runtime, keys, values);
             defer keyed_result.free(ctx.runtime);
@@ -1912,8 +1912,8 @@ pub fn promiseCapability(
 
     promise_value = try constructValueOrBytecode(ctx, output, global, constructor_value, &.{executor_value}, caller_function, caller_frame);
 
-    resolve_value = if (slot.promiseCapabilityResolve()) |stored| stored.dup() else core.JSValue.undefinedValue();
-    reject_value = if (slot.promiseCapabilityReject()) |stored| stored.dup() else core.JSValue.undefinedValue();
+    resolve_value = if (slot.promiseCapabilityResolve(ctx.runtime)) |stored| stored.dup() else core.JSValue.undefinedValue();
+    reject_value = if (slot.promiseCapabilityReject(ctx.runtime)) |stored| stored.dup() else core.JSValue.undefinedValue();
     if (!isCallableValue(resolve_value) or !isCallableValue(reject_value)) return error.TypeError;
     return .{
         .promise = promise_value.dup(),
@@ -2035,7 +2035,7 @@ pub fn promiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: cor
     defer root_frame.deactivate(rt);
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &record.header);
+    errdefer core.Object.destroyFromHeader(rt, record.gcHeader());
     const status = try value_ops.createStringValue(rt, if (rejected) "rejected" else "fulfilled");
     defer status.free(rt);
     try defineValueProperty(rt, record, "status", status);
@@ -2086,7 +2086,7 @@ pub fn promiseCombinatorState(rt: *core.JSRuntime, resolve_value: core.JSValue, 
     defer root_frame.deactivate(rt);
 
     const state = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &state.header);
+    errdefer core.Object.destroyFromHeader(rt, state.gcHeader());
     try state.setPromiseCombinatorResolve(rt, rooted_resolve.dup());
     try state.setPromiseCombinatorReject(rt, rooted_reject.dup());
     try state.setPromiseCombinatorValues(rt, rooted_values.dup());
@@ -2119,13 +2119,19 @@ test "promiseCombinatorState roots direct function bytecode resolve while creati
 
     const state = try promiseCombinatorState(rt, resolve_value, core.JSValue.undefinedValue(), values);
     var state_alive = true;
-    defer if (state_alive) core.Object.destroyFromHeader(rt, &state.header);
+    defer if (state_alive) core.Object.destroyFromHeader(rt, state.gcHeader());
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = state.promiseCombinatorResolve() orelse return error.TypeError;
+    const stored = state.promiseCombinatorResolve(rt) orelse return error.TypeError;
     try std.testing.expect(stored.same(resolve_value));
 
-    core.Object.destroyFromHeader(rt, &state.header);
+    // The zero threshold opened an incremental mark while constructing the
+    // state. This test deliberately bypasses normal tracer ownership with a
+    // direct destructor below, so first close that epoch and drain the entry
+    // which may name `state`; freeing it while queued is exactly the O2-B
+    // raw-pointer lifetime violation.
+    rt.gc.abortIncrementalCycle();
+    core.Object.destroyFromHeader(rt, state.gcHeader());
     state_alive = false;
     resolve_value.free(rt);
     resolve_alive = false;
@@ -2135,7 +2141,7 @@ test "promiseCombinatorState roots direct function bytecode resolve while creati
 
 pub fn promiseKeyedCombinatorState(rt: *core.JSRuntime, resolve_value: core.JSValue, reject_value: core.JSValue, values: *core.Object, keys: *core.Object) !*core.Object {
     const state = try promiseCombinatorState(rt, resolve_value, reject_value, values);
-    errdefer core.Object.destroyFromHeader(rt, &state.header);
+    errdefer core.Object.destroyFromHeader(rt, state.gcHeader());
     try state.setPromiseCombinatorKeys(rt, keys.value().dup());
     return state;
 }
@@ -2372,7 +2378,7 @@ pub fn promiseCombinatorCall(
         defer step_value.free(ctx.runtime);
 
         if (state) |state_object| {
-            const remaining = state_object.promiseCombinatorRemaining();
+            const remaining = state_object.promiseCombinatorRemaining(ctx.runtime);
             try promiseSetArrayIndex(ctx.runtime, values.?, index, core.JSValue.undefinedValue());
             (try state_object.promiseCombinatorRemainingSlot(ctx.runtime)).* = remaining + 1;
         }
@@ -2425,7 +2431,7 @@ pub fn promiseCombinatorCall(
     }
 
     if (state) |state_object| {
-        const remaining = state_object.promiseCombinatorRemaining();
+        const remaining = state_object.promiseCombinatorRemaining(ctx.runtime);
         const next_remaining = remaining - 1;
         (try state_object.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
         if (next_remaining == 0) {
@@ -2514,7 +2520,7 @@ pub fn promiseKeyedCombinatorCall(
         defer key_value.free(ctx.runtime);
         try promiseSetArrayIndex(ctx.runtime, keys, index, key_value);
 
-        const remaining = state.promiseCombinatorRemaining();
+        const remaining = state.promiseCombinatorRemaining(ctx.runtime);
         try promiseSetArrayIndex(ctx.runtime, values, index, core.JSValue.undefinedValue());
         (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = remaining + 1;
 
@@ -2551,7 +2557,7 @@ pub fn promiseKeyedCombinatorCall(
         index += 1;
     }
 
-    const remaining = state.promiseCombinatorRemaining();
+    const remaining = state.promiseCombinatorRemaining(ctx.runtime);
     const next_remaining = remaining - 1;
     (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
     if (next_remaining == 0) {
@@ -2655,7 +2661,7 @@ pub fn promiseStaticCall(
             var capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
             defer capability.deinit(ctx.runtime);
             const result = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
-            errdefer core.Object.destroyFromHeader(ctx.runtime, &result.header);
+            errdefer core.Object.destroyFromHeader(ctx.runtime, result.gcHeader());
             try defineValueProperty(ctx.runtime, result, "promise", capability.promise);
             try defineValueProperty(ctx.runtime, result, "resolve", capability.resolve);
             try defineValueProperty(ctx.runtime, result, "reject", capability.reject);
@@ -3827,13 +3833,13 @@ pub fn drainPendingPromiseJobs(
     }
 }
 
-fn promiseReactionInternalSettleCanRetry(payload: *const jobs_mod.PromiseReactionPayload) bool {
+fn promiseReactionInternalSettleCanRetry(rt: *const core.JSRuntime, payload: *const jobs_mod.PromiseReactionPayload) bool {
     if (payload.phase == .invoke) return false;
     const reaction = objectFromValue(payload.reaction) orelse return false;
     const settle = switch (payload.phase) {
         .invoke => unreachable,
-        .resolve => reaction.promiseReactionResolve(),
-        .reject => reaction.promiseReactionReject(),
+        .resolve => reaction.promiseReactionResolve(rt),
+        .reject => reaction.promiseReactionReject(rt),
     } orelse return false;
     const function = objectFromValue(settle) orelse return false;
     return function.internalCallableTag() == .promise_resolving;
@@ -3889,7 +3895,7 @@ pub fn drainOnePendingJob(
             const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
             ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
             result = promiseReactionJobCall(job_ctx, output, job_global, payload, null, null) catch |err| {
-                if (err == error.OutOfMemory and promiseReactionInternalSettleCanRetry(payload)) {
+                if (err == error.OutOfMemory and promiseReactionInternalSettleCanRetry(ctx.runtime, payload)) {
                     std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                     ctx.runtime.job_queue.prependReserved(entry);
                     entry_owned = false;

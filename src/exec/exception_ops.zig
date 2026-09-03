@@ -97,7 +97,7 @@ fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []
     defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, core.class.ids.error_, null);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     // Mirror JS_ThrowError2 (quickjs.c:7637-7658): the thrown error carries a
     // single own `message` data property (JS_PROP_WRITABLE|JS_PROP_CONFIGURABLE,
     // non-enumerable); `name`/`constructor` resolve through the prototype
@@ -400,8 +400,7 @@ pub fn throwSyntaxErrorMessage(ctx: *core.JSContext, global: *core.Object, messa
 }
 
 pub fn isCallSiteObject(rt: *core.JSRuntime, object: *core.Object) bool {
-    _ = rt;
-    return object.isCallSite();
+    return object.isCallSite(rt);
 }
 
 /// CallSite prototype methods dispatched by `.host` native-record id; the
@@ -410,11 +409,11 @@ pub fn callSiteMethodById(rt: *core.JSRuntime, object: *core.Object, id: core.fu
     if (!isCallSiteObject(rt, object)) return null;
     return switch (id) {
         .callsite_get_function => core.JSValue.nullValue(),
-        .callsite_get_function_name => if (object.callSiteFunctionName()) |value| value.dup() else core.JSValue.nullValue(),
-        .callsite_get_file_name => if (object.callSiteFile()) |value| value.dup() else core.JSValue.nullValue(),
-        .callsite_get_line_number => if (object.callSiteIsNative()) core.JSValue.nullValue() else core.JSValue.int32(object.callSiteLine()),
-        .callsite_get_column_number => if (object.callSiteIsNative()) core.JSValue.nullValue() else core.JSValue.int32(object.callSiteColumn()),
-        .callsite_is_native => core.JSValue.boolean(object.callSiteIsNative()),
+        .callsite_get_function_name => if (object.callSiteFunctionName(rt)) |value| value.dup() else core.JSValue.nullValue(),
+        .callsite_get_file_name => if (object.callSiteFile(rt)) |value| value.dup() else core.JSValue.nullValue(),
+        .callsite_get_line_number => if (object.callSiteIsNative(rt)) core.JSValue.nullValue() else core.JSValue.int32(object.callSiteLine(rt)),
+        .callsite_get_column_number => if (object.callSiteIsNative(rt)) core.JSValue.nullValue() else core.JSValue.int32(object.callSiteColumn(rt)),
+        .callsite_is_native => core.JSValue.boolean(object.callSiteIsNative(rt)),
         else => null,
     };
 }

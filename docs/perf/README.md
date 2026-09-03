@@ -3,7 +3,7 @@
 This directory contains performance notes and the checked performance status
 for `zjs`. No `zig build` step gates on performance, and nothing here runs on
 shared CI runners: every run described below is a local diagnostic governed by
-the measurement contract.
+the [measurement contract](measurement-contracts.md).
 
 There is one performance *merge* gate, and it is not a build step:
 [refactor-policy](../refactor-policy.md) rule 2 requires a bench-v8 A/B against
@@ -12,14 +12,44 @@ a frozen merge-base build before any hot-path split, move, or rename lands.
 Current design notes:
 
 - [bench-v8 status](bench-v8-status.md) — the public claim
-- [Zoo runner (standalone-file attribution instrument)](../../tools/perf/zoo/README.md)
-  — its frozen baseline doc was removed 2026-08-25 (git history)
+- Fixed-work PMU screening: `tools/perf/bench_v8/run_fixed_pmu.py`
+  (`mise run perf-screen`) — the per-candidate instruction/cycle screen;
+  only candidates that pass it spend a full score A/B. It replaced the
+  retired external-checkout zoo runner (`tools/perf/zoo/`, removed
+  2026-08-29; git history)
 - [GC behaviour baseline](gc-baseline.md) — pre-refactor collector counters
 - [Object and shape implementation](object-shape-design.md)
 - [`exec/call_runtime.zig` candidate domains and move criteria](../backlog.md)
 - Frozen subsystem baseline (historical):
   `docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md` — removed
   2026-08-25; recover from git history
+
+## Iteration ladder (2026-08-29)
+
+Per-candidate measurement is tiered; do not start at the bottom:
+
+1. **Screen** — `mise run perf-screen -- --benches <touched>` (fixed-work
+   instructions/cycles vs pinned QuickJS, ~30s per benchmark at
+   `--samples 2`). `ZJS_MEASURE_FIELD=a|b|host` selects the field; B is the
+   compatibility default. A candidate that does not move the screen does not
+   get a score run.
+2. **Targeted score** — `run_benchv8_compare.py --suites <bench>
+   --samples <high>` for single-benchmark iteration (diagnostic subset,
+   never headline-eligible).
+3. **Acceptance** — the full-suite rule-2 A/B (`--baseline`, parallel
+   clusters) or the serial published-metric protocol, paid only for
+   candidates that survived screening.
+
+Instruction counts are a screening instrument, not an acceptance verdict
+(2026-08-13 owner ruling: the score adjudicates; instruction deltas cannot
+price layout or microarchitecture effects).
+
+Acceptance sample count: a same-binary null experiment under the parallel
+rule-2 protocol (2026-08-29, artifact schema in `run_benchv8_compare.py`)
+resolved the headline to roughly ±1% at `--samples 4` and ±0.6% at
+`--samples 8`, with a systematic 1–2% bias between cluster assignments
+that the swap-balanced schedule cancels. Keep `--samples 8` for
+acceptance; reserve 4 for rough intermediate looks.
 
 ## bench-v8 (Octane 2.0, v9) — the public-metric tooling
 
@@ -209,7 +239,10 @@ No benchmark result JSON is checked in.
 
 The 2026-06-13 QuickJS-ng `*-vs-quickjs*` snapshots were removed from the
 active tree. Do not recover them as a current Bellard-QuickJS comparison.
-The public claim is [bench-v8-status.md](bench-v8-status.md); the zoo suite stays as a standalone-file attribution instrument ([tools/perf/zoo/README.md](../../tools/perf/zoo/README.md)).
+The public claim is [bench-v8-status.md](bench-v8-status.md). The former
+standalone-file zoo runner was retired 2026-08-29 (the vendored bench-v8
+suite covers the same Octane corpus; fixed-work attribution moved to
+`tools/perf/bench_v8/run_fixed_pmu.py`).
 As of 2026-08-25, no v9-suite number has passed an owner ruling to become
 the published metric, and any quoted ratio is only valid against the named
 reference-binary fingerprint.

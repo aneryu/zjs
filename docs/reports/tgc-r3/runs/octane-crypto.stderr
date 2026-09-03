@@ -1,0 +1,5 @@
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=10 payload=object_data
+VERIFY-MINOR 1 of 16382 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=10 payload=object_data
+VERIFY-MINOR 1 of 16364 condemned objects are reachable by a full trace (0 precise, 1 conservative-only)
+wall=54.06 rss=52236

@@ -9,7 +9,10 @@ On Linux, formal comparable runs must pin the collector externally, for
 example:
 
 ```sh
-taskset -c 19 node tools/perf/same_runtime/run_same_runtime.js --cpu 19 --no-pmu
+field=b
+cpu="$(python3 tools/perf/measure_fields.py cpus --field "$field" --layer single)"
+python3 tools/perf/measure_fields.py run --field "$field" --layer single -- \
+  node tools/perf/same_runtime/run_same_runtime.js --cpu "$cpu" --no-pmu
 ```
 
 The collector reads its own `/proc/self/status`, launches an unwrapped Node

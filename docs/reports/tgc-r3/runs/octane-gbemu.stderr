@@ -1,0 +1,14 @@
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=ordinary
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=ordinary
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=ordinary
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=ordinary
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=ordinary
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=ordinary
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=ordinary
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=ordinary
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=ordinary
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=1 payload=ordinary
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=object class=2 payload=none
+VERIFY-MINOR condemned-but-reachable source=conservative_only kind=shape
+VERIFY-MINOR 12 of 8512 condemned objects are reachable by a full trace (0 precise, 12 conservative-only)
+wall=13.06 rss=64992

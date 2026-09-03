@@ -320,11 +320,16 @@ slice that directly reproduces the changed behavior. The explicit `test-core`,
 `test-runtime`, and `test-runner` targets apply compile-time namespace filters
 and fail if the selection becomes empty.
 
-After a coherent edit, run `mise run quick-gate` for Debug CLI integration
-coverage. For several consecutive edits that all need CLI smoke feedback,
-`mise run quick-watch` keeps the compiler resident; stop the watcher before
-escalating to a broader gate. `quick-gate` intentionally does not compile the
-separate test262 runner.
+Run `mise run quick-gate` when the change touches the CLI, runtime glue, or
+another surface the focused targets do not exercise; for engine-internal
+edits the focused target plus the checkpoint gate at handoff covers it, and
+running quick-gate after every edit buys little for its ~35s Debug compile
+(2026-08-29 re-audit). For several consecutive edits that need CLI smoke
+feedback, `mise run quick-watch` keeps the compiler resident; the generic
+`mise run watch -- <step>` does the same for any focused target (worth it
+for engine-wide targets like `test-exec`, whose cold compile is ~90s). Stop
+the watcher before escalating to a broader gate. `quick-gate` intentionally
+does not compile the separate test262 runner.
 
 `build.zig` pins the Zig 0.16 build/test seed to `0` so the compile graph
 stays cacheable. CLI `--seed` is not required. Pass `-Dzjs_test_seed=<u32>`
@@ -338,9 +343,14 @@ mise run checkpoint-gate
 
 This includes the unified Debug suite, Debug CLI smoke, and source-side
 architecture checks. It does not compile ReleaseFast `zjs`; the
-compiler-stage `nm` check stays on the production gate. Add the relevant focused
-test262 directory or file set; do not run `quick-gate` first because
-checkpoint already supersedes it.
+compiler-stage `nm` check stays on the production gate. It also excludes the
+long-running stress tier (`zig build test-stress`: stack exhaustion and
+bigint kernel sweeps in `src/tests/stress.zig`) — that tier runs on the
+engine-production gate, primary-platform CI, and the per-merge-batch gate
+(docs/verification-policy.md). Run `test-stress` locally when a change
+touches stack unwinding, call teardown, or the bigint division kernels. Add
+the relevant focused test262 directory or file set; do not run `quick-gate`
+first because checkpoint already supersedes it.
 
 The full test262 suite is a zero-failure gate and runs on every PR
 (`zig build test262-check`), so a semantic regression cannot reach `main`.
@@ -352,7 +362,7 @@ evidence, or CI gates:
 
 ```bash
 zig build engine-production-gate --summary all
-zig build test -Doptimize=ReleaseSafe --summary all
+zig build test test-stress -Doptimize=ReleaseSafe --summary all
 ```
 
 **Instrumentation tiers.** `zig build test-oom --summary all` (allocator / OOM

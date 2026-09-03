@@ -1,0 +1,836 @@
+{
+ "tool": "zjs-benchv8-fixed-pmu",
+ "schemaVersion": 1,
+ "direction": "ratios are zjs/qjs; below 1.0 means zjs used fewer counters or wall time",
+ "workload": "per-benchmark scripts assembled from the vendored suite with doWarmup=false and doDeterministic=true appended; both engines execute identical deterministicIterations/minIterations batches",
+ "role": "screening instrument; score adjudication stays with run_benchv8_compare.py",
+ "iterationDivisor": 1,
+ "timestamp": "2026-08-30T08:47:44Z",
+ "samplesPerEnginePerBench": 16,
+ "samplingOrder": "paired ABBA by sample parity",
+ "firstPositionCounts": {
+  "qjs": 8,
+  "zjs": 8
+ },
+ "firstPositionBalanced": true,
+ "cpu": 19,
+ "effectiveAffinity": [
+  19
+ ],
+ "pmu": "armv8_pmuv3_1",
+ "events": [
+  "armv8_pmuv3_1/instructions/",
+  "armv8_pmuv3_1/cycles/",
+  "armv8_pmuv3_1/branch-instructions/",
+  "armv8_pmuv3_1/branch-misses/",
+  "armv8_pmuv3_1/cache-references/",
+  "armv8_pmuv3_1/cache-misses/"
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": "0xd87",
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/g0c-new-zjs",
+   "sha256": "18001642f6ee928e36415c400751e287cb5edcdee0a729e97d97d7febd590bce",
+   "repo": "v0.1.0-165-g1c03df9a-dirty"
+  },
+  "qjs": {
+   "path": "/tmp/g0a-new-zjs",
+   "sha256": "05026e8e550cede89a2621f44f6291ff57c4ee7a9e77c52c7c19c55ca23fcb3b",
+   "repo": "unavailable"
+  }
+ },
+ "benchmarks": {
+  "splay": {
+   "source": {
+    "suiteDir": "/home/aneryu/zjs/tools/perf/bench_v8/suite",
+    "files": [
+     {
+      "file": "base.js",
+      "sha256": "216612c2e7096a02b3e52b57e9cf9351bbaf180d60938d5c60b85fd756232733"
+     },
+     {
+      "file": "splay.js",
+      "sha256": "f9a6a60d8f205908f5542ad1180abc1902dcdab3dcb4278017c5ce179ee123f7"
+     }
+    ],
+    "fixedWorkSha256": "e9a794cab2e318f7ff4509d079f7172b819e4689c2399188c9e54559e8f36fe7"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 31375689448,
+       "cycles": 8376314836,
+       "branch-instructions": 5840299520,
+       "branch-misses": 16577524,
+       "cache-references": 13039215548,
+       "cache-misses": 86082138
+      },
+      "wallSeconds": 2.205372772179544,
+      "stdout": "Splay: 5742\nSplayLatency: 6678\n----",
+      "scores": {
+       "Splay": 5742.0,
+       "SplayLatency": 6678.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31340490006,
+       "cycles": 8402214930,
+       "branch-instructions": 5828091157,
+       "branch-misses": 16668627,
+       "cache-references": 13031505222,
+       "cache-misses": 89338664
+      },
+      "wallSeconds": 2.2002012520097196,
+      "stdout": "Splay: 5687\nSplayLatency: 6560\n----",
+      "scores": {
+       "Splay": 5687.0,
+       "SplayLatency": 6560.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31367744728,
+       "cycles": 8439206600,
+       "branch-instructions": 5838943406,
+       "branch-misses": 16747000,
+       "cache-references": 13043194875,
+       "cache-misses": 90650538
+      },
+      "wallSeconds": 2.2021131650544703,
+      "stdout": "Splay: 5662\nSplayLatency: 6542\n----",
+      "scores": {
+       "Splay": 5662.0,
+       "SplayLatency": 6542.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31320483972,
+       "cycles": 8366212816,
+       "branch-instructions": 5820131050,
+       "branch-misses": 16674518,
+       "cache-references": 13020062706,
+       "cache-misses": 85627989
+      },
+      "wallSeconds": 2.1823581671342254,
+      "stdout": "Splay: 5713\nSplayLatency: 6600\n----",
+      "scores": {
+       "Splay": 5713.0,
+       "SplayLatency": 6600.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31324202241,
+       "cycles": 8384282575,
+       "branch-instructions": 5821482067,
+       "branch-misses": 16979803,
+       "cache-references": 13035530468,
+       "cache-misses": 84894678
+      },
+      "wallSeconds": 2.1971330740489066,
+      "stdout": "Splay: 5702\nSplayLatency: 6579\n----",
+      "scores": {
+       "Splay": 5702.0,
+       "SplayLatency": 6579.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31321026737,
+       "cycles": 8373291917,
+       "branch-instructions": 5820189053,
+       "branch-misses": 16645730,
+       "cache-references": 13020007004,
+       "cache-misses": 84938377
+      },
+      "wallSeconds": 2.195624731015414,
+      "stdout": "Splay: 5710\nSplayLatency: 6571\n----",
+      "scores": {
+       "Splay": 5710.0,
+       "SplayLatency": 6571.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31325578115,
+       "cycles": 8387719414,
+       "branch-instructions": 5821868565,
+       "branch-misses": 16750640,
+       "cache-references": 13027909434,
+       "cache-misses": 85236261
+      },
+      "wallSeconds": 2.1854438767768443,
+      "stdout": "Splay: 5702\nSplayLatency: 6565\n----",
+      "scores": {
+       "Splay": 5702.0,
+       "SplayLatency": 6565.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31328444980,
+       "cycles": 8376411972,
+       "branch-instructions": 5822864920,
+       "branch-misses": 16739193,
+       "cache-references": 13034602810,
+       "cache-misses": 84585724
+      },
+      "wallSeconds": 2.1887716418132186,
+      "stdout": "Splay: 5704\nSplayLatency: 6579\n----",
+      "scores": {
+       "Splay": 5704.0,
+       "SplayLatency": 6579.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31320650193,
+       "cycles": 8362369070,
+       "branch-instructions": 5820183916,
+       "branch-misses": 16845595,
+       "cache-references": 13022192011,
+       "cache-misses": 86446780
+      },
+      "wallSeconds": 2.1929132407531142,
+      "stdout": "Splay: 5716\nSplayLatency: 6572\n----",
+      "scores": {
+       "Splay": 5716.0,
+       "SplayLatency": 6572.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31363314532,
+       "cycles": 8413949385,
+       "branch-instructions": 5837085362,
+       "branch-misses": 16587847,
+       "cache-references": 13028236844,
+       "cache-misses": 85833040
+      },
+      "wallSeconds": 2.2052969350479543,
+      "stdout": "Splay: 5696\nSplayLatency: 6551\n----",
+      "scores": {
+       "Splay": 5696.0,
+       "SplayLatency": 6551.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31320182574,
+       "cycles": 8382926590,
+       "branch-instructions": 5820093412,
+       "branch-misses": 16718844,
+       "cache-references": 13028979874,
+       "cache-misses": 84829482
+      },
+      "wallSeconds": 2.197832199279219,
+      "stdout": "Splay: 5699\nSplayLatency: 6581\n----",
+      "scores": {
+       "Splay": 5699.0,
+       "SplayLatency": 6581.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31359595195,
+       "cycles": 8431834752,
+       "branch-instructions": 5835649984,
+       "branch-misses": 16693670,
+       "cache-references": 13079137648,
+       "cache-misses": 89192988
+      },
+      "wallSeconds": 2.2004069038666785,
+      "stdout": "Splay: 5670\nSplayLatency: 6475\n----",
+      "scores": {
+       "Splay": 5670.0,
+       "SplayLatency": 6475.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31327609334,
+       "cycles": 8397068692,
+       "branch-instructions": 5823040041,
+       "branch-misses": 16733758,
+       "cache-references": 13067122223,
+       "cache-misses": 85313759
+      },
+      "wallSeconds": 2.200613445136696,
+      "stdout": "Splay: 5693\nSplayLatency: 6510\n----",
+      "scores": {
+       "Splay": 5693.0,
+       "SplayLatency": 6510.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31339121343,
+       "cycles": 8390484058,
+       "branch-instructions": 5827209445,
+       "branch-misses": 16607531,
+       "cache-references": 13025636122,
+       "cache-misses": 86246069
+      },
+      "wallSeconds": 2.1987247220240533,
+      "stdout": "Splay: 5696\nSplayLatency: 6575\n----",
+      "scores": {
+       "Splay": 5696.0,
+       "SplayLatency": 6575.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31330200198,
+       "cycles": 8387527817,
+       "branch-instructions": 5823729730,
+       "branch-misses": 16726881,
+       "cache-references": 13032561495,
+       "cache-misses": 83369750
+      },
+      "wallSeconds": 2.1987839969806373,
+      "stdout": "Splay: 5699\nSplayLatency: 6557\n----",
+      "scores": {
+       "Splay": 5699.0,
+       "SplayLatency": 6557.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31371443568,
+       "cycles": 8403700094,
+       "branch-instructions": 5840075113,
+       "branch-misses": 16690991,
+       "cache-references": 13039838924,
+       "cache-misses": 85898234
+      },
+      "wallSeconds": 2.1934920107014477,
+      "stdout": "Splay: 5690\nSplayLatency: 6566\n----",
+      "scores": {
+       "Splay": 5690.0,
+       "SplayLatency": 6566.0
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 31344179267,
+       "cycles": 8394224269,
+       "branch-instructions": 5822600431,
+       "branch-misses": 17607038,
+       "cache-references": 13063468376,
+       "cache-misses": 85753244
+      },
+      "wallSeconds": 2.1986739579588175,
+      "stdout": "Splay: 5719\nSplayLatency: 6676\n----",
+      "scores": {
+       "Splay": 5719.0,
+       "SplayLatency": 6676.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31346524869,
+       "cycles": 8495425471,
+       "branch-instructions": 5823635965,
+       "branch-misses": 17767389,
+       "cache-references": 13149158443,
+       "cache-misses": 90668993
+      },
+      "wallSeconds": 2.214838549029082,
+      "stdout": "Splay: 5651\nSplayLatency: 6541\n----",
+      "scores": {
+       "Splay": 5651.0,
+       "SplayLatency": 6541.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31354036460,
+       "cycles": 8448226052,
+       "branch-instructions": 5826220839,
+       "branch-misses": 16912061,
+       "cache-references": 13062965034,
+       "cache-misses": 86114818
+      },
+      "wallSeconds": 2.213378543034196,
+      "stdout": "Splay: 5668\nSplayLatency: 6550\n----",
+      "scores": {
+       "Splay": 5668.0,
+       "SplayLatency": 6550.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31348962420,
+       "cycles": 8576103152,
+       "branch-instructions": 5824406505,
+       "branch-misses": 17782356,
+       "cache-references": 13113684601,
+       "cache-misses": 89604388
+      },
+      "wallSeconds": 2.2478881892748177,
+      "stdout": "Splay: 5593\nSplayLatency: 6579\n----",
+      "scores": {
+       "Splay": 5593.0,
+       "SplayLatency": 6579.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31399104368,
+       "cycles": 8594062920,
+       "branch-instructions": 5844542917,
+       "branch-misses": 17699821,
+       "cache-references": 13233677195,
+       "cache-misses": 91181704
+      },
+      "wallSeconds": 2.251232130918652,
+      "stdout": "Splay: 5590\nSplayLatency: 6376\n----",
+      "scores": {
+       "Splay": 5590.0,
+       "SplayLatency": 6376.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31339820049,
+       "cycles": 8572516790,
+       "branch-instructions": 5821232516,
+       "branch-misses": 17817977,
+       "cache-references": 13219576130,
+       "cache-misses": 89104823
+      },
+      "wallSeconds": 2.2464960431680083,
+      "stdout": "Splay: 5598\nSplayLatency: 6385\n----",
+      "scores": {
+       "Splay": 5598.0,
+       "SplayLatency": 6385.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31351272587,
+       "cycles": 8453700281,
+       "branch-instructions": 5825600378,
+       "branch-misses": 17495092,
+       "cache-references": 13074987326,
+       "cache-misses": 86801257
+      },
+      "wallSeconds": 2.2156771128065884,
+      "stdout": "Splay: 5662\nSplayLatency: 6566\n----",
+      "scores": {
+       "Splay": 5662.0,
+       "SplayLatency": 6566.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31351098896,
+       "cycles": 8563246941,
+       "branch-instructions": 5825373605,
+       "branch-misses": 17920547,
+       "cache-references": 13214974255,
+       "cache-misses": 89310759
+      },
+      "wallSeconds": 2.237924390938133,
+      "stdout": "Splay: 5606\nSplayLatency: 6391\n----",
+      "scores": {
+       "Splay": 5606.0,
+       "SplayLatency": 6391.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31348073721,
+       "cycles": 8481977969,
+       "branch-instructions": 5823754861,
+       "branch-misses": 17648565,
+       "cache-references": 13069992888,
+       "cache-misses": 89329647
+      },
+      "wallSeconds": 2.2231672131456435,
+      "stdout": "Splay: 5634\nSplayLatency: 6550\n----",
+      "scores": {
+       "Splay": 5634.0,
+       "SplayLatency": 6550.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31346232143,
+       "cycles": 8498344986,
+       "branch-instructions": 5823797255,
+       "branch-misses": 17696428,
+       "cache-references": 13064044387,
+       "cache-misses": 85467097
+      },
+      "wallSeconds": 2.22769372491166,
+      "stdout": "Splay: 5645\nSplayLatency: 6565\n----",
+      "scores": {
+       "Splay": 5645.0,
+       "SplayLatency": 6565.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31336115905,
+       "cycles": 8470786565,
+       "branch-instructions": 5819743871,
+       "branch-misses": 17693308,
+       "cache-references": 13063917425,
+       "cache-misses": 85550720
+      },
+      "wallSeconds": 2.218497803900391,
+      "stdout": "Splay: 5659\nSplayLatency: 6598\n----",
+      "scores": {
+       "Splay": 5659.0,
+       "SplayLatency": 6598.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31349948433,
+       "cycles": 8496817911,
+       "branch-instructions": 5824983691,
+       "branch-misses": 17798837,
+       "cache-references": 13078616869,
+       "cache-misses": 92915951
+      },
+      "wallSeconds": 2.223010479938239,
+      "stdout": "Splay: 5642\nSplayLatency: 6589\n----",
+      "scores": {
+       "Splay": 5642.0,
+       "SplayLatency": 6589.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31343192437,
+       "cycles": 8515705224,
+       "branch-instructions": 5821973021,
+       "branch-misses": 17758057,
+       "cache-references": 13069833315,
+       "cache-misses": 91955952
+      },
+      "wallSeconds": 2.233035176061094,
+      "stdout": "Splay: 5628\nSplayLatency: 6579\n----",
+      "scores": {
+       "Splay": 5628.0,
+       "SplayLatency": 6579.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31337408116,
+       "cycles": 8486907068,
+       "branch-instructions": 5819928357,
+       "branch-misses": 17567145,
+       "cache-references": 13055105932,
+       "cache-misses": 86157551
+      },
+      "wallSeconds": 2.2246418157592416,
+      "stdout": "Splay: 5653\nSplayLatency: 6584\n----",
+      "scores": {
+       "Splay": 5653.0,
+       "SplayLatency": 6584.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31348047283,
+       "cycles": 8626755341,
+       "branch-instructions": 5824123584,
+       "branch-misses": 18226110,
+       "cache-references": 13126630565,
+       "cache-misses": 94245994
+      },
+      "wallSeconds": 2.2584009747952223,
+      "stdout": "Splay: 5560\nSplayLatency: 6534\n----",
+      "scores": {
+       "Splay": 5560.0,
+       "SplayLatency": 6534.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31344811533,
+       "cycles": 8502195105,
+       "branch-instructions": 5822833021,
+       "branch-misses": 17470691,
+       "cache-references": 13064581382,
+       "cache-misses": 92315277
+      },
+      "wallSeconds": 2.2282096170820296,
+      "stdout": "Splay: 5631\nSplayLatency: 6514\n----",
+      "scores": {
+       "Splay": 5631.0,
+       "SplayLatency": 6514.0
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 31329322589.0,
+     "zjsMedian": 31347286076.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9989957135108625,
+      1.0001925580295281,
+      0.9995629820339693,
+      1.0009092595128946,
+      1.0023911902503924,
+      1.0006000222201463,
+      1.0008202393553816,
+      1.0007231101324838,
+      1.0008755733942627,
+      0.9994553385299066,
+      1.0005087240779122,
+      0.9996923824449897,
+      1.000497423944287,
+      0.9999453326409107,
+      1.0005696447800272,
+      0.9991510739713882
+     ],
+     "ratioMedian": 1.0005030740110996,
+     "ratioMAD": 0.0003893424424790126
+    },
+    "cycles": {
+     "qjsMedian": 8387623615.5,
+     "zjsMedian": 8497581448.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0021381040888087,
+      1.011093567800461,
+      1.0010687559183584,
+      1.0250878552358356,
+      1.025020667316905,
+      1.0237928971036494,
+      1.0078663655450695,
+      1.0223048925511946,
+      1.014303231297109,
+      1.0100304383991727,
+      1.0104808236189027,
+      1.007706882417802,
+      1.0141283269616488,
+      1.0114919484184068,
+      1.0285218158698834,
+      1.0117204338444112
+     ],
+     "ratioMedian": 1.011606191131409,
+     "ratioMAD": 0.0038195671499732242
+    },
+    "branch-instructions": {
+     "qjsMedian": 5823384885.5,
+     "zjsMedian": 5823776058.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9969694895031685,
+      0.9992355658345101,
+      0.9978210840360386,
+      1.0007345977200977,
+      1.003961336603736,
+      1.0001792833515368,
+      1.0006409991840823,
+      1.000430833453028,
+      1.0006135450445446,
+      0.997723503054023,
+      0.99993994237287,
+      0.9981722185139197,
+      0.9998167589450722,
+      0.9987505017506711,
+      1.000067629168636,
+      0.9970476249592032
+     ],
+     "ratioMedian": 0.999878350658971,
+     "ratioMAD": 0.0008094477931189781
+    },
+    "branch-misses": {
+     "qjsMedian": 16706257.0,
+     "zjsMedian": 17698124.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0621030016304003,
+      1.0659179667287533,
+      1.009856153340897,
+      1.0664389819243951,
+      1.0424043788965043,
+      1.070423285731536,
+      1.0444431973942487,
+      1.0705741310229233,
+      1.0476664671090572,
+      1.0668309154286268,
+      1.0582853694908572,
+      1.066202758291017,
+      1.0612115341933355,
+      1.0577818581220773,
+      1.0896299196484986,
+      1.0467138230438204
+     ],
+     "ratioMedian": 1.0616572679118679,
+     "ratioMAD": 0.006969832668213494
+    },
+    "cache-references": {
+     "qjsMedian": 13032033358.5,
+     "zjsMedian": 13072490107.0,
+     "pairedRatiosZjsOverQjs": [
+      1.001859991340025,
+      1.0090283677131462,
+      1.0015157451214574,
+      1.0071905871049958,
+      1.015200511209453,
+      1.0153278816162457,
+      1.0036136183044946,
+      1.0138378934616727,
+      1.0036707243265668,
+      1.002748456558532,
+      1.002681526208335,
+      0.9999601824666109,
+      1.0002074742972273,
+      1.0022624468950292,
+      1.0072180031558715,
+      1.001897451198915
+     ],
+     "ratioMedian": 1.0031810374315133,
+     "ratioMAD": 0.0023194277221709747
+    },
+    "cache-misses": {
+     "qjsMedian": 85730514.5,
+     "zjsMedian": 89320203.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9961793002864311,
+      1.014890853975609,
+      0.9499647757192572,
+      1.0464380752886768,
+      1.0740567742067413,
+      1.0490525737264793,
+      1.0183606833715992,
+      1.0558609039038314,
+      1.0333484601739937,
+      0.9957365718376048,
+      1.0085022091729854,
+      1.0417405345810369,
+      1.0778560583645131,
+      0.9989736575704106,
+      1.1304579178898821,
+      1.0747051796198743
+     ],
+     "ratioMedian": 1.0375444973775152,
+     "ratioMAD": 0.03277728251687795
+    },
+    "wallSeconds": {
+     "qjsMedian": 2.198278460651636,
+     "zjsMedian": 2.2261677703354508,
+     "pairedRatiosZjsOverQjs": [
+      0.9969625025278125,
+      1.0066527082492986,
+      1.0051157125612329,
+      1.0300271619606067,
+      1.024622567248533,
+      1.0231694020539965,
+      1.013833910973881,
+      1.0224567735555068,
+      1.0137962468511243,
+      1.0101559066753152,
+      1.0094027217491623,
+      1.0102724528049063,
+      1.014733042277847,
+      1.0117873299352045,
+      1.0271136127497975,
+      1.0158275508692096
+     ],
+     "ratioMedian": 1.0138150789125027,
+     "ratioMAD": 0.00578736391327217
+    }
+   },
+   "derived": {
+    "qjsIPC": 3.7351846035514327,
+    "zjsIPC": 3.6889656505185306,
+    "ipcRatioZjsOverQjs": 0.9876260592344066
+   }
+  }
+ },
+ "orderLog": [
+  {
+   "bench": "splay",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 8,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 9,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 10,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 11,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 12,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 13,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 14,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 15,
+   "order": "zjs->qjs"
+  }
+ ]
+}

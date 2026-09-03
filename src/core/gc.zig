@@ -7,6 +7,7 @@ pub const representation = @import("gc_representation_constants.zig");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const memory = @import("memory.zig");
+const carrier = @import("gc_carrier.zig");
 const bigint = @import("bigint.zig");
 const object = @import("object.zig");
 const class = @import("class.zig");
@@ -23,45 +24,27 @@ const JSValue = @import("value.zig").JSValue;
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 
-/// The stop-the-world reclaiming tracer in `gc_trace_stw.zig` is now the only
-/// collector, so this is a comptime `true`. The name is kept because roughly
-/// 270 `if (comptime gc.trace_stw_enabled)` gates across the tree read it;
-/// they collapse to their taken arm without any of them having to move, and
-/// the `else` arms they guard are what the removal batches delete.
+/// The stop-the-world reclaiming tracer in `gc_trace_stw.zig` is the only
+/// collector, so this is a comptime `true`. The name survives because
+/// `if (comptime gc.trace_stw_enabled)` gates outside this file still read
+/// it (the derived `generation_enabled` / `concurrent_enabled` /
+/// `block_heap_enabled` / `address_registry_enabled` constants below are all
+/// aliases of it); the dead `else` arms inside gc.zig were removed in TGC S0
+/// and the cross-file gates go with S5.
 pub const trace_stw_enabled: bool = true;
 
-/// Full-every-2 sticky-major experiment. This is a separate compile-time
-/// opt-in underneath the already experimental tracer so the ordinary trace
-/// artifact pays no scheduler branch, state field, or changed collection
-/// semantics. It must never be inferred from an environment variable alone.
-pub const sticky_major_enabled: bool =
-    trace_stw_enabled and build_options.zjs_experimental_gc_sticky_major;
+/// R3 roots diagnosis (`-Dzjs_gc_roots_diag=true`, docs/tracing-gc-s0-spec.md
+/// §L4): production links scalar `ValueRootFrame`s, the verify probe records
+/// every object only a conservative word kept alive, and the L3 store probe
+/// is armed regardless of optimize mode. Off in every shipped artifact.
+pub const roots_diag_enabled: bool = build_options.zjs_gc_roots_diag;
 
-/// Pass-B corpse census (`-Dzjs_experimental_gc_corpse_census=true`). It
-/// classifies every parked corpse inside `drainCycleDeferredFreesBudgeted`,
-/// which is the symbol being priced, so the switch has to be comptime: a
-/// runtime flag test would be part of the 27.8 cycles/entry under measurement.
-/// Default false in every shipped and every measured artifact.
-pub const corpse_census_enabled: bool =
-    trace_stw_enabled and build_options.zjs_experimental_gc_corpse_census;
 /// Live page-radix address registry for conservative candidate validation.
 pub const address_registry_enabled: bool = trace_stw_enabled or builtin.is_test;
 
 /// Publication-size histogram and measured size-class table (§4.2 / §4.3).
 /// Same compile gate as the address registry.
 pub const space_model_enabled: bool = address_registry_enabled;
-
-/// Logical 64 KiB window sweep state machine and four scheduling quantities
-/// (§8.7). Same compile gate.
-pub const sweep_model_enabled: bool = address_registry_enabled;
-
-/// Sweep-model observation on the allocation path. Everything the state
-/// machine produces is read only by `--gc-stats` and by tests; nothing in the
-/// collector or allocator branches on it, and `refreshHeadroom`'s
-/// per-publication result is overwritten by `endSweepModelSweep` before the
-/// report reads it. So the per-object hash insert is instrumentation and
-/// carries an instrument's gate, matching `gc_slot.stats_enabled`.
-pub const sweep_model_stats_enabled: bool = sweep_model_enabled and builtin.is_test;
 
 /// 64 KiB block heap.
 pub const block_heap_enabled: bool = trace_stw_enabled;
@@ -79,12 +62,23 @@ const SpaceHistogram = if (space_model_enabled)
 else
     void;
 
-const SweepModel = if (sweep_model_enabled)
-    @import("gc_sweep_model.zig").Model
-else
-    void;
-
 pub const generation_enabled: bool = trace_stw_enabled;
+pub const AllocationHandle = carrier.AllocationHandle;
+pub const CurrentMembershipKey = carrier.CurrentMembershipKey;
+pub const CarrierStateMask = carrier.StateMask;
+pub const CarrierLifecycleState = carrier.LifecycleState;
+pub const CarrierResolveError = carrier.ResolveError;
+pub const block_generation_enabled = carrier.block_generation_enabled;
+pub const extent_identity_enabled = carrier.extent_identity_enabled;
+pub const lifecycle_state_enabled = carrier.lifecycle_state_enabled;
+pub const block_tracking_enabled = carrier.block_tracking_enabled;
+pub const extent_tracking_enabled = carrier.extent_tracking_enabled;
+pub const ResolvedExact = union(enum) {
+    tracing: *Header,
+};
+pub const ResolvedCurrentMember = union(enum) {
+    tracing: *Header,
+};
 
 /// Set from the `ZJS_GC_STRESS` environment variable. Collect at every
 /// safepoint that has anything young, instead of waiting for the young
@@ -105,49 +99,30 @@ pub var stress_collect: bool = false;
 /// orders of magnitude slower than the production 10_000.
 pub var stress_cadence: i32 = 64;
 
-/// `ZJS_GC_STRESS=off` suppresses collection entirely. Diagnostic only: it is
-/// how you answer "is this failure caused by a collection landing here at all?"
-/// in one run instead of by inference.
-pub var stress_disable: bool = false;
-
-/// `ZJS_GC_NO_MINOR=1` runs majors only. Splits "a generational invariant --
-/// sticky marks, a missing write barrier, the young suffix" from "a root the
-/// trace never sees at all", which a full collection would miss too.
-pub var stress_no_minor: bool = false;
-
-/// Diagnostic floor for the major-collection threshold, in bytes
-/// (`ZJS_GC_MIN_THRESHOLD`). Raising it far above a workload's total
-/// allocation makes the collector effectively never run, which is the only
-/// way to separate the two halves of the tracer's price: what the MUTATOR
-/// pays merely to be collectable (allocation route, write barrier,
-/// generational bookkeeping) from what COLLECTING costs. Never set in any
-/// shipped configuration; a run under it is not a correctness
-/// configuration either, since nothing is ever reclaimed.
-pub var min_major_threshold: usize = 0;
-
-/// Diagnostic override for `small_heap_major_headroom_bytes`
-/// (`ZJS_GC_HEADROOM`, bytes; 0 = use the compiled constant). The floor sets
-/// the major cadence for every small live set -- raytrace's threshold is set
-/// by it on 100% of collections -- so its value has to be swept, not
-/// inherited.
-pub var headroom_override: usize = 0;
-
-/// Diagnostic override for the tracer's major growth factor, as a percentage
-/// of the live bytes (`ZJS_GC_GROWTH_PERCENT`; 0 = use the compiled 200).
-///
-/// The slab's free-block pool -- and therefore the reuse distance of every
-/// recycled slab block -- is about half the allocation headroom this factor
-/// buys. That makes it the only knob that moves the alloc side's cache
-/// behaviour at all, so it has to be sweepable rather than argued about.
-/// Never set in any shipped configuration.
-pub var growth_percent_override: usize = 0;
-
 /// `ZJS_MINOR_AUDIT=1`: after the minor picks its condemned set, report any
 /// live object still holding an edge into it. Parsed once here rather than
 /// read at the check, because the minor path is exactly where a `getenv` per
 /// collection is the probe that hides the bug -- regexp performs 794 minors in
 /// a two-second script.
 pub var minor_audit: bool = false;
+/// `ZJS_MINOR_AUDIT=fatal`: the audit above panics on its first hit instead
+/// of only printing, so a gate that runs the suite under it turns red.
+pub var minor_audit_fatal: bool = false;
+/// `ZJS_GC_VERIFY_MINOR=fatal`: a PRECISE condemned-but-reachable violation
+/// panics. Conservative-only violations stay a report: the verifier's probe
+/// runs on a deeper native frame than the minor it checks, so register and
+/// stack residue differ between the two scans by construction.
+pub var verify_minor_fatal: bool = false;
+
+/// TGC S0 L3: sites of stores that static reading found unbarriered. The
+/// probe below counts, per site, the state the generational barrier exists
+/// to prevent -- an old, unremembered, published owner gaining a young child.
+pub const UnbarrieredStoreSite = enum(u8) {
+    set_property_data_overwrite,
+    dense_array_in_capacity_append,
+    global_lexical_cell_replace,
+};
+pub var unbarriered_store_hits: [3]usize = .{ 0, 0, 0 };
 
 /// `ZJS_GC_ARENA_AUDIT=1`: after every collection, check that a slab block
 /// reads as a live GC object exactly when it holds one.
@@ -171,32 +146,22 @@ pub inline fn invariantChecksEnabled() bool {
 /// full trace would keep. See `gc_trace_stw.computeFullReachable`.
 pub var verify_minor: bool = false;
 
-/// `ZJS_GC_VERIFY_STICKY_MAJOR=1`: before an experimental sticky cycle
-/// condemns anything, recompute reachability from freshly cleared marks and
-/// reject every object that the sticky marks would condemn but the fresh
-/// trace reaches. Parsed only in builds that contain the sticky experiment.
-pub var verify_sticky_major: bool = false;
-
-/// `ZJS_GC_STICKY_MAJOR=0`: keep the experimental scheduler compiled in but
-/// force every self-paced cycle back to full scope. This exists so the arm can
-/// be priced against itself in ONE binary: the layout, the branch, and the
-/// extra state field are identical on both sides, and the only difference
-/// measured is the scope decision. Defaults to on, because in this build the
-/// `-Dzjs_experimental_gc_sticky_major` option is already the opt-in.
-pub var sticky_major_on: bool = true;
-
-/// `ZJS_GC_VERIFY_MAJOR_ALL=1`: run the same fresh-trace oracle over FULL-scope
-/// incremental cycles too. A full scope cannot under-mark by construction, so
-/// anything the oracle reports there is its own noise floor -- which is the
-/// only way to read the sticky arm's number as a rate rather than a raw count.
+/// `ZJS_GC_VERIFY_MAJOR_ALL=1` (roots-diag builds): re-derive reachability
+/// from freshly cleared marks at every incremental finish and reject any
+/// object the fresh precise roots reach but the cycle is about to condemn.
 pub var verify_major_all: bool = false;
 
-/// `ZJS_GC_STICKY_INJECT_SKIP=N`: deliberately fail to expand the first N
-/// remembered owners of a sticky cycle. This is the fault the fresh-trace
-/// oracle exists to catch -- an old owner whose young child nothing else
-/// reaches -- reproduced in the shipped ReleaseFast arm rather than only in a
-/// Debug unit test. Never read unless the sticky experiment is compiled in.
-pub var sticky_inject_skip: usize = 0;
+/// `ZJS_GC_M_CUT_INJECT=N`: terminal Object-layout deletion mutants.
+/// 1 borrows the still-live scalar word for the parked successor; 2 sends a
+/// slots2 Object through its absent resident payload arm; 3 skips removal of
+/// its sparse payload entry at destruction; 4 applies the historical uniform-
+/// header body offset to Object. Test binaries only.
+pub var m_cut_inject: u8 = 0;
+
+pub inline fn mCutInjection(comptime mutation: u8) bool {
+    if (comptime !builtin.is_test) return false;
+    return m_cut_inject == mutation;
+}
 
 /// Read once at `Registry.init`. "0" or empty disables; "1" enables at the
 /// default cadence; any other integer enables at that cadence.
@@ -204,6 +169,7 @@ fn readStressFromEnv() void {
     if (std.c.getenv("ZJS_MINOR_AUDIT")) |raw| {
         const text = std.mem.span(raw);
         minor_audit = text.len != 0 and !std.mem.eql(u8, text, "0");
+        minor_audit_fatal = std.mem.eql(u8, text, "fatal");
     }
     if (std.c.getenv("ZJS_GC_ARENA_AUDIT")) |raw| {
         const text = std.mem.span(raw);
@@ -212,80 +178,41 @@ fn readStressFromEnv() void {
     if (std.c.getenv("ZJS_GC_VERIFY_MINOR")) |raw| {
         const text = std.mem.span(raw);
         verify_minor = text.len != 0 and !std.mem.eql(u8, text, "0");
+        verify_minor_fatal = std.mem.eql(u8, text, "fatal");
     }
-    if (comptime sticky_major_enabled) {
-        if (std.c.getenv("ZJS_GC_VERIFY_STICKY_MAJOR")) |raw| {
-            const text = std.mem.span(raw);
-            verify_sticky_major = text.len != 0 and !std.mem.eql(u8, text, "0");
-        }
-        if (std.c.getenv("ZJS_GC_STICKY_MAJOR")) |raw| {
-            const text = std.mem.span(raw);
-            sticky_major_on = text.len != 0 and !std.mem.eql(u8, text, "0");
-        }
+    if (comptime roots_diag_enabled) {
         if (std.c.getenv("ZJS_GC_VERIFY_MAJOR_ALL")) |raw| {
             const text = std.mem.span(raw);
             verify_major_all = text.len != 0 and !std.mem.eql(u8, text, "0");
         }
-        if (std.c.getenv("ZJS_GC_STICKY_INJECT_SKIP")) |raw| {
-            sticky_inject_skip = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 0;
+    }
+    if (comptime builtin.is_test) {
+        if (std.c.getenv("ZJS_GC_M_CUT_INJECT")) |raw| {
+            m_cut_inject = std.fmt.parseInt(u8, std.mem.span(raw), 10) catch 0;
         }
-    }
-    if (std.c.getenv("ZJS_GC_NO_MINOR")) |raw| {
-        const text = std.mem.span(raw);
-        stress_no_minor = text.len != 0 and !std.mem.eql(u8, text, "0");
-    }
-    if (std.c.getenv("ZJS_GC_MIN_THRESHOLD")) |raw| {
-        min_major_threshold = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 0;
-    }
-    if (std.c.getenv("ZJS_GC_DESTROY_PROBE")) |raw| {
-        const text = std.mem.span(raw);
-        @import("gc_trace_stw.zig").destroy_probe = text.len != 0 and !std.mem.eql(u8, text, "0");
-    }
-    if (std.c.getenv("ZJS_GC_HEADROOM")) |raw| {
-        headroom_override = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 0;
-    }
-    if (std.c.getenv("ZJS_GC_GROWTH_PERCENT")) |raw| {
-        const parsed_growth = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 0;
-        growth_percent_override = if (parsed_growth >= 100) parsed_growth else 0;
     }
     const raw = std.c.getenv("ZJS_GC_STRESS") orelse return;
     const text = std.mem.span(raw);
     if (text.len == 0 or std.mem.eql(u8, text, "0")) return;
-    if (std.mem.eql(u8, text, "off")) {
-        stress_disable = true;
-        return;
-    }
     stress_collect = true;
     const parsed = std.fmt.parseInt(i32, text, 10) catch return;
     if (parsed > 1) stress_cadence = parsed;
 }
 
-/// Candidate validation for torn concurrent reads (§5.4). Compiled wherever a
-/// tracer exists, since conservative scanning needs the same checks.
-pub const candidate_validation = @import("gc_candidate.zig");
-
 /// Concurrent-major barrier and safepoint handshake (§8.4). Present wherever
 /// a tracer is compiled; the marker thread that uses it arrives separately.
 pub const concurrent_enabled: bool = trace_stw_enabled;
 pub const concurrent = @import("gc_concurrent.zig");
-/// Bounded mark queue whose overflow downgrades to rescan rather than
-/// dropping work (§8.4).
+/// Unbounded segmented private/shared mark frontier (§8.4).
 pub const mark_queue = @import("gc_mark_queue.zig");
 
-/// The census switch lives with the collector; the barrier only reads it.
-/// Mutual import with `gc_trace_stw.zig` is fine -- Zig resolves lazily.
+/// `detailed_reports` and the stats sinks live with the collector; the
+/// barrier only reads them. Mutual import with `gc_trace_stw.zig` is fine --
+/// Zig resolves lazily.
 const gc_trace_stw_reports = @import("gc_trace_stw.zig");
-/// Marker worker thread (§8.6). Reads published objects and claims mark state;
-/// never frees, allocates, or calls embedder code.
-pub const marker = @import("gc_marker.zig");
+const conservative_mod = @import("gc_conservative.zig");
 pub const generation = @import("gc_generation.zig");
-/// Seqlock snapshot for dynamic layouts, so a marker can read a descriptor
-/// beside a mutator that is replacing it (§6.3).
-pub const layout_snapshot = @import("gc_snapshot.zig");
-const ConcurrentState = if (concurrent_enabled)
-    concurrent.State
-else
-    void;
+const ConcurrentState = concurrent.State;
 
 /// Young objects required before a minor is worth its root scan.
 ///
@@ -336,6 +263,19 @@ pub const minor_young_threshold: usize = 16 * 1024;
 /// remark slices, which carry fixed whole-heap work until Phase 3.
 pub const incremental_mark_budget_ns: u64 = 1_000_000;
 
+/// Mutator allocation required before an open incremental major receives its
+/// next bounded assist at an object-allocation boundary.
+///
+/// The time budget bounds ONE slice, but object-heavy JavaScript can cross
+/// thousands of allocation boundaries inside one observable operation. Giving
+/// every boundary another slice merely concatenates a whole major cycle into
+/// that operation (Splay observed ~46 one-millisecond slices in one sample).
+/// Pace those assists by allocation debt instead: 512 KiB is below the major
+/// headroom floor and still buys enough assists for the collector to finish
+/// before the ordinary 2x growth threshold is exhausted. Explicit scheduler,
+/// callback, idle, and urgent polls remain unpaced.
+pub const incremental_assist_interval_bytes: usize = 512 * 1024;
+
 /// Floor on the allocation a small live set gets before the next major.
 ///
 /// Named for what it does rather than for how it was first derived. The
@@ -366,77 +306,28 @@ const GenerationState = if (generation_enabled)
 else
     void;
 
-pub const IncrementalMajorScope = enum(u1) {
-    full,
-    sticky,
-};
+/// Independent byte oracle for tests and explicit ownership-audit builds.
+///
+/// The public counters are a cold ownership census. An audit cannot use that
+/// same census as its expected value: losing the only owner link would hide a
+/// still-accounted allocation from both sides. This shadow follows lifecycle
+/// publication/free events instead, and is entirely absent from shipped
+/// ReleaseFast builds.
+pub const heap_accounting_oracle_enabled: bool = carrier.audit_oracle_enabled;
 
-pub const StickyMajorStats = struct {
-    full_cycles: usize = 0,
-    sticky_cycles: usize = 0,
-    full_forced_by_pressure: usize = 0,
-    oracle_checks_sticky: usize = 0,
-    /// Oracle runs over FULL-scope cycles. These are the control arm: the same
-    /// instrument on a scope that cannot be wrong by construction, so whatever
-    /// it reports there is the instrument's own noise floor.
-    oracle_checks_full: usize = 0,
-    /// A condemned object the fresh trace reached from PRECISE roots. This is
-    /// the number that means "sticky killed something live"; it is fail-closed.
-    oracle_violations_precise: usize = 0,
-    /// A condemned object the fresh trace reached ONLY through a conservative
-    /// stack candidate. The oracle runs on a different native frame than the
-    /// cycle it audits, so residue can exist in one scan and not the other --
-    /// the minor verifier has always reported this class separately for the
-    /// same reason. Counted, never fatal, and expected to appear at the same
-    /// rate on the full-scope control.
-    oracle_violations_conservative: usize = 0,
-    /// Settled bytes after a sticky cycle minus settled bytes after the full
-    /// that preceded it. At a steady state where live is flat this is the
-    /// floating garbage the skipped full would have reclaimed -- the cost side
-    /// of the trade. It is an upper bound where live is genuinely growing,
-    /// because real new survivors are counted in it too.
-    max_sticky_excess_bytes: usize = 0,
-    sum_sticky_excess_bytes: usize = 0,
-    /// The largest ordinary (sticky-contaminated) threshold ever installed.
-    /// Prerequisite #2 is only satisfied if the full-pressure threshold is NOT
-    /// a function of this number, so both are printed and can be compared.
-    max_ordinary_threshold: usize = 0,
-};
-
-const StickyMajorState = struct {
-    cycle_scope: IncrementalMajorScope = .full,
-    full_baseline_valid: bool = false,
-    sticky_rounds_since_full: u1 = 0,
-    last_full_settled_bytes: usize = 0,
-    full_pressure_threshold: usize = 0,
-    stats: StickyMajorStats = .{},
-};
-
-/// Max alignment the block heap can serve; `void`-safe for default `rc`.
-pub inline fn blockHeapMaxAlign() usize {
-    return if (block_heap_enabled) @import("gc_block_heap.zig").cell_alignment else 0;
-}
+const HeapAccountingOracle = if (heap_accounting_oracle_enabled)
+    carrier.HeapAccountingOracle
+else
+    void;
 
 const BlockHeap = if (block_heap_enabled)
     @import("gc_block_heap.zig").Heap
 else
     void;
 
-pub const Mode = enum {
-    balanced,
-    throughput,
-    low_rss,
-    low_latency,
-};
-
 pub const Policy = struct {
-    mode: Mode = .balanced,
-
     large_object_threshold: usize = 8 * KB,
 
-    callback_slice_budget_ns: u64 = 300_000,
-    idle_slice_budget_ns: u64 = 2_000_000,
-    allocation_slow_path_budget_ns: u64 = 2_000_000,
     native_cleanup_slice_jobs: usize = 8,
 
     external_weight: usize = 8,
@@ -463,36 +354,6 @@ pub const Policy = struct {
             self.rss_hard_limit != null or
             self.cgroup_soft_ratio_per_mille != 0 or
             self.cgroup_hard_ratio_per_mille != 0;
-    }
-
-    pub fn forMode(mode: Mode) Policy {
-        var policy = Policy{
-            .mode = mode,
-        };
-        switch (mode) {
-            .balanced => {},
-            .throughput => {
-                policy.callback_slice_budget_ns = 200_000;
-                policy.idle_slice_budget_ns = 2_000_000;
-                policy.allocation_slow_path_budget_ns = 2_000_000;
-                policy.native_cleanup_slice_jobs = 16;
-            },
-            .low_rss => {
-                policy.callback_slice_budget_ns = 300_000;
-                policy.idle_slice_budget_ns = 5_000_000;
-                policy.external_weight = 12;
-                policy.native_cleanup_slice_jobs = 16;
-                policy.cgroup_soft_ratio_per_mille = 850;
-                policy.cgroup_hard_ratio_per_mille = 950;
-            },
-            .low_latency => {
-                policy.callback_slice_budget_ns = 100_000;
-                policy.idle_slice_budget_ns = 1_000_000;
-                policy.allocation_slow_path_budget_ns = 500_000;
-                policy.native_cleanup_slice_jobs = 4;
-            },
-        }
-        return policy;
     }
 };
 
@@ -556,7 +417,7 @@ pub const StrongEdgeClass = enum(u8) {
 
 /// Physical prefix carried by a RefKind.  `.metadata` is the shared eight-byte
 /// allocator/GC prefix immediately before the carrier header;
-/// `.string_rc` is the four-byte refcount-only prefix used by flat strings and
+/// `.string_rc` was the four-byte refcount-only prefix used by flat strings and
 /// ropes, which intentionally has no allocator or lifecycle fields.
 pub const PrefixModel = enum(u8) {
     metadata,
@@ -596,8 +457,8 @@ pub const ref_kind_catalog = [_]RefKindDescriptor{
     .{ .kind = .shape, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
     // RefKind does not distinguish flat strings from StringRope. Flat strings
     // are leaves; ropes own left/right JSValue edges. Neither is on gc_obj_list.
-    .{ .kind = .string, .census = .allocation_ledger, .strong_edges = .string_family, .cycle_candidate = false },
-    .{ .kind = .big_int, .census = .allocation_ledger, .strong_edges = .leaf, .cycle_candidate = false },
+    .{ .kind = .string, .census = if (string_tracer_owned) .rc_registry else .allocation_ledger, .strong_edges = .string_family, .cycle_candidate = string_tracer_owned },
+    .{ .kind = .big_int, .census = .rc_registry, .strong_edges = .leaf, .cycle_candidate = true },
 };
 
 pub inline fn refKindDescriptor(kind: RefKind) *const RefKindDescriptor {
@@ -618,11 +479,11 @@ pub const representation_kind_catalog = [_]RepresentationKindDescriptor{
     .{ .kind = .object, .prefix = .metadata, .allocation = .block_slab_or_standalone, .ref_count = .trace_removed },
     .{ .kind = .function_bytecode, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .trace_removed },
     .{ .kind = .var_ref, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .trace_removed },
-    .{ .kind = .realm_context, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .retained },
+    .{ .kind = .realm_context, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .trace_removed },
     .{ .kind = .module, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .trace_removed },
-    .{ .kind = .shape, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .retained },
-    .{ .kind = .string, .prefix = .string_rc, .allocation = .string_family, .ref_count = .retained },
-    .{ .kind = .big_int, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .retained },
+    .{ .kind = .shape, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .trace_removed },
+    .{ .kind = .string, .prefix = .metadata, .allocation = if (string_tracer_owned) .block_slab_or_standalone else .string_family, .ref_count = if (string_tracer_owned) .trace_removed else .retained },
+    .{ .kind = .big_int, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .trace_removed },
 };
 
 pub inline fn representationKindDescriptor(kind: RefKind) *const RepresentationKindDescriptor {
@@ -643,13 +504,13 @@ comptime {
     }
     for (representation_kind_catalog, 0..) |descriptor, index| {
         std.debug.assert(@intFromEnum(descriptor.kind) == index);
-        std.debug.assert((descriptor.prefix == .string_rc) == (descriptor.kind == .string));
-        std.debug.assert((descriptor.allocation == .block_slab_or_standalone) == (descriptor.kind == .object));
-        std.debug.assert((descriptor.allocation == .string_family) == (descriptor.kind == .string));
-        std.debug.assert((descriptor.ref_count == .trace_removed) == switch (descriptor.kind) {
-            .object, .function_bytecode, .var_ref, .module => true,
-            else => false,
-        });
+        // Since S2-a1 every kind carries the eight-byte Metadata prefix; the
+        // string family still keeps its count in the prefix's lifetime word.
+        std.debug.assert(descriptor.prefix == .metadata);
+        std.debug.assert((descriptor.allocation == .block_slab_or_standalone) ==
+            (descriptor.kind == .object or (string_tracer_owned and descriptor.kind == .string)));
+        std.debug.assert((descriptor.allocation == .string_family) == (descriptor.kind == .string and !string_tracer_owned));
+        std.debug.assert((descriptor.ref_count == .trace_removed) == refCountRemoved(descriptor.kind));
     }
 }
 
@@ -669,11 +530,50 @@ pub const gc_kind_count: usize = @typeInfo(GcKind).@"enum".fields.len;
 /// API and a teardown-order contract (`context_head == null`) that the runtime
 /// asserts. Strings, ropes, symbols and BigInt are not traced at all, so their
 /// counts are the only thing keeping them alive.
+/// TGC S2 liveness switch for the string family (flat strings, ropes, symbol
+/// bodies). false: strings are refcounted raw-slab allocations the tracer
+/// never sees (S2-a1 state). true: strings are block cells / extents that the
+/// tracer marks and sweeps, and their count is dead. Every S2 change lands
+/// behind this constant so both builds gate until the flip (S2 spec §5.0).
+pub const string_tracer_owned: bool = false;
+
 pub inline fn refCountRemoved(kind: GcKind) bool {
     return switch (kind) {
-        .object, .function_bytecode, .var_ref, .module => true,
-        else => false,
+        .object, .function_bytecode, .var_ref, .module, .shape, .realm_context, .big_int => true,
+        .string => string_tracer_owned,
     };
+}
+
+/// O2-B's marking-epoch exemption. Only kinds whose lifetime is owned by the
+/// tracer AND whose struct never moves under the mutator may persist as raw
+/// pointers in a private or shared mark frontier. Shape is tracer-owned (no
+/// refcount) but `relocateShape` frees and re-creates the struct on inline
+/// FAM growth, so a queued raw pointer could dangle; it is shaded
+/// synchronously instead (`Collector.shade` non-frontier branch). Realm is
+/// tracer-owned too and keeps the synchronous route for now (its edges are
+/// few; S1-b left the queue admission for a later measurement).
+/// Keep this separate from enum ranges: Realm sits between VarRef and Module.
+pub inline fn frontierEpochSafe(kind: GcKind) bool {
+    return switch (kind) {
+        .object, .function_bytecode, .var_ref, .module, .big_int => true,
+        .string => string_tracer_owned,
+        .realm_context, .shape => false,
+    };
+}
+
+comptime {
+    for (std.meta.tags(GcKind)) |kind| {
+        const expected = switch (kind) {
+            .object, .function_bytecode, .var_ref, .module, .big_int => true,
+            .string => string_tracer_owned,
+            .realm_context, .shape => false,
+        };
+        std.debug.assert(frontierEpochSafe(kind) == expected);
+        // A raw frontier pointer requires tracer-owned lifetime; the converse
+        // does not hold (Shape relocates). If either catalog changes, O2 must
+        // be reopened here.
+        if (frontierEpochSafe(kind)) std.debug.assert(refCountRemoved(kind));
+    }
 }
 pub const Phase = enum {
     none,
@@ -687,7 +587,6 @@ pub const Phase = enum {
     /// teardown. `.remove_cycles` retired with that collector.
     tracer_destroy,
     deinit,
-    cycle,
 };
 
 /// The teardown window where resources are freed in one pass and structs in
@@ -752,36 +651,6 @@ pub const PinEntry = struct {
 /// value; the discriminator adds no field or padding to the existing ledger.
 const construction_pin_count = std.math.maxInt(usize);
 
-pub const SpaceAccount = struct {
-    live_bytes: usize = 0,
-
-    // qjs-aligned hot path: mirror rt->malloc_size / rt->malloc_count by
-    // tracking only live_bytes (quickjs.c:2160 js_def_malloc bumps a single
-    // scalar and delegates all page management to the system allocator).
-    fn recordAlloc(self: *SpaceAccount, bytes: usize) void {
-        // Plain unsigned add, exactly qjs `s->malloc_size += ...`
-        // (quickjs.c:2166). The former checked-add-with-saturation compiled to
-        // adds+cset+tst+csinv on the per-object hot path for an overflow that
-        // cannot occur (live bytes are bounded by the address space); wrapping
-        // `+%=` keeps the codegen a bare ldr/add/str in every build mode. The
-        // zero-bytes early-out is dropped for the same reason: adding 0 is a
-        // no-op, and qjs has no such guard.
-        self.live_bytes +%= bytes;
-    }
-
-    fn recordFree(self: *SpaceAccount, bytes: usize) void {
-        // Plain wrapping sub, exactly qjs `s->malloc_size -= ...`
-        // (quickjs.c:2174 js_def_free): the alloc side records the same exact
-        // byte total the free side debits (Debug verifyHeapAccounting walks the
-        // object list and proves the balance), so saturation guarded an
-        // underflow that cannot occur while costing a subs+csel pair on every
-        // GC-object free. The zero-bytes early-out mirrors recordAlloc's
-        // removal: subtracting 0 is a no-op.
-        std.debug.assert(self.live_bytes >= bytes);
-        self.live_bytes -%= bytes;
-    }
-};
-
 fn ratioPerMille(numerator: usize, denominator: usize) usize {
     if (denominator == 0) return 0;
     const scaled = std.math.mul(usize, numerator, 1000) catch std.math.maxInt(usize);
@@ -829,17 +698,13 @@ pub const AllocInfo = packed struct(u8) {
     /// free paths read it back instead of re-deriving the class from the byte
     /// size (qjs `__js_free`, quickjs.c:1614-1617).
     block_size_idx: u5 = 0,
-    /// Alloc-time large-space classification, stamped by registration
-    /// (`addInitializedWithSizeNoFail`) and valid iff `heap_accounted`. The
-    /// free path reads it from the alloc_info byte it already loads instead of
-    /// re-deriving `bytes >= policy.large_object_threshold` (a policy load +
-    /// compare qjs never pays: js_free_rt has no space split at all,
-    /// quickjs.c:1613-1617). Stamping also pins the classification to the
-    /// space that was actually credited, so a policy-threshold change between
-    /// alloc and free can no longer unbalance the two space accounts.
+    /// Alloc-time large-space classification, stamped by registration and
+    /// valid iff `heap_accounted`. Cold accounting audits compare it with the
+    /// live object's current byte size; it is independent of whether the
+    /// physical carrier is a slab, block cell, or standalone.
     large: bool = false,
-    /// The allocation has been added to the live-byte accounts. Kept separate
-    /// from size_class because slab-overlaid metadata reserves that field.
+    /// The allocation has been published to the live heap. Kept separate from
+    /// size_class because slab-overlaid metadata reserves that field.
     heap_accounted: bool = false,
     /// The metadata is a dedicated prefix ahead of the object (slab-ineligible
     /// or over-aligned allocation); `size_class` then holds encoded heap bytes.
@@ -848,58 +713,7 @@ pub const AllocInfo = packed struct(u8) {
     standalone: bool = false,
 };
 
-/// The owner's private LIFO mark frontier (see `Registry.mark_stack`).
-/// Fixed capacity: a marker must not allocate per object mid-phase. When
-/// full, the caller routes the overflow to the shared ring, whose own
-/// overflow downgrades to a marked-object rescan -- the same ladder the
-/// design already specifies.
-pub const MarkStack = struct {
-    items: ?[]*GCObjectHeader = null,
-    len: usize = 0,
-
-    pub const cap = 65536;
-
-    pub fn ensure(self: *MarkStack) void {
-        if (self.items != null) return;
-        self.items = Registry.markQueueAllocator().alloc(*GCObjectHeader, cap) catch null;
-    }
-
-    pub fn deinitStack(self: *MarkStack) void {
-        if (self.items) |slice| Registry.markQueueAllocator().free(slice);
-        self.* = .{};
-    }
-
-    pub inline fn pop(self: *MarkStack) ?*GCObjectHeader {
-        if (self.len == 0) return null;
-        self.len -= 1;
-        return self.items.?[self.len];
-    }
-
-    /// Pop and software-prefetch the next entry. Tracing's dominant cost is
-    /// the cache miss on the popped object (JSC keeps the same prefetch in
-    /// SlotVisitor::popAndPrefetch and documents it as the top cost of GC
-    /// marking); starting the next line's fetch while the current object's
-    /// edges are walked hides most of it.
-    pub inline fn popPrefetch(self: *MarkStack) ?*GCObjectHeader {
-        if (self.len == 0) return null;
-        self.len -= 1;
-        const items = self.items.?;
-        if (self.len != 0) {
-            @prefetch(items[self.len - 1], .{ .rw = .read, .locality = 3, .cache = .data });
-        }
-        return items[self.len];
-    }
-
-    /// False when the stack is missing or full; the caller falls back to the
-    /// shared ring.
-    pub inline fn push(self: *MarkStack, h: *GCObjectHeader) bool {
-        const items = self.items orelse return false;
-        if (self.len == cap) return false;
-        items[self.len] = h;
-        self.len += 1;
-        return true;
-    }
-};
+pub const MarkStack = mark_queue.MarkStack;
 
 /// Tracer-owned lifetime state in the tail of Metadata. Epoch 0 is reserved
 /// for newborn/unmarked; the Registry epoch starts at 1. Husk is orthogonal to
@@ -932,15 +746,15 @@ pub const trace_remembered_mask: u8 = 0b1000_0000;
 /// enum range makes the gate one unsigned compare, the same price as the
 /// `== .object` test it replaces.
 pub inline fn traceRememberedCacheEligible(kind: GcKind) bool {
-    return @intFromEnum(kind) <= @intFromEnum(GcKind.shape);
+    return kind != .string or string_tracer_owned;
 }
 
 comptime {
-    // The range test above must stay the enumeration of the admitted kinds.
+    // The test above must stay the enumeration of the admitted kinds.
     for (std.meta.tags(GcKind)) |kind| {
         const expected = switch (kind) {
-            .object, .function_bytecode, .var_ref, .realm_context, .module, .shape => true,
-            .string, .big_int => false,
+            .object, .function_bytecode, .var_ref, .realm_context, .module, .shape, .big_int => true,
+            .string => string_tracer_owned,
         };
         std.debug.assert(traceRememberedCacheEligible(kind) == expected);
         // Ineligibility must coincide with "not a gc_obj_list carrier", which
@@ -1020,7 +834,7 @@ comptime {
     // prefix writers in memory.zig and object.zig store.
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .big_int })) == @intFromEnum(GcKind.big_int));
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .mark = true })) == 1 << 3);
-    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .young = true })) == 1 << 4);
+    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .young = true })) == representation.metadata_young_mask);
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .finalizing = true })) == 1 << 5);
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .is_pinned = true })) == 1 << 6);
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .cycle_visited = true })) == 1 << 7);
@@ -1100,7 +914,10 @@ pub inline fn barrierOwnerWord(header: *const Header) u64 {
 /// on the list (the block bitmap enumerates them), making this word padding for
 /// the hot population and shrinking `[Metadata + Object]` from 72 to 64 bytes.
 pub const TraceHeader = extern struct {
-    next: ?*TraceHeader = null,
+    /// Intrusive successor for non-Object tracing kinds. Object headers are
+    /// body pointers in terminal layout M, so their first word is the scalar
+    /// word and must never be interpreted as linkage.
+    next_non_object: ?*TraceHeader = null,
 
     comptime {
         std.debug.assert(@sizeOf(TraceHeader) == 8);
@@ -1113,6 +930,20 @@ pub const TraceHeader = extern struct {
 
     pub inline fn metaConst(self: *const TraceHeader) *const Metadata {
         return @ptrFromInt(@intFromPtr(self) - metadata_prefix_size);
+    }
+
+    /// Kind-gated successor access for real list members. Sentinel-only list
+    /// code uses the storage field directly because sentinels have no Metadata.
+    pub inline fn nextNonObject(self: *const TraceHeader) ?*TraceHeader {
+        if (comptime std.debug.runtime_safety)
+            std.debug.assert(self.metaConst().flags.kind != .object);
+        return self.next_non_object;
+    }
+
+    pub inline fn setNextNonObject(self: *TraceHeader, next: ?*TraceHeader) void {
+        if (comptime std.debug.runtime_safety)
+            std.debug.assert(self.metaConst().flags.kind != .object);
+        self.next_non_object = next;
     }
 
     pub inline fn retain(self: *TraceHeader) void {
@@ -1151,9 +982,12 @@ pub const RefCountHeader = extern struct {
 /// Compatibility alias for the standalone prefix used by String/StringRope.
 pub const StringHeader = RefCountHeader;
 
-/// Byte size of the refcount prefix reserved ahead of every flat `String` and
-/// `StringRope` allocation. Equal to `@sizeOf(StringHeader)` (4).
-pub const string_rc_prefix_size: usize = @sizeOf(StringHeader);
+/// Byte size of the prefix reserved ahead of every flat `String` and
+/// `StringRope` allocation: a full `Metadata` word (S2-a1). Its `lifetime`
+/// tail is the refcount word at payload-4 that `StringHeader` names, so the
+/// string family's rc arithmetic is unchanged while the carrier now has the
+/// same eight-byte prefix as every GC kind (kind = `.string`, no list link).
+pub const string_prefix_size: usize = metadata_prefix_size;
 
 /// Physical payload displacement of the four-byte lifetime word. It is an RC
 /// word only for the kinds/configurations documented on `LifetimeWord`.
@@ -1176,12 +1010,87 @@ pub const Header = TraceHeader;
 pub const GCObjectHeader = Header;
 pub const ObjectHeader = Header;
 
-inline fn prefixRefCount(meta: *Metadata) *i32 {
-    return &meta.lifetime.rc;
+/// Physical displacement from the unified GC handle to the kind's body. M
+/// makes Object's handle equal its body pointer; every other Metadata-backed
+/// kind retains the eight-byte TraceHeader word ahead of its body.
+pub inline fn bodyOffsetFromHeader(comptime kind: GcKind) usize {
+    return switch (kind) {
+        .object => 0,
+        .function_bytecode, .var_ref, .realm_context, .module, .shape, .string, .big_int => @sizeOf(TraceHeader),
+    };
 }
 
-inline fn prefixRefCountConst(meta: *const Metadata) *const i32 {
-    return &meta.lifetime.rc;
+/// Typed header-to-body arithmetic. Object's zero displacement is asserted at
+/// the only conversion boundary it owns; mutation 4 proves a reintroduced
+/// uniform eight-byte offset stops here before a body field is dereferenced.
+pub inline fn bodyAddressFromHeader(comptime kind: GcKind, header: *const GCObjectHeader) usize {
+    const offset = if (mCutInjection(4) and kind == .object)
+        @sizeOf(TraceHeader)
+    else
+        bodyOffsetFromHeader(kind);
+    if (comptime std.debug.runtime_safety) {
+        if (kind == .object and offset != 0)
+            @panic("gc: M-CUT BODY OFFSET: Object handle must equal body start");
+    }
+    return @intFromPtr(header) + offset;
+}
+
+comptime {
+    std.debug.assert(bodyOffsetFromHeader(.object) == 0);
+    for (.{ GcKind.function_bytecode, .var_ref, .realm_context, .module, .shape, .string, .big_int }) |kind|
+        std.debug.assert(bodyOffsetFromHeader(kind) == 8);
+}
+
+/// Parked Object corpses keep their scalar word readable through Pass B, so
+/// their temporary successor occupies the already-dead Shape word at body+8.
+/// Non-Object corpses retain the ordinary TraceHeader successor.
+pub const object_deferred_link_body_offset: usize = 8;
+
+inline fn deferredLinkSlot(header: *GCObjectHeader) *?*GCObjectHeader {
+    if (header.metaConst().flags.kind == .object)
+        return @ptrFromInt(@intFromPtr(header) + if (mCutInjection(1)) 0 else object_deferred_link_body_offset);
+    return &header.next_non_object;
+}
+
+pub inline fn deferredNext(header: *const GCObjectHeader) ?*GCObjectHeader {
+    return deferredLinkSlot(@constCast(header)).*;
+}
+
+/// Deferred successor when the caller has already proven `kind`; skips the
+/// per-corpse kind reload of `deferredLinkSlot` on the drain hot loops.
+pub inline fn deferredNextForKind(header: *const GCObjectHeader, kind: GcKind) ?*GCObjectHeader {
+    if (kind == .object) {
+        const slot: *?*GCObjectHeader = @ptrFromInt(@intFromPtr(header) + if (mCutInjection(1)) 0 else object_deferred_link_body_offset);
+        return slot.*;
+    }
+    return header.next_non_object;
+}
+
+pub inline fn setDeferredNext(header: *GCObjectHeader, next: ?*GCObjectHeader) void {
+    deferredLinkSlot(header).* = next;
+}
+
+/// An O2-B frontier entry. Its representation stays one raw address, but the
+/// distinct type makes every private/shared enqueue prove the publication,
+/// header-agreement, lifetime-kind, and mark-claim preconditions first.
+///
+/// The constructor is deliberately module-private. Queue code can unwrap an
+/// entry it received, but it cannot manufacture one from `*Header`.
+pub const FrontierSafeHeader = enum(usize) {
+    _,
+
+    inline fn init(raw_header: *Header) FrontierSafeHeader {
+        return @enumFromInt(@intFromPtr(raw_header));
+    }
+
+    pub inline fn header(self: FrontierSafeHeader) *Header {
+        return @ptrFromInt(@intFromEnum(self));
+    }
+};
+
+comptime {
+    std.debug.assert(@sizeOf(FrontierSafeHeader) == @sizeOf(*Header));
+    std.debug.assert(@alignOf(FrontierSafeHeader) == @alignOf(*Header));
 }
 
 /// The authoritative count for kinds which retain RC semantics in this build.
@@ -1189,34 +1098,16 @@ inline fn prefixRefCountConst(meta: *const Metadata) *const i32 {
 /// padding; BigInt remains in the prefix because JSValue's payload-4 ABI owns
 /// it. Calling this for a tracer-owned kind is a contract violation.
 pub inline fn headerRefCount(h: *const Header) i32 {
-    return switch (h.metaConst().flags.kind) {
-        .shape => blk: {
-            const value: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
-            break :blk value.ownership.trace_ref_count;
-        },
-        .realm_context => blk: {
-            const value: *const context_mod.JSContext = @alignCast(@fieldParentPtr("header", h));
-            break :blk value.traceRefCountPtrConst().*;
-        },
-        .big_int => prefixRefCountConst(h.metaConst()).*,
-        .object, .function_bytecode, .var_ref, .module, .string => unreachable,
-    };
+    // No list kind keeps a count any more (S1-c closed the BigInt tail);
+    // every caller is behind a `refCountRemoved` gate that is now always true.
+    _ = h;
+    unreachable;
 }
 
 pub inline fn setHeaderRefCount(h: *Header, value: i32) void {
     std.debug.assert(value >= 0);
-    switch (h.metaConst().flags.kind) {
-        .shape => {
-            const owner: *shape.Shape = @alignCast(@fieldParentPtr("header", h));
-            owner.ownership.trace_ref_count = value;
-        },
-        .realm_context => {
-            const owner: *context_mod.JSContext = @alignCast(@fieldParentPtr("header", h));
-            owner.traceRefCountPtr().* = value;
-        },
-        .big_int => prefixRefCount(h.meta()).* = value,
-        .object, .function_bytecode, .var_ref, .module, .string => unreachable,
-    }
+    _ = h;
+    unreachable;
 }
 
 pub inline fn incrementHeaderRefCount(h: *Header) void {
@@ -1234,8 +1125,6 @@ pub inline fn decrementHeaderRefCount(h: *Header) i32 {
 }
 
 pub inline fn headerRefCountIsZeroOrHusk(h: *const Header) bool {
-    if (h.metaConst().flags.kind == .big_int)
-        return prefixRefCountConst(h.metaConst()).* == 0;
     return h.metaConst().lifetime.trace.flags.husk;
 }
 
@@ -1268,22 +1157,10 @@ pub inline fn setHeaderWeakHusk(h: *Header) void {
 }
 
 inline fn resetHeaderLifetimeForPublication(h: *Header) void {
-    if (h.metaConst().flags.kind == .big_int) {
-        prefixRefCount(h.meta()).* = 1;
-        return;
-    }
     h.meta().lifetime.trace = .{};
-    switch (h.metaConst().flags.kind) {
-        .shape, .realm_context => setHeaderRefCount(h, 1),
-        else => {},
-    }
 }
 
 inline fn assertInitialHeaderLifetime(h: *const Header) void {
-    if (h.metaConst().flags.kind == .big_int) {
-        std.debug.assert(prefixRefCountConst(h.metaConst()).* == 1);
-        return;
-    }
     const state = h.metaConst().lifetime.trace;
     std.debug.assert(state.mark_epoch == 0);
     std.debug.assert(!state.flags.husk);
@@ -1297,10 +1174,6 @@ inline fn assertInitialHeaderLifetime(h: *const Header) void {
     // consistent, which is all I0 asks; it is simply not "initial".
     if (h.metaConst().flags.kind != .object)
         std.debug.assert(state.object_shape_summary & trace_object_shape_summary_mask == 0);
-    switch (h.metaConst().flags.kind) {
-        .shape, .realm_context => std.debug.assert(headerRefCount(h) == 1),
-        else => {},
-    }
 }
 
 /// Shape and Realm retain true refcount semantics, so a mutator last-release
@@ -1336,31 +1209,32 @@ inline fn setStoredListPrevious(h: *Header, previous: ?*Header) void {
     }
 }
 
-/// Intrusive-list authority: the compact `Header.next` plus this per-list
+/// Intrusive-list authority: the compact non-Object successor plus this per-list
 /// tail. The extra word is paid once per list, never once per object. (The
 /// QuickJS doubly-linked node it replaced went with the rc collector.)
 pub const IntrusiveHeaderList = struct {
     sentinel: Header = .{},
     /// Empty lists point at their own sentinel. This keeps append/delete in
-    /// the same branch-free shape as the old intrusive sentinel: `tail.next`
+    /// the same branch-free shape as the old intrusive sentinel: the tail link
     /// is always writable, including for the first element.
     tail: ?*Header = null,
 };
 
 pub inline fn listInit(head: *IntrusiveHeaderList) void {
-    head.sentinel.next = &head.sentinel;
+    head.sentinel.next_non_object = &head.sentinel;
     head.tail = &head.sentinel;
 }
 
 pub inline fn listEmpty(head: *const IntrusiveHeaderList) bool {
-    return head.sentinel.next == @constCast(&head.sentinel);
+    return head.sentinel.next_non_object == @constCast(&head.sentinel);
 }
 
 pub inline fn listAddTail(head: *IntrusiveHeaderList, el: *Header) void {
-    std.debug.assert(el.next == null);
+    std.debug.assert(el.metaConst().flags.kind != .object);
+    std.debug.assert(el.next_non_object == null);
     const previous = head.tail.?;
-    el.next = &head.sentinel;
-    previous.next = el;
+    el.next_non_object = &head.sentinel;
+    previous.next_non_object = el;
     head.tail = el;
     setStoredListPrevious(el, previous);
 }
@@ -1370,10 +1244,11 @@ pub inline fn listAddTail(head: *IntrusiveHeaderList, el: *Header) void {
 /// Shape/Realm's arbitrary-unlink backlink, so do not pay the kind dispatch
 /// that maintains it on the allocation-ordered `gc_obj_list`.
 pub inline fn listAddTailTraversalOwned(head: *IntrusiveHeaderList, el: *Header) void {
-    std.debug.assert(el.next == null);
+    std.debug.assert(el.metaConst().flags.kind != .object);
+    std.debug.assert(el.next_non_object == null);
     const previous = head.tail.?;
-    el.next = &head.sentinel;
-    previous.next = el;
+    el.next_non_object = &head.sentinel;
+    previous.next_non_object = el;
     head.tail = el;
 }
 
@@ -1384,14 +1259,14 @@ pub inline fn listPrevious(head: *IntrusiveHeaderList, el: *Header) *Header {
     switch (el.metaConst().flags.kind) {
         .shape, .realm_context => {
             const previous = storedListPrevious(el) orelse unreachable;
-            std.debug.assert(previous.next == el);
+            std.debug.assert(previous.next_non_object == el);
             return previous;
         },
         else => {},
     }
     var previous: *Header = &head.sentinel;
-    while (previous.next != el) {
-        previous = previous.next.?;
+    while (previous.next_non_object != el) {
+        previous = previous.next_non_object.?;
         std.debug.assert(previous != &head.sentinel);
     }
     return previous;
@@ -1401,9 +1276,10 @@ pub inline fn listPrevious(head: *IntrusiveHeaderList, el: *Header) *Header {
 /// traversal. This is the normal compact-trace sweep primitive: one pointer
 /// splice, never a search per corpse.
 pub inline fn listDelAfter(head: *IntrusiveHeaderList, previous: *Header, el: *Header) void {
-    std.debug.assert(previous.next == el);
-    const next = el.next.?;
-    previous.next = next;
+    std.debug.assert(el.metaConst().flags.kind != .object);
+    std.debug.assert(previous.next_non_object == el);
+    const next = el.next_non_object.?;
+    previous.next_non_object = next;
     if (next != &head.sentinel) setStoredListPrevious(next, previous);
     head.tail = if (head.tail == el) previous else head.tail;
     // Linkage is already authoritatively cleared by `next = null` below.
@@ -1412,17 +1288,18 @@ pub inline fn listDelAfter(head: *IntrusiveHeaderList, previous: *Header, el: *H
     // or immediately re-linked (which overwrites it). Keep the scrub in
     // safety builds so stale-backlink misuse still fails close to origin.
     if (std.debug.runtime_safety) setStoredListPrevious(el, null);
-    el.next = null;
+    el.next_non_object = null;
 }
 
 /// Traversal-owned counterpart to `listDelAfter`. The caller promises this is
 /// not `gc_obj_list`: no mutator can arbitrarily unlink Shape/Realm nodes from
 /// it, so successor backlinks are deliberately absent and need no repair.
 pub inline fn listDelAfterTraversalOwned(head: *IntrusiveHeaderList, previous: *Header, el: *Header) void {
-    std.debug.assert(previous.next == el);
-    previous.next = el.next.?;
+    std.debug.assert(el.metaConst().flags.kind != .object);
+    std.debug.assert(previous.next_non_object == el);
+    previous.next_non_object = el.next_non_object.?;
     head.tail = if (head.tail == el) previous else head.tail;
-    el.next = null;
+    el.next_non_object = null;
 }
 
 /// qjs `list_del` (list.h:69-78 / remove_gc_object at quickjs.c:6548).
@@ -1433,22 +1310,13 @@ pub inline fn listDel(head: *IntrusiveHeaderList, el: *Header) void {
 }
 
 pub inline fn listFirst(head: *const IntrusiveHeaderList) ?*Header {
-    const next = head.sentinel.next.?;
+    const next = head.sentinel.next_non_object.?;
     if (next == @constCast(&head.sentinel)) return null;
     return next;
 }
 
-pub inline fn listLastAssumeNonEmpty(head: *const IntrusiveHeaderList) *Header {
-    std.debug.assert(!listEmpty(head));
-    return head.tail.?;
-}
-
-pub inline fn listSentinel(head: *const IntrusiveHeaderList) *const Header {
-    return &head.sentinel;
-}
-
 pub inline fn headerLinked(header: *const Header) bool {
-    return header.next != null;
+    return header.nextNonObject() != null;
 }
 
 fn verifyCircularHeaderList(
@@ -1457,25 +1325,25 @@ fn verifyCircularHeaderList(
     comptime verify_stored_previous: bool,
 ) InvariantError!usize {
     const sentinel = &head.sentinel;
-    if (sentinel.next == null) return error.CorruptGcList;
+    if (sentinel.next_non_object == null) return error.CorruptGcList;
     if (listEmpty(head)) {
         if (head.tail != sentinel) return error.CorruptGcList;
         return 0;
     }
 
-    var tortoise = sentinel.next.?;
-    var hare = sentinel.next.?;
+    var tortoise = sentinel.next_non_object.?;
+    var hare = sentinel.next_non_object.?;
     while (hare != sentinel) {
-        hare = hare.next orelse return error.CorruptGcList;
+        hare = hare.nextNonObject() orelse return error.CorruptGcList;
         if (hare == sentinel) break;
-        hare = hare.next orelse return error.CorruptGcList;
-        tortoise = tortoise.next orelse return error.CorruptGcList;
+        hare = hare.nextNonObject() orelse return error.CorruptGcList;
+        tortoise = tortoise.nextNonObject() orelse return error.CorruptGcList;
         if (hare != sentinel and tortoise == hare) return error.CorruptGcList;
     }
 
     var count: usize = 0;
     var previous: *GCObjectHeader = sentinel;
-    var current = sentinel.next;
+    var current = sentinel.next_non_object;
     while (current) |node| {
         if (node == sentinel) break;
         if (expected_kind) |kind| {
@@ -1488,50 +1356,158 @@ fn verifyCircularHeaderList(
                 else => {},
             }
         }
-        const next = node.next orelse return error.CorruptGcList;
+        const next = node.nextNonObject() orelse return error.CorruptGcList;
         previous = node;
         current = next;
         count += 1;
     }
-    if (previous.next != sentinel or head.tail != previous) return error.CorruptGcList;
+    if (previous.next_non_object != sentinel or head.tail != previous) return error.CorruptGcList;
     return count;
 }
 
 /// Allocation-free temporary intrusive list for cycle partitioning and
-/// Pass-B struct deferral. Same `Header.link` words as the Registry lists
-/// (qjs reuses `JSGCObjectHeader.link`). Call `init()` in place after the
-/// list reaches its stable address — the sentinel is self-referential.
-/// See `Registry.cycle_deferred_frees`. Reuses the header's `next` link; the
-/// header is off every other list by the time it gets here (the resource pass
-/// detached it).
+/// Pass-B struct deferral. Non-Object kinds reuse their TraceHeader successor;
+/// Object uses the dead Shape word so its scalar word remains readable until
+/// the Pass-B weak-husk/class/free decision.
 pub const DeferredFreeStack = struct {
     head: ?*GCObjectHeader = null,
     count: usize = 0,
 
     pub fn push(self: *DeferredFreeStack, header: *GCObjectHeader) void {
-        header.next = self.head;
+        const object_scalar_before: u64 = if (comptime builtin.is_test)
+            (if (header.metaConst().flags.kind == .object)
+                @as(*const u64, @ptrCast(@alignCast(header))).*
+            else
+                0)
+        else
+            0;
+        setDeferredNext(header, self.head);
+        if (mCutInjection(1) and header.metaConst().flags.kind == .object and
+            @as(*const u64, @ptrCast(@alignCast(header))).* != object_scalar_before)
+        {
+            @panic("gc: M-CUT PARKED LINK: Object scalar word was used as successor");
+        }
         self.head = header;
         self.count += 1;
     }
 
     pub fn pop(self: *DeferredFreeStack) ?*GCObjectHeader {
         const header = self.head orelse return null;
-        self.head = header.next;
-        header.next = null;
+        self.head = deferredNext(header);
+        setDeferredNext(header, null);
         self.count -= 1;
         return header;
     }
+};
 
-    /// Pop storage that the caller is about to free. Unlike `pop`, this does
-    /// not spend two stores detaching a header whose allocation is dead on
-    /// the next instruction. A caller that decides to keep the entry (the
-    /// weak-object husk case) must clear both links before returning it to the
-    /// heap's observable population.
-    pub fn popForFree(self: *DeferredFreeStack) ?*GCObjectHeader {
-        const header = self.head orelse return null;
-        self.head = header.next;
-        self.count -= 1;
-        return header;
+/// Large enough for ordinary Shape/Realm release cascades without making
+/// every outermost zero transition reserve a 512-byte frame. Deeper cascades
+/// use the scratch allocator arm below and are pinned by the overflow test.
+pub const zero_ref_inline_capacity: usize = 8;
+
+/// One-call anti-recursion worklist for Shape/Realm eager-zero teardown.
+/// Nodes remain published while queued here, so the canonical header word is
+/// never borrowed. Overflow storage is returned before the outermost release
+/// completes.
+pub const ZeroRefScratch = struct {
+    inline_items: [zero_ref_inline_capacity]*GCObjectHeader = undefined,
+    inline_len: usize = 0,
+    overflow: std.ArrayListUnmanaged(*GCObjectHeader) = .empty,
+    read_index: usize = 0,
+
+    fn deinit(self: *ZeroRefScratch) void {
+        self.overflow.deinit(std.heap.page_allocator);
+        self.* = .{};
+    }
+
+    fn append(self: *ZeroRefScratch, header: *GCObjectHeader) void {
+        if (self.inline_len < self.inline_items.len) {
+            self.inline_items[self.inline_len] = header;
+            self.inline_len += 1;
+            return;
+        }
+        self.overflow.append(std.heap.page_allocator, header) catch
+            @panic("gc: zero-ref scratch worklist OOM");
+    }
+
+    fn next(self: *ZeroRefScratch) ?*GCObjectHeader {
+        const total = self.inline_len + self.overflow.items.len;
+        if (self.read_index >= total) return null;
+        const index = self.read_index;
+        self.read_index += 1;
+        if (index < self.inline_len) return self.inline_items[index];
+        return self.overflow.items[index - self.inline_len];
+    }
+};
+
+
+/// Header-external membership authority for published `.object` allocations
+/// that are not served by the block heap. Block objects are enumerated by the
+/// block allocation bitmap; every other traced kind remains on `gc_obj_list`.
+///
+/// This intentionally stores only pointers. Object publication reserves one
+/// slot before exposing a non-block allocation, so committing membership is a
+/// no-fail append and no object/header byte is consumed. Removal is unordered:
+/// collection is the only mutator, and none of the consumers assign semantic
+/// meaning to allocation order.
+const NonBlockObjectAuthority = struct {
+    items: std.ArrayListUnmanaged(*GCObjectHeader) = .empty,
+    /// Header-external condemnation lanes. Object's body remains entirely
+    /// semantic until its destructor strips resources, so neither live scalar
+    /// nor Shape words may be borrowed by the major morgue or STW worklist.
+    doomed: std.ArrayListUnmanaged(*GCObjectHeader) = .empty,
+    temporary: std.ArrayListUnmanaged(*GCObjectHeader) = .empty,
+
+    fn prepare(self: *NonBlockObjectAuthority, allocator: std.mem.Allocator) !void {
+        try self.items.ensureUnusedCapacity(allocator, 1);
+        const total_population = self.items.items.len + self.doomed.items.len + self.temporary.items.len + 1;
+        try self.doomed.ensureTotalCapacity(allocator, total_population);
+        try self.temporary.ensureTotalCapacity(allocator, total_population);
+    }
+
+    fn publish(self: *NonBlockObjectAuthority, header: *GCObjectHeader) void {
+        std.debug.assert(header.metaConst().flags.kind == .object);
+        std.debug.assert(!Registry.isBlockCellHeader(header));
+        self.items.appendAssumeCapacity(header);
+    }
+
+    fn indexOf(self: *const NonBlockObjectAuthority, header: *const GCObjectHeader) ?usize {
+        for (self.items.items, 0..) |candidate, index| {
+            if (candidate == header) return index;
+        }
+        return null;
+    }
+
+    fn remove(self: *NonBlockObjectAuthority, header: *const GCObjectHeader) bool {
+        const index = self.indexOf(header) orelse return false;
+        _ = self.items.swapRemove(index);
+        return true;
+    }
+
+    fn condemn(self: *NonBlockObjectAuthority, header: *GCObjectHeader, temporary: bool) void {
+        const index = self.indexOf(header) orelse unreachable;
+        _ = self.items.swapRemove(index);
+        if (temporary)
+            self.temporary.appendAssumeCapacity(header)
+        else
+            self.doomed.appendAssumeCapacity(header);
+    }
+
+    fn popDoomed(self: *NonBlockObjectAuthority) ?*GCObjectHeader {
+        return self.doomed.pop();
+    }
+
+    fn popTemporary(self: *NonBlockObjectAuthority) ?*GCObjectHeader {
+        return self.temporary.pop();
+    }
+
+    fn deinit(self: *NonBlockObjectAuthority, allocator: std.mem.Allocator) void {
+        std.debug.assert(self.doomed.items.len == 0);
+        std.debug.assert(self.temporary.items.len == 0);
+        self.items.deinit(allocator);
+        self.doomed.deinit(allocator);
+        self.temporary.deinit(allocator);
+        self.* = .{};
     }
 };
 
@@ -1565,7 +1541,7 @@ pub const HeaderList = struct {
     /// Successor of `header` on this list, or null at the sentinel.
     /// Mirrors `list_for_each_safe`'s saved `el1` (qjs:6797).
     pub fn nextAfter(self: *const HeaderList, header: *const Header) ?*Header {
-        const next = header.next.?;
+        const next = header.nextNonObject().?;
         if (next == &self.list.sentinel) return null;
         return next;
     }
@@ -1591,20 +1567,22 @@ pub const CollectionResult = struct {
 
 pub const InvariantError = error{
     CorruptGcList,
+    CorruptNonBlockObjectAuthority,
     /// `young_head` no longer names a node on `gc_obj_list` -- a detach path
     /// forgot the young-suffix anchor and the next minor would walk freed
     /// memory (the `unlinkObjectWithBytes` hole, 2026-08-25).
     DanglingYoungHead,
     NegativeRefCount,
     InvalidHeaderState,
-    MarkBitLeftSet,
-    DuplicateHeapAllocation,
     MissingHeapAllocation,
     HeapLiveBytesMismatch,
     OldLiveBytesMismatch,
     LargeObjectBytesMismatch,
-    OldSpaceLiveBytesMismatch,
-    LargeSpaceLiveBytesMismatch,
+    LargeObjectClassificationMismatch,
+    CarrierOldNewMismatch,
+    CarrierRawOwnedMismatch,
+    CarrierGenerationMismatch,
+    CarrierByteMismatch,
     DuplicateExternalMemoryToken,
     EmptyExternalMemoryToken,
     ExternalTokenBytesMismatch,
@@ -1641,6 +1619,10 @@ pub const InvariantError = error{
     InvalidTrailingPropertyClass,
     InvalidTrailingPropertyLayout,
     InvalidTrailingPropertyCapacity,
+    DanglingSlots2PayloadOwner,
+    InvalidSlots2PayloadOwner,
+    InvalidSlots2PayloadSlot,
+    MissingSlots2PayloadSlot,
     UndersizedTrailingObjectCell,
     ObjectCellSizeClassMismatch,
     DeferredPayloadRootNotLive,
@@ -1766,8 +1748,6 @@ pub const PauseDistribution = struct {
 /// not cost-neutral (2026-08-11 ruling), and cycle *count* is absent because
 /// the collector reports freed objects, not strongly-connected components.
 pub const GeStats = struct {
-    zero_ref_drains: usize = 0,
-
     cycle_gc_count: usize = 0,
     cycle_gc_time_ns: u64 = 0,
     failed_collections: usize = 0,
@@ -1833,7 +1813,6 @@ pub const Stats = struct {
     major_gc_count: usize = 0,
     major_gc_time_ns: u64 = 0,
     last_collection_time_ns: u64 = 0,
-    zero_ref_drains: usize = 0,
     major_phase: MajorPhase = .idle,
     failed_collections: usize = 0,
     last_failure: FailureKind = .none,
@@ -1880,47 +1859,39 @@ pub const Registry = struct {
     /// Deliberately adjacent to `phase` so it rides the Registry's pinned
     /// front cache line (see K4 above) rather than a cold tail line.
     /// `refreshBarrierGate` is the only writer; `initLists` seeds it.
-    barrier_gate: if (generation_enabled) u64 else void =
-        if (generation_enabled) barrier_skip_bits else {},
+    barrier_gate: u64 = barrier_skip_bits,
 
     memory: *memory.MemoryAccount,
     policy: Policy = .{},
 
-    // qjs `rt->gc_obj_list` / `rt->tmp_obj_list` / RC zero-ref queue.
-    // Each is a cyclic sentinel (list.h). Call `initLists` after the Registry
-    // reaches its stable address — sentinels are self-referential.
+    // qjs `rt->gc_obj_list` / `rt->tmp_obj_list`.
+    // Published Objects are deliberately absent: block cells use allocation
+    // bitmaps, and the rare non-block population uses the authority stored in
+    // the address registry's cold state.
+    // Each intrusive list is a cyclic sentinel (list.h). Call `initLists` after
+    // the Registry reaches its stable address — sentinels are self-referential.
     gc_obj_list: IntrusiveHeaderList = .{},
 
     /// First young object in `gc_obj_list`, or null when nothing is young.
     /// See `youngIterator` for why the young set is a suffix.
-    young_head: if (generation_enabled) ?*Header else void =
-        if (generation_enabled) null else {},
+    young_head: ?*Header = null,
     /// Predecessor of `young_head`. Compact trace nodes have no backlink, so
     /// retaining this one per-runtime cursor lets a minor detach a young list
     /// suffix in O(young) rather than searching from the list head per corpse.
-    young_predecessor: if (generation_enabled) ?*Header else void =
-        if (generation_enabled) null else {},
+    young_predecessor: ?*Header = null,
     tmp_obj_list: IntrusiveHeaderList = .{},
-    zero_ref_list: IntrusiveHeaderList = .{},
+    /// Active outermost Shape/Realm eager-zero worklist. It is transient and
+    /// never borrows a published header's canonical `.next` word.
+    zero_ref_scratch: ?*ZeroRefScratch = null,
     // No live-object counter: qjs add_gc_object/remove_gc_object
     // (quickjs.c:6540/6548) are pure list splices with no count scalar.
     // Diagnostics (`liveCount`) derive the count by walking, like
     // `liveCountKind` always has.
-    // Header currently owned by the zero-ref drain. It has been detached from
-    // both intrusive lists so its destructor may reuse the links, but remains
-    // runtime-owned until the destructor performs final accounting/raw free.
-    // `containsHeader` includes this slot so synchronous class finalizers see
-    // the same live-object lifetime as qjs `free_object`.
-    zero_ref_current: ?*GCObjectHeader = null,
     /// The header the tracing sweep has unlinked and is destroying right now.
     ///
-    /// The refcounting path publishes the same fact as `zero_ref_current`, and
     /// `containsHeader` reads it so a synchronous class payload finalizer
     /// asking `JSRuntime.ownsObject` about its own object gets `true` while its
-    /// callback runs. The sweep had no such window: it unlinks from
-    /// `gc_obj_list` and destroys, so a host finalizer invoked from a
-    /// collection was told the engine did not own the object it was being
-    /// handed. Nothing else distinguishes the two paths to a host callback.
+    /// callback runs.
     sweep_current: ?*GCObjectHeader = null,
     external_tokens: []ExternalTokenEntry = &.{},
     external_tokens_capacity: usize = 0,
@@ -1931,8 +1902,6 @@ pub const Registry = struct {
     major_phase: MajorPhase = .idle,
     major_reason: ?RequestReason = null,
     major_request: Request = .{},
-    old_space: SpaceAccount = .{},
-    large_space: SpaceAccount = .{},
     stats: GeStats = .{},
 
     // Pass-B struct-free deferral for cycle removal (qjs gc_zero_ref_count_list,
@@ -1957,8 +1926,7 @@ pub const Registry = struct {
     /// prefix. Do not invalidate this in `deferCycleStructFree`: that is one
     /// production-path store per corpse for a checker that only runs under
     /// `ZJS_GC_ARENA_AUDIT`.
-    deferred_run_topology_verified: if (block_heap_enabled) bool else void =
-        if (block_heap_enabled) false else {},
+    deferred_run_topology_verified: bool = false,
     /// Set only around `JSRuntime.deinit`'s teardown collections. The host has
     /// by contract released every handle and no mutator frame is live, so those
     /// collections are entitled to the precise root scan that
@@ -1969,22 +1937,15 @@ pub const Registry = struct {
     /// refcounting owns object lifetime.
     host_quiescent: bool = false,
 
-    /// Page-radix map of published GC objects. Void in production `rc`.
-    /// The slab whose arena lifetimes this registry observes, for recovery.
-    arena_slab: if (address_registry_enabled) ?*memory.SmallObjectSlab else void =
-        if (address_registry_enabled) null else {},
-    address_registry: if (address_registry_enabled) AddressRegistryTable else void =
-        if (address_registry_enabled) .{} else {},
+    /// The slab whose arena lifetimes the address registry observes, for
+    /// recovery.
+    arena_slab: ?*memory.SmallObjectSlab = null,
+    /// Page-radix map of published GC objects.
+    address_registry: AddressRegistryTable = .{},
 
-    /// Publication-size histogram for Stage 4 class freeze. Void in production `rc`.
-    space_histogram: if (space_model_enabled) SpaceHistogram else void =
-        if (space_model_enabled) .{} else {},
+    /// Publication-size histogram for Stage 4 class freeze.
+    space_histogram: SpaceHistogram = .{},
 
-    /// Logical 64 KiB window sweep machine. Void in production `rc`.
-    sweep_model: if (sweep_model_enabled) SweepModel else void =
-        if (sweep_model_enabled) .{} else {},
-
-    /// 64 KiB block heap. Void unless `-Dzjs_experimental_gc=trace_stw`.
     // The concurrent mark queue and marker worker are *not* fields here.
     //
     // Embedding them made the OOM canary "binding Realm construction
@@ -1998,8 +1959,7 @@ pub const Registry = struct {
     // This is the same lesson as the 32 KB embedded ring, one level up: what
     // a Registry contains is paid for by every runtime, including the ones
     // that fail halfway through construction.
-    concurrent: if (concurrent_enabled) ConcurrentState else void =
-        if (concurrent_enabled) .{} else {},
+    concurrent: ConcurrentState = .{},
     /// Current mark epoch for non-block trace carriers. Epoch 0 is reserved
     /// for newborn/unmarked; a major advances this scalar, while minors keep
     /// it fixed so sticky survivor marks remain valid. Unlike a global parity
@@ -2047,37 +2007,31 @@ pub const Registry = struct {
     doomed_bytes: usize = 0,
 
     /// Objects the marking barrier shaded GREY: marked, children still to be
-    /// traced. The remark drains it; overflow downgrades to a rescan of every
-    /// marked object (`gc_trace_stw.drainBarrierQueue`). Lives on the Registry
-    /// rather than in `concurrent.State` so the barrier reaches it without an
-    /// import cycle through `gc_mark_queue`.
-    concurrent_mark_queue: if (concurrent_enabled) mark_queue.Queue else void =
-        if (concurrent_enabled) .{} else {},
-    /// The owner's private mark stack: LIFO, plain array operations, no
-    /// atomics. The tracing hot loop lives here; the shared ring above
-    /// carries only barrier greys and root seeds (and, under parallel
-    /// slices, spilled work). It persists across slices -- the mutator
-    /// never touches it -- so a budget-exhausted slice parks its frontier
-    /// in place instead of paying a drain-back. Fixed capacity, lazily
-    /// allocated; on overflow half spills to the ring, whose own overflow
-    /// downgrades to rescan. A marker that allocates per-object is a marker
-    /// that can fail mid-phase, hence no growable list.
-    mark_stack: if (concurrent_enabled) MarkStack else void =
-        if (concurrent_enabled) .{} else {},
-    generation: if (generation_enabled) GenerationState else void =
-        if (generation_enabled) .{} else {},
-    sticky_major: if (sticky_major_enabled) StickyMajorState else void =
-        if (sticky_major_enabled) .{} else {},
-    block_heap: if (block_heap_enabled) BlockHeap else void =
-        if (block_heap_enabled) .init(std.heap.page_allocator) else {},
+    /// traced. Whole 4 KiB segments move between this shared chain and the
+    /// private tracer stacks. Lives on the Registry so the barrier reaches it
+    /// without an import cycle through `gc_mark_queue`.
+    concurrent_mark_queue: mark_queue.Queue = .{},
+    /// The owner's segmented private LIFO. It persists across slices; old
+    /// whole segments are donated for parallel work while the hot top stays
+    /// local. Allocation failure aborts the cycle before sweep.
+    mark_stack: MarkStack = .{},
+    generation: GenerationState = .{},
+    /// Independent byte oracle for tests and ownership-audit builds; void in
+    /// shipped builds.
+    heap_accounting_oracle: if (heap_accounting_oracle_enabled) HeapAccountingOracle else void =
+        if (heap_accounting_oracle_enabled) .{} else {},
+    /// 64 KiB block heap.
+    block_heap: BlockHeap = .init(std.heap.page_allocator),
+    /// R3 conservative-only root census; void outside the diag build so the
+    /// shipped Registry layout is untouched.
+    roots_diag: if (roots_diag_enabled) conservative_mod.RootsDiagCensus else void =
+        if (roots_diag_enabled) .{} else {},
 
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
         readStressFromEnv();
         return .{
             .memory = account,
             .policy = policy,
-            .old_space = .{},
-            .large_space = .{},
             // Off the JS heap deliberately. Backing the block heap with the
             // account allocator means OOM injection reaches it, and a
             // rollback then tears down structures whose allocation never
@@ -2097,7 +2051,7 @@ pub const Registry = struct {
         self.refreshBarrierGate();
         listInit(&self.gc_obj_list);
         listInit(&self.tmp_obj_list);
-        listInit(&self.zero_ref_list);
+        self.zero_ref_scratch = null;
         for (&self.doomed_by_kind) |*head| listInit(head);
         self.cycle_deferred_frees = .{};
         if (comptime block_heap_enabled) self.deferred_run_topology_verified = false;
@@ -2114,12 +2068,7 @@ pub const Registry = struct {
     /// completes before any Pass-B drain, so one audit-only invalidation covers
     /// every park in the sequence without taxing every dead object.
     pub inline fn beginDeferredFreeProducerSequence(self: *Registry) void {
-        if (comptime !block_heap_enabled) return;
         if (arena_audit) self.deferred_run_topology_verified = false;
-    }
-
-    pub fn popCycleDeferredFree(self: *Registry) ?*GCObjectHeader {
-        return self.cycle_deferred_frees.pop();
     }
 
     /// Prove the implicit Pass-B block-run representation before its first
@@ -2129,7 +2078,6 @@ pub const Registry = struct {
     /// signal to stop and review the reentrancy before introducing the
     /// per-run-descriptor fallback described by the joint design.
     pub fn verifyDeferredFreeRunTopology(self: *Registry) InvariantError!void {
-        if (comptime !block_heap_enabled) return;
         if (!arena_audit or self.deferred_run_topology_verified) return;
 
         var seen_blocks: std.AutoHashMapUnmanaged(usize, void) = .empty;
@@ -2137,7 +2085,7 @@ pub const Registry = struct {
         var saw_block_suffix = false;
         var current_block_base: ?usize = null;
         var cursor = self.cycle_deferred_frees.head;
-        while (cursor) |header| : (cursor = header.next) {
+        while (cursor) |header| : (cursor = deferredNext(header)) {
             if (!isBlockCellHeader(header)) {
                 if (saw_block_suffix) return error.DeferredFreeRunInterleaved;
                 continue;
@@ -2169,10 +2117,30 @@ pub const Registry = struct {
         if (comptime concurrent_enabled) {
             self.abortCycleEnvelope();
             self.invalidateCycleEnvelopeBaseline();
+            // Close the epoch before any destructor can condemn or raw-free a
+            // queued address, then return every private/shared segment.
+            self.closeMarkingAndDrainFrontier(.monotonic);
         }
-        std.debug.assert(listEmpty(&self.zero_ref_list));
-        std.debug.assert(self.zero_ref_current == null);
+        std.debug.assert(self.zero_ref_scratch == null);
         self.phase = .deinit;
+
+        // Phase 0: unpublished construction-root shells (detached generator
+        // shells) are owned only by the pin ledger. Tear them down through the
+        // same typed route as `destroyGeneratorShell` -- payload, borrowed
+        // holders, raw cell -- while classes, the payload allocator and the
+        // block heap are all still alive. `removeConstructionRoot` shifts the
+        // ledger, so the index is only advanced past non-construction pins.
+        {
+            var index: usize = 0;
+            while (index < self.pin_entries.len) {
+                const entry = self.pin_entries[index];
+                if (entry.count != construction_pin_count) {
+                    index += 1;
+                    continue;
+                }
+                object.Object.fromHeader(entry.header).destroyGeneratorShell(rt);
+            }
+        }
 
         // Phase 1: free object resources. Function bytecodes, Shapes, and
         // VarRefs are spliced into holding stacks (reusing their now-unused
@@ -2197,6 +2165,21 @@ pub const Registry = struct {
         var held_shapes: ?*GCObjectHeader = null;
         var held_var_refs: ?*GCObjectHeader = null;
         var held_function_bytecodes: ?*GCObjectHeader = null;
+
+        // Objects must release their Shape/FB/VarRef edges before those carrier
+        // bodies are dismantled below. Block objects should already be gone
+        // after JSRuntime's host-quiescent teardown collections; the explicit
+        // side authority is nevertheless a complete fallback for every
+        // non-block Object still owned at this boundary.
+        while (self.nonBlockObjectCount() != 0) {
+            const h = self.nonBlockObjectAt(self.nonBlockObjectCount() - 1);
+            std.debug.assert(h.metaConst().flags.kind == .object);
+            self.removeNonBlockObject(h);
+            self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
+            h.meta().flags.finalizing = true;
+            object.Object.destroyFromHeader(rt, h);
+            rt.drainDeferredClassPayloadFinalizers();
+        }
         while (!listEmpty(&self.gc_obj_list)) {
             // Compact headers have no backlink on tracer-owned kinds. Teardown
             // order is mediated by the holding stacks below, not list order,
@@ -2204,7 +2187,7 @@ pub const Registry = struct {
             const h = listFirst(&self.gc_obj_list).?;
             if (h.meta().flags.kind == .shape) {
                 self.removeGcObject(h);
-                h.next = held_shapes;
+                h.setNextNonObject(held_shapes);
                 held_shapes = h;
                 continue;
             }
@@ -2212,7 +2195,7 @@ pub const Registry = struct {
                 self.removeGcObject(h);
                 h.meta().flags.finalizing = true;
                 var_ref.VarRef.prepareForRuntimeDeinit(rt, h);
-                h.next = held_var_refs;
+                h.setNextNonObject(held_var_refs);
                 held_var_refs = h;
                 continue;
             }
@@ -2220,7 +2203,7 @@ pub const Registry = struct {
             self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
             h.meta().flags.finalizing = true;
             if (h.meta().flags.kind == .function_bytecode) {
-                h.next = held_function_bytecodes;
+                h.setNextNonObject(held_function_bytecodes);
                 held_function_bytecodes = h;
                 continue;
             }
@@ -2228,6 +2211,7 @@ pub const Registry = struct {
                 .object => object.Object.destroyFromHeader(rt, h),
                 .realm_context => context_mod.JSContext.destroyFromHeader(rt, h),
                 .module => module_mod.ModuleRecord.destroyFromHeader(rt, h),
+                .big_int => bigint.BigInt.destroyFromHeader(rt, h),
                 else => unreachable,
             }
             rt.drainDeferredClassPayloadFinalizers();
@@ -2237,8 +2221,8 @@ pub const Registry = struct {
         // resources may now release constant-pool object edges; Object structs
         // remain parked in cycle_deferred_frees until after Shape teardown.
         while (held_function_bytecodes) |h| {
-            const next = h.next;
-            h.next = null;
+            const next = h.nextNonObject();
+            h.setNextNonObject(null);
             function_bytecode_mod.destroyFromHeader(rt, h);
             held_function_bytecodes = next;
         }
@@ -2247,8 +2231,8 @@ pub const Registry = struct {
         // the deinit phase/finalizing bit, so reclaim each prepared cell struct
         // exactly once regardless of its residual refcount.
         while (held_var_refs) |h| {
-            const next = h.next;
-            h.next = null;
+            const next = h.nextNonObject();
+            h.setNextNonObject(null);
             self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
             var_ref.VarRef.freeCycleDeferredStruct(rt, h);
             held_var_refs = next;
@@ -2259,8 +2243,8 @@ pub const Registry = struct {
         // self-removes from the GC list (guarded no-op here) and frees property
         // storage + bucket links.
         while (held_shapes) |h| {
-            const next = h.next;
-            h.next = null;
+            const next = h.nextNonObject();
+            h.setNextNonObject(null);
             rt.shapes.destroyFromHeader(h);
             held_shapes = next;
         }
@@ -2272,7 +2256,7 @@ pub const Registry = struct {
 
         listInit(&self.gc_obj_list);
         listInit(&self.tmp_obj_list);
-        listInit(&self.zero_ref_list);
+        self.zero_ref_scratch = null;
 
         std.debug.assert(self.cycle_deferred_frees.count == 0);
         if (self.external_tokens_capacity != 0) {
@@ -2290,17 +2274,33 @@ pub const Registry = struct {
         self.pin_entries = &.{};
         self.pin_entries_capacity = 0;
 
+        // TGC S2: string carriers that survived the host-quiescent teardown
+        // collections (atom-table roots) leave through the same unpublish +
+        // return path the sweep uses, so the accounting oracle balances.
+        if (comptime string_tracer_owned) string.destroyAllStringCarriersForDeinit(rt);
+
+        if (self.nonBlockObjectAuthority()) |authority| {
+            authority.deinit(addressRegistryAllocator());
+            addressRegistryAllocator().destroy(authority);
+            if (comptime block_heap_enabled) {
+                self.address_registry.nonblock_objects = null;
+            }
+        }
         if (comptime address_registry_enabled) {
             self.address_registry.deinit(addressRegistryAllocator());
             if (comptime generation_enabled) self.generation.deinit(addressRegistryAllocator());
         }
-        if (comptime concurrent_enabled) self.concurrent_mark_queue.deinit(addressRegistryAllocator());
         if (comptime concurrent_enabled) self.mark_stack.deinitStack();
-        if (comptime sweep_model_enabled) {
-            self.sweep_model.deinit(addressRegistryAllocator());
-        }
+        if (comptime concurrent_enabled) self.concurrent_mark_queue.deinit(addressRegistryAllocator());
         if (comptime block_heap_enabled) {
             self.block_heap.deinit();
+        }
+        if (comptime heap_accounting_oracle_enabled) {
+            std.debug.assert(self.heap_accounting_oracle.raw.count() == 0);
+            self.heap_accounting_oracle.deinit(std.heap.page_allocator);
+        }
+        if (comptime carrier.block_tracking_enabled or carrier.extent_tracking_enabled) {
+            self.memory.deinitGcCarrier();
         }
 
         self.phase = .none;
@@ -2480,17 +2480,7 @@ pub const Registry = struct {
         return true;
     }
 
-    pub fn sliceBudgetNs(self: Registry, point: SchedulerPoint) u64 {
-        return switch (point) {
-            .allocation_slow_path => self.policy.allocation_slow_path_budget_ns,
-            .callback_boundary, .safepoint => self.policy.callback_slice_budget_ns,
-            .idle => self.policy.idle_slice_budget_ns,
-            .urgent => self.policy.allocation_slow_path_budget_ns,
-        };
-    }
-
     pub fn shouldRunMajorAt(self: Registry, point: SchedulerPoint, over_threshold: bool) bool {
-        if (stress_disable) return false;
         if (point == .urgent or over_threshold) return true;
         const request = self.pendingMajorRequest() orelse return false;
         return switch (point) {
@@ -2560,42 +2550,55 @@ pub const Registry = struct {
         return @min(if (rank == 0) 0 else rank - 1, len - 1);
     }
 
-    pub fn statsSnapshot(self: *const Registry, rt: anytype) Stats {
-        const snapshot = self.*;
-        // The space accounts are the byte source of truth. Counts are split by
-        // walking the already-maintained GC object list; this cold snapshot work
-        // keeps scalar count updates off the allocation paths.
-        const old_live = snapshot.old_space.live_bytes;
-        const large_live = snapshot.large_space.live_bytes;
-        const derived_heap_live = old_live +| large_live;
-        var derived_old_count: usize = 0;
-        var derived_large_count: usize = 0;
-        // Walk the live Registry, not the by-value snapshot: nodes' prev/next
-        // point at this sentinel, not a copied dummy Header.
-        var iterator = self.objectIterator();
+    pub const HeapSpaceSnapshot = struct {
+        heap_live_bytes: usize = 0,
+        old_live_bytes: usize = 0,
+        large_object_bytes: usize = 0,
+        old_count: usize = 0,
+        large_count: usize = 0,
+    };
+
+    /// Cold logical-space census. Production publication/free keep no byte
+    /// ledger: live containers, condemned buckets, and explicit in-finalizer
+    /// lifecycle slots are the accounting authority, and each header's real
+    /// allocation size is classified against the current immutable policy.
+    pub fn deriveHeapSpaceSnapshot(self: *const Registry, rt: anytype) HeapSpaceSnapshot {
+        var derived: HeapSpaceSnapshot = .{};
+        var iterator = self.heapAccountingIterator();
         while (iterator.next()) |header| {
             const bytes = heapByteSizeFromHeader(rt, header);
-            if (snapshot.isLargeAllocation(bytes)) {
-                derived_large_count +|= 1;
+            derived.heap_live_bytes +|= bytes;
+            if (self.isLargeAllocation(bytes)) {
+                derived.large_object_bytes +|= bytes;
+                derived.large_count +|= 1;
             } else {
-                derived_old_count +|= 1;
+                derived.old_live_bytes +|= bytes;
+                derived.old_count +|= 1;
             }
         }
+        return derived;
+    }
+
+    pub fn statsSnapshot(self: *const Registry, rt: anytype) Stats {
+        const snapshot = self.*;
+        // Walk the Registry's accounting containers, not the by-value
+        // snapshot: nodes' links point at live sentinels, not copied headers.
+        const heap = self.deriveHeapSpaceSnapshot(rt);
         return .{
-            .total_allocated_bytes = derived_heap_live,
+            .total_allocated_bytes = heap.heap_live_bytes,
             // The account's real high-water, not live again. This field
             // printed `live` for its whole history, which is why the §1.3
             // peak/live rows had no instrument: peak == live == allocated on
             // every panel ever captured. Whole-account rather than heap-only,
             // which errs on the reporting-more side.
             .peak_allocated_bytes = rt.memory.peak_allocated_bytes,
-            .heap_live_bytes = derived_heap_live,
-            .old_live_bytes = old_live,
-            .large_object_bytes = large_live,
-            .old_allocated_bytes = old_live,
-            .old_alloc_count = derived_old_count,
-            .large_allocated_bytes = large_live,
-            .large_alloc_count = derived_large_count,
+            .heap_live_bytes = heap.heap_live_bytes,
+            .old_live_bytes = heap.old_live_bytes,
+            .large_object_bytes = heap.large_object_bytes,
+            .old_allocated_bytes = heap.old_live_bytes,
+            .old_alloc_count = heap.old_count,
+            .large_allocated_bytes = heap.large_object_bytes,
+            .large_alloc_count = heap.large_count,
             .external_bytes = snapshot.stats.external_bytes,
             .external_untracked_bytes = snapshot.stats.external_untracked_bytes,
             .peak_external_bytes = snapshot.stats.peak_external_bytes,
@@ -2609,7 +2612,6 @@ pub const Registry = struct {
             .major_gc_count = snapshot.stats.cycle_gc_count,
             .major_gc_time_ns = snapshot.stats.cycle_gc_time_ns,
             .last_collection_time_ns = snapshot.stats.last_collection_time_ns,
-            .zero_ref_drains = snapshot.stats.zero_ref_drains,
             .major_phase = snapshot.major_phase,
             .failed_collections = snapshot.stats.failed_collections,
             .last_failure = snapshot.stats.last_failure,
@@ -2635,15 +2637,27 @@ pub const Registry = struct {
         // clearing it here upholds addInitializedWithSizeNoFail's clear-on-entry
         // invariant for re-registered headers.
         h.meta().alloc_info.large = false;
-        h.next = null;
+        if (h.metaConst().flags.kind != .object) h.setNextNonObject(null);
         try self.addInitializedWithSize(h, bytes);
     }
 
     /// Register a freshly allocated header whose prefix and intrusive links are
     /// already initialized. Typed MemoryAccount allocations plus their owning
     /// constructors provide this invariant, avoiding duplicate hot-path stores.
-    pub fn addInitializedWithSize(self: *Registry, h: *GCObjectHeader, bytes: usize) !void {
+    pub inline fn addInitializedWithSize(self: *Registry, h: *GCObjectHeader, bytes: usize) !void {
+        if (h.metaConst().flags.kind == .object and !isBlockCellHeader(h)) {
+            try self.prepareNonBlockObjectAuthority();
+        }
         self.addInitializedWithSizeNoFail(h, bytes);
+    }
+
+    /// Reserve the header-external membership slot before a raw Object
+    /// allocation becomes observable. Object allocators call this after they
+    /// know the block heap declined; the fallible generic publication API calls
+    /// it again as a defensive boundary for test/embedding-created carriers.
+    pub fn prepareNonBlockObjectAuthority(self: *Registry) !void {
+        const authority = self.nonBlockObjectAuthority() orelse unreachable;
+        try authority.prepare(addressRegistryAllocator());
     }
 
     /// No-fail publication primitive for fully prepared GC objects. Registry
@@ -2696,7 +2710,10 @@ pub const Registry = struct {
         std.debug.assert(!h.meta().flags.is_pinned);
         std.debug.assert(!h.meta().flags.cycle_visited);
         std.debug.assert(!h.meta().alloc_info.heap_accounted);
-        std.debug.assert(!headerLinked(h));
+        // Strings have no TraceHeader link word (the body starts at the
+        // handle), so "unlinked" is only meaningful for list carriers.
+        if (h.metaConst().flags.kind != .object and !(string_tracer_owned and h.metaConst().flags.kind == .string))
+            std.debug.assert(!headerLinked(h));
 
         const is_large = self.isLargeAllocation(bytes);
         // The large bit is clear on entry for every registration: initGcPrefix
@@ -2709,17 +2726,14 @@ pub const Registry = struct {
         // Every classification this publication still needs from it --
         // standalone prefix, block-cell size class -- is by construction
         // unchanged by setting bit 6 (heap_accounted) or bit 5 (large). The
-        // compiler cannot prove that on its own: `old_space.recordAlloc` and
-        // `recordLargeSpaceAllocCold` write through `self`, which may alias
-        // the header, so every later `alloc_info` read became a reload of the
-        // byte just stored. On this host the dependent of that reload carried
-        // ~40% of this function's self cycles, and a second reload (after the
-        // young-bit store to the adjacent byte) another ~7%.
+        // compiler cannot prove that on its own: Registry writes through
+        // `self` may alias the header, so every later `alloc_info` read used to
+        // become a reload of the byte just stored. On this host the dependent
+        // of that reload carried ~40% of this function's self cycles, and a
+        // second reload (after the young-bit store to the adjacent byte)
+        // another ~7%.
         const info_at_entry = h.metaConst().alloc_info;
-        const is_block_cell = block_cell_blk: {
-            if (comptime !block_heap_enabled) break :block_cell_blk false;
-            break :block_cell_blk info_at_entry.block_size_idx == representation.block_cell_size_class;
-        };
+        const is_block_cell = info_at_entry.block_size_idx == representation.block_cell_size_class;
         if (comptime arm == .fast) {
             if (self.publicationNeedsColdArm(is_large, info_at_entry.standalone)) {
                 @branchHint(.unlikely);
@@ -2735,30 +2749,30 @@ pub const Registry = struct {
         } else info_at_entry.standalone;
         if (standalone) h.meta().size_class = encodeHeapBytes(bytes);
         h.meta().alloc_info.heap_accounted = true;
+        if (comptime heap_accounting_oracle_enabled) {
+            self.heap_accounting_oracle.recordPublish(@intFromPtr(h), bytes, is_large);
+        }
+        if (comptime carrier.lifecycle_state_enabled) {
+            self.memory.carrierPublish(@intFromPtr(h), bytes) catch
+                @panic("gc: CARRIER IDENTITY: publication missing carrier record");
+        }
         // qjs add_gc_object writes header bookkeeping once and then
-        // list_add_tail's (quickjs.c:6540-6546). No membership flag.
-        // GC pacing is owned by MemoryAccount.allocated_bytes. The registry only
-        // keeps the selected space's live-byte scalar; all other allocation
-        // diagnostics are derived by statsSnapshot. The single cold arm stamps
-        // the alloc-time large classification (read back by
-        // recordHeapFreeWithBytes) and credits the large space; the hot arm is
-        // the policy compare + a fixed-offset old_space bump.
+        // list_add_tail's (quickjs.c:6540-6546). No membership flag. GC pacing
+        // is owned by MemoryAccount.allocated_bytes; logical space bytes and
+        // counts are derived by statsSnapshot. Only the cold large arm stamps
+        // the alloc-time classification for representation auditing.
         if (comptime arm == .fast) {
             std.debug.assert(!is_large);
-            self.old_space.recordAlloc(bytes);
         } else if (is_large) {
             @branchHint(.unlikely);
             h.meta().alloc_info.large = true;
-            self.recordLargeSpaceAllocCold(bytes);
-        } else {
-            self.old_space.recordAlloc(bytes);
         }
 
-        // Keep this classification out of the large-space accounting live
-        // range. In trace builds the publication tail also keeps a far-field
-        // Registry base live for block/generation state; carrying `tracked`
-        // across the cold allocation call forced every small Object
-        // publication to spill one extra callee-saved register.
+        // Keep the tracked-kind classification after the large cold arm. In
+        // trace builds the publication tail also keeps a far-field Registry
+        // base live for block/generation state; carrying `tracked` across the
+        // cold arm forced every small Object publication to spill one extra
+        // callee-saved register.
         const tracked = isCycleCandidate(h);
         // Checkers for the two hoisted classifications above. Everything this
         // function does between the read and here writes `heap_accounted`,
@@ -2766,15 +2780,30 @@ pub const Registry = struct {
         // `standalone` or `block_size_idx`.
         std.debug.assert(info_at_entry.standalone == h.metaConst().alloc_info.standalone);
         std.debug.assert(is_block_cell == isBlockCellHeader(h));
+        const is_nonblock_object = tracked and !is_block_cell and
+            h.metaConst().flags.kind == .object;
+        // TGC S2: a string that is neither a block cell nor a non-block
+        // Object is an extent (standalone prefix). Strings carry no
+        // TraceHeader link word, so `gc_obj_list` cannot hold them; the
+        // heap's medium/large extent tables are their enumeration (marked
+        // through `extentSetMark`, swept by `Heap.sweepStringExtents`).
+        const is_list_carrier = tracked and !is_block_cell and
+            !(string_tracer_owned and h.metaConst().flags.kind == .string);
         if (comptime address_registry_enabled) {
-            if (tracked and !is_block_cell) self.linkGcObjectTail(h);
+            if (is_nonblock_object) {
+                self.nonBlockObjectAuthority().?.publish(h);
+            } else if (is_list_carrier) {
+                self.linkGcObjectTail(h);
+            }
             self.registerLiveAddressClassified(h, bytes, tracked, standalone, is_block_cell, arm);
             self.observeNewPublication(h, bytes);
-        } else if (tracked) self.linkGcObjectTail(h);
+        } else if (is_nonblock_object) {
+            self.nonBlockObjectAuthority().?.publish(h);
+        } else if (is_list_carrier) self.linkGcObjectTail(h);
     }
 
     /// qjs `add_gc_object` for shapes (quickjs.c:6540): rc/kind already live
-    /// in the prefix, then heap_accounted + old_space + list_add_tail.
+    /// in the prefix, then heap_accounted + list_add_tail.
     /// Shapes stay below `large_object_threshold` (8KiB); skip the large
     /// compare, standalone size_class stamp, and isCycleCandidate test.
     pub fn addInitializedShape(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
@@ -2787,7 +2816,13 @@ pub const Registry = struct {
         }
         std.debug.assert(!h.meta().alloc_info.large);
         h.meta().alloc_info.heap_accounted = true;
-        self.old_space.recordAlloc(bytes);
+        if (comptime heap_accounting_oracle_enabled) {
+            self.heap_accounting_oracle.recordPublish(@intFromPtr(h), bytes, false);
+        }
+        if (comptime carrier.lifecycle_state_enabled) {
+            self.memory.carrierPublish(@intFromPtr(h), bytes) catch
+                @panic("gc: CARRIER IDENTITY: publication missing carrier record");
+        }
         if (comptime address_registry_enabled) {
             self.linkGcObjectTail(h);
             self.registerLiveAddress(h, bytes, true);
@@ -2801,13 +2836,9 @@ pub const Registry = struct {
             // word; no property access or tracing path needs to decode the
             // property pointer. Inline class payloads still use the explicit
             // WithBytes APIs, as before.
-            .object => blk: {
-                const obj: *const object.Object = @alignCast(@fieldParentPtr("header", h));
-                break :blk @sizeOf(object.Object) + object.Object.objectTailBytes(
-                    obj.class_id,
-                    obj.hasTrailingPropertyAllocation(),
-                );
-            },
+            // Symmetric with publication: block cells are charged their
+            // physical body capacity (class rounding), standalone their size.
+            .object => object.Object.fromHeaderConst(h).bodyBytes(),
             .function_bytecode => blk: {
                 const fb: *const FunctionBytecode = @fieldParentPtr("header", h);
                 break :blk fb.heapByteSize();
@@ -2821,7 +2852,11 @@ pub const Registry = struct {
                 const sh: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
                 break :blk sh.accountedAllocationSize();
             },
-            .string, .big_int => 0,
+            .string => if (comptime string_tracer_owned) string.accountedAllocationSizeFromHeader(h) else 0,
+            .big_int => blk: {
+                const big: *const bigint.BigInt = @alignCast(@fieldParentPtr("header", h));
+                break :blk big.accountedAllocationSize();
+            },
         };
     }
 
@@ -2840,7 +2875,7 @@ pub const Registry = struct {
         if (storedHeapBytes(h)) |bytes| return bytes;
         return switch (h.metaConst().flags.kind) {
             .object => blk: {
-                const obj: *const object.Object = @alignCast(@fieldParentPtr("header", h));
+                const obj = object.Object.fromHeaderConst(h);
                 break :blk obj.allocationSize(rt);
             },
             .function_bytecode => blk: {
@@ -2854,7 +2889,11 @@ pub const Registry = struct {
                 const sh: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
                 break :blk sh.accountedAllocationSize();
             },
-            .string, .big_int => 0,
+            .string => if (comptime string_tracer_owned) string.accountedAllocationSizeFromHeader(h) else 0,
+            .big_int => blk: {
+                const big: *const bigint.BigInt = @alignCast(@fieldParentPtr("header", h));
+                break :blk big.accountedAllocationSize();
+            },
         };
     }
 
@@ -2863,31 +2902,27 @@ pub const Registry = struct {
     }
 
     fn isCycleCandidate(h: *const GCObjectHeader) bool {
-        return h.metaConst().flags.kind == .object or h.metaConst().flags.kind == .function_bytecode or h.metaConst().flags.kind == .var_ref or h.metaConst().flags.kind == .shape or h.metaConst().flags.kind == .realm_context or h.metaConst().flags.kind == .module;
+        return h.metaConst().flags.kind == .object or h.metaConst().flags.kind == .function_bytecode or h.metaConst().flags.kind == .var_ref or h.metaConst().flags.kind == .shape or h.metaConst().flags.kind == .realm_context or h.metaConst().flags.kind == .module or h.metaConst().flags.kind == .big_int or
+            (string_tracer_owned and h.metaConst().flags.kind == .string);
     }
 
     fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
         if (!header.meta().alloc_info.heap_accounted or bytes == 0) return;
-        // Alloc-time classification stamped by addInitializedWithSizeNoFail:
-        // reading it back from the already-loaded alloc_info byte replaces the
-        // policy-threshold reload + compare (qjs js_free_rt re-derives nothing,
-        // quickjs.c:1613-1617), and guarantees the debit hits the same space
-        // account the registration credited.
-        const is_large = header.meta().alloc_info.large;
-        std.debug.assert(is_large == self.isLargeAllocation(bytes));
-        // Live-bytes bookkeeping lives entirely in the space accounts now (see
-        // addInitializedWithSize); the free path just decrements live_bytes. Page
-        // geometry is derived lazily in refreshPageState, not trimmed here.
-        // The cold arm also clears the stamp, restoring the registration
-        // clear-on-entry invariant for any later re-registration of the header.
-        if (is_large) {
-            @branchHint(.unlikely);
-            header.meta().alloc_info.large = false;
-            self.recordLargeSpaceFreeCold(bytes);
-        } else {
-            self.old_space.recordFree(bytes);
+        self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
+        // The cold verifier owns size/classification validation. Production
+        // only restores the publication bits; test/audit builds also debit
+        // the independent lifecycle oracle compiled above.
+        const is_large = self.isLargeAllocation(bytes);
+        std.debug.assert(header.meta().alloc_info.large == is_large);
+        if (comptime heap_accounting_oracle_enabled) {
+            self.heap_accounting_oracle.recordUnpublish(@intFromPtr(header), bytes, is_large);
         }
+        header.meta().alloc_info.large = false;
         header.meta().alloc_info.heap_accounted = false;
+        if (comptime carrier.lifecycle_state_enabled) {
+            self.memory.carrierTransition(@intFromPtr(header), .doomed) catch
+                @panic("gc: CARRIER IDENTITY: retirement missing carrier record");
+        }
         if (header.meta().alloc_info.standalone) header.meta().size_class = 0;
     }
 
@@ -2924,29 +2959,10 @@ pub const Registry = struct {
         header.setPinned(false);
     }
 
-    // heap_live_bytes / old_live_bytes / large_object_bytes are no longer stored:
-    // they are derived from {old,large}_space.live_bytes in statsSnapshot (the
-    // space accounts are the single source of truth, cross-checked by the Debug
-    // verifyHeapAccounting object-list walk).
-
-    // Keep alloc/free hot paths scalar: QuickJS js_def_malloc updates
-    // malloc_count/malloc_size (quickjs.c:2160), add_gc_object only links the
-    // object (quickjs.c:6540), and js_trigger_gc gates on one threshold
-    // (quickjs.c:1780). Page state is derived by consumers.
-    // The large arm is an outlined cold twin: virtually every GC allocation is
-    // a small-slab object/shape, and the call boundary is the only reliable way
-    // to keep the hot arm a fixed-offset ldr/add/str on old_space.live_bytes —
-    // with both arms inline LLVM if-converts the two-way select into a
-    // csel-computed store address (a store whose address depends on the policy
-    // compare was the top stall of both the registration and destroy paths;
-    // @branchHint alone did not defeat the if-conversion).
-    noinline fn recordLargeSpaceAllocCold(self: *Registry, bytes: usize) void {
-        self.large_space.recordAlloc(bytes);
-    }
-
-    noinline fn recordLargeSpaceFreeCold(self: *Registry, bytes: usize) void {
-        self.large_space.recordFree(bytes);
-    }
+    // Production heap_live_bytes / old_live_bytes / large_object_bytes are
+    // never stored: statsSnapshot derives them from the accounting census.
+    // Test/audit builds separately retain a shadow lifecycle oracle so the
+    // verifier can detect a census ownership omission.
 
     fn externalTokenIndex(self: Registry, id: u64) ?usize {
         for (self.external_tokens, 0..) |entry, index| {
@@ -2984,6 +3000,10 @@ pub const Registry = struct {
         // work.
         if (h.meta().flags.cycle_visited) return;
         if (!isCycleCandidate(h)) return;
+        if (h.metaConst().flags.kind == .object) {
+            if (!isBlockCellHeader(h)) self.removeNonBlockObject(h);
+            return;
+        }
         // Already unlinked, or condemned on tmp_obj_list / a partition list.
         // qjs remove_gc_object is only called while the node is on gc_obj_list.
         if (!headerLinked(h) or h.meta().flags.cycle_visited) return;
@@ -3010,9 +3030,32 @@ pub const Registry = struct {
         self.unlinkObjectWithBytes(h, bytes);
     }
 
-    pub fn retainObject(self: *Registry, h: *GCObjectHeader) void {
-        _ = self;
-        h.retain();
+    /// TGC S2: unpublish an extent string the extent sweep found dead
+    /// (`string.sweepStringExtents`). Not `unlinkObjectWithBytes`: that path
+    /// reads the intrusive link word, which a string does not have. What a
+    /// standalone string publication left behind is the byte ledger, the
+    /// address-registry occupant (`insertLiveAddressCold`) and the young
+    /// census; undo exactly those, in `unregisterLiveAddress`'s order.
+    /// TGC S2: a condemned string BLOCK CELL leaves the registry. Cells are
+    /// bitmap-owned (no list link, no occupant-table entry), so this is the
+    /// byte debit plus the remembered-owner release -- the string twin of
+    /// what `unregisterObjectWithBytes` does for an Object cell.
+    pub fn unpublishStringCell(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
+        comptime std.debug.assert(string_tracer_owned);
+        std.debug.assert(isBlockCellHeader(h));
+        self.recordHeapFreeWithBytes(h, bytes);
+        if (comptime generation_enabled) self.forgetGenerationalOwner(h);
+    }
+
+    pub fn unpublishStringExtent(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
+        comptime std.debug.assert(string_tracer_owned);
+        std.debug.assert(h.metaConst().flags.kind == .string);
+        std.debug.assert(h.metaConst().alloc_info.standalone);
+        self.recordHeapFreeWithBytes(h, bytes);
+        if (comptime address_registry_enabled) {
+            self.address_registry.remove(addressRegistryAllocator(), h);
+        }
+        if (comptime generation_enabled) self.forgetGenerationalOwner(h);
     }
 
     fn ensureExternalTokenCapacity(self: *Registry, required: usize) !void {
@@ -3049,10 +3092,10 @@ pub const Registry = struct {
 
     /// Composite iterator over every PUBLISHED GC object.
     ///
-    /// Two phases behind one `next()`: the intrusive list (slab and
-    /// standalone kinds -- block-served objects no longer link there), then
-    /// the block heap's cells, walked bitmap-word first so an empty block
-    /// costs four word tests. Producing a cell requires alloc-bit AND
+    /// Three phases behind one `next()`: the intrusive non-Object carriers,
+    /// the block heap's cells, then the side-authoritative non-block Objects,
+    /// walked bitmap-word first so an empty block costs four word tests.
+    /// Producing a cell requires alloc-bit AND
     /// `heap_accounted`, which is exactly the old list membership: husks keep
     /// their cell but lose their accounting, and a cell between
     /// `initGcPrefix` and registration is not yet an object.
@@ -3060,17 +3103,28 @@ pub const Registry = struct {
     /// In young mode the block phase walks the young-block list instead of
     /// every superblock, filtering per cell on the `young` header bit --
     /// recycled cells put OLD objects inside young-listed blocks.
+    ///
+    /// NOT enumerated here: TGC S2 extent strings (standalone `.string`
+    /// prefixes over the cell ceiling). They have no link word and no cell,
+    /// so their only enumeration is the block heap's medium/large extent
+    /// tables (`Heap.sweepStringExtents`); census/verify consumers that need
+    /// them must walk those tables.
     pub const GcObjectIterator = struct {
         cursor: ?*GCObjectHeader,
         sentinel: *const GCObjectHeader,
-        heap: if (block_heap_enabled) ?*const BlockHeapMod.Heap else void =
-            if (block_heap_enabled) null else {},
+        heap: ?*const BlockHeapMod.Heap = null,
         young_only: bool = false,
         /// Dead-scan mode: the block phase yields only allocated-and-unmarked
         /// cells, computed word-at-a-time, so survivors are never touched --
         /// the whole point of bitmap condemnation. List-phase consumers do
         /// their own mark test as before.
         unmarked_only: bool = false,
+        /// Include the side-authoritative non-block Object phase. Kept in the
+        /// iterator's existing flag tail: the side index reuses `blk_index`
+        /// after block enumeration, and Registry is recovered from the stable
+        /// list sentinel. This preserves the pre-side iterator size/offsets so
+        /// conservative native-stack scanning is not perturbed by bookkeeping.
+        side_objects: bool = false,
         sb_index: usize = 0,
         blk_index: usize = 0,
         cell_index: u32 = 0,
@@ -3079,15 +3133,43 @@ pub const Registry = struct {
         pub fn next(self: *GcObjectIterator) ?*GCObjectHeader {
             if (self.cursor) |current| {
                 if (current != self.sentinel) {
-                    self.cursor = current.next;
+                    self.cursor = current.nextNonObject();
                     return current;
                 }
                 self.cursor = null;
             }
-            if (comptime !block_heap_enabled) return null;
-            const heap = self.heap orelse return null;
-            if (self.young_only) return self.nextYoungCell(heap);
-            return self.nextCell(heap);
+            if (comptime block_heap_enabled) {
+                if (self.heap) |heap| {
+                    const current = if (self.young_only)
+                        self.nextYoungCell(heap)
+                    else
+                        self.nextCell(heap);
+                    if (current) |header| return header;
+                    // Retire the phase once. Leaving this pointer live made
+                    // every subsequent block-cell `next()` re-check the empty
+                    // side authority before it could advance the bitmap.
+                    self.heap = null;
+                }
+            }
+            if (self.side_objects) {
+                const registry = self.registryFromSentinel();
+                // Re-read the authority on every step: a block or payload
+                // marker may publish another non-block Object and grow the
+                // backing array before or during this final phase.
+                while (self.blk_index < registry.nonBlockObjectCount()) {
+                    const current = registry.nonBlockObjectAt(self.blk_index);
+                    self.blk_index += 1;
+                    if (self.young_only and !current.metaConst().flags.young) continue;
+                    if (self.unmarked_only and registry.headerMarked(current)) continue;
+                    return current;
+                }
+            }
+            return null;
+        }
+
+        inline fn registryFromSentinel(self: *const GcObjectIterator) *const Registry {
+            const list: *const IntrusiveHeaderList = @fieldParentPtr("sentinel", self.sentinel);
+            return @alignCast(@fieldParentPtr("gc_obj_list", list));
         }
 
         fn nextInBlock(self: *GcObjectIterator, block: *BlockHeapMod.Block, young_filter: bool) ?*GCObjectHeader {
@@ -3168,11 +3250,89 @@ pub const Registry = struct {
         }
     };
 
+    /// Logical accounting population: every allocation that still carries
+    /// `heap_accounted`, including condemned corpses awaiting destruction.
+    ///
+    /// This deliberately follows the old ledger's physical-lifetime meaning:
+    /// condemnation proves logical death but does not return bytes. Block
+    /// corpses remain visible in the alloc bitmap, while delisted standalone
+    /// and non-block corpses live in `doomed_by_kind`; current callback slots
+    /// cover the interval after a bucket unlink and before the actual debit.
+    const HeapAccountingIterator = struct {
+        live: GcObjectIterator,
+        doomed_by_kind: *const [gc_kind_count]IntrusiveHeaderList,
+        doomed_objects: []const *GCObjectHeader,
+        temporary_objects: []const *GCObjectHeader,
+        doomed_kind_index: usize = 0,
+        doomed_cursor: ?*GCObjectHeader = null,
+        doomed_object_index: usize = 0,
+        temporary_object_index: usize = 0,
+        sweep_current: ?*GCObjectHeader,
+        current_yielded: bool = false,
+        /// TGC S2: string extents sit in the block heap's medium/large
+        /// tables, outside every list and bitmap; audits enumerate them here.
+        extents: if (block_heap_enabled) BlockHeapMod.Heap.ExtentKeyIterator else void =
+            if (block_heap_enabled) undefined else {},
+
+        fn next(self: *HeapAccountingIterator) ?*GCObjectHeader {
+            if (self.live.next()) |header| return header;
+            if (comptime block_heap_enabled and string_tracer_owned) {
+                while (self.extents.next()) |base| {
+                    const header: *GCObjectHeader = @ptrFromInt(base + metadata_prefix_size);
+                    if (header.metaConst().alloc_info.heap_accounted) return header;
+                }
+            }
+            while (self.doomed_kind_index < gc_kind_count) {
+                const bucket = &self.doomed_by_kind[self.doomed_kind_index];
+                const current = self.doomed_cursor orelse bucket.sentinel.next_non_object orelse {
+                    self.doomed_kind_index += 1;
+                    continue;
+                };
+                if (current == &bucket.sentinel) {
+                    self.doomed_kind_index += 1;
+                    self.doomed_cursor = null;
+                    continue;
+                }
+                self.doomed_cursor = current.nextNonObject();
+                if (!current.metaConst().alloc_info.heap_accounted) continue;
+                return current;
+            }
+            while (self.doomed_object_index < self.doomed_objects.len) {
+                const current = self.doomed_objects[self.doomed_object_index];
+                self.doomed_object_index += 1;
+                if (current.metaConst().alloc_info.heap_accounted) return current;
+            }
+            while (self.temporary_object_index < self.temporary_objects.len) {
+                const current = self.temporary_objects[self.temporary_object_index];
+                self.temporary_object_index += 1;
+                if (current.metaConst().alloc_info.heap_accounted) return current;
+            }
+            if (self.current_yielded) return null;
+            self.current_yielded = true;
+            const current = self.sweep_current orelse return null;
+            if (current.metaConst().alloc_info.heap_accounted) return current;
+            return null;
+        }
+    };
+
     pub fn objectIterator(self: *const Registry) GcObjectIterator {
         return .{
-            .cursor = self.gc_obj_list.sentinel.next,
+            .cursor = self.gc_obj_list.sentinel.next_non_object,
             .sentinel = &self.gc_obj_list.sentinel,
             .heap = if (comptime block_heap_enabled) &self.block_heap else {},
+            .side_objects = true,
+        };
+    }
+
+    fn heapAccountingIterator(self: *const Registry) HeapAccountingIterator {
+        const authority = self.nonBlockObjectAuthority();
+        return .{
+            .live = self.objectIterator(),
+            .doomed_by_kind = &self.doomed_by_kind,
+            .doomed_objects = if (authority) |value| value.doomed.items else &.{},
+            .temporary_objects = if (authority) |value| value.temporary.items else &.{},
+            .sweep_current = self.sweep_current,
+            .extents = if (comptime block_heap_enabled) self.block_heap.extentKeys() else {},
         };
     }
 
@@ -3188,7 +3348,6 @@ pub const Registry = struct {
     pub fn addConstructionRoot(self: *Registry, header: *GCObjectHeader) void {
         std.debug.assert(header.metaConst().flags.kind == .object);
         std.debug.assert(!header.metaConst().alloc_info.heap_accounted);
-        std.debug.assert(!headerLinked(header));
         std.debug.assert(self.pinEntryIndex(header) == null);
         std.debug.assert(self.pin_entries.len < self.pin_entries_capacity);
         self.pin_entries.ptr[self.pin_entries.len] = .{
@@ -3231,7 +3390,7 @@ pub const Registry = struct {
         {
             return false;
         }
-        const shell: *const object.Object = @alignCast(@fieldParentPtr("header", header));
+        const shell = object.Object.fromHeaderConst(header);
         return shell.isDetachedGeneratorShellForGc();
     }
 
@@ -3243,7 +3402,7 @@ pub const Registry = struct {
     /// cycle. The block heap supplies the cell base; the Registry owns the
     /// exact construction-list membership authority.
     pub fn blockCellPublicationAllowance(
-        context: *anyopaque,
+        context: *const anyopaque,
         cell_addr: usize,
     ) BlockHeapMod.Heap.UnpublishedCellAllowance.Kind {
         const self: *const Registry = @ptrCast(@alignCast(context));
@@ -3260,26 +3419,23 @@ pub const Registry = struct {
             return .none;
         }
         var parked = self.cycle_deferred_frees.head;
-        while (parked) |candidate| : (parked = candidate.next) {
+        while (parked) |candidate| : (parked = deferredNext(candidate)) {
             if (candidate == header) return .parked_finalizer;
         }
         return .none;
     }
 
-    /// Iterate only the young objects.
-    ///
-    /// Publication appends at the tail and promotion clears the whole young
-    /// set at once, so the young objects are always a contiguous suffix of
-    /// the allocation-ordered list. `young_head` names where that suffix
-    /// starts, which is what lets a minor cost O(young) instead of O(heap) --
-    /// the difference between a nursery collection and a whole-heap walk that
-    /// happens to ignore most of what it visits.
-    /// Dead-scan iterator: block phase yields only unmarked allocated cells.
-    /// The list phase is unchanged -- its consumers test marks themselves.
-    pub fn deadCandidateIterator(self: *const Registry) GcObjectIterator {
-        var it = self.objectIterator();
-        it.unmarked_only = true;
-        return it;
+    /// Heap-accounting runs both outside and after collections. A detached
+    /// generator shell is a valid allocated-but-unpublished cell in the first
+    /// case; collector publication audit separately requires its mark.
+    pub fn blockCellAccountingAllowance(
+        context: *const anyopaque,
+        cell_addr: usize,
+    ) BlockHeapMod.Heap.UnpublishedCellAllowance.Kind {
+        const self: *const Registry = @ptrCast(@alignCast(context));
+        const header: *const GCObjectHeader = @ptrFromInt(cell_addr + metadata_prefix_size);
+        if (self.isConstructionRoot(header)) return .unmarked_construction;
+        return blockCellPublicationAllowance(context, cell_addr);
     }
 
     /// Dead block cells only. List condemnation is a separate cursor walk so
@@ -3299,6 +3455,7 @@ pub const Registry = struct {
             .sentinel = &self.gc_obj_list.sentinel,
             .heap = if (comptime block_heap_enabled) &self.block_heap else {},
             .young_only = true,
+            .side_objects = true,
             .young_block = if (comptime block_heap_enabled)
                 (if (self.block_heap.young_blocks) |head| @intFromPtr(head) else 0)
             else
@@ -3319,6 +3476,23 @@ pub const Registry = struct {
             else
                 0,
         };
+    }
+
+    /// Young non-block carriers only. Block cells have their own bitmap-word
+    /// clearing path, while the intrusive suffix still needs the ordinary
+    /// fixed-header epoch store.
+    pub fn youngListIterator(self: *const Registry) GcObjectIterator {
+        return .{
+            .cursor = self.young_head,
+            .sentinel = &self.gc_obj_list.sentinel,
+            .heap = if (comptime block_heap_enabled) null else {},
+            .young_only = true,
+            .side_objects = true,
+        };
+    }
+
+    pub fn clearYoungBlockMarksStw(self: *Registry) void {
+        if (comptime block_heap_enabled) self.block_heap.clearYoungBlockMarksStw();
     }
 
     /// Non-reclaiming census of the intrusive RC registry. One Adapter for a
@@ -3359,7 +3533,6 @@ pub const Registry = struct {
     /// Served from the collector's block heap: enumerated by block bitmaps,
     /// never linked on `gc_obj_list`, young-tracked at block granularity.
     pub inline fn isBlockCellHeader(h: *const GCObjectHeader) bool {
-        if (comptime !block_heap_enabled) return false;
         // The CLASS FIELD is the marker, not the whole byte: publication sets
         // `heap_accounted` on top of it (0x1F becomes 0x5F), and comparing
         // the full byte made every published block object fail this test --
@@ -3376,11 +3549,13 @@ pub const Registry = struct {
         var iterator = self.objectIterator();
         while (iterator.next()) |header| {
             if (header.metaConst().flags.kind != .object) continue;
-            const owner: *const object.Object = @fieldParentPtr("header", header);
-            if (@intFromPtr(owner.prop_values) & (@alignOf(property.Entry) - 1) != 0)
+            const owner = object.Object.fromHeaderConst(header);
+            const slots2 = owner.hasSlots2Layout();
+            const storage = owner.prop_values;
+            if (@intFromPtr(storage) & (@alignOf(property.Entry) - 1) != 0)
                 return error.MisalignedPropertyStorage;
 
-            const has_trailing_allocation = owner.hasTrailingPropertyAllocation();
+            const has_trailing_allocation = slots2;
             if (has_trailing_allocation) {
                 if (owner.class_id != class.ids.object) return error.InvalidTrailingPropertyClass;
                 const definition = rt.classes.recordPtr(owner.class_id) orelse
@@ -3395,6 +3570,12 @@ pub const Registry = struct {
                 }
             } else if (owner.propertyStorageIsInline()) {
                 return error.InvalidTrailingPropertyLayout;
+            }
+            const has_side_payload = rt.slots2_payloads.contains(@constCast(owner));
+            if (slots2 and owner.flags.class_payload_kind == .ordinary) {
+                if (!has_side_payload) return error.MissingSlots2PayloadSlot;
+            } else if (has_side_payload) {
+                return error.InvalidSlots2PayloadOwner;
             }
             if (owner.shape_ref.prop_count != 0 and !owner.hasPropertyStorage())
                 return error.MissingObjectPropertyStorage;
@@ -3422,10 +3603,28 @@ pub const Registry = struct {
                 }
             }
         }
+
+        // Validate membership before dereferencing a key. A skipped destroy-
+        // side removal leaves raw Object identity in this table after its cell
+        // has returned to the allocator; the address registry is the authority
+        // that makes that stale key safe to diagnose rather than dereference.
+        var payload_iterator = rt.slots2_payloads.iterator();
+        while (payload_iterator.next()) |entry| {
+            const owner = entry.key_ptr.*;
+            const header: *const GCObjectHeader = @ptrCast(owner);
+            if (!self.containsHeader(header)) return error.DanglingSlots2PayloadOwner;
+            if (!owner.hasSlots2Layout() or owner.class_id != class.ids.object or
+                owner.flags.class_payload_kind != .ordinary)
+            {
+                return error.InvalidSlots2PayloadOwner;
+            }
+            if (entry.value_ptr.* == null) return error.InvalidSlots2PayloadSlot;
+        }
     }
 
     fn appendGcObject(self: *Registry, header: *GCObjectHeader) void {
         std.debug.assert(isCycleCandidate(header));
+        std.debug.assert(header.metaConst().flags.kind != .object);
         std.debug.assert(!headerLinked(header));
         self.stageYoungTailPredecessor();
         listAddTail(&self.gc_obj_list, header);
@@ -3433,21 +3632,78 @@ pub const Registry = struct {
 
     /// qjs `list_add_tail` (quickjs.c:6545).
     inline fn linkGcObjectTail(self: *Registry, header: *GCObjectHeader) void {
+        std.debug.assert(header.metaConst().flags.kind != .object);
         self.stageYoungTailPredecessor();
         listAddTail(&self.gc_obj_list, header);
+    }
+
+    fn unregisterNonBlockObject(self: *Registry, header: *GCObjectHeader) void {
+        std.debug.assert(header.metaConst().flags.kind == .object);
+        std.debug.assert(!isBlockCellHeader(header));
+        if (comptime address_registry_enabled) {
+            if (header.metaConst().alloc_info.standalone) {
+                self.address_registry.remove(addressRegistryAllocator(), header);
+            }
+        }
+        if (comptime generation_enabled) self.forgetGenerationalOwner(header);
+    }
+
+    fn removeNonBlockObject(self: *Registry, header: *GCObjectHeader) void {
+        const authority = self.nonBlockObjectAuthority() orelse return;
+        if (!authority.remove(header)) return;
+        self.unregisterNonBlockObject(header);
+    }
+
+    /// Move a live non-block Object into one of the two header-external
+    /// condemnation lanes. Publication pre-reserves both lanes for the whole
+    /// extant Object population, so the collector-side move cannot allocate.
+    pub fn condemnNonBlockObject(self: *Registry, header: *GCObjectHeader, temporary: bool) void {
+        self.assertFrontierAllowsReclaimKind(.object);
+        std.debug.assert(header.metaConst().flags.kind == .object);
+        std.debug.assert(!isBlockCellHeader(header));
+        std.debug.assert(!header.metaConst().flags.cycle_visited);
+        const authority = self.nonBlockObjectAuthority() orelse unreachable;
+        authority.condemn(header, temporary);
+        self.unregisterNonBlockObject(header);
+        header.meta().flags.cycle_visited = true;
+    }
+
+    pub fn doomedNonBlockObjectCount(self: *const Registry) usize {
+        const authority = self.nonBlockObjectAuthority() orelse return 0;
+        return authority.doomed.items.len;
+    }
+
+    pub fn temporaryNonBlockObjectCount(self: *const Registry) usize {
+        const authority = self.nonBlockObjectAuthority() orelse return 0;
+        return authority.temporary.items.len;
+    }
+
+    pub fn popDoomedNonBlockObject(self: *Registry) ?*GCObjectHeader {
+        const authority = self.nonBlockObjectAuthority() orelse return null;
+        return authority.popDoomed();
+    }
+
+    pub fn popTemporaryNonBlockObject(self: *Registry) ?*GCObjectHeader {
+        const authority = self.nonBlockObjectAuthority() orelse return null;
+        return authority.popTemporary();
+    }
+
+    pub fn condemnedNonBlockObjectContains(self: *const Registry, header: *const GCObjectHeader) bool {
+        const authority = self.nonBlockObjectAuthority() orelse return false;
+        for (authority.doomed.items) |candidate| if (candidate == header) return true;
+        for (authority.temporary.items) |candidate| if (candidate == header) return true;
+        return false;
     }
 
     /// Publication marks a freshly appended carrier young immediately after
     /// linkage. Capture the old tail before that append while it is still O(1).
     inline fn stageYoungTailPredecessor(self: *Registry) void {
-        if (comptime !generation_enabled) return;
         if (self.young_head == null) {
             self.young_predecessor = self.gc_obj_list.tail.?;
         }
     }
 
     pub inline fn resetYoungListSuffix(self: *Registry) void {
-        if (comptime !generation_enabled) return;
         self.young_head = null;
         self.young_predecessor = null;
     }
@@ -3456,6 +3712,7 @@ pub const Registry = struct {
     /// headers (deinit shape self-remove) are a no-op; a linked node is spliced
     /// with no head/tail null branches.
     fn removeGcObject(self: *Registry, header: *GCObjectHeader) void {
+        std.debug.assert(header.metaConst().flags.kind != .object);
         if (!headerLinked(header)) return;
         const previous = listPrevious(&self.gc_obj_list, header);
         self.removeGcObjectAfter(previous, header);
@@ -3463,7 +3720,7 @@ pub const Registry = struct {
 
     /// O(1) list detach for a collector already walking `gc_obj_list`.
     fn removeGcObjectAfter(self: *Registry, previous: *GCObjectHeader, header: *GCObjectHeader) void {
-        std.debug.assert(previous.next == header);
+        std.debug.assert(previous.next_non_object == header);
         // `unregisterLiveAddress` owns the young-suffix anchor fixup for every
         // detach path; it runs before the `listDel` below so `header.next` is
         // still the successor it needs.
@@ -3495,6 +3752,73 @@ pub const Registry = struct {
     /// first cache line with the header) and a mask; the bitmap word is
     /// shared by 64 neighbours, which is better locality than 64 scattered
     /// header bytes.
+    pub inline fn frontierSafeHeaderAfterMarkClaim(
+        self: *const Registry,
+        header: *GCObjectHeader,
+    ) FrontierSafeHeader {
+        // O2-B adds no shipped instruction: the wrapper is pointer-sized and
+        // all proof checks are compiled only into safety/test binaries.
+        if (comptime std.debug.runtime_safety) {
+            const meta = header.metaConst();
+            if (!frontierEpochSafe(meta.flags.kind))
+                @panic("gc: FRONTIER SAFETY: unsafe kind entered frontier");
+            if (!meta.alloc_info.heap_accounted or meta.flags.cycle_visited)
+                @panic("gc: FRONTIER SAFETY: unpublished header entered frontier");
+            // Frontier agreement covers the immutable/shared carrier prefix.
+            // The whole representation audit additionally checks Object's
+            // mutable Shape projection, but owner requeue legitimately occurs
+            // between the shape-slot store and that projection's commit.
+            verifyMetadataSemantics(meta, meta.flags.kind, .registry_published) catch
+                @panic("gc: FRONTIER SAFETY: carrier/header agreement failed");
+            if (!self.headerMarked(header))
+                @panic("gc: FRONTIER SAFETY: queue admission preceded mark claim");
+        }
+        return FrontierSafeHeader.init(header);
+    }
+
+    /// Admission for an owner that would be re-traced after a mutator write.
+    /// A white owner does not need requeueing: if reachable, its first normal
+    /// mark claim will expand the updated edges; if unreachable, preserving
+    /// those edges is unnecessary. Only an owner whose earlier claim already
+    /// made it black may enter the frontier again.
+    ///
+    /// This is deliberately a mark CHECK, not a mark execution. The original
+    /// exact-target shade keeps its existing `setHeaderMarked(target)` call;
+    /// requeue adds no ReleaseFast mark RMW relative to the S1 base.
+    pub inline fn frontierSafeHeaderForRequeue(
+        self: *const Registry,
+        header: *GCObjectHeader,
+    ) ?FrontierSafeHeader {
+        if (!self.headerMarked(header)) return null;
+        return self.frontierSafeHeaderAfterMarkClaim(header);
+    }
+
+    fn frontierHasEntriesForSafety(self: *Registry) bool {
+        if (self.mark_stack.len != 0 or !self.concurrent_mark_queue.isEmpty()) return true;
+        // Helper-private stacks share this pool. An active segment is never
+        // empty: the last pop releases it immediately.
+        return self.concurrent_mark_queue.segmentPool().stats().active_segments != 0;
+    }
+
+    /// Condemnation/raw-free entry guard for O2-B's generation omission. Shape
+    /// and Realm are exempt because they never persist in a frontier; all four
+    /// admitted kinds must retain their address until marking closes and every
+    /// private/shared segment has drained.
+    pub fn assertFrontierAllowsReclaimKind(self: *Registry, kind: GcKind) void {
+        if (comptime !std.debug.runtime_safety) return;
+        if (!frontierEpochSafe(kind)) return;
+        if (self.concurrent.markingActive() and self.frontierHasEntriesForSafety())
+            @panic("gc: FRONTIER SAFETY: reclaim began with live frontier");
+    }
+
+    pub fn assertFrontierDrainedBeforeReclaim(self: *Registry) void {
+        if (comptime !std.debug.runtime_safety) return;
+        if (self.concurrent.markingActive())
+            @panic("gc: FRONTIER SAFETY: reclaim began while marking active");
+        if (self.frontierHasEntriesForSafety())
+            @panic("gc: FRONTIER SAFETY: reclaim began before frontier drain");
+    }
+
     pub inline fn headerMarked(self: *const Registry, h: *const GCObjectHeader) bool {
         if (comptime block_heap_enabled) {
             if (h.metaConst().alloc_info.block_size_idx == representation.block_cell_size_class) {
@@ -3502,8 +3826,27 @@ pub const Registry = struct {
                 const block = BlockHeapMod.Block.fromCellTrusted(cell);
                 return block.isMarked(h.metaConst().size_class, self.block_heap.mark_epoch);
             }
+            // TGC S2 extent string (spec §5.7): no bitmap and no TraceHeader
+            // epoch either -- the mark lives in the heap's extent table,
+            // keyed by the allocation base (body - 8). Cold: only strings
+            // over the cell ceiling get here.
+            if (comptime string_tracer_owned) {
+                if (h.metaConst().flags.kind == .string and h.metaConst().alloc_info.standalone) {
+                    @branchHint(.unlikely);
+                    return self.block_heap.extentIsMarked(@intFromPtr(h) - metadata_prefix_size, self.block_heap.mark_epoch);
+                }
+            }
         }
         if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
+        return @atomicLoad(u16, &h.metaConst().lifetime.trace.mark_epoch, .monotonic) == self.header_mark_epoch;
+    }
+
+    /// Mark probe for a typed carrier whose representation descriptor excludes
+    /// block cells. Shape edges dominate object tracing and are known to use
+    /// the fixed header epoch; routing each one through the object-only block
+    /// discriminator repeats work for every object sharing the same shape.
+    pub inline fn headerMarkedKnownNonBlock(self: *const Registry, h: *const GCObjectHeader) bool {
+        std.debug.assert(h.metaConst().alloc_info.block_size_idx != representation.block_cell_size_class);
         return @atomicLoad(u16, &h.metaConst().lifetime.trace.mark_epoch, .monotonic) == self.header_mark_epoch;
     }
 
@@ -3515,36 +3858,17 @@ pub const Registry = struct {
                 block.setMark(h.metaConst().size_class, self.block_heap.mark_epoch);
                 return;
             }
-        }
-        if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
-        @atomicStore(u16, &h.meta().lifetime.trace.mark_epoch, self.header_mark_epoch, .monotonic);
-    }
-
-    /// Atomically claim the mark: returns true iff this caller transitioned
-    /// the object from unmarked to marked. Parallel tracing uses the claim as
-    /// its dedup so each object's edges are walked by exactly one thread --
-    /// which also keeps the trace's rare write-backs (accessor sync stores in
-    /// `traceChildEdgesFallible`) single-writer. Block cells claim a bitmap
-    /// bit; trace header kinds claim the fixed-offset u16 epoch. The separate
-    /// state-flags u16 is never part of this atomic operation.
-    pub inline fn tryAcquireHeaderMark(self: *const Registry, h: *GCObjectHeader) bool {
-        if (comptime block_heap_enabled) {
-            if (h.metaConst().alloc_info.block_size_idx == representation.block_cell_size_class) {
-                const cell = @intFromPtr(h) - metadata_prefix_size;
-                const block = BlockHeapMod.Block.fromCellTrusted(cell);
-                return block.tryAcquireMark(h.metaConst().size_class, self.block_heap.mark_epoch);
+            // Extent string: table-held mark, see `headerMarked`.
+            if (comptime string_tracer_owned) {
+                if (h.metaConst().flags.kind == .string and h.metaConst().alloc_info.standalone) {
+                    @branchHint(.unlikely);
+                    self.block_heap.extentSetMark(@intFromPtr(h) - metadata_prefix_size, self.block_heap.mark_epoch);
+                    return;
+                }
             }
         }
         if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
-        const epoch_ptr = &h.meta().lifetime.trace.mark_epoch;
-        // The only caller is the parallel STW tracer. Its preceding plain
-        // marked-load filters the common hit; the Registry epoch cannot
-        // change while workers run. One exchange therefore elects exactly
-        // one winner without a general CAS retry loop: a racing loser reads
-        // back the current epoch written by the winner.
-        const epoch = self.header_mark_epoch;
-        const old = @atomicRmw(u16, epoch_ptr, .Xchg, epoch, .monotonic);
-        return old != epoch;
+        @atomicStore(u16, &h.meta().lifetime.trace.mark_epoch, self.header_mark_epoch, .monotonic);
     }
 
     /// Retire a block cell the tracer has just finished expanding.
@@ -3560,7 +3884,6 @@ pub const Registry = struct {
     /// walk already retires those survivors, and clearing them here would
     /// break `young_head`'s exact-suffix invariant over `gc_obj_list`.
     pub inline fn retireTracedYoung(self: *Registry, h: *GCObjectHeader) void {
-        if (comptime !generation_enabled) return;
         if (self.generation.major_retirement != .tracing) return;
         // A header the tracer reached must be a published, un-condemned
         // object. Reaching anything else means a stale entry survived in the
@@ -3602,24 +3925,49 @@ pub const Registry = struct {
             return;
         }
 
-        var cursor = self.gc_obj_list.sentinel.next;
+        var cursor = self.gc_obj_list.sentinel.next_non_object;
         while (cursor) |header| {
             if (header == &self.gc_obj_list.sentinel) break;
             @atomicStore(u16, &header.meta().lifetime.trace.mark_epoch, 0, .monotonic);
-            cursor = header.next;
+            cursor = header.nextNonObject();
+        }
+        if (self.nonBlockObjectAuthority()) |authority| {
+            for (authority.items.items) |header| {
+                @atomicStore(u16, &header.meta().lifetime.trace.mark_epoch, 0, .monotonic);
+            }
         }
         self.header_mark_epoch = 1;
     }
 
     pub fn detachCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
+        self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
         std.debug.assert(!header.meta().flags.cycle_visited);
-        self.removeGcObject(header);
+        if (header.metaConst().flags.kind == .object) {
+            if (!isBlockCellHeader(header)) self.removeNonBlockObject(header);
+        } else {
+            self.removeGcObject(header);
+        }
+        header.meta().flags.cycle_visited = true;
+    }
+
+    /// Detach for a header produced by a block-only iterator. Allocation
+    /// bitmap ownership proves there is no intrusive or side membership to
+    /// remove, so the production sweep need only stamp the condemnation.
+    pub inline fn detachBlockObjectCandidate(self: *Registry, header: *GCObjectHeader) void {
+        if (comptime std.debug.runtime_safety) {
+            self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
+            std.debug.assert(!header.metaConst().flags.cycle_visited);
+            const cell_kind = header.metaConst().flags.kind;
+            std.debug.assert(cell_kind == .object or (string_tracer_owned and cell_kind == .string));
+            std.debug.assert(isBlockCellHeader(header));
+        }
         header.meta().flags.cycle_visited = true;
     }
 
     /// Sequential-sweep twin of `detachCycleCandidate`; the predecessor must
     /// still name the live-list node immediately before `header`.
     pub fn detachCycleCandidateAfter(self: *Registry, previous: *GCObjectHeader, header: *GCObjectHeader) void {
+        self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
         std.debug.assert(!header.meta().flags.cycle_visited);
         self.removeGcObjectAfter(previous, header);
         header.meta().flags.cycle_visited = true;
@@ -3628,170 +3976,15 @@ pub const Registry = struct {
     pub fn restoreCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
         std.debug.assert(header.meta().flags.cycle_visited);
         header.meta().flags.cycle_visited = false;
-        self.appendGcObject(header);
+        if (header.metaConst().flags.kind == .object) {
+            if (!isBlockCellHeader(header)) self.nonBlockObjectAuthority().?.publish(header);
+        } else {
+            self.appendGcObject(header);
+        }
         if (comptime address_registry_enabled) {
             const bytes = storedHeapBytes(header) orelse defaultHeapBytes(header);
             self.registerLiveAddress(header, bytes, true);
         }
-    }
-
-    /// Shade a target during concurrent marking (§8.4). Marking the object is
-    /// what publishes it to the marker; the work queue that would carry it is
-    /// the marker thread's business and arrives with it.
-    ///
-    /// Called only from inside a `CriticalScope`, so final remark cannot stop
-    /// the mutator between the heap store and this shading.
-    /// Marking-phase write barrier: shade the stored value GREY.
-    ///
-    /// Grey means marked AND queued for tracing. The first version of this
-    /// function only claimed the mark state, which is black-without-having-been-
-    /// traced: a pre-existing child whose only path ran through the shaded
-    /// object was never discovered and was swept alive. The remark could not
-    /// save it -- `shade()` skips already-marked objects, so a marked object
-    /// is never re-entered. The hole exists for single-threaded incremental
-    /// marking exactly as for a concurrent thread: an object traced in one
-    /// increment and mutated in the mutator window is otherwise never
-    /// re-examined.
-    ///
-    /// This is the Dijkstra direction (shade the target), not JSC's
-    /// Steele-style owner-append (`Heap::addToRememberedSet` re-queues the
-    /// owner). JSC can afford owner-append because `CellState` gives it a
-    /// grey state that deduplicates the append: the second barrier on a
-    /// remembered owner takes the fast path. Our collector has marked/unmarked
-    /// but no distinct grey state, so owner-append would re-push the same hot owner on
-    /// every store and flood the ring -- forcing the coarse overflow rescan
-    /// every cycle. Shading the target dedups for free: the mark claim itself
-    /// is the "already queued" test. The price is more floating garbage (a
-    /// stored-then-overwritten value survives the cycle), which is the
-    /// documented cost of an insertion barrier (§8.4).
-    ///
-    /// A failed push is not lost work: the object stays marked and the
-    /// queue's overflow flag makes it findable by the remark's rescan of
-    /// marked objects.
-    /// Choose the scope of the next self-paced incremental cycle. The first
-    /// cycle is full, then the experiment permits exactly one sticky cycle;
-    /// the following cycle is full even if the ordinary threshold, reset from
-    /// the sticky-inflated account, would prefer to wait. A repair transaction
-    /// is always full.
-    pub fn prepareIncrementalMajorScope(self: *Registry) IncrementalMajorScope {
-        if (comptime !sticky_major_enabled) return .full;
-        const pressure = self.stickyMajorFullPressureExceeded();
-        const must_full = !sticky_major_on or
-            !self.sticky_major.full_baseline_valid or
-            self.sticky_major.sticky_rounds_since_full != 0 or
-            pressure or
-            self.generation.major_retirement != .clean;
-        self.sticky_major.cycle_scope = if (must_full) .full else .sticky;
-        if (must_full and pressure) self.sticky_major.stats.full_forced_by_pressure +|= 1;
-        return self.sticky_major.cycle_scope;
-    }
-
-    pub inline fn incrementalMajorScope(self: *const Registry) IncrementalMajorScope {
-        if (comptime !sticky_major_enabled) return .full;
-        return self.sticky_major.cycle_scope;
-    }
-
-    /// A second threshold whose baseline changes only after a full trace.
-    /// It grants two copies of the first post-full allocation window: one to
-    /// reach the sticky cycle, one to reach the mandatory full. Resetting the
-    /// ordinary threshold from floating garbage cannot move this cap.
-    pub inline fn stickyMajorFullPressureExceeded(self: *const Registry) bool {
-        if (comptime !sticky_major_enabled) return false;
-        // With the arm off there is no floating garbage to defeat, so the
-        // second threshold must not add collections the ordinary schedule
-        // would not have run. Off means off, not "off plus a second trigger".
-        if (!sticky_major_on) return false;
-        return self.sticky_major.full_baseline_valid and
-            self.memory.allocated_bytes > self.sticky_major.full_pressure_threshold;
-    }
-
-    pub fn noteFullCollectionSettled(
-        self: *Registry,
-        settled_bytes: usize,
-        ordinary_threshold: usize,
-        full_sweep_completed: bool,
-    ) void {
-        if (comptime !sticky_major_enabled) return;
-        // Sticky tracing assumes that every old object left behind by the
-        // baseline full is marked. An incomplete arena set makes the full
-        // collector deliberately retain unmarked objects instead of sweeping
-        // them. Such a safe-leak round is not a sticky baseline: an old->old
-        // write could revive one of those objects, and the generational
-        // remembered set intentionally does not record that edge.
-        if (!full_sweep_completed) {
-            self.sticky_major.full_baseline_valid = false;
-            self.sticky_major.sticky_rounds_since_full = 0;
-            self.sticky_major.cycle_scope = .full;
-            return;
-        }
-        const first_window = ordinary_threshold -| settled_bytes;
-        const two_windows = std.math.mul(usize, first_window, 2) catch std.math.maxInt(usize);
-        self.sticky_major.last_full_settled_bytes = settled_bytes;
-        self.sticky_major.full_pressure_threshold =
-            std.math.add(usize, settled_bytes, two_windows) catch std.math.maxInt(usize);
-        self.sticky_major.full_baseline_valid = true;
-        self.sticky_major.sticky_rounds_since_full = 0;
-        self.sticky_major.cycle_scope = .full;
-        self.sticky_major.stats.full_cycles +|= 1;
-    }
-
-    pub fn noteIncrementalCollectionSettled(
-        self: *Registry,
-        settled_bytes: usize,
-        ordinary_threshold: usize,
-        full_sweep_completed: bool,
-    ) void {
-        if (comptime !sticky_major_enabled) return;
-        if (!full_sweep_completed) {
-            self.sticky_major.full_baseline_valid = false;
-            self.sticky_major.sticky_rounds_since_full = 0;
-            self.sticky_major.cycle_scope = .full;
-            return;
-        }
-        self.sticky_major.stats.max_ordinary_threshold =
-            @max(self.sticky_major.stats.max_ordinary_threshold, ordinary_threshold);
-        switch (self.sticky_major.cycle_scope) {
-            .full => self.noteFullCollectionSettled(settled_bytes, ordinary_threshold, true),
-            .sticky => {
-                self.sticky_major.sticky_rounds_since_full = 1;
-                self.sticky_major.stats.sticky_cycles +|= 1;
-                const excess = settled_bytes -| self.sticky_major.last_full_settled_bytes;
-                self.sticky_major.stats.sum_sticky_excess_bytes +|= excess;
-                self.sticky_major.stats.max_sticky_excess_bytes =
-                    @max(self.sticky_major.stats.max_sticky_excess_bytes, excess);
-            },
-        }
-    }
-
-    pub fn noteStickyMajorOracle(
-        self: *Registry,
-        scope: IncrementalMajorScope,
-        precise: usize,
-        conservative_only: usize,
-    ) void {
-        if (comptime !sticky_major_enabled) return;
-        switch (scope) {
-            .full => self.sticky_major.stats.oracle_checks_full +|= 1,
-            .sticky => self.sticky_major.stats.oracle_checks_sticky +|= 1,
-        }
-        self.sticky_major.stats.oracle_violations_precise +|= precise;
-        self.sticky_major.stats.oracle_violations_conservative +|= conservative_only;
-    }
-
-    pub fn stickyMajorStats(self: *const Registry) StickyMajorStats {
-        if (comptime !sticky_major_enabled) return .{};
-        return self.sticky_major.stats;
-    }
-
-    pub fn stickyMajorFullBaseline(self: *const Registry) struct {
-        settled_bytes: usize,
-        pressure_threshold: usize,
-    } {
-        if (comptime !sticky_major_enabled) return .{ .settled_bytes = 0, .pressure_threshold = 0 };
-        return .{
-            .settled_bytes = self.sticky_major.last_full_settled_bytes,
-            .pressure_threshold = self.sticky_major.full_pressure_threshold,
-        };
     }
 
     /// Discard an open incremental cycle so a full STW collection can run.
@@ -3803,12 +3996,9 @@ pub const Registry = struct {
     /// collector's own `clearMarks` re-derives everything the increments
     /// knew, so nothing is lost but the work already done.
     pub fn abortIncrementalCycle(self: *Registry) void {
-        if (comptime !concurrent_enabled) return;
         self.abortCycleEnvelope();
         if (!self.concurrent.markingActive()) return;
-        self.setMajorMarkingActive(false, .monotonic);
-        self.concurrent_mark_queue.reset();
-        self.mark_stack.len = 0;
+        self.closeMarkingAndDrainFrontier(.monotonic);
         // The trace already promoted whatever it reached; the young
         // structures still describe those cells as young. Minors stay closed
         // until a major commits and makes the two agree again.
@@ -3816,11 +4006,23 @@ pub const Registry = struct {
         self.concurrent.stats.cycles_aborted += 1;
     }
 
+    fn closeMarkingAndDrainFrontier(
+        self: *Registry,
+        comptime order: std.builtin.AtomicOrder,
+    ) void {
+        // Ordering is the invariant: no reclamation may see marking active
+        // after entries begin disappearing, and teardown may not proceed until
+        // every shared/private segment is back in the pool cache.
+        if (self.concurrent.markingActive()) self.setMajorMarkingActive(false, order);
+        self.mark_stack.reset();
+        self.concurrent_mark_queue.reset();
+        self.assertFrontierDrainedBeforeReclaim();
+    }
+
     /// Publish the settled account and the threshold derived from it for the
     /// next automatic incremental cycle. This pair is one policy decision;
     /// keeping it intact is what makes the later S/T/P tuple same-domain.
     pub fn noteCycleEnvelopeBaseline(self: *Registry, start_bytes: usize, threshold_bytes: usize) void {
-        if (comptime !concurrent_enabled) return;
         if (!gc_trace_stw_reports.detailed_reports) return;
         std.debug.assert(!self.concurrent.envelope_active);
         if (self.concurrent.envelope_baseline_valid) self.memory.endCyclePeakTracking();
@@ -3836,7 +4038,6 @@ pub const Registry = struct {
     /// A caller-supplied threshold has no settled S selected by the growth
     /// policy, so the next cycle must not be presented as §1.3 evidence.
     pub fn invalidateCycleEnvelopeBaseline(self: *Registry) void {
-        if (comptime !concurrent_enabled) return;
         if (self.concurrent.envelope_active) {
             self.memory.endCyclePeakTracking();
             self.concurrent.envelope_active = false;
@@ -3850,7 +4051,6 @@ pub const Registry = struct {
     /// Consume the preceding reset's S/T pair and begin exact account-peak
     /// tracking before any initial-mark allocation can occur.
     pub fn beginCycleEnvelope(self: *Registry, threshold_bytes: usize) void {
-        if (comptime !concurrent_enabled) return;
         if (!gc_trace_stw_reports.detailed_reports) return;
         std.debug.assert(!self.concurrent.envelope_active);
         if (!self.concurrent.envelope_baseline_valid or
@@ -3868,14 +4068,12 @@ pub const Registry = struct {
     }
 
     fn abortCycleEnvelope(self: *Registry) void {
-        if (comptime !concurrent_enabled) return;
         if (!self.concurrent.envelope_active) return;
         self.memory.endCyclePeakTracking();
         self.concurrent.envelope_active = false;
     }
 
     fn finishCycleEnvelope(self: *Registry) void {
-        if (comptime !concurrent_enabled) return;
         if (!self.concurrent.envelope_active) return;
         self.memory.endCyclePeakTracking();
         self.concurrent.envelope_active = false;
@@ -3900,7 +4098,6 @@ pub const Registry = struct {
     }
 
     pub inline fn shadeForConcurrentMark(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void {
-        if (comptime !concurrent_enabled) return;
         // The exit split is a --gc-stats structural guardrail, not collector
         // policy. Keep the default tracing build's hot barrier at lane-e's
         // counter-free cost; tests and explicitly requested detailed reports
@@ -3917,9 +4114,9 @@ pub const Registry = struct {
         // queuing is the black-without-tracing hole, so instead the OWNER is
         // re-queued: its re-trace reaches the target through `shade`, whose
         // queue mode expands rc-managed kinds synchronously. In the
-        // vanishing case where the owner is itself rc-managed, fall back to
-        // the queue's overflow contract: mark the target and set the flag, so
-        // the remark's marked-object rescan traces its children.
+        // vanishing case where the owner is itself rc-managed cannot retain a
+        // safe queue address. Fail this cycle closed instead of reintroducing
+        // a whole-heap recovery scan.
         // An UNPUBLISHED owner's stores are construction, not mutation: the
         // object is queued grey at publication and its trace shades every
         // initial edge, so the barrier owes these writes nothing. Queueing
@@ -3941,35 +4138,53 @@ pub const Registry = struct {
         if (kind == .shape or kind == .realm_context) {
             const owner_kind = owner.meta().flags.kind;
             if (owner_kind == .shape or owner_kind == .realm_context) {
-                self.setHeaderMarked(target);
-                self.concurrent.stats.shaded += 1;
-                self.concurrent_mark_queue.overflowed.store(true, .release);
+                if (kind == .shape) {
+                    // Realm -> Shape is a real production edge: a realm fills
+                    // its five initial shapes lazily (`ensureInitialShapes`),
+                    // possibly while a major is marking and after the realm
+                    // went black. A shape's only child is its proto, so shade
+                    // it synchronously -- mark the shape, queue the proto --
+                    // exactly what `Collector.shade`'s queue mode does for
+                    // rc-managed kinds. Failing the cycle here surfaced as a
+                    // spurious OutOfMemory in test262 `$262.createRealm()`
+                    // tests once the realm barrier existed.
+                    self.setHeaderMarked(target);
+                    const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", target));
+                    if (shape_ref.proto) |proto| {
+                        if (@intFromPtr(proto) != 0) {
+                            const proto_header = proto.gcHeader();
+                            if (!self.headerMarked(proto_header)) {
+                                self.setHeaderMarked(proto_header);
+                                self.concurrent.stats.shaded += 1;
+                                _ = self.concurrent_mark_queue.push(
+                                    self.frontierSafeHeaderAfterMarkClaim(proto_header),
+                                );
+                            }
+                        }
+                    }
+                    return;
+                }
+                self.concurrent_mark_queue.invalidateBarrier();
                 return;
             }
             if (report) self.concurrent.stats.barrier_requeued_owner += 1;
-            _ = self.concurrent_mark_queue.pushSingle(owner);
+            const frontier_owner = self.frontierSafeHeaderForRequeue(owner) orelse return;
+            _ = self.concurrent_mark_queue.push(frontier_owner);
             return;
         }
         self.setHeaderMarked(target);
         self.concurrent.stats.shaded += 1;
-        _ = self.concurrent_mark_queue.pushSingle(target);
+        _ = self.concurrent_mark_queue.push(
+            self.frontierSafeHeaderAfterMarkClaim(target),
+        );
     }
-
-    // `markAssist` used to live here: pop a slice of the queue and set mark
-    // bits. Under grey-queue semantics that is unsound, not merely useless --
-    // an entry's presence in the queue is the ONLY record that its children
-    // are still untraced, so popping without tracing loses work. The panel no
-    // longer advertises assist or floating-garbage counters that had no
-    // production write site.
 
     /// Whether a minor is worth attempting: enough young objects to be worth
     /// the root scan, and no full collection already in flight. Deliberately
     /// simple — the scheduling policy that replaces it belongs with the
     /// allocation-headroom work, not with the collector mechanism.
     pub inline fn shouldTryMinor(self: *const Registry) bool {
-        if (comptime !generation_enabled) return false;
         if (self.phase != .none) return false;
-        if (stress_disable or stress_no_minor) return false;
         // Before the stress arm, not after: an open retirement transaction is
         // a correctness condition, and a diagnostic knob must not be able to
         // step past it. (Adversarial review, codex, 2026-08-27.)
@@ -4023,11 +4238,9 @@ pub const Registry = struct {
     /// widened the mutator windows enough to expose it.
     ///
     /// A hot array appended in a loop re-pushes once per bulk write -- the
-    /// mark state cannot dedup an owner that must be re-traced -- so the ring
-    /// can overflow. Overflow is the queue's sound downgrade: the remark
-    /// rescans every marked object. Worse pause, never a lost object.
+    /// mark state cannot dedup an owner that must be re-traced -- so the
+    /// shared frontier must be unbounded rather than silently dropping work.
     pub inline fn rememberOwnerForBulkWrite(self: *Registry, owner: *GCObjectHeader) void {
-        if (comptime !generation_enabled) return;
         if (self.barrierOwnerSkips(owner)) return;
         self.rememberOwnerForBulkWriteSlow(owner);
     }
@@ -4039,7 +4252,8 @@ pub const Registry = struct {
                 // Same publication rule as the value barrier: an unpublished
                 // owner's edges are covered by its published-grey trace.
                 if (owner.meta().alloc_info.heap_accounted) {
-                    _ = self.concurrent_mark_queue.pushSingle(owner);
+                    if (self.frontierSafeHeaderForRequeue(owner)) |frontier_owner|
+                        _ = self.concurrent_mark_queue.push(frontier_owner);
                 }
                 return;
             }
@@ -4058,7 +4272,6 @@ pub const Registry = struct {
     /// is not stale. Keeping them the same expression is the point -- a gate
     /// computed one way and checked another checks nothing.
     inline fn expectedBarrierGate(self: *const Registry) u64 {
-        if (comptime !generation_enabled) return 0;
         if (comptime concurrent_enabled) {
             // Marking wants the exact-target shading arm on every store, so no
             // owner state may buy an exit.
@@ -4079,7 +4292,6 @@ pub const Registry = struct {
     /// a silently wrong statistics row, because the fast path re-derives the
     /// expected gate on every barrier (see `barrierOwnerSkips`).
     pub fn refreshBarrierGate(self: *Registry) void {
-        if (comptime !generation_enabled) return;
         self.barrier_gate = self.expectedBarrierGate();
     }
 
@@ -4093,13 +4305,8 @@ pub const Registry = struct {
     /// What ENFORCES that is `barrierOwnerSkips`'s C1 assert, not review: a
     /// bare store leaves the gate stale and the next barrier call panics.
     /// Injection-verified at `beginIncrementalCycle`'s publication, which is
-    /// the one whose window really contains mutator stores. Note the other
-    /// direction of that experiment: a bare store at `collectConcurrentMajor`'s
-    /// publication is NOT caught, because no barrier runs between it and the
-    /// matching close in today's stop-the-world harness -- the site is reached
-    /// (probe-verified), the window is simply empty of mutator writes.
+    /// the one whose window really contains mutator stores.
     pub fn setMajorMarkingActive(self: *Registry, active: bool, comptime order: std.builtin.AtomicOrder) void {
-        if (comptime !concurrent_enabled) return;
         self.concurrent.major_marking_active.store(active, order);
         self.refreshBarrierGate();
     }
@@ -4114,7 +4321,6 @@ pub const Registry = struct {
     /// set -- the SECOND object header the old-target classification used to
     /// touch.
     pub inline fn barrierOwnerSkips(self: *const Registry, owner: *const GCObjectHeader) bool {
-        if (comptime !generation_enabled) return true;
         if (comptime std.debug.runtime_safety) {
             // C1. A stale gate is the one way this fold can go silently wrong,
             // and it is invisible from the slow path: a gate that wrongly
@@ -4153,7 +4359,6 @@ pub const Registry = struct {
     }
 
     inline fn clearGenerationalRememberedBits(self: *Registry) void {
-        if (comptime !generation_enabled) return;
         var remembered = self.generation.rememberedIterator();
         while (remembered.next()) |addr| {
             const owner: *GCObjectHeader = @ptrFromInt(addr.*);
@@ -4167,7 +4372,6 @@ pub const Registry = struct {
     /// its low-seven-bit Shape summary, so no entry-side whole-map walk is
     /// needed and open incremental slices may use the cache normally.
     pub fn retireGenerationalYoungSet(self: *Registry) void {
-        if (comptime !generation_enabled) return;
         // I3: the two halves below are one transaction. Between them the cache
         // reads "absent" while the map is still populated, which is the single
         // interval where `forgetUnremembered`'s premise is false.
@@ -4230,11 +4434,60 @@ pub const Registry = struct {
         self.rememberGenerationalOwner(owner);
     }
 
+    /// TGC S0 L3 audit probe (`docs/tracing-gc-s0-spec.md` §L3). Placed after
+    /// a store that static reading found unbarriered; counts the exact state
+    /// the generational barrier exists to prevent: a published, OLD,
+    /// UNREMEMBERED owner now holding an edge to a YOUNG child. Only the
+    /// authoritative remembered map is consulted, never the cache bit.
+    ///
+    /// Erased in ReleaseFast (`runtime_safety` is false there) so the shipped
+    /// `zjs` carries no symbol; armed in Debug / ReleaseSafe test binaries,
+    /// in `zjs-dev`, and in the `-Dzjs_gc_roots_diag` ReleaseFast binary
+    /// (which is how Octane runs under the probe at speed); gated at run time
+    /// on `ZJS_MINOR_AUDIT`.
+    pub inline fn auditUnbarrieredStore(
+        self: *Registry,
+        owner: *GCObjectHeader,
+        child: ?*GCObjectHeader,
+        comptime site: UnbarrieredStoreSite,
+    ) void {
+        if (comptime !(std.debug.runtime_safety or roots_diag_enabled)) return;
+        if (!minor_audit) return;
+        const target = child orelse return;
+        @call(.never_inline, auditUnbarrieredStoreSlow, .{ self, owner, target, site });
+    }
+
+    fn auditUnbarrieredStoreSlow(
+        self: *Registry,
+        owner: *GCObjectHeader,
+        target: *GCObjectHeader,
+        site: UnbarrieredStoreSite,
+    ) void {
+        if (!owner.metaConst().alloc_info.heap_accounted) return;
+        if (owner.metaConst().flags.young) return;
+        if (!target.metaConst().flags.young) return;
+        var it = self.generation.rememberedIterator();
+        while (it.next()) |addr| {
+            if (addr.* == @intFromPtr(owner)) return;
+        }
+        const slot = &unbarriered_store_hits[@intFromEnum(site)];
+        slot.* += 1;
+        const owner_class: u32 = if (owner.metaConst().flags.kind == .object)
+            object.Object.fromHeader(owner).class_id
+        else
+            0;
+        std.debug.print(
+            "UNBARRIERED-STORE site={s} hit={d} owner_kind={s} owner_class={d} child_kind={s}\n",
+            .{ @tagName(site), slot.*, @tagName(owner.metaConst().flags.kind), owner_class, @tagName(target.metaConst().flags.kind) },
+        );
+        if (slot.* == 1) std.debug.dumpCurrentStackTrace(.{});
+        if (minor_audit_fatal) @panic("UNBARRIERED-STORE: old unremembered owner gained a young child without a barrier");
+    }
+
     /// Header-shaped write barrier. The whole steady-state decision is
     /// `barrierOwnerSkips`; everything below it is a phase the gate has
     /// already announced by being zero.
     pub inline fn generationalBarrier(self: *Registry, owner: *GCObjectHeader, child: ?*GCObjectHeader) void {
-        if (comptime !generation_enabled) return;
         const target = child orelse return;
         if (self.barrierOwnerSkips(owner)) return;
         self.generationalBarrierSlow(owner, target);
@@ -4285,13 +4538,12 @@ pub const Registry = struct {
     /// gate-first shape decodes exactly when the pre-fold three-way ordering
     /// did, and the edge-only counters stay comparable with earlier runs.
     pub inline fn generationalBarrierValue(self: *Registry, owner: *GCObjectHeader, child: JSValue) void {
-        if (comptime !generation_enabled) return;
         if (self.barrierOwnerSkips(owner)) return;
         const target = child.cycleMarkHeader() orelse return;
         self.generationalBarrierSlow(owner, target);
     }
 
-    /// The barrier queue's ring shares the registry's allocator for the same
+    /// The mark frontier shares the registry's allocator for the same
     /// reason the registry uses it: collection-infrastructure allocation must
     /// not recurse into the JS heap account.
     pub inline fn markQueueAllocator() std.mem.Allocator {
@@ -4327,8 +4579,7 @@ pub const Registry = struct {
     /// overwhelming majority of the heap (space histogram: 18.4M of 18.4M
     /// small allocations) and fixed-size, so the routing predicate is one
     /// comptime tag compare.
-    pub fn serveObjectCells(self: *Registry, account: *memory.MemoryAccount) void {
-        if (comptime !block_heap_enabled) return;
+    pub fn serveObjectCells(self: *Registry, account: *memory.MemoryAccount) !void {
         // The conservative resolver needs the block geometry before the first
         // cell can appear in a stack slot.
         self.address_registry.block_heap = &self.block_heap;
@@ -4337,10 +4588,15 @@ pub const Registry = struct {
         // now direct-call and specialize `allocCell`; RC comptime-erases both
         // the field and the branch.
         account.gc_object_cell_heap = &self.block_heap;
+        if (comptime heap_accounting_oracle_enabled) {
+            account.gc_heap_oracle = &self.heap_accounting_oracle;
+        }
+        const authority = try addressRegistryAllocator().create(NonBlockObjectAuthority);
+        authority.* = .{};
+        self.address_registry.nonblock_objects = authority;
     }
 
     pub fn observeSlabArenas(self: *Registry, slab: *memory.SmallObjectSlab) void {
-        if (comptime !address_registry_enabled) return;
         // Kept so a failed arena registration can be recovered by re-walking
         // the slab, instead of leaving that arena invisible for its whole life.
         self.arena_slab = slab;
@@ -4373,7 +4629,6 @@ pub const Registry = struct {
     }
 
     inline fn registerLiveAddress(self: *Registry, header: *GCObjectHeader, bytes: usize, tracked: bool) void {
-        if (comptime !address_registry_enabled) return;
         if (!tracked) return;
         const info = header.metaConst().alloc_info;
         self.registerLiveAddressClassified(header, bytes, true, info.standalone, isBlockCellHeader(header), .cold);
@@ -4392,7 +4647,6 @@ pub const Registry = struct {
         is_block_cell: bool,
         comptime arm: PublicationArm,
     ) void {
-        if (comptime !address_registry_enabled) return;
         if (!tracked) return;
         // Slab-backed objects need no entry: their arena is registered, the
         // mask finds it, and the `heap_accounted` bit set just above this call
@@ -4403,7 +4657,11 @@ pub const Registry = struct {
             @branchHint(.unlikely);
             self.insertLiveAddressCold(header, bytes);
         }
-        self.markPublishedYoungClassified(header, is_block_cell, arm);
+        self.markPublishedYoungClassified(
+            header,
+            is_block_cell,
+            arm,
+        );
     }
 
     /// Outlined so the standalone-prefix arm's call does not have to be
@@ -4423,8 +4681,11 @@ pub const Registry = struct {
     /// byte the allocator already writes, rather than a hash-map insert per
     /// allocation.
     inline fn markPublishedYoung(self: *Registry, header: *GCObjectHeader) void {
-        if (comptime !generation_enabled) return;
-        self.markPublishedYoungClassified(header, isBlockCellHeader(header), .cold);
+        self.markPublishedYoungClassified(
+            header,
+            isBlockCellHeader(header),
+            .cold,
+        );
     }
 
     /// `markPublishedYoung` for callers holding the block-cell answer already.
@@ -4438,7 +4699,6 @@ pub const Registry = struct {
         is_block_cell: bool,
         comptime arm: PublicationArm,
     ) void {
-        if (comptime !generation_enabled) return;
         // §8.6 concurrent mark: "new objects are black-published AND ALL
         // INITIAL STRONG EDGES ARE SHADED". Both halves, and the second is
         // load-bearing: field initialisation happens BEFORE publication, so
@@ -4480,6 +4740,16 @@ pub const Registry = struct {
                 return;
             }
         }
+        // Non-block Objects are not part of the allocation-ordered intrusive
+        // suffix. Their side authority is small and filtered on the young bit
+        // by `youngListIterator`, so no list anchor belongs to them.
+        if (header.metaConst().flags.kind == .object) return;
+        // Neither are extent strings: `publishInitialized` never linked them
+        // (no link word), so anchoring the young suffix on one would send the
+        // next minor's list walk through string bytes.
+        if (comptime string_tracer_owned) {
+            if (header.metaConst().flags.kind == .string) return;
+        }
         // This object was just appended at the tail, so if no suffix was open
         // it starts here.
         if (self.young_head == null) {
@@ -4497,7 +4767,6 @@ pub const Registry = struct {
     /// of publications, so keeping them inline only bought the hot path a
     /// callee-saved prologue it never used.
     noinline fn publishGreyCold(self: *Registry, header: *GCObjectHeader) void {
-        if (comptime !concurrent_enabled) return;
         // Published-grey applies to PLAIN OBJECTS ONLY. An object is
         // the one kind a published container can hold before its
         // construction settles, so its initial edges need the push.
@@ -4513,12 +4782,13 @@ pub const Registry = struct {
         // popped mid-construction.
         if (header.meta().flags.kind == .object) {
             self.setHeaderMarked(header);
-            _ = self.concurrent_mark_queue.pushSingle(header);
+            _ = self.concurrent_mark_queue.push(
+                self.frontierSafeHeaderAfterMarkClaim(header),
+            );
         }
     }
 
     inline fn unregisterLiveAddress(self: *Registry, header: *GCObjectHeader) void {
-        if (comptime !address_registry_enabled) return;
         // Mirror of `registerLiveAddress`: nothing was inserted for a
         // slab-backed object, and `heap_accounted` is cleared by the free path
         // that brought us here, so the mask stops resolving it on its own.
@@ -4537,7 +4807,7 @@ pub const Registry = struct {
             // the `listDel` follows this call. Freeing the anchor shrinks the
             // suffix to its successor; the suffix never grows here.
             if (self.young_head == header) {
-                const next = header.next;
+                const next = header.nextNonObject();
                 self.young_head = if (next == &self.gc_obj_list.sentinel) null else next;
             }
         }
@@ -4548,19 +4818,16 @@ pub const Registry = struct {
     inline fn observeNewPublication(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
         if (comptime space_model_enabled) {
             if (comptime builtin.is_test) {
-                self.space_histogram.record(bytes);
+                if (header.metaConst().flags.kind == .object) {
+                    self.space_histogram.recordObject(
+                        bytes,
+                        object.Object.fromHeaderConst(header).hasSlots2Layout(),
+                    );
+                } else self.space_histogram.record(bytes);
             } else if (gc_trace_stw_reports.detailed_reports) {
                 @branchHint(.unlikely);
-                self.recordSpacePublicationDetailed(bytes);
+                self.recordSpacePublicationDetailed(header, bytes);
             }
-        }
-        if (comptime sweep_model_stats_enabled) {
-            self.sweep_model.noteAllocated(addressRegistryAllocator(), @intFromPtr(header));
-            self.sweep_model.refreshHeadroom(
-                self.old_space.live_bytes +| self.large_space.live_bytes,
-                self.policy.major_debt_threshold,
-                self.stats.external_bytes,
-            );
         }
     }
 
@@ -4569,72 +4836,41 @@ pub const Registry = struct {
     /// diagnostic counters on every object/shape publication. Outlining keeps
     /// the disabled arm to one flag load and branch instead of retaining the
     /// histogram's classify-and-update body in both publication funnels.
-    noinline fn recordSpacePublicationDetailed(self: *Registry, bytes: usize) void {
-        self.space_histogram.record(bytes);
-    }
-
-    fn appendZeroRef(self: *Registry, header: *GCObjectHeader) void {
-        std.debug.assert(headerRefCount(header) == 0);
-        std.debug.assert(!headerLinked(header));
-        listAddTail(&self.zero_ref_list, header);
-    }
-
-    fn popZeroRef(self: *Registry) ?*GCObjectHeader {
-        const header = listFirst(&self.zero_ref_list) orelse return null;
-        listDel(&self.zero_ref_list, header);
-        return header;
-    }
-
-    fn drainZeroRefs(self: *Registry, rt: anytype) void {
-        if (listEmpty(&self.zero_ref_list)) return;
-        self.stats.zero_ref_drains +|= 1;
-        while (self.popZeroRef()) |queued| {
-            std.debug.assert(headerRefCount(queued) == 0);
-            std.debug.assert(self.zero_ref_current == null);
-            self.zero_ref_current = queued;
-            destroyZeroRefNow(rt, queued);
-            self.zero_ref_current = null;
-        }
+    noinline fn recordSpacePublicationDetailed(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
+        if (header.metaConst().flags.kind == .object) {
+            self.space_histogram.recordObject(
+                bytes,
+                object.Object.fromHeaderConst(header).hasSlots2Layout(),
+            );
+        } else self.space_histogram.record(bytes);
     }
 
     /// Hold zero-ref GC nodes until a batch traversal is complete. QuickJS
     /// uses the same DECREF phase around its weakref_list walk so payload
     /// finalizers cannot unlink the next weak holder out from under the walk;
     /// the tracer's `processWeak` inherited that discipline verbatim.
-    pub fn beginDecrefPhase(self: *Registry) void {
+    pub fn beginDecrefPhase(self: *Registry, scratch: *ZeroRefScratch) void {
         std.debug.assert(self.phase == .none);
-        std.debug.assert(listEmpty(&self.zero_ref_list));
+        std.debug.assert(self.zero_ref_scratch == null);
+        scratch.* = .{};
+        self.zero_ref_scratch = scratch;
         // .none -> .decref; teardown's .deinit phase cannot overlap this
         // batch (asserted above).
         self.phase = .decref;
     }
 
-    pub fn endDecrefPhase(self: *Registry, rt: anytype) void {
+    pub fn endDecrefPhase(self: *Registry, rt: anytype, scratch: *ZeroRefScratch) void {
         std.debug.assert(self.phase == .decref);
-        // .decref -> .none after the queued batch drains.
-        defer self.phase = .none;
-        self.drainZeroRefs(rt);
-    }
-
-    /// Move a value-bearing GC node to the intrusive zero-ref queue and drain
-    /// it at the outermost release boundary. Mirrors QuickJS
-    /// `__JS_FreeValueRT` + `free_zero_refcount` without allocating.
-    pub fn enqueueZeroRef(self: *Registry, rt: anytype, header: *GCObjectHeader) void {
-        std.debug.assert(headerRefCount(header) == 0);
-        self.removeGcObject(header);
-        // Weak-reference teardown observes this bit while the object is queued,
-        // before Object.destroyFromHeader gets its turn to set it again.
-        header.meta().flags.mark = true;
-        self.appendZeroRef(header);
-
-        if (self.phase != .none) {
-            std.debug.assert(self.phase == .decref);
-            return;
+        std.debug.assert(self.zero_ref_scratch == scratch);
+        defer {
+            self.zero_ref_scratch = null;
+            self.phase = .none;
+            scratch.deinit();
         }
-
-        // .none -> .decref (guarded above) for the outermost queue drain.
-        self.phase = .decref;
-        self.endDecrefPhase(rt);
+        // Nothing is admitted to the scratch any more: every list kind is
+        // tracer-owned. The phase bracket alone is what processWeak needs.
+        std.debug.assert(scratch.next() == null);
+        _ = rt;
     }
 
     pub fn recordFailure(self: *Registry, err: CollectionError) void {
@@ -4719,7 +4955,7 @@ pub const Registry = struct {
         self.stats.pause_sample_count +|= 1;
     }
 
-    /// Is every live arena resolvable, so that sweeping is sound?
+    /// Is every live allocation resolvable, so that sweeping is sound?
     ///
     /// An arena that failed to register hides every object it holds from the
     /// conservative stack scan, so a sweep performed in that state can free a
@@ -4727,11 +4963,26 @@ pub const Registry = struct {
     /// costs one pass over at most a few thousand pointers and only happens
     /// after an allocation failure. If it still cannot record them, the caller
     /// must mark without sweeping: a bounded leak instead of a use-after-free.
-    pub fn arenaSetWhole(self: *Registry) bool {
-        if (comptime !address_registry_enabled) return true;
-        if (!self.address_registry.arenas_incomplete) return true;
-        const slab = self.arena_slab orelse return false;
-        return self.address_registry.resyncArenas(addressRegistryAllocator(), slab);
+    pub fn addressSetWhole(self: *Registry, rt: anytype) bool {
+        if (self.address_registry.arenasIncomplete()) {
+            const slab = self.arena_slab orelse return false;
+            if (!self.address_registry.resyncArenas(addressRegistryAllocator(), slab)) return false;
+        }
+        if (!self.address_registry.occupantsIncomplete()) return true;
+
+        // A failed standalone insert is recoverable because liveness no longer
+        // depends on the address index: list carriers and side-authoritative
+        // Objects can replay every missing range before sweep. Keep the flag
+        // sticky if any retry fails; the caller will mark without reclaiming.
+        var live = self.objectIterator();
+        while (live.next()) |header| {
+            if (!header.metaConst().alloc_info.standalone) continue;
+            if (self.address_registry.by_header.contains(@intFromPtr(header))) continue;
+            const bytes = heapByteSizeFromHeader(rt, header);
+            self.address_registry.insert(addressRegistryAllocator(), header, bytes) catch return false;
+        }
+        self.address_registry.setOccupantsIncomplete(false);
+        return true;
     }
 
     pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {
@@ -4740,7 +4991,7 @@ pub const Registry = struct {
 
         var saw_young_head = false;
         const sentinel = &self.gc_obj_list.sentinel;
-        var current = sentinel.next;
+        var current = sentinel.next_non_object;
         var previous: *GCObjectHeader = sentinel;
         while (current) |h| {
             if (h == sentinel) break;
@@ -4761,7 +5012,8 @@ pub const Registry = struct {
                     if (saw_young_head and !is_young) return error.DanglingYoungHead;
                 } else if (is_young) return error.DanglingYoungHead;
             }
-            if (!isCycleCandidate(h)) return error.CorruptGcList;
+            if (!isCycleCandidate(h) or h.metaConst().flags.kind == .object)
+                return error.CorruptGcList;
             {
                 const state = h.metaConst().lifetime.trace;
                 if (state.flags.reserved != 0 or state.flags.husk or state.mark_epoch > self.header_mark_epoch)
@@ -4775,14 +5027,10 @@ pub const Registry = struct {
                 if (!refCountRemoved(h.metaConst().flags.kind) and headerRefCount(h) < 0)
                     return error.NegativeRefCount;
             }
-            // Trial deletion must leave every mark bit clear once a round
-            // ends. Sticky generations invert that: a survivor's mark bit is
-            // precisely what records "this is old now" between collections
-            // (§8.2), so the invariant only applies where marks are transient.
-            if (comptime !generation_enabled) {
-                if (h.meta().flags.mark and self.phase == .none) return error.MarkBitLeftSet;
-            }
-            const next = h.next orelse return error.CorruptGcList;
+            // No "mark bit left set" check here: sticky generations keep a
+            // survivor's mark bit between collections as the record of "this
+            // is old now" (§8.2), so a set mark outside a collection is normal.
+            const next = h.nextNonObject() orelse return error.CorruptGcList;
             previous = h;
             current = next;
         }
@@ -4793,42 +5041,98 @@ pub const Registry = struct {
             if (self.young_head != null and !saw_young_head) return error.DanglingYoungHead;
             if (self.young_head == null and self.young_predecessor != null) return error.DanglingYoungHead;
         }
+
+        const nonblock_items = if (self.nonBlockObjectAuthority()) |authority|
+            authority.items.items
+        else
+            &.{};
+        for (nonblock_items, 0..) |header, index| {
+            const meta = header.metaConst();
+            if (meta.flags.kind != .object or isBlockCellHeader(header) or
+                !meta.alloc_info.heap_accounted or meta.flags.cycle_visited)
+            {
+                return error.CorruptNonBlockObjectAuthority;
+            }
+            for (nonblock_items[0..index]) |previous_object| {
+                if (previous_object == header) return error.CorruptNonBlockObjectAuthority;
+            }
+        }
     }
 
     fn verifyAuxiliaryIntrusiveLists(self: *Registry) InvariantError!void {
         _ = try verifyCircularHeaderList(&self.tmp_obj_list, null, false);
-        _ = try verifyCircularHeaderList(&self.zero_ref_list, null, true);
+        var temporary_cursor = self.tmp_obj_list.sentinel.next_non_object;
+        while (temporary_cursor) |header| {
+            if (header == &self.tmp_obj_list.sentinel) break;
+            if (header.metaConst().flags.kind == .object)
+                return error.CorruptNonBlockObjectAuthority;
+            temporary_cursor = header.nextNonObject();
+        }
 
         var doomed_nodes: usize = 0;
         var cursor_found = self.doomed_cursor == null;
         for (&self.doomed_by_kind, 0..) |*head, kind_index| {
             const kind: GcKind = @enumFromInt(kind_index);
+            if (kind == .object and !listEmpty(head))
+                return error.CorruptNonBlockObjectAuthority;
             doomed_nodes += try verifyCircularHeaderList(head, kind, false);
             if (!cursor_found) {
-                var node = head.sentinel.next;
+                var node = head.sentinel.next_non_object;
                 while (node) |candidate| {
                     if (candidate == &head.sentinel) break;
                     if (candidate == self.doomed_cursor.?) cursor_found = true;
-                    node = candidate.next;
+                    node = candidate.nextNonObject();
                 }
             }
         }
         if (!cursor_found) return error.DoomedCursorMismatch;
 
+        if (self.nonBlockObjectAuthority()) |authority| {
+            const live = authority.items.items;
+            const doomed = authority.doomed.items;
+            const temporary = authority.temporary.items;
+            for (doomed, 0..) |header, index| {
+                const meta = header.metaConst();
+                if (meta.flags.kind != .object or isBlockCellHeader(header) or
+                    !meta.alloc_info.heap_accounted or !meta.flags.cycle_visited)
+                {
+                    return error.CorruptNonBlockObjectAuthority;
+                }
+                for (live) |candidate| if (candidate == header)
+                    return error.CorruptNonBlockObjectAuthority;
+                for (doomed[0..index]) |candidate| if (candidate == header)
+                    return error.CorruptNonBlockObjectAuthority;
+                for (temporary) |candidate| if (candidate == header)
+                    return error.CorruptNonBlockObjectAuthority;
+            }
+            for (temporary, 0..) |header, index| {
+                const meta = header.metaConst();
+                if (meta.flags.kind != .object or isBlockCellHeader(header) or
+                    !meta.alloc_info.heap_accounted or !meta.flags.cycle_visited)
+                {
+                    return error.CorruptNonBlockObjectAuthority;
+                }
+                for (live) |candidate| if (candidate == header)
+                    return error.CorruptNonBlockObjectAuthority;
+                for (temporary[0..index]) |candidate| if (candidate == header)
+                    return error.CorruptNonBlockObjectAuthority;
+            }
+        }
+
         var deferred_count: usize = 0;
         var slow = self.cycle_deferred_frees.head;
         var fast = self.cycle_deferred_frees.head;
         while (fast) |first| {
-            fast = first.next;
-            if (fast) |second| fast = second.next;
-            if (slow) |node| slow = node.next;
+            fast = deferredNext(first);
+            if (fast) |second| fast = deferredNext(second);
+            if (slow) |node| slow = deferredNext(node);
             if (fast != null and fast == slow) return error.CorruptDeferredFreeStack;
         }
         var deferred = self.cycle_deferred_frees.head;
         while (deferred) |node| {
             if (!node.metaConst().flags.finalizing) return error.CorruptDeferredFreeStack;
             deferred_count += 1;
-            deferred = node.next;
+            deferred = deferredNext(node);
         }
         if (deferred_count != self.cycle_deferred_frees.count) {
             return error.CorruptDeferredFreeStack;
@@ -4838,7 +5142,10 @@ pub const Registry = struct {
             self.block_heap.doomed_blocks != null
         else
             false;
-        if ((doomed_nodes != 0 or block_doomed or self.doomed_cursor != null) and !self.doomed_pending) {
+        const temporary_objects = self.temporaryNonBlockObjectCount() != 0;
+        if ((doomed_nodes != 0 or block_doomed or self.doomed_cursor != null or temporary_objects) and
+            !self.doomed_pending and self.phase != .tracer_destroy)
+        {
             return error.DoomedPendingMismatch;
         }
     }
@@ -4882,7 +5189,7 @@ pub const Registry = struct {
         };
 
         if (kind == .object) {
-            const owner: *const object.Object = @alignCast(@fieldParentPtr("header", header));
+            const owner = object.Object.fromHeaderConst(header);
             if (!owner.traceShapeSummaryMatches())
                 return error.ObjectShapeSummaryMismatch;
         }
@@ -4905,7 +5212,8 @@ pub const Registry = struct {
             if ((physical_block != null) != stamped_block)
                 return error.RepresentationAllocationCarrierMismatch;
             if (physical_block) |block| {
-                if (kind != .object) return error.RepresentationAllocationCarrierMismatch;
+                if (kind != .object and !(string_tracer_owned and kind == .string))
+                    return error.RepresentationAllocationCarrierMismatch;
                 const actual_index = block.cellIndex(cell_addr) orelse
                     return error.RepresentationCellIndexMismatch;
                 if (meta.size_class != actual_index or !block.cellAllocated(actual_index))
@@ -4922,18 +5230,25 @@ pub const Registry = struct {
     /// cache bit before clearing the map, so the two representations must agree
     /// in both directions whenever this checker runs.
     pub fn verifyRepresentationInvariants(self: *const Registry) InvariantError!void {
-
         var live = self.objectIterator();
         while (live.next()) |header| {
             try self.verifyPublishedHeaderRepresentation(header, null);
         }
         for (&self.doomed_by_kind, 0..) |*head, kind_index| {
             const expected: GcKind = @enumFromInt(kind_index);
-            var cursor = head.sentinel.next;
+            var cursor = head.sentinel.next_non_object;
             while (cursor) |header| {
                 if (header == &head.sentinel) break;
                 try self.verifyPublishedHeaderRepresentation(header, expected);
-                cursor = header.next;
+                cursor = header.nextNonObject();
+            }
+        }
+        if (self.nonBlockObjectAuthority()) |authority| {
+            for (authority.doomed.items) |header| {
+                try self.verifyPublishedHeaderRepresentation(header, .object);
+            }
+            for (authority.temporary.items) |header| {
+                try self.verifyPublishedHeaderRepresentation(header, .object);
             }
         }
         if (comptime generation_enabled) {
@@ -4959,7 +5274,6 @@ pub const Registry = struct {
     /// stable collection boundary. A stale remembered address is dereferenced
     /// by the next minor; an under-count silently postpones that minor.
     pub fn verifyGenerationInvariants(self: *Registry) InvariantError!void {
-        if (comptime !generation_enabled) return;
         var actual_young: usize = 0;
         var young = self.youngIterator();
         while (young.next()) |_| actual_young += 1;
@@ -4978,7 +5292,6 @@ pub const Registry = struct {
     /// A successful major commit must close the trace-coupled retirement
     /// transaction and leave no survivor in the young population.
     pub fn verifyMajorRetirementCommit(self: *Registry) InvariantError!void {
-        if (comptime !generation_enabled) return;
         if (self.generation.major_retirement != .clean or
             self.young_head != null or
             self.young_predecessor != null or
@@ -5001,11 +5314,32 @@ pub const Registry = struct {
     }
 
     pub fn verifyHeapAccounting(self: *const Registry, rt: anytype) InvariantError!void {
+        if (comptime carrier.extent_identity_enabled) {
+            self.memory.gc_extent_identity.verify() catch return error.CarrierOldNewMismatch;
+        }
+        if (comptime carrier.lifecycle_state_enabled) {
+            self.memory.gc_extent_lifecycle.verify() catch return error.CarrierOldNewMismatch;
+        }
+        if (comptime block_heap_enabled and carrier.block_generation_enabled) {
+            self.block_heap.verifyGenerationAuthority() catch return error.CarrierOldNewMismatch;
+        }
+        if (comptime block_heap_enabled and carrier.lifecycle_state_enabled) {
+            self.block_heap.verifyLifecycleAuthority() catch return error.CarrierOldNewMismatch;
+            self.block_heap.verifyAccountingCellsAllowing(
+                representation.block_cell_size_class,
+                @as(u3, @intCast(@intFromEnum(GcKind.object))),
+                .{
+                    .context = @ptrCast(self),
+                    .classify = Registry.blockCellAccountingAllowance,
+                },
+            ) catch return error.MissingHeapAllocation;
+        }
+
         var heap_live_bytes: usize = 0;
         var old_live_bytes: usize = 0;
         var large_object_bytes: usize = 0;
 
-        var iterator = self.objectIterator();
+        var iterator = self.heapAccountingIterator();
         while (iterator.next()) |header| {
             if (!header.metaConst().alloc_info.heap_accounted) return error.MissingHeapAllocation;
             if (header.pinned() and self.pinEntryIndex(header) == null) {
@@ -5013,11 +5347,31 @@ pub const Registry = struct {
             }
             const bytes = heapByteSizeFromHeader(rt, header);
             if (bytes == 0) return error.MissingHeapAllocation;
+            const is_large = self.isLargeAllocation(bytes);
+            if (header.metaConst().alloc_info.large != is_large) {
+                return error.LargeObjectClassificationMismatch;
+            }
             heap_live_bytes = std.math.add(usize, heap_live_bytes, bytes) catch std.math.maxInt(usize);
-            if (self.isLargeAllocation(bytes)) {
+            if (is_large) {
                 large_object_bytes = std.math.add(usize, large_object_bytes, bytes) catch std.math.maxInt(usize);
             } else {
                 old_live_bytes = std.math.add(usize, old_live_bytes, bytes) catch std.math.maxInt(usize);
+            }
+            if (comptime heap_accounting_oracle_enabled) {
+                const raw = self.heap_accounting_oracle.raw.get(@intFromPtr(header)) orelse
+                    return error.CarrierRawOwnedMismatch;
+                if (!raw.published) return error.CarrierOldNewMismatch;
+                if (raw.accounted_bytes != bytes) return error.CarrierByteMismatch;
+                if (comptime carrier.authority_audit_enabled) {
+                    const handle = self.allocationHandle(header) orelse return error.CarrierOldNewMismatch;
+                    const resolved = self.resolveExact(
+                        handle,
+                        header.metaConst().flags.kind,
+                        CarrierStateMask.publishedOnly(),
+                    ) catch return error.CarrierOldNewMismatch;
+                    if (resolved.tracing != header) return error.CarrierOldNewMismatch;
+                    if (raw.generation != handle.generation) return error.CarrierGenerationMismatch;
+                }
             }
         }
 
@@ -5043,18 +5397,73 @@ pub const Registry = struct {
             external_token_bytes = std.math.add(usize, external_token_bytes, entry.bytes) catch std.math.maxInt(usize);
         }
 
-        // heap_live / old_live / large_object bytes are derived from the space
-        // accounts (the single source of truth since they are no longer mirrored
-        // in gc.stats). The object-list walk cross-checks that the space accounts
-        // agree with the actual live headers.
-        const space_heap_live = self.old_space.live_bytes +| self.large_space.live_bytes;
-        if (heap_live_bytes != space_heap_live) return error.HeapLiveBytesMismatch;
-        if (old_live_bytes != self.old_space.live_bytes) return error.OldLiveBytesMismatch;
-        if (large_object_bytes != self.large_space.live_bytes) return error.LargeObjectBytesMismatch;
+        // The expected value is lifecycle-maintained, not another instance of
+        // the ownership iterator above. An accounted header that loses every
+        // owner container must therefore leave the walk short and fail here.
+        if (comptime heap_accounting_oracle_enabled) {
+            const oracle = &self.heap_accounting_oracle;
+            if (heap_live_bytes != oracle.heap_live_bytes) return error.HeapLiveBytesMismatch;
+            if (old_live_bytes != oracle.old_live_bytes) return error.OldLiveBytesMismatch;
+            if (large_object_bytes != oracle.large_object_bytes) return error.LargeObjectBytesMismatch;
+
+            if (comptime carrier.authority_audit_enabled) {
+                // independent raw -> new owned authority
+                var raw_it = oracle.raw.valueIterator();
+                while (raw_it.next()) |raw| {
+                    const handle = self.allocationHandle(@ptrFromInt(raw.base)) orelse
+                        return error.CarrierRawOwnedMismatch;
+                    if (handle.generation != raw.generation) return error.CarrierGenerationMismatch;
+                    if (raw.published) {
+                        _ = self.resolveExact(
+                            handle,
+                            null,
+                            CarrierStateMask.publishedOnly(),
+                        ) catch return error.CarrierOldNewMismatch;
+                    }
+                }
+            }
+
+            // new extent authority -> independent raw
+            if (comptime carrier.extent_identity_enabled) {
+                var extent_it = self.memory.gc_extent_identity.records.valueIterator();
+                while (extent_it.next()) |record| {
+                    const raw = oracle.raw.get(record.base) orelse return error.CarrierRawOwnedMismatch;
+                    if (raw.generation != record.generation) return error.CarrierGenerationMismatch;
+                    if (raw.raw_base != record.raw_base or raw.raw_bytes != record.raw_bytes) {
+                        return error.CarrierByteMismatch;
+                    }
+                }
+            }
+            if (comptime carrier.lifecycle_state_enabled) {
+                var lifecycle_it = self.memory.gc_extent_lifecycle.records.iterator();
+                while (lifecycle_it.next()) |entry| {
+                    const raw = oracle.raw.get(entry.key_ptr.*) orelse return error.CarrierRawOwnedMismatch;
+                    if (raw.published and raw.accounted_bytes != entry.value_ptr.accounted_bytes) {
+                        return error.CarrierByteMismatch;
+                    }
+                }
+            }
+
+            const BlockAudit = struct {
+                oracle: *const HeapAccountingOracle,
+                mismatch: ?InvariantError = null,
+                fn visit(raw_context: *anyopaque, handle: AllocationHandle, _: CarrierLifecycleState) void {
+                    const audit: *@This() = @ptrCast(@alignCast(raw_context));
+                    const raw = audit.oracle.raw.get(handle.base) orelse {
+                        audit.mismatch = error.CarrierRawOwnedMismatch;
+                        return;
+                    };
+                    if (raw.generation != handle.generation) audit.mismatch = error.CarrierGenerationMismatch;
+                }
+            };
+            if (comptime carrier.block_generation_enabled and carrier.lifecycle_state_enabled) {
+                var block_audit: BlockAudit = .{ .oracle = oracle };
+                self.block_heap.forEachOwnedIdentity(metadata_prefix_size, &block_audit, BlockAudit.visit);
+                if (block_audit.mismatch) |err| return err;
+            }
+        }
         const accounted_external_bytes = std.math.add(usize, external_token_bytes, self.stats.external_untracked_bytes) catch std.math.maxInt(usize);
         if (accounted_external_bytes != self.stats.external_bytes) return error.ExternalTokenBytesMismatch;
-        if (old_live_bytes != self.old_space.live_bytes) return error.OldSpaceLiveBytesMismatch;
-        if (large_object_bytes != self.large_space.live_bytes) return error.LargeSpaceLiveBytesMismatch;
     }
 
     pub fn verifyNoExternalTokenLeaks(self: Registry) InvariantError!void {
@@ -5082,28 +5491,116 @@ pub const Registry = struct {
         return count;
     }
 
+    pub inline fn nonBlockObjectCount(self: *const Registry) usize {
+        const authority = self.nonBlockObjectAuthority() orelse return 0;
+        return authority.items.items.len;
+    }
+
+    pub inline fn nonBlockObjectAt(self: *const Registry, index: usize) *GCObjectHeader {
+        return self.nonBlockObjectAuthority().?.items.items[index];
+    }
+
+    pub fn nonBlockObjectAuthorityCountForTest(self: *const Registry) usize {
+        return self.nonBlockObjectCount();
+    }
+
+    pub fn nonBlockObjectAuthorityContainsForTest(
+        self: *const Registry,
+        header: *const GCObjectHeader,
+    ) bool {
+        const authority = self.nonBlockObjectAuthority() orelse return false;
+        return authority.indexOf(header) != null;
+    }
+
+    inline fn nonBlockObjectAuthority(self: *const Registry) ?*NonBlockObjectAuthority {
+        const context = self.address_registry.nonblock_objects orelse return null;
+        return @ptrCast(@alignCast(context));
+    }
+
     pub fn containsHeader(self: *const Registry, header: *const GCObjectHeader) bool {
-        if (self.zero_ref_current == header) return true;
         if (self.sweep_current == header) return true;
-        // Condemned-but-not-yet-destroyed nodes are the sweep's analogue of
-        // `zero_ref_list`: still owned, resources still intact.
-        var condemned = self.tmp_obj_list.sentinel.next;
+        if (self.condemnedNonBlockObjectContains(header)) return true;
+        // Condemned-but-not-yet-destroyed nodes remain runtime-owned with
+        // resources intact.
+        var condemned = self.tmp_obj_list.sentinel.next_non_object;
         while (condemned) |candidate| {
             if (candidate == &self.tmp_obj_list.sentinel) break;
             if (candidate == header) return true;
-            condemned = candidate.next;
-        }
-        var queued = self.zero_ref_list.sentinel.next;
-        while (queued) |candidate| {
-            if (candidate == &self.zero_ref_list.sentinel) break;
-            if (candidate == header) return true;
-            queued = candidate.next;
+            condemned = candidate.nextNonObject();
         }
         var iterator = self.objectIterator();
         while (iterator.next()) |candidate| {
             if (candidate == header) return true;
         }
         return false;
+    }
+
+    /// Resolve only whether this exact address is a member of the current v1
+    /// block/address index.  The key intentionally carries neither generation
+    /// nor lifecycle state: it promises no ABA or state-mask protection and
+    /// may return NotFound while the cold address index is incomplete.
+    pub fn resolveCurrentMember(
+        self: *const Registry,
+        key: CurrentMembershipKey,
+        expected_kind: ?GcKind,
+    ) CarrierResolveError!ResolvedCurrentMember {
+        const header: *GCObjectHeader = @ptrFromInt(key.base);
+        if (!self.address_registry.containsHeader(header)) return error.NotFound;
+        const kind = header.metaConst().flags.kind;
+        if (expected_kind) |expected| if (kind != expected) return error.KindMismatch;
+        return .{ .tracing = header };
+    }
+
+    /// Mint a generation-bearing handle (audit builds only: the carrier
+    /// authorities behind it exist nowhere else).
+    pub fn allocationHandle(self: *const Registry, header: *const GCObjectHeader) ?AllocationHandle {
+        comptime std.debug.assert(carrier.authority_audit_enabled);
+        return self.memory.carrierGenerationHandle(@intFromPtr(header));
+    }
+
+    /// Generation/state exact resolution (audit builds only).
+    pub fn resolveExact(
+        self: *const Registry,
+        handle: AllocationHandle,
+        expected_kind: ?GcKind,
+        allowed_states: CarrierStateMask,
+    ) CarrierResolveError!ResolvedExact {
+        comptime std.debug.assert(carrier.authority_audit_enabled);
+        if (comptime block_heap_enabled) {
+            if (self.block_heap.blockOf(@ptrFromInt(handle.base -| metadata_prefix_size)) != null) {
+                const resolved = try self.block_heap.resolveExactHandle(
+                    handle,
+                    metadata_prefix_size,
+                    allowed_states,
+                    false,
+                );
+                if (resolved.generation != handle.generation) {
+                    @panic("gc: CARRIER IDENTITY: stale generation accepted");
+                }
+                const header: *GCObjectHeader = @ptrFromInt(handle.base);
+                const kind = header.metaConst().flags.kind;
+                // Block cells hold Objects, and string bodies once TGC S2 is on.
+                if (kind != .object and !(string_tracer_owned and kind == .string)) return error.HeaderMismatch;
+                if (expected_kind) |expected| if (kind != expected) return error.KindMismatch;
+                if (resolved.state == .published and !header.metaConst().alloc_info.heap_accounted) {
+                    return error.HeaderMismatch;
+                }
+                return .{ .tracing = header };
+            }
+        }
+
+        const record = try self.memory.gc_extent_identity.resolve(
+            handle,
+            if (expected_kind) |kind| @intFromEnum(kind) else null,
+        );
+        const lifecycle = try self.memory.gc_extent_lifecycle.resolve(handle.base, allowed_states);
+        const header: *GCObjectHeader = @ptrFromInt(handle.base);
+        const kind = header.metaConst().flags.kind;
+        if (@intFromEnum(kind) != record.kind) return error.HeaderMismatch;
+        if (lifecycle.state == .published and !header.metaConst().alloc_info.heap_accounted) {
+            return error.HeaderMismatch;
+        }
+        return .{ .tracing = header };
     }
 };
 
@@ -5124,184 +5621,17 @@ pub inline fn release(rt: anytype, header: anytype) void {
     if (decrementHeaderRefCount(header) == 0) destroyZeroRef(rt, header);
 }
 
-const ZeroRefKindSet = enum {
-    finalizing,
-    deinit,
-    two_pass_teardown,
-    enqueue,
-};
-
-/// Central oracle for the deliberately unequal zero-ref kind sets. The
-/// comptime selector preserves each call site's exact checks after inlining.
-inline fn zeroRefKindMatches(kind: GcKind, comptime set: ZeroRefKindSet) bool {
-    return switch (set) {
-        .finalizing, .two_pass_teardown => kind == .object or kind == .var_ref or kind == .function_bytecode or kind == .realm_context or kind == .module,
-        .deinit => kind == .object or kind == .var_ref or kind == .function_bytecode or kind == .shape or kind == .realm_context or kind == .module,
-        .enqueue => kind == .object or kind == .function_bytecode or kind == .realm_context or kind == .module,
-    };
-}
-
 /// Slow path after the caller has already decremented the common RC word to 0.
 /// JSValue.free uses this after its QuickJS-style payload-4 fast path; direct
 /// GC owners also arrive here through `release` above.
 pub noinline fn destroyZeroRef(rt: anytype, header: *Header) align(32) void {
     std.debug.assert(headerRefCount(header) == 0);
-    if (header.meta().flags.finalizing and zeroRefKindMatches(header.meta().flags.kind, .finalizing)) return;
-    if (rt.gc.phase == .deinit and zeroRefKindMatches(header.meta().flags.kind, .deinit)) return;
-    // During cycle removal, a child reaching rc 0 must NOT be freed here: the
-    // dedicated batch loop in `destroyRuntimeCyclesWithValueRoots` frees every
-    // marked-garbage object exactly once. Freeing it here (a cascade) would
-    // double-free it when the batch loop reaches it, and over-release any shape
-    // it shares. Pure no-op = qjs `__JS_FreeValueRT`'s `if (gc_phase !=
-    // JS_GC_PHASE_REMOVE_CYCLES)` gate (quickjs.c:6476): the object remains
-    // owned by the intrusive garbage/staging batch and is reclaimed exactly
-    // once by that pass. This makes a reference the mark phase missed harmless
-    // (leak at worst) instead of a use-after-free.
-    //
-    // Kind-set note: qjs gates {OBJECT, FUNCTION_BYTECODE, MODULE} (quickjs.c:6476);
-    // zjs also gates realm contexts and VarRefs, and intentionally OMITS shape.
-    // A garbage (dead-cycle) shape is freed exactly once by the intrusive shape
-    // staging loop in destroyRuntimeCyclesWithValueRoots, and its owners skip
-    // releasing it via the `headerIsCycleGarbage` guard (object.zig
-    // destroyFromHeader shape-skip);
-    // a live/shared shape's eager release here can never reach rc 0 during a cycle
-    // round, so shape needs no gate.
-    if (phaseIsTwoPassTeardown(rt.gc.phase) and zeroRefKindMatches(header.meta().flags.kind, .two_pass_teardown)) return;
+    const kind = header.metaConst().flags.kind;
+    if (rt.gc.phase == .deinit and Registry.isCycleCandidate(header)) return;
+    if (header.metaConst().flags.finalizing or header.metaConst().flags.cycle_visited) return;
 
-    // Under the tracing collector the trace owns the lifetime of every kind on
-    // `gc_obj_list`: `sweepUnmarked` (gc_trace_stw.zig) condemns all six
-    // cycle-candidate kinds on mark + pin alone and tears each one down in a
-    // safe order. A second, eager reclamation path keyed on rc is exactly what
-    // let a missing root or a missing barrier stay invisible, so during normal
-    // execution reaching rc 0 must mean nothing at all. Runtime teardown is
-    // excluded: `.deinit` still drains the heap through here for the kinds its
-    // own gate above does not claim. Strings, ropes and BigInt are NOT on
-    // `gc_obj_list` -- the tracer never sees them -- so they keep refcounting
-    // forever, which is why this gate is a kind test and not a blanket return.
-    {
-        // `.realm_context` is deliberately NOT in this set. A Realm is a host
-        // handle with an explicit `JSContext.destroy` API and a teardown-order
-        // contract the runtime asserts (`context_head == null` in
-        // JSRuntime.deinit): the host promises every Realm is gone before the
-        // Runtime is. Handing Realms to the tracer breaks that promise, because
-        // production collections always add the conservative stack pass and the
-        // host's own now-dead `ctx` local keeps the released Realm marked --
-        // observed as the `context_head` assert firing across the staging/sm
-        // TypedArray directory. JSC draws the same line: cells are traced, but
-        // the API-level JSGlobalContext keeps a retain count.
-        const kind = header.meta().flags.kind;
-        if (rt.gc.phase != .deinit and Registry.isCycleCandidate(header) and kind != .realm_context) return;
-    }
-
-    // qjs free_var_ref (quickjs.c:6164-6183) tears a dead cell down fully
-    // synchronously: --ref_count -> JS_FreeValueRT(value) -> remove_gc_object
-    // -> js_free_rt. __JS_FreeValueRT's zero-ref queue set is only
-    // {OBJECT, FUNCTION_BYTECODE, MODULE} (quickjs.c:6471-6483) — a JSVarRef
-    // never touches gc_zero_ref_count_list, so zjs enqueuing it paid a queue
-    // splice + drain pop + the full destroyZeroRefNow frame per dead cell.
-    // The three phase gates above stay in front, so this tail is reachable only
-    // in .none/.decref; remove_cycles keeps its batch loop as the sole cycle
-    // release point. Recursion is bounded: a cell's value is never itself a
-    // cell (var_ref.zig setVarRefValue terminal-state assert), and an object
-    // value released here still goes through the queue exactly like qjs.
-    if (header.meta().flags.kind == .var_ref) {
-        destroyVarRefNow(rt, header);
-        return;
-    }
-
-    // QJS queues the GC kinds reachable through JSValue and lets the outermost
-    // free drain them. Strings/ropes and BigInt remain immediate; Shape has its
-    // own direct release path and can only add object work while a queued node
-    // is being destroyed. This removes unbounded Object/FB destructor
-    // recursion without adding a fallible allocation to the zero-ref path.
-    if (zeroRefKindMatches(header.meta().flags.kind, .enqueue)) {
-        rt.gc.enqueueZeroRef(rt, header);
-        return;
-    }
-
-    destroyZeroRefNow(rt, header);
-}
-
-/// Synchronous var_ref teardown, mirroring qjs free_var_ref
-/// (quickjs.c:6164-6183): unlink + accounting, then the existing destructor.
-/// Never sets the queued-node mark bit — a var_ref has no weak identity
-/// (runtime.zig objectFromWeakIdentity resolves objects only) and no
-/// containsHeader consumer, so nothing observes the queued state qjs's
-/// `js_rc(p)->mark = 1` publishes for objects.
-noinline fn destroyVarRefNow(rt: anytype, header: *Header) void {
-    std.debug.assert(headerRefCount(header) == 0);
-    std.debug.assert(header.meta().flags.kind == .var_ref);
-    // Accounting must not drift from the generic path: heapByteSizeFromHeader
-    // resolves a var_ref to @sizeOf(VarRef) either via the stamped size_class
-    // (addInitializedWithSize stores encodeHeapBytes(@sizeOf(VarRef)), exact
-    // as long as it is below the large-class clamp) or the kind switch.
-    comptime std.debug.assert(@sizeOf(var_ref.VarRef) < large_heap_size_class);
-    rt.gc.unlinkObjectWithBytes(header, comptime @sizeOf(var_ref.VarRef));
-    var_ref.VarRef.destroyFromHeader(rt, header);
-}
-
-/// Destruct a zero-ref node whose queue link has already been removed. Kept
-/// separate from `destroyZeroRef` so releases performed by this teardown append
-/// to Registry.zero_ref_* instead of entering another destructor recursively.
-///
-/// Mirrors qjs free_gc_object (quickjs.c:6394-6412): a frame-free small switch
-/// whose hot object arm tail-jumps into free_object. `Object.destroyFromHeader`
-/// (via `unregisterObjectWithBytes`) and `Registry.destroyShape` each ALREADY
-/// unlink their own header and record the space-account free as the first
-/// thing they do — an unlink here would only make that in-destructor unlink a
-/// double no-op, yet pay a `heapByteSizeFromHeader` load per free (qjs
-/// free_object/free_shape do the gc_obj_list unlink + malloc_size adjustment
-/// exactly once inside the teardown, never twice). The cold kinds whose
-/// destructors do NOT self-unlink (function_bytecode / realm_context / module)
-/// are outlined into noinline wrappers that carry unlink + accounting + the
-/// destructor call: inlining the FunctionBytecode dismantle arm
-/// (FunctionLayout.init + SIMD copies) here used to cost the hot object arm a
-/// 304-byte prologue before its tail jump.
-fn destroyZeroRefNow(rt: anytype, header: *Header) void {
-    std.debug.assert(headerRefCount(header) == 0);
-    switch (header.meta().flags.kind) {
-        .string => unreachable,
-        .object => object.Object.destroyFromHeader(rt, header),
-        .shape => rt.shapes.destroyFromHeader(header),
-        .big_int => destroyBigIntZeroRef(rt, header),
-        // Unreachable through the queue since var_ref frees synchronously
-        // (destroyZeroRef); kept routed for direct callers' completeness.
-        .var_ref => destroyVarRefNow(rt, header),
-        .function_bytecode => destroyFunctionBytecodeZeroRef(rt, header),
-        .realm_context => destroyRealmContextZeroRef(rt, header),
-        .module => destroyModuleZeroRef(rt, header),
-    }
-}
-
-/// Cold zero-ref tails. Private noinline wrappers keep the FunctionBytecode /
-/// context / module dismantle bodies (and their frames) out of the hot
-/// destroyZeroRefNow switch while leaving each destructor's contract — the
-/// runtime-deinit sweep's phase-1 accounting/phase-2 destroy split and the
-/// cycle-removal batch's own unlink+destroy pairs — untouched.
-noinline fn destroyBigIntZeroRef(rt: anytype, header: *Header) void {
-    // BigInt is never queued (destroyZeroRef reaches it directly) and its heap
-    // bytes are stamped per allocation, so it keeps the size-from-header unlink.
-    rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
-    bigint.BigInt.destroyFromHeader(rt, header);
-}
-
-noinline fn destroyFunctionBytecodeZeroRef(rt: anytype, header: *Header) void {
-    const fb: *const FunctionBytecode = @fieldParentPtr("header", header);
-    rt.gc.unlinkObjectWithBytes(header, fb.heapByteSize());
-    function_bytecode_mod.destroyFromHeader(rt, header);
-}
-
-noinline fn destroyRealmContextZeroRef(rt: anytype, header: *Header) void {
-    // comptime kind->size: identical to heapByteSizeFromHeader's resolution
-    // (stamped size_class roundtrips below the large clamp; the switch arm is
-    // @sizeOf either way), with the clamp condition pinned at comptime.
-    comptime std.debug.assert(@sizeOf(context_mod.JSContext) < large_heap_size_class);
-    rt.gc.unlinkObjectWithBytes(header, comptime @sizeOf(context_mod.JSContext));
-    context_mod.JSContext.destroyFromHeader(rt, header);
-}
-
-noinline fn destroyModuleZeroRef(rt: anytype, header: *Header) void {
-    comptime std.debug.assert(@sizeOf(module_mod.ModuleRecord) < large_heap_size_class);
-    rt.gc.unlinkObjectWithBytes(header, comptime @sizeOf(module_mod.ModuleRecord));
-    module_mod.ModuleRecord.destroyFromHeader(rt, header);
+    // Every list kind is tracer-owned and has no RC transition; only the
+    // string family (S2) still reaches a zero-ref destroy, through its own
+    // StringHeader path, never through here.
+    std.debug.assert(refCountRemoved(kind));
 }

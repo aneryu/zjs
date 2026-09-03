@@ -5,6 +5,14 @@ Date: 2026-08-23
 Status: reviewed against the source; research and migration plan, not the
 production collector
 
+> **2026-09-03 banner.** The stop-the-world tracer described here is the only
+> collector since 2026-08-29 (`-Dzjs_gc=rc` and `shadow` no longer build;
+> `tracing-gc-experimental-rollout.md` records the promotion). Strings, Shape,
+> Realm and BigInt still carry reference counts; the plan to finish that
+> migration and remove RC entirely is `tracing-gc-completion-plan.md`, which
+> supersedes §4.5's "separately registered leaf/rope descriptor" allowance
+> and header-v2 O1. Stage/gate text below is historical.
+
 Review note (0.5 -> 0.6): source review found two material corrections to the
 first migration plan. `Registry.objectIterator()` enumerates only the six
 cycle-candidate carriers, not String/Rope or BigInt, and `StringRope` owns two
@@ -115,7 +123,7 @@ These are release blockers for any tracing build:
 | Root completeness | production execution roots, handles, contexts, jobs, modules, host roots, native stack/register roots, and suspended fibers all covered |
 | Shadow agreement | no unexplained live object outside the shadow reachable set after RC collection, sweep, and finalization quiescence |
 | Language behaviour | current unit/integration suites, full test262, and QuickJS differential coverage remain green |
-| Failure behaviour | allocation-failure injection, queue-overflow injection, epoch transitions, teardown, and finalizer failures are covered |
+| Failure behaviour | allocation-failure injection, segmented-frontier allocation failure, epoch transitions, teardown, and finalizer failures are covered |
 | Concurrency | stress schedules and a race-detection strategy cover Slots, bitmap transitions, snapshot retry, queues, and safepoint handshakes |
 | Collector-specific tests | remembered-owner, young-block, ephemeron, WeakRef keep-alive, finalization, conservative-root, and retire-list deletion probes pass |
 
@@ -357,7 +365,7 @@ The compatibility Implementation is a `CompositeHeapCensus` with two Adapters:
 The ledger assigns a monotonic allocation identity and records allocation,
 publication, finalization, and free state; an address is only a lookup key and
 cannot be identity because allocator reuse creates ABA. A test-only
-`SyntheticHeapCensus` is the second executable Adapter for bounded-queue,
+`SyntheticHeapCensus` is the second executable Adapter for segmented-frontier,
 deletion, unpublished-object, and address-reuse tests. Replacing the allocator
 later does not change the `HeapCensus` Interface. Existing `traceChildEdges*`,
 `RootVisitor`/`RootProvider`, and the gated `ActiveInvocationTrace` prefix are
@@ -379,8 +387,9 @@ every concrete payload layout.
 9. The marker may read only published objects through concurrent trace
    Interfaces.
 10. Every published strong heap write uses a typed Slot or bulk-write API.
-11. Every overflow path retains discoverability; exhaustion may cause extra
-    tracing or synchronous assist, never a missed edge.
+11. Every accepted frontier entry remains discoverable. Frontier allocation
+    failure invalidates the cycle and prevents sweep; it never drops an edge
+    or recovers by rescanning the marked heap.
 12. GC callbacks for host/plugin state execute only on the owner thread.
 13. Native modules depend only on public handles and object addresses, never
     on headers, blocks, bitmaps, or mark epochs.
@@ -420,7 +429,7 @@ owner_runtime, size_class, cell_size, cell_count
 mark_epoch
 allocated bitmap, mark bitmap, remembered bitmap
 young_enlisted, remembered_enlisted
-mark_overflow, trace_bailout
+trace_bailout
 sweep_state, free_list, bump range
 intrusive list links, epoch-transition state
 ```
@@ -487,7 +496,7 @@ const Header = packed struct(u64) {
 };
 ```
 
-Mark, allocated, remembered, overflow, bailout, sweep, and generation state
+Mark, allocated, remembered, bailout, sweep, and generation state
 remain in side metadata. `type_tag` and `trace_class` are immutable after
 publication. The address registry plus block class identifies an allocation's
 start and bounds for interior-pointer resolution; medium/large entries carry
@@ -1062,13 +1071,14 @@ cannot stop and acknowledge the mutator between them. `major_marking_active`
 changes only while the runtime is stopped.
 
 `shade` validates runtime ownership, ensures the mark epoch, atomically sets
-the bit, and publishes work. If the normal ring is full, it first atomically
-sets `mark_overflow` and enlists the block in a preallocated intrusive overflow
-registry. Overflow processing conservatively retraces every marked allocated
-cell in the flagged block; no separate gray bit is assumed. Clearing an
-overflow flag uses a generation/handshake that cannot race with re-enlistment.
-Queue exhaustion can increase scanning; it cannot leave a marked object
-undiscoverable.
+the bit, and publishes work to an unbounded segmented frontier. Private lanes
+grow through 4 KiB segments and exchange complete old segments through a
+shared chain. Segment storage comes from an allocator outside the JavaScript
+heap account, so growing the frontier cannot recursively trigger GC. If that
+allocator fails, the frontier latches the failure, the current cycle aborts
+without sweeping, and the runtime requests a fresh synchronous full
+collection. No accepted address is dropped and there is no marked-heap rescan
+fallback.
 
 ### 8.5 Minor collection
 
@@ -1150,7 +1160,7 @@ an experiment whose result it already has.
 - require an empty old-backing retire list;
 - account for finalization backlog and external pressure;
 - close admission of a new minor request;
-- reserve marker, overflow, bailout, retire, weak, and cleanup capacity or
+- reserve marker, frontier, bailout, retire, weak, and cleanup capacity or
   select a safe synchronous fallback before changing phase.
 
 #### Initial mark: STW
@@ -1159,7 +1169,7 @@ an experiment whose result it already has.
 2. increment `mark_epoch` and materialize active allocation blocks;
 3. open a **retirement transaction** and clear the generational structures
    (remembered set, counts, block young list, `young_head`);
-4. reset queues, overflow/bailout state, weak work, and local rings;
+4. reset frontier/bailout state, weak work, and local segmented stacks;
 5. scan every precise root, including engine-managed host root slots;
 
 Step 3 formerly said "clear the young generations", meaning a walk of every
@@ -1206,7 +1216,7 @@ from roots and ephemeron rules.
 #### Concurrent mark
 
 If mutator-concurrent payload traversal is later re-authorised, the marker
-prioritizes ordinary mark work, overflow blocks, layout-capture retries, and
+prioritizes ordinary frontier work, layout-capture retries, and
 ephemeron candidates. Owner-affine work and exhausted captures enter a
 preallocated bailout registry. During this phase:
 
@@ -1217,17 +1227,16 @@ preallocated bailout registry. During this phase:
 - allocation debt causes bounded mutator mark assist on slow paths/polls;
 - the marker never invokes host code or frees objects/backing.
 
-Before requesting final remark, pre-remark drains normal work and overflow as
-far as practical, retries snapshots, and increases assist to bound bailout
-work.
+Before requesting final remark, pre-remark drains the segmented frontier as far
+as practical, retries snapshots, and increases assist to bound bailout work.
 
 #### Final remark: STW
 
 1. stop and acknowledge the mutator after all barrier-critical scopes exit;
-2. flush every local ring/buffer;
+2. flush every local segmented stack/buffer;
 3. rescan all precise roots;
 4. respill and rescan native registers, native stacks, and suspended fibers;
-5. drain ordinary work and overflow blocks;
+5. drain the shared segmented frontier;
 6. trace engine `owner_stw` objects on the owner thread; do not invoke a legacy
    reentrant plugin tracer;
 7. drain work produced by bailout tracing;
@@ -1524,11 +1533,12 @@ queue ownership, shutdown, cancellation, and runtime-lifetime semantics.
 All failure boundaries are explicit:
 
 - Prepare is fallible and occurs before a phase becomes externally visible.
-- Heap stores, barriers, bitmap transitions, overflow enrollment, publication,
-  final remark, and sweep record detachment are no-fail.
-- Fixed-capacity exhaustion switches to an already-represented conservative
-  fallback: flagged block scan, owner-thread bailout, synchronous assist, or
-  full STW tracing.
+- Heap stores, bitmap transitions, publication, final remark, and sweep record
+  detachment are no-fail. Barrier publication may latch a frontier failure,
+  which is observed at the next marker boundary before any sweep.
+- Segmented-frontier allocation failure aborts the incomplete cycle and
+  requests a fresh synchronous full collection. The fallback restarts from
+  roots; it never reconstructs lost work by rescanning marked heap objects.
 - Emergency collection distinguishes address-space exhaustion, hard heap
   limit, external pressure, and bytes held by a pending doomed transaction in
   diagnostics.
@@ -1536,9 +1546,9 @@ All failure boundaries are explicit:
   work, completes or abandons marking safely, drains native destruction,
   releases retired backing, then returns heap spaces.
 
-Fault injection covers every reserve and every fallback transition. Queue
-overflow tests force tiny capacities; they must produce the same survivor set
-as an unbounded reference tracer.
+Fault injection covers every reserve and every fallback transition. Frontier
+tests force backing allocation failure and prove abort -> request -> fresh
+synchronous full collection, followed by a clean retirement transaction.
 
 ## 13. Migration
 
@@ -1546,9 +1556,9 @@ The migration is vertical: each stage leaves a runnable, reviewable engine and
 has a go/no-go gate. Build modes are provisional and internal:
 
 ```text
--Dzjs_gc=rc                          production default
--Dzjs_gc=shadow                      RC reclaims; tracer observes only
--Dzjs_experimental_gc=trace_stw      experimental stop-the-world tracer
+-Dzjs_gc=rc                          (historical) production default until 2026-08-29
+-Dzjs_gc=shadow                      (historical) RC reclaims; tracer observes only
+-Dzjs_gc=trace_stw                   the only collector since 2026-08-29 (build.zig:63)
 ```
 
 `trace_concurrent` remains a possible later experimental value, but the build
@@ -1591,10 +1601,10 @@ Still open in this stage:
   and publication sites, native boundaries, payload classifications, and
   finalizable types. The RefKind catalog is exhaustive for carriers but cannot
   see FAM/slice storage or opaque payloads;
-- deterministic tiny-mark-queue stress. It lands with the first real bounded
-  shadow worklist and must compare its overflow report with an unbounded
-  SyntheticHeapCensus reference; adding an empty queue knob now would test no
-  mechanism.
+- deterministic frontier stress. The live segmented worklist is exercised past
+  both former 65,536-entry bounds and compared with the
+  `SyntheticHeapCensus` survivor set; backing-allocation fault injection covers
+  its fail-closed transition.
 
 Gate: current RC behaviour and machine-code/performance requirements remain
 inside the applicable repository policy.
@@ -2071,13 +2081,14 @@ Major remains stop-the-world, as Stage 5 specifies.
 ### Stage 6: concurrent major
 
 Deliver atomic heap Slots, target shading, barrier-critical handshake, marker
-worker, atomic snapshot descriptors, retire/bailout/overflow protocols, mark
-assist, and final remark.
+worker, atomic snapshot descriptors, retire/bailout protocols, segmented mark
+frontier, mark assist, and final remark.
 
-Gate: forced interleaving tests for every store/read tear, queue overflow and
-re-enlistment, snapshot churn, construction publication, epoch transition,
-ephemeron fixed point, and shutdown. Report bailout share, floating garbage,
-assist time, safepoint latency, and pause distributions.
+Gate: forced interleaving tests for every store/read tear, frontier growth and
+allocation failure, helper-generation arrival/completion, snapshot churn,
+construction publication, epoch transition, ephemeron fixed point, and
+shutdown. Report bailout share, frontier pressure, floating garbage, assist
+time, safepoint latency, and pause distributions.
 
 **Stage 6 prerequisite measured: the two-word protocol tears, as predicted,
 at a rate that makes candidate validation load-bearing rather than
@@ -2126,26 +2137,27 @@ acknowledgement is refused inside a critical scope and granted once it closes,
 that the barrier shades a target the previous slice already walked past, that
 shading is idempotent, and that marking is off before any sweeping begins.
 
-The bounded queue, a focused mutator-concurrent worker prototype, and the live
+The segmented frontier, a focused mutator-concurrent worker prototype, and the live
 parallel-STW helper pool must not be conflated:
 
-- **Bounded mark queue** whose overflow downgrades rather than drops. When
-  the ring is full the object stays marked and its block is flagged for
-  rescan, which honours the design's rule exactly — exhaustion costs
-  scanning, never discovery. Tested at the boundary (one past capacity
-  refuses, the flag survives draining and is cleared only by the rescan that
-  answers it) and across wraparound.
-- **`gc_marker.Worker` prototype** runs only in focused tests. It reads queue
-  entries and claims mark bits but deliberately does not enumerate children;
-  there is no production caller that runs it beside the mutator.
+- **Segmented mark frontier** grows in 4 KiB segments and transfers complete
+  old segments between private LIFO stacks and the shared chain. It is tested
+  beyond the former combined private/shared capacity. Backing allocation
+  failure invalidates the cycle and is recovered by a fresh synchronous full
+  collection; it never drops an address or scans every marked object.
+- **`gc_marker.Worker` prototype** (deleted in TGC S0, 2026-09-03, together
+  with `gc_snapshot.zig` and `gc_candidate.zig`) ran only in focused tests. It
+  read queue entries and claimed mark bits but never enumerated children; no
+  production caller ever ran it beside the mutator.
 - **`gc_parallel_mark` helpers** are the production second-thread path. They
   enumerate children through the shared trace authority, but only inside a
-  slice where the mutator is stopped. Owner and helper lanes quiesce before
-  the mutator resumes.
-- **Concurrent shading protocol test** still verifies the lower-level queue
-  and barrier interleaving: the owner shades half a set while the prototype
-  worker claims the other half, and no object loses its mark. It does not
-  claim concurrent payload enumeration.
+  slice where the mutator is stopped. Before publishing a generation the owner
+  freezes its expected-helper count; every helper acks arrival and completion
+  for that generation, and the owner waits for all completion acks before the
+  mutator resumes.
+- **Concurrent shading protocol test** went with the prototype worker; the
+  barrier / queue interleaving that remains under test is the owner-thread
+  shading path plus the parallel-STW helpers above.
 
 **Driver verdict: Stage 6 gate PASSED for the lower-level protocol it
 implements.** Mutator-concurrent payload enumeration is not claimed.
@@ -2153,13 +2165,25 @@ implements.** Mutator-concurrent payload enumeration is not claimed.
 | Gate row | Evidence |
 |---|---|
 | store/read tear interleaving | litmus drives real concurrent writers: 6.2% of reads tear, zero acquire/release violations, and candidate validation rejects every tear shape before a dereference |
-| queue overflow and re-enlistment | one past capacity refuses and flags; the flag survives draining and is cleared only by the rescan that answers it; wraparound loses nothing |
+| segmented frontier | growth past the former combined bounds loses nothing; injected backing OOM aborts, requests, and completes a fresh synchronous full collection with retirement clean |
+| helper generation quiescence | deterministic pauses before arrival and after arrival/before stop-load both prove the owner cannot return before every expected helper completes |
 | snapshot churn | 200k publishes against a live reader: 5,865 captures, 130,363 bailouts, 522,032 retries, and **zero incoherent descriptors accepted** |
 | construction publication | §4.6 reserve/initialize/publish, landed in Stage 3 and still green |
 | epoch transition | mark epochs advance per major with per-block lazy clearing |
 | ephemeron fixed point | implemented in Stage 3, exercised by the weak suites |
 | shutdown | marker join before final remark; marking published off before any sweep |
 | reporting rows | exact-target barrier exits, per-kind STW slices, phase totals and doomed/drain work are measured and printed; the 2026-08-27 panel audit removed assist, safepoint-latency and floating-garbage rows because production had no write sites for them (snapshot churn remains a focused-test metric) |
+
+**S4 frontier-pressure gate (pre-registered by S1a).** The replacement for the
+deleted overflow-count line is the `--gc-stats` segment-pool tuple
+`(peak-active bytes, peak-owned bytes, allocation failures)`, captured for the
+fixed-work splay and earley-boyer corpora with the production configuration.
+S1a V2's post-fix report freezes the reference tuple. An S4 combination fails
+this row if either workload reports any allocation failure or if either peak
+exceeds `1.10x` its same-workload S1a V2 reference. Current/terminal active
+bytes are reported separately and are not substituted for a peak. This is a
+pressure regression gate, not permission to restore an overflow or marked-heap
+rescan path.
 
 The bailout-to-capture ratio is worth reading rather than glossing: under a
 writer republishing as fast as it can, the marker gives up far more often
@@ -2197,7 +2221,8 @@ default switch.
 
 The two prerequisites that are independent of the performance verdict are in
 place. 2026-08-29 update: **the Stage 7 promotion is executed** -- the tracer
-is the shipped default, RC is the supported rollback (`-Dzjs_gc=rc`), and
+is the shipped default, RC was the supported rollback (`-Dzjs_gc=rc`) until
+the rc and shadow collectors were deleted the same day (build.zig:64), and
 [`tracing-gc-experimental-rollout.md`](tracing-gc-experimental-rollout.md)
 holds the rollback contract and the gate basis (gc_heavy_six geomean 1.0419
 vs the frozen rc baseline, margin 1.05 met; trace test262 0/49778).
@@ -2245,13 +2270,13 @@ forward as that sign-off.
 | Snapshots | odd sequence, descriptor tear attempts, repeated retry, bailout, retired backing, structural churn |
 | Epochs | first materialization, simultaneous `tryMark`, new allocation block, wrap fallback |
 | Minor | root-only young, old-to-young owner, young cycle, remembered overflow, weak table, lazy sweep reopen |
-| Major | root mutation, unreachable-owner floating edge, ring overflow, final root rescan, assist, teardown |
+| Major | root mutation, unreachable-owner floating edge, frontier growth, helper-generation quiescence, final root rescan, assist, teardown |
 | Weak | identity ABA, WeakMap chains/fixed point, WeakRef job keep-alive, unregister, held-value lifetime |
 | Native | every supported ABI trampoline, GPR/SIMD-only candidate, interior pointer, long callback, persistent handle |
 | Spaces | all size classes and boundaries, medium extents, large lookup, fragmentation, empty-block return |
 | Multiple runtimes | parallel runtimes, independent STW, shared backing pressure, no cross-runtime heap edge |
 | Plugins | legacy reentrant tracer rejection, engine-managed host roots, class-generation pins; ReleaseFast negative probe currently rejects deferred reentrant-finalizer claim (§9.4) |
-| Failure | allocator OOM, reserve exhaustion, overflow, cleanup backlog, external-memory pressure, hard headroom |
+| Failure | allocator OOM, reserve exhaustion, frontier backing OOM and synchronous-full recovery, cleanup backlog, external-memory pressure, hard headroom |
 
 Concurrency tests use a deterministic scheduler/fault hooks in addition to
 high-volume stress. A race detector that supports the chosen Zig/LLVM atomic

@@ -2709,7 +2709,7 @@ pub fn createConstructorInstance(
     var prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Object", new_target, caller_function, caller_frame);
     defer prototype.deinit(ctx.runtime);
     const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype.object());
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &instance.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, instance.gcHeader());
     return instance.value();
 }
 
@@ -2753,7 +2753,7 @@ fn createProfiledConstructorInstance(
         break :blk if (profile.state == .live) profile.capacity else 0;
     } else 0;
     const instance = try core.Object.create(rt, core.class.ids.object, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &instance.header);
+    errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
     // Reserving 1–3 slots costs more than the later put_field grows on this
     // host (N3 1.21 → 1.28). Four or more named writes pay for the extra
     // buffer. Threshold is a slot count, not a bytecode pattern.
@@ -3360,6 +3360,13 @@ pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_
             // old cell transfers to us; the new cell's creation ref transfers
             // to the property slot. Kind stays .var_ref — no shape change.
             global.propertyEntry(gidx).*.slot.var_ref = new_cell;
+            // The global object is old by the time a second script declares a
+            // `let` over an eval-created `var`; `new_cell` is young. Without
+            // this the next minor condemns the cell and the global's slot
+            // dangles (TGC S0 L3 site C: reproduced with `zjs -I a.js b.js`,
+            // a.js `eval("var x = {}")`, b.js `let x = 1`).
+            rt.gc.generationalBarrier(global.gcHeader(), &new_cell.header);
+            rt.gc.auditUnbarrieredStore(global.gcHeader(), &new_cell.header, .global_lexical_cell_replace);
             // Keep one rollback ref because appendPreparedPropertyEntry consumes
             // the transferred property ref even when its shape allocation fails.
             const rollback_cell = old_cell.dupCell();
@@ -3370,6 +3377,7 @@ pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_
                 old_cell.is_lexical = old_is_lexical;
                 old_cell.varRefIsConstSlot().* = old_is_const;
                 global.propertyEntry(gidx).*.slot.var_ref = rollback_cell;
+                rt.gc.generationalBarrier(global.gcHeader(), &rollback_cell.header);
                 new_cell.freeCell(rt);
                 rollback_cell_owned = false;
             };
@@ -3493,7 +3501,7 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
                 stored.* = next;
                 // Initialising a binding in a long-lived environment object is
                 // an old-to-young edge like any other property store.
-                rt.gc.generationalBarrier(&env.header, next.cycleMarkHeader());
+                rt.gc.generationalBarrier(env.gcHeader(), next.cycleMarkHeader());
                 old_value.free(rt);
                 return true;
             },
@@ -4549,7 +4557,7 @@ pub fn wrapIteratorFromIterator(ctx: *core.JSContext, global: *core.Object, iter
     const iterator_object = object_ops.objectFromValue(rooted_iterator) orelse return error.TypeError;
     const prototype = try object_ops.wrapForValidIteratorPrototype(ctx.runtime, global);
     const wrapper = try core.Object.create(ctx.runtime, core.class.ids.iterator_wrap, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &wrapper.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, wrapper.gcHeader());
     try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorTargetSlot(), rooted_iterator.dup());
     if (next_method != null) {
         try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorNextSlot(), rooted_next_method.dup());
@@ -4572,7 +4580,7 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     defer global.value().free(rt);
     global.class_id = core.class.ids.global_object;
     _ = try global.ensureGlobalPayload(rt);
-    core.gc.retain(&global.header);
+    core.gc.retain(global.gcHeader());
     ctx.global = global;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
     defer iterator.value().free(rt);
@@ -4652,7 +4660,7 @@ test "iterator_ops.createIteratorResult roots direct function bytecode value whi
     defer global.value().free(rt);
     global.class_id = core.class.ids.global_object;
     _ = try global.ensureGlobalPayload(rt);
-    core.gc.retain(&global.header);
+    core.gc.retain(global.gcHeader());
     ctx.global = global;
 
     const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
@@ -4712,8 +4720,7 @@ pub fn throwTypeErrorIntrinsicForGlobal(rt: *core.JSRuntime, global: *core.Objec
     try thrower_object.freeze(rt);
 
     try object_ops.installFunctionPrototypeThrowTypeErrorAccessors(rt, global, thrower);
-    const cached_thrower = try global.cachedThrowTypeErrorIntrinsicSlot(rt);
-    try global.setOptionalValueSlot(rt, cached_thrower, thrower.dup());
+    try global.setCachedRealmValue(rt, .throw_type_error_intrinsic, thrower.dup());
     return thrower;
 }
 

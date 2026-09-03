@@ -331,7 +331,7 @@ pub fn constructBare(rt: *core.JSRuntime, kind: u32) !core.JSValue {
 pub fn constructWithPrototype(rt: *core.JSRuntime, kind: u32, prototype: ?*core.Object) !core.JSValue {
     const class_id = collectionClassId(kind) orelse return error.TypeError;
     const object = try core.Object.create(rt, class_id, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     return object.value();
 }
 
@@ -580,7 +580,7 @@ fn mapSetNoResult(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, 
         entry.value = next_value;
         // Overwriting an existing entry stores into the payload slice, which
         // no property-store barrier covers.
-        rt.gc.generationalBarrier(&object.header, next_value.cycleMarkHeader());
+        rt.gc.generationalBarrier(object.gcHeader(), next_value.cycleMarkHeader());
         old_value.free(rt);
     } else {
         const entry = core.object.CollectionEntry{ .key = canonical_key.dup(), .value = value.dup() };
@@ -673,7 +673,7 @@ fn collectionIterator(
     );
     defer if (prototype.owned) prototype.object.value().free(rt);
     const iterator = try core.Object.create(rt, iterator_class, prototype.object);
-    errdefer core.Object.destroyFromHeader(rt, &iterator.header);
+    errdefer core.Object.destroyFromHeader(rt, iterator.gcHeader());
     try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), target_value.dup());
     // No entry-array cursor yet: qjs's fresh iterator has `cur_record == NULL`
     // and holds no record reference (js_map_iterator_new quickjs.c:52556). The
@@ -705,7 +705,7 @@ fn iteratorPrototype(
         // Array-iterator prototype in iterator_ops. Lazily built long after the
         // realm went old, and the realm is not a root once its create-ref is
         // consumed.
-        rt.gc.generationalBarrier(&realm.header, &prototype.header);
+        rt.gc.generationalBarrier(&realm.header, prototype.gcHeader());
         value.free(rt);
         return .{ .object = prototype, .owned = false };
     }
@@ -722,7 +722,7 @@ fn createIteratorPrototype(
     errdefer if (owned_base) |base| base.value().free(rt);
     const base = iterator_ops.iteratorPrototypeFromGlobal(rt, global) orelse blk: {
         const fallback = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(global));
-        errdefer core.Object.destroyFromHeader(rt, &fallback.header);
+        errdefer core.Object.destroyFromHeader(rt, fallback.gcHeader());
         try defineToStringTag(rt, fallback, "Iterator");
 
         const iterator_method = try function_builtin.nativeFunctionForGlobal(rt, global, "[Symbol.iterator]", 0);
@@ -736,7 +736,7 @@ fn createIteratorPrototype(
     };
 
     const specific = try core.Object.create(rt, core.class.ids.object, base);
-    errdefer core.Object.destroyFromHeader(rt, &specific.header);
+    errdefer core.Object.destroyFromHeader(rt, specific.gcHeader());
     if (owned_base) |base_object| {
         base_object.value().free(rt);
         owned_base = null;
@@ -809,7 +809,7 @@ fn iteratorValue(rt: *core.JSRuntime, global: ?*core.Object, class_id: core.Clas
             // is the realm Array.prototype, not a null-proto class-name fallback.
             const prototype = if (global) |g| array_ops.arrayPrototypeFromGlobal(rt, g) else null;
             const pair = try core.Object.createArray(rt, prototype);
-            errdefer core.Object.destroyFromHeader(rt, &pair.header);
+            errdefer core.Object.destroyFromHeader(rt, pair.gcHeader());
             try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(key_value, true, true, true));
             try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(value_value, true, true, true));
             return pair.value();
@@ -1513,14 +1513,14 @@ fn stringElementAt(rt: *core.JSRuntime, string_object: *core.string.String, inde
 fn isCallableClosure(value: core.JSValue) bool {
     if (!value.isObject()) return false;
     const header = value.refHeader() orelse return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object = core.Object.fromHeader(header);
     return object.class_id == core.class.ids.c_closure;
 }
 
 fn isCallableObject(value: core.JSValue) bool {
     if (!value.isObject()) return false;
     const header = value.refHeader() orelse return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object = core.Object.fromHeader(header);
     return object.class_id == core.class.ids.c_closure or object.class_id == core.class.ids.c_function;
 }
 
@@ -2529,7 +2529,7 @@ fn mapAppendGroupByValue(
     }
 
     const group = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &group.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, group.gcHeader());
     try group.defineOwnProperty(
         ctx.runtime,
         core.atom.atomFromUInt32(group.arrayLength()),

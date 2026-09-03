@@ -1,0 +1,429 @@
+{
+  "tool": "run_benchv8_compare",
+  "suiteVersion": "9",
+  "mode": "refactor-ab",
+  "referenceRole": "baseline",
+  "scoreDirection": "higher-is-better",
+  "ratioDefinition": "zjs / baseline of per-engine median composite Score",
+  "protocol": {
+    "kind": "serial",
+    "cpu": 18
+  },
+  "cpu": 18,
+  "samples": 8,
+  "binaries": {
+    "zjs": {
+      "path": "/tmp/opc-base-copy-zjs",
+      "md5": "79c34e7478f8b28fe5a6bf204c94681a"
+    },
+    "baseline": {
+      "path": "/tmp/opc-base-zjs",
+      "md5": "79c34e7478f8b28fe5a6bf204c94681a"
+    }
+  },
+  "medians": {
+    "zjs": {
+      "score": 4482.5,
+      "suites": {
+        "Richards": 1716.0,
+        "DeltaBlue": 1447.0,
+        "Crypto": 2351.5,
+        "RayTrace": 3642.0,
+        "EarleyBoyer": 3920.5,
+        "RegExp": 908.0,
+        "Splay": 7257.0,
+        "SplayLatency": 17891.0,
+        "NavierStokes": 4836.5,
+        "PdfJS": 8364.0,
+        "Mandreel": 2185.5,
+        "MandreelLatency": 16238.0,
+        "Gameboy": 13996.0,
+        "CodeLoad": 36696.5,
+        "Box2D": 7209.0,
+        "Typescript": 22889.5
+      }
+    },
+    "baseline": {
+      "score": 4489.0,
+      "suites": {
+        "Richards": 1716.0,
+        "DeltaBlue": 1443.0,
+        "Crypto": 2357.0,
+        "RayTrace": 3669.0,
+        "EarleyBoyer": 3905.5,
+        "RegExp": 905.5,
+        "Splay": 7249.0,
+        "SplayLatency": 18771.0,
+        "NavierStokes": 4846.5,
+        "PdfJS": 8375.0,
+        "Mandreel": 2184.5,
+        "MandreelLatency": 16238.0,
+        "Gameboy": 13958.5,
+        "CodeLoad": 36878.0,
+        "Box2D": 7206.0,
+        "Typescript": 22877.0
+      }
+    }
+  },
+  "suiteRatios": {
+    "Richards": 1.0,
+    "DeltaBlue": 1.0027720027720028,
+    "Crypto": 0.9976665252439542,
+    "RayTrace": 0.9926410466067048,
+    "EarleyBoyer": 1.003840737421585,
+    "RegExp": 1.0027609055770292,
+    "Splay": 1.0011036004966203,
+    "SplayLatency": 0.9531191731926909,
+    "NavierStokes": 0.9979366553182709,
+    "PdfJS": 0.9986865671641791,
+    "Mandreel": 1.000457770656901,
+    "MandreelLatency": 1.0,
+    "Gameboy": 1.0026865350861482,
+    "CodeLoad": 0.9950783665057757,
+    "Box2D": 1.0004163197335554,
+    "Typescript": 1.0005464003147266
+  },
+  "headlineRatio": 0.998552016039207,
+  "rawRuns": {
+    "zjs": [
+      {
+        "suites": {
+          "Richards": 1714.0,
+          "DeltaBlue": 1437.0,
+          "Crypto": 2359.0,
+          "RayTrace": 3685.0,
+          "EarleyBoyer": 3935.0,
+          "RegExp": 914.0,
+          "Splay": 7293.0,
+          "SplayLatency": 19806.0,
+          "NavierStokes": 4834.0,
+          "PdfJS": 8352.0,
+          "Mandreel": 2181.0,
+          "MandreelLatency": 16238.0,
+          "Gameboy": 14020.0,
+          "CodeLoad": 37002.0,
+          "Box2D": 7203.0,
+          "Typescript": 22941.0
+        },
+        "score": 4518.0
+      },
+      {
+        "suites": {
+          "Richards": 1716.0,
+          "DeltaBlue": 1447.0,
+          "Crypto": 2348.0,
+          "RayTrace": 3642.0,
+          "EarleyBoyer": 3881.0,
+          "RegExp": 910.0,
+          "Splay": 7188.0,
+          "SplayLatency": 18575.0,
+          "NavierStokes": 4858.0,
+          "PdfJS": 8284.0,
+          "Mandreel": 2185.0,
+          "MandreelLatency": 16186.0,
+          "Gameboy": 13971.0,
+          "CodeLoad": 36810.0,
+          "Box2D": 7209.0,
+          "Typescript": 22855.0
+        },
+        "score": 4486.0
+      },
+      {
+        "suites": {
+          "Richards": 1712.0,
+          "DeltaBlue": 1448.0,
+          "Crypto": 2352.0,
+          "RayTrace": 3631.0,
+          "EarleyBoyer": 3848.0,
+          "RegExp": 898.0,
+          "Splay": 7147.0,
+          "SplayLatency": 16211.0,
+          "NavierStokes": 4820.0,
+          "PdfJS": 8360.0,
+          "Mandreel": 2185.0,
+          "MandreelLatency": 15978.0,
+          "Gameboy": 13946.0,
+          "CodeLoad": 36557.0,
+          "Box2D": 7216.0,
+          "Typescript": 22724.0
+        },
+        "score": 4436.0
+      },
+      {
+        "suites": {
+          "Richards": 1717.0,
+          "DeltaBlue": 1445.0,
+          "Crypto": 2347.0,
+          "RayTrace": 3667.0,
+          "EarleyBoyer": 3909.0,
+          "RegExp": 914.0,
+          "Splay": 7245.0,
+          "SplayLatency": 15552.0,
+          "NavierStokes": 4815.0,
+          "PdfJS": 8399.0,
+          "Mandreel": 2182.0,
+          "MandreelLatency": 16238.0,
+          "Gameboy": 13983.0,
+          "CodeLoad": 36641.0,
+          "Box2D": 7209.0,
+          "Typescript": 22924.0
+        },
+        "score": 4448.0
+      },
+      {
+        "suites": {
+          "Richards": 1703.0,
+          "DeltaBlue": 1445.0,
+          "Crypto": 2338.0,
+          "RayTrace": 3642.0,
+          "EarleyBoyer": 3924.0,
+          "RegExp": 899.0,
+          "Splay": 7269.0,
+          "SplayLatency": 20455.0,
+          "NavierStokes": 4811.0,
+          "PdfJS": 8337.0,
+          "Mandreel": 2186.0,
+          "MandreelLatency": 16292.0,
+          "Gameboy": 13996.0,
+          "CodeLoad": 36872.0,
+          "Box2D": 7216.0,
+          "Typescript": 22801.0
+        },
+        "score": 4512.0
+      },
+      {
+        "suites": {
+          "Richards": 1716.0,
+          "DeltaBlue": 1449.0,
+          "Crypto": 2352.0,
+          "RayTrace": 3635.0,
+          "EarleyBoyer": 3929.0,
+          "RegExp": 907.0,
+          "Splay": 7318.0,
+          "SplayLatency": 17207.0,
+          "NavierStokes": 4839.0,
+          "PdfJS": 8375.0,
+          "Mandreel": 2192.0,
+          "MandreelLatency": 16292.0,
+          "Gameboy": 13996.0,
+          "CodeLoad": 36662.0,
+          "Box2D": 7209.0,
+          "Typescript": 22978.0
+        },
+        "score": 4479.0
+      },
+      {
+        "suites": {
+          "Richards": 1717.0,
+          "DeltaBlue": 1447.0,
+          "Crypto": 2353.0,
+          "RayTrace": 3626.0,
+          "EarleyBoyer": 3917.0,
+          "RegExp": 899.0,
+          "Splay": 7236.0,
+          "SplayLatency": 18709.0,
+          "NavierStokes": 4839.0,
+          "PdfJS": 8368.0,
+          "Mandreel": 2189.0,
+          "MandreelLatency": 16238.0,
+          "Gameboy": 13996.0,
+          "CodeLoad": 36731.0,
+          "Box2D": 7196.0,
+          "Typescript": 22900.0
+        },
+        "score": 4491.0
+      },
+      {
+        "suites": {
+          "Richards": 1717.0,
+          "DeltaBlue": 1453.0,
+          "Crypto": 2351.0,
+          "RayTrace": 3678.0,
+          "EarleyBoyer": 3946.0,
+          "RegExp": 909.0,
+          "Splay": 7302.0,
+          "SplayLatency": 17118.0,
+          "NavierStokes": 4849.0,
+          "PdfJS": 8375.0,
+          "Mandreel": 2187.0,
+          "MandreelLatency": 16030.0,
+          "Gameboy": 14045.0,
+          "CodeLoad": 36599.0,
+          "Box2D": 7216.0,
+          "Typescript": 22879.0
+        },
+        "score": 4478.0
+      }
+    ],
+    "baseline": [
+      {
+        "suites": {
+          "Richards": 1716.0,
+          "DeltaBlue": 1450.0,
+          "Crypto": 2349.0,
+          "RayTrace": 3685.0,
+          "EarleyBoyer": 3927.0,
+          "RegExp": 897.0,
+          "Splay": 7245.0,
+          "SplayLatency": 20071.0,
+          "NavierStokes": 4844.0,
+          "PdfJS": 8383.0,
+          "Mandreel": 2144.0,
+          "MandreelLatency": 16186.0,
+          "Gameboy": 13946.0,
+          "CodeLoad": 36846.0,
+          "Box2D": 7196.0,
+          "Typescript": 22855.0
+        },
+        "score": 4508.0
+      },
+      {
+        "suites": {
+          "Richards": 1716.0,
+          "DeltaBlue": 1448.0,
+          "Crypto": 2345.0,
+          "RayTrace": 3671.0,
+          "EarleyBoyer": 3907.0,
+          "RegExp": 906.0,
+          "Splay": 7212.0,
+          "SplayLatency": 17477.0,
+          "NavierStokes": 4839.0,
+          "PdfJS": 8383.0,
+          "Mandreel": 2189.0,
+          "MandreelLatency": 16238.0,
+          "Gameboy": 13996.0,
+          "CodeLoad": 36795.0,
+          "Box2D": 7189.0,
+          "Typescript": 22822.0
+        },
+        "score": 4476.0
+      },
+      {
+        "suites": {
+          "Richards": 1716.0,
+          "DeltaBlue": 1448.0,
+          "Crypto": 2336.0,
+          "RayTrace": 3682.0,
+          "EarleyBoyer": 3744.0,
+          "RegExp": 905.0,
+          "Splay": 7171.0,
+          "SplayLatency": 19927.0,
+          "NavierStokes": 4863.0,
+          "PdfJS": 8337.0,
+          "Mandreel": 2194.0,
+          "MandreelLatency": 16238.0,
+          "Gameboy": 13921.0,
+          "CodeLoad": 36857.0,
+          "Box2D": 7209.0,
+          "Typescript": 22867.0
+        },
+        "score": 4498.0
+      },
+      {
+        "suites": {
+          "Richards": 1709.0,
+          "DeltaBlue": 1444.0,
+          "Crypto": 2360.0,
+          "RayTrace": 3638.0,
+          "EarleyBoyer": 3936.0,
+          "RegExp": 900.0,
+          "Splay": 7326.0,
+          "SplayLatency": 17669.0,
+          "NavierStokes": 4849.0,
+          "PdfJS": 8375.0,
+          "Mandreel": 2182.0,
+          "MandreelLatency": 16238.0,
+          "Gameboy": 13971.0,
+          "CodeLoad": 36711.0,
+          "Box2D": 7196.0,
+          "Typescript": 22892.0
+        },
+        "score": 4480.0
+      },
+      {
+        "suites": {
+          "Richards": 1716.0,
+          "DeltaBlue": 1441.0,
+          "Crypto": 2357.0,
+          "RayTrace": 3642.0,
+          "EarleyBoyer": 3865.0,
+          "RegExp": 911.0,
+          "Splay": 7261.0,
+          "SplayLatency": 14944.0,
+          "NavierStokes": 4811.0,
+          "PdfJS": 8399.0,
+          "Mandreel": 2191.0,
+          "MandreelLatency": 16238.0,
+          "Gameboy": 14071.0,
+          "CodeLoad": 37001.0,
+          "Box2D": 7203.0,
+          "Typescript": 22945.0
+        },
+        "score": 4437.0
+      },
+      {
+        "suites": {
+          "Richards": 1712.0,
+          "DeltaBlue": 1437.0,
+          "Crypto": 2362.0,
+          "RayTrace": 3667.0,
+          "EarleyBoyer": 3901.0,
+          "RegExp": 899.0,
+          "Splay": 7220.0,
+          "SplayLatency": 19873.0,
+          "NavierStokes": 4854.0,
+          "PdfJS": 8368.0,
+          "Mandreel": 2187.0,
+          "MandreelLatency": 16186.0,
+          "Gameboy": 13909.0,
+          "CodeLoad": 37126.0,
+          "Box2D": 7209.0,
+          "Typescript": 22789.0
+        },
+        "score": 4507.0
+      },
+      {
+        "suites": {
+          "Richards": 1714.0,
+          "DeltaBlue": 1441.0,
+          "Crypto": 2357.0,
+          "RayTrace": 3671.0,
+          "EarleyBoyer": 3932.0,
+          "RegExp": 908.0,
+          "Splay": 7302.0,
+          "SplayLatency": 16658.0,
+          "NavierStokes": 4844.0,
+          "PdfJS": 8375.0,
+          "Mandreel": 2142.0,
+          "MandreelLatency": 16186.0,
+          "Gameboy": 13946.0,
+          "CodeLoad": 36948.0,
+          "Box2D": 7223.0,
+          "Typescript": 22887.0
+        },
+        "score": 4464.0
+      },
+      {
+        "suites": {
+          "Richards": 1716.0,
+          "DeltaBlue": 1442.0,
+          "Crypto": 2362.0,
+          "RayTrace": 3642.0,
+          "EarleyBoyer": 3904.0,
+          "RegExp": 914.0,
+          "Splay": 7253.0,
+          "SplayLatency": 20203.0,
+          "NavierStokes": 4868.0,
+          "PdfJS": 8375.0,
+          "Mandreel": 2180.0,
+          "MandreelLatency": 16238.0,
+          "Gameboy": 13971.0,
+          "CodeLoad": 36899.0,
+          "Box2D": 7230.0,
+          "Typescript": 23011.0
+        },
+        "score": 4521.0
+      }
+    ]
+  }
+}

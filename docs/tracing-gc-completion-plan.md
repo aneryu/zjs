@@ -1,0 +1,204 @@
+# Tracing GC 完成计划（对象模型全面适配）v0.1
+
+Status: **APPROVED — owner 2026-09-03「全部同意」：方向、分期、§8 决策点 D1-D6 全部按 driver 建议批准**（driver，2026-09-03）
+
+批准即授权 S0 开工与 R3 并行开工；每期仍按 §3 规则先出函数级规格再派发。
+
+前置：`docs/gc-v2-completion-and-pivot-2026-09-03.md`（GC v2 完成对账）、本日 GC 评审（会话记录，要点见 §1）。
+owner 裁决（2026-09-03）：**先不管性能，把 tracing GC 做到底，把对象模型改造成完全适配。**
+
+本文取代以下已批准文档中的相应条款（见 §7 supersede 表）：
+`tracing-gc-header-v2-design.md` O1 中「Shape/Realm 保留 body RC、BigInt 保留 rc 前缀」；
+`tracing-gc-design.md` §1.4 中「string 可保留独立 rc 描述符」的容忍；
+`gc-v2-completion-and-pivot-2026-09-03.md` §4 的转向（TS/AOT）顺延到本计划完成后。
+
+## 0. 一句话目标
+
+**所有 JS 可达的堆分配都由 tracing 管理；普通对象的死亡零成本（位图 sweep，不跑析构）；引用计数机器整体删除；根集精确、保守扫描降级为校验臂。**
+
+完成判据是正确性与结构，不是 cycles。性能只记账不裁决（§6）。
+
+## 1. 现状事实（勘察结论，均已对 HEAD 0dbf7d86 核实）
+
+| # | 事实 | 证据 |
+|---|---|---|
+| F1 | 八个 GC kind 中只有 object / function_bytecode / var_ref / module 由 tracer 拥有；shape / realm_context / string / big_int 标 `.retained`，仍是 rc | gc.zig:746-757 `representation_kind_catalog`；value.zig:480-493 `isTracerOwned` 范围 [-3,-1] |
+| F2 | string 家族（flat / rope / symbol 描述串）4B rc 前缀，不进 block heap、不进 gc_obj_list、不进 address_registry；tracer 对 string 值不做任何事 | string.zig:244/848；gc_trace_stw.zig:103 `.string => {}` |
+| F3 | BigInt 甚至不被 mark：`cycleMarkHeader` 对 tag −9 返回 null，无列表成员，纯 rc | value.zig:480；gc.zig:3253 |
+| F4 | Shape 的 rc 不是活性而是 **COW 唯一性判定**（`refCount()==1`）；shape hash 表已是弱表，transition 靠全局 hash 无父→子指针；tracer 已能回收未标记 shape | shape.zig:73-75/1047/1361；gc_trace_stw.zig:1306 |
+| F5 | Realm 的 rc 只承担「host destroy 即时释放」+ runtime.deinit 断言；堆内活性已由 RealmRef 边与 root provider 承载 | context.zig:460-471/906-935；runtime.zig:1671 |
+| F6 | 对象死亡必须逐对象析构：释放属性里的 string/bigint rc、shape rc、堆外 `prop_values`、数组元素、21 种 class payload；EB 上 minor 的 sweep+destroy 占 minor 总时长 69%，splay 上 destroy 比 marking 还贵 | object.zig:2437-2600；`--gc-stats` 实测 |
+| F7 | `JSValue.dup/free` 全仓 1190 / 7826 处；对 object 类 tag 已是 no-op，只对 string/bigint 起作用 | value.zig:495-505 |
+| F8 | **生产二进制没有标量精确根**：`value_root_link_containers_only = !is_test`，134 个 `rootValues/rootObjects` 站点在 CLI 中被编译成空壳；`host_quiescent` 仅在 runtime 析构时为真，即生产每次 GC 都靠保守扫描兜底 | runtime.zig:501；runtime.zig:1643-1650 |
+| F9 | 保守扫描也有覆盖不到的洞：解释器 fast handler 只推进 `reg_sp` 不提交 `stack.len`，操作数 arena 在堆上不在原生栈；`pending_call_region` threadlocal 是被 TypedArray 回收事故逼出的单窗口补丁 | tailcall_dispatch.zig:2396-2404 |
+| F10 | `prop_values` 在 object.zig 之外没有任何裸 `Entry` 指针缓存；数组元素裸 slice 跨分配仅 4 处 | 勘察 lane 结论（object.zig:517/377 及 exec 层 grep） |
+| F11 | `RefKind` 是 `enum(u3)` 已满 8 值；`ObjectFlags` 16 位已满 | gc.zig:660；object.zig:283-305 |
+| F12 | block heap 的 medium / large 空间与 `Heap.alloc/free` 在生产中零调用者 | gc_block_heap.zig:721/2437/2489 |
+
+## 2. 目标态
+
+### 2.1 所有权矩阵（目标）
+
+| kind | 承载 | 活性 | 死亡 |
+|---|---|---|---|
+| object | block cell（现状） | mark 位图 | 位图 sweep；仅 `needs_finalizer` 位为 1 的走 finalizer |
+| string（flat / rope / symbol body） | **block cell**（≤120B 载荷）或 medium / large extent | mark 位图 / extent 标记 | 位图 sweep，无析构 |
+| big_int | block cell / medium | 同上 | 同上 |
+| property_storage（新 kind） | block cell / medium | 由 owner Object 的边标记 | 位图 sweep |
+| array_storage（新 kind） | block cell / medium / large | 同上 | 同上 |
+| payload（新 kind，a 类 class payload） | block cell / medium | 同上 | 同上；b/c 类保留 finalizer |
+| shape | 现状（非块 carrier） | mark | 保留析构（atom 退引 / hash 表 unlink），rc 删除 |
+| realm_context / module / function_bytecode / var_ref | 现状 | mark | 保留析构（现状） |
+
+**rc 归零**：`RefCountHeader`、`retain/release`、`headerRefCount`、`ZeroRefScratch`、`beginDecrefPhase`、`Phase.decref/.cycle`、`destroyZeroRef*`、`DeferredFreeStack`/Pass B 停尸链、`JSValue.dup/free` 全部删除。
+
+### 2.2 头部（目标，S4 前出函数级规格）
+
+保持 8B `Metadata` 一个前缀，Object 与所有块 cell kind 一致（body offset 0，沿用 M-cut 结论）；非块 kind 保留 `TraceHeader.next_non_object`。flags 字节重排（S4 落地，S1-S3 不动位）：
+
+```
+BlockFlags(u8): kind:u4 | young:1 | needs_finalizer:1 | finalizing:1 | reserved:1
+```
+
+去掉 `mark`（块 cell 的 mark 权威早已是块位图；非块 kind 用 `mark_epoch`）、`is_pinned`（pin_entries 表是权威）、`cycle_visited`（由 doomed 位图 / lifecycle 替代）。这三项都是 rc 时代残留被 tracer 借用，S4 的规格里逐一给替代物。
+
+### 2.3 根集（目标）
+
+- 精确根 = 现有精确根 + **生产链入标量 ValueRootFrame**（翻转 runtime.zig:501）+ 解释器 `reg_sp` 作 windowed 根（`ValueRootSlice.windowed` 已有形态）。
+- 保守扫描保留为 `-Dzjs_gc_verify_roots` 校验臂：生产不开；校验构建中 `computeFullReachable` 按来源归因 conservative-only 命中，目标读数 = 0。
+- 移动（copying nursery）**不在本计划内**（§8 D1）。
+
+## 3. 分期
+
+两条并行 track：**T-M 对象模型**（S1→S4 串行）与 **T-R 根集**（R3→R1，与 T-M 并行）。S0 与 S5 是公共首尾。每期开工前 driver 出函数/偏移级规格（先例 `gc-v2-m-cut-object-layout.md`），codex 实现，对抗 ≤1 轮，driver 亲读关键 diff。
+
+### S0 止血与安全网（1-2 lane-week）
+
+1. 删僵尸：gc_candidate.zig / gc_snapshot.zig / gc_marker.zig 及其测试；object_gc.zig 测试专用 mark 臂与 `MarkMode`；`Phase.cycle`；41 行恒真门死臂与 15 个 `else void` 字段类型；gc.zig:29 失实注释。
+2. 文档对账：gc-invariants.md 重写为「混合所有权 → 目标全 tracing」；gc-inventory.md 删不存在符号；tracing-gc-design.md 标 rc 已删；gc-v2-systemic-design.md 状态改 DONE。
+3. 安全网入门禁：`ZJS_GC_STRESS=1 ZJS_GC_VERIFY_MINOR=1 ZJS_MINOR_AUDIT=1` 跑单测进 checkpoint-gate；test262 全量在 `ZJS_GC_STRESS` 下跑一次并归档产物为基线；`liveBytes/committedLiveMilli` 挂到 `--gc-stats` 门后。
+4. 三处静态可疑无屏障写（object.zig:10141、src/exec/array_ops.zig:6115、call_runtime.zig:3362）加插桩审计：在 `ZJS_MINOR_AUDIT` 下记录「老 owner 无屏障写入年轻 target」，跑 Octane 全套，出结论后关闭或修复。
+
+门：全测绿 + test262 双模式 0 回归 + stress 基线产物在案。
+
+### S1 Shape / Realm / BigInt 去 rc（1-2 lane-week，~600 行）
+
+| 步 | 改什么 | 文件 |
+|---|---|---|
+| 1 | Shape COW 唯一性：用 `shared` 位（发布进 hash 表或被第二个对象引用时置位）替代 `refCount()==1`；6 个判定点改读该位 | shape.zig:581/660/667/709/826/934；object.zig:11355 |
+| 2 | 删 `ShapeOwnership.trace_ref_count`、`Shape.retain/release/releaseForRealmTeardown`、`destroyEagerZeroDirect` shape 臂；shape 死亡只走 doomed pass | shape.zig；object.zig 16 处；context.zig 5 处；gc.zig headerRefCount 分支 |
+| 3 | Realm：`RealmRef` 变裸指针 + 现有 traced 边；`JSContext.destroy` 只撤 root provider；runtime.deinit 断言改为「无未消费 host ref」并在 gc.deinit 前跑一次 full major | context.zig:1429-1460 及 ≈65 处 retain/clone/deinit |
+| 4 | BigInt 入 tracer：`Tag.big_int` 纳入 `isTracerOwned/cycleMarkHeader`（范围改双比较，不重排 tag）；分配走 `addInitialized*`；`heapByteSizeFromHeader` 补尺寸；memory.zig:1471 去 rc=1 特判；`traceRememberedCacheEligible` 放宽；doomed pass 加 `.big_int` 臂；删 `destroyBigIntZeroRef` | value.zig；bigint.zig；gc.zig；memory.zig；gc_trace_stw.zig |
+| 5 | parser 字面量 BigInt（parser.zig:3787，function 持久分配器）改为常量池内的普通堆 BigInt，由 FunctionBytecode 边持有 | parser.zig；bytecode.zig |
+| 6 | 收 `ZeroRefScratch/beginDecrefPhase`：仅剩 weak 批处理用途 → 改名 `WeakSweepScratch` 或内联到 processWeak | gc.zig:1727/5424；gc_trace_stw.zig:2248 |
+
+疑点先判：object.zig:1635 `template.shape_ref.retain()` 是否让未 hashed shape 被多对象共享（决定 `shared` 位的置位点）。
+
+门：全测绿；test262 双模式；stress 三开关绿；`refCountRemoved` 对 shape/realm/big_int 为 true。
+
+### S2 string 家族入 tracer（3-4 lane-week，~1200 行）
+
+原则：**string 走 Object 同款路径**——block cell + 位图权威 + body offset 0，不进 `gc_obj_list` 链；超过 cell 上限的走 medium / large extent（F12 的零调用者空间由此启用）。atom 表在 S2 **保持 rc**，作为其缓存串的强根，S3 再弱化。
+
+| 步 | 改什么 | 文件 |
+|---|---|---|
+| 1 | 前缀：`String`/`StringRope` 改 8B Metadata 前缀（kind=.string，rope 用 `alloc_info` 或 metadata 备用位区分 flat/rope/symbol）；`header()/fromHeader/value()`、`inlineAllocationLayout`、`freeRopeNode` 改偏移；分配改走 block heap（`allocCell` 或 medium/large） | string.zig；gc.zig:1218-1270 catalog 断言；memory.zig |
+| 2 | JSValue 边界：`Tag.string/symbol/string_rope` 纳入 `isTracerOwned/cycleMarkHeader`（双比较 [-9,-6]∪[-3,-1]）；`dup/free` 对 string 变 no-op；`destroyZeroRef` 去 string 臂 | value.zig:480-505/688-698 |
+| 3 | 标记：`.string` 臂改为 rope `left/right` 子边遍历；`markOrdinaryObjectHot/markFastArrayHot` 对 string 值调用 mark（热臂 + 权威 + comptime 列表三处同步，守卫已有） | object_gc.zig:227；gc_trace_stw.zig:103；object.zig |
+| 4 | sweep：block 位图 sweep 对 string cell 无析构；medium/large extent 按标记释放 | gc_trace_stw.zig；gc_block_heap.zig |
+| 5 | rc==1 独占优化处置：value_ops.zig:892/994/1139、string.zig:1414 `appendRopeTail` 改为「仅当 rope 未发布」或删除 | value_ops.zig；string.zig |
+| 6 | 根：runtime 缓存数组（runtime.zig:1355-1375）、`RegExpPayload.source/compiled_bytecode`（改为 traced 边）、`atom.predefined_str/entries[].str`（S2 内为强根，由 atom 表 root provider 提供） | runtime.zig；object_payloads.zig:718；atom.zig |
+| 7 | 保守扫描：string cell 自动被 block 解析器识别；medium/large 走 extent 记录 | gc_address_registry.zig（`.string/.rope` 占位启用） |
+| 8 | 测试：property_direct.zig:645-729 等 rc 断言 ~20 处改写 | tests |
+
+门：同 S1 + 一条新守卫「任意 string 值出现在已标记对象的边里必被标记」（deletion-probe 验证）。
+
+### S3 atom 表弱化 + dup/free 删除（3-4 lane-week）
+
+| 步 | 改什么 |
+|---|---|
+| 1 | `DynamicAtom.str` 变弱；atom 活性 = 所属 string body 被标记 ∨ 有裸 Atom 持有者边。GC kind（FunctionBytecode / Shape / Module / JSContext 帧 / class）加 `visitAtom` 边（shape.zig:292 等）；编译期临时（parser / compiler ~130 字段）用一个 **编译作用域 root provider** 整体持有，不逐个建边 |
+| 2 | major 末扫 `entries[]`，清未标记且无边的 atom（`finalizeDeadEntry` 改由 sweep 驱动）；预定义 atom 永久 pin；symbol 的 `weakref_count` / WeakMap 键改用 body mark |
+| 3 | 删 `atoms.dup/free`（228 / 1467 处）与 `ref_count` 转移逻辑（atom.zig:1594-1720） |
+| 4 | `JSValue.dup/free` 此时对所有 tag 均为 no-op → codex 机械删除 1190 / 7826 处及 `defer x.free(rt)` 样板；`ValueRootFrame` 与 dup/free 正交，不受影响 |
+| 5 | 删 `RefCountHeader`、`gc.retain/release`、`headerRefCount*`、`refCountRemoved`（恒 true 后删门） |
+
+门：同上 + leak census 0 + 「atom 表条目数在 major 后回落」测试。
+
+### S4 零成本 sweep（4-6 lane-week）
+
+| 步 | 改什么 |
+|---|---|
+| 1 | `RefKind` 扩为 u4，新增 `.property_storage / .array_storage / .payload`；flags 字节按 §2.2 重排，出偏移级规格 + representation snapshot |
+| 2 | `prop_values` → GC cell（block ≤128B / medium），Object 的 trace 边加一次 cell 标记；改点 object.zig 4 构造 + 2 增长 + 3 释放 + shape.zig:850-921 压缩 + `propertyStorageCapacity`（F10：无外部裸指针缓存，非移动下读点不改） |
+| 3 | 数组元素 → GC cell（`ensureArrayBufferCapacity` 4892 的 remap 路径消失；adopt 4765/4781；4 释放点） |
+| 4 | a 类 payload（ordinary / arguments / object_data / var_ref / proxy / bound / promise / disposable / global / iterator 主体 / regexp / function rare+aux）→ traced cell 或内联，无析构 |
+| 5 | `needs_finalizer`：b/c 类（ArrayBuffer 非 inline、TypedArray/DataView view 链、WeakRef、WeakMap/WeakSet、FinalizationRegistry、std_file、Generator open VarRef、插件/嵌入类、有活游标的 Map/Set、has_weak_id / borrowed holder）在构造时置位；sweep 只遍历 `doomed & finalizer`（块级第 4 位图或 metadata 位） |
+| 6 | 弱语义改 sweep 期清槽：WeakRef / WeakMap / FR 目标由 `weakref_count` / husk 改为按 mark 位清（`keyIsMarked` 骨架已有）；删 husk 与两遍 park |
+| 7 | 计账块级化：sweep 按 `popcount(alloc & ~mark) × cell_size` 减账；阈值改用 block live_bytes + 非块池残余（memory.zig:1622/1862/1901 逐对象减账删除） |
+| 8 | 删 `destroyPlainObjectFast/Slow` 主体、Pass-A settle、Pass-B 停尸链、corpse census、`DeferredFreeStack`（净删 ~800 行） |
+
+门：同上 + 「普通对象死亡不进入任何析构函数」的 deletion-probe（在 destroy 入口放计数器，Octane 全套普通对象计数 = 0）+ 弱语义 test262 子集（WeakRef / FR）绿。
+
+### T-R 根集（与 T-M 并行）
+
+**R3 诊断（3-5 lane-week，S0 后即开）**：翻转 runtime.zig:501 做诊断构建；`computeFullReachable` 扩为按来源（帧 / 原生栈 word / 寄存器）归因 conservative-only 命中；test262 + Octane 跑 `ZJS_GC_VERIFY`，产出「保守扫描到底救了谁」的清单，把 F9 的 D 类洞逼出来。
+
+**R1 全精确非移动（12-20 lane-week，R3 后 owner 二次裁决量级）**：≈740 个候选函数按 R3 清单收窄后补 rooting；解释器每个可分配 cold 出口前 `publish(pc, sp)`（tailcall_dispatch 审计）或 `reg_sp` windowed 根；保守扫描降为 `-Dzjs_gc_verify_roots` 校验臂，生产关闭。
+
+### S5 收尾（1 lane-week）
+
+删 gc_conservative 生产路径的门、`concurrent` 改名 `incremental`、Registry 拆 Scheduler / Heap / Lists / IncrementalMajor / Diagnostics 五个子结构、header-v2 文档标 superseded、写完成对账。
+
+## 4. 依赖图
+
+```
+S0 ─┬─ S1 ── S2 ── S3 ── S4 ── S5
+    └─ R3 ─────────── R1 ─────┘
+```
+
+S2 依赖 S1（bigint 先走一遍「入 tracer」的全套改点，作为 string 的小规模排练）。S4 依赖 S3（dup/free 删掉后 destroy 路径才能整段删）。R1 与 S4 无代码依赖，但 R1 完成前 string / storage cell 的活性同样靠保守扫描兜底，因此 **S2 起 string 必须对保守解析器可见**（S2 步 7）。
+
+## 5. 不变量（每期必须保持）
+
+1. 精确根 + 保守扫描的并集在每期都覆盖该期新增的 tracer-owned kind（string / bigint / storage 在保守解析器里可解析）。
+2. 三色不变量：新 kind 的写入点都经 `generationalBarrierValue` 或 `rememberOwnerForBulkWrite`；每个新 kind 加入热臂 / 权威 / comptime 列表三处守卫。
+3. `refCountRemoved(kind)` 恒 true 的 kind 不得有任何 `retain/release` 路径残留（comptime 断言）。
+4. 弱语义只在 sweep 期由 mark 位决定，不由计数决定。
+5. 每期结束时 `--gc-stats` 的 `destroyed counted objects` 语义清楚（S4 后普通对象不再计入）。
+
+## 6. 门禁与记账
+
+- **裁决门（每期）**：`zig build test` 全绿；test262 双模式 0 回归；`ZJS_GC_STRESS=1 ZJS_GC_VERIFY_MINOR=1 ZJS_MINOR_AUDIT=1` 单测绿；leak census 0；本期 deletion-probe 守卫。
+- **记账不裁决**：Stage 0 七指标 + cycles(u+k) + maxrss + minflt 对 `shared-h_pre0/main-d944f26d` 记录，写进各期报告，不设线。S5 结束后一次正式 2×2 出「完成态 vs v2 终态」总账，作为下一阶段（性能再定价）的起点。
+- 并行 lane 同机测量污染规则沿用（parallel-lane 教训）：记账跑单独安静窗口。
+
+## 7. Supersede 表
+
+| 被取代条款 | 取代为 |
+|---|---|
+| header-v2 O1：Shape/Realm 保留 body RC | S1：删除；COW 唯一性用 `shared` 位 |
+| header-v2 O1：BigInt 8B 前缀含 rc 字 | S1：BigInt 普通 tracer kind |
+| header-v2 §6.1「BigInt never placed on trace-live」 | S1 步 4 |
+| tracing-gc-design §4.5「Strings/ropes… retain a separately registered leaf/rope descriptor」 | S2：string 即块 cell kind |
+| tracing-gc-design §1.4 非目标保持不变（移动 / 并发 minor / 并发 sweep 仍非目标） | — |
+| gc-v2-completion §4 转向 TS/AOT | 顺延至 S5 后 |
+| header-v2 O2 mark-frontier 契约（四 kind 限定） | S2 后扩为全部 tracer-owned kind，O2 的 epoch-exemption 证明需重做 |
+
+## 8. owner 决策点
+
+| ID | 决策 | driver 建议 |
+|---|---|---|
+| D1 | 根集终态：R1 全精确非移动 / R2 再加 copying nursery / 维持保守 | **R1**。R2 需 ≥9 个以地址为身份的结构 + IC ABA + FNABI pin，且 splay 实测 conservative-only young 仅 1/12 minor，收益无法在 R1 前定价；先 R3 拿清单再定 R1 量级 |
+| D2 | 属性 / 数组存储形态：独立 GC kind（JSC butterfly 式）/ 仅内联 | **独立 GC kind**，走 block 小类 + medium，F10 证明改点 ≈12 处 |
+| D3 | `JSValue.dup/free` 处置：no-op 保留（qjs 源码对齐可读性）/ 机械删除 | **删除**（S3 步 4）。7826 处 no-op 是最大的一块阅读噪音，且保留会诱发新代码继续「配对」 |
+| D4 | atom 表：S3 全弱化 / 长期保留 atom rc 只弱化 string body | **全弱化**，但分两步（S2 保留 rc 作强根，S3 弱化），编译期临时用作用域 root provider 避免 130 处逐字段建边 |
+| D5 | S2 中 string 的载体：块 cell 位图权威（同 Object）/ 非块链表 carrier（同 shape） | **块 cell**。链表 carrier 在百万级 string 上 sweep 是指针追逐，且与 S4 的 storage kind 路径不一致 |
+| D6 | 本计划期间 T-spike / TS 类型导向线是否并行 | **不并行**。两线都改 Object 布局与解释器热路径，合并冲突与测量污染都不可控 |
+
+## 9. 风险
+
+- **R1 量级不确定**（12-20 lw 是上界估算，R3 后收窄）；若 owner 不接受，退路是 R3 + 永久保守（JSC 路线），本计划其余部分不受影响。
+- **S2 的 rope 原地 flatten 与并行标记**：并行标记默认关，S2 期间保持关，S5 前补「flatten 只在 mutator 期」断言。
+- **S4 的 Generator open VarRef**：若不 close 会指向已死栈；需在规格里决定「sweep 前统一 close」或「VarRef 仅 close 时持值」。
+- **FNABI**：插件持有的 JSValue 若含 string，S2 后其活性由 handle 表承担；对照 `docs/runtime-plugin-abi.md` 的 persistent handle 条款，S2 规格内确认无裸 string 借用跨调用。

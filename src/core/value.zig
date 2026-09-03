@@ -21,8 +21,13 @@ const string_mod = @import("string.zig");
 const value_free_profile = false;
 
 pub const Tag = struct {
-    pub const first: i32 = -9;
-    pub const big_int: i32 = -9;
+    /// Deviation from qjs (JS_TAG_BIG_INT = -9): heap BigInt is tracer-owned
+    /// since TGC S1-c, so it sits in the former -4 hole to keep the
+    /// tracer-owned tags one contiguous range `[big_int, object]` -- one
+    /// unsigned compare on every `dup`/`free`, exactly qjs's `cmn tag, #3`
+    /// trick widened by one. The string family stays contiguous below it.
+    pub const first: i32 = -8;
+    pub const big_int: i32 = -4;
     pub const symbol: i32 = -8;
     pub const string: i32 = -7;
     pub const string_rope: i32 = -6;
@@ -241,8 +246,8 @@ pub const JSValue = extern struct {
 
     pub inline fn requiresRefCount(self: JSValue) bool {
         // QuickJS deliberately uses one unsigned range comparison here:
-        // negative refcounted tags [-9..-1] (including the unreachable -5/-4
-        // holes) compare above every non-negative immediate tag.
+        // negative refcounted tags [-8..-1] (including the unreachable -5
+        // hole) compare above every non-negative immediate tag.
         const tag: u64 = @bitCast(self.repr.tag);
         const first: u64 = @bitCast(@as(i64, Tag.first));
         return tag >= first;
@@ -469,27 +474,33 @@ pub const JSValue = extern struct {
     /// their bodies are refcount-only and do not carry cycle-list links.
     pub fn refCountHeader(self: JSValue) ?*gc.Header {
         return switch (self.tagOf()) {
-            Tag.big_int, Tag.object, Tag.module, Tag.function_bytecode => ptrFromPayload(gc.Header, self.payloadOf()),
+            Tag.object, Tag.module, Tag.function_bytecode => ptrFromPayload(gc.Header, self.payloadOf()),
             else => null,
         };
     }
 
-    /// `JS_MarkValue` filter (quickjs.c:6553-6566): OBJECT / FUNCTION_BYTECODE /
-    /// MODULE only. Heap BigInt is refcounted but is not a cycle-list member;
-    /// qjs drops it here with `cmn tag, #3` (tagged tags {-3,-2,-1}).
+    /// `JS_MarkValue` filter (quickjs.c:6553-6566) widened by one tag: OBJECT /
+    /// FUNCTION_BYTECODE / MODULE plus heap BIG_INT, which is a leaf on
+    /// `gc_obj_list` since S1-c (qjs keeps BigInt refcounted; zjs traces it).
+    /// `big_int` sits at -4 so this stays one range compare (`cmn tag, #4`).
     pub inline fn cycleMarkHeader(self: JSValue) ?*gc.Header {
         const tag = self.repr.tag;
-        if (tag > Tag.object or tag < Tag.module) return null;
+        if (tag > Tag.object or tag < tracer_owned_first_tag) return null;
         return ptrFromPayload(gc.Header, self.repr.payload);
     }
 
+    /// Lowest tracer-owned tag: `big_int` (-4) until TGC S2 flips
+    /// `gc.string_tracer_owned`, then `symbol` (-8) -- the whole heap tag
+    /// range, still one compare.
+    pub const tracer_owned_first_tag: i32 = if (gc.string_tracer_owned) Tag.symbol else Tag.big_int;
+
     /// Whether the tracing collector owns this value's lifetime: exactly the
-    /// tag range `cycleMarkHeader` accepts, i.e. everything that lives on
-    /// `gc_obj_list`. Strings, ropes, symbols and BigInt fall outside it and
-    /// keep their counts forever -- the tracer never sees them.
+    /// tag set `cycleMarkHeader` accepts, i.e. everything that lives on
+    /// `gc_obj_list`. Strings, ropes and symbols fall outside it and keep
+    /// their counts until S2 -- the tracer never sees them.
     pub inline fn isTracerOwned(self: JSValue) bool {
         const tag = self.repr.tag;
-        return tag >= Tag.module and tag <= Tag.object;
+        return tag >= tracer_owned_first_tag and tag <= Tag.object;
     }
 
     pub inline fn dup(self: JSValue) JSValue {
@@ -508,7 +519,7 @@ pub const JSValue = extern struct {
         }
         if (!self.requiresRefCount()) return;
         const tag = self.tagOf();
-        if (rt.gc.phase == .deinit and tag >= Tag.module and tag <= Tag.object) return;
+        if (rt.gc.phase == .deinit and tag >= tracer_owned_first_tag and tag <= Tag.object) return;
         if (comptime value_free_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
@@ -641,7 +652,7 @@ pub const JSValue = extern struct {
         if (!self.requiresRefCount()) return false;
         if (self.isTracerOwned()) return false;
         const tag = self.tagOf();
-        if (rt.gc.phase == .deinit and tag >= Tag.module and tag <= Tag.object) return false;
+        if (rt.gc.phase == .deinit and tag >= tracer_owned_first_tag and tag <= Tag.object) return false;
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         if (hdr.rc == 1) return true;
@@ -699,7 +710,7 @@ pub const JSValue = extern struct {
         switch (self.tagOf()) {
             Tag.string, Tag.symbol => string_mod.String.destroyFromHeader(rt, self.refCountWordAssumeRefCounted()),
             Tag.string_rope => string_mod.destroyRope(rt, self.ropeBody().?),
-            Tag.big_int, Tag.module, Tag.function_bytecode, Tag.object => gc.destroyZeroRef(rt, ptrFromPayload(gc.Header, self.payloadOf()).?),
+            Tag.module, Tag.function_bytecode, Tag.object => gc.destroyZeroRef(rt, ptrFromPayload(gc.Header, self.payloadOf()).?),
             else => unreachable,
         }
     }
@@ -846,9 +857,11 @@ test "cycleMarkHeader matches JS_MarkValue tag set" {
     try t.expectEqual(@as(?*gc.Header, &dummy), JSValue.module(&dummy).cycleMarkHeader());
     try t.expectEqual(@as(?*gc.Header, &dummy), JSValue.functionBytecode(&dummy).cycleMarkHeader());
 
-    // Heap BigInt is refcounted but JS_MarkValue skips it (quickjs.c:6557-6564).
-    try t.expect(JSValue.bigInt(&dummy).cycleMarkHeader() == null);
-    try t.expect(JSValue.bigInt(&dummy).refCountHeader() != null);
+    // Heap BigInt is tracer-owned since S1-c: marked like an object, no
+    // common refcount word (qjs 6557-6564 skips it because qjs refcounts it).
+    try t.expectEqual(@as(?*gc.Header, &dummy), JSValue.bigInt(&dummy).cycleMarkHeader());
+    try t.expect(JSValue.bigInt(&dummy).refCountHeader() == null);
+    try t.expect(JSValue.bigInt(&dummy).isTracerOwned());
 }
 
 test "asInt64 / asUint64 on inline short BigInt and non-BigInt" {

@@ -5,12 +5,89 @@ bun = "1"
 
 [tasks.quick-gate]
 description = "Run the Debug inner-loop gate once"
-run = "zig build quick-gate --summary all"
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-0-4,10-14}" zig build quick-gate --summary all'
 
 [tasks.checkpoint-gate]
 description = "Run the checkpoint gate"
-run = "zig build checkpoint-gate --summary all"
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-0-4,10-14}" zig build checkpoint-gate --summary all'
 
 [tasks.quick-watch]
 description = "Keep the Debug quick-gate compiler alive for faster incremental edit feedback"
-run = "zig build quick-gate --watch -fincremental --summary new"
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-0-4,10-14}" zig build quick-gate --watch -fincremental --summary new'
+
+# Resident incremental compiler for ANY build step. The engine-wide Debug
+# targets (test-exec ~90s, zjs-dev ~35s cold) are the ones worth keeping
+# resident; one-shot -fincremental does not help (state only persists in
+# watch mode). Example: mise run watch -- test-exec
+[tasks.watch]
+description = "Keep a resident incremental compiler on a named build step (mise run watch -- test-exec)"
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-0-4,10-14}" zig build --watch -fincremental --summary new'
+
+# Fixed-work instruction/cycle screen of zig-out/bin/zjs against pinned
+# QuickJS. This is the per-candidate screening instrument (~30s/benchmark at
+# --samples 2); only candidates that pass it spend a full score A/B
+# (run_benchv8_compare.py). Append arguments after `--`, e.g.:
+#   mise run perf-screen -- --benches raytrace splay
+[tasks.perf-screen]
+description = "Fixed-work PMU screen (zjs vs pinned qjs) on targeted bench-v8 benchmarks"
+run = """
+field="${ZJS_MEASURE_FIELD:-b}"
+python3 tools/perf/measure_fields.py run --field "$field" --layer single -- \
+  python3 tools/perf/bench_v8/run_fixed_pmu.py \
+    --zjs zig-out/bin/zjs --qjs /home/aneryu/quickjs/qjs \
+    --field "$field" --samples 2
+"""
+
+[tasks.stage0]
+description = "Fail-first GC Stage 0 screen against a frozen baseline (field A / CPU9 only)"
+run = 'taskset -c 0-18 python3 "$MISE_TASK_DIR/tools/perf/stage0_screen.py" screen'
+
+[tasks.stage0-freeze]
+description = "Cold-build and freeze the four GC Stage 0 baseline artifacts"
+run = 'taskset -c 0-18 python3 "$MISE_TASK_DIR/tools/perf/stage0_screen.py" freeze'
+
+# Reclaim build-cache and worktree debris. The Zig local cache has no
+# garbage collection; on 2026-08-30 it had grown to 137 GB in this repo
+# (plus ~500 GB of finished-lane worktrees). Trims o/ entries untouched
+# for 7 days -- a trimmed entry is only a cache miss, never a correctness
+# hazard (verified: `zig build check` green right after a trim). Worktree
+# removal stays manual because dirty trees may hold unlanded work; this
+# only prunes metadata for already-deleted ones.
+[tasks.tidy]
+description = "Trim >7-day zig-cache entries and prune stale worktree metadata"
+run = """
+find .zig-cache/o -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
+rm -rf .zig-cache/tmp/*
+git worktree prune
+du -sh .zig-cache
+"""
+
+[tasks.worktree-init]
+description = "Reuse the main worktree's test262 checkout from a linked worktree"
+run = '"$MISE_TASK_DIR/tools/worktree_init.sh"'
+
+# TGC S0 safety net: full test262 with the collector running at every
+# safepoint (ZJS_GC_STRESS=1 -> cadence 64 ticks instead of 10_000). Writes
+# its -R products to reports/test262-stress/ so the regular test262-latest
+# directory is never overwritten. Pass extra run-test262 flags after `--`
+# (e.g. `-m` for module mode, `-t 8` to cap threads).
+[tasks.test262-stress]
+description = "Full test262 under ZJS_GC_STRESS=1; -R products in reports/test262-stress/"
+run = """
+zig build run-test262
+ZJS_GC_STRESS=1 ./zig-out/bin/run-test262 -c test262.conf -d test262/test 0 100000 -R reports/test262-stress "$@"
+"""
+
+# The per-merge-batch gate (docs/verification-policy.md, driver side) as one
+# command. engine-production-gate is a single build graph, so every artifact
+# (unified suite, stress tier, ReleaseFast zjs, test262 runner, embedding,
+# smoke) compiles in parallel and full test262 runs alongside the suites --
+# measured 2026-08-30 against the ~18-minute sequential dance it replaces.
+# gate_smoke then runs the fixed-work corpus, including one arena-audit run
+# per workload, against the zjs binary the same graph just installed.
+[tasks.batch-gate]
+description = "Per-merge-batch gate: engine-production-gate (parallel graph incl. test262) + fixed-work gate_smoke"
+run = """
+flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-0-4,10-14}" zig build engine-production-gate --summary all
+ZJS_GATE_PARALLEL_CPUS=0,1,2,3,4,10 tools/perf/gate_smoke.sh zig-out/bin/zjs
+"""

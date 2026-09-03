@@ -19,14 +19,16 @@ The reported number for a stage is the *difference* between the `k1` case
 import argparse
 import bisect
 import collections
-import fcntl
 import json
 import os
 import subprocess
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CASES = os.path.join(HERE, "cases")
-LOCK = "/tmp/zjs-host-heavy.lock"
+sys.path.insert(0, os.path.dirname(HERE))
+from measure_fields import field_metadata, measurement_lock, single_cpu
+
 PERIODS = [50021, 65599, 82657]
 ITERATIONS = 20_000_000
 
@@ -100,59 +102,67 @@ def profile(binary, script, cpu, pmu, period, tmp, syms, starts):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--zjs", required=True)
-    ap.add_argument("--cpu", type=int, default=19)
+    ap.add_argument("--field", choices=("a", "b", "host"), default=None)
+    ap.add_argument("--cpu", type=int, default=None,
+                    help="legacy CPU override; noncanonical values are diagnostic-only")
     ap.add_argument("--pmu", default="armv8_pmuv3_1")
     ap.add_argument("--tmp", default=os.environ.get("TMPDIR", "/tmp"))
     ap.add_argument("--pairs", default="t_int_nonzero,t_object_plain")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
+    try:
+        measure_field, args.cpu, field_conforming = single_cpu(args.field, args.cpu)
+    except ValueError as error:
+        ap.error(str(error))
+
     binary = os.path.abspath(args.zjs)
     syms = symbol_table(binary)
     starts = [s[0] for s in syms]
     results = {}
 
-    with open(LOCK, "a") as lock_fh:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX)
-        try:
-            for pair in args.pairs.split(","):
-                per_period = {}
-                for period in PERIODS:
-                    legs = {}
-                    for leg in ("k0", "k1"):
-                        script = os.path.join(CASES, f"{pair}_{leg}.js")
-                        total, per_symbol = profile(binary, script, args.cpu,
-                                                    args.pmu, period, args.tmp,
-                                                    syms, starts)
-                        legs[leg] = {"samples": total,
-                                     "per_symbol": dict(per_symbol)}
-                    stages = collections.Counter()
-                    for name, n in legs["k1"]["per_symbol"].items():
-                        stages[STAGE_OF_SYMBOL.get(name, "other")] += n
-                    for name, n in legs["k0"]["per_symbol"].items():
-                        stages[STAGE_OF_SYMBOL.get(name, "other")] -= n
-                    cyc_per_sample = period
-                    per_period[period] = {
-                        "legs": legs,
-                        "delta_samples": legs["k1"]["samples"] - legs["k0"]["samples"],
-                        "delta_cycles_total":
-                            (legs["k1"]["samples"] - legs["k0"]["samples"]) * cyc_per_sample,
-                        "stage_cyc_per_lnot": {
-                            k: v * cyc_per_sample / ITERATIONS
-                            for k, v in sorted(stages.items())},
-                    }
-                    print(f"{pair} c={period}", flush=True)
-                    for k, v in sorted(per_period[period]["stage_cyc_per_lnot"].items(),
-                                       key=lambda kv: -kv[1]):
-                        print(f"    {k:40s} {v:7.2f} cyc/lnot", flush=True)
-                results[pair] = per_period
-        finally:
-            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+    with measurement_lock(measure_field):
+        for pair in args.pairs.split(","):
+            per_period = {}
+            for period in PERIODS:
+                legs = {}
+                for leg in ("k0", "k1"):
+                    script = os.path.join(CASES, f"{pair}_{leg}.js")
+                    total, per_symbol = profile(binary, script, args.cpu,
+                                                args.pmu, period, args.tmp,
+                                                syms, starts)
+                    legs[leg] = {"samples": total,
+                                 "per_symbol": dict(per_symbol)}
+                stages = collections.Counter()
+                for name, n in legs["k1"]["per_symbol"].items():
+                    stages[STAGE_OF_SYMBOL.get(name, "other")] += n
+                for name, n in legs["k0"]["per_symbol"].items():
+                    stages[STAGE_OF_SYMBOL.get(name, "other")] -= n
+                cyc_per_sample = period
+                per_period[period] = {
+                    "legs": legs,
+                    "delta_samples": legs["k1"]["samples"] - legs["k0"]["samples"],
+                    "delta_cycles_total":
+                        (legs["k1"]["samples"] - legs["k0"]["samples"]) * cyc_per_sample,
+                    "stage_cyc_per_lnot": {
+                        k: v * cyc_per_sample / ITERATIONS
+                        for k, v in sorted(stages.items())},
+                }
+                print(f"{pair} c={period}", flush=True)
+                for k, v in sorted(per_period[period]["stage_cyc_per_lnot"].items(),
+                                   key=lambda kv: -kv[1]):
+                    print(f"    {k:40s} {v:7.2f} cyc/lnot", flush=True)
+            results[pair] = per_period
 
     payload = {
         "collector": "tools/perf/logical_not/run_stage_record.py",
         "zjs_binary": binary,
         "cpu": args.cpu,
+        "measurement_field": {
+            **field_metadata(measure_field, "single"),
+            "fieldConforming": field_conforming,
+            "lockAttested": True,
+        },
         "pmu": args.pmu,
         "periods": PERIODS,
         "period_policy": "fixed co-prime periods only (P7-42 -F aliasing hazard)",

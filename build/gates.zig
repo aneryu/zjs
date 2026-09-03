@@ -119,6 +119,7 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
 
     const checkpoint_gate_step = b.step("checkpoint-gate", "Run checkpoint validation without the full test262, OOM-injection, or ReleaseFast binary gates");
     checkpoint_gate_step.dependOn(test_step);
+    checkpoint_gate_step.dependOn(test_graph.gc_stress_step);
     checkpoint_gate_step.dependOn(smoke_dev_step);
     // Source-side architecture only. The ReleaseFast compiler-stage `nm`
     // half stays on the production gate, which already compiles zjs for smoke.
@@ -137,6 +138,9 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");
     engine_production_gate_step.dependOn(test_step);
+    // The stress tier is excluded from test_step so per-change close-out
+    // stays fast; the production gate pays for it here.
+    engine_production_gate_step.dependOn(test_graph.stress_step);
     engine_production_gate_step.dependOn(smoke_step);
     engine_production_gate_step.dependOn(embedding_step);
     engine_production_gate_step.dependOn(&run_architecture_deps.step);

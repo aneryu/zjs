@@ -303,7 +303,7 @@ pub fn disposableStackMove(
     if (stack.disposableStackDisposed()) return error.ReferenceError;
     const prototype = ctx.classPrototypeObject(core.class.ids.disposable_stack) orelse return error.InvalidBuiltinRegistry;
     const moved = try core.Object.create(ctx.runtime, core.class.ids.disposable_stack, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &moved.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, moved.gcHeader());
     try stack.moveDisposableResourcesTo(ctx.runtime, moved);
     stack.disposableStackDisposedSlot().* = true;
     return moved.value();
@@ -390,7 +390,7 @@ pub fn asyncDisposableStackConstructWithPrototype(
     prototype: ?*core.Object,
 ) !core.JSValue {
     const stack = try core.Object.create(ctx.runtime, core.class.ids.async_disposable_stack, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &stack.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, stack.gcHeader());
     return stack.value();
 }
 
@@ -491,7 +491,7 @@ pub fn asyncDisposableStackMove(
     if (stack.disposableStackDisposed()) return error.ReferenceError;
     const prototype = ctx.classPrototypeObject(core.class.ids.async_disposable_stack) orelse return error.InvalidBuiltinRegistry;
     const moved = try core.Object.create(ctx.runtime, core.class.ids.async_disposable_stack, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &moved.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, moved.gcHeader());
     try stack.moveDisposableResourcesTo(ctx.runtime, moved);
     stack.disposableStackDisposedSlot().* = true;
     return moved.value();
@@ -515,8 +515,8 @@ pub fn asyncDisposableStackStoreCapability(stack: *core.Object, rt: *core.JSRunt
     reject_owned = false;
     // Both slots live in the stack's payload; the capability functions are made
     // right here while the stack itself is typically already old.
-    rt.gc.generationalBarrier(&stack.header, resolve.cycleMarkHeader());
-    rt.gc.generationalBarrier(&stack.header, reject.cycleMarkHeader());
+    rt.gc.generationalBarrier(stack.gcHeader(), resolve.cycleMarkHeader());
+    rt.gc.generationalBarrier(stack.gcHeader(), reject.cycleMarkHeader());
 }
 
 pub fn asyncDisposableStackDisposeAsync(

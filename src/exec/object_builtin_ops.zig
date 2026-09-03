@@ -364,7 +364,7 @@ pub fn literal(rt: *core.JSRuntime, names: []const core.Atom, values: []const co
     defer root_frame.deactivate(rt);
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
 
     for (names, rooted.values) |name, value| {
         try object.defineOwnProperty(rt, name, core.Descriptor.data(value, true, true, true));
@@ -434,7 +434,7 @@ fn entryArrayValue(rt: *core.JSRuntime, key: core.Atom, value: core.JSValue) !co
     defer root_frame.deactivate(rt);
 
     const array = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &array.header);
+    errdefer core.Object.destroyFromHeader(rt, array.gcHeader());
     const key_value = try rt.atoms.toStringValue(rt, key);
     defer key_value.free(rt);
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(key_value, true, true, true));
@@ -534,7 +534,7 @@ pub fn objectCreateCall(
     else
         objectFromValue(args[0]) orelse return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not a prototype"));
     const object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
     if (args.len >= 2 and !args[1].isUndefined()) {
         try definePropertiesOnTarget(ctx, output, global, object, args[1], caller_function, caller_frame);
     }
@@ -818,7 +818,7 @@ pub fn objectFromEntriesCall(
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
     const out = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     const out_value = out.value();
 
     const iterator_value = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
@@ -866,7 +866,7 @@ pub fn objectGroupByCall(
     if (args.len < 2) return error.TypeError;
     if (!isCallableValue(args[1])) return error.TypeError;
     const out = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     const out_value = out.value();
 
     const iterator_value = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
@@ -1198,7 +1198,7 @@ pub fn getOwnPropertyDescriptorsCall(
     defer core.Object.freeKeys(ctx.runtime, own_keys);
 
     const out = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     for (own_keys) |key| {
         var desc = (try objectRestOwnPropertyDescriptor(ctx, output, global, object, key)) orelse continue;
         try call.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, object, key, &desc);
@@ -1233,7 +1233,7 @@ pub fn objectOwnPropertyKeysCall(
     defer core.Object.freeKeys(ctx.runtime, own_keys);
 
     const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     for (own_keys) |key| {
         const is_symbol = ctx.runtime.atoms.isPublicSymbol(key);
         switch (filter) {

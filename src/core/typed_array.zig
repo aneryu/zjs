@@ -69,7 +69,7 @@ pub fn arrayBufferConstructLength(rt: *JSRuntime, byte_length: usize, max_byte_l
 
 pub fn sharedArrayBufferConstructLength(rt: *JSRuntime, byte_length: usize, max_byte_length: ?usize, prototype: ?*Object) !JSValue {
     const obj = try Object.create(rt, class.ids.shared_array_buffer, prototype);
-    errdefer Object.destroyFromHeader(rt, &obj.header);
+    errdefer Object.destroyFromHeader(rt, obj.gcHeader());
     try validateArrayBufferLength(byte_length);
     if (max_byte_length) |max| try validateArrayBufferLength(max);
     // Mirrors js_array_buffer_constructor3 (quickjs.c:56777-56786): a growable
@@ -90,7 +90,7 @@ pub fn sharedArrayBufferFromStore(
     prototype: ?*Object,
 ) !JSValue {
     const obj = try Object.create(rt, class.ids.shared_array_buffer, prototype);
-    errdefer Object.destroyFromHeader(rt, &obj.header);
+    errdefer Object.destroyFromHeader(rt, obj.gcHeader());
     if (max_byte_length) |max| {
         if (max < store.bytes.len) return error.RangeError;
         try validateArrayBufferLength(max);
@@ -107,7 +107,7 @@ pub fn createArrayBuffer(rt: *JSRuntime, byte_length: usize, max_byte_length: ?u
 
 pub fn createArrayBufferWithPrototype(rt: *JSRuntime, byte_length: usize, max_byte_length: ?usize, prototype: ?*Object) !JSValue {
     const obj = try Object.create(rt, class.ids.array_buffer, prototype);
-    errdefer Object.destroyFromHeader(rt, &obj.header);
+    errdefer Object.destroyFromHeader(rt, obj.gcHeader());
     try validateArrayBufferLength(byte_length);
     if (max_byte_length) |max| try validateArrayBufferLength(max);
     if (!try obj.installInlineByteStorage(rt, byte_length)) {
@@ -353,7 +353,7 @@ fn typedArrayClassIdForKind(kind: u8) ?class.ClassId {
 fn createTypedArrayInstance(rt: *JSRuntime, kind: u8, prototype: ?*Object) !*Object {
     const class_id = typedArrayClassIdForKind(kind) orelse class.ids.object;
     const obj = try Object.create(rt, class_id, prototype);
-    errdefer Object.destroyFromHeader(rt, &obj.header);
+    errdefer Object.destroyFromHeader(rt, obj.gcHeader());
     if (class_id == class.ids.object) try obj.ensureTypedArrayPayload(rt);
     return obj;
 }
@@ -385,7 +385,7 @@ pub fn typedArrayConstructWithOptions(rt: *JSRuntime, element_size: u32, kind: u
         break :blk @as(u32, @intCast(@divTrunc(remaining, element_size)));
     } else null;
     const obj = try createTypedArrayInstance(rt, kind, prototype);
-    errdefer Object.destroyFromHeader(rt, &obj.header);
+    errdefer Object.destroyFromHeader(rt, obj.gcHeader());
     try obj.initTypedArrayView(rt, buffer.value().dup(), byte_offset, element_size, fixed_length, kind);
     return obj.value();
 }
@@ -406,7 +406,7 @@ pub fn typedArrayConstructFullBufferOwned(rt: *JSRuntime, element_size: u32, kin
     if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
 
     const obj = try createTypedArrayInstance(rt, kind, prototype);
-    errdefer Object.destroyFromHeader(rt, &obj.header);
+    errdefer Object.destroyFromHeader(rt, obj.gcHeader());
     const view_buffer = owned_buffer_value;
     owned_buffer_value = JSValue.undefinedValue();
     try obj.initTypedArrayView(rt, view_buffer, 0, element_size, @intCast(length), kind);
@@ -430,7 +430,7 @@ pub fn dataViewConstruct(rt: *JSRuntime, args: []const JSValue, prototype: ?*Obj
     if (byte_offset + view_length > buffer_length) return error.RangeError;
 
     const obj = try Object.create(rt, class.ids.dataview, prototype);
-    errdefer Object.destroyFromHeader(rt, &obj.header);
+    errdefer Object.destroyFromHeader(rt, obj.gcHeader());
     if (view_length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
     try obj.initTypedArrayView(
         rt,

@@ -1,0 +1,468 @@
+{
+ "tool": "zjs-benchv8-fixed-pmu",
+ "schemaVersion": 1,
+ "direction": "ratios are zjs/qjs; below 1.0 means zjs used fewer counters or wall time",
+ "workload": "per-benchmark scripts assembled from the vendored suite with doWarmup=false and doDeterministic=true appended; both engines execute identical deterministicIterations/minIterations batches",
+ "role": "screening instrument; score adjudication stays with run_benchv8_compare.py",
+ "iterationDivisor": 1,
+ "timestamp": "2026-08-30T11:46:47Z",
+ "samplesPerEnginePerBench": 8,
+ "samplingOrder": "paired ABBA by sample parity",
+ "firstPositionCounts": {
+  "qjs": 4,
+  "zjs": 4
+ },
+ "firstPositionBalanced": true,
+ "cpu": 18,
+ "effectiveAffinity": [
+  18
+ ],
+ "pmu": "armv8_pmuv3_1",
+ "events": [
+  "armv8_pmuv3_1/instructions/",
+  "armv8_pmuv3_1/cycles/",
+  "armv8_pmuv3_1/branch-instructions/",
+  "armv8_pmuv3_1/branch-misses/",
+  "armv8_pmuv3_1/cache-references/",
+  "armv8_pmuv3_1/cache-misses/"
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": "0xd87",
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/c1w-new-zjs",
+   "sha256": "f5113c3071c9615ba6333205d2ef948dbaf57f8d073661f5754c2a32ac9bd1e3",
+   "repo": "v0.1.0-167-gd020a6f6-dirty"
+  },
+  "qjs": {
+   "path": "/tmp/c1w-parent-zjs",
+   "sha256": "7b54d7d4316f36f01573ea149f5409cea61bd44056f3cb1a022bb4338e0a858d",
+   "repo": "unavailable"
+  }
+ },
+ "benchmarks": {
+  "raytrace": {
+   "source": {
+    "suiteDir": "/home/aneryu/zjs/tools/perf/bench_v8/suite",
+    "files": [
+     {
+      "file": "base.js",
+      "sha256": "216612c2e7096a02b3e52b57e9cf9351bbaf180d60938d5c60b85fd756232733"
+     },
+     {
+      "file": "raytrace.js",
+      "sha256": "64b8ff90969966dd69659100e28754976dfc3e9a4f8ee55b9232f974c66ed08c"
+     }
+    ],
+    "fixedWorkSha256": "f639174798f684f9724af6c08ab53aaf4143e2715c393f3a90634635166bb24b"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 237969849117,
+       "cycles": 47384237221,
+       "branch-instructions": 44635400499,
+       "branch-misses": 102724339,
+       "cache-references": 91062828704,
+       "cache-misses": 443001764
+      },
+      "wallSeconds": 12.182033758610487,
+      "stdout": "RayTrace: 3654\n----",
+      "scores": {
+       "RayTrace": 3654.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237662752049,
+       "cycles": 47128667692,
+       "branch-instructions": 44536816955,
+       "branch-misses": 100892951,
+       "cache-references": 90967532006,
+       "cache-misses": 368162889
+      },
+      "wallSeconds": 12.105734950397164,
+      "stdout": "RayTrace: 3671\n----",
+      "scores": {
+       "RayTrace": 3671.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237475541207,
+       "cycles": 47570175638,
+       "branch-instructions": 44461159426,
+       "branch-misses": 101028345,
+       "cache-references": 90859970577,
+       "cache-misses": 425815491
+      },
+      "wallSeconds": 12.219919824972749,
+      "stdout": "RayTrace: 3637\n----",
+      "scores": {
+       "RayTrace": 3637.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237889611867,
+       "cycles": 47426457472,
+       "branch-instructions": 44619726451,
+       "branch-misses": 100610566,
+       "cache-references": 91003775270,
+       "cache-misses": 406523260
+      },
+      "wallSeconds": 12.172738935798407,
+      "stdout": "RayTrace: 3651\n----",
+      "scores": {
+       "RayTrace": 3651.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237742089638,
+       "cycles": 47415238391,
+       "branch-instructions": 44574537230,
+       "branch-misses": 101745744,
+       "cache-references": 91067366060,
+       "cache-misses": 410066774
+      },
+      "wallSeconds": 12.169711960013956,
+      "stdout": "RayTrace: 3652\n----",
+      "scores": {
+       "RayTrace": 3652.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237668324440,
+       "cycles": 47155778937,
+       "branch-instructions": 44529786823,
+       "branch-misses": 101545529,
+       "cache-references": 90954161343,
+       "cache-misses": 361527994
+      },
+      "wallSeconds": 12.102847651112825,
+      "stdout": "RayTrace: 3672\n----",
+      "scores": {
+       "RayTrace": 3672.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237896455802,
+       "cycles": 47320402300,
+       "branch-instructions": 44614379761,
+       "branch-misses": 99214271,
+       "cache-references": 90926923266,
+       "cache-misses": 408118006
+      },
+      "wallSeconds": 12.153080059681088,
+      "stdout": "RayTrace: 3659\n----",
+      "scores": {
+       "RayTrace": 3659.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237506900706,
+       "cycles": 47155392062,
+       "branch-instructions": 44462161209,
+       "branch-misses": 100557823,
+       "cache-references": 90834560634,
+       "cache-misses": 388998203
+      },
+      "wallSeconds": 12.101114037912339,
+      "stdout": "RayTrace: 3672\n----",
+      "scores": {
+       "RayTrace": 3672.0
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 237702742067,
+       "cycles": 47398483383,
+       "branch-instructions": 44537876351,
+       "branch-misses": 101627147,
+       "cache-references": 90949968402,
+       "cache-misses": 500317079
+      },
+      "wallSeconds": 12.168639556970447,
+      "stdout": "RayTrace: 3652\n----",
+      "scores": {
+       "RayTrace": 3652.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237747599642,
+       "cycles": 47207737008,
+       "branch-instructions": 44584777158,
+       "branch-misses": 100844947,
+       "cache-references": 90986869364,
+       "cache-misses": 431062631
+      },
+      "wallSeconds": 12.122657674830407,
+      "stdout": "RayTrace: 3666\n----",
+      "scores": {
+       "RayTrace": 3666.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237627190458,
+       "cycles": 47285294084,
+       "branch-instructions": 44520995655,
+       "branch-misses": 102895265,
+       "cache-references": 90978061890,
+       "cache-misses": 371522695
+      },
+      "wallSeconds": 12.147713592741638,
+      "stdout": "RayTrace: 3659\n----",
+      "scores": {
+       "RayTrace": 3659.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237670890882,
+       "cycles": 47471782587,
+       "branch-instructions": 44537158788,
+       "branch-misses": 106662901,
+       "cache-references": 90980113991,
+       "cache-misses": 432347357
+      },
+      "wallSeconds": 12.198644068092108,
+      "stdout": "RayTrace: 3643\n----",
+      "scores": {
+       "RayTrace": 3643.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237626195089,
+       "cycles": 47485747615,
+       "branch-instructions": 44530308854,
+       "branch-misses": 101786472,
+       "cache-references": 91013803807,
+       "cache-misses": 414337433
+      },
+      "wallSeconds": 12.187413988634944,
+      "stdout": "RayTrace: 3647\n----",
+      "scores": {
+       "RayTrace": 3647.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237562008032,
+       "cycles": 47437453221,
+       "branch-instructions": 44480760456,
+       "branch-misses": 103006513,
+       "cache-references": 90909611341,
+       "cache-misses": 471321079
+      },
+      "wallSeconds": 12.174492661841214,
+      "stdout": "RayTrace: 3650\n----",
+      "scores": {
+       "RayTrace": 3650.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237564731115,
+       "cycles": 47417768253,
+       "branch-instructions": 44494849052,
+       "branch-misses": 101915656,
+       "cache-references": 90940981184,
+       "cache-misses": 434644864
+      },
+      "wallSeconds": 12.169519808609039,
+      "stdout": "RayTrace: 3652\n----",
+      "scores": {
+       "RayTrace": 3652.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 237669654764,
+       "cycles": 47686432024,
+       "branch-instructions": 44529204499,
+       "branch-misses": 98115464,
+       "cache-references": 90616806436,
+       "cache-misses": 514759779
+      },
+      "wallSeconds": 12.237976431846619,
+      "stdout": "RayTrace: 3632\n----",
+      "scores": {
+       "RayTrace": 3632.0
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 237705207039.0,
+     "zjsMedian": 237648422611.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9988775592748782,
+      1.0003570083753912,
+      1.0006385889267975,
+      0.9990805778222789,
+      0.999512519852179,
+      0.9995526690052177,
+      0.9986055921435161,
+      1.0006852603335574
+     ],
+     "ratioMedian": 0.9995325944286984,
+     "ratioMAD": 0.0007397245502565042
+    },
+    "cycles": {
+     "qjsMedian": 47352319760.5,
+     "zjsMedian": 47427610737.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0003006519221478,
+      1.0016777328932094,
+      0.9940113411359274,
+      1.0009556926115926,
+      1.0014870583043063,
+      1.0059732717887306,
+      1.0020575892906134,
+      1.0112614896998797
+     ],
+     "ratioMedian": 1.0015823955987577,
+     "ratioMAD": 0.0009542233318875493
+    },
+    "branch-instructions": {
+     "qjsMedian": 44555677092.5,
+     "zjsMedian": 44529756676.5,
+     "pairedRatiosZjsOverQjs": [
+      0.9978150941425475,
+      1.001076866428251,
+      1.001345809011112,
+      0.9981495255671127,
+      0.9990077658962159,
+      0.9988990208465431,
+      0.9973208030764895,
+      1.0015078729458258
+     ],
+     "ratioMedian": 0.9989533933713795,
+     "ratioMAD": 0.0013854447618609211
+    },
+    "branch-misses": {
+     "qjsMedian": 100960648.0,
+     "zjsMedian": 101851064.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9893190648810113,
+      0.9995242085842052,
+      1.018479170375403,
+      1.0601560575655642,
+      1.00040029192769,
+      1.0143874773649562,
+      1.027227786615496,
+      0.9757118946379736
+     ],
+     "ratioMedian": 1.007393884646323,
+     "ratioMAD": 0.01458005274719587
+    },
+    "cache-references": {
+     "qjsMedian": 90960846674.5,
+     "zjsMedian": 90964015146.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9987606325917368,
+      1.0002125742841823,
+      1.001299706705275,
+      0.9997399967316762,
+      0.9994118392205973,
+      0.9995101928120474,
+      1.0001546067709657,
+      0.997602738467824
+     ],
+     "ratioMedian": 0.9996250947718619,
+     "ratioMAD": 0.0005584957557120962
+    },
+    "cache-misses": {
+     "qjsMedian": 407320633.0,
+     "zjsMedian": 433496110.5,
+     "pairedRatiosZjsOverQjs": [
+      1.129379428385301,
+      1.170847589149595,
+      0.8724968979580877,
+      1.0635242790289539,
+      1.0104145453150029,
+      1.3036917937812584,
+      1.0649980094237743,
+      1.3232960333238353
+     ],
+     "ratioMedian": 1.0971887189045377,
+     "ratioMAD": 0.08021652191729611
+    },
+    "wallSeconds": {
+     "qjsMedian": 12.161396009847522,
+     "zjsMedian": 12.172006235225126,
+     "pairedRatiosZjsOverQjs": [
+      0.9989004954422678,
+      1.0013979097099501,
+      0.9940911042572024,
+      1.0021281268275226,
+      1.001454597173635,
+      1.0059196821106644,
+      1.0013527228362866,
+      1.0113099003534298
+     ],
+     "ratioMedian": 1.0014262534417926,
+     "ratioMAD": 0.0016138156926274183
+    }
+   },
+   "derived": {
+    "qjsIPC": 5.019927391968812,
+    "zjsIPC": 5.0107610085785295,
+    "ipcRatioZjsOverQjs": 0.998174000802293
+   }
+  }
+ },
+ "orderLog": [
+  {
+   "bench": "raytrace",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 7,
+   "order": "zjs->qjs"
+  }
+ ]
+}

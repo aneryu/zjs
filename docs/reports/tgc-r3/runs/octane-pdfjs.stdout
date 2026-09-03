@@ -1,0 +1,68 @@
+PdfJS: 137
+----
+gc: collection entries total 160, major completed 6, minor completed 154, failed 0
+gc: collector counted objects freed 2745265 (excludes bytecode), zero-ref drains 0
+gc: heap live 8017208 bytes, account peak 66623294 bytes
+gc: external bytes current 1566073, peak 2200713, token bytes 1565997 in 141 tokens, untracked bytes 76, allocations 3449, frees 3304, invalid releases 0, weighted debt 43605056
+gc: weak refs current 0, finalizer queue current 0
+gc: major pause p50 1003736 ns, p95 6963892 ns, p99 7215493 ns, max 7215493 ns, retained 35 of 35 pauses
+gc: allocation histogram publications 4602226, payload bytes 370469023, p50-below-large 64, p95-below-large 128, p99-below-large 128, max-small 128, covered-by-small 4584139/4602222 below-large, large 4
+gc: Object publications total 2814103, slots2 15395
+gc: slots2 payload attaches 0, live side entries 0
+gc: block heap committed 23015424 live 4620672 committed/live-x1000 4981 superblocks 12 large maps 0
+gc: block heap topology classed superblocks 12, medium superblocks 0, initialized blocks 359, reserved-uninitialized blocks 25, nonempty blocks 322, partially-full blocks 272, empty-free blocks 37, empty-active blocks 0, decommitted-empty blocks 35, wholly-empty superblocks 0, hot-reuse blocks 0, interval-active blocks 0
+gc: block heap cell capacity live 4620672, nonempty capacity 20934912, empty capacity 2405632, within-nonempty-unused 16314240
+gc: block heap class 48 bytes initialized 24, nonempty 22, empty-free 2, empty-active 0, live-cells 19152, capacity-cells 32448
+gc: block heap class 64 bytes initialized 335, nonempty 300, empty-free 35, empty-active 0, live-cells 57834, capacity-cells 340360
+gc: block heap deferred block runs 2567, hot reuse published 155, reopened 65, pass-A settled cells 2622343
+gc: major threshold resets growth 11, small-heap-floor 0
+gc: block heap page returns cumulative decommitted 55726080, recommitted 53575680
+gc: block heap decommit checks 6, released blocks cumulative 907, current bytes 2150400, max batch bytes 16527360
+gc: process heap trim attempts 0, successes 0
+gc: marked-set census not run (pass --gc-mark-footprint; it costs a whole-heap walk inside every final remark)
+gc: incremental subphase ns totals begin-clear 400, begin-precise-seed 75233, begin-conservative-seed 233761, begin-retire 1984, finish-init 512, finish-remark-total 23322109, finish-conservative-seed-subset 157491, finish-weak 1904, finish-condemn 298339, finish-tail 4083791
+gc: incremental subphase reconciliation begin STW 316258 - subphases 311378 = other 4880 ns; finish STW 27719855 - subphases 27706655 = other 13200 ns
+gc: incremental subphase work totals retired non-block headers 0, retired young blocks 74, retired remembered sets 5, clearMarks non-block headers 0
+gc: generation current young 14355, remembered owners 23
+gc: minor collections 154, reclaimed 2500600, promoted-by-minor 99343, promoted-all 99343, remembered without young 532, remembered drops 0, suspensions 0
+gc: major retirement commits 6, abandons 0, current state clean
+gc: generational barrier calls 6859166, exit young-owner 6766598, exit old-target 18501, remembered-owner 74067
+gc: minor stw total 174158073800 ns, mean 1130896583 ns, max 1579898559 ns
+gc: minor pause p50 1169859084 ns, p95 1449149649 ns, p99 1521422134 ns, max 1579898559 ns over 154 retained of 154 samples
+gc: minor phase totals clear 267392, roots 1682175, conservative 3677239, remembered 521729, trace 4154714, sweep+destroy 173674177982, promote 1336331, other 472256238 ns
+gc: minor young-at-start mean 16882, max 20111
+gc: conservative-only young 415 over 154 verified minors
+gc: exact-target marking barrier calls 358701, exit marked-target 184933, exit unpublished-owner 0, exit unpublished-target 0, requeued-owner 173049, shaded-target 719
+gc: incremental doomed condemned headers 244666, destroyed counted objects 244665, parked entries drained 3275, parked-drain slices 5
+gc: incremental major cycles completed 6, aborted 0, forced 0, mark steps 15, cycle STW last 12822046 ns max 12822046 ns
+gc: mark frontier segment bytes active 0, cached 32768, peak-active 425984, peak-owned 425984; segments allocated 621, freed 613, allocation failures 0
+gc: cycle envelope measured 5, skipped 1, max-P/T S 7378043, T 14756086, B 14756138, P 21521049, B/T-x1000000 1000004, P/T-x1000000 1458453, P/S-x1000000 2916905, forced 0
+gc: incremental STW phase-segment max ns begin 102881, increment 1048071, destroy 1050168, finish 6384191
+gc: incremental STW phase totals begin 316258 ns/6 segments, increment 13016161 ns/15 segments, destroy 12037210 ns/14 segments, finish 27719855 ns/6 segments
+gc: conservative-only census probes 160, direct 836 (young 187), transitive 19507, dropped keys 0
+gc: conservative-only by source registers 616, stack<1K 8, <4K 140, <16K 63, <64K 9, >=64K 0; by pointer exact 724, prefix 13, interior 99
+gc: conservative-only by kind object 799 function_bytecode 0 var_ref 31 realm_context 0 module 0 shape 6 string 0 big_int 0
+gc: conservative-only registers x4 1 q2.lo 123 q2.hi 123 q3.lo 123 q3.hi 123 q4.lo 55 q5.hi 68
+gc: conservative-only top 20 of 132 keys (function, kind/class, source, pointer, young, native)
+gc: conservative-only #1 82 fn=Type1Parser_extractFontProgram kind=object class=13 src=register ptr=exact young=0 native=0
+gc: conservative-only #2 66 fn=Type1Parser_extractFontProgram kind=object class=2 src=register ptr=exact young=0 native=0
+gc: conservative-only #3 45 fn=createTableEntry kind=object class=13 src=register ptr=exact young=0 native=0
+gc: conservative-only #4 40 fn=createTableEntry kind=object class=2 src=register ptr=exact young=0 native=0
+gc: conservative-only #5 38 fn=Type1Parser_extractFontProgram kind=object class=1 src=register ptr=exact young=0 native=0
+gc: conservative-only #6 28 fn=Type1Font_flattenCharstring kind=object class=2 src=register ptr=exact young=0 native=0
+gc: conservative-only #7 27 fn=Type1Font_flattenCharstring kind=object class=13 src=register ptr=exact young=0 native=0
+gc: conservative-only #8 26 fn=arrayToString kind=object class=13 src=register ptr=exact young=0 native=0
+gc: conservative-only #9 25 fn=Type1Font_flattenCharstring kind=object class=13 src=stack_lt_4k ptr=interior young=1 native=0
+gc: conservative-only #10 20 fn=createTableEntry kind=object class=2 src=stack_lt_4k ptr=exact young=1 native=0
+gc: conservative-only #11 18 fn=arrayToString kind=object class=2 src=register ptr=exact young=0 native=0
+gc: conservative-only #12 17 fn=Type1Font_flattenCharstring kind=object class=2 src=stack_lt_4k ptr=exact young=1 native=0
+gc: conservative-only #13 16 fn=arrayToString kind=object class=1 src=register ptr=exact young=0 native=0
+gc: conservative-only #14 15 fn=isSeparator kind=object class=1 src=register ptr=exact young=0 native=0
+gc: conservative-only #15 15 fn=Font_charToGlyph kind=object class=13 src=register ptr=exact young=0 native=0
+gc: conservative-only #16 13 fn=isSeparator kind=object class=13 src=register ptr=exact young=0 native=0
+gc: conservative-only #17 11 fn=Type1Font_flattenCharstring kind=object class=2 src=stack_lt_4k ptr=interior young=1 native=0
+gc: conservative-only #18 10 fn=Type1Parser_extractFontProgram kind=var_ref class=0 src=register ptr=exact young=0 native=0
+gc: conservative-only #19 10 fn=createTableEntry kind=object class=1 src=register ptr=exact young=0 native=0
+gc: conservative-only #20 10 fn=getToken kind=object class=13 src=register ptr=exact young=0 native=0
+gc: endpoint doomed_pending false, doomed_buckets 0, doomed_headers 0, doomed_cursor false, doomed_blocks 0, parked_frees 0, deferred_finalizers 0, active_finalizer false
+exit=0

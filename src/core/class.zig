@@ -694,10 +694,16 @@ pub const Table = struct {
         payload: *Payload,
         visitor: *PayloadVisitor,
     ) bool {
+        // Parallel GC workers may inspect immutable class records while the
+        // mutator is stopped. Almost every standard object has no embedder
+        // payload marker, so reject that common case before entering the
+        // owner-only callback pin protocol (and before looking the record up a
+        // second time). A real callback remains owner-affine and pinned across
+        // invocation exactly as before.
+        const mark = (self.recordPtr(id) orelse return false).payload_mark orelse return false;
         self.assertOwnerThread();
         const generation = self.pinCallback(id) orelse return false;
         defer self.releaseCallback(id, generation);
-        const mark = (self.recordPtr(id) orelse return false).payload_mark orelse return false;
         mark(runtime, object, payload, visitor);
         return true;
     }

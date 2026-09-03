@@ -1,8 +1,9 @@
 # CodeLoad compile-throughput micro
 
 Fixed paired A/B harness for the code-load optimization campaign.
-The macro arbiter remains
-`tools/perf/zoo/run_zoo_compare.py --benches code-load`; this micro exists so
+The macro arbiter is the bench-v8 score protocol
+(`tools/perf/bench_v8/run_benchv8_compare.py`; the zoo runner this micro
+originally paired with was retired 2026-08-29); this micro exists so
 each cut can be adjudicated on a deterministic fixed workload with
 instructions as the primary (layout-immune) metric.
 
@@ -36,18 +37,18 @@ measured <1% on both engines in the 2026-07-31 attribution).
 ## Usage
 
 ```bash
-flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
+python3 tools/perf/measure_fields.py run --field b --layer single -- \
   python3 tools/perf/codeload/run_codeload_micro.py \
     --a /path/to/zjs-baseline --b zig-out/bin/zjs \
-    --mode compile --samples 8 --cpu 19 \
+    --mode compile --samples 8 --field b \
     --output /tmp/micro-compile.json
 ```
 
 Ratio is `b/a`: below 1.0 means the candidate does less work. Instructions
 decide work-removal cuts; cycles must not contradict (the runner prints a
-same-direction verdict); the zoo macro arbitrates the final merge.
+same-direction verdict); the bench-v8 macro arbitrates the final merge.
 
-## Fail-closed contracts (same lineage as run_zoo_compare.py)
+## Fail-closed contracts (same lineage as the retired run_zoo_compare.py)
 
 - odd `--samples` refused, not rounded (paired ABBA order must balance);
 - effective affinity attested to be exactly `{--cpu}`;

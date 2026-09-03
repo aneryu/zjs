@@ -19,7 +19,7 @@ pub const LogMode = enum { initial, again };
 
 pub fn create(rt: *core.JSRuntime, kind: i32, value: i32, b: i32, c: i32) !core.JSValue {
     const object = try core.Object.create(rt, core.class.ids.c_closure, null);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     try defineIntProperty(rt, object, "__closure_kind", kind);
     try defineIntProperty(rt, object, "__closure_value", value);
     try defineIntProperty(rt, object, "__closure_b", b);
@@ -269,7 +269,7 @@ pub fn appendLog(rt: *core.JSRuntime, globals: []globals_mod.Slot, mode: LogMode
 fn expectClosure(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
-    const closure: *core.Object = @fieldParentPtr("header", header);
+    const closure = core.Object.fromHeader(header);
     if (closure.class_id != core.class.ids.c_closure) return error.TypeError;
     return closure;
 }
@@ -297,7 +297,7 @@ fn incrementGlobalInt(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []
 
 fn iteratorFactory(rt: *core.JSRuntime, shape: i32) !core.JSValue {
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &iterator.header);
+    errdefer core.Object.destroyFromHeader(rt, iterator.gcHeader());
 
     const next_kind: i32 = switch (shape) {
         1 => 41,
@@ -348,7 +348,7 @@ fn iteratorNextNull(rt: *core.JSRuntime, closure: *core.Object) !core.JSValue {
 fn iteratorNextValueGetterThrows(rt: *core.JSRuntime, closure: *core.Object) !core.JSValue {
     if (try iteratorNextDoneIfConsumed(rt, closure)) |done| return done;
     const result = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &result.header);
+    errdefer core.Object.destroyFromHeader(rt, result.gcHeader());
     const getter = try create(rt, 12, 0, 0, 0);
     defer getter.free(rt);
     const value_key = try rt.internAtom("value");
@@ -680,7 +680,7 @@ test "appendArrayValue roots direct function bytecode value while appending" {
 
 fn arrayFromShape(rt: *core.JSRuntime, shape: i32) !core.JSValue {
     const array = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &array.header);
+    errdefer core.Object.destroyFromHeader(rt, array.gcHeader());
     switch (shape) {
         0 => {},
         1 => try appendArrayValue(rt, array, core.JSValue.int32(1)),
@@ -988,7 +988,7 @@ fn getGlobalThisObject(rt: *core.JSRuntime, globals: []globals_mod.Slot) !*core.
     defer global_value.free(rt);
     const header = global_value.refHeader() orelse return error.TypeError;
     if (!global_value.isObject()) return error.TypeError;
-    return @fieldParentPtr("header", header);
+    return core.Object.fromHeader(header);
 }
 
 fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {

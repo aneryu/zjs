@@ -1,0 +1,212 @@
+Splay: 5198
+SplayLatency: 6214
+
+ZJS opcode profile
+  opcodes executed: 319875063
+  measured ns:      not instrumented
+  value dups:       not instrumented
+  value frees:      0
+  prop lookups:     0
+  global lookups:   not instrumented
+  allocations:      not instrumented
+  call frames:      not instrumented
+  ic hits:          not instrumented
+  ic misses:        not instrumented
+  ic invalidations: not instrumented
+  ic promote poly:  not instrumented
+  ic promote mega:  not instrumented
+
+OPCODE                 COUNT          TOTAL_NS           AVG_NS             SLOW
+get_loc3              27638332   not instrumented not instrumented not instrumented
+get_field             25829014   not instrumented not instrumented not instrumented
+get_arg0              23112428   not instrumented not instrumented not instrumented
+define_field          15120007   not instrumented not instrumented not instrumented
+put_field             11438937   not instrumented not instrumented not instrumented
+push_0                11401424   not instrumented not instrumented not instrumented
+get_arg1              11400029   not instrumented not instrumented not instrumented
+push_1                11304000   not instrumented not instrumented not instrumented
+get_loc8              10297862   not instrumented not instrumented not instrumented
+return                 9527409   not instrumented not instrumented not instrumented
+get_var                8755828   not instrumented not instrumented not instrumented
+add                    8537834   not instrumented not instrumented not instrumented
+push_i8                8176024   not instrumented not instrumented not instrumented
+eq_if_false8           7920005   not instrumented not instrumented not instrumented
+push_atom_value        7680005   not instrumented not instrumented not instrumented
+object_slots2          7559230   not instrumented not instrumented not instrumented
+sub                    7451200   not instrumented not instrumented not instrumented
+call2                  7440000   not instrumented not instrumented not instrumented
+lnot                   6190832   not instrumented not instrumented not instrumented
+if_false8              5537976   not instrumented not instrumented not instrumented
+cmp_if_false8          4801090   not instrumented not instrumented not instrumented
+push_5                 3960005   not instrumented not instrumented not instrumented
+push_3                 3960004   not instrumented not instrumented not instrumented
+array_from             3840007   not instrumented not instrumented not instrumented
+push_2                 3840001   not instrumented not instrumented not instrumented
+push_4                 3840000   not instrumented not instrumented not instrumented
+push_6                 3840000   not instrumented not instrumented not instrumented
+push_7                 3840000   not instrumented not instrumented not instrumented
+if_true8               3788870   not instrumented not instrumented not instrumented
+gt                     3555739   not instrumented not instrumented not instrumented
+get_loc1               3367130   not instrumented not instrumented not instrumented
+put_loc3               3262104   not instrumented not instrumented not instrumented
+get_loc0_field         2886759   not instrumented not instrumented not instrumented
+put_loc8               2584920   not instrumented not instrumented not instrumented
+put_loc1               2011932   not instrumented not instrumented not instrumented
+get_loc2               1967052   not instrumented not instrumented not instrumented
+set_loc3               1889143   not instrumented not instrumented not instrumented
+get_loc0               1808621   not instrumented not instrumented not instrumented
+null                   1623775   not instrumented not instrumented not instrumented
+goto8                  1452539   not instrumented not instrumented not instrumented
+goto16                 1436340   not instrumented not instrumented not instrumented
+goto                   1391477   not instrumented not instrumented not instrumented
+push_this_put_loc0     1383614   not instrumented not instrumented not instrumented
+if_true                1370182   not instrumented not instrumented not instrumented
+put_loc2               1365999   not instrumented not instrumented not instrumented
+push_const8            1200041   not instrumented not instrumented not instrumented
+call_method            1163828   not instrumented not instrumented not instrumented
+get_field2             1059852   not instrumented not instrumented not instrumented
+put_loc0               1054828   not instrumented not instrumented not instrumented
+get_field2_call_method   1042796   not instrumented not instrumented not instrumented
+push_this               923604   not instrumented not instrumented not instrumented
+get_var_ref0            848048   not instrumented not instrumented not instrumented
+and                     840028   not instrumented not instrumented not instrumented
+drop                    833220   not instrumented not instrumented not instrumented
+dup                     812599   not instrumented not instrumented not instrumented
+get_loc2_field          783349   not instrumented not instrumented not instrumented
+set_var_ref0            720024   not instrumented not instrumented not instrumented
+return_undef            703029   not instrumented not instrumented not instrumented
+call_constructor        697191   not instrumented not instrumented not instrumented
+get_var_field           695745   not instrumented not instrumented not instrumented
+set_loc2                687723   not instrumented not instrumented not instrumented
+xor                     600020   not instrumented not instrumented not instrumented
+set_loc1                583788   not instrumented not instrumented not instrumented
+put_loc8_get_loc8       575788   not instrumented not instrumented not instrumented
+push_i32                480019   not instrumented not instrumented not instrumented
+shl                     480016   not instrumented not instrumented not instrumented
+get_loc2_field2         335771   not instrumented not instrumented not instrumented
+call0                   240011   not instrumented not instrumented not instrumented
+shr                     240008   not instrumented not instrumented not instrumented
+neq                     232009   not instrumented not instrumented not instrumented
+tail_call_method        231809   not instrumented not instrumented not instrumented
+inc_loc                 129402   not instrumented not instrumented not instrumented
+call1                   128003   not instrumented not instrumented not instrumented
+div                     120011   not instrumented not instrumented not instrumented
+get_array_el             16009   not instrumented not instrumented not instrumented
+mod                       8000   not instrumented not instrumented not instrumented
+gte                       7999   not instrumented not instrumented not instrumented
+put_var                   5416   not instrumented not instrumented not instrumented
+get_var_ref2              2807   not instrumented not instrumented not instrumented
+mul                       1805   not instrumented not instrumented not instrumented
+post_inc                  1802   not instrumented not instrumented not instrumented
+get_var_ref1              1408   not instrumented not instrumented not instrumented
+lt                        1403   not instrumented not instrumented not instrumented
+fclosure8                   47   not instrumented not instrumented not instrumented
+insert2                     33   not instrumented not instrumented not instrumented
+put_var_ref                 14   not instrumented not instrumented not instrumented
+get_length                  14   not instrumented not instrumented not instrumented
+get_arg                      8   not instrumented not instrumented not instrumented
+get_var_ref                  5   not instrumented not instrumented not instrumented
+if_false                     5   not instrumented not instrumented not instrumented
+push_true                    4   not instrumented not instrumented not instrumented
+get_var_undef                4   not instrumented not instrumented not instrumented
+put_var_ref0                 4   not instrumented not instrumented not instrumented
+push_false                   3   not instrumented not instrumented not instrumented
+catch                        3   not instrumented not instrumented not instrumented
+push_i16                     3   not instrumented not instrumented not instrumented
+get_arg2                     3   not instrumented not instrumented not instrumented
+get_var_ref3                 3   not instrumented not instrumented not instrumented
+get_field_field2             3   not instrumented not instrumented not instrumented
+undefined                    2   not instrumented not instrumented not instrumented
+strict_neq                   2   not instrumented not instrumented not instrumented
+set_loc0                     2   not instrumented not instrumented not instrumented
+put_arg1                     2   not instrumented not instrumented not instrumented
+put_var_ref1                 2   not instrumented not instrumented not instrumented
+ext0                         2   not instrumented not instrumented not instrumented
+object                       1   not instrumented not instrumented not instrumented
+set_name                     1   not instrumented not instrumented not instrumented
+eq                           1   not instrumented not instrumented not instrumented
+push_empty_string            1   not instrumented not instrumented not instrumented
+get_arg3                     1   not instrumented not instrumented not instrumented
+put_var_ref2                 1   not instrumented not instrumented not instrumented
+put_var_ref3                 1   not instrumented not instrumented not instrumented
+
+USING SUB               COUNT
+using_typeof_is_undefined         2  (sub 4)
+
+FAMILY (rollup)         COUNT
+add                    8537834
+and                     840028
+array_from             3840007
+call                   7808014
+call_constructor        697191
+call_method            1163828
+catch                        3
+cmp_if_false8          4801090
+define_field          15120007
+div                     120011
+drop                    833220
+dup                     812599
+eq                           1
+eq_if_false8           7920005
+fclosure                    47
+get_arg               34512469
+get_array_el             16009
+get_field             25829014
+get_field2             1059852
+get_field2_call_method   1042796
+get_field_field2             3
+get_length                  14
+get_loc               45078997
+get_loc0_field         2886759
+get_loc2_field          783349
+get_loc2_field2         335771
+get_var                8755828
+get_var_field           695745
+get_var_ref             852271
+get_var_undef                4
+goto                   4280356
+gt                     3555739
+gte                       7999
+if_false               5537981
+if_true                5159052
+inc_loc                 129402
+insert2                     33
+lnot                   6190832
+lt                        1403
+mod                       8000
+mul                       1805
+neq                     232009
+null                   1623775
+object                       1
+object_slots2          7559230
+post_inc                  1802
+push_atom_value        7680005
+push_const             1200041
+push_empty_string            1
+push_false                   3
+push_i16                     3
+push_i32                480019
+push_i8                8176024
+push_int              45985434
+push_this               923604
+push_this_put_loc0     1383614
+push_true                    4
+put_arg                      2
+put_field             11438937
+put_loc               10279783
+put_loc8_get_loc8       575788
+put_var                   5416
+put_var_ref                 22
+return                 9527409
+return_undef            703029
+set_loc                3160656
+set_name                     1
+set_var_ref             720024
+shl                     480016
+shr                     240008
+strict_neq                   2
+sub                    7451200
+tail_call_method        231809
+undefined                    2
+ext0                         2
+xor                     600020

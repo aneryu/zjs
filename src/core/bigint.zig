@@ -8,7 +8,9 @@
 //! this module; it depends only on core/libs, never exec/runtime/binding.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const gc = @import("gc.zig");
+const memory = @import("memory.zig");
 const libs = @import("../libs/root.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
@@ -147,6 +149,14 @@ pub const BigInt = struct {
     }
 
     pub fn createFromOwned(rt: *JSRuntime, value: libs.bigint.BigInt) !*BigInt {
+        const self = try createFromOwnedReserved(rt, value);
+        self.register(rt);
+        return self;
+    }
+
+    /// `createFromOwned` without the GC publication: the wrapper is on no
+    /// list and the tracer neither marks nor sweeps it until `register`.
+    pub fn createFromOwnedReserved(rt: *JSRuntime, value: libs.bigint.BigInt) !*BigInt {
         const self = try rt.memory.create(BigInt);
         errdefer rt.memory.destroy(BigInt, self);
 
@@ -222,6 +232,60 @@ pub const BigInt = struct {
 
     pub fn valueRef(self: *BigInt) JSValue {
         return JSValue.bigInt(&self.header);
+    }
+
+    pub inline fn fromHeader(header: *gc.Header) *BigInt {
+        return @alignCast(@fieldParentPtr("header", header));
+    }
+
+    /// Bytes this wrapper (plus inline limbs) is registered with. External
+    /// limbs are charged separately through `accountedAllocator`.
+    pub fn accountedAllocationSize(self: *const BigInt) usize {
+        return memory.MemoryAccount.gcSlabAccountedPayload(self) orelse
+            (@sizeOf(BigInt) + if (self.flags.inline_storage) self.famBytes() else 0);
+    }
+
+    /// Publish onto the GC list: from here the tracer owns the wrapper
+    /// (marked through `cycleMarkHeader`, swept in the doomed pass).
+    /// Constructors publish before returning; the parser's constant-pool
+    /// literals stay reserved until their FunctionBytecode is published
+    /// (`registerReservedValue`), and are destroyed by hand if that never
+    /// happens (`destroyIfReservedValue`).
+    pub fn register(self: *BigInt, rt: *JSRuntime) void {
+        rt.gc.addInitializedWithSizeNoFail(&self.header, self.accountedAllocationSize());
+    }
+
+    pub inline fn isRegistered(self: *const BigInt) bool {
+        return self.header.metaConst().alloc_info.heap_accounted;
+    }
+
+    /// Test seam: free a BigInt this frame owns outright, whether it is still
+    /// reserved or already registered (unlinked first, as the sweep would).
+    /// Production never frees a registered BigInt outside the collector.
+    pub fn releaseForTest(self: *BigInt, rt: *JSRuntime) void {
+        if (comptime !builtin.is_test) @compileError("test-only");
+        if (self.isRegistered()) {
+            rt.gc.unlinkObjectWithBytes(&self.header, gc.Registry.heapByteSizeFromHeader(rt, &self.header));
+        }
+        destroyFromHeader(rt, &self.header);
+    }
+
+    pub fn registerReservedValue(rt: *JSRuntime, value: JSValue) void {
+        if (!value.isBigInt()) return;
+        const header = value.refHeader() orelse return;
+        const self = fromHeader(header);
+        if (!self.isRegistered()) self.register(rt);
+    }
+
+    /// True when `value` was a reserved (never registered) heap BigInt and
+    /// has now been freed; false leaves the value to its ordinary owner.
+    pub fn destroyIfReservedValue(rt: *JSRuntime, value: JSValue) bool {
+        if (!value.isBigInt()) return false;
+        const header = value.refHeader() orelse return false;
+        const self = fromHeader(header);
+        if (self.isRegistered()) return false;
+        destroyFromHeader(rt, header);
+        return true;
     }
 
     // ---- single-allocation multiplication -----------------------------------
@@ -330,6 +394,7 @@ pub const BigInt = struct {
         std.debug.assert(len >= 2);
 
         self.publishInline(len, lhs.negative() != rhs.negative());
+        self.register(rt);
         return self;
     }
 
@@ -364,14 +429,20 @@ pub const BigInt = struct {
     // ---- destruction -------------------------------------------------------
 
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
-        const self: *BigInt = @alignCast(@fieldParentPtr("header", header));
+        fromHeader(header).destroyWithAccount(&rt.memory);
+    }
+
+    /// Free the wrapper (and inline limbs) through the account that created
+    /// it. The parser allocates constant-pool literals from the function's
+    /// account before any runtime publication, so it frees them here too.
+    pub fn destroyWithAccount(self: *BigInt, account: *memory.MemoryAccount) void {
         if (self.flags.inline_storage) {
             // Capacity, not len: an inline result normalized down from
             // `lhs.len + rhs.len` would otherwise be released at the wrong size.
-            rt.memory.destroyWithFam(BigInt, self, self.famBytes());
+            account.destroyWithFam(BigInt, self, self.famBytes());
             return;
         }
         if (self.capacity != 0) self.allocator.free(self.limbs_ptr.?[0..self.capacity]);
-        rt.memory.destroy(BigInt, self);
+        account.destroy(BigInt, self);
     }
 };

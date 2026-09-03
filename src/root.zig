@@ -206,7 +206,7 @@ pub const object = struct {
         if (!v.isObject()) return null;
         const header = v.refHeader() orelse return null;
         if (header.meta().flags.kind != .object) return null;
-        return @fieldParentPtr("header", header);
+        return CoreObject.fromHeader(header);
     }
 
     pub fn toValue(obj: *Object) value.Value {
@@ -471,13 +471,13 @@ pub const object = struct {
             errdefer guard.release();
 
             // Pin the view object itself.
-            guard.view_pin = try zjs_core.runtime.pinHeaderForNative(rt, &core_obj.header);
+            guard.view_pin = try zjs_core.runtime.pinHeaderForNative(rt, core_obj.gcHeader());
 
             // For a TypedArray/DataView, the bytes live in the backing buffer
             // object; pin THAT too (pinning only the view leaves bytes collectable).
             if (backingBufferCore(core_obj)) |backing| {
                 if (backing != core_obj) {
-                    guard.buffer_pin = try zjs_core.runtime.pinHeaderForNative(rt, &backing.header);
+                    guard.buffer_pin = try zjs_core.runtime.pinHeaderForNative(rt, backing.gcHeader());
                 }
             }
             return guard;
@@ -912,7 +912,7 @@ test "public Buffer borrowBytes detach is rejected up front" {
     // Detach via the backing ArrayBuffer object.
     const ta_core: *zjs_core.Object = @ptrCast(@alignCast(ta));
     const backing_value = ta_core.typedArrayBuffer().?;
-    const backing: *zjs_core.Object = @fieldParentPtr("header", backing_value.refHeader().?);
+    const backing = zjs_core.Object.fromHeader(backing_value.refHeader().?);
     backing.detachByteStorage(rt);
 
     // A fresh borrow after detach must fail (the old ptr is dead).

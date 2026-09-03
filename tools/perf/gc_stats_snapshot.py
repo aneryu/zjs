@@ -11,9 +11,9 @@ Comparison mode reads two existing snapshots and reports numeric leaves whose
 absolute and relative movement crosses caller-provided thresholds. It runs no
 engine process.
 
-The lane measurement CPUs (5-9 and 15-19) are rejected explicitly.  CPU 0 is
-the default so this check cannot accidentally occupy the measurement host's
-reserved clusters.
+The lane measurement CPUs (5-9 and 15-19) are rejected explicitly by default.
+Stage 0 may opt CPU9 in with ``--allow-field-cpu``, but only under exact field-A
+affinity and lock attestation; CPU19 remains unavailable. CPU0 stays the default.
 """
 
 from __future__ import annotations
@@ -30,10 +30,48 @@ from pathlib import Path
 
 
 PERF_DIR = Path(__file__).resolve().parent
-ZOO_TOOL_DIR = PERF_DIR / "zoo"
-sys.path.insert(0, str(ZOO_TOOL_DIR))
-from run_zoo_compare import git_describe, sha256_of  # noqa: E402
-from run_zoo_fixed_pmu import fixed_source  # noqa: E402
+sys.path.insert(0, str(PERF_DIR / "bench_v8"))
+from run_fixed_pmu import sha256_of  # noqa: E402
+sys.path.insert(0, str(PERF_DIR))
+from measure_fields import FIELDS, lock_attested  # noqa: E402
+
+# Deterministic fixed-work transform for the EXTERNAL javascript-zoo
+# standalone files this tool still measures against (its GC accounting
+# baselines are recorded in that corpus). Inlined verbatim from the retired
+# tools/perf/zoo/run_zoo_fixed_pmu.py (2026-08-29); the vendored bench-v8
+# fixed-work runner assembles sources instead and has no marker rewrite.
+WARMUP_MARKER = "BenchmarkSuite.config.doWarmup = undefined;"
+DETERMINISTIC_MARKER = "BenchmarkSuite.config.doDeterministic = undefined;"
+
+
+def fixed_source(source: bytes, path: Path, iteration_divisor: int) -> bytes:
+    warmup = WARMUP_MARKER.encode()
+    deterministic = DETERMINISTIC_MARKER.encode()
+    if source.count(warmup) != 1 or source.count(deterministic) != 1:
+        print(
+            f"error: {path} does not contain exactly one canonical Octane "
+            "warmup and deterministic configuration assignment",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    deterministic_replacement = "BenchmarkSuite.config.doDeterministic = true;"
+    if iteration_divisor != 1:
+        deterministic_replacement += f"""
+for (var __zjs_suite = 0; __zjs_suite < BenchmarkSuite.suites.length; __zjs_suite++) {{
+  var __zjs_benchmarks = BenchmarkSuite.suites[__zjs_suite].benchmarks;
+  for (var __zjs_bench = 0; __zjs_bench < __zjs_benchmarks.length; __zjs_bench++) {{
+    var __zjs_item = __zjs_benchmarks[__zjs_bench];
+    __zjs_item.deterministicIterations = Math.max(1, Math.ceil(__zjs_item.deterministicIterations / {iteration_divisor}));
+    __zjs_item.minIterations = Math.max(1, Math.ceil(__zjs_item.minIterations / {iteration_divisor}));
+  }}
+}}"""
+    return source.replace(
+        warmup,
+        b"BenchmarkSuite.config.doWarmup = false;",
+    ).replace(
+        deterministic,
+        deterministic_replacement.encode(),
+    )
 
 
 GC_HEAVY_SIX = (
@@ -93,6 +131,27 @@ def tracked_tree_dirty(repo: Path) -> bool:
     return proc.returncode == 1
 
 
+def git_identity(repo: Path) -> dict[str, str | bool]:
+    revision = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if revision.returncode != 0:
+        raise SnapshotError(f"cannot resolve source revision in {repo}")
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode != 0:
+        raise SnapshotError(f"cannot inspect source state in {repo}")
+    return {
+        "commit": revision.stdout.strip(),
+        "dirty": bool(status.stdout.strip()),
+    }
+
+
 def one_match(text: str, pattern: str, label: str) -> dict[str, int | str]:
     matches = list(re.finditer(pattern, text, re.MULTILINE))
     if len(matches) != 1:
@@ -101,6 +160,8 @@ def one_match(text: str, pattern: str, label: str) -> dict[str, int | str]:
         )
     values: dict[str, int | str] = {}
     for key, value in matches[0].groupdict().items():
+        if value is None:
+            continue  # optional group (older row formats)
         values[key] = int(value) if value.isdigit() else value
     return values
 
@@ -207,6 +268,11 @@ def parse_gc_stats(text: str) -> dict:
         text,
         r"^gc: block heap committed (?P<committed>\d+) live (?P<live>\d+) committed/live-x1000 (?P<committed_over_live_x1000>\d+) superblocks (?P<superblocks>\d+) large maps (?P<large_maps>\d+)$",
         "block heap",
+    )
+    block_reuse = one_match(
+        text,
+        r"^gc: block heap deferred block runs (?P<deferred_block_runs>\d+), hot reuse published (?P<hot_reuse_published>\d+), reopened (?P<reopened>\d+), pass-A settled cells (?P<pass_a_settled_cells>\d+)$",
+        "block reuse",
     )
     thresholds = one_match(
         text,
@@ -326,7 +392,7 @@ def parse_gc_stats(text: str) -> dict:
     )
     marked_kinds = one_match(
         text,
-        r"^gc: marked-set kinds object (?P<object>\d+), function-bytecode (?P<function_bytecode>\d+), var-ref (?P<var_ref>\d+), realm-context (?P<realm_context>\d+), module (?P<module>\d+), shape (?P<shape>\d+)$",
+        r"^gc: marked-set kinds object (?P<object>\d+), function-bytecode (?P<function_bytecode>\d+), var-ref (?P<var_ref>\d+), realm-context (?P<realm_context>\d+), module (?P<module>\d+), shape (?P<shape>\d+)(?:, big-int (?P<big_int>\d+))?$",
         "marked-set kinds",
     )
     trace_classes = one_match(
@@ -446,19 +512,32 @@ def parse_gc_stats(text: str) -> dict:
         decommit_totals["decommitted"] - decommit_totals["recommitted"], 0
     ):
         raise SnapshotError("current decommitted bytes are inconsistent")
-    if doomed["destroyed_objects"] > doomed["condemned_headers"]:
-        raise SnapshotError("destroyed object count exceeds condemned headers")
-    if marked["majors"] > collections["major"]:
-        raise SnapshotError("marked-set censuses exceed completed majors")
+    # Eager zero-ref teardown is counted as physical destruction without first
+    # entering the traced condemned population.  The physical subset therefore
+    # need not fit under condemned_headers, but it must fit under the collector's
+    # total counted releases.
+    if doomed["destroyed_objects"] > collector["objects_freed"]:
+        raise SnapshotError("destroyed object count exceeds collector releases")
+    # The footprint census runs after final marking but before condemnation and
+    # deferred destruction commit the major.  A naturally timed endpoint may
+    # therefore expose the final census one generation ahead of the completed
+    # counter.  There is only one active major, so a lead larger than one still
+    # proves broken accounting.
+    if marked["majors"] > collections["major"] + 1:
+        raise SnapshotError(
+            "marked-set censuses exceed completed majors plus one active cycle"
+        )
     if marked["headers"] != sum(marked_kinds.values()):
         raise SnapshotError("marked kind partition does not add to headers")
     if marked["headers"] != sum(trace_classes.values()):
         raise SnapshotError("marked trace-class partition does not add to headers")
     if marked["block_headers"] > marked_kinds["object"]:
         raise SnapshotError("marked block headers exceed marked objects")
+    # Every gc.Header kind is tracer-owned since TGC S1; big-int is optional
+    # in the row so pre-S1 baseline binaries still parse.
     expected_refcount_removed = sum(
-        marked_kinds[key]
-        for key in ("object", "function_bytecode", "var_ref", "module")
+        marked_kinds.get(key, 0)
+        for key in ("object", "function_bytecode", "var_ref", "module", "shape", "realm_context", "big_int")
     )
     if marked["refcount_removed_headers"] != expected_refcount_removed:
         raise SnapshotError("refcount-removed marked partition is inconsistent")
@@ -575,6 +654,10 @@ def parse_gc_stats(text: str) -> dict:
             "maxDecommitBatch": decommit["max_batch"],
             "trimAttempts": trim["attempts"],
             "trimSuccesses": trim["successes"],
+            "deferredBlockRuns": block_reuse["deferred_block_runs"],
+            "hotReusePublished": block_reuse["hot_reuse_published"],
+            "reopened": block_reuse["reopened"],
+            "passASettledCells": block_reuse["pass_a_settled_cells"],
         },
         "cycles": {
             "collectionEntries": collections["entries"],
@@ -886,10 +969,20 @@ def compare_snapshots(
     return drifts
 
 
-def validate_cpu(cpu: int) -> None:
+def validate_cpu(cpu: int, allow_field_cpu: bool = False) -> None:
     if cpu < 0:
         raise SnapshotError("--cpu must be non-negative")
     if cpu in FORBIDDEN_CPUS:
+        if allow_field_cpu and cpu == FIELDS["a"].single_cpu:
+            if os.sched_getaffinity(0) != {cpu}:
+                raise SnapshotError(
+                    "--allow-field-cpu requires exact field-A affinity on CPU9"
+                )
+            if not lock_attested(FIELDS["a"]):
+                raise SnapshotError(
+                    "--allow-field-cpu requires the canonical field-A lock attestation"
+                )
+            return
         raise SnapshotError(
             f"CPU {cpu} is reserved for measurements; choose a non-reserved CPU"
         )
@@ -921,7 +1014,7 @@ def run_checked(command: list[str], timeout: int) -> subprocess.CompletedProcess
 
 
 def capture(args: argparse.Namespace) -> dict:
-    validate_cpu(args.cpu)
+    validate_cpu(args.cpu, args.allow_field_cpu)
     binary = Path(args.zjs).resolve()
     zoo = Path(args.zoo).resolve()
     bench_dir = zoo / "bench"
@@ -939,7 +1032,15 @@ def capture(args: argparse.Namespace) -> dict:
     runs: list[dict] = []
     with tempfile.TemporaryDirectory(prefix="gc-stats-fixed-work-") as tmp:
         tmp_dir = Path(tmp)
-        for bench in GC_HEAVY_SIX:
+        benches = args.benches or GC_HEAVY_SIX
+        unknown = sorted(set(benches) - set(GC_HEAVY_SIX))
+        if unknown:
+            raise SnapshotError(
+                f"unknown --benches values {unknown}; expected a subset of {GC_HEAVY_SIX}"
+            )
+        if not benches:
+            raise SnapshotError("--benches must name at least one benchmark")
+        for bench in benches:
             original_path = bench_dir / f"{bench}.js"
             if not original_path.is_file():
                 raise SnapshotError(f"benchmark not found: {original_path}")
@@ -978,8 +1079,8 @@ def capture(args: argparse.Namespace) -> dict:
             )
 
     repo = PERF_DIR.parents[1]
-    repo_desc = git_describe(repo)
-    zoo_desc = git_describe(zoo)
+    repo_desc = git_identity(repo)
+    zoo_desc = git_identity(zoo)
     return {
         "schemaVersion": 7,
         "kind": "gc-heavy-six-fixed-work-structure",
@@ -987,7 +1088,11 @@ def capture(args: argparse.Namespace) -> dict:
             "One run per benchmark; structural counts are diff guards. "
             "Nanosecond fields are diagnostic only, not a performance gate."
         ),
-        "execution": {"cpu": args.cpu, "runsPerBenchmark": 1},
+        "execution": {
+            "cpu": args.cpu,
+            "runsPerBenchmark": 1,
+            "fieldCpuAllowed": args.allow_field_cpu,
+        },
         "engine": {
             "configSignature": config,
             "sha256": sha256_of(binary),
@@ -1011,7 +1116,20 @@ def main() -> int:
     parser.add_argument("--zjs", default="zig-out/bin/zjs")
     parser.add_argument("--zoo", default="/home/aneryu/javascript-zoo")
     parser.add_argument("--cpu", type=int, default=0)
+    parser.add_argument(
+        "--allow-field-cpu",
+        action="store_true",
+        help=(
+            "allow CPU9 only when exact field-A affinity and lock ownership "
+            "are attested; default reserved-CPU refusal is unchanged"
+        ),
+    )
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument(
+        "--benches",
+        nargs="*",
+        help="capture a named subset of the fixed GC-heavy six",
+    )
     parser.add_argument("--output")
     parser.add_argument(
         "--compare",

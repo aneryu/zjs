@@ -123,7 +123,10 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
 
             /// Promote a borrowed binding when native state genuinely escapes
             /// the current context lifetime.
-            pub fn retain(self: Binding) OwnedBinding {
+            pub fn retain(self: Binding) !OwnedBinding {
+                // An escaping native holder is not a traced parent; pin the
+                // realm so the tracer keeps it (and its class table) alive.
+                try self.realm.runtime.gc.pinHeader(&self.realm.header);
                 return .{
                     .realm = core.RealmRef.retain(self.realm),
                     .class_id = self.class_id,
@@ -146,6 +149,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             class_id: core.ClassId,
 
             pub fn deinit(self: *OwnedBinding) void {
+                if (self.realm.borrow()) |ctx| ctx.runtime.gc.unpinHeader(&ctx.header);
                 self.realm.deinit();
             }
 
@@ -281,7 +285,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             const rt = bound.realm.runtimePtr();
             const prototype = bound.prototype() orelse return error.NotInstalled;
             const object = try core.Object.create(rt, bound.class_id, prototype);
-            errdefer core.Object.destroyFromHeader(rt, &object.header);
+            errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
             const payload_ptr = try installPayload(rt, object, data);
             _ = payload_ptr;
             return object.value();
@@ -1078,16 +1082,22 @@ test "JSObject owned binding explicitly retains its realm" {
     const ctx = try core.JSContext.create(rt);
     try ObjectType.install(ctx);
 
-    var binding = (try ObjectType.binding(ctx)).retain();
+    var binding = try (try ObjectType.binding(ctx)).retain();
     ctx.destroy();
+    // The owned binding pins the realm: it survives a full collection with
+    // the host create-ref gone.
+    _ = try rt.forceMajorGC(null);
     try std.testing.expect(rt.firstContext() != null);
 
     const value = try binding.new(.{ .value = 7 });
     try std.testing.expectEqual(@as(i32, 7), binding.payload(value).?.value);
     value.free(rt);
 
+    // Dropping the binding unpins the realm; whether the next collection
+    // reclaims it depends on conservative residue in this frame (`value`),
+    // so the teardown leak check, not an assertion here, proves the release.
     binding.deinit();
-    try std.testing.expect(rt.firstContext() == null);
+    _ = try rt.forceMajorGC(null);
 }
 
 test "JSObject prototype methods enforce realm-local binding" {

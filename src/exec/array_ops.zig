@@ -301,7 +301,7 @@ pub fn arrayPrototypeNativeRecord(
 
 pub fn buildCallSiteArray(ctx: *core.JSContext, global: *core.Object, skip_name: ?[]const u8) !core.JSValue {
     const array = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &array.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, array.gcHeader());
     const limit = errorStackTraceLimit(ctx.runtime, global);
     const frames = try ctx.snapshotBacktraceFrames();
     defer ctx.freeBacktraceFrameSnapshot(frames);
@@ -438,7 +438,7 @@ pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, global: *core.Object, 
 
 pub noinline fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: *const RegExpMatch) !core.JSValue {
     const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
+    errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
 
     const full = try createRegExpIndexPair(rt, global, found.index, found.index + found.len);
     defer full.free(rt);
@@ -2746,7 +2746,7 @@ fn fastDenseArraySplice(
         // already owned -- but these inserts are new edges into an array that
         // may be arbitrarily old, which is what makes `a.splice(i, 1, {..})`
         // free its own fresh elements under a minor.
-        rt.gc.rememberOwnerForBulkWrite(&object.header);
+        rt.gc.rememberOwnerForBulkWrite(object.gcHeader());
         const values = object.fastArrayValuesMut();
         for (insert_items, 0..) |item, offset| {
             const slot = &values[actual_start + offset];
@@ -3469,7 +3469,7 @@ fn fastDenseArrayUnshift(
     // `fastArrayEnsureCapacity` rather than the remembering
     // `appendUninitializedFastArraySlot`, so the new head references are edges
     // from a possibly-old array that the minor is never told about.
-    rt.gc.rememberOwnerForBulkWrite(&object.header);
+    rt.gc.rememberOwnerForBulkWrite(object.gcHeader());
     for (args, 0..) |item, index| {
         values[index] = item.dup();
     }
@@ -3980,7 +3980,7 @@ pub fn arrayFromCall(
         try constructValueOrBytecode(ctx, output, global, constructor_value, &.{core.JSValue.int32(@intCast(length))}, caller_function, caller_frame)
     else blk: {
         const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-        errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+        errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
         out.setArrayLength(@intCast(length));
         break :blk out.value();
     };
@@ -4861,7 +4861,7 @@ pub fn arrayOfCall(
         try constructValueOrBytecode(ctx, output, global, constructor_value, &.{length_value}, caller_function, caller_frame)
     else blk: {
         const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-        errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
+        errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
         out.setArrayLength(@intCast(args.len));
         break :blk out.value();
     };
@@ -5010,7 +5010,7 @@ pub fn arrayMapCall(
     }
 
     const mapped = try core.Object.createArray(ctx.runtime, null);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &mapped.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, mapped.gcHeader());
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
         const item = try object.getProperty(core.atom.atomFromUInt32(index));
@@ -5057,11 +5057,14 @@ const SortEntryRootWindow = struct {
     }
 
     fn deactivate(self: *@This(), rt: *core.JSRuntime) void {
+        // `activate` links nothing for an empty receiver; deactivating a frame
+        // that was never pushed is a LIFO violation under precise-root
+        // builds (found by the `-Dzjs_gc_roots_diag` test262 run on
+        // `[].sort()`; production's containers-only policy masked it).
+        if (self.rooted_values.len == 0) return;
         self.frame.deactivate(rt);
-        if (self.rooted_values.len != 0) {
-            rt.memory.free(core.JSValue, self.rooted_values);
-            self.rooted_values = &.{};
-        }
+        rt.memory.free(core.JSValue, self.rooted_values);
+        self.rooted_values = &.{};
     }
 };
 
@@ -6030,7 +6033,7 @@ pub fn uint8ArrayViewBytes(rt: *core.JSRuntime, object: *core.Object) ![]u8 {
 
 pub fn uint8ArrayCodecResult(rt: *core.JSRuntime, read: usize, written: usize) !core.JSValue {
     const object = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     try defineValueProperty(rt, object, "read", core.JSValue.int32(@intCast(read)));
     try defineValueProperty(rt, object, "written", core.JSValue.int32(@intCast(written)));
     return object.value();
@@ -6113,6 +6116,7 @@ pub noinline fn putDenseArrayElementOverwriteOwnedFast(rt: *core.JSRuntime, obje
     const new_count = index + 1;
     if (new_count > object.fastArrayCapacity()) return .append_candidate;
     object.fastArraySlotAssumeCapacity(index).* = value;
+    rt.gc.auditUnbarrieredStore(object.gcHeader(), value.cycleMarkHeader(), .dense_array_in_capacity_append);
     object.setFastArrayCountAssumeCapacity(new_count);
     if (new_count > object.arrayLength()) object.setArrayLength(new_count);
     object.markIndexedProperties(rt);
@@ -6436,7 +6440,7 @@ pub fn arrayIteratorMethodRecord(ctx: *core.JSContext, global: *core.Object, rec
     }
     const prototype = try arrayIteratorPrototypeFromContext(ctx, global);
     const iterator = try core.Object.create(ctx.runtime, core.class.ids.array_iterator, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &iterator.header);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, iterator.gcHeader());
     object_value_owned = false;
     try iterator.setOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot(), object_value);
     iterator.iteratorIndexSlot().* = 0;
@@ -6488,7 +6492,7 @@ pub fn createArrayFromArgs(rt: *core.JSRuntime, global: *core.Object, args: []co
     defer root_frame.deactivate(rt);
 
     const array = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    errdefer core.Object.destroyFromHeader(rt, &array.header);
+    errdefer core.Object.destroyFromHeader(rt, array.gcHeader());
     try array.reserveDenseArrayElements(rt, @intCast(rooted_args.len));
     for (rooted_args, 0..) |arg, index| {
         const atom_id = core.atom.atomFromUInt32(@intCast(index));

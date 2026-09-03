@@ -49,6 +49,9 @@ test "gc stress deterministic tiny heap preserves live roots" {
         edge_key,
         core.Descriptor.data(objects[0].?.value(), true, true, true),
     );
+    // Baseline after a sweep: shapes the objects transitioned away from are
+    // tracer-owned garbage until collected, and must not count as "live".
+    _ = try rt.forceMajorGC(null);
     const live_with_cycle = rt.gc.liveCount();
     try std.testing.expect(live_with_cycle >= count);
 

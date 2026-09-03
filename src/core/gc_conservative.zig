@@ -1,6 +1,7 @@
-//! Conservative native-root scanner (design §7.2). Written for the Stage 1
-//! shadow observer and inherited by the reclaiming tracer, which is now its
-//! only caller.
+//! Conservative native-root scanner (design §7.2): the net under every Zig
+//! local that holds a heap reference across an allocation while production
+//! links only container/window `ValueRootFrame`s (R1 of the completion plan
+//! retires it to a verification arm).
 //!
 //! Implemented ABIs: AArch64 Linux/macOS (AAPCS64 + Darwin), x86_64 SysV
 //! (Linux/macOS), and x86_64 Windows. Remaining ABIs are an explicit
@@ -8,8 +9,7 @@
 //!
 //! Candidates are never dereferenced. A machine word is a root only if the
 //! live address registry maps it to a published allocation (header, metadata
-//! prefix, interior, or one-past-end). `AddressLookup.build` remains a
-//! census-snapshot oracle for tests.
+//! prefix, interior, or one-past-end).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -17,6 +17,7 @@ const builtin = @import("builtin");
 const gc = @import("gc.zig");
 const AddressRegistry = @import("gc_address_registry.zig");
 const runtime_mod = @import("runtime.zig");
+const object_mod = @import("object.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 
 pub const target_supported = switch (builtin.cpu.arch) {
@@ -54,61 +55,6 @@ pub const Metrics = struct {
     supported: bool = target_supported,
     candidates: usize = 0,
     validated_hits: usize = 0,
-    retained_only_conservatively: usize = 0,
-    direct_bytes: usize = 0,
-    transitive_bytes: usize = 0,
-};
-
-const Range = struct {
-    lo: usize,
-    hi: usize,
-    header: *gc.Header,
-
-    fn lessThan(_: void, a: Range, b: Range) bool {
-        return a.lo < b.lo;
-    }
-};
-
-pub const AddressLookup = struct {
-    ranges: []Range,
-
-    /// Census snapshot used as a test oracle against the live page-radix
-    /// registry. Collection no longer builds this on the mark path.
-    pub fn build(rt: *JSRuntime, allocator: std.mem.Allocator) std.mem.Allocator.Error!AddressLookup {
-        var list: std.ArrayList(Range) = .empty;
-        var iterator = rt.gc.objectIterator();
-        while (iterator.next()) |header| {
-            const header_addr = @intFromPtr(header);
-            const size = gc.Registry.heapByteSizeFromHeader(rt, header);
-            const lo = header_addr - gc.metadata_prefix_size;
-            // Exclusive end includes one-past-end of the object body.
-            const hi = header_addr + size + 1;
-            try list.append(allocator, .{ .lo = lo, .hi = hi, .header = header });
-        }
-        const ranges = list.items;
-        std.mem.sort(Range, ranges, {}, Range.lessThan);
-        return .{ .ranges = ranges };
-    }
-
-    pub fn resolve(self: AddressLookup, addr: usize) ?*gc.Header {
-        if (addr < 4096) return null;
-        const ranges = self.ranges;
-        if (ranges.len == 0) return null;
-        var lo: usize = 0;
-        var hi: usize = ranges.len;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            if (ranges[mid].lo <= addr) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        if (lo == 0) return null;
-        const range = ranges[lo - 1];
-        if (addr < range.hi) return range.header;
-        return null;
-    }
 };
 
 const SpillImage = switch (builtin.cpu.arch) {
@@ -329,7 +275,7 @@ fn scanWords(
     var addr = std.mem.alignForward(usize, lo, @sizeOf(usize));
     // Account the fixed word range once. Keeping both counters in the loop
     // forced two diagnostic read-modify-writes for every native-stack word --
-    // once to this scan's Metrics and once inside `forEachGcObjectAt` to the
+    // once to this scan's Metrics and once inside `forEachTraceCandidateAt` to the
     // registry's cumulative Stats. The callback may alias arbitrary runtime
     // state, so the compiler cannot safely hoist those writes on its own.
     const candidates = if (hi > addr) (hi - addr) / @sizeOf(usize) else 0;
@@ -338,13 +284,17 @@ fn scanWords(
     var validated_hits: usize = 0;
     while (addr + @sizeOf(usize) <= hi) : (addr += @sizeOf(usize)) {
         const word = @as(*const usize, @ptrFromInt(addr)).*;
+        if (comptime gc.roots_diag_enabled) {
+            diag_word.addr = addr;
+            diag_word.word = word;
+        }
         // Shade every gc object the word lands inside, not just one. A word
         // sitting where object A's one-past-end meets object B's metadata
         // prefix is a live reference to whichever of the two the native code
         // meant, and the registry cannot tell; shading both is the only safe
         // reading. String and rope hits are still discarded -- they are
         // refcount-owned and the tracer does not sweep them.
-        const hits = rt.gc.address_registry.forEachGcObjectAt(word, scan_filter, shade_ctx, shade);
+        const hits = rt.gc.address_registry.forEachTraceCandidateAt(word, scan_filter, shade_ctx, shade);
         if (hits != 0) validated_hits += 1;
     }
     metrics.validated_hits += validated_hits;
@@ -373,8 +323,243 @@ pub fn spillRegistersAndScan(
     const sp = dumpRegisters(&image);
     std.mem.doNotOptimizeAway(&image);
     const high = scanHigh(rt, sp);
+    if (comptime gc.roots_diag_enabled) {
+        diag_word.sp = sp;
+        diag_word.image_lo = @intFromPtr(&image);
+        diag_word.image_hi = @intFromPtr(&image) + @sizeOf(SpillImage);
+    }
     scanWords(rt, sp, high, scan_filter, metrics, shade, shade_ctx);
 }
+
+// ===== R3 roots diagnosis (`-Dzjs_gc_roots_diag=true`) =====
+//
+// Question: in a production binary, which objects does the conservative
+// scan alone keep alive, and which native word did it? The probe in
+// `gc_trace_stw.computeFullReachable` finishes the precise trace first, so a
+// header that is unmarked when the conservative callback reaches it and
+// marked after is a DIRECT conservative-only root; everything the drain then
+// reaches through it is TRANSITIVE. The scan loop publishes the word it is
+// resolving; the census keys each direct hit by (interpreter function,
+// header kind, object class, word source, pointer shape).
+
+/// The stack word the scan loop is currently resolving, plus the frame
+/// geometry needed to classify it. Written only in the diag build.
+pub const DiagWord = struct {
+    addr: usize = 0,
+    word: usize = 0,
+    sp: usize = 0,
+    image_lo: usize = 0,
+    image_hi: usize = 0,
+};
+threadlocal var diag_word: DiagWord = .{};
+
+pub inline fn diagCurrentWord() DiagWord {
+    return diag_word;
+}
+
+/// Number of machine words in the register spill image.
+pub const diag_register_words = if (target_supported) @sizeOf(SpillImage) / @sizeOf(usize) else 0;
+
+pub fn diagRegisterName(index: usize, buf: []u8) []const u8 {
+    if (comptime builtin.cpu.arch == .aarch64) {
+        if (index < 31) return std.fmt.bufPrint(buf, "x{d}", .{index}) catch "?";
+        if (index == 31) return "pad";
+        const q = (index - 32) / 2;
+        return std.fmt.bufPrint(buf, "q{d}.{s}", .{ q, if ((index - 32) % 2 == 0) "lo" else "hi" }) catch "?";
+    } else if (comptime builtin.cpu.arch == .x86_64) {
+        const names = [_][]const u8{ "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "pad", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" };
+        if (index < names.len) return names[index];
+        const x = (index - 16) / 2;
+        return std.fmt.bufPrint(buf, "xmm{d}.{s}", .{ x, if ((index - 16) % 2 == 0) "lo" else "hi" }) catch "?";
+    }
+    return "?";
+}
+
+pub const RootsDiagCensus = struct {
+    pub const Source = enum(u3) { register, stack_lt_1k, stack_lt_4k, stack_lt_16k, stack_lt_64k, stack_ge_64k };
+    pub const PtrKind = enum(u2) { exact, prefix, interior };
+
+    pub const Key = packed struct(u64) {
+        function_atom: u32,
+        class_id: u16,
+        kind: u4,
+        source: u3,
+        ptr_kind: u2,
+        young: u1,
+        native: u1,
+        _pad: u5 = 0,
+    };
+
+    const Slot = struct {
+        key: Key = @bitCast(@as(u64, 0)),
+        count: usize = 0,
+        used: bool = false,
+    };
+    const slots_len = 1024;
+
+    slots: [slots_len]Slot = @splat(.{}),
+    /// `computeFullReachable` runs with the conservative arm on.
+    probes: usize = 0,
+    /// Headers a conservative word marked that the precise trace had not.
+    direct: usize = 0,
+    direct_young: usize = 0,
+    /// Conservative-only headers reached through a direct hit, not by a word
+    /// of their own.
+    transitive: usize = 0,
+    /// Distinct keys the fixed table could not hold (never silently dropped:
+    /// printed with the census).
+    dropped_keys: usize = 0,
+    by_source: [6]usize = @splat(0),
+    by_ptr_kind: [3]usize = @splat(0),
+    by_kind: [8]usize = @splat(0),
+    by_register: [if (diag_register_words == 0) 1 else diag_register_words]usize = @splat(0),
+
+    fn hashKey(key: Key) usize {
+        const bits: u64 = @bitCast(key);
+        return @intCast((bits *% 0x9E37_79B9_7F4A_7C15) >> (64 - 10));
+    }
+
+    fn currentFunction(rt: *const JSRuntime) struct { atom: u32, native: bool } {
+        if (rt.hot.current_backtrace_frame) |frame| {
+            if (frame.resolver(frame.data, 0)) |snapshot| {
+                return .{ .atom = snapshot.function_name, .native = snapshot.is_native };
+            }
+        }
+        return .{ .atom = 0, .native = false };
+    }
+
+    /// Record one direct conservative-only root. `header` was unmarked before
+    /// the shade and is marked now; `w` is the word that named it.
+    pub fn noteDirect(self: *RootsDiagCensus, rt: *const JSRuntime, header: *const gc.Header, w: DiagWord) void {
+        self.direct += 1;
+        const meta = header.metaConst();
+        if (meta.flags.young) self.direct_young += 1;
+        const header_addr = @intFromPtr(header);
+        const ptr_kind: PtrKind = if (w.word == header_addr)
+            .exact
+        else if (w.word == header_addr - gc.metadata_prefix_size)
+            .prefix
+        else
+            .interior;
+        var source: Source = undefined;
+        if (w.addr >= w.image_lo and w.addr < w.image_hi) {
+            source = .register;
+            const index = (w.addr - w.image_lo) / @sizeOf(usize);
+            if (index < self.by_register.len) self.by_register[index] += 1;
+        } else {
+            const depth = w.addr -| w.sp;
+            source = if (depth < 1024)
+                .stack_lt_1k
+            else if (depth < 4096)
+                .stack_lt_4k
+            else if (depth < 16384)
+                .stack_lt_16k
+            else if (depth < 65536)
+                .stack_lt_64k
+            else
+                .stack_ge_64k;
+        }
+        self.by_source[@intFromEnum(source)] += 1;
+        self.by_ptr_kind[@intFromEnum(ptr_kind)] += 1;
+        self.by_kind[@intFromEnum(meta.flags.kind)] += 1;
+        const function = currentFunction(rt);
+        const class_id: u16 = if (meta.flags.kind == .object)
+            @intCast(object_mod.Object.fromHeaderConst(header).class_id)
+        else
+            0;
+        const key: Key = .{
+            .function_atom = function.atom,
+            .class_id = class_id,
+            .kind = @intCast(@intFromEnum(meta.flags.kind)),
+            .source = @intFromEnum(source),
+            .ptr_kind = @intFromEnum(ptr_kind),
+            .young = @intFromBool(meta.flags.young),
+            .native = @intFromBool(function.native),
+        };
+        var index = hashKey(key);
+        var probed: usize = 0;
+        while (probed < slots_len) : (probed += 1) {
+            const slot = &self.slots[index];
+            if (!slot.used) {
+                slot.* = .{ .key = key, .count = 1, .used = true };
+                return;
+            }
+            if (@as(u64, @bitCast(slot.key)) == @as(u64, @bitCast(key))) {
+                slot.count += 1;
+                return;
+            }
+            index = (index + 1) % slots_len;
+        }
+        self.dropped_keys += 1;
+    }
+
+    /// Close one probe: `conservative_only` is the number of headers the
+    /// probe's conservative arm marked in total, `direct` how many of those
+    /// were hit by a word of their own.
+    pub fn noteProbe(self: *RootsDiagCensus, conservative_only: usize, direct: usize) void {
+        self.probes += 1;
+        self.transitive += conservative_only -| direct;
+    }
+
+    pub fn report(self: *const RootsDiagCensus, writer: *std.Io.Writer, rt: *const JSRuntime) !void {
+        try writer.print(
+            "gc: conservative-only census probes {d}, direct {d} (young {d}), transitive {d}, dropped keys {d}\n",
+            .{ self.probes, self.direct, self.direct_young, self.transitive, self.dropped_keys },
+        );
+        try writer.print(
+            "gc: conservative-only by source registers {d}, stack<1K {d}, <4K {d}, <16K {d}, <64K {d}, >=64K {d}; by pointer exact {d}, prefix {d}, interior {d}\n",
+            .{
+                self.by_source[0],   self.by_source[1],   self.by_source[2],   self.by_source[3], self.by_source[4], self.by_source[5],
+                self.by_ptr_kind[0], self.by_ptr_kind[1], self.by_ptr_kind[2],
+            },
+        );
+        try writer.print("gc: conservative-only by kind", .{});
+        for (self.by_kind, 0..) |count, kind_index| {
+            const kind: gc.GcKind = @enumFromInt(kind_index);
+            try writer.print(" {s} {d}", .{ @tagName(kind), count });
+        }
+        try writer.print("\n", .{});
+        try writer.print("gc: conservative-only registers", .{});
+        var any_register = false;
+        for (self.by_register, 0..) |count, index| {
+            if (count == 0) continue;
+            any_register = true;
+            var name_buf: [16]u8 = undefined;
+            try writer.print(" {s} {d}", .{ diagRegisterName(index, &name_buf), count });
+        }
+        if (!any_register) try writer.print(" none", .{});
+        try writer.print("\n", .{});
+
+        var ranked: [slots_len]Slot = undefined;
+        var used: usize = 0;
+        for (self.slots) |slot| {
+            if (!slot.used) continue;
+            ranked[used] = slot;
+            used += 1;
+        }
+        std.mem.sort(Slot, ranked[0..used], {}, struct {
+            fn moreHits(_: void, a: Slot, b: Slot) bool {
+                return a.count > b.count;
+            }
+        }.moreHits);
+        const shown = @min(used, 20);
+        try writer.print("gc: conservative-only top {d} of {d} keys (function, kind/class, source, pointer, young, native)\n", .{ shown, used });
+        for (ranked[0..shown], 1..) |slot, rank| {
+            const key = slot.key;
+            const kind: gc.GcKind = @enumFromInt(key.kind);
+            const source: Source = @enumFromInt(key.source);
+            const ptr_kind: PtrKind = @enumFromInt(key.ptr_kind);
+            const function_name: []const u8 = if (key.function_atom == 0)
+                "<no frame>"
+            else
+                rt.atoms.name(key.function_atom) orelse "<anonymous>";
+            try writer.print(
+                "gc: conservative-only #{d} {d} fn={s} kind={s} class={d} src={s} ptr={s} young={d} native={d}\n",
+                .{ rank, slot.count, function_name, @tagName(kind), key.class_id, @tagName(source), @tagName(ptr_kind), key.young, key.native },
+            );
+        }
+    }
+};
 
 test "conservative scanner is enabled on this ABI" {
     try std.testing.expect(target_supported);

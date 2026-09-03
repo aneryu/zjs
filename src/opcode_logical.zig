@@ -1,0 +1,1610 @@
+//! F0a1: the logical half of the opcode declaration source.
+//!
+//! Contract 1 (opcode-design.md 10.8, frozen 2026-08-27): the identity
+//! primary key is the FORM, not the semantic family. `get_loc0`, `get_loc8`
+//! and `get_loc` are three logical rows, not three encodings of one row --
+//! if a row's final encoding were decided jointly by slot value, layout
+//! mode, jump distance, shortening and fusion context, a single-valued
+//! encoding contract could not hold. `SemanticFamily` is the derived rollup
+//! view, and it is derived because same-family different-form frequencies
+//! differ by orders of magnitude here (push_const 25,524 against
+//! push_const8 9,550,185): a profile keyed on family cannot price an id.
+//!
+//! P1-2: `LogicalOpcode` is `enum(u16)` with explicit values. Final forms
+//! keep their current physical id so the two are legible side by side
+//! during migration; compiler-only (temp) forms start at 300 because their
+//! physical ids overlap the short opcodes at 178..196.
+//!
+//! This module imports nothing from `bytecode.zig`. The dependency runs
+//! exec -> bytecode -> here, never back (P0-3): 49 files under src/exec
+//! import bytecode.zig and nothing goes the other way, so a declaration
+//! that reached into the execution layer would close the loop.
+
+const std = @import("std");
+
+/// Mirror of `opcode.Format`. `bytecode.zig` asserts the two agree field for
+/// field; ownership moves here at G0.
+pub const Format = enum(u8) {
+    none,
+    none_int,
+    none_loc,
+    none_arg,
+    none_var_ref,
+    u8,
+    i8,
+    loc8,
+    const8,
+    label8,
+    u16,
+    i16,
+    label16,
+    npop,
+    npopx,
+    npop_u16,
+    loc,
+    arg,
+    var_ref,
+    u32,
+    i32,
+    @"const",
+    label,
+    atom,
+    atom_u8,
+    atom_u16,
+    atom_label_u8,
+    atom_label_u16,
+    label_u16,
+};
+
+pub const LogicalOpcode = enum(u16) {
+    invalid = 0,
+    push_i32 = 1,
+    push_const = 2,
+    fclosure = 3,
+    push_atom_value = 4,
+    private_symbol = 5,
+    undefined = 6,
+    null = 7,
+    push_this = 8,
+    push_false = 9,
+    push_true = 10,
+    object = 11,
+    special_object = 12,
+    rest = 13,
+    drop = 14,
+    nip = 15,
+    dup = 17,
+    get_loc8_push_i8 = 18,
+    push_0_or = 19,
+    push_i8_add = 20,
+    insert2 = 21,
+    insert3 = 22,
+    push_2_sar = 23,
+    perm3 = 24,
+    perm4 = 25,
+    sar_get_array_el = 26,
+    swap = 27,
+    push_0_shr = 28,
+    rot3l = 29,
+    get_loc8_push_1 = 30,
+    get_var_ref0_get_loc8 = 31,
+    get_loc8_push_2 = 32,
+    call_constructor = 33,
+    call = 34,
+    tail_call = 35,
+    call_method = 36,
+    tail_call_method = 37,
+    array_from = 38,
+    apply = 39,
+    @"return" = 40,
+    return_undef = 41,
+    check_ctor = 43,
+    init_ctor = 44,
+    check_brand = 45,
+    add_brand = 46,
+    return_async = 47,
+    throw = 48,
+    throw_error = 49,
+    eval = 50,
+    apply_eval = 51,
+    regexp = 52,
+    get_super = 53,
+    import = 54,
+    get_var_undef = 55,
+    get_var = 56,
+    put_var = 57,
+    put_var_init = 58,
+    get_ref_value = 59,
+    put_ref_value = 60,
+    get_field = 61,
+    get_field2 = 62,
+    put_field = 63,
+    get_private_field = 64,
+    put_private_field = 65,
+    define_private_field = 66,
+    get_array_el = 67,
+    get_array_el2 = 68,
+    get_array_el3 = 69,
+    put_array_el = 70,
+    get_super_value = 71,
+    define_field = 73,
+    set_name = 74,
+    // set_name_computed moved to the carrier plane (420) when C1-1 closed;
+    // its reclaimed final id 75 is quarantined_unused and its lowered
+    // encoding (the builder rewrite's output) is declared in `lowered_direct`.
+    set_home_object = 77,
+    define_array_el = 78,
+    append = 79,
+    copy_data_properties = 80,
+    define_method = 81,
+    define_method_computed = 82,
+    define_class = 83,
+    define_class_computed = 84,
+    get_loc = 85,
+    put_loc = 86,
+    set_loc = 87,
+    get_arg = 88,
+    put_arg = 89,
+    set_arg = 90,
+    get_var_ref = 91,
+    put_var_ref = 92,
+    set_var_ref = 93,
+    set_loc_uninitialized = 94,
+    get_loc_check = 95,
+    put_loc_check = 96,
+    set_loc_check = 97,
+    put_loc_check_init = 98,
+    get_loc_checkthis = 99,
+    get_var_ref_check = 100,
+    put_var_ref_check = 101,
+    put_var_ref_check_init = 102,
+    close_loc = 103,
+    if_false = 104,
+    if_true = 105,
+    goto = 106,
+    @"catch" = 107,
+    gosub = 108,
+    ret = 109,
+    nip_catch = 110,
+    // to_propkey moved to the carrier plane (419) when C0 closed; its
+    // reclaimed final id 112 is quarantined_unused and its lowered
+    // encoding is declared in `lowered_direct`.
+    dyn_env_probe = 113,
+    make_loc_ref = 118,
+    make_arg_ref = 119,
+    make_var_ref_ref = 120,
+    make_var_ref = 121,
+    for_in_start = 122,
+    for_of_start = 123,
+    for_await_of_start = 124,
+    for_in_next = 125,
+    for_of_next = 126,
+    for_await_of_next = 127,
+    iterator_check_object = 128,
+    iterator_get_value_done = 129,
+    iterator_close = 130,
+    iterator_next = 131,
+    iterator_call = 132,
+    initial_yield = 133,
+    yield = 134,
+    yield_star = 135,
+    async_yield_star = 136,
+    await = 137,
+    neg = 138,
+    to_number = 139,
+    dec = 140,
+    inc = 141,
+    post_dec = 142,
+    post_inc = 143,
+    dec_loc = 144,
+    inc_loc = 145,
+    add_loc = 146,
+    not = 147,
+    lnot = 148,
+    typeof = 149,
+    delete = 150,
+    delete_var = 151,
+    mul = 152,
+    div = 153,
+    mod = 154,
+    add = 155,
+    sub = 156,
+    pow = 157,
+    shl = 158,
+    sar = 159,
+    shr = 160,
+    lt = 161,
+    lte = 162,
+    gt = 163,
+    gte = 164,
+    instanceof = 165,
+    in = 166,
+    eq = 167,
+    neq = 168,
+    strict_eq = 169,
+    strict_neq = 170,
+    @"and" = 171,
+    xor = 172,
+    @"or" = 173,
+    is_undefined_or_null = 174,
+    private_in = 175,
+    push_bigint_i32 = 176,
+    nop = 177,
+    push_minus1 = 178,
+    push_0 = 179,
+    push_1 = 180,
+    push_2 = 181,
+    push_3 = 182,
+    push_4 = 183,
+    push_5 = 184,
+    push_6 = 185,
+    push_7 = 186,
+    push_i8 = 187,
+    push_i16 = 188,
+    push_const8 = 189,
+    fclosure8 = 190,
+    push_empty_string = 191,
+    get_loc8 = 192,
+    put_loc8 = 193,
+    set_loc8 = 194,
+    get_loc0 = 195,
+    get_loc1 = 196,
+    get_loc2 = 197,
+    get_loc3 = 198,
+    put_loc0 = 199,
+    put_loc1 = 200,
+    put_loc2 = 201,
+    put_loc3 = 202,
+    set_loc0 = 203,
+    set_loc1 = 204,
+    set_loc2 = 205,
+    set_loc3 = 206,
+    get_arg0 = 207,
+    get_arg1 = 208,
+    get_arg2 = 209,
+    get_arg3 = 210,
+    put_arg0 = 211,
+    put_arg1 = 212,
+    put_arg2 = 213,
+    put_arg3 = 214,
+    set_arg0 = 215,
+    set_arg1 = 216,
+    set_arg2 = 217,
+    set_arg3 = 218,
+    get_var_ref0 = 219,
+    get_var_ref1 = 220,
+    get_var_ref2 = 221,
+    get_var_ref3 = 222,
+    put_var_ref0 = 223,
+    put_var_ref1 = 224,
+    put_var_ref2 = 225,
+    put_var_ref3 = 226,
+    set_var_ref0 = 227,
+    set_var_ref1 = 228,
+    set_var_ref2 = 229,
+    set_var_ref3 = 230,
+    get_length = 231,
+    if_false8 = 232,
+    if_true8 = 233,
+    goto8 = 234,
+    goto16 = 235,
+    call0 = 236,
+    call1 = 237,
+    call2 = 238,
+    call3 = 239,
+    get_field_field2 = 240,
+    is_null = 241,
+    get_var_field = 242,
+    get_loc2_field2 = 243,
+    ext0 = 244,
+    get_field2_call_method = 245,
+    get_loc2_field = 246,
+    eq_if_false8 = 247,
+    call_method_apply_fwd = 248,
+    get_loc0_field = 249,
+    cmp_if_false8 = 250,
+    put_loc8_get_loc8 = 251,
+    push_this_put_loc0 = 252,
+    /// zjs-only object-literal capacity hint (a variant of `object`): the
+    /// parser back-patches it in when all keys are static and the final
+    /// unique named-property count is one or two. Landed on main 2026-08-29
+    /// (obj64 S1) while this line was in flight; declared here during the
+    /// rebase so the join assertions stay closed.
+    object_slots2 = 254,
+    // Cold-plane residents (400+). Without these the sixteen opcodes
+    // demoted into the `using` carrier would sit outside the single
+    // declaration source -- which is exactly how an identity-matching
+    // scanner goes blind (5.2 clause 3). `plane` says where each lives.
+    using_create = 400,
+    using_dispose = 401,
+    using_dispose_throw = 402,
+    using_is_undefined = 403,
+    using_typeof_is_undefined = 404,
+    using_typeof_is_function = 405,
+    using_insert4 = 406,
+    using_rot5l = 407,
+    using_perm5 = 408,
+    using_dup2 = 409,
+    using_swap2 = 410,
+    using_rot3r = 411,
+    using_rot4l = 412,
+    using_dup3 = 413,
+    using_dup1 = 414,
+    using_check_ctor_return = 415,
+    using_set_proto = 416,
+    using_put_super_value = 417,
+    using_to_object = 418,
+    /// C0 end state: the first late-encoding resident. Unlike the demoted
+    /// `using_*` opcodes above it keeps its own name and semantic family,
+    /// and unlike them it still has a LOWERED direct encoding (declared in
+    /// `lowered_direct`): the parser and every compiler pass see the
+    /// direct byte, and only the final writer selects the carrier tag.
+    to_propkey = 419,
+    /// C1-1 end state: same shape as to_propkey (lowered-direct byte 75,
+    /// produced by the builder's trailing set_name rewrite).
+    set_name_computed = 420,
+    // compiler-only (temp) forms; physical ids 178..196 overlap the short opcodes
+    enter_scope = 300,
+    leave_scope = 301,
+    label = 302,
+    scope_get_var_undef = 303,
+    scope_get_var = 304,
+    scope_put_var = 305,
+    scope_delete_var = 306,
+    scope_make_ref = 307,
+    scope_get_ref = 308,
+    scope_put_var_init = 309,
+    scope_get_var_checkthis = 310,
+    scope_get_private_field = 311,
+    scope_get_private_field2 = 312,
+    scope_put_private_field = 313,
+    scope_in_private_field = 314,
+    get_field_opt_chain = 315,
+    get_array_el_opt_chain = 316,
+    set_class_name = 317,
+    line_num = 318,
+};
+
+/// Where a form lives physically. P0-4/D11 puts alias and quarantine on the
+/// physical slot; this is the complementary logical fact -- a form is either
+/// a first-class id or a resident of a carrier's sub space.
+pub const Plane = union(enum) {
+    /// Owns a physical id outright (or, for compiler-only forms, a temp id).
+    main,
+    /// Lives behind a carrier at `slot` in its sub space.
+    sub: struct { carrier: LogicalOpcode, slot: u8 },
+};
+
+pub fn planeOf(form: LogicalOpcode) Plane {
+    const raw = @intFromEnum(form);
+    if (raw < 400) return .main;
+    return .{ .sub = .{ .carrier = .ext0, .slot = @intCast(raw - 400) } };
+}
+
+/// Derived rollup view (contract 1 / P0-5). Never an identity key.
+pub const SemanticFamily = enum {
+    /// Rollup for every resident of the `using` carrier's sub space.
+    ext0_sub,
+    add,
+    add_brand,
+    add_loc,
+    @"and",
+    append,
+    apply,
+    apply_eval,
+    array_from,
+    async_yield_star,
+    await,
+    call,
+    call_constructor,
+    call_method,
+    call_method_apply_fwd,
+    @"catch",
+    check_brand,
+    check_ctor,
+    close_loc,
+    cmp_if_false8,
+    copy_data_properties,
+    dec,
+    dec_loc,
+    define_array_el,
+    define_class,
+    define_class_computed,
+    define_field,
+    define_method,
+    define_method_computed,
+    define_private_field,
+    delete,
+    delete_var,
+    div,
+    drop,
+    dup,
+    dyn_env_probe,
+    enter_scope,
+    eq,
+    eq_if_false8,
+    eval,
+    fclosure,
+    for_await_of_next,
+    for_await_of_start,
+    for_in_next,
+    for_in_start,
+    for_of_next,
+    for_of_start,
+    get_arg,
+    get_array_el,
+    get_array_el2,
+    get_array_el3,
+    get_array_el_opt_chain,
+    get_field,
+    get_field2,
+    get_field2_call_method,
+    get_field_field2,
+    get_field_opt_chain,
+    get_length,
+    get_loc,
+    get_loc0_field,
+    get_loc2_field,
+    get_loc2_field2,
+    get_loc8_push_1,
+    get_loc8_push_2,
+    get_loc8_push_i8,
+    get_loc_check,
+    get_loc_checkthis,
+    get_private_field,
+    get_ref_value,
+    get_super,
+    get_super_value,
+    get_var,
+    get_var_field,
+    get_var_ref,
+    get_var_ref0_get_loc8,
+    get_var_ref_check,
+    get_var_undef,
+    gosub,
+    goto,
+    gt,
+    gte,
+    if_false,
+    if_true,
+    import,
+    in,
+    inc,
+    inc_loc,
+    init_ctor,
+    initial_yield,
+    insert2,
+    insert3,
+    instanceof,
+    invalid,
+    is_null,
+    is_undefined_or_null,
+    iterator_call,
+    iterator_check_object,
+    iterator_close,
+    iterator_get_value_done,
+    iterator_next,
+    label,
+    leave_scope,
+    line_num,
+    lnot,
+    lt,
+    lte,
+    make_arg_ref,
+    make_loc_ref,
+    make_var_ref,
+    make_var_ref_ref,
+    mod,
+    mul,
+    neg,
+    neq,
+    nip,
+    nip_catch,
+    nop,
+    not,
+    null,
+    object,
+    object_slots2,
+    @"or",
+    perm3,
+    perm4,
+    post_dec,
+    post_inc,
+    pow,
+    private_in,
+    private_symbol,
+    push_0_or,
+    push_0_shr,
+    push_2_sar,
+    push_atom_value,
+    push_bigint_i32,
+    push_const,
+    push_empty_string,
+    push_false,
+    push_i16,
+    push_i32,
+    push_i8,
+    push_i8_add,
+    push_int,
+    push_this,
+    push_this_put_loc0,
+    push_true,
+    put_arg,
+    put_array_el,
+    put_field,
+    put_loc,
+    put_loc8_get_loc8,
+    put_loc_check,
+    put_loc_check_init,
+    put_private_field,
+    put_ref_value,
+    put_var,
+    put_var_init,
+    put_var_ref,
+    put_var_ref_check,
+    put_var_ref_check_init,
+    regexp,
+    rest,
+    ret,
+    @"return",
+    return_async,
+    return_undef,
+    rot3l,
+    sar,
+    sar_get_array_el,
+    scope_delete_var,
+    scope_get_private_field,
+    scope_get_private_field2,
+    scope_get_ref,
+    scope_get_var,
+    scope_get_var_checkthis,
+    scope_get_var_undef,
+    scope_in_private_field,
+    scope_make_ref,
+    scope_put_private_field,
+    scope_put_var,
+    scope_put_var_init,
+    set_arg,
+    set_class_name,
+    set_home_object,
+    set_loc,
+    set_loc_check,
+    set_loc_uninitialized,
+    set_name,
+    set_name_computed,
+    set_var_ref,
+    shl,
+    shr,
+    special_object,
+    strict_eq,
+    strict_neq,
+    sub,
+    swap,
+    tail_call,
+    tail_call_method,
+    throw,
+    throw_error,
+    to_number,
+    to_propkey,
+    typeof,
+    undefined,
+    ext0,
+    xor,
+    yield,
+    yield_star,
+};
+
+pub fn familyOf(form: LogicalOpcode) SemanticFamily {
+    return switch (form) {
+        .using_create => .ext0_sub,
+        .using_dispose => .ext0_sub,
+        .using_dispose_throw => .ext0_sub,
+        .using_is_undefined => .ext0_sub,
+        .using_typeof_is_undefined => .ext0_sub,
+        .using_typeof_is_function => .ext0_sub,
+        .using_insert4 => .ext0_sub,
+        .using_rot5l => .ext0_sub,
+        .using_perm5 => .ext0_sub,
+        .using_dup2 => .ext0_sub,
+        .using_swap2 => .ext0_sub,
+        .using_rot3r => .ext0_sub,
+        .using_rot4l => .ext0_sub,
+        .using_dup3 => .ext0_sub,
+        .using_dup1 => .ext0_sub,
+        .using_check_ctor_return => .ext0_sub,
+        .using_set_proto => .ext0_sub,
+        .using_put_super_value => .ext0_sub,
+        .using_to_object => .ext0_sub,
+        .invalid => .invalid,
+        .push_i32 => .push_i32,
+        .push_const => .push_const,
+        .fclosure => .fclosure,
+        .push_atom_value => .push_atom_value,
+        .private_symbol => .private_symbol,
+        .undefined => .undefined,
+        .null => .null,
+        .push_this => .push_this,
+        .push_false => .push_false,
+        .push_true => .push_true,
+        .object => .object,
+        .object_slots2 => .object_slots2,
+        .special_object => .special_object,
+        .rest => .rest,
+        .drop => .drop,
+        .nip => .nip,
+        .dup => .dup,
+        .get_loc8_push_i8 => .get_loc8_push_i8,
+        .push_0_or => .push_0_or,
+        .push_i8_add => .push_i8_add,
+        .insert2 => .insert2,
+        .insert3 => .insert3,
+        .push_2_sar => .push_2_sar,
+        .perm3 => .perm3,
+        .perm4 => .perm4,
+        .sar_get_array_el => .sar_get_array_el,
+        .swap => .swap,
+        .push_0_shr => .push_0_shr,
+        .rot3l => .rot3l,
+        .get_loc8_push_1 => .get_loc8_push_1,
+        .get_var_ref0_get_loc8 => .get_var_ref0_get_loc8,
+        .get_loc8_push_2 => .get_loc8_push_2,
+        .call_constructor => .call_constructor,
+        .call => .call,
+        .tail_call => .tail_call,
+        .call_method => .call_method,
+        .tail_call_method => .tail_call_method,
+        .array_from => .array_from,
+        .apply => .apply,
+        .@"return" => .@"return",
+        .return_undef => .return_undef,
+        .check_ctor => .check_ctor,
+        .init_ctor => .init_ctor,
+        .check_brand => .check_brand,
+        .add_brand => .add_brand,
+        .return_async => .return_async,
+        .throw => .throw,
+        .throw_error => .throw_error,
+        .eval => .eval,
+        .apply_eval => .apply_eval,
+        .regexp => .regexp,
+        .get_super => .get_super,
+        .import => .import,
+        .get_var_undef => .get_var_undef,
+        .get_var => .get_var,
+        .put_var => .put_var,
+        .put_var_init => .put_var_init,
+        .get_ref_value => .get_ref_value,
+        .put_ref_value => .put_ref_value,
+        .get_field => .get_field,
+        .get_field2 => .get_field2,
+        .put_field => .put_field,
+        .get_private_field => .get_private_field,
+        .put_private_field => .put_private_field,
+        .define_private_field => .define_private_field,
+        .get_array_el => .get_array_el,
+        .get_array_el2 => .get_array_el2,
+        .get_array_el3 => .get_array_el3,
+        .put_array_el => .put_array_el,
+        .get_super_value => .get_super_value,
+        .define_field => .define_field,
+        .set_name => .set_name,
+        .set_name_computed => .set_name_computed,
+        .set_home_object => .set_home_object,
+        .define_array_el => .define_array_el,
+        .append => .append,
+        .copy_data_properties => .copy_data_properties,
+        .define_method => .define_method,
+        .define_method_computed => .define_method_computed,
+        .define_class => .define_class,
+        .define_class_computed => .define_class_computed,
+        .get_loc => .get_loc,
+        .put_loc => .put_loc,
+        .set_loc => .set_loc,
+        .get_arg => .get_arg,
+        .put_arg => .put_arg,
+        .set_arg => .set_arg,
+        .get_var_ref => .get_var_ref,
+        .put_var_ref => .put_var_ref,
+        .set_var_ref => .set_var_ref,
+        .set_loc_uninitialized => .set_loc_uninitialized,
+        .get_loc_check => .get_loc_check,
+        .put_loc_check => .put_loc_check,
+        .set_loc_check => .set_loc_check,
+        .put_loc_check_init => .put_loc_check_init,
+        .get_loc_checkthis => .get_loc_checkthis,
+        .get_var_ref_check => .get_var_ref_check,
+        .put_var_ref_check => .put_var_ref_check,
+        .put_var_ref_check_init => .put_var_ref_check_init,
+        .close_loc => .close_loc,
+        .if_false => .if_false,
+        .if_true => .if_true,
+        .goto => .goto,
+        .@"catch" => .@"catch",
+        .gosub => .gosub,
+        .ret => .ret,
+        .nip_catch => .nip_catch,
+        .to_propkey => .to_propkey,
+        .dyn_env_probe => .dyn_env_probe,
+        .make_loc_ref => .make_loc_ref,
+        .make_arg_ref => .make_arg_ref,
+        .make_var_ref_ref => .make_var_ref_ref,
+        .make_var_ref => .make_var_ref,
+        .for_in_start => .for_in_start,
+        .for_of_start => .for_of_start,
+        .for_await_of_start => .for_await_of_start,
+        .for_in_next => .for_in_next,
+        .for_of_next => .for_of_next,
+        .for_await_of_next => .for_await_of_next,
+        .iterator_check_object => .iterator_check_object,
+        .iterator_get_value_done => .iterator_get_value_done,
+        .iterator_close => .iterator_close,
+        .iterator_next => .iterator_next,
+        .iterator_call => .iterator_call,
+        .initial_yield => .initial_yield,
+        .yield => .yield,
+        .yield_star => .yield_star,
+        .async_yield_star => .async_yield_star,
+        .await => .await,
+        .neg => .neg,
+        .to_number => .to_number,
+        .dec => .dec,
+        .inc => .inc,
+        .post_dec => .post_dec,
+        .post_inc => .post_inc,
+        .dec_loc => .dec_loc,
+        .inc_loc => .inc_loc,
+        .add_loc => .add_loc,
+        .not => .not,
+        .lnot => .lnot,
+        .typeof => .typeof,
+        .delete => .delete,
+        .delete_var => .delete_var,
+        .mul => .mul,
+        .div => .div,
+        .mod => .mod,
+        .add => .add,
+        .sub => .sub,
+        .pow => .pow,
+        .shl => .shl,
+        .sar => .sar,
+        .shr => .shr,
+        .lt => .lt,
+        .lte => .lte,
+        .gt => .gt,
+        .gte => .gte,
+        .instanceof => .instanceof,
+        .in => .in,
+        .eq => .eq,
+        .neq => .neq,
+        .strict_eq => .strict_eq,
+        .strict_neq => .strict_neq,
+        .@"and" => .@"and",
+        .xor => .xor,
+        .@"or" => .@"or",
+        .is_undefined_or_null => .is_undefined_or_null,
+        .private_in => .private_in,
+        .push_bigint_i32 => .push_bigint_i32,
+        .nop => .nop,
+        .enter_scope => .enter_scope,
+        .leave_scope => .leave_scope,
+        .label => .label,
+        .scope_get_var_undef => .scope_get_var_undef,
+        .scope_get_var => .scope_get_var,
+        .scope_put_var => .scope_put_var,
+        .scope_delete_var => .scope_delete_var,
+        .scope_make_ref => .scope_make_ref,
+        .scope_get_ref => .scope_get_ref,
+        .scope_put_var_init => .scope_put_var_init,
+        .scope_get_var_checkthis => .scope_get_var_checkthis,
+        .scope_get_private_field => .scope_get_private_field,
+        .scope_get_private_field2 => .scope_get_private_field2,
+        .scope_put_private_field => .scope_put_private_field,
+        .scope_in_private_field => .scope_in_private_field,
+        .get_field_opt_chain => .get_field_opt_chain,
+        .get_array_el_opt_chain => .get_array_el_opt_chain,
+        .set_class_name => .set_class_name,
+        .line_num => .line_num,
+        .push_minus1 => .push_int,
+        .push_0 => .push_int,
+        .push_1 => .push_int,
+        .push_2 => .push_int,
+        .push_3 => .push_int,
+        .push_4 => .push_int,
+        .push_5 => .push_int,
+        .push_6 => .push_int,
+        .push_7 => .push_int,
+        .push_i8 => .push_i8,
+        .push_i16 => .push_i16,
+        .push_const8 => .push_const,
+        .fclosure8 => .fclosure,
+        .push_empty_string => .push_empty_string,
+        .get_loc8 => .get_loc,
+        .put_loc8 => .put_loc,
+        .set_loc8 => .set_loc,
+        .get_loc0 => .get_loc,
+        .get_loc1 => .get_loc,
+        .get_loc2 => .get_loc,
+        .get_loc3 => .get_loc,
+        .put_loc0 => .put_loc,
+        .put_loc1 => .put_loc,
+        .put_loc2 => .put_loc,
+        .put_loc3 => .put_loc,
+        .set_loc0 => .set_loc,
+        .set_loc1 => .set_loc,
+        .set_loc2 => .set_loc,
+        .set_loc3 => .set_loc,
+        .get_arg0 => .get_arg,
+        .get_arg1 => .get_arg,
+        .get_arg2 => .get_arg,
+        .get_arg3 => .get_arg,
+        .put_arg0 => .put_arg,
+        .put_arg1 => .put_arg,
+        .put_arg2 => .put_arg,
+        .put_arg3 => .put_arg,
+        .set_arg0 => .set_arg,
+        .set_arg1 => .set_arg,
+        .set_arg2 => .set_arg,
+        .set_arg3 => .set_arg,
+        .get_var_ref0 => .get_var_ref,
+        .get_var_ref1 => .get_var_ref,
+        .get_var_ref2 => .get_var_ref,
+        .get_var_ref3 => .get_var_ref,
+        .put_var_ref0 => .put_var_ref,
+        .put_var_ref1 => .put_var_ref,
+        .put_var_ref2 => .put_var_ref,
+        .put_var_ref3 => .put_var_ref,
+        .set_var_ref0 => .set_var_ref,
+        .set_var_ref1 => .set_var_ref,
+        .set_var_ref2 => .set_var_ref,
+        .set_var_ref3 => .set_var_ref,
+        .get_length => .get_length,
+        .if_false8 => .if_false,
+        .if_true8 => .if_true,
+        .goto8 => .goto,
+        .goto16 => .goto,
+        .call0 => .call,
+        .call1 => .call,
+        .call2 => .call,
+        .call3 => .call,
+        .get_field_field2 => .get_field_field2,
+        .is_null => .is_null,
+        .get_var_field => .get_var_field,
+        .get_loc2_field2 => .get_loc2_field2,
+        .ext0 => .ext0,
+        .get_field2_call_method => .get_field2_call_method,
+        .get_loc2_field => .get_loc2_field,
+        .eq_if_false8 => .eq_if_false8,
+        .call_method_apply_fwd => .call_method_apply_fwd,
+        .get_loc0_field => .get_loc0_field,
+        .cmp_if_false8 => .cmp_if_false8,
+        .put_loc8_get_loc8 => .put_loc8_get_loc8,
+        .push_this_put_loc0 => .push_this_put_loc0,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Operands (P0-2) and effects (P0-6, contract 5a)
+// ---------------------------------------------------------------------------
+
+pub const Flow = enum { read, write, read_write };
+
+pub const OperandKind = enum {
+    // model-independent
+    atom,
+    constant,
+    label,
+    imm,
+    count,
+    flags,
+    sub_opcode,
+    // slot addressing is a first-class kind: FNABI needs it either way (9.2),
+    // and if the machine-model fork ever resolves toward registers what
+    // changes is the declaration content, not the declaration machine.
+    local_slot,
+    arg_slot,
+    var_ref_slot,
+};
+
+pub const Width = enum(u8) { u8 = 1, u16 = 2, u32 = 4, i8 = 11, i16 = 12, i32 = 14 };
+
+/// P0-2: where a logical operand's value comes from is declared, never
+/// inferred from the physical id. The id is exactly what this work
+/// reclaims and reassigns, so deriving semantics from `id - base` would
+/// lose its definition the moment a slot is aliased or moved to a carrier.
+pub const OperandSource = union(enum) {
+    payload: struct { index: u8, width: Width },
+    /// Burned into the opcode: `get_loc0`'s slot is fixed(0), `push_2` is
+    /// fixed(2). 53 of the 263 forms (22%) are in this class.
+    fixed: i33,
+};
+
+pub const Operand = struct {
+    kind: OperandKind,
+    /// Assertion 15: required for slot kinds, must be null for the rest.
+    flow: ?Flow = null,
+    source: OperandSource,
+};
+
+/// P0-6: a closed expression language, not a function pointer. A pointer
+/// cannot be compared at comptime, cannot enter a canonical fingerprint,
+/// hides the effect back in arbitrary code and emits an indirect call.
+/// Verified sufficient: every dynamic stack effect in the engine -- npop,
+/// npop_u16, npopx, the `using` sub table and `dyn_env_probe`'s flags --
+/// reduces to one of these three.
+pub const StackEffectExpr = union(enum) {
+    fixed: struct { pop: u32, push: u32 },
+    operand_table: struct {
+        operand_index: u8,
+        rows: []const TableRow,
+    },
+    affine: struct {
+        operand_index: u8,
+        pop_base: i16,
+        pop_scale: i16,
+        push_base: i16,
+        push_scale: i16,
+    },
+
+    pub const TableRow = struct { value: u32, pop: u32, push: u32 };
+};
+
+pub const Effects = struct {
+    /// Fall-through stack effect.
+    stack: StackEffectExpr,
+    /// Contract 5a: stack height at a jump target, as a delta from the
+    /// fall-through height. Null for the eight branches that land level.
+    /// Two do not: `gosub` lands one deeper, and `dyn_env_probe` lands +1,
+    /// +2 or -1 depending on its kind operand.
+    branch_stack: ?StackEffectExpr = null,
+};
+
+/// P0-2: the historical compression of the legacy direct encoding is
+/// declared and asserted separately. The authority runs one way -- the
+/// declaration states `get_loc0`'s slot is fixed(0) and the assertion
+/// checks `direct_id - base_id == 0`. Never the reverse.
+pub const LegacyEmbeddedEncoding = struct {
+    first: LogicalOpcode,
+    count: u8,
+    operand_index: u8,
+    base_value: i33,
+};
+
+pub const legacy_embedded: []const LegacyEmbeddedEncoding = &.{
+    .{ .first = .push_0, .count = 8, .operand_index = 0, .base_value = 0 },
+    .{ .first = .get_loc0, .count = 4, .operand_index = 0, .base_value = 0 },
+    .{ .first = .put_loc0, .count = 4, .operand_index = 0, .base_value = 0 },
+    .{ .first = .set_loc0, .count = 4, .operand_index = 0, .base_value = 0 },
+    .{ .first = .get_arg0, .count = 4, .operand_index = 0, .base_value = 0 },
+    .{ .first = .put_arg0, .count = 4, .operand_index = 0, .base_value = 0 },
+    .{ .first = .set_arg0, .count = 4, .operand_index = 0, .base_value = 0 },
+    .{ .first = .get_var_ref0, .count = 4, .operand_index = 0, .base_value = 0 },
+    .{ .first = .put_var_ref0, .count = 4, .operand_index = 0, .base_value = 0 },
+    .{ .first = .set_var_ref0, .count = 4, .operand_index = 0, .base_value = 0 },
+    .{ .first = .call0, .count = 4, .operand_index = 0, .base_value = 0 },
+    // Singletons: a burned-in value with no contiguous run behind it.
+    .{ .first = .push_minus1, .count = 1, .operand_index = 0, .base_value = -1 },
+    .{ .first = .get_loc0_field, .count = 1, .operand_index = 0, .base_value = 0 },
+    .{ .first = .get_loc2_field, .count = 1, .operand_index = 0, .base_value = 2 },
+    .{ .first = .get_loc2_field2, .count = 1, .operand_index = 0, .base_value = 2 },
+};
+
+// ---------------------------------------------------------------------------
+// Operand templates (contract 1) — position and width come from the format,
+// kind does not.
+// ---------------------------------------------------------------------------
+
+/// For most formats the operand kinds follow from the format itself. For six
+/// of them they do not, and that is a fact about this instruction set rather
+/// than a modelling choice: `fmt = .u8` is a sub-opcode selector on `using`
+/// and a flags byte on `special_object`; `fmt = .u16` is a boolean on
+/// `apply`, a scope index on `enter_scope` and an argument slot on `rest`.
+/// Those formats return null here and MUST be supplied by
+/// `operand_overrides`; the join in bytecode.zig asserts every form has
+/// exactly one of the two, never both and never neither (invariant 5).
+pub fn operandTemplate(fmt: Format) ?[]const Operand {
+    return switch (fmt) {
+        .none => &.{},
+        // Burned-in operands: zero payload bytes, value from `legacy_embedded`.
+        .none_int => &.{.{ .kind = .imm, .source = .{ .fixed = 0 } }},
+        .none_loc => &.{.{ .kind = .local_slot, .flow = .read_write, .source = .{ .fixed = 0 } }},
+        .none_arg => &.{.{ .kind = .arg_slot, .flow = .read_write, .source = .{ .fixed = 0 } }},
+        .none_var_ref => &.{.{ .kind = .var_ref_slot, .flow = .read_write, .source = .{ .fixed = 0 } }},
+        .npopx => &.{.{ .kind = .count, .source = .{ .fixed = 0 } }},
+
+        // Payload operands. Width and kind are orthogonal: `loc8` is a local
+        // in one byte, `loc` is a local in two.
+        .loc8 => &.{.{ .kind = .local_slot, .flow = .read_write, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }},
+        .loc => &.{.{ .kind = .local_slot, .flow = .read_write, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }},
+        .arg => &.{.{ .kind = .arg_slot, .flow = .read_write, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }},
+        .var_ref => &.{.{ .kind = .var_ref_slot, .flow = .read_write, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }},
+        .const8 => &.{.{ .kind = .constant, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }},
+        .@"const" => &.{.{ .kind = .constant, .source = .{ .payload = .{ .index = 0, .width = .u32 } } }},
+        .label8 => &.{.{ .kind = .label, .source = .{ .payload = .{ .index = 0, .width = .i8 } } }},
+        .label16 => &.{.{ .kind = .label, .source = .{ .payload = .{ .index = 0, .width = .i16 } } }},
+        .label => &.{.{ .kind = .label, .source = .{ .payload = .{ .index = 0, .width = .i32 } } }},
+        .atom => &.{.{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } }},
+        .npop => &.{.{ .kind = .count, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }},
+        .i8 => &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .i8 } } }},
+        .i16 => &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .i16 } } }},
+        .i32 => &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .i32 } } }},
+        .npop_u16 => &.{
+            .{ .kind = .count, .source = .{ .payload = .{ .index = 0, .width = .u16 } } },
+            .{ .kind = .imm, .source = .{ .payload = .{ .index = 1, .width = .u16 } } },
+        },
+        .atom_u8 => &.{
+            .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
+            .{ .kind = .flags, .source = .{ .payload = .{ .index = 1, .width = .u8 } } },
+        },
+        .atom_u16 => &.{
+            .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
+            .{ .kind = .imm, .source = .{ .payload = .{ .index = 1, .width = .u16 } } },
+        },
+        .atom_label_u8 => &.{
+            .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
+            .{ .kind = .label, .source = .{ .payload = .{ .index = 1, .width = .i32 } } },
+            .{ .kind = .flags, .source = .{ .payload = .{ .index = 2, .width = .u8 } } },
+        },
+        .atom_label_u16 => &.{
+            .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
+            .{ .kind = .label, .source = .{ .payload = .{ .index = 1, .width = .i32 } } },
+            .{ .kind = .imm, .source = .{ .payload = .{ .index = 2, .width = .u16 } } },
+        },
+        .label_u16 => &.{
+            .{ .kind = .label, .source = .{ .payload = .{ .index = 0, .width = .i32 } } },
+            .{ .kind = .imm, .source = .{ .payload = .{ .index = 1, .width = .u16 } } },
+        },
+
+        // Ambiguous by format; see `operand_overrides`.
+        .u8, .u16, .u32 => null,
+    };
+}
+
+pub const OperandOverride = struct { form: LogicalOpcode, operands: []const Operand };
+
+/// The eighteen forms whose operand kind does not follow from the format.
+/// Every kind here was read out of the implementation rather than inferred
+/// from the name -- the recurring failure in this work has been treating a
+/// name as a design.
+pub const operand_overrides: []const OperandOverride = &.{
+    // fmt u8
+    .{ .form = .ext0, .operands = &.{.{ .kind = .sub_opcode, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }} },
+    .{ .form = .special_object, .operands = &.{.{ .kind = .flags, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }} },
+    .{ .form = .copy_data_properties, .operands = &.{.{ .kind = .flags, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }} },
+    .{ .form = .define_method_computed, .operands = &.{.{ .kind = .flags, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }} },
+    .{ .form = .iterator_call, .operands = &.{.{ .kind = .flags, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }} },
+    // `for_of_next` reads a stack depth, not a flag set (iterator_ops.zig:575).
+    .{ .form = .for_of_next, .operands = &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .u8 } } }} },
+
+    // fmt u16
+    // `apply`/`apply_eval` read `is_new`, a boolean (vm_call.zig:909).
+    .{ .form = .apply, .operands = &.{.{ .kind = .flags, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }} },
+    .{ .form = .apply_eval, .operands = &.{.{ .kind = .flags, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }} },
+    // `rest` reads `first_arg_idx` -- an argument slot, read-only
+    // (vm_literal.zig:499).
+    .{ .form = .rest, .operands = &.{.{ .kind = .arg_slot, .flow = .read, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }} },
+    .{ .form = .enter_scope, .operands = &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }} },
+    .{ .form = .leave_scope, .operands = &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .u16 } } }} },
+
+    // fmt u32
+    .{ .form = .line_num, .operands = &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .u32 } } }} },
+    // Compiler-only marker patched back into the earlier define_class
+    // (parser.zig:14573); the operand is a position, not an atom.
+    .{ .form = .set_class_name, .operands = &.{.{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .u32 } } }} },
+};
+
+pub fn operandsOf(form: LogicalOpcode, fmt: Format) []const Operand {
+    for (operand_overrides) |o| {
+        if (o.form == form) return o.operands;
+    }
+    return operandTemplate(fmt) orelse
+        @panic("form has an ambiguous format and no operand override");
+}
+
+// ---------------------------------------------------------------------------
+// Effects (P0-6 closed expressions, contract 5a branch edge)
+// ---------------------------------------------------------------------------
+
+/// Forms whose fall-through stack effect is not a constant. Verified
+/// complete against the engine: these are the only shapes `computeStackSize`
+/// treats specially.
+///
+/// The `operand_table` rows are NOT listed here during migration. `using`'s
+/// sub operand has RANGE semantics -- every value at or above `add_base`
+/// (64) pops 2 -- so a hand-written enumeration would be 256 lines and would
+/// duplicate the authority. Assertion 17 requires the table to cover the
+/// operand's whole accepted value set, so bytecode.zig materialises the rows
+/// from that authority at comptime and asserts the coverage. G0 moves the
+/// rows in here and deletes the authority.
+pub const DynamicStack = struct {
+    form: LogicalOpcode,
+    shape: Shape,
+
+    pub const Shape = union(enum) {
+        /// Rows are materialised from the legacy authority during migration.
+        operand_table_from_legacy: struct { operand_index: u8 },
+        affine: StackEffectExpr,
+    };
+};
+
+pub const dynamic_stack: []const DynamicStack = &.{
+    // `using`: sub-opcode selects the effect; the add range is a range, not
+    // an enumeration, which is why the rows are generated.
+    .{ .form = .ext0, .shape = .{ .operand_table_from_legacy = .{ .operand_index = 0 } } },
+    // `dyn_env_probe`: the flags byte carries kind + is_with; only ten of
+    // the 256 byte values decode, and the assertion checks that the rows and
+    // the decoder agree on exactly which ten.
+    .{ .form = .dyn_env_probe, .shape = .{ .operand_table_from_legacy = .{ .operand_index = 2 } } },
+
+    // Variable-arity calls: pop grows one per argument. `pop_base` is the
+    // fixed part already in the physical row; `pop_scale` 1 is the argument
+    // count. `npopx` (call0..3) uses the same expression over a burned-in
+    // operand, which is why OperandSource.fixed had to exist first.
+    .{ .form = .call, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call_constructor, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 2, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call_method, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 2, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call_method_apply_fwd, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 2, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .tail_call, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 0, .push_scale = 0 } } } },
+    .{ .form = .tail_call_method, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 2, .pop_scale = 1, .push_base = 0, .push_scale = 0 } } } },
+    .{ .form = .array_from, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 0, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .eval, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call0, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call1, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call2, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+    .{ .form = .call3, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
+};
+
+/// Contract 5a. Stack effect at a jump target, on the same basis as the
+/// fall-through effect (not a delta), for the two forms that do not land
+/// level. Everything else branches to the height it falls through at.
+pub const BranchStack = struct { form: LogicalOpcode, shape: DynamicStack.Shape };
+
+pub const branch_stack: []const BranchStack = &.{
+    // `gosub` pushes the return address on the taken edge only.
+    .{ .form = .gosub, .shape = .{ .affine = .{ .fixed = .{ .pop = 0, .push = 1 } } } },
+    // `dyn_env_probe` lands at three different heights depending on kind:
+    // read/delete replace the probed object with the result, get_ref and
+    // make_ref keep it underneath, put consumes the stored value.
+    .{ .form = .dyn_env_probe, .shape = .{ .operand_table_from_legacy = .{ .operand_index = 2 } } },
+};
+
+// ---------------------------------------------------------------------------
+// Traits (invariant 5: fail-closed)
+// ---------------------------------------------------------------------------
+
+/// Scanner policy travels with the declaration. This is the structural fix
+/// for the defect class in 5.2 clause 3: `scanSmallInlineEligible` and
+/// `isForwardForbiddenOp` were hand-written lists keyed on opcode identity,
+/// so demoting an opcode behind a carrier made it invisible to them and
+/// silently widened optimisation coverage -- with no test turning red,
+/// because the difference is only in what gets optimised.
+///
+/// Invariant 5 says there is no implicit default here. During migration the
+/// values mirror the old lists and the join asserts the two agree exactly;
+/// at G0 the mirror goes and a new opcode without a policy stops compiling.
+pub const InlinePolicy = enum {
+    /// May appear in a body that is a candidate for small-function inlining.
+    allowed,
+    /// Its presence disqualifies the body.
+    forbidden,
+};
+
+/// Whether a form may appear in a body eligible for apply-arguments
+/// forwarding (L1).
+pub const ForwardPolicy = enum { allowed, forbidden };
+
+pub const Traits = struct {
+    inline_policy: InlinePolicy,
+    forward_policy: ForwardPolicy,
+};
+
+/// C0 (opcode-design.md 11.7 D7/D11): a form whose FINAL encoding is a
+/// carrier tag while its lowered encoding keeps the direct id. This is the
+/// late-encoding registry contract 3 writes through: the compiler carries
+/// the logical form to the last writer, and only that writer consults this
+/// table to choose direct-vs-carrier. The slot is a tag in the carrier's
+/// sub space, not a physical id -- the physical byte of the carrier itself
+/// is bytecode.zig's fact, joined and asserted there (P0-3 keeps this
+/// module free of physical ids it does not own).
+pub const FinalCarrierResident = struct {
+    form: LogicalOpcode,
+    carrier: LogicalOpcode,
+    slot: u8,
+};
+
+/// The C0 pilot: `to_propkey` (D7's default candidate: payload-free, cold
+/// handler, finalizer path was plain copyDefault, no control/catch effect).
+/// The migration window closed 2026-08-30: the D11 alias over id 112 was
+/// deleted after the cycle ledger read neutral, and the id is
+/// quarantined_unused.
+pub const final_carrier_residents: []const FinalCarrierResident = &.{
+    .{ .form = .to_propkey, .carrier = .ext0, .slot = 19 },
+    // C1-1 (2026-08-30, window closed same day): zero executions across
+    // the eight-workload census; reached only by the builder's trailing
+    // set_name rewrite, so the lowered stream keeps the direct byte and
+    // only the final writer selects the carrier.
+    .{ .form = .set_name_computed, .carrier = .ext0, .slot = 20 },
+};
+
+/// C0 end state, the executable form of 0's "parser/lowered stream 既可
+/// 沿用旧 direct id": a form whose final id has been reclaimed but whose
+/// LOWERED encoding is still the old direct byte. The byte is internal to
+/// one compilation -- it is not an ISA fact -- but it must be declared,
+/// or the phase-1/parser decoders would grow a hand-maintained id table
+/// again (the 5.2 clause 3 failure shape). bytecode.zig joins this to the
+/// row tables and asserts the final view of the id is reclaimed.
+pub const LoweredDirect = struct { form: LogicalOpcode, id: u8 };
+
+pub const lowered_direct: []const LoweredDirect = &.{
+    .{ .form = .to_propkey, .id = 112 },
+    .{ .form = .set_name_computed, .id = 75 },
+};
+
+/// The resident a carrier tag selects. Null for a tag no resident claims --
+/// callers treat that as undecodable rather than guessing, which is what an
+/// identity-matching scanner could not do. Covers both the cold-plane
+/// residents (400+, whose only home is the carrier) and the late-encoding
+/// residents of `final_carrier_residents` (which keep a direct id for the
+/// alias window).
+pub fn subForm(tag: u8) ?LogicalOpcode {
+    // Comptime-built dense table: the enum fields cannot be indexed with a
+    // runtime tag, and a linear scan per lookup would put a loop on a
+    // scanner path.
+    const table = comptime blk: {
+        var t = [_]?LogicalOpcode{null} ** 256;
+        for (@typeInfo(LogicalOpcode).@"enum".fields) |f| {
+            if (f.value < 400) continue;
+            t[f.value - 400] = @enumFromInt(f.value);
+        }
+        for (final_carrier_residents) |r| {
+            // A resident that has reached the 400+ plane (window closed) is
+            // already placed by the enum loop above; the registry must then
+            // agree with it, not re-claim the slot.
+            if (t[r.slot]) |existing| {
+                if (existing != r.form)
+                    @compileError("final carrier resident collides with a cold-plane slot");
+            } else {
+                t[r.slot] = r.form;
+            }
+        }
+        break :blk t;
+    };
+    return table[tag];
+}
+
+pub fn traitsOf(form: LogicalOpcode) Traits {
+    return .{
+        .inline_policy = switch (form) {
+            .eval,
+            .apply_eval,
+            .special_object,
+            .fclosure,
+            .fclosure8,
+            .apply,
+            .rest,
+            .initial_yield,
+            .yield,
+            .yield_star,
+            .async_yield_star,
+            .await,
+            .return_async,
+            .get_super,
+            .get_super_value,
+            .get_private_field,
+            .put_private_field,
+            .define_private_field,
+            .define_class,
+            .define_class_computed,
+            .import,
+            .dyn_env_probe,
+            .make_loc_ref,
+            .make_arg_ref,
+            .make_var_ref_ref,
+            .make_var_ref,
+            .gosub,
+            .@"catch",
+            .nip_catch,
+            .tail_call,
+            .tail_call_method,
+            // Demoted behind the `using` carrier, and the reason the
+            // hand-written scanner needed a special case: an identity match
+            // cannot see a carrier resident. Declaring the policy on the
+            // form removes the need for that case.
+            .using_put_super_value,
+            => .forbidden,
+            else => .allowed,
+        },
+        .forward_policy = switch (form) {
+            .apply,
+            .apply_eval,
+            .rest,
+            .eval,
+            .dyn_env_probe,
+            .fclosure,
+            .fclosure8,
+            => .forbidden,
+            else => .allowed,
+        },
+    };
+}
+
+// ---------------------------------------------------------------------------
+// G0: per-form physical facts (format + fall-through stack constants).
+// Together with the enum (identity and id), the operand templates
+// (encoding) and the effects tables above, this completes the declaration
+// source: bytecode.zig GENERATES `opcode_info` from it and proves the
+// generated table equal to the retired hand-written one, so a C1+ demotion
+// edits declarations only. Size is deliberately NOT declared -- it is
+// derived as 1 + the payload widths of `operandsOf(form, fmt)`, which is
+// the same arithmetic the join has asserted against the hand table since
+// F0a1 (a declared size could drift from the operands; a derived one
+// cannot).
+// ---------------------------------------------------------------------------
+
+pub const FormDecl = struct { form: LogicalOpcode, fmt: Format, pop: u8, push: u8 };
+
+pub const form_decls: []const FormDecl = &.{
+    .{ .form = .invalid, .fmt = .none, .pop = 0, .push = 0 },
+    .{ .form = .push_i32, .fmt = .i32, .pop = 0, .push = 1 },
+    .{ .form = .push_const, .fmt = .@"const", .pop = 0, .push = 1 },
+    .{ .form = .fclosure, .fmt = .@"const", .pop = 0, .push = 1 },
+    .{ .form = .push_atom_value, .fmt = .atom, .pop = 0, .push = 1 },
+    .{ .form = .private_symbol, .fmt = .atom, .pop = 0, .push = 1 },
+    .{ .form = .undefined, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .null, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .push_this, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .push_false, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .push_true, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .object, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .special_object, .fmt = .u8, .pop = 0, .push = 1 },
+    .{ .form = .rest, .fmt = .u16, .pop = 0, .push = 1 },
+    .{ .form = .drop, .fmt = .none, .pop = 1, .push = 0 },
+    .{ .form = .nip, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .dup, .fmt = .none, .pop = 1, .push = 2 },
+    .{ .form = .get_loc8_push_i8, .fmt = .loc8, .pop = 0, .push = 1 },
+    .{ .form = .push_0_or, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .push_i8_add, .fmt = .i8, .pop = 0, .push = 1 },
+    .{ .form = .insert2, .fmt = .none, .pop = 2, .push = 3 },
+    .{ .form = .insert3, .fmt = .none, .pop = 3, .push = 4 },
+    .{ .form = .push_2_sar, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .perm3, .fmt = .none, .pop = 3, .push = 3 },
+    .{ .form = .perm4, .fmt = .none, .pop = 4, .push = 4 },
+    .{ .form = .sar_get_array_el, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .swap, .fmt = .none, .pop = 2, .push = 2 },
+    .{ .form = .push_0_shr, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .rot3l, .fmt = .none, .pop = 3, .push = 3 },
+    .{ .form = .get_loc8_push_1, .fmt = .loc8, .pop = 0, .push = 1 },
+    .{ .form = .get_var_ref0_get_loc8, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .get_loc8_push_2, .fmt = .loc8, .pop = 0, .push = 1 },
+    .{ .form = .call_constructor, .fmt = .npop, .pop = 2, .push = 1 },
+    .{ .form = .call, .fmt = .npop, .pop = 1, .push = 1 },
+    .{ .form = .tail_call, .fmt = .npop, .pop = 1, .push = 0 },
+    .{ .form = .call_method, .fmt = .npop, .pop = 2, .push = 1 },
+    .{ .form = .tail_call_method, .fmt = .npop, .pop = 2, .push = 0 },
+    .{ .form = .array_from, .fmt = .npop, .pop = 0, .push = 1 },
+    .{ .form = .apply, .fmt = .u16, .pop = 3, .push = 1 },
+    .{ .form = .@"return", .fmt = .none, .pop = 1, .push = 0 },
+    .{ .form = .return_undef, .fmt = .none, .pop = 0, .push = 0 },
+    .{ .form = .check_ctor, .fmt = .none, .pop = 0, .push = 0 },
+    .{ .form = .init_ctor, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .check_brand, .fmt = .none, .pop = 2, .push = 2 },
+    .{ .form = .add_brand, .fmt = .none, .pop = 2, .push = 0 },
+    .{ .form = .return_async, .fmt = .none, .pop = 1, .push = 0 },
+    .{ .form = .throw, .fmt = .none, .pop = 1, .push = 0 },
+    .{ .form = .throw_error, .fmt = .atom_u8, .pop = 0, .push = 0 },
+    .{ .form = .eval, .fmt = .npop_u16, .pop = 1, .push = 1 },
+    .{ .form = .apply_eval, .fmt = .u16, .pop = 2, .push = 1 },
+    .{ .form = .regexp, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .get_super, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .import, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .get_var_undef, .fmt = .var_ref, .pop = 0, .push = 1 },
+    .{ .form = .get_var, .fmt = .var_ref, .pop = 0, .push = 1 },
+    .{ .form = .put_var, .fmt = .var_ref, .pop = 1, .push = 0 },
+    .{ .form = .put_var_init, .fmt = .var_ref, .pop = 1, .push = 0 },
+    .{ .form = .get_ref_value, .fmt = .none, .pop = 2, .push = 3 },
+    .{ .form = .put_ref_value, .fmt = .none, .pop = 3, .push = 0 },
+    .{ .form = .get_field, .fmt = .atom, .pop = 1, .push = 1 },
+    .{ .form = .get_field2, .fmt = .atom, .pop = 1, .push = 2 },
+    .{ .form = .put_field, .fmt = .atom, .pop = 2, .push = 0 },
+    .{ .form = .get_private_field, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .put_private_field, .fmt = .none, .pop = 3, .push = 0 },
+    .{ .form = .define_private_field, .fmt = .none, .pop = 3, .push = 1 },
+    .{ .form = .get_array_el, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .get_array_el2, .fmt = .none, .pop = 2, .push = 2 },
+    .{ .form = .get_array_el3, .fmt = .none, .pop = 2, .push = 3 },
+    .{ .form = .put_array_el, .fmt = .none, .pop = 3, .push = 0 },
+    .{ .form = .get_super_value, .fmt = .none, .pop = 3, .push = 1 },
+    .{ .form = .define_field, .fmt = .atom, .pop = 2, .push = 1 },
+    .{ .form = .set_name, .fmt = .atom, .pop = 1, .push = 1 },
+    .{ .form = .set_name_computed, .fmt = .none, .pop = 2, .push = 2 },
+    .{ .form = .set_home_object, .fmt = .none, .pop = 2, .push = 2 },
+    .{ .form = .define_array_el, .fmt = .none, .pop = 3, .push = 2 },
+    .{ .form = .append, .fmt = .none, .pop = 3, .push = 2 },
+    .{ .form = .copy_data_properties, .fmt = .u8, .pop = 3, .push = 3 },
+    .{ .form = .define_method, .fmt = .atom_u8, .pop = 2, .push = 1 },
+    .{ .form = .define_method_computed, .fmt = .u8, .pop = 3, .push = 1 },
+    .{ .form = .define_class, .fmt = .atom_u8, .pop = 2, .push = 2 },
+    .{ .form = .define_class_computed, .fmt = .atom_u8, .pop = 3, .push = 3 },
+    .{ .form = .get_loc, .fmt = .loc, .pop = 0, .push = 1 },
+    .{ .form = .put_loc, .fmt = .loc, .pop = 1, .push = 0 },
+    .{ .form = .set_loc, .fmt = .loc, .pop = 1, .push = 1 },
+    .{ .form = .get_arg, .fmt = .arg, .pop = 0, .push = 1 },
+    .{ .form = .put_arg, .fmt = .arg, .pop = 1, .push = 0 },
+    .{ .form = .set_arg, .fmt = .arg, .pop = 1, .push = 1 },
+    .{ .form = .get_var_ref, .fmt = .var_ref, .pop = 0, .push = 1 },
+    .{ .form = .put_var_ref, .fmt = .var_ref, .pop = 1, .push = 0 },
+    .{ .form = .set_var_ref, .fmt = .var_ref, .pop = 1, .push = 1 },
+    .{ .form = .set_loc_uninitialized, .fmt = .loc, .pop = 0, .push = 0 },
+    .{ .form = .get_loc_check, .fmt = .loc, .pop = 0, .push = 1 },
+    .{ .form = .put_loc_check, .fmt = .loc, .pop = 1, .push = 0 },
+    .{ .form = .set_loc_check, .fmt = .loc, .pop = 1, .push = 1 },
+    .{ .form = .put_loc_check_init, .fmt = .loc, .pop = 1, .push = 0 },
+    .{ .form = .get_loc_checkthis, .fmt = .loc, .pop = 0, .push = 1 },
+    .{ .form = .get_var_ref_check, .fmt = .var_ref, .pop = 0, .push = 1 },
+    .{ .form = .put_var_ref_check, .fmt = .var_ref, .pop = 1, .push = 0 },
+    .{ .form = .put_var_ref_check_init, .fmt = .var_ref, .pop = 1, .push = 0 },
+    .{ .form = .close_loc, .fmt = .loc, .pop = 0, .push = 0 },
+    .{ .form = .if_false, .fmt = .label, .pop = 1, .push = 0 },
+    .{ .form = .if_true, .fmt = .label, .pop = 1, .push = 0 },
+    .{ .form = .goto, .fmt = .label, .pop = 0, .push = 0 },
+    .{ .form = .@"catch", .fmt = .label, .pop = 0, .push = 1 },
+    .{ .form = .gosub, .fmt = .label, .pop = 0, .push = 0 },
+    .{ .form = .ret, .fmt = .none, .pop = 1, .push = 0 },
+    .{ .form = .nip_catch, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .dyn_env_probe, .fmt = .atom_label_u8, .pop = 1, .push = 0 },
+    .{ .form = .make_loc_ref, .fmt = .atom_u16, .pop = 0, .push = 2 },
+    .{ .form = .make_arg_ref, .fmt = .atom_u16, .pop = 0, .push = 2 },
+    .{ .form = .make_var_ref_ref, .fmt = .atom_u16, .pop = 0, .push = 2 },
+    .{ .form = .make_var_ref, .fmt = .atom, .pop = 0, .push = 2 },
+    .{ .form = .for_in_start, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .for_of_start, .fmt = .none, .pop = 1, .push = 3 },
+    .{ .form = .for_await_of_start, .fmt = .none, .pop = 1, .push = 3 },
+    .{ .form = .for_in_next, .fmt = .none, .pop = 1, .push = 3 },
+    .{ .form = .for_of_next, .fmt = .u8, .pop = 3, .push = 5 },
+    .{ .form = .for_await_of_next, .fmt = .none, .pop = 3, .push = 4 },
+    .{ .form = .iterator_check_object, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .iterator_get_value_done, .fmt = .none, .pop = 2, .push = 3 },
+    .{ .form = .iterator_close, .fmt = .none, .pop = 3, .push = 0 },
+    .{ .form = .iterator_next, .fmt = .none, .pop = 4, .push = 4 },
+    .{ .form = .iterator_call, .fmt = .u8, .pop = 4, .push = 5 },
+    .{ .form = .initial_yield, .fmt = .none, .pop = 0, .push = 0 },
+    .{ .form = .yield, .fmt = .none, .pop = 1, .push = 2 },
+    .{ .form = .yield_star, .fmt = .none, .pop = 1, .push = 2 },
+    .{ .form = .async_yield_star, .fmt = .none, .pop = 1, .push = 2 },
+    .{ .form = .await, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .neg, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .to_number, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .dec, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .inc, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .post_dec, .fmt = .none, .pop = 1, .push = 2 },
+    .{ .form = .post_inc, .fmt = .none, .pop = 1, .push = 2 },
+    .{ .form = .dec_loc, .fmt = .loc8, .pop = 0, .push = 0 },
+    .{ .form = .inc_loc, .fmt = .loc8, .pop = 0, .push = 0 },
+    .{ .form = .add_loc, .fmt = .loc8, .pop = 1, .push = 0 },
+    .{ .form = .not, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .lnot, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .typeof, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .delete, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .delete_var, .fmt = .atom, .pop = 0, .push = 1 },
+    .{ .form = .mul, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .div, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .mod, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .add, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .sub, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .pow, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .shl, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .sar, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .shr, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .lt, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .lte, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .gt, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .gte, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .instanceof, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .in, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .eq, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .neq, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .strict_eq, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .strict_neq, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .@"and", .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .xor, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .@"or", .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .is_undefined_or_null, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .private_in, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .push_bigint_i32, .fmt = .i32, .pop = 0, .push = 1 },
+    .{ .form = .nop, .fmt = .none, .pop = 0, .push = 0 },
+    .{ .form = .push_minus1, .fmt = .none_int, .pop = 0, .push = 1 },
+    .{ .form = .push_0, .fmt = .none_int, .pop = 0, .push = 1 },
+    .{ .form = .push_1, .fmt = .none_int, .pop = 0, .push = 1 },
+    .{ .form = .push_2, .fmt = .none_int, .pop = 0, .push = 1 },
+    .{ .form = .push_3, .fmt = .none_int, .pop = 0, .push = 1 },
+    .{ .form = .push_4, .fmt = .none_int, .pop = 0, .push = 1 },
+    .{ .form = .push_5, .fmt = .none_int, .pop = 0, .push = 1 },
+    .{ .form = .push_6, .fmt = .none_int, .pop = 0, .push = 1 },
+    .{ .form = .push_7, .fmt = .none_int, .pop = 0, .push = 1 },
+    .{ .form = .push_i8, .fmt = .i8, .pop = 0, .push = 1 },
+    .{ .form = .push_i16, .fmt = .i16, .pop = 0, .push = 1 },
+    .{ .form = .push_const8, .fmt = .const8, .pop = 0, .push = 1 },
+    .{ .form = .fclosure8, .fmt = .const8, .pop = 0, .push = 1 },
+    .{ .form = .push_empty_string, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .get_loc8, .fmt = .loc8, .pop = 0, .push = 1 },
+    .{ .form = .put_loc8, .fmt = .loc8, .pop = 1, .push = 0 },
+    .{ .form = .set_loc8, .fmt = .loc8, .pop = 1, .push = 1 },
+    .{ .form = .get_loc0, .fmt = .none_loc, .pop = 0, .push = 1 },
+    .{ .form = .get_loc1, .fmt = .none_loc, .pop = 0, .push = 1 },
+    .{ .form = .get_loc2, .fmt = .none_loc, .pop = 0, .push = 1 },
+    .{ .form = .get_loc3, .fmt = .none_loc, .pop = 0, .push = 1 },
+    .{ .form = .put_loc0, .fmt = .none_loc, .pop = 1, .push = 0 },
+    .{ .form = .put_loc1, .fmt = .none_loc, .pop = 1, .push = 0 },
+    .{ .form = .put_loc2, .fmt = .none_loc, .pop = 1, .push = 0 },
+    .{ .form = .put_loc3, .fmt = .none_loc, .pop = 1, .push = 0 },
+    .{ .form = .set_loc0, .fmt = .none_loc, .pop = 1, .push = 1 },
+    .{ .form = .set_loc1, .fmt = .none_loc, .pop = 1, .push = 1 },
+    .{ .form = .set_loc2, .fmt = .none_loc, .pop = 1, .push = 1 },
+    .{ .form = .set_loc3, .fmt = .none_loc, .pop = 1, .push = 1 },
+    .{ .form = .get_arg0, .fmt = .none_arg, .pop = 0, .push = 1 },
+    .{ .form = .get_arg1, .fmt = .none_arg, .pop = 0, .push = 1 },
+    .{ .form = .get_arg2, .fmt = .none_arg, .pop = 0, .push = 1 },
+    .{ .form = .get_arg3, .fmt = .none_arg, .pop = 0, .push = 1 },
+    .{ .form = .put_arg0, .fmt = .none_arg, .pop = 1, .push = 0 },
+    .{ .form = .put_arg1, .fmt = .none_arg, .pop = 1, .push = 0 },
+    .{ .form = .put_arg2, .fmt = .none_arg, .pop = 1, .push = 0 },
+    .{ .form = .put_arg3, .fmt = .none_arg, .pop = 1, .push = 0 },
+    .{ .form = .set_arg0, .fmt = .none_arg, .pop = 1, .push = 1 },
+    .{ .form = .set_arg1, .fmt = .none_arg, .pop = 1, .push = 1 },
+    .{ .form = .set_arg2, .fmt = .none_arg, .pop = 1, .push = 1 },
+    .{ .form = .set_arg3, .fmt = .none_arg, .pop = 1, .push = 1 },
+    .{ .form = .get_var_ref0, .fmt = .none_var_ref, .pop = 0, .push = 1 },
+    .{ .form = .get_var_ref1, .fmt = .none_var_ref, .pop = 0, .push = 1 },
+    .{ .form = .get_var_ref2, .fmt = .none_var_ref, .pop = 0, .push = 1 },
+    .{ .form = .get_var_ref3, .fmt = .none_var_ref, .pop = 0, .push = 1 },
+    .{ .form = .put_var_ref0, .fmt = .none_var_ref, .pop = 1, .push = 0 },
+    .{ .form = .put_var_ref1, .fmt = .none_var_ref, .pop = 1, .push = 0 },
+    .{ .form = .put_var_ref2, .fmt = .none_var_ref, .pop = 1, .push = 0 },
+    .{ .form = .put_var_ref3, .fmt = .none_var_ref, .pop = 1, .push = 0 },
+    .{ .form = .set_var_ref0, .fmt = .none_var_ref, .pop = 1, .push = 1 },
+    .{ .form = .set_var_ref1, .fmt = .none_var_ref, .pop = 1, .push = 1 },
+    .{ .form = .set_var_ref2, .fmt = .none_var_ref, .pop = 1, .push = 1 },
+    .{ .form = .set_var_ref3, .fmt = .none_var_ref, .pop = 1, .push = 1 },
+    .{ .form = .get_length, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .if_false8, .fmt = .label8, .pop = 1, .push = 0 },
+    .{ .form = .if_true8, .fmt = .label8, .pop = 1, .push = 0 },
+    .{ .form = .goto8, .fmt = .label8, .pop = 0, .push = 0 },
+    .{ .form = .goto16, .fmt = .label16, .pop = 0, .push = 0 },
+    .{ .form = .call0, .fmt = .npopx, .pop = 1, .push = 1 },
+    .{ .form = .call1, .fmt = .npopx, .pop = 1, .push = 1 },
+    .{ .form = .call2, .fmt = .npopx, .pop = 1, .push = 1 },
+    .{ .form = .call3, .fmt = .npopx, .pop = 1, .push = 1 },
+    .{ .form = .get_field_field2, .fmt = .atom, .pop = 1, .push = 1 },
+    .{ .form = .is_null, .fmt = .none, .pop = 1, .push = 1 },
+    .{ .form = .get_var_field, .fmt = .var_ref, .pop = 0, .push = 1 },
+    .{ .form = .get_loc2_field2, .fmt = .none_loc, .pop = 0, .push = 1 },
+    .{ .form = .ext0, .fmt = .u8, .pop = 0, .push = 1 },
+    .{ .form = .get_field2_call_method, .fmt = .atom, .pop = 1, .push = 2 },
+    .{ .form = .get_loc2_field, .fmt = .none_loc, .pop = 0, .push = 1 },
+    .{ .form = .eq_if_false8, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .call_method_apply_fwd, .fmt = .npop, .pop = 2, .push = 1 },
+    .{ .form = .get_loc0_field, .fmt = .none_loc, .pop = 0, .push = 1 },
+    .{ .form = .cmp_if_false8, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .put_loc8_get_loc8, .fmt = .loc8, .pop = 1, .push = 0 },
+    .{ .form = .push_this_put_loc0, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .object_slots2, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .enter_scope, .fmt = .u16, .pop = 0, .push = 0 },
+    .{ .form = .leave_scope, .fmt = .u16, .pop = 0, .push = 0 },
+    .{ .form = .label, .fmt = .label, .pop = 0, .push = 0 },
+    .{ .form = .scope_get_var_undef, .fmt = .atom_u16, .pop = 0, .push = 1 },
+    .{ .form = .scope_get_var, .fmt = .atom_u16, .pop = 0, .push = 1 },
+    .{ .form = .scope_put_var, .fmt = .atom_u16, .pop = 1, .push = 0 },
+    .{ .form = .scope_delete_var, .fmt = .atom_u16, .pop = 0, .push = 1 },
+    .{ .form = .scope_make_ref, .fmt = .atom_label_u16, .pop = 0, .push = 2 },
+    .{ .form = .scope_get_ref, .fmt = .atom_u16, .pop = 0, .push = 2 },
+    .{ .form = .scope_put_var_init, .fmt = .atom_u16, .pop = 0, .push = 2 },
+    .{ .form = .scope_get_var_checkthis, .fmt = .atom_u16, .pop = 0, .push = 1 },
+    .{ .form = .scope_get_private_field, .fmt = .atom_u16, .pop = 1, .push = 1 },
+    .{ .form = .scope_get_private_field2, .fmt = .atom_u16, .pop = 1, .push = 2 },
+    .{ .form = .scope_put_private_field, .fmt = .atom_u16, .pop = 2, .push = 0 },
+    .{ .form = .scope_in_private_field, .fmt = .atom_u16, .pop = 1, .push = 1 },
+    .{ .form = .get_field_opt_chain, .fmt = .atom, .pop = 1, .push = 1 },
+    .{ .form = .get_array_el_opt_chain, .fmt = .none, .pop = 2, .push = 1 },
+    .{ .form = .set_class_name, .fmt = .u32, .pop = 1, .push = 1 },
+    .{ .form = .line_num, .fmt = .u32, .pop = 0, .push = 0 },
+    .{ .form = .to_propkey, .fmt = .none, .pop = 1, .push = 1 },
+};

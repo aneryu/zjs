@@ -14,15 +14,16 @@ Corpus groups are declared in ``corpus.json`` so the entry list is auditable.
 """
 
 import argparse
-import fcntl
 import json
 import os
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-LOCK = "/tmp/zjs-host-heavy.lock"
+sys.path.insert(0, os.path.dirname(HERE))
+from measure_fields import field_metadata, measurement_lock, single_cpu
 
 
 def load_corpus():
@@ -131,12 +132,19 @@ def main():
     ap.add_argument("--mode", choices=["count", "cycles"], required=True)
     ap.add_argument("--binary", required=True)
     ap.add_argument("--tmp", default=os.environ.get("TMPDIR", "/tmp"))
-    ap.add_argument("--cpu", type=int, default=19)
+    ap.add_argument("--field", choices=("a", "b", "host"), default=None)
+    ap.add_argument("--cpu", type=int, default=None,
+                    help="legacy CPU override; noncanonical values are diagnostic-only")
     ap.add_argument("--pmu", default="armv8_pmuv3_1")
     ap.add_argument("--timeout", type=float, default=180.0)
     ap.add_argument("--groups", default=None)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+
+    try:
+        measure_field, args.cpu, field_conforming = single_cpu(args.field, args.cpu)
+    except ValueError as error:
+        ap.error(str(error))
 
     corpus = load_corpus()
     todo = entries(corpus)
@@ -146,11 +154,8 @@ def main():
 
     binary = os.path.abspath(args.binary)
     results = {}
-    lock_fh = None
-    if args.mode == "cycles":
-        lock_fh = open(LOCK, "a")
-        fcntl.flock(lock_fh, fcntl.LOCK_EX)
-    try:
+    lock = measurement_lock(measure_field) if args.mode == "cycles" else nullcontext()
+    with lock:
         for group, name, path in todo:
             key = f"{group}/{name}"
             if args.mode == "count":
@@ -165,10 +170,6 @@ def main():
             rec["script"] = path
             rec["group"] = group
             results[key] = rec
-    finally:
-        if lock_fh is not None:
-            fcntl.flock(lock_fh, fcntl.LOCK_UN)
-            lock_fh.close()
 
     payload = {
         "collector": "tools/perf/logical_not/run_census.py",
@@ -176,7 +177,12 @@ def main():
         "binary": binary,
         "cpu": args.cpu if args.mode == "cycles" else None,
         "pmu": args.pmu if args.mode == "cycles" else None,
-        "host_lock": "exclusive" if args.mode == "cycles" else "none (counting only)",
+        "measurement_field": ({
+            **field_metadata(measure_field, "single"),
+            "fieldConforming": field_conforming,
+            "lockAttested": True,
+        } if args.mode == "cycles" else None),
+        "measurement_lock": "canonical field lock" if args.mode == "cycles" else "none (counting only)",
         "entries": results,
     }
     with open(args.out, "w") as fh:

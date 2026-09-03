@@ -1,0 +1,67 @@
+DeltaBlue: 82.1
+gc: collection entries total 598, major completed 15, minor completed 583, failed 0
+gc: collector counted objects freed 10033248 (excludes bytecode), zero-ref drains 0
+gc: heap live 1046036 bytes, account peak 10535617 bytes
+gc: external bytes current 0, peak 0, token bytes 0 in 0 tokens, untracked bytes 0, allocations 0, frees 0, invalid releases 0, weighted debt 0
+gc: weak refs current 0, finalizer queue current 0
+gc: major pause p50 408710 ns, p95 3809467 ns, p99 3920251 ns, max 3920251 ns, retained 56 of 56 pauses
+gc: allocation histogram publications 18648128, payload bytes 1337741988, p50-below-large 64, p95-below-large 160, p99-below-large 160, max-small 128, covered-by-small 16874758/18648128 below-large, large 0
+gc: Object publications total 10054345, slots2 3
+gc: slots2 payload attaches 0, live side entries 0
+gc: block heap committed 5586944 live 1120640 committed/live-x1000 4986 superblocks 7 large maps 0
+gc: block heap topology classed superblocks 7, medium superblocks 0, initialized blocks 200, reserved-uninitialized blocks 24, nonempty blocks 42, partially-full blocks 34, empty-free blocks 158, empty-active blocks 0, decommitted-empty blocks 148, wholly-empty superblocks 3, hot-reuse blocks 0, interval-active blocks 0
+gc: block heap cell capacity live 1120640, nonempty capacity 2728192, empty capacity 10263680, within-nonempty-unused 1607552
+gc: block heap class 48 bytes initialized 101, nonempty 22, empty-free 79, empty-active 0, live-cells 14376, capacity-cells 136552
+gc: block heap class 64 bytes initialized 99, nonempty 20, empty-free 79, empty-active 0, live-cells 6728, capacity-cells 100584
+gc: block heap deferred block runs 8952, hot reuse published 145, reopened 59, pass-A settled cells 9496225
+gc: major threshold resets growth 29, small-heap-floor 0
+gc: block heap page returns cumulative decommitted 119132160, recommitted 110039040
+gc: block heap decommit checks 14, released blocks cumulative 1939, current bytes 9093120, max batch bytes 10506240
+gc: process heap trim attempts 0, successes 0
+gc: marked-set census not run (pass --gc-mark-footprint; it costs a whole-heap walk inside every final remark)
+gc: incremental subphase ns totals begin-clear 1056, begin-precise-seed 100401, begin-conservative-seed 274771, begin-retire 4880, finish-init 1728, finish-remark-total 34391559, finish-conservative-seed-subset 330005, finish-weak 3888, finish-condemn 135474, finish-tail 7752861
+gc: incremental subphase reconciliation begin STW 391588 - subphases 381108 = other 10480 ns; finish STW 42346647 - subphases 42285510 = other 61137 ns
+gc: incremental subphase work totals retired non-block headers 0, retired young blocks 201, retired remembered sets 14, clearMarks non-block headers 0
+gc: generation current young 1074, remembered owners 8
+gc: minor collections 583, reclaimed 9281722, promoted-by-minor 377662, promoted-all 377662, remembered without young 2026, remembered drops 0, suspensions 0
+gc: major retirement commits 15, abandons 0, current state clean
+gc: generational barrier calls 59107930, exit young-owner 58861652, exit old-target 181360, remembered-owner 64918
+gc: minor stw total 335285643977 ns, mean 575104020 ns, max 980611707 ns
+gc: minor pause p50 571770123 ns, p95 856529726 ns, p99 953026683 ns, max 980611707 ns over 583 retained of 583 samples
+gc: minor phase totals clear 380214, roots 3141969, conservative 7127681, remembered 769997, trace 6465613, sweep+destroy 334600341148, promote 3039837, other 664377518 ns
+gc: minor young-at-start mean 16568, max 17346
+gc: conservative-only young 77160 over 583 verified minors
+gc: exact-target marking barrier calls 1025067, exit marked-target 680795, exit unpublished-owner 0, exit unpublished-target 0, requeued-owner 342507, shaded-target 1765
+gc: incremental doomed condemned headers 751526, destroyed counted objects 751526, parked entries drained 1955, parked-drain slices 14
+gc: incremental major cycles completed 15, aborted 0, forced 0, mark steps 15, cycle STW last 5209336 ns max 5209336 ns
+gc: mark frontier segment bytes active 0, cached 32768, peak-active 290816, peak-owned 290816; segments allocated 921, freed 913, allocation failures 0
+gc: cycle envelope measured 14, skipped 1, max-P/T S 1806824, T 3613648, B 3613697, P 6660385, B/T-x1000000 1000014, P/T-x1000000 1843120, P/S-x1000000 3686239, forced 0
+gc: incremental STW phase-segment max ns begin 59393, increment 560502, destroy 1006748, finish 3371141
+gc: incremental STW phase totals begin 391588 ns/15 segments, increment 7939758 ns/15 segments, destroy 15329622 ns/26 segments, finish 42346647 ns/15 segments
+gc: conservative-only census probes 598, direct 4446 (young 765), transitive 573684, dropped keys 0
+gc: conservative-only by source registers 3113, stack<1K 238, <4K 1012, <16K 83, <64K 0, >=64K 0; by pointer exact 3964, prefix 64, interior 418
+gc: conservative-only by kind object 4440 function_bytecode 0 var_ref 0 realm_context 0 module 0 shape 6 string 0 big_int 0
+gc: conservative-only registers q2.lo 539 q2.hi 539 q3.lo 538 q3.hi 538 q4.lo 381 q4.hi 210 q5.lo 210 q5.hi 158
+gc: conservative-only top 20 of 97 keys (function, kind/class, source, pointer, young, native)
+gc: conservative-only #1 1741 fn= kind=object class=1 src=register ptr=exact young=0 native=0
+gc: conservative-only #2 1037 fn= kind=object class=2 src=register ptr=exact young=0 native=0
+gc: conservative-only #3 293 fn= kind=object class=2 src=stack_lt_4k ptr=exact young=0 native=0
+gc: conservative-only #4 255 fn= kind=object class=2 src=stack_lt_4k ptr=exact young=1 native=0
+gc: conservative-only #5 198 fn= kind=object class=1 src=stack_lt_4k ptr=interior young=1 native=0
+gc: conservative-only #6 90 fn= kind=object class=2 src=stack_lt_1k ptr=interior young=0 native=0
+gc: conservative-only #7 54 fn= kind=object class=1 src=stack_lt_4k ptr=prefix young=1 native=0
+gc: conservative-only #8 53 fn= kind=object class=1 src=stack_lt_1k ptr=interior young=0 native=0
+gc: conservative-only #9 49 fn= kind=object class=2 src=stack_lt_1k ptr=exact young=1 native=0
+gc: conservative-only #10 36 fn=chainTest kind=object class=2 src=register ptr=exact young=0 native=0
+gc: conservative-only #11 36 fn=projectionTest kind=object class=1 src=register ptr=exact young=0 native=0
+gc: conservative-only #12 32 fn=OrderedCollection kind=object class=1 src=register ptr=exact young=0 native=0
+gc: conservative-only #13 32 fn= kind=object class=10 src=stack_lt_4k ptr=exact young=1 native=0
+gc: conservative-only #14 30 fn= kind=object class=1 src=stack_lt_4k ptr=exact young=1 native=0
+gc: conservative-only #15 27 fn=Variable kind=object class=1 src=register ptr=exact young=0 native=0
+gc: conservative-only #16 26 fn=chainTest kind=object class=1 src=register ptr=exact young=0 native=0
+gc: conservative-only #17 22 fn=Variable kind=object class=2 src=register ptr=exact young=0 native=0
+gc: conservative-only #18 21 fn=<no frame> kind=object class=2 src=stack_lt_16k ptr=exact young=0 native=1
+gc: conservative-only #19 19 fn=UnaryConstraint kind=object class=2 src=register ptr=exact young=0 native=0
+gc: conservative-only #20 19 fn=OrderedCollection kind=object class=2 src=register ptr=exact young=0 native=0
+gc: endpoint doomed_pending false, doomed_buckets 0, doomed_headers 0, doomed_cursor false, doomed_blocks 0, parked_frees 0, deferred_finalizers 0, active_finalizer false
+exit=0

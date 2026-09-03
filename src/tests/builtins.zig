@@ -757,8 +757,7 @@ test "standard Array prototype guard publication and invalidation are realm loca
     // Guard invalidation must happen before that allocation and remain sticky
     // even though the indexed property itself is rolled back on OOM.
     const pinned_oom_shape = oom_mutation_object.shape_ref;
-    pinned_oom_shape.retain();
-    defer js.runtime.shapes.release(pinned_oom_shape);
+    pinned_oom_shape.markShared();
     const index_zero = core.atom.atomFromUInt32(0);
     // Injecting an allocation failure, not testing the collector: see
     // `suppressLimitCollectionForTest`.
@@ -5159,7 +5158,7 @@ fn symmetricDifferenceMutatingKeysImpl(
     }
 
     const array = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &array.header);
+    errdefer core.Object.destroyFromHeader(rt, array.gcHeader());
     comptime var index: u32 = 0;
     inline for (.{ "x", "b", "c", "c" }) |name| {
         const value = (try core.string.String.createUtf8(rt, name)).value();

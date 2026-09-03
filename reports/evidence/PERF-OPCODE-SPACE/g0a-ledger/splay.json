@@ -1,0 +1,484 @@
+{
+ "tool": "zjs-benchv8-fixed-pmu",
+ "schemaVersion": 1,
+ "direction": "ratios are zjs/qjs; below 1.0 means zjs used fewer counters or wall time",
+ "workload": "per-benchmark scripts assembled from the vendored suite with doWarmup=false and doDeterministic=true appended; both engines execute identical deterministicIterations/minIterations batches",
+ "role": "screening instrument; score adjudication stays with run_benchv8_compare.py",
+ "iterationDivisor": 1,
+ "timestamp": "2026-08-30T07:54:35Z",
+ "samplesPerEnginePerBench": 8,
+ "samplingOrder": "paired ABBA by sample parity",
+ "firstPositionCounts": {
+  "qjs": 4,
+  "zjs": 4
+ },
+ "firstPositionBalanced": true,
+ "cpu": 5,
+ "effectiveAffinity": [
+  5
+ ],
+ "pmu": "armv8_pmuv3_1",
+ "events": [
+  "armv8_pmuv3_1/instructions/",
+  "armv8_pmuv3_1/cycles/",
+  "armv8_pmuv3_1/branch-instructions/",
+  "armv8_pmuv3_1/branch-misses/",
+  "armv8_pmuv3_1/cache-references/",
+  "armv8_pmuv3_1/cache-misses/"
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": "0xd87",
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/g0a-new-zjs",
+   "sha256": "05026e8e550cede89a2621f44f6291ff57c4ee7a9e77c52c7c19c55ca23fcb3b",
+   "repo": "v0.1.0-164-g74629969-dirty"
+  },
+  "qjs": {
+   "path": "/tmp/g0a-baseline-zjs",
+   "sha256": "c29cc4080420e6c57b82b1dabe1a3cb7086da1f9af3e9cdb6a54f56f43515bcc",
+   "repo": "unavailable"
+  }
+ },
+ "benchmarks": {
+  "splay": {
+   "source": {
+    "suiteDir": "/home/aneryu/zjs/tools/perf/bench_v8/suite",
+    "files": [
+     {
+      "file": "base.js",
+      "sha256": "216612c2e7096a02b3e52b57e9cf9351bbaf180d60938d5c60b85fd756232733"
+     },
+     {
+      "file": "splay.js",
+      "sha256": "f9a6a60d8f205908f5542ad1180abc1902dcdab3dcb4278017c5ce179ee123f7"
+     }
+    ],
+    "fixedWorkSha256": "e9a794cab2e318f7ff4509d079f7172b819e4689c2399188c9e54559e8f36fe7"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 31347372017,
+       "cycles": 8676596807,
+       "branch-instructions": 5828751940,
+       "branch-misses": 17283286,
+       "cache-references": 13045338267,
+       "cache-misses": 85809408
+      },
+      "wallSeconds": 2.31807729229331,
+      "stdout": "Splay: 5467\nSplayLatency: 6264\n----",
+      "scores": {
+       "Splay": 5467.0,
+       "SplayLatency": 6264.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31328229520,
+       "cycles": 8697864879,
+       "branch-instructions": 5822915136,
+       "branch-misses": 16697757,
+       "cache-references": 13030110763,
+       "cache-misses": 87783455
+      },
+      "wallSeconds": 2.3134183129295707,
+      "stdout": "Splay: 5430\nSplayLatency: 6125\n----",
+      "scores": {
+       "Splay": 5430.0,
+       "SplayLatency": 6125.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31363381220,
+       "cycles": 8699918856,
+       "branch-instructions": 5836625223,
+       "branch-misses": 16740664,
+       "cache-references": 13055893910,
+       "cache-misses": 86364379
+      },
+      "wallSeconds": 2.306766382418573,
+      "stdout": "Splay: 5446\nSplayLatency: 6146\n----",
+      "scores": {
+       "Splay": 5446.0,
+       "SplayLatency": 6146.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31360806498,
+       "cycles": 8705596152,
+       "branch-instructions": 5835783224,
+       "branch-misses": 16662243,
+       "cache-references": 13032554630,
+       "cache-misses": 85632688
+      },
+      "wallSeconds": 2.304971770849079,
+      "stdout": "Splay: 5435\nSplayLatency: 6184\n----",
+      "scores": {
+       "Splay": 5435.0,
+       "SplayLatency": 6184.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31330235107,
+       "cycles": 8684159381,
+       "branch-instructions": 5823432988,
+       "branch-misses": 16783455,
+       "cache-references": 13025562810,
+       "cache-misses": 84756579
+      },
+      "wallSeconds": 2.302960173226893,
+      "stdout": "Splay: 5446\nSplayLatency: 6186\n----",
+      "scores": {
+       "Splay": 5446.0,
+       "SplayLatency": 6186.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31332259827,
+       "cycles": 8843820389,
+       "branch-instructions": 5824534968,
+       "branch-misses": 16891674,
+       "cache-references": 13308399929,
+       "cache-misses": 86996735
+      },
+      "wallSeconds": 2.3390707578510046,
+      "stdout": "Splay: 5349\nSplayLatency: 5889\n----",
+      "scores": {
+       "Splay": 5349.0,
+       "SplayLatency": 5889.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31339449876,
+       "cycles": 8726343549,
+       "branch-instructions": 5826722021,
+       "branch-misses": 16763446,
+       "cache-references": 13033484443,
+       "cache-misses": 89821316
+      },
+      "wallSeconds": 2.311942426022142,
+      "stdout": "Splay: 5417\nSplayLatency: 6151\n----",
+      "scores": {
+       "Splay": 5417.0,
+       "SplayLatency": 6151.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31345051777,
+       "cycles": 8700549165,
+       "branch-instructions": 5829888490,
+       "branch-misses": 16756143,
+       "cache-references": 13032019676,
+       "cache-misses": 85826408
+      },
+      "wallSeconds": 2.3117818888276815,
+      "stdout": "Splay: 5415\nSplayLatency: 6151\n----",
+      "scores": {
+       "Splay": 5415.0,
+       "SplayLatency": 6151.0
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 31336796691,
+       "cycles": 8709995607,
+       "branch-instructions": 5825962362,
+       "branch-misses": 16670242,
+       "cache-references": 13045660441,
+       "cache-misses": 86372412
+      },
+      "wallSeconds": 2.310588683001697,
+      "stdout": "Splay: 5420\nSplayLatency: 6159\n----",
+      "scores": {
+       "Splay": 5420.0,
+       "SplayLatency": 6159.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31321458914,
+       "cycles": 8773220663,
+       "branch-instructions": 5820270092,
+       "branch-misses": 16742761,
+       "cache-references": 13070244490,
+       "cache-misses": 90930101
+      },
+      "wallSeconds": 2.3270881278440356,
+      "stdout": "Splay: 5387\nSplayLatency: 6125\n----",
+      "scores": {
+       "Splay": 5387.0,
+       "SplayLatency": 6125.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31329943165,
+       "cycles": 8768381007,
+       "branch-instructions": 5823519733,
+       "branch-misses": 16903304,
+       "cache-references": 13160626048,
+       "cache-misses": 84808703
+      },
+      "wallSeconds": 2.3220315938815475,
+      "stdout": "Splay: 5394\nSplayLatency: 6017\n----",
+      "scores": {
+       "Splay": 5394.0,
+       "SplayLatency": 6017.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31336818437,
+       "cycles": 8760019548,
+       "branch-instructions": 5826256665,
+       "branch-misses": 16819007,
+       "cache-references": 13075465127,
+       "cache-misses": 87256138
+      },
+      "wallSeconds": 2.3250786033459008,
+      "stdout": "Splay: 5387\nSplayLatency: 6081\n----",
+      "scores": {
+       "Splay": 5387.0,
+       "SplayLatency": 6081.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31327180232,
+       "cycles": 8820441878,
+       "branch-instructions": 5822389286,
+       "branch-misses": 17089595,
+       "cache-references": 13181386008,
+       "cache-misses": 88567675
+      },
+      "wallSeconds": 2.3390560261905193,
+      "stdout": "Splay: 5356\nSplayLatency: 6023\n----",
+      "scores": {
+       "Splay": 5356.0,
+       "SplayLatency": 6023.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31325709030,
+       "cycles": 8737973678,
+       "branch-instructions": 5821810272,
+       "branch-misses": 16767122,
+       "cache-references": 13033018518,
+       "cache-misses": 89552434
+      },
+      "wallSeconds": 2.3190789078362286,
+      "stdout": "Splay: 5417\nSplayLatency: 6183\n----",
+      "scores": {
+       "Splay": 5417.0,
+       "SplayLatency": 6183.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31325299718,
+       "cycles": 8702413795,
+       "branch-instructions": 5821565936,
+       "branch-misses": 16715383,
+       "cache-references": 13023913914,
+       "cache-misses": 87774612
+      },
+      "wallSeconds": 2.3015754469670355,
+      "stdout": "Splay: 5420\nSplayLatency: 6183\n----",
+      "scores": {
+       "Splay": 5420.0,
+       "SplayLatency": 6183.0
+      }
+     },
+     {
+      "counters": {
+       "instructions": 31342093460,
+       "cycles": 8744574042,
+       "branch-instructions": 5828490182,
+       "branch-misses": 16910865,
+       "cache-references": 13167997668,
+       "cache-misses": 85217818
+      },
+      "wallSeconds": 2.313946880865842,
+      "stdout": "Splay: 5394\nSplayLatency: 6039\n----",
+      "scores": {
+       "Splay": 5394.0,
+       "SplayLatency": 6039.0
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 31342250826.5,
+     "zjsMedian": 31328561698.5,
+     "pairedRatiosZjsOverQjs": [
+      0.9996626407472287,
+      0.9997838816267712,
+      0.9989338504427999,
+      0.9992350942568543,
+      0.9999024943480453,
+      0.9997909248475478,
+      0.999548487352012,
+      0.999905620924762
+     ],
+     "ratioMedian": 0.999723261187,
+     "ratioMAD": 0.00017700349801669235
+    },
+    "cycles": {
+     "qjsMedian": 8700234010.5,
+     "zjsMedian": 8752296795.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0038492972236597,
+      1.008663710582805,
+      1.0078692861546386,
+      1.006251541542907,
+      1.0156932284428326,
+      0.9880315625663709,
+      0.9972577570587692,
+      1.0050600112895287
+     ],
+     "ratioMedian": 1.005655776416218,
+     "ratioMAD": 0.0026107219525037806
+    },
+    "branch-instructions": {
+     "qjsMedian": 5827736980.5,
+     "zjsMedian": 5822954509.5,
+     "pairedRatiosZjsOverQjs": [
+      0.9995214107533285,
+      0.9995457526104671,
+      0.9977546116978085,
+      0.9983675611937021,
+      0.9998207754769136,
+      0.9995322036840761,
+      0.99911509679346,
+      0.9997601484140909
+     ],
+     "ratioMedian": 0.9995268072187022,
+     "ratioMAD": 0.0002636547268000111
+    },
+    "branch-misses": {
+     "qjsMedian": 16759794.5,
+     "zjsMedian": 16793064.5,
+     "pairedRatiosZjsOverQjs": [
+      0.9645296617784372,
+      1.0026952122970767,
+      1.0097152657744042,
+      1.0094083371608493,
+      1.018240582764395,
+      0.9926264264868006,
+      0.9971328687430974,
+      1.0092337478857754
+     ],
+     "ratioMedian": 1.005964480091426,
+     "ratioMAD": 0.006291198515653407
+    },
+    "cache-references": {
+     "qjsMedian": 13033019536.5,
+     "zjsMedian": 13072854808.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0000246964849364,
+      1.0030800756593692,
+      1.0080218282043316,
+      1.0032925622196298,
+      1.0119628764048776,
+      0.9793076994628089,
+      0.9992656968255991,
+      1.010434145695039
+     ],
+     "ratioMedian": 1.0031863189394996,
+     "ratioMAD": 0.004378065689366273
+    },
+    "cache-misses": {
+     "qjsMedian": 86095393.5,
+     "zjsMedian": 87515375.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0065610987550455,
+      1.0358455474325998,
+      0.9819870643659697,
+      1.0189582977939453,
+      1.0449651937933928,
+      1.0293769530546175,
+      0.9772136048418618,
+      0.9929090589460531
+     ],
+     "ratioMedian": 1.0127596982744955,
+     "ratioMAD": 0.02146824424327337
+    },
+    "wallSeconds": {
+     "qjsMedian": 2.311862157424912,
+     "zjsMedian": 2.320555250858888,
+     "pairedRatiosZjsOverQjs": [
+      0.9967694738581367,
+      1.005908924831305,
+      1.0066175801673378,
+      1.0087232445755356,
+      1.0156736765938288,
+      0.9914530802680193,
+      0.9955159008553064,
+      1.0009365035899898
+     ],
+     "ratioMedian": 1.0034227142106473,
+     "ratioMAD": 0.005976885358699446
+    }
+   },
+   "derived": {
+    "qjsIPC": 3.6024606681468754,
+    "zjsIPC": 3.5794674737718375,
+    "ipcRatioZjsOverQjs": 0.9936173642148699
+   }
+  }
+ },
+ "orderLog": [
+  {
+   "bench": "splay",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 7,
+   "order": "zjs->qjs"
+  }
+ ]
+}

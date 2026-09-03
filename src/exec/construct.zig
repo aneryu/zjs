@@ -122,7 +122,7 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
             break :object null;
         };
         owned_prototype_value = prototype_value;
-        break :object @as(*core.Object, @fieldParentPtr("header", header));
+        break :object core.Object.fromHeader(header);
     };
 
     if (constructor.typedArrayElementSize() != 0 and constructor.typedArrayKind() != 0) {
@@ -163,7 +163,7 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
             _ = try expectObject(rooted_args[0]);
             _ = try expectObject(rooted_args[1]);
             const proxy = try core.Object.create(rt, core.class.ids.proxy, null);
-            errdefer core.Object.destroyFromHeader(rt, &proxy.header);
+            errdefer core.Object.destroyFromHeader(rt, proxy.gcHeader());
             try proxy.ensureProxyPayload(rt);
             try proxy.setOptionalValueSlot(rt, proxy.proxyTargetSlot(), rooted_args[0].dup());
             try proxy.setOptionalValueSlot(rt, proxy.proxyHandlerSlot(), rooted_args[1].dup());
@@ -209,7 +209,7 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
     rooted_instance = instance.value();
     errdefer {
         rooted_instance = core.JSValue.undefinedValue();
-        core.Object.destroyFromHeader(rt, &instance.header);
+        core.Object.destroyFromHeader(rt, instance.gcHeader());
     }
     const constructor_key = try rt.internAtom("constructor");
     defer rt.atoms.free(constructor_key);
@@ -229,8 +229,7 @@ test "constructValue fallback roots callee while defining constructor property" 
     const function_proto = try core.Object.create(rt, core.class.ids.object, null);
     ctx.cached_function_proto = function_proto;
     const object_proto = try core.Object.create(rt, core.class.ids.object, null);
-    const object_proto_slot = try global.cachedRealmValueSlot(rt, .object_prototype);
-    try global.setOptionalValueSlot(rt, object_proto_slot, object_proto.value());
+    try global.setCachedRealmValue(rt, .object_prototype, object_proto.value());
 
     const name = try rt.internAtom("FallbackConstructor");
     defer rt.atoms.free(name);
@@ -318,7 +317,7 @@ pub fn constructErrorObject(rt: *core.JSRuntime, name: []const u8, constructor: 
 
     if (std.mem.eql(u8, name, "AggregateError")) return constructAggregateErrorObject(rt, constructor, prototype, rooted_args);
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &instance.header);
+    errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
     // No own `name` property: it lives on the per-class prototype only
     // (qjs js_error_constructor quickjs.c:41441 defines only message/cause).
     if (rooted_args.len >= 1 and !rooted_args[0].isUndefined()) {
@@ -376,7 +375,7 @@ pub fn constructDOMExceptionObject(rt: *core.JSRuntime, prototype: ?*core.Object
     defer root_frame.deactivate(rt);
 
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &instance.header);
+    errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
     const message = if (rooted_args.len >= 1 and !rooted_args[0].isUndefined())
         try value_ops.toStringValue(rt, rooted_args[0])
     else
@@ -504,7 +503,7 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
     defer cause_val.free(rt);
 
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &instance.header);
+    errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
     // No own `name` property: it lives on AggregateError.prototype
     // (qjs js_error_constructor quickjs.c:41441, JS_AGGREGATE_ERROR magic).
 
@@ -571,7 +570,7 @@ pub fn weakRefWithPrototype(rt: *core.JSRuntime, target: core.JSValue, prototype
     defer root_frame.deactivate(rt);
 
     const instance = try core.Object.create(rt, core.class.ids.weak_ref, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &instance.header);
+    errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
     try instance.setWeakRefTarget(rt, rooted_target);
     return instance.value();
 }
@@ -579,7 +578,7 @@ pub fn weakRefWithPrototype(rt: *core.JSRuntime, target: core.JSValue, prototype
 fn constructFinalizationRegistry(ctx: *core.JSContext, cleanup_callback: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rt = ctx.runtime;
     const instance = try core.Object.createFinalizationRegistry(rt, ctx, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &instance.header);
+    errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
     try instance.setOptionalValueSlot(rt, instance.finalizationRegistryCleanupCallbackSlot(), cleanup_callback.dup());
     return instance.value();
 }
@@ -636,7 +635,7 @@ fn constructPrimitiveWrapper(rt: *core.JSRuntime, class_id: core.class.ClassId, 
     defer root_frame.deactivate(rt);
 
     const instance = try core.Object.create(rt, class_id, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &instance.header);
+    errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
     try instance.setOptionalValueSlot(rt, instance.objectDataSlot(), rooted_primitive.dup());
     return instance.value();
 }
@@ -755,7 +754,7 @@ fn constructTypedArrayTypedArrayInput(rt: *core.JSRuntime, prototype: ?*core.Obj
     if (try core.object.typedArrayOutOfBounds(source)) {
         const buffer_value = source.typedArrayBuffer() orelse return error.TypeError;
         const buffer_header = buffer_value.refHeader() orelse return error.TypeError;
-        const buffer: *core.Object = @fieldParentPtr("header", buffer_header);
+        const buffer = core.Object.fromHeader(buffer_header);
         if (source.typedArrayFixedLength() != null or source.typedArrayByteOffset() > buffer.byteStorage().len) return error.TypeError;
     }
     const length = try core.object.typedArrayLength(rt, source);
@@ -1102,7 +1101,7 @@ fn nativeFunctionNameValue(rt: *core.JSRuntime, function_object: *core.Object, p
 fn isNativeCollectionAdder(rt: *core.JSRuntime, value: core.JSValue, expected: []const u8) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.c_function) return false;
     const name_value = nativeFunctionNameValue(rt, object, true) catch return false;
     defer name_value.free(rt);
@@ -1153,7 +1152,7 @@ fn constructorName(rt: *core.JSRuntime, constructor: *core.Object) !?[]u8 {
 fn isCallableObject(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object = core.Object.fromHeader(header);
     return object.class_id == core.class.ids.c_function or
         object.class_id == core.class.ids.c_function_data or
         object.class_id == core.class.ids.c_closure or
@@ -1178,7 +1177,7 @@ fn isConstructibleBytecodeFunctionObject(object: *const core.Object) bool {
 fn expectConstructor(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object = core.Object.fromHeader(header);
     if (core.class.isBytecodeFunctionClass(object.class_id)) {
         if (!isConstructibleBytecodeFunctionObject(object)) return error.TypeError;
         return object;

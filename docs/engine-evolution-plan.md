@@ -136,7 +136,7 @@ Phase 5    Trace 或 Region Optimizing JIT(profile 后决定)
 | 事实 | 出处 |
 | --- | --- |
 | bench-v8 composite **1.0464×QuickJS**(zjs 2706 / qjs 2586,7/8 ≥ 1.0);唯一落后 EarleyBoyer 0.879。**历史口径注(2026-08-25)**:此数为 V8 suite v7 / GCC-13 参考二进制口径;套件已于 2026-08-25 换为 Octane 2.0(v9),跨套件/跨参考二进制的 ratio 不可比,现行快照与官方 yardstick 归属(owner 待裁决)见 [perf/bench-v8-status.md](perf/bench-v8-status.md) | [perf/bench-v8-status.md](perf/bench-v8-status.md) |
-| zoo 内部诊断:geomean 1.0304;落后项 pdfjs 0.849、earley-boyer 0.886、box2d 0.955、typescript 0.958,均以分配/调用密集为主。**历史口径注(2026-08-25)**:同为 GCC-13 参考口径的冻结基线,基线文档已移出树(git history 可回溯) | 工具见 `tools/perf/zoo/README.md` |
+| zoo 内部诊断:geomean 1.0304;落后项 pdfjs 0.849、earley-boyer 0.886、box2d 0.955、typescript 0.958,均以分配/调用密集为主。**历史口径注(2026-08-25)**:同为 GCC-13 参考口径的冻结基线,基线文档已移出树(git history 可回溯) | zoo 运行器已于 2026-08-29 退役(git history) |
 | test262:44,584 pass / 0 unexpected failures,语义已稳定 | `STATUS.md` |
 | dispatch 现状:每 opcode 一个 `callconv(.c)` handler,`@call(.always_tail)` 经 256 表尾跳;pc/sp/var_buf 驻参数寄存器,其余挂 `*Vm`(x3);热 handler 帧 ~80–150B,叶级热臂零 prologue | `src/exec/tailcall_dispatch.zig` |
 | **热 JS→JS 调用不往返 driver(0.4 勘误)**:warm exact-args / capture-leaf / plain 家族经 `pushWarmExactArgsLeafAndEnter`/`pushAndEnter` 域内进入 callee;`return .tail` → driver 仅存于 generic `execCall` 兜底、`op_apply`、spread 构造器等冷形态 | 同上 opCall 段;冷形态频次先例:padded-leaf 0.0015% 普查删除(在册注释) |

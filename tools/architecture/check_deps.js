@@ -219,12 +219,16 @@ const TEST_ROOTS = [
   'src/parser_tests.zig',
   'src/bytecode_tests.zig',
   'src/runner_tests.zig',
+  'src/stress_tests.zig',
   'src/leak_census_tests.zig',
   'src/embedding_tests.zig',
   'src/compiler_tests.zig',
   'src/runtime_tests.zig',
   'src/tests/oom.zig',
   'src/tests/smoke_test.zig',
+  // Standalone build-graph tool roots (referenced by build.zig steps, not
+  // imported by any module).
+  'src/abi/gen_header.zig', // zig build gen-abi-header
   // tools/ and tests/ files that import the zjs module (scanned for edges;
   // they are build-graph roots, not orphans).
   'tools/perf/same_runtime/zjs_same_runtime.zig',
