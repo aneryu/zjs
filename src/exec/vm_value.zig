@@ -536,7 +536,7 @@ fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
 fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (!core.class.isBytecodeFunctionClass(object.class_id)) return null;
     return object;
 }
@@ -546,7 +546,7 @@ const objectFromValue = core.value_semantics.objectFromValue;
 fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.c_function and
         object.class_id != core.class.ids.c_function_data and
         object.class_id != core.class.ids.c_closure and

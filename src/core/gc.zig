@@ -1086,8 +1086,8 @@ comptime {
 
 /// The owner state word of the fast path. One aligned eight-byte load of the
 /// prefix the caller is about to write through anyway.
-pub inline fn barrierOwnerWord(header: *const Header) u64 {
-    return @bitCast(header.metaConst().*);
+pub inline fn barrierOwnerWord(header: anytype) u64 {
+    return @bitCast(headerPtrConst(header).metaConst().*);
 }
 
 /// Trace-only compact carrier header.
@@ -1096,15 +1096,24 @@ pub inline fn barrierOwnerWord(header: *const Header) u64 {
 /// payload during this physical-layout tranche.  Traced nodes need only one
 /// intrusive successor: collector partitioning always knows the owning list,
 /// so removal can recover the predecessor from that cold list instead of
-/// charging every live object a second pointer.  Ordinary Objects are never
-/// on the list (the block bitmap enumerates them), making this word padding for
-/// the hot population and shrinking `[Metadata + Object]` from 72 to 64 bytes.
+/// charging every live object a second pointer.  Ordinary Objects use
+/// `ObjectGcToken` instead of this word; leftover `.object` carriers live on
+/// `standalone_objects`, and Pass B reuses `Object.prop_values` as the
+/// deferred-free link.
 pub const TraceHeader = extern struct {
     next: ?*TraceHeader = null,
 
     comptime {
         std.debug.assert(@sizeOf(TraceHeader) == 8);
         std.debug.assert(@sizeOf(Metadata) == 8);
+    }
+
+    pub inline fn asHeader(self: *TraceHeader) *Header {
+        return self;
+    }
+
+    pub inline fn asHeaderConst(self: *const TraceHeader) *const Header {
+        return self;
     }
 
     pub inline fn meta(self: *TraceHeader) *Metadata {
@@ -1129,6 +1138,85 @@ pub const TraceHeader = extern struct {
         self.meta().flags.is_pinned = value;
     }
 };
+
+/// Size-0 identity token at Object offset 0. The live Object head is the
+/// fields that follow (`weakref_count` through `prop_values`); GC APIs that
+/// still take `*Header` ptrCast this address, which equals `*Object`.
+pub const ObjectGcToken = extern struct {
+    comptime {
+        std.debug.assert(@sizeOf(@This()) == 0);
+    }
+
+    pub inline fn asHeader(self: *ObjectGcToken) *Header {
+        return @ptrCast(@alignCast(self));
+    }
+
+    pub inline fn asHeaderConst(self: *const ObjectGcToken) *const Header {
+        return @ptrCast(@alignCast(self));
+    }
+
+    pub inline fn meta(self: *ObjectGcToken) *Metadata {
+        return @ptrFromInt(@intFromPtr(self) - metadata_prefix_size);
+    }
+
+    pub inline fn metaConst(self: *const ObjectGcToken) *const Metadata {
+        return @ptrFromInt(@intFromPtr(self) - metadata_prefix_size);
+    }
+
+    pub inline fn retain(self: *ObjectGcToken) void {
+        self.asHeader().retain();
+    }
+
+    pub fn pinned(self: *const ObjectGcToken) bool {
+        return self.metaConst().flags.is_pinned;
+    }
+
+    pub fn setPinned(self: *ObjectGcToken, value: bool) void {
+        self.meta().flags.is_pinned = value;
+    }
+};
+
+/// Coerce an Object identity token or a real `Header` to `*Header`. Object's
+/// token is size 0 at offset 0, so the address equals `*Object`.
+pub inline fn headerPtr(ptr: anytype) *Header {
+    return @ptrCast(@alignCast(ptr));
+}
+
+pub inline fn headerPtrConst(ptr: anytype) *const Header {
+    return @ptrCast(@alignCast(ptr));
+}
+
+pub inline fn headerPtrOrNull(child: anytype) ?*Header {
+    const T = @TypeOf(child);
+    switch (@typeInfo(T)) {
+        .optional => {
+            const inner = child orelse return null;
+            return headerPtr(inner);
+        },
+        .pointer => return headerPtr(child),
+        .null => return null,
+        else => @compileError("expected a GC header pointer or optional header pointer"),
+    }
+}
+
+/// After Pass A, Object.prop_values is a dead sentinel. Pass B reuses that
+/// word as the deferred-free LIFO link so Object can drop `TraceHeader.next`.
+pub inline fn deferredFreeNext(header: *Header) *?*Header {
+    if (header.metaConst().flags.kind == .object) {
+        const obj: *object.Object = @ptrCast(@alignCast(header));
+        return @ptrCast(@alignCast(&obj.prop_values));
+    }
+    return &header.next;
+}
+
+pub inline fn deferredFreeSuccessor(header: *const Header) ?*Header {
+    if (header.metaConst().flags.kind == .object) {
+        const obj: *const object.Object = @ptrCast(@alignCast(header));
+        const link: *const ?*Header = @ptrCast(@alignCast(&obj.prop_values));
+        return link.*;
+    }
+    return header.next;
+}
 
 /// Common QuickJS-style refcount word. Every refcounted JSValue payload points
 /// at its body, with this header at the fixed `payload - 4` offset (`__js_rc`
@@ -1233,7 +1321,8 @@ pub inline fn decrementHeaderRefCount(h: *Header) i32 {
     return next;
 }
 
-pub inline fn headerRefCountIsZeroOrHusk(h: *const Header) bool {
+pub inline fn headerRefCountIsZeroOrHusk(header: anytype) bool {
+    const h = headerPtrConst(header);
     if (h.metaConst().flags.kind == .big_int)
         return prefixRefCountConst(h.metaConst()).* == 0;
     return h.metaConst().lifetime.trace.flags.husk;
@@ -1242,12 +1331,14 @@ pub inline fn headerRefCountIsZeroOrHusk(h: *const Header) bool {
 /// True when dropping the last WeakRef may reclaim the resource-stripped
 /// object struct. There is an explicit state bit for it, and tracer-owned
 /// objects never go through the zero-ref queue.
-pub inline fn headerIsReclaimableWeakHusk(h: *const Header) bool {
+pub inline fn headerIsReclaimableWeakHusk(header: anytype) bool {
+    const h = headerPtrConst(header);
     std.debug.assert(h.metaConst().flags.kind == .object);
     return h.metaConst().lifetime.trace.flags.husk;
 }
 
-pub inline fn setHeaderWeakHusk(h: *Header) void {
+pub inline fn setHeaderWeakHusk(header: anytype) void {
+    const h = headerPtr(header);
     std.debug.assert(h.metaConst().flags.kind == .object);
     {
         std.debug.assert(!h.metaConst().alloc_info.heap_accounted);
@@ -1447,13 +1538,14 @@ pub inline fn listSentinel(head: *const IntrusiveHeaderList) *const Header {
     return &head.sentinel;
 }
 
-pub inline fn headerLinked(header: *const Header) bool {
+pub inline fn headerLinked(header: anytype) bool {
     // `.object` is never an intrusive-list member: block cells are bitmap
     // enumerated and leftover standalone objects live in `standalone_objects`.
-    // Read the kind from the prefix so a later compact Object token can drop
-    // `next` without this predicate loading a missing field.
-    if (header.metaConst().flags.kind == .object) return false;
-    return header.next != null;
+    // Read the kind from the prefix so Object can drop `next` without this
+    // predicate loading a missing field.
+    const h = headerPtrConst(header);
+    if (h.metaConst().flags.kind == .object) return false;
+    return h.next != null;
 }
 
 fn verifyCircularHeaderList(
@@ -1504,9 +1596,10 @@ fn verifyCircularHeaderList(
 
 /// Allocation-free temporary intrusive list for cycle partitioning and
 /// Pass-B struct deferral. Same `Header.link` words as the Registry lists
-/// (qjs reuses `JSGCObjectHeader.link`). Call `init()` in place after the
-/// list reaches its stable address — the sentinel is self-referential.
-/// See `Registry.cycle_deferred_frees`. Reuses the header's `next` link; the
+/// (qjs reuses `JSGCObjectHeader.link`) for non-object kinds. Objects overlay
+/// the successor on `Object.prop_values` after Pass A (`deferredFreeNext`).
+/// Call `init()` in place after the list reaches its stable address — the
+/// sentinel is self-referential. See `Registry.cycle_deferred_frees`. The
 /// header is off every other list by the time it gets here (the resource pass
 /// detached it).
 pub const DeferredFreeStack = struct {
@@ -1514,15 +1607,15 @@ pub const DeferredFreeStack = struct {
     count: usize = 0,
 
     pub fn push(self: *DeferredFreeStack, header: *GCObjectHeader) void {
-        header.next = self.head;
+        deferredFreeNext(header).* = self.head;
         self.head = header;
         self.count += 1;
     }
 
     pub fn pop(self: *DeferredFreeStack) ?*GCObjectHeader {
         const header = self.head orelse return null;
-        self.head = header.next;
-        header.next = null;
+        self.head = deferredFreeSuccessor(header);
+        deferredFreeNext(header).* = null;
         self.count -= 1;
         return header;
     }
@@ -1534,7 +1627,7 @@ pub const DeferredFreeStack = struct {
     /// heap's observable population.
     pub fn popForFree(self: *DeferredFreeStack) ?*GCObjectHeader {
         const header = self.head orelse return null;
-        self.head = header.next;
+        self.head = deferredFreeSuccessor(header);
         self.count -= 1;
         return header;
     }
@@ -2119,9 +2212,10 @@ pub const Registry = struct {
 
     /// Park a resource-stripped GC object's struct for the Pass-B drain. The
     /// header is already unlinked from the GC object list by the resource pass.
-    pub fn deferCycleStructFree(self: *Registry, header: *GCObjectHeader) void {
-        header.meta().flags.finalizing = true;
-        self.cycle_deferred_frees.push(header);
+    pub fn deferCycleStructFree(self: *Registry, header: anytype) void {
+        const h = headerPtr(header);
+        h.meta().flags.finalizing = true;
+        self.cycle_deferred_frees.push(h);
     }
 
     /// Open one Pass-A producer sequence for the deferred-free stack. Pass A
@@ -2151,7 +2245,7 @@ pub const Registry = struct {
         var saw_block_suffix = false;
         var current_block_base: ?usize = null;
         var cursor = self.cycle_deferred_frees.head;
-        while (cursor) |header| : (cursor = header.next) {
+        while (cursor) |header| : (cursor = deferredFreeSuccessor(header)) {
             if (!isBlockCellHeader(header)) {
                 if (saw_block_suffix) return error.DeferredFreeRunInterleaved;
                 continue;
@@ -2667,15 +2761,15 @@ pub const Registry = struct {
         // clearing it here upholds addInitializedWithSizeNoFail's clear-on-entry
         // invariant for re-registered headers.
         h.meta().alloc_info.large = false;
-        h.next = null;
+        if (h.metaConst().flags.kind != .object) h.next = null;
         try self.addInitializedWithSize(h, bytes);
     }
 
     /// Register a freshly allocated header whose prefix and intrusive links are
     /// already initialized. Typed MemoryAccount allocations plus their owning
     /// constructors provide this invariant, avoiding duplicate hot-path stores.
-    pub fn addInitializedWithSize(self: *Registry, h: *GCObjectHeader, bytes: usize) !void {
-        self.addInitializedWithSizeNoFail(h, bytes);
+    pub fn addInitializedWithSize(self: *Registry, header: anytype, bytes: usize) !void {
+        self.addInitializedWithSizeNoFail(headerPtr(header), bytes);
     }
 
     /// No-fail publication primitive for fully prepared GC objects. Registry
@@ -2834,7 +2928,7 @@ pub const Registry = struct {
             // property pointer. Inline class payloads still use the explicit
             // WithBytes APIs, as before.
             .object => blk: {
-                const obj: *const object.Object = @alignCast(@fieldParentPtr("header", h));
+                const obj: *const object.Object = object.Object.fromHeaderConst(h);
                 break :blk @sizeOf(object.Object) + object.Object.objectTailBytes(
                     obj.class_id,
                     obj.hasTrailingPropertyAllocation(),
@@ -2872,7 +2966,7 @@ pub const Registry = struct {
         if (storedHeapBytes(h)) |bytes| return bytes;
         return switch (h.metaConst().flags.kind) {
             .object => blk: {
-                const obj: *const object.Object = @alignCast(@fieldParentPtr("header", h));
+                const obj: *const object.Object = object.Object.fromHeaderConst(h);
                 break :blk obj.allocationSize(rt);
             },
             .function_bytecode => blk: {
@@ -2923,23 +3017,25 @@ pub const Registry = struct {
         if (header.meta().alloc_info.standalone) header.meta().size_class = 0;
     }
 
-    pub fn pinHeader(self: *Registry, header: *GCObjectHeader) !void {
-        if (self.pinEntryIndex(header)) |index| {
+    pub fn pinHeader(self: *Registry, header: anytype) !void {
+        const h = headerPtr(header);
+        if (self.pinEntryIndex(h)) |index| {
             std.debug.assert(self.pin_entries[index].count != construction_pin_count);
             self.pin_entries[index].count +|= 1;
             return;
         }
         try self.ensurePinEntryCapacity(self.pin_entries.len + 1);
         self.pin_entries.ptr[self.pin_entries.len] = .{
-            .header = header,
+            .header = h,
             .count = 1,
         };
         self.pin_entries = self.pin_entries.ptr[0 .. self.pin_entries.len + 1];
-        header.setPinned(true);
+        h.setPinned(true);
     }
 
-    pub fn unpinHeader(self: *Registry, header: *GCObjectHeader) void {
-        const index = self.pinEntryIndex(header) orelse return;
+    pub fn unpinHeader(self: *Registry, header: anytype) void {
+        const h = headerPtr(header);
+        const index = self.pinEntryIndex(h) orelse return;
         std.debug.assert(self.pin_entries[index].count != construction_pin_count);
         if (self.pin_entries[index].count > 1) {
             self.pin_entries[index].count -= 1;
@@ -2953,7 +3049,7 @@ pub const Registry = struct {
             );
         }
         self.pin_entries = self.pin_entries[0 .. self.pin_entries.len - 1];
-        header.setPinned(false);
+        h.setPinned(false);
     }
 
     // heap_live_bytes / old_live_bytes / large_object_bytes are no longer stored:
@@ -3009,7 +3105,8 @@ pub const Registry = struct {
         return total;
     }
 
-    pub fn unlinkObjectWithBytes(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
+    pub fn unlinkObjectWithBytes(self: *Registry, header: anytype, bytes: usize) void {
+        const h = headerPtr(header);
         self.recordHeapFreeWithBytes(h, bytes);
         // Condemnation detached this header before its resource destructor.
         // Let that structural stamp answer before kind, list, and generation
@@ -3036,14 +3133,16 @@ pub const Registry = struct {
     /// entirely; only the byte ledger remains. Keeping this as a separate
     /// contract also prevents a future caller from accidentally treating the
     /// `cycle_visited` stamp as permission to omit accounting.
-    pub inline fn recordDetachedHeapFreeWithBytes(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
+    pub inline fn recordDetachedHeapFreeWithBytes(self: *Registry, header: anytype, bytes: usize) void {
+        const h = headerPtr(header);
         if (comptime std.debug.runtime_safety) {
             std.debug.assert(h.metaConst().flags.cycle_visited);
         }
         self.recordHeapFreeWithBytes(h, bytes);
     }
 
-    pub fn unlinkObject(self: *Registry, h: *GCObjectHeader) void {
+    pub fn unlinkObject(self: *Registry, header: anytype) void {
+        const h = headerPtr(header);
         const bytes = storedHeapBytes(h) orelse defaultHeapBytes(h);
         self.unlinkObjectWithBytes(h, bytes);
     }
@@ -3297,22 +3396,24 @@ pub const Registry = struct {
     /// Protect a fully initialized Object whose shape is intentionally not
     /// installed yet. Only the detached generator constructor has this
     /// lifetime; all other block-cell objects publish immediately.
-    pub fn addConstructionRoot(self: *Registry, header: *GCObjectHeader) void {
-        std.debug.assert(header.metaConst().flags.kind == .object);
-        std.debug.assert(!header.metaConst().alloc_info.heap_accounted);
-        std.debug.assert(!headerLinked(header));
-        std.debug.assert(self.pinEntryIndex(header) == null);
+    pub fn addConstructionRoot(self: *Registry, header: anytype) void {
+        const h = headerPtr(header);
+        std.debug.assert(h.metaConst().flags.kind == .object);
+        std.debug.assert(!h.metaConst().alloc_info.heap_accounted);
+        std.debug.assert(!headerLinked(h));
+        std.debug.assert(self.pinEntryIndex(h) == null);
         std.debug.assert(self.pin_entries.len < self.pin_entries_capacity);
         self.pin_entries.ptr[self.pin_entries.len] = .{
-            .header = header,
+            .header = h,
             .count = construction_pin_count,
         };
         self.pin_entries = self.pin_entries.ptr[0 .. self.pin_entries.len + 1];
-        header.setPinned(true);
+        h.setPinned(true);
     }
 
-    pub fn removeConstructionRoot(self: *Registry, header: *GCObjectHeader) void {
-        const index = self.pinEntryIndex(header) orelse unreachable;
+    pub fn removeConstructionRoot(self: *Registry, header: anytype) void {
+        const h = headerPtr(header);
+        const index = self.pinEntryIndex(h) orelse unreachable;
         std.debug.assert(self.pin_entries[index].count == construction_pin_count);
         if (index + 1 < self.pin_entries.len) {
             std.mem.copyForwards(
@@ -3322,7 +3423,7 @@ pub const Registry = struct {
             );
         }
         self.pin_entries = self.pin_entries[0 .. self.pin_entries.len - 1];
-        header.setPinned(false);
+        h.setPinned(false);
     }
 
     fn isConstructionRoot(self: *const Registry, header: *const GCObjectHeader) bool {
@@ -3343,7 +3444,7 @@ pub const Registry = struct {
         {
             return false;
         }
-        const shell: *const object.Object = @alignCast(@fieldParentPtr("header", header));
+        const shell: *const object.Object = object.Object.fromHeaderConst(header);
         return shell.isDetachedGeneratorShellForGc();
     }
 
@@ -3372,7 +3473,7 @@ pub const Registry = struct {
             return .none;
         }
         var parked = self.cycle_deferred_frees.head;
-        while (parked) |candidate| : (parked = candidate.next) {
+        while (parked) |candidate| : (parked = deferredFreeSuccessor(candidate)) {
             if (candidate == header) return .parked_finalizer;
         }
         return .none;
@@ -3473,14 +3574,14 @@ pub const Registry = struct {
 
     /// Served from the collector's block heap: enumerated by block bitmaps,
     /// never linked on `gc_obj_list`, young-tracked at block granularity.
-    pub inline fn isBlockCellHeader(h: *const GCObjectHeader) bool {
+    pub inline fn isBlockCellHeader(header: anytype) bool {
         if (comptime !block_heap_enabled) return false;
         // The CLASS FIELD is the marker, not the whole byte: publication sets
         // `heap_accounted` on top of it (0x1F becomes 0x5F), and comparing
         // the full byte made every published block object fail this test --
         // so they linked onto the list AND were enumerated by the block
         // phase, and the bitmap mark split never engaged at all.
-        return h.metaConst().alloc_info.block_size_idx == representation.block_cell_size_class;
+        return headerPtrConst(header).metaConst().alloc_info.block_size_idx == representation.block_cell_size_class;
     }
 
     /// Cross-module representation audit for Object's direct property pointer
@@ -3491,7 +3592,7 @@ pub const Registry = struct {
         var iterator = self.objectIterator();
         while (iterator.next()) |header| {
             if (header.metaConst().flags.kind != .object) continue;
-            const owner: *const object.Object = @fieldParentPtr("header", header);
+            const owner: *const object.Object = object.Object.fromHeaderConst(header);
             if (@intFromPtr(owner.prop_values) & (@alignOf(property.Entry) - 1) != 0)
                 return error.MisalignedPropertyStorage;
 
@@ -3617,7 +3718,8 @@ pub const Registry = struct {
     /// first cache line with the header) and a mask; the bitmap word is
     /// shared by 64 neighbours, which is better locality than 64 scattered
     /// header bytes.
-    pub inline fn headerMarked(self: *const Registry, h: *const GCObjectHeader) bool {
+    pub inline fn headerMarked(self: *const Registry, header: anytype) bool {
+        const h = headerPtrConst(header);
         if (comptime block_heap_enabled) {
             if (h.metaConst().alloc_info.block_size_idx == representation.block_cell_size_class) {
                 const cell = @intFromPtr(h) - metadata_prefix_size;
@@ -3629,7 +3731,8 @@ pub const Registry = struct {
         return @atomicLoad(u16, &h.metaConst().lifetime.trace.mark_epoch, .monotonic) == self.header_mark_epoch;
     }
 
-    pub inline fn setHeaderMarked(self: *const Registry, h: *GCObjectHeader) void {
+    pub inline fn setHeaderMarked(self: *const Registry, header: anytype) void {
+        const h = headerPtr(header);
         if (comptime block_heap_enabled) {
             if (h.metaConst().alloc_info.block_size_idx == representation.block_cell_size_class) {
                 const cell = @intFromPtr(h) - metadata_prefix_size;
@@ -3703,7 +3806,8 @@ pub const Registry = struct {
         }
     }
 
-    pub inline fn setHeaderUnmarked(self: *const Registry, h: *GCObjectHeader) void {
+    pub inline fn setHeaderUnmarked(self: *const Registry, header: anytype) void {
+        const h = headerPtr(header);
         if (comptime block_heap_enabled) {
             if (h.metaConst().alloc_info.block_size_idx == representation.block_cell_size_class) {
                 const cell = @intFromPtr(h) - metadata_prefix_size;
@@ -4025,15 +4129,17 @@ pub const Registry = struct {
         }
     }
 
-    pub inline fn shadeForConcurrentMark(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void {
+    pub inline fn shadeForConcurrentMark(self: *Registry, owner: anytype, target: anytype) void {
         if (comptime !concurrent_enabled) return;
+        const owner_h = headerPtr(owner);
+        const target_h = headerPtr(target);
         // The exit split is a --gc-stats structural guardrail, not collector
         // policy. Keep the default tracing build's hot barrier at lane-e's
         // counter-free cost; tests and explicitly requested detailed reports
         // retain lane-f's complete call accounting.
         const report = builtin.is_test or gc_trace_stw_reports.detailed_reports;
         if (report) self.concurrent.stats.barrier_calls += 1;
-        if (self.headerMarked(target)) {
+        if (self.headerMarked(target_h)) {
             if (report) self.concurrent.stats.barrier_marked_target += 1;
             return;
         }
@@ -4052,33 +4158,33 @@ pub const Registry = struct {
         // the owner here instead was the corpse factory -- a failed
         // construction's errdefer-destroy left the queue naming a recycled
         // cell.
-        if (!owner.meta().alloc_info.heap_accounted) {
+        if (!owner_h.meta().alloc_info.heap_accounted) {
             if (report) self.concurrent.stats.barrier_unpublished_owner += 1;
             return;
         }
         // Mirror rule for the target: an unpublished target queues itself
         // grey at publication, and pushing it now would name a cell whose
         // construction can still fail and free it.
-        if (!target.meta().alloc_info.heap_accounted) {
+        if (!target_h.meta().alloc_info.heap_accounted) {
             if (report) self.concurrent.stats.barrier_unpublished_target += 1;
             return;
         }
-        const kind = target.meta().flags.kind;
+        const kind = target_h.meta().flags.kind;
         if (kind == .shape or kind == .realm_context) {
-            const owner_kind = owner.meta().flags.kind;
+            const owner_kind = owner_h.meta().flags.kind;
             if (owner_kind == .shape or owner_kind == .realm_context) {
-                self.setHeaderMarked(target);
+                self.setHeaderMarked(target_h);
                 self.concurrent.stats.shaded += 1;
                 self.concurrent_mark_queue.overflowed.store(true, .release);
                 return;
             }
             if (report) self.concurrent.stats.barrier_requeued_owner += 1;
-            _ = self.concurrent_mark_queue.pushSingle(owner);
+            _ = self.concurrent_mark_queue.pushSingle(owner_h);
             return;
         }
-        self.setHeaderMarked(target);
+        self.setHeaderMarked(target_h);
         self.concurrent.stats.shaded += 1;
-        _ = self.concurrent_mark_queue.pushSingle(target);
+        _ = self.concurrent_mark_queue.pushSingle(target_h);
     }
 
     // `markAssist` used to live here: pop a slice of the queue and set mark
@@ -4152,10 +4258,11 @@ pub const Registry = struct {
     /// mark state cannot dedup an owner that must be re-traced -- so the ring
     /// can overflow. Overflow is the queue's sound downgrade: the remark
     /// rescans every marked object. Worse pause, never a lost object.
-    pub inline fn rememberOwnerForBulkWrite(self: *Registry, owner: *GCObjectHeader) void {
+    pub inline fn rememberOwnerForBulkWrite(self: *Registry, owner: anytype) void {
         if (comptime !generation_enabled) return;
-        if (self.barrierOwnerSkips(owner)) return;
-        self.rememberOwnerForBulkWriteSlow(owner);
+        const owner_h = headerPtr(owner);
+        if (self.barrierOwnerSkips(owner_h)) return;
+        self.rememberOwnerForBulkWriteSlow(owner_h);
     }
 
     fn rememberOwnerForBulkWriteSlow(self: *Registry, owner: *GCObjectHeader) void {
@@ -4239,8 +4346,9 @@ pub const Registry = struct {
     /// `detailed_reports` load, and -- for an owner already in the remembered
     /// set -- the SECOND object header the old-target classification used to
     /// touch.
-    pub inline fn barrierOwnerSkips(self: *const Registry, owner: *const GCObjectHeader) bool {
+    pub inline fn barrierOwnerSkips(self: *const Registry, owner: anytype) bool {
         if (comptime !generation_enabled) return true;
+        const owner_h = headerPtrConst(owner);
         if (comptime std.debug.runtime_safety) {
             // C1. A stale gate is the one way this fold can go silently wrong,
             // and it is invisible from the slow path: a gate that wrongly
@@ -4252,9 +4360,9 @@ pub const Registry = struct {
             // at all, and `.big_int` aliases the byte onto its live refcount.
             // Audit §10.3 walked every barrier call site and found neither
             // kind; this turns that survey into a machine check.
-            std.debug.assert(traceRememberedCacheEligible(owner.metaConst().flags.kind));
+            std.debug.assert(traceRememberedCacheEligible(owner_h.metaConst().flags.kind));
         }
-        return barrierOwnerWord(owner) & self.barrier_gate != 0;
+        return barrierOwnerWord(owner_h) & self.barrier_gate != 0;
     }
 
     /// Target-bearing callers reach the bit only after old-owner/young-target
@@ -4338,9 +4446,9 @@ pub const Registry = struct {
     /// remove both the authoritative entry and its redundant cache bit; leaving
     /// only the bit would manufacture an invalid representation instead of the
     /// missing-barrier state the oracle is meant to reject.
-    pub fn forgetGenerationalOwnerForTest(self: *Registry, header: *GCObjectHeader) void {
+    pub fn forgetGenerationalOwnerForTest(self: *Registry, header: anytype) void {
         if (comptime !builtin.is_test) @compileError("test-only remembered-owner mutation");
-        self.forgetGenerationalOwner(header);
+        self.forgetGenerationalOwner(headerPtr(header));
     }
 
     inline fn generationalBarrierDetailed(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void {
@@ -4359,11 +4467,12 @@ pub const Registry = struct {
     /// Header-shaped write barrier. The whole steady-state decision is
     /// `barrierOwnerSkips`; everything below it is a phase the gate has
     /// already announced by being zero.
-    pub inline fn generationalBarrier(self: *Registry, owner: *GCObjectHeader, child: ?*GCObjectHeader) void {
+    pub inline fn generationalBarrier(self: *Registry, owner: anytype, child: anytype) void {
         if (comptime !generation_enabled) return;
-        const target = child orelse return;
-        if (self.barrierOwnerSkips(owner)) return;
-        self.generationalBarrierSlow(owner, target);
+        const target = headerPtrOrNull(child) orelse return;
+        const owner_h = headerPtr(owner);
+        if (self.barrierOwnerSkips(owner_h)) return;
+        self.generationalBarrierSlow(owner_h, target);
     }
 
     /// Everything the folded fast path stopped doing inline.
@@ -4410,11 +4519,12 @@ pub const Registry = struct {
     /// young owner, and both announce themselves by zeroing the gate -- so the
     /// gate-first shape decodes exactly when the pre-fold three-way ordering
     /// did, and the edge-only counters stay comparable with earlier runs.
-    pub inline fn generationalBarrierValue(self: *Registry, owner: *GCObjectHeader, child: JSValue) void {
+    pub inline fn generationalBarrierValue(self: *Registry, owner: anytype, child: JSValue) void {
         if (comptime !generation_enabled) return;
-        if (self.barrierOwnerSkips(owner)) return;
+        const owner_h = headerPtr(owner);
+        if (self.barrierOwnerSkips(owner_h)) return;
         const target = child.cycleMarkHeader() orelse return;
-        self.generationalBarrierSlow(owner, target);
+        self.generationalBarrierSlow(owner_h, target);
     }
 
     /// The barrier queue's ring shares the registry's allocator for the same
@@ -4954,16 +5064,16 @@ pub const Registry = struct {
         var slow = self.cycle_deferred_frees.head;
         var fast = self.cycle_deferred_frees.head;
         while (fast) |first| {
-            fast = first.next;
-            if (fast) |second| fast = second.next;
-            if (slow) |node| slow = node.next;
+            fast = deferredFreeSuccessor(first);
+            if (fast) |second| fast = deferredFreeSuccessor(second);
+            if (slow) |node| slow = deferredFreeSuccessor(node);
             if (fast != null and fast == slow) return error.CorruptDeferredFreeStack;
         }
         var deferred = self.cycle_deferred_frees.head;
         while (deferred) |node| {
             if (!node.metaConst().flags.finalizing) return error.CorruptDeferredFreeStack;
             deferred_count += 1;
-            deferred = node.next;
+            deferred = deferredFreeSuccessor(node);
         }
         if (deferred_count != self.cycle_deferred_frees.count) {
             return error.CorruptDeferredFreeStack;
@@ -5017,7 +5127,7 @@ pub const Registry = struct {
         };
 
         if (kind == .object) {
-            const owner: *const object.Object = @alignCast(@fieldParentPtr("header", header));
+            const owner: *const object.Object = object.Object.fromHeaderConst(header);
             if (!owner.traceShapeSummaryMatches())
                 return error.ObjectShapeSummaryMismatch;
         }
@@ -5217,29 +5327,30 @@ pub const Registry = struct {
         return count;
     }
 
-    pub fn containsHeader(self: *const Registry, header: *const GCObjectHeader) bool {
-        if (self.zero_ref_current == header) return true;
-        if (self.sweep_current == header) return true;
+    pub fn containsHeader(self: *const Registry, header: anytype) bool {
+        const h = headerPtrConst(header);
+        if (self.zero_ref_current == h) return true;
+        if (self.sweep_current == h) return true;
         // Condemned-but-not-yet-destroyed nodes are the sweep's analogue of
         // `zero_ref_list`: still owned, resources still intact.
         var condemned = self.tmp_obj_list.sentinel.next;
         while (condemned) |candidate| {
             if (candidate == &self.tmp_obj_list.sentinel) break;
-            if (candidate == header) return true;
+            if (candidate == h) return true;
             condemned = candidate.next;
         }
         var queued = self.zero_ref_list.sentinel.next;
         while (queued) |candidate| {
             if (candidate == &self.zero_ref_list.sentinel) break;
-            if (candidate == header) return true;
+            if (candidate == h) return true;
             queued = candidate.next;
         }
         for (self.standalone_objects) |candidate| {
-            if (candidate == header) return true;
+            if (candidate == h) return true;
         }
         var iterator = self.objectIterator();
         while (iterator.next()) |candidate| {
-            if (candidate == header) return true;
+            if (candidate == h) return true;
         }
         return false;
     }
@@ -5258,8 +5369,9 @@ pub inline fn release(rt: anytype, header: anytype) void {
         string.String.releaseFromHeader(rt, header);
         return;
     }
-    if (refCountRemoved(header.meta().flags.kind)) return;
-    if (decrementHeaderRefCount(header) == 0) destroyZeroRef(rt, header);
+    const h = headerPtr(header);
+    if (refCountRemoved(h.meta().flags.kind)) return;
+    if (decrementHeaderRefCount(h) == 0) destroyZeroRef(rt, h);
 }
 
 const ZeroRefKindSet = enum {

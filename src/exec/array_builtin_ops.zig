@@ -299,7 +299,7 @@ fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Ob
     const stored = global.cachedRealmValue(rt, .array_prototype) orelse return null;
     if (!stored.isObject()) return null;
     const header = stored.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return core.Object.fromHeader(header);
 }
 
 /// Shared record handler for the `.array` domain. Mirrors the retired
@@ -1347,7 +1347,7 @@ fn concat(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValu
 fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value: core.JSValue) !void {
     if (value.isObject()) {
         const header = value.refHeader() orelse unreachable;
-        const object: *core.Object = @fieldParentPtr("header", header);
+        const object: *core.Object = core.Object.fromHeader(header);
         if (object.isArray()) {
             var index: u32 = 0;
             while (index < object.arrayLength()) : (index += 1) {

@@ -937,7 +937,7 @@ fn int64ResultValue(value: i64) zjs.JSValue {
 fn test262InternalObjectFromValue(value: zjs.JSValue) ?*zjs.Object {
     const header = value.refHeader() orelse return null;
     if (header.meta().flags.kind != .object) return null;
-    return @fieldParentPtr("header", header);
+    return zjs.Object.fromHeader(header);
 }
 
 fn hostCallIsHtmlDda(

@@ -114,7 +114,7 @@ test "fulfilledWithPrototype roots direct function bytecode result while constru
 
 fn promiseObject(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.promise) return null;
     return object;
 }
@@ -224,7 +224,7 @@ fn createResolvingFunction(ctx: *core.JSContext, promise: core.JSValue, reject: 
     function_val = try core.function.nativeDataFunctionWithPrototype(rt, function_proto, "", 1);
     errdefer function_val.free(rt);
     const header = function_val.refHeader() orelse return error.TypeError;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     const state = try core.Object.create(rt, core.class.ids.object, null);
     state_val = state.value();
     defer state_val.free(rt);
@@ -253,13 +253,13 @@ test "createResolvingFunction roots promise and state while allocating slots" {
     const function_value = try createResolvingFunction(ctx, promise_value, false);
     var function_alive = true;
     defer if (function_alive) function_value.free(rt);
-    const function_object: *core.Object = @fieldParentPtr("header", function_value.refHeader() orelse return error.TypeError);
+    const function_object: *core.Object = core.Object.fromHeader(function_value.refHeader() orelse return error.TypeError);
 
     try std.testing.expect(rt.atoms.name(promise_symbol) != null);
     const stored_target = function_object.functionPromiseResolvingTarget() orelse return error.TypeError;
     try std.testing.expect(stored_target.same(promise_value));
     const stored_state = function_object.functionPromiseResolvingState() orelse return error.TypeError;
-    const state_object: *core.Object = @fieldParentPtr("header", stored_state.refHeader() orelse return error.TypeError);
+    const state_object: *core.Object = core.Object.fromHeader(stored_state.refHeader() orelse return error.TypeError);
     try std.testing.expect(!state_object.promiseAlreadyResolved());
 
     function_value.free(rt);
@@ -284,7 +284,7 @@ test "withResolvers roots promise and resolving functions while creating result"
     const result_value = try withResolvers(ctx, null);
     var result_alive = true;
     defer if (result_alive) result_value.free(rt);
-    const result: *core.Object = @fieldParentPtr("header", result_value.refHeader() orelse return error.TypeError);
+    const result: *core.Object = core.Object.fromHeader(result_value.refHeader() orelse return error.TypeError);
 
     const promise_key = try rt.internAtom("promise");
     defer rt.atoms.free(promise_key);
@@ -301,8 +301,8 @@ test "withResolvers roots promise and resolving functions while creating result"
     defer reject_value.free(rt);
 
     try std.testing.expect(promiseObject(promise_value) != null);
-    const resolve_object: *core.Object = @fieldParentPtr("header", resolve_value.refHeader() orelse return error.TypeError);
-    const reject_object: *core.Object = @fieldParentPtr("header", reject_value.refHeader() orelse return error.TypeError);
+    const resolve_object: *core.Object = core.Object.fromHeader(resolve_value.refHeader() orelse return error.TypeError);
+    const reject_object: *core.Object = core.Object.fromHeader(reject_value.refHeader() orelse return error.TypeError);
     try std.testing.expect(resolve_object.functionPromiseResolvingTarget().?.same(promise_value));
     try std.testing.expect(reject_object.functionPromiseResolvingTarget().?.same(promise_value));
     try std.testing.expect(!resolve_object.functionPromiseResolvingReject());
@@ -720,7 +720,7 @@ test "aggregateErrorValue roots errors array while creating aggregate error" {
 
 fn arrayObject(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (!object.isArray()) return null;
     return object;
 }

@@ -555,7 +555,7 @@ pub const Table = struct {
         self.* = .{};
     }
 
-    pub fn occupantFor(header: *gc.Header, bytes: usize) Occupant {
+    pub fn occupantFor(header: anytype, bytes: usize) Occupant {
         const header_addr = @intFromPtr(header);
         const lo = header_addr - gc.metadata_prefix_size;
         const hi = header_addr + bytes + 1;
@@ -768,7 +768,7 @@ pub const Table = struct {
     /// Is this a live, published GC object as far as candidate validation is
     /// concerned? Answers for arena-resolvable objects too, not just the ones
     /// the occupant table still holds.
-    pub fn containsHeader(self: *const Table, header: *const gc.Header) bool {
+    pub fn containsHeader(self: *const Table, header: anytype) bool {
         const addr = @intFromPtr(header);
         if (comptime gc.block_heap_enabled) {
             if (self.block_heap) |heap| {

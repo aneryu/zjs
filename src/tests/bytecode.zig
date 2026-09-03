@@ -1503,13 +1503,13 @@ test "parent finalization moves an existing child FunctionBytecode cpool owner w
 
     try std.testing.expect(fd.cpool[0].isUndefined());
     try helpers.expectRefCount(child_rc_before, &child_fb.header);
-    try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].objectHeader().?);
+    try std.testing.expectEqual(child_fb.header.asHeader(), parent_fb.cpoolSlice()[0].objectHeader().?);
 
     fd.deinit(rt);
     fd_alive = false;
     try helpers.expectRefCount(child_rc_before, &child_fb.header);
     try std.testing.expectEqual(name, child_fb.funcName());
-    try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].objectHeader().?);
+    try std.testing.expectEqual(child_fb.header.asHeader(), parent_fb.cpoolSlice()[0].objectHeader().?);
 
     const held_child = parent_fb.cpoolSlice()[0].dup();
     var held_child_alive = true;

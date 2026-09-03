@@ -823,7 +823,7 @@ fn isRawJsonEdgeWhitespace(byte: u8) bool {
 pub fn isRawJSON(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     return object.class_id == core.class.ids.raw_json;
 }
 
@@ -872,7 +872,7 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
         return error.TypeError;
     } else if (rooted_value.isObject()) {
         const header = rooted_value.refHeader() orelse return;
-        const object_value: *core.Object = @fieldParentPtr("header", header);
+        const object_value: *core.Object = core.Object.fromHeader(header);
         if (object_value.class_id == core.class.ids.raw_json) {
             raw = try object_value.getProperty(core.atom.ids.rawJSON);
             defer raw.free(rt);
@@ -942,7 +942,7 @@ fn appendJsonObject(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *co
         if (rooted_value.isUndefined() or rooted_value.isSymbol()) continue;
         if (rooted_value.isObject()) {
             const header = rooted_value.refHeader() orelse continue;
-            const child_object: *core.Object = @fieldParentPtr("header", header);
+            const child_object: *core.Object = core.Object.fromHeader(header);
             if (isCallableJsonOmittedObject(child_object)) continue;
         }
         if (emitted) try buffer.append(rt.memory.allocator, ',');
@@ -1329,7 +1329,7 @@ test "JSON callable omission recognizes every bytecode function class" {
 fn isArrayObject(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     return object.isArray();
 }
 
@@ -1341,7 +1341,7 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
 
     const header = rooted_replacer.refHeader() orelse return &.{};
     if (!rooted_replacer.isObject()) return &.{};
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (!object.isArray()) return &.{};
 
     var list = std.ArrayList(core.Atom).empty;
@@ -1400,7 +1400,7 @@ fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.At
     }
     const header = rooted_value.refHeader() orelse return null;
     if (!rooted_value.isObject()) return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.string and object.class_id != core.class.ids.number) return null;
     primitive = try primitiveValue(rt, object) orelse return null;
     defer primitive.free(rt);
@@ -1422,7 +1422,7 @@ fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
     else blk: {
         const header = rooted_space.refHeader() orelse break :blk null;
         if (!rooted_space.isObject()) break :blk null;
-        const object: *core.Object = @fieldParentPtr("header", header);
+        const object: *core.Object = core.Object.fromHeader(header);
         if (object.class_id == core.class.ids.number) {
             primitive = try primitiveValue(rt, object) orelse break :blk null;
             defer primitive.free(rt);
@@ -1440,7 +1440,7 @@ fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
         try core.string.appendValueUtf8(rt, &out, rooted_space);
     } else if (rooted_space.isObject()) {
         const header = rooted_space.refHeader() orelse return out;
-        const object: *core.Object = @fieldParentPtr("header", header);
+        const object: *core.Object = core.Object.fromHeader(header);
         if (object.class_id == core.class.ids.string) {
             primitive = try primitiveValue(rt, object) orelse return out;
             defer primitive.free(rt);
@@ -1519,7 +1519,7 @@ fn appendJsonInputString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
     if (rooted_value.isBigInt()) return core.value_format.appendBigIntBase10(rt.memory.allocator, buffer, rooted_value);
     if (rooted_value.isObject()) {
         const header = rooted_value.refHeader() orelse return error.TypeError;
-        const object: *core.Object = @fieldParentPtr("header", header);
+        const object: *core.Object = core.Object.fromHeader(header);
         primitive = try primitiveValue(rt, object) orelse return error.TypeError;
         defer primitive.free(rt);
         return appendJsonInputString(rt, buffer, primitive);

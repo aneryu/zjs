@@ -1,8 +1,9 @@
 //! QuickJS-shaped object model. Out-of-line payload representations and
 //! generator suspension storage live in `object_payloads.zig` and
 //! `generator_state.zig`; their public names are re-exported here so existing
-//! users retain one object-model namespace. `Object` remains a 64-byte
-//! `extern struct` with the class methods below. For property behavior start at
+//! users retain one object-model namespace. `Object` is a 24-byte head
+//! `extern struct` (`ObjectGcToken` is size 0); class data trails the head.
+//! For property behavior start at
 //! `shape.zig` and `property.zig`, then the call site in `src/exec/`.
 
 const array = @import("array.zig");
@@ -479,10 +480,11 @@ pub const Object = extern struct {
         // trails the head at `unionArmBytes(class_id)` bytes wide, so
         // `@sizeOf(Object)` is the head only and is NEVER an allocation size.
         // Use `bodyBytes()` / `objectBodyBytes(class_id)` for that.
-        std.debug.assert(@sizeOf(@This()) == 32);
+        // ① step 2: ObjectGcToken is size 0, so the live head is 24 bytes.
+        std.debug.assert(@sizeOf(@This()) == 24);
         std.debug.assert(@sizeOf(ObjectFlags) == 2);
         std.debug.assert(@sizeOf(ObjectStorage) == 24);
-        const header_bytes = @sizeOf(gc.GCObjectHeader);
+        const header_bytes = @sizeOf(gc.ObjectGcToken);
         std.debug.assert(@offsetOf(@This(), "weakref_count") == header_bytes);
         std.debug.assert(@offsetOf(@This(), "class_id") == header_bytes + 4);
         std.debug.assert(@offsetOf(@This(), "flags") == header_bytes + 6);
@@ -491,22 +493,22 @@ pub const Object = extern struct {
         std.debug.assert(trailing_property_allocation_bit & weakref_count_mask == 0);
         // The widest body must still be what the pre-knife fixed struct was, so
         // no wide class silently changed size class.
-        std.debug.assert(@sizeOf(@This()) + union_arm_max_bytes == 56);
-        // ③'s size-class contract, stated where it is checked rather than in a
-        // comment: the trailing-property form (only `ids.object` may have one)
-        // must land in the 64-byte block class in ReleaseFast, and the dense
-        // arm classes must NOT fall into the 48-byte class (whose 64-byte-grid
-        // phase costs 1.5 lines/object -- a net regression for 33% of the
-        // traced population).
+        std.debug.assert(@sizeOf(@This()) + union_arm_max_bytes == 48);
+        // Size-class contract: after ① step 2 the trailing-property form
+        // (only `ids.object` may have one) is 64 used (24+8+32) and still
+        // rounds to the 80-byte cell class until ④. Dense arm classes must
+        // NOT fall into the 48-byte class (whose 64-byte-grid phase costs
+        // 1.5 lines/object -- a net regression for 33% of the traced
+        // population).
         if (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall) {
             std.debug.assert(trailing_property_bytes == 32);
-            std.debug.assert(objectBodyBytes(class.ids.object) + trailing_property_bytes == 72);
-            std.debug.assert(objectBodyBytes(class.ids.array) == 56);
+            std.debug.assert(objectBodyBytes(class.ids.object) + trailing_property_bytes == 64);
+            std.debug.assert(objectBodyBytes(class.ids.array) == 48);
         } else {
             std.debug.assert(trailing_property_bytes == 48);
         }
     }
-    header: gc.GCObjectHeader,
+    header: gc.ObjectGcToken = .{},
     weakref_count: u32 = 0,
     class_id: class.ClassId,
     flags: ObjectFlags = .{},
@@ -524,6 +526,24 @@ pub const Object = extern struct {
     /// name the two arm widths without reaching into the file scope.
     pub const arm_min_bytes: usize = union_arm_min_bytes;
     pub const arm_max_bytes: usize = union_arm_max_bytes;
+
+    /// Object identity is the cell address. `ObjectGcToken` is size 0 at
+    /// offset 0, so a GC `*Header` for kind `.object` is already `*Object`.
+    pub inline fn fromHeader(header: anytype) *Object {
+        return @ptrCast(@alignCast(header));
+    }
+
+    pub inline fn fromHeaderConst(header: anytype) *const Object {
+        return @ptrCast(@alignCast(header));
+    }
+
+    pub inline fn gcHeader(self: *Object) *gc.Header {
+        return self.header.asHeader();
+    }
+
+    pub inline fn gcHeaderConst(self: *const Object) *const gc.Header {
+        return self.header.asHeaderConst();
+    }
 
     /// Head + class-data arm. The single authority for how many bytes an
     /// `.object` allocation owns before its optional trailing property FAM.
@@ -806,7 +826,7 @@ pub const Object = extern struct {
     pub fn expect(val: JSValue) !*Object {
         const header = val.refHeader() orelse return error.TypeError;
         if (!val.isObject()) return error.TypeError;
-        return @fieldParentPtr("header", header);
+        return fromHeader(header);
     }
 
     pub fn create(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object) !*Object {
@@ -2379,8 +2399,9 @@ pub const Object = extern struct {
     }
 
     // ===== destroy / teardown =====
-    pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) align(16) void {
-        const self: *Object = @alignCast(@fieldParentPtr("header", header));
+    pub fn destroyFromHeader(rt: *JSRuntime, header: anytype) align(16) void {
+        const h: *gc.Header = gc.headerPtr(header);
+        const self: *Object = fromHeader(h);
         const weakref_state = self.weakref_count;
         // qjs free_object (quickjs.c:6340-6391) for a plain JS Object: mark,
         // free slots, free prop[], js_free_shape, remove_gc_object, js_free.
@@ -2418,7 +2439,7 @@ pub const Object = extern struct {
                 return;
             }
         }
-        destroyFromHeaderSlow(rt, header);
+        destroyFromHeaderSlow(rt, h);
     }
 
     /// qjs free_object 6340-6391 ordinary-object arm. Inlined into
@@ -2484,7 +2505,7 @@ pub const Object = extern struct {
     }
 
     noinline fn destroyFromHeaderSlow(rt: *JSRuntime, header: *gc.Header) void {
-        const self: *Object = @alignCast(@fieldParentPtr("header", header));
+        const self: *Object = fromHeader(header);
         // qjs marks an object "about to be freed" before its zero-refcount free
         // runs (`js_rc(p)->mark = 1`, __JS_FreeValueRT quickjs.c:6479), and
         // js_weakref_free tests that mark (quickjs.c:51728-51735) so releasing
@@ -7012,7 +7033,7 @@ pub const Object = extern struct {
     fn objectFromValue(stored: JSValue) ?*Object {
         const stored_header = stored.refHeader() orelse return null;
         if (stored_header.meta().flags.kind != .object) return null;
-        return @fieldParentPtr("header", stored_header);
+        return fromHeader(stored_header);
     }
 
     const PayloadCollectContext = struct {
@@ -7721,7 +7742,7 @@ pub const Object = extern struct {
     fn objectFromWeakCandidate(stored: JSValue) ?*Object {
         const header = stored.refHeader() orelse return null;
         if (header.meta().flags.kind != .object) return null;
-        return @alignCast(@fieldParentPtr("header", header));
+        return fromHeader(header);
     }
 
     fn accumulateIncomingReferences(
@@ -8368,7 +8389,7 @@ pub const Object = extern struct {
     ) PropertyReadError!void {
         if (info.native_builtin_id != 0) {
             if (function_value.refHeader()) |header| {
-                const obj: *Object = @fieldParentPtr("header", header);
+                const obj: *Object = fromHeader(header);
                 obj.setNativeBuiltinIdAndRecord(rt, info.native_builtin_id);
             }
         }
@@ -8531,7 +8552,7 @@ pub const Object = extern struct {
         const getter = try function.nativeFunction(realm, "get userAgent", 0);
         defer getter.free(rt);
         if (getter.refHeader()) |getter_header| {
-            const getter_object: *Object = @fieldParentPtr("header", getter_header);
+            const getter_object: *Object = fromHeader(getter_header);
             getter_object.setNativeBuiltinIdAndRecord(rt, function.nativeBuiltinId(.host, @intFromEnum(function.HostGlobalMethod.navigator_user_agent_get)));
         }
         const user_agent = try rt.internAtom("userAgent");
@@ -11324,6 +11345,13 @@ pub const Object = extern struct {
         return @ptrFromInt(@alignOf(property.Entry));
     }
 
+    /// After Pass B pops this object, `prop_values` holds the deferred-free
+    /// overlay. Restore the empty-storage sentinel so a kept weak husk is a
+    /// valid object again.
+    pub fn restoreEmptyPropertyStorage(self: *Object) void {
+        self.prop_values = emptyPropertyStorageBase();
+    }
+
     /// The trailing property FAM starts right after the class-data arm. Only
     /// `ids.object` may own one (`verifyObjectPropertyStorageLayouts` /
     /// `freeObjectAllocation` both enforce it), so the offset stays a compile-
@@ -12165,7 +12193,7 @@ fn arrayLengthNumber(rt: *JSRuntime, value: JSValue) !?f64 {
     if (value.isString()) return try arrayLengthStringNumber(rt, value);
     if (value.isObject()) {
         const header = value.refHeader() orelse return null;
-        const object: *Object = @fieldParentPtr("header", header);
+        const object: *Object = Object.fromHeader(header);
         if (object.class_id == class.ids.string) {
             const data = object.objectData() orelse return null;
             return try arrayLengthStringNumber(rt, data);
@@ -12252,7 +12280,7 @@ pub const EntriesMode = enum {
 fn ownEntriesExpectObject(value: JSValue) !*Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
-    return @fieldParentPtr("header", header);
+    return Object.fromHeader(header);
 }
 
 fn entriesAtomToStringValue(rt: *JSRuntime, atom_id: atom.Atom) !JSValue {
@@ -12339,7 +12367,7 @@ fn stringIteratorPrimitiveValue(value: JSValue) !JSValue {
     if (value.isString()) return value.dup();
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
-    const object: *Object = @fieldParentPtr("header", header);
+    const object: *Object = Object.fromHeader(header);
     if (object.class_id != class.ids.string) return error.TypeError;
     return (object.objectData() orelse return error.TypeError).dup();
 }
@@ -12366,7 +12394,7 @@ fn stringIteratorPrototype(ctx: *context_mod.RealmContext, tag_name: []const u8)
     defer next.free(rt);
     const next_object = (next.refHeader() orelse return error.TypeError);
     if (!next.isObject()) return error.TypeError;
-    const next_function: *Object = @fieldParentPtr("header", next_object);
+    const next_function: *Object = Object.fromHeader(next_object);
     next_function.setNativeBuiltinIdAndRecord(rt, function.nativeBuiltinId(.string, @intFromEnum(host_function.builtin_method_ids.string.PrototypeMethod.iterator_next)));
     try specific.defineOwnProperty(rt, atom.predefinedId("next", .string).?, descriptor.Descriptor.data(next, true, false, true));
     return specific;

@@ -449,7 +449,7 @@ fn stringInputValue(input: core.JSValue) !?core.JSValue {
     }
     if (input.isObject()) {
         const header = input.refHeader() orelse return null;
-        const object_value: *core.Object = @fieldParentPtr("header", header);
+        const object_value: *core.Object = core.Object.fromHeader(header);
         if (object_value.class_id == core.class.ids.string) {
             const data = object_value.objectData() orelse return error.TypeError;
             return data;
@@ -700,7 +700,7 @@ fn appendValueCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: co
     if (value.isString()) return appendStringCodeUnits(rt, out, value);
     if (value.isObject()) {
         const header = value.refHeader() orelse return;
-        const object_value: *core.Object = @fieldParentPtr("header", header);
+        const object_value: *core.Object = core.Object.fromHeader(header);
         if (object_value.class_id == core.class.ids.string) {
             const data = object_value.objectData() orelse return error.TypeError;
             return appendStringCodeUnits(rt, out, data);

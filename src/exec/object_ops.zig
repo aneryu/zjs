@@ -1652,7 +1652,7 @@ fn symbolPrimitiveValue(rt: *core.JSRuntime, this_value: core.JSValue) !core.JSV
     if (this_value.isSymbol()) return this_value.dup();
     if (!this_value.isObject()) return error.TypeError;
     const header = this_value.refHeader() orelse return error.TypeError;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object: *core.Object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.symbol) return error.TypeError;
     const primitive = (object.objectData() orelse return error.TypeError).dup();
     if (!primitive.isSymbol()) {

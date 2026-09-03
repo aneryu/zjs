@@ -84,7 +84,7 @@ pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) Co
         .string, .big_int => return,
     }
 
-    const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+    const obj: *Object = Object.fromHeader(header);
     try obj.traceChildEdgesFallible(rt, visitor);
 }
 
@@ -671,7 +671,7 @@ fn recordFinalMarkFootprint(rt: *JSRuntime) void {
         footprint.noteMarkedHeader(header);
 
         if (header.metaConst().flags.kind == .object) {
-            const object: *const Object = @alignCast(@fieldParentPtr("header", header));
+            const object: *const Object = Object.fromHeaderConst(header);
             object.recordTraceStorageFootprint(rt, footprint);
         } else {
             footprint.beginTraceClass(.non_object);
@@ -1896,9 +1896,10 @@ const Collector = struct {
     /// Shade an edge whose producer owns a typed GC reference. `*Header`
     /// supplies alignment, and the edge contract supplies address validity;
     /// conservative words use `shadeConservativeCandidate` below instead.
-    fn shadeExact(self: *Collector, header: *gc.Header) void {
+    fn shadeExact(self: *Collector, header: anytype) void {
+        const h = gc.headerPtr(header);
         if (self.err != null) return;
-        if (self.rt.gc.headerMarked(header)) return;
+        if (self.rt.gc.headerMarked(h)) return;
         // UNPUBLISHED: a published container can briefly hold a pointer to an
         // object still under construction (the store happens, the barrier
         // correctly skips it), and tracing through the container reaches it
@@ -1907,15 +1908,15 @@ const Collector = struct {
         // so no sweep can condemn it, and its edges are covered by the
         // published-grey push the moment registration completes -- or it
         // dies unconstructed, in which case there was nothing to keep.
-        if (!header.meta().alloc_info.heap_accounted) return;
+        if (!h.meta().alloc_info.heap_accounted) return;
         // A condemned corpse awaiting its destruction slice. No precise root
         // can name it -- the remark proved it unreachable and processWeak
         // cleared its identities -- so the only way here is conservative
         // stack residue resolving a parked slab block that still reads
         // `heap_accounted`. Shading it would trace freed payloads.
         // `detachCycleCandidate` already stamps the bit; this is the read.
-        if (header.meta().flags.cycle_visited) return;
-        self.rt.gc.setHeaderMarked(header);
+        if (h.meta().flags.cycle_visited) return;
+        self.rt.gc.setHeaderMarked(h);
         if (self.shade_to_queue) {
             // rc-managed kinds (shapes and realms still refcount under the
             // tracer) never enter the queue: the mutator can free them during
@@ -1927,7 +1928,7 @@ const Collector = struct {
             // only be freed by the collector itself, which does not run
             // inside its own windows, so the queue needs no validation at
             // all.
-            const kind = header.meta().flags.kind;
+            const kind = h.meta().flags.kind;
             if (kind == .shape or kind == .realm_context) {
                 // Mark BEFORE tracing: the mark is both this object's
                 // survival (an unmarked shape here was condemned alive -- the
@@ -1935,8 +1936,8 @@ const Collector = struct {
                 // found what macro-check missed) and the recursion's
                 // deduplication, since a re-shade of the same shape now takes
                 // the marked early-return above.
-                self.rt.gc.setHeaderMarked(header);
-                self.traceHeader(header) catch |err| {
+                self.rt.gc.setHeaderMarked(h);
+                self.traceHeader(h) catch |err| {
                     self.err = err;
                 };
                 return;
@@ -1945,12 +1946,12 @@ const Collector = struct {
             // array ops. Full or missing -> the shared ring; a failed ring
             // push is the overflow contract (object marked, flag set, the
             // remark's rescan finds it).
-            if (!self.rt.gc.mark_stack.push(header)) {
-                _ = self.rt.gc.concurrent_mark_queue.pushSingle(header);
+            if (!self.rt.gc.mark_stack.push(h)) {
+                _ = self.rt.gc.concurrent_mark_queue.pushSingle(h);
             }
             return;
         }
-        self.work.append(self.allocator(), header) catch |err| {
+        self.work.append(self.allocator(), h) catch |err| {
             self.err = err;
         };
     }
@@ -2006,7 +2007,7 @@ const Collector = struct {
             // cell directly and trace only its initialized payload.
             if (self.rt.gc.pinEntryIsConstructionRoot(entry)) {
                 self.rt.gc.setHeaderMarked(entry.header);
-                const object: *Object = @alignCast(@fieldParentPtr("header", entry.header));
+                const object: *Object = Object.fromHeader(entry.header);
                 try object.traceDetachedGeneratorShellEdges(self);
                 continue;
             }
@@ -2363,7 +2364,7 @@ const Collector = struct {
                 if (reachability == .precise) precise_violations += 1;
                 const kind = header.metaConst().flags.kind;
                 if (kind == .object) {
-                    const o: *Object = @alignCast(@fieldParentPtr("header", header));
+                    const o: *Object = Object.fromHeader(header);
                     std.debug.print("VERIFY-MINOR condemned-but-reachable source={s} kind=object class={d} payload={s}\n", .{ @tagName(reachability), o.class_id, @tagName(o.flags.class_payload_kind) });
                 } else {
                     std.debug.print("VERIFY-MINOR condemned-but-reachable source={s} kind={s}\n", .{ @tagName(reachability), @tagName(kind) });
@@ -2539,13 +2540,13 @@ const Collector = struct {
             owner_ptr: *gc.Header = undefined,
             owner_young: bool = false,
             owner_remembered: bool = false,
-            fn hit(a: *@This(), h: ?*gc.Header) void {
-                const child = h orelse return;
+            fn hit(a: *@This(), header: anytype) void {
+                const child = gc.headerPtrOrNull(header) orelse return;
                 for (a.doomed) |d| {
                     if (d != child) continue;
-                    const c: *Object = @alignCast(@fieldParentPtr("header", child));
+                    const c: *Object = Object.fromHeader(child);
                     if (a.owner_kind == .object) {
-                        const o: *Object = @alignCast(@fieldParentPtr("header", a.owner_ptr));
+                        const o: *Object = Object.fromHeader(a.owner_ptr);
                         var where: []const u8 = "unknown";
                         var hit_atom: u32 = 0;
                         if (o.promisePayload()) |pp| {
@@ -2639,7 +2640,7 @@ const Collector = struct {
             };
             switch (h.metaConst().flags.kind) {
                 .object => {
-                    const owner: *Object = @alignCast(@fieldParentPtr("header", h));
+                    const owner: *Object = Object.fromHeader(h);
                     audit.owner_class = owner.class_id;
                     owner.traceChildEdgesFallible(self.rt, &audit) catch {};
                 },

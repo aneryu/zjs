@@ -1021,13 +1021,14 @@ pub fn pinValueForNative(runtime: *JSRuntime, value: JSValue) !?NativePin {
     return try pinHeaderForNative(runtime, header);
 }
 
-pub fn pinHeaderForNative(runtime: *JSRuntime, header: *gc.Header) !NativePin {
-    gc.retain(header);
-    errdefer gc.release(runtime, header);
-    try runtime.gc.pinHeader(header);
+pub fn pinHeaderForNative(runtime: *JSRuntime, header: anytype) !NativePin {
+    const h = gc.headerPtr(header);
+    gc.retain(h);
+    errdefer gc.release(runtime, h);
+    try runtime.gc.pinHeader(h);
     return .{
         .runtime = runtime,
-        .header = header,
+        .header = h,
     };
 }
 
@@ -2093,7 +2094,7 @@ pub const JSRuntime = struct {
         var iter = self.gc.objectIterator();
         while (iter.next()) |header| {
             if (header.metaConst().flags.kind != .object) continue;
-            const candidate: *Object = @alignCast(@fieldParentPtr("header", header));
+            const candidate: *Object = Object.fromHeader(header);
             candidate.releaseNativeFunctionRealmForRuntimeTeardown(ctx);
         }
     }
@@ -2366,13 +2367,14 @@ pub const JSRuntime = struct {
             rt: *JSRuntime,
             failure: ?gc.InvariantError = null,
 
-            fn checkHeader(audit: *@This(), header: *const gc.Header) void {
+            fn checkHeader(audit: *@This(), header: anytype) void {
+                const h = gc.headerPtrConst(header);
                 if (audit.failure != null) return;
-                if (!audit.rt.gc.containsHeader(header)) {
+                if (!audit.rt.gc.containsHeader(h)) {
                     audit.failure = error.DeferredPayloadRootNotLive;
                     return;
                 }
-                if (header.metaConst().flags.finalizing) {
+                if (h.metaConst().flags.finalizing) {
                     audit.failure = error.DeferredPayloadRootDoomed;
                     return;
                 }
@@ -3619,7 +3621,7 @@ pub const JSRuntime = struct {
         var gc_iter = self.gc.objectIterator();
         while (gc_iter.next()) |header| {
             if (header.meta().flags.kind == .object) {
-                const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+                const obj: *Object = Object.fromHeader(header);
                 count +|= obj.weakCollectionEntries().len;
                 count +|= obj.finalizationRegistryCells().len;
             }

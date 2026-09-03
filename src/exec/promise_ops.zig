@@ -860,7 +860,7 @@ test "promiseSettleValue handles result self-assignment" {
     const current = promise.promiseResult().?;
     try promiseSettleValue(ctx, global, promise, current, false);
 
-    try std.testing.expectEqual(&result.header, promise.promiseResult().?.refHeader().?);
+    try std.testing.expectEqual(result.header.asHeader(), promise.promiseResult().?.refHeader().?);
 }
 
 test "promiseSettleValue roots direct symbol result while preparing reaction jobs" {

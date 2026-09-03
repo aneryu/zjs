@@ -4265,7 +4265,7 @@ test "frame setLocal handles self-assignment without dropping object" {
     try frame.setLocal(&rt.memory, rt, 0, current);
 
     try helpers.expectRefCount(1, &object.header);
-    try std.testing.expectEqual(&object.header, frame.locals[0].refHeader().?);
+    try std.testing.expectEqual(@intFromPtr(&object.header), @intFromPtr(frame.locals[0].refHeader().?));
 }
 
 test "lookupFrameVarRef tolerates synthetic var-ref name mirrors" {
@@ -5081,7 +5081,7 @@ test "value ops own primitive VM semantics" {
 
     const boxed_one = try engine.exec.string_builtin_ops.constructWithPrototype(rt, &.{one_string}, null);
     defer boxed_one.free(rt);
-    const boxed_one_object: *core.Object = @fieldParentPtr("header", boxed_one.refHeader().?);
+    const boxed_one_object: *core.Object = core.Object.fromHeader(boxed_one.refHeader().?);
     const boxed_one_data = boxed_one_object.objectData() orelse return error.TypeError;
     try std.testing.expect(boxed_one_data.same(one_string));
 
@@ -5813,7 +5813,7 @@ test "call subsystem installs and invokes host globals" {
     defer rt.atoms.free(print_key);
     const print = try global.getProperty(print_key);
     defer print.free(rt);
-    const print_object: *core.Object = @fieldParentPtr("header", print.refHeader().?);
+    const print_object: *core.Object = core.Object.fromHeader(print.refHeader().?);
     const host_function_key = try rt.internAtom("__host_function");
     defer rt.atoms.free(host_function_key);
     try std.testing.expect((try print_object.getOwnProperty(rt, host_function_key)) == null);
@@ -5835,10 +5835,10 @@ test "call subsystem installs and invokes host globals" {
     defer rt.atoms.free(log_key);
     const console_value = try global.getProperty(console_key);
     defer console_value.free(rt);
-    const console_object: *core.Object = @fieldParentPtr("header", console_value.refHeader().?);
+    const console_object: *core.Object = core.Object.fromHeader(console_value.refHeader().?);
     const log = try console_object.getProperty(log_key);
     defer log.free(rt);
-    const log_object: *core.Object = @fieldParentPtr("header", log.refHeader().?);
+    const log_object: *core.Object = core.Object.fromHeader(log.refHeader().?);
     try std.testing.expectEqual(core.host_function.ids.external_host, log_object.hostFunctionKindSlot().*);
     try std.testing.expectEqual(print_object.externalHostFunctionId(), log_object.externalHostFunctionId());
 
@@ -5855,7 +5855,7 @@ test "call subsystem installs and invokes host globals" {
     const assert_object_value = try global.getProperty(assert_key);
     defer assert_object_value.free(rt);
     const assert_object_header = assert_object_value.refHeader().?;
-    const assert_object: *core.Object = @fieldParentPtr("header", assert_object_header);
+    const assert_object: *core.Object = core.Object.fromHeader(assert_object_header);
     const same_value = try assert_object.getProperty(same_value_key);
     defer same_value.free(rt);
 
@@ -5876,7 +5876,7 @@ test "call subsystem installs and invokes host globals" {
 
     const map_value = try engine.exec.collection_ops.construct(ctx, 1);
     defer map_value.free(rt);
-    const map_object: *core.Object = @fieldParentPtr("header", map_value.refHeader().?);
+    const map_object: *core.Object = core.Object.fromHeader(map_value.refHeader().?);
     const set_key = try rt.internAtom("set");
     defer rt.atoms.free(set_key);
     const get_key = try rt.internAtom("get");
@@ -5920,10 +5920,10 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     defer rt.atoms.free(abs_key);
     const math_value = try global.getProperty(math_key);
     defer math_value.free(rt);
-    const math_object: *core.Object = @fieldParentPtr("header", math_value.refHeader().?);
+    const math_object: *core.Object = core.Object.fromHeader(math_value.refHeader().?);
     const abs_value = try math_object.getProperty(abs_key);
     defer abs_value.free(rt);
-    const abs_object: *core.Object = @fieldParentPtr("header", abs_value.refHeader().?);
+    const abs_object: *core.Object = core.Object.fromHeader(abs_value.refHeader().?);
     try std.testing.expect(abs_object.nativeFunctionIdSlot().* != 0);
     const abs_record = abs_object.nativeRecord() orelse return error.InvalidBuiltinRegistry;
     try std.testing.expectEqual(core.host_function.NativeCProto.f_f, abs_record.cproto);
@@ -5933,14 +5933,14 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     defer rt.atoms.free(atan2_key);
     const atan2_value = try math_object.getProperty(atan2_key);
     defer atan2_value.free(rt);
-    const atan2_object: *core.Object = @fieldParentPtr("header", atan2_value.refHeader().?);
+    const atan2_object: *core.Object = core.Object.fromHeader(atan2_value.refHeader().?);
     const atan2_record = atan2_object.nativeRecord() orelse return error.InvalidBuiltinRegistry;
     try std.testing.expectEqual(core.host_function.NativeCProto.f_f_f, atan2_record.cproto);
     try std.testing.expect(atan2_record.native_function != null);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notMathAbs", 1);
     defer fake.free(rt);
-    const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
+    const fake_object: *core.Object = core.Object.fromHeader(fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = abs_object.nativeFunctionIdSlot().*;
 
     const dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_object);
@@ -7567,16 +7567,16 @@ test "number native builtin records cover static and prototype dispatch" {
 
     const number_value = try global.getProperty(number_key);
     defer number_value.free(rt);
-    const number_object: *core.Object = @fieldParentPtr("header", number_value.refHeader().?);
+    const number_object: *core.Object = core.Object.fromHeader(number_value.refHeader().?);
 
     const is_integer_value = try number_object.getProperty(is_integer_key);
     defer is_integer_value.free(rt);
-    const is_integer_object: *core.Object = @fieldParentPtr("header", is_integer_value.refHeader().?);
+    const is_integer_object: *core.Object = core.Object.fromHeader(is_integer_value.refHeader().?);
     try std.testing.expect(is_integer_object.nativeFunctionIdSlot().* != 0);
 
     const fake_static = try engine.core.function.nativeFunction(ctx, "notNumberIsInteger", 1);
     defer fake_static.free(rt);
-    const fake_static_object: *core.Object = @fieldParentPtr("header", fake_static.refHeader().?);
+    const fake_static_object: *core.Object = core.Object.fromHeader(fake_static.refHeader().?);
     fake_static_object.nativeFunctionIdSlot().* = is_integer_object.nativeFunctionIdSlot().*;
     const static_dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_static_object);
     defer rt.memory.allocator.free(static_dispatch_name);
@@ -7588,15 +7588,15 @@ test "number native builtin records cover static and prototype dispatch" {
 
     const prototype_value = try number_object.getProperty(prototype_key);
     defer prototype_value.free(rt);
-    const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
+    const prototype_object: *core.Object = core.Object.fromHeader(prototype_value.refHeader().?);
     const to_fixed_value = try prototype_object.getProperty(to_fixed_key);
     defer to_fixed_value.free(rt);
-    const to_fixed_object: *core.Object = @fieldParentPtr("header", to_fixed_value.refHeader().?);
+    const to_fixed_object: *core.Object = core.Object.fromHeader(to_fixed_value.refHeader().?);
     try std.testing.expect(to_fixed_object.nativeFunctionIdSlot().* != 0);
 
     const fake_proto = try engine.core.function.nativeFunction(ctx, "notNumberToFixed", 1);
     defer fake_proto.free(rt);
-    const fake_proto_object: *core.Object = @fieldParentPtr("header", fake_proto.refHeader().?);
+    const fake_proto_object: *core.Object = core.Object.fromHeader(fake_proto.refHeader().?);
     fake_proto_object.nativeFunctionIdSlot().* = to_fixed_object.nativeFunctionIdSlot().*;
     const proto_dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_proto_object);
     defer rt.memory.allocator.free(proto_dispatch_name);
@@ -7698,15 +7698,15 @@ test "string static native builtin records ignore dispatch names" {
     defer rt.atoms.free(from_code_point_key);
     const string_value = try global.getProperty(string_key);
     defer string_value.free(rt);
-    const string_object: *core.Object = @fieldParentPtr("header", string_value.refHeader().?);
+    const string_object: *core.Object = core.Object.fromHeader(string_value.refHeader().?);
     const from_code_point_value = try string_object.getProperty(from_code_point_key);
     defer from_code_point_value.free(rt);
-    const from_code_point_object: *core.Object = @fieldParentPtr("header", from_code_point_value.refHeader().?);
+    const from_code_point_object: *core.Object = core.Object.fromHeader(from_code_point_value.refHeader().?);
     try std.testing.expect(from_code_point_object.nativeFunctionIdSlot().* != 0);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notStringFromCodePoint", 1);
     defer fake.free(rt);
-    const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
+    const fake_object: *core.Object = core.Object.fromHeader(fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = from_code_point_object.nativeFunctionIdSlot().*;
     const dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_object);
     defer rt.memory.allocator.free(dispatch_name);
@@ -7750,18 +7750,18 @@ test "string prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(index_of_key);
     const string_value = try global.getProperty(string_key);
     defer string_value.free(rt);
-    const string_object: *core.Object = @fieldParentPtr("header", string_value.refHeader().?);
+    const string_object: *core.Object = core.Object.fromHeader(string_value.refHeader().?);
     const prototype_value = try string_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
-    const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
+    const prototype_object: *core.Object = core.Object.fromHeader(prototype_value.refHeader().?);
     const index_of_value = try prototype_object.getProperty(index_of_key);
     defer index_of_value.free(rt);
-    const index_of_object: *core.Object = @fieldParentPtr("header", index_of_value.refHeader().?);
+    const index_of_object: *core.Object = core.Object.fromHeader(index_of_value.refHeader().?);
     try std.testing.expect(index_of_object.nativeFunctionIdSlot().* != 0);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notStringIndexOf", 1);
     defer fake.free(rt);
-    const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
+    const fake_object: *core.Object = core.Object.fromHeader(fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = index_of_object.nativeFunctionIdSlot().*;
     const dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_object);
     defer rt.memory.allocator.free(dispatch_name);
@@ -7847,15 +7847,15 @@ test "date static native builtin records ignore dispatch names" {
     defer rt.atoms.free(utc_key);
     const date_value = try global.getProperty(date_key);
     defer date_value.free(rt);
-    const date_object: *core.Object = @fieldParentPtr("header", date_value.refHeader().?);
+    const date_object: *core.Object = core.Object.fromHeader(date_value.refHeader().?);
     const utc_value = try date_object.getProperty(utc_key);
     defer utc_value.free(rt);
-    const utc_object: *core.Object = @fieldParentPtr("header", utc_value.refHeader().?);
+    const utc_object: *core.Object = core.Object.fromHeader(utc_value.refHeader().?);
     try std.testing.expect(utc_object.nativeFunctionIdSlot().* != 0);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notDateUTC", 7);
     defer fake.free(rt);
-    const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
+    const fake_object: *core.Object = core.Object.fromHeader(fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = utc_object.nativeFunctionIdSlot().*;
     const dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_object);
     defer rt.memory.allocator.free(dispatch_name);
@@ -7896,12 +7896,12 @@ test "date constructor native builtin records ignore dispatch names" {
     defer rt.atoms.free(date_key);
     const date_value = try global.getProperty(date_key);
     defer date_value.free(rt);
-    const date_object: *core.Object = @fieldParentPtr("header", date_value.refHeader().?);
+    const date_object: *core.Object = core.Object.fromHeader(date_value.refHeader().?);
     try std.testing.expect(date_object.nativeFunctionIdSlot().* != 0);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notDateConstructor", 7);
     defer fake.free(rt);
-    const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
+    const fake_object: *core.Object = core.Object.fromHeader(fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = date_object.nativeFunctionIdSlot().*;
     const dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_object);
     defer rt.memory.allocator.free(dispatch_name);
@@ -8008,18 +8008,18 @@ test "date prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(set_time_key);
     const date_value = try global.getProperty(date_key);
     defer date_value.free(rt);
-    const date_object: *core.Object = @fieldParentPtr("header", date_value.refHeader().?);
+    const date_object: *core.Object = core.Object.fromHeader(date_value.refHeader().?);
     const prototype_value = try date_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
-    const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
+    const prototype_object: *core.Object = core.Object.fromHeader(prototype_value.refHeader().?);
     const set_time_value = try prototype_object.getProperty(set_time_key);
     defer set_time_value.free(rt);
-    const set_time_object: *core.Object = @fieldParentPtr("header", set_time_value.refHeader().?);
+    const set_time_object: *core.Object = core.Object.fromHeader(set_time_value.refHeader().?);
     try std.testing.expect(set_time_object.nativeFunctionIdSlot().* != 0);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notDateSetTime", 1);
     defer fake.free(rt);
-    const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
+    const fake_object: *core.Object = core.Object.fromHeader(fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = set_time_object.nativeFunctionIdSlot().*;
     const dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_object);
     defer rt.memory.allocator.free(dispatch_name);
@@ -8066,19 +8066,19 @@ test "array static native builtin records ignore dispatch names" {
     defer rt.atoms.free(from_key);
     const array_value = try global.getProperty(array_key);
     defer array_value.free(rt);
-    const array_object: *core.Object = @fieldParentPtr("header", array_value.refHeader().?);
+    const array_object: *core.Object = core.Object.fromHeader(array_value.refHeader().?);
     const is_array_value = try array_object.getProperty(is_array_key);
     defer is_array_value.free(rt);
-    const is_array_object: *core.Object = @fieldParentPtr("header", is_array_value.refHeader().?);
+    const is_array_object: *core.Object = core.Object.fromHeader(is_array_value.refHeader().?);
     try std.testing.expect(is_array_object.nativeFunctionIdSlot().* != 0);
     const from_value = try array_object.getProperty(from_key);
     defer from_value.free(rt);
-    const from_object: *core.Object = @fieldParentPtr("header", from_value.refHeader().?);
+    const from_object: *core.Object = core.Object.fromHeader(from_value.refHeader().?);
     try std.testing.expect(from_object.nativeFunctionIdSlot().* != 0);
 
     const fake_is_array = try engine.core.function.nativeFunction(ctx, "notArrayIsArray", 1);
     defer fake_is_array.free(rt);
-    const fake_is_array_object: *core.Object = @fieldParentPtr("header", fake_is_array.refHeader().?);
+    const fake_is_array_object: *core.Object = core.Object.fromHeader(fake_is_array.refHeader().?);
     fake_is_array_object.nativeFunctionIdSlot().* = is_array_object.nativeFunctionIdSlot().*;
     const is_array_dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_is_array_object);
     defer rt.memory.allocator.free(is_array_dispatch_name);
@@ -8093,7 +8093,7 @@ test "array static native builtin records ignore dispatch names" {
 
     const fake_from = try engine.core.function.nativeFunction(ctx, "notArrayFrom", 1);
     defer fake_from.free(rt);
-    const fake_from_object: *core.Object = @fieldParentPtr("header", fake_from.refHeader().?);
+    const fake_from_object: *core.Object = core.Object.fromHeader(fake_from.refHeader().?);
     fake_from_object.nativeFunctionIdSlot().* = from_object.nativeFunctionIdSlot().*;
     const from_dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_from_object);
     defer rt.memory.allocator.free(from_dispatch_name);
@@ -8101,7 +8101,7 @@ test "array static native builtin records ignore dispatch names" {
 
     const direct_from_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, array_value, fake_from, &direct_is_array_args);
     defer direct_from_result.free(rt);
-    const direct_from_array: *core.Object = @fieldParentPtr("header", direct_from_result.refHeader().?);
+    const direct_from_array: *core.Object = core.Object.fromHeader(direct_from_result.refHeader().?);
     try std.testing.expect(direct_from_array.isArray());
     try std.testing.expectEqual(@as(u32, 1), direct_from_array.arrayLength());
 
@@ -8148,31 +8148,31 @@ test "array prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(values_key);
     const array_value = try global.getProperty(array_key);
     defer array_value.free(rt);
-    const array_object: *core.Object = @fieldParentPtr("header", array_value.refHeader().?);
+    const array_object: *core.Object = core.Object.fromHeader(array_value.refHeader().?);
     const prototype_value = try array_object.getProperty(prototype_key);
     defer prototype_value.free(rt);
-    const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
+    const prototype_object: *core.Object = core.Object.fromHeader(prototype_value.refHeader().?);
 
     const to_string_value = try prototype_object.getProperty(to_string_key);
     defer to_string_value.free(rt);
-    const to_string_object: *core.Object = @fieldParentPtr("header", to_string_value.refHeader().?);
+    const to_string_object: *core.Object = core.Object.fromHeader(to_string_value.refHeader().?);
     try std.testing.expect(to_string_object.nativeFunctionIdSlot().* != 0);
     const join_value = try prototype_object.getProperty(join_key);
     defer join_value.free(rt);
-    const join_object: *core.Object = @fieldParentPtr("header", join_value.refHeader().?);
+    const join_object: *core.Object = core.Object.fromHeader(join_value.refHeader().?);
     try std.testing.expect(join_object.nativeFunctionIdSlot().* != 0);
     const map_value = try prototype_object.getProperty(map_key);
     defer map_value.free(rt);
-    const map_object: *core.Object = @fieldParentPtr("header", map_value.refHeader().?);
+    const map_object: *core.Object = core.Object.fromHeader(map_value.refHeader().?);
     try std.testing.expect(map_object.nativeFunctionIdSlot().* != 0);
     const values_value = try prototype_object.getProperty(values_key);
     defer values_value.free(rt);
-    const values_object: *core.Object = @fieldParentPtr("header", values_value.refHeader().?);
+    const values_object: *core.Object = core.Object.fromHeader(values_value.refHeader().?);
     try std.testing.expect(values_object.nativeFunctionIdSlot().* != 0);
 
     const fake_join = try engine.core.function.nativeFunction(ctx, "notArrayJoin", 1);
     defer fake_join.free(rt);
-    const fake_join_object: *core.Object = @fieldParentPtr("header", fake_join.refHeader().?);
+    const fake_join_object: *core.Object = core.Object.fromHeader(fake_join.refHeader().?);
     fake_join_object.nativeFunctionIdSlot().* = join_object.nativeFunctionIdSlot().*;
     const join_dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_join_object);
     defer rt.memory.allocator.free(join_dispatch_name);
@@ -8191,7 +8191,7 @@ test "array prototype native builtin records ignore dispatch names" {
 
     const fake_to_string = try engine.core.function.nativeFunction(ctx, "notArrayToString", 0);
     defer fake_to_string.free(rt);
-    const fake_to_string_object: *core.Object = @fieldParentPtr("header", fake_to_string.refHeader().?);
+    const fake_to_string_object: *core.Object = core.Object.fromHeader(fake_to_string.refHeader().?);
     fake_to_string_object.nativeFunctionIdSlot().* = to_string_object.nativeFunctionIdSlot().*;
     const to_string_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_array, fake_to_string, &.{});
     defer to_string_result.free(rt);
@@ -8202,11 +8202,11 @@ test "array prototype native builtin records ignore dispatch names" {
 
     const fake_map = try engine.core.function.nativeFunction(ctx, "notArrayMap", 1);
     defer fake_map.free(rt);
-    const fake_map_object: *core.Object = @fieldParentPtr("header", fake_map.refHeader().?);
+    const fake_map_object: *core.Object = core.Object.fromHeader(fake_map.refHeader().?);
     fake_map_object.nativeFunctionIdSlot().* = map_object.nativeFunctionIdSlot().*;
     const fake_values = try engine.core.function.nativeFunction(ctx, "notArrayValues", 0);
     defer fake_values.free(rt);
-    const fake_values_object: *core.Object = @fieldParentPtr("header", fake_values.refHeader().?);
+    const fake_values_object: *core.Object = core.Object.fromHeader(fake_values.refHeader().?);
     fake_values_object.nativeFunctionIdSlot().* = values_object.nativeFunctionIdSlot().*;
 
     const fake_map_key = try rt.internAtom("fakeArrayMap");
@@ -8257,41 +8257,41 @@ test "collection native builtin records ignore dispatch names" {
 
     const map_value = try global.getProperty(map_key);
     defer map_value.free(rt);
-    const map_object: *core.Object = @fieldParentPtr("header", map_value.refHeader().?);
+    const map_object: *core.Object = core.Object.fromHeader(map_value.refHeader().?);
     const group_by_value = try map_object.getProperty(group_by_key);
     defer group_by_value.free(rt);
-    const group_by_object: *core.Object = @fieldParentPtr("header", group_by_value.refHeader().?);
+    const group_by_object: *core.Object = core.Object.fromHeader(group_by_value.refHeader().?);
     try std.testing.expect(group_by_object.nativeFunctionIdSlot().* != 0);
     const map_prototype_value = try map_object.getProperty(prototype_key);
     defer map_prototype_value.free(rt);
-    const map_prototype_object: *core.Object = @fieldParentPtr("header", map_prototype_value.refHeader().?);
+    const map_prototype_object: *core.Object = core.Object.fromHeader(map_prototype_value.refHeader().?);
     const map_set_value = try map_prototype_object.getProperty(map_set_key);
     defer map_set_value.free(rt);
-    const map_set_object: *core.Object = @fieldParentPtr("header", map_set_value.refHeader().?);
+    const map_set_object: *core.Object = core.Object.fromHeader(map_set_value.refHeader().?);
     try std.testing.expect(map_set_object.nativeFunctionIdSlot().* != 0);
     const map_for_each_value = try map_prototype_object.getProperty(map_for_each_key);
     defer map_for_each_value.free(rt);
-    const map_for_each_object: *core.Object = @fieldParentPtr("header", map_for_each_value.refHeader().?);
+    const map_for_each_object: *core.Object = core.Object.fromHeader(map_for_each_value.refHeader().?);
     try std.testing.expect(map_for_each_object.nativeFunctionIdSlot().* != 0);
 
     const set_value = try global.getProperty(set_key);
     defer set_value.free(rt);
-    const set_object: *core.Object = @fieldParentPtr("header", set_value.refHeader().?);
+    const set_object: *core.Object = core.Object.fromHeader(set_value.refHeader().?);
     const set_prototype_value = try set_object.getProperty(prototype_key);
     defer set_prototype_value.free(rt);
-    const set_prototype_object: *core.Object = @fieldParentPtr("header", set_prototype_value.refHeader().?);
+    const set_prototype_object: *core.Object = core.Object.fromHeader(set_prototype_value.refHeader().?);
     const set_union_value = try set_prototype_object.getProperty(set_union_key);
     defer set_union_value.free(rt);
-    const set_union_object: *core.Object = @fieldParentPtr("header", set_union_value.refHeader().?);
+    const set_union_object: *core.Object = core.Object.fromHeader(set_union_value.refHeader().?);
     try std.testing.expect(set_union_object.nativeFunctionIdSlot().* != 0);
     const set_values_value = try set_prototype_object.getProperty(set_values_key);
     defer set_values_value.free(rt);
-    const set_values_object: *core.Object = @fieldParentPtr("header", set_values_value.refHeader().?);
+    const set_values_object: *core.Object = core.Object.fromHeader(set_values_value.refHeader().?);
     try std.testing.expect(set_values_object.nativeFunctionIdSlot().* != 0);
 
     const fake_map_set = try engine.core.function.nativeFunction(ctx, "notMapSet", 2);
     defer fake_map_set.free(rt);
-    const fake_map_set_object: *core.Object = @fieldParentPtr("header", fake_map_set.refHeader().?);
+    const fake_map_set_object: *core.Object = core.Object.fromHeader(fake_map_set.refHeader().?);
     fake_map_set_object.nativeFunctionIdSlot().* = map_set_object.nativeFunctionIdSlot().*;
     const dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_map_set_object);
     defer rt.memory.allocator.free(dispatch_name);
@@ -8311,19 +8311,19 @@ test "collection native builtin records ignore dispatch names" {
 
     const fake_group_by = try engine.core.function.nativeFunction(ctx, "notMapGroupBy", 2);
     defer fake_group_by.free(rt);
-    const fake_group_by_object: *core.Object = @fieldParentPtr("header", fake_group_by.refHeader().?);
+    const fake_group_by_object: *core.Object = core.Object.fromHeader(fake_group_by.refHeader().?);
     fake_group_by_object.nativeFunctionIdSlot().* = group_by_object.nativeFunctionIdSlot().*;
     const fake_map_for_each = try engine.core.function.nativeFunction(ctx, "notMapForEach", 1);
     defer fake_map_for_each.free(rt);
-    const fake_map_for_each_object: *core.Object = @fieldParentPtr("header", fake_map_for_each.refHeader().?);
+    const fake_map_for_each_object: *core.Object = core.Object.fromHeader(fake_map_for_each.refHeader().?);
     fake_map_for_each_object.nativeFunctionIdSlot().* = map_for_each_object.nativeFunctionIdSlot().*;
     const fake_set_union = try engine.core.function.nativeFunction(ctx, "notSetUnion", 1);
     defer fake_set_union.free(rt);
-    const fake_set_union_object: *core.Object = @fieldParentPtr("header", fake_set_union.refHeader().?);
+    const fake_set_union_object: *core.Object = core.Object.fromHeader(fake_set_union.refHeader().?);
     fake_set_union_object.nativeFunctionIdSlot().* = set_union_object.nativeFunctionIdSlot().*;
     const fake_set_values = try engine.core.function.nativeFunction(ctx, "notSetValues", 0);
     defer fake_set_values.free(rt);
-    const fake_set_values_object: *core.Object = @fieldParentPtr("header", fake_set_values.refHeader().?);
+    const fake_set_values_object: *core.Object = core.Object.fromHeader(fake_set_values.refHeader().?);
     fake_set_values_object.nativeFunctionIdSlot().* = set_values_object.nativeFunctionIdSlot().*;
 
     const fake_map_set_key = try rt.internAtom("fakeMapSet");
@@ -8385,80 +8385,80 @@ test "buffer native builtin records ignore dispatch names" {
 
     const array_buffer_value = try global.getProperty(array_buffer_key);
     defer array_buffer_value.free(rt);
-    const array_buffer_object: *core.Object = @fieldParentPtr("header", array_buffer_value.refHeader().?);
+    const array_buffer_object: *core.Object = core.Object.fromHeader(array_buffer_value.refHeader().?);
     const is_view_value = try array_buffer_object.getProperty(is_view_key);
     defer is_view_value.free(rt);
-    const is_view_object: *core.Object = @fieldParentPtr("header", is_view_value.refHeader().?);
+    const is_view_object: *core.Object = core.Object.fromHeader(is_view_value.refHeader().?);
     try std.testing.expect(is_view_object.nativeFunctionIdSlot().* != 0);
     const array_buffer_prototype_value = try array_buffer_object.getProperty(prototype_key);
     defer array_buffer_prototype_value.free(rt);
-    const array_buffer_prototype_object: *core.Object = @fieldParentPtr("header", array_buffer_prototype_value.refHeader().?);
+    const array_buffer_prototype_object: *core.Object = core.Object.fromHeader(array_buffer_prototype_value.refHeader().?);
     const array_buffer_slice_value = try array_buffer_prototype_object.getProperty(slice_key);
     defer array_buffer_slice_value.free(rt);
-    const array_buffer_slice_object: *core.Object = @fieldParentPtr("header", array_buffer_slice_value.refHeader().?);
+    const array_buffer_slice_object: *core.Object = core.Object.fromHeader(array_buffer_slice_value.refHeader().?);
     try std.testing.expect(array_buffer_slice_object.nativeFunctionIdSlot().* != 0);
     const array_buffer_byte_length_desc = (try array_buffer_prototype_object.getOwnProperty(rt, byte_length_key)).?;
     defer array_buffer_byte_length_desc.destroy(rt);
-    const array_buffer_byte_length_getter: *core.Object = @fieldParentPtr("header", array_buffer_byte_length_desc.getter.refHeader().?);
+    const array_buffer_byte_length_getter: *core.Object = core.Object.fromHeader(array_buffer_byte_length_desc.getter.refHeader().?);
     try std.testing.expect(array_buffer_byte_length_getter.nativeFunctionIdSlot().* != 0);
 
     const shared_array_buffer_value = try global.getProperty(shared_array_buffer_key);
     defer shared_array_buffer_value.free(rt);
-    const shared_array_buffer_object: *core.Object = @fieldParentPtr("header", shared_array_buffer_value.refHeader().?);
+    const shared_array_buffer_object: *core.Object = core.Object.fromHeader(shared_array_buffer_value.refHeader().?);
     const shared_array_buffer_prototype_value = try shared_array_buffer_object.getProperty(prototype_key);
     defer shared_array_buffer_prototype_value.free(rt);
-    const shared_array_buffer_prototype_object: *core.Object = @fieldParentPtr("header", shared_array_buffer_prototype_value.refHeader().?);
+    const shared_array_buffer_prototype_object: *core.Object = core.Object.fromHeader(shared_array_buffer_prototype_value.refHeader().?);
     const shared_array_buffer_slice_value = try shared_array_buffer_prototype_object.getProperty(slice_key);
     defer shared_array_buffer_slice_value.free(rt);
-    const shared_array_buffer_slice_object: *core.Object = @fieldParentPtr("header", shared_array_buffer_slice_value.refHeader().?);
+    const shared_array_buffer_slice_object: *core.Object = core.Object.fromHeader(shared_array_buffer_slice_value.refHeader().?);
     try std.testing.expect(shared_array_buffer_slice_object.nativeFunctionIdSlot().* != 0);
 
     const data_view_value = try global.getProperty(data_view_key);
     defer data_view_value.free(rt);
-    const data_view_object: *core.Object = @fieldParentPtr("header", data_view_value.refHeader().?);
+    const data_view_object: *core.Object = core.Object.fromHeader(data_view_value.refHeader().?);
     const data_view_prototype_value = try data_view_object.getProperty(prototype_key);
     defer data_view_prototype_value.free(rt);
-    const data_view_prototype_object: *core.Object = @fieldParentPtr("header", data_view_prototype_value.refHeader().?);
+    const data_view_prototype_object: *core.Object = core.Object.fromHeader(data_view_prototype_value.refHeader().?);
     const get_uint8_value = try data_view_prototype_object.getProperty(get_uint8_key);
     defer get_uint8_value.free(rt);
-    const get_uint8_object: *core.Object = @fieldParentPtr("header", get_uint8_value.refHeader().?);
+    const get_uint8_object: *core.Object = core.Object.fromHeader(get_uint8_value.refHeader().?);
     try std.testing.expect(get_uint8_object.nativeFunctionIdSlot().* != 0);
     const set_uint8_value = try data_view_prototype_object.getProperty(set_uint8_key);
     defer set_uint8_value.free(rt);
-    const set_uint8_object: *core.Object = @fieldParentPtr("header", set_uint8_value.refHeader().?);
+    const set_uint8_object: *core.Object = core.Object.fromHeader(set_uint8_value.refHeader().?);
     try std.testing.expect(set_uint8_object.nativeFunctionIdSlot().* != 0);
     const data_view_byte_length_desc = (try data_view_prototype_object.getOwnProperty(rt, byte_length_key)).?;
     defer data_view_byte_length_desc.destroy(rt);
-    const data_view_byte_length_getter: *core.Object = @fieldParentPtr("header", data_view_byte_length_desc.getter.refHeader().?);
+    const data_view_byte_length_getter: *core.Object = core.Object.fromHeader(data_view_byte_length_desc.getter.refHeader().?);
     try std.testing.expect(data_view_byte_length_getter.nativeFunctionIdSlot().* != 0);
 
     const fake_is_view = try engine.core.function.nativeFunction(ctx, "notArrayBufferIsView", 1);
     defer fake_is_view.free(rt);
-    const fake_is_view_object: *core.Object = @fieldParentPtr("header", fake_is_view.refHeader().?);
+    const fake_is_view_object: *core.Object = core.Object.fromHeader(fake_is_view.refHeader().?);
     fake_is_view_object.nativeFunctionIdSlot().* = is_view_object.nativeFunctionIdSlot().*;
     const fake_array_buffer_slice = try engine.core.function.nativeFunction(ctx, "notArrayBufferSlice", 2);
     defer fake_array_buffer_slice.free(rt);
-    const fake_array_buffer_slice_object: *core.Object = @fieldParentPtr("header", fake_array_buffer_slice.refHeader().?);
+    const fake_array_buffer_slice_object: *core.Object = core.Object.fromHeader(fake_array_buffer_slice.refHeader().?);
     fake_array_buffer_slice_object.nativeFunctionIdSlot().* = array_buffer_slice_object.nativeFunctionIdSlot().*;
     const fake_array_buffer_byte_length = try engine.core.function.nativeFunction(ctx, "notArrayBufferByteLength", 0);
     defer fake_array_buffer_byte_length.free(rt);
-    const fake_array_buffer_byte_length_object: *core.Object = @fieldParentPtr("header", fake_array_buffer_byte_length.refHeader().?);
+    const fake_array_buffer_byte_length_object: *core.Object = core.Object.fromHeader(fake_array_buffer_byte_length.refHeader().?);
     fake_array_buffer_byte_length_object.nativeFunctionIdSlot().* = array_buffer_byte_length_getter.nativeFunctionIdSlot().*;
     const fake_shared_array_buffer_slice = try engine.core.function.nativeFunction(ctx, "notSharedArrayBufferSlice", 2);
     defer fake_shared_array_buffer_slice.free(rt);
-    const fake_shared_array_buffer_slice_object: *core.Object = @fieldParentPtr("header", fake_shared_array_buffer_slice.refHeader().?);
+    const fake_shared_array_buffer_slice_object: *core.Object = core.Object.fromHeader(fake_shared_array_buffer_slice.refHeader().?);
     fake_shared_array_buffer_slice_object.nativeFunctionIdSlot().* = shared_array_buffer_slice_object.nativeFunctionIdSlot().*;
     const fake_data_view_get_uint8 = try engine.core.function.nativeFunction(ctx, "notDataViewGetUint8", 1);
     defer fake_data_view_get_uint8.free(rt);
-    const fake_data_view_get_uint8_object: *core.Object = @fieldParentPtr("header", fake_data_view_get_uint8.refHeader().?);
+    const fake_data_view_get_uint8_object: *core.Object = core.Object.fromHeader(fake_data_view_get_uint8.refHeader().?);
     fake_data_view_get_uint8_object.nativeFunctionIdSlot().* = get_uint8_object.nativeFunctionIdSlot().*;
     const fake_data_view_set_uint8 = try engine.core.function.nativeFunction(ctx, "notDataViewSetUint8", 2);
     defer fake_data_view_set_uint8.free(rt);
-    const fake_data_view_set_uint8_object: *core.Object = @fieldParentPtr("header", fake_data_view_set_uint8.refHeader().?);
+    const fake_data_view_set_uint8_object: *core.Object = core.Object.fromHeader(fake_data_view_set_uint8.refHeader().?);
     fake_data_view_set_uint8_object.nativeFunctionIdSlot().* = set_uint8_object.nativeFunctionIdSlot().*;
     const fake_data_view_byte_length = try engine.core.function.nativeFunction(ctx, "notDataViewByteLength", 0);
     defer fake_data_view_byte_length.free(rt);
-    const fake_data_view_byte_length_object: *core.Object = @fieldParentPtr("header", fake_data_view_byte_length.refHeader().?);
+    const fake_data_view_byte_length_object: *core.Object = core.Object.fromHeader(fake_data_view_byte_length.refHeader().?);
     fake_data_view_byte_length_object.nativeFunctionIdSlot().* = data_view_byte_length_getter.nativeFunctionIdSlot().*;
 
     const dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_array_buffer_slice_object);
@@ -8469,7 +8469,7 @@ test "buffer native builtin records ignore dispatch names" {
     defer direct_buffer.free(rt);
     const direct_slice_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_buffer, fake_array_buffer_slice, &.{ core.JSValue.int32(1), core.JSValue.int32(4) });
     defer direct_slice_result.free(rt);
-    const direct_slice_object: *core.Object = @fieldParentPtr("header", direct_slice_result.refHeader().?);
+    const direct_slice_object: *core.Object = core.Object.fromHeader(direct_slice_result.refHeader().?);
     try std.testing.expectEqual(@as(usize, 3), direct_slice_object.byteStorage().len);
     const direct_length_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_buffer, fake_array_buffer_byte_length, &.{});
     defer direct_length_result.free(rt);
@@ -8541,35 +8541,35 @@ test "typed array accessor native builtin records ignore dispatch names" {
 
     const typed_array_value = try global.getProperty(typed_array_key);
     defer typed_array_value.free(rt);
-    const typed_array_object: *core.Object = @fieldParentPtr("header", typed_array_value.refHeader().?);
+    const typed_array_object: *core.Object = core.Object.fromHeader(typed_array_value.refHeader().?);
     const prototype_value = try typed_array_object.getProperty(prototype_key);
     defer prototype_value.free(rt);
-    const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
+    const prototype_object: *core.Object = core.Object.fromHeader(prototype_value.refHeader().?);
 
     const byte_length_desc = (try prototype_object.getOwnProperty(rt, byte_length_key)).?;
     defer byte_length_desc.destroy(rt);
-    const byte_length_getter: *core.Object = @fieldParentPtr("header", byte_length_desc.getter.refHeader().?);
+    const byte_length_getter: *core.Object = core.Object.fromHeader(byte_length_desc.getter.refHeader().?);
     try std.testing.expect(byte_length_getter.nativeFunctionIdSlot().* != 0);
     const length_desc = (try prototype_object.getOwnProperty(rt, length_key)).?;
     defer length_desc.destroy(rt);
-    const length_getter: *core.Object = @fieldParentPtr("header", length_desc.getter.refHeader().?);
+    const length_getter: *core.Object = core.Object.fromHeader(length_desc.getter.refHeader().?);
     try std.testing.expect(length_getter.nativeFunctionIdSlot().* != 0);
     const tag_desc = (try prototype_object.getOwnProperty(rt, core.atom.predefinedId("Symbol.toStringTag", .symbol).?)).?;
     defer tag_desc.destroy(rt);
-    const tag_getter: *core.Object = @fieldParentPtr("header", tag_desc.getter.refHeader().?);
+    const tag_getter: *core.Object = core.Object.fromHeader(tag_desc.getter.refHeader().?);
     try std.testing.expect(tag_getter.nativeFunctionIdSlot().* != 0);
 
     const fake_byte_length = try engine.core.function.nativeFunction(ctx, "notTypedArrayByteLength", 0);
     defer fake_byte_length.free(rt);
-    const fake_byte_length_object: *core.Object = @fieldParentPtr("header", fake_byte_length.refHeader().?);
+    const fake_byte_length_object: *core.Object = core.Object.fromHeader(fake_byte_length.refHeader().?);
     fake_byte_length_object.nativeFunctionIdSlot().* = byte_length_getter.nativeFunctionIdSlot().*;
     const fake_length = try engine.core.function.nativeFunction(ctx, "notTypedArrayLength", 0);
     defer fake_length.free(rt);
-    const fake_length_object: *core.Object = @fieldParentPtr("header", fake_length.refHeader().?);
+    const fake_length_object: *core.Object = core.Object.fromHeader(fake_length.refHeader().?);
     fake_length_object.nativeFunctionIdSlot().* = length_getter.nativeFunctionIdSlot().*;
     const fake_tag = try engine.core.function.nativeFunction(ctx, "notTypedArrayTag", 0);
     defer fake_tag.free(rt);
-    const fake_tag_object: *core.Object = @fieldParentPtr("header", fake_tag.refHeader().?);
+    const fake_tag_object: *core.Object = core.Object.fromHeader(fake_tag.refHeader().?);
     fake_tag_object.nativeFunctionIdSlot().* = tag_getter.nativeFunctionIdSlot().*;
 
     const dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_byte_length_object);
@@ -8631,15 +8631,15 @@ test "regexp static native builtin records ignore dispatch names" {
     defer rt.atoms.free(escape_key);
     const regexp_value = try global.getProperty(regexp_key);
     defer regexp_value.free(rt);
-    const regexp_object: *core.Object = @fieldParentPtr("header", regexp_value.refHeader().?);
+    const regexp_object: *core.Object = core.Object.fromHeader(regexp_value.refHeader().?);
     const escape_value = try regexp_object.getProperty(escape_key);
     defer escape_value.free(rt);
-    const escape_object: *core.Object = @fieldParentPtr("header", escape_value.refHeader().?);
+    const escape_object: *core.Object = core.Object.fromHeader(escape_value.refHeader().?);
     try std.testing.expect(escape_object.nativeFunctionIdSlot().* != 0);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notRegExpEscape", 1);
     defer fake.free(rt);
-    const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
+    const fake_object: *core.Object = core.Object.fromHeader(fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = escape_object.nativeFunctionIdSlot().*;
     const dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_object);
     defer rt.memory.allocator.free(dispatch_name);
@@ -8690,26 +8690,26 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(to_string_key);
     const regexp_value = try global.getProperty(regexp_key);
     defer regexp_value.free(rt);
-    const regexp_object: *core.Object = @fieldParentPtr("header", regexp_value.refHeader().?);
+    const regexp_object: *core.Object = core.Object.fromHeader(regexp_value.refHeader().?);
     const prototype_value = try regexp_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
-    const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
+    const prototype_object: *core.Object = core.Object.fromHeader(prototype_value.refHeader().?);
     const exec_value = try prototype_object.getProperty(exec_key);
     defer exec_value.free(rt);
-    const exec_object: *core.Object = @fieldParentPtr("header", exec_value.refHeader().?);
+    const exec_object: *core.Object = core.Object.fromHeader(exec_value.refHeader().?);
     try std.testing.expect(exec_object.nativeFunctionIdSlot().* != 0);
     const test_value = try prototype_object.getProperty(test_key);
     defer test_value.free(rt);
-    const test_object: *core.Object = @fieldParentPtr("header", test_value.refHeader().?);
+    const test_object: *core.Object = core.Object.fromHeader(test_value.refHeader().?);
     try std.testing.expect(test_object.nativeFunctionIdSlot().* != 0);
     const to_string_value = try prototype_object.getProperty(to_string_key);
     defer to_string_value.free(rt);
-    const to_string_object: *core.Object = @fieldParentPtr("header", to_string_value.refHeader().?);
+    const to_string_object: *core.Object = core.Object.fromHeader(to_string_value.refHeader().?);
     try std.testing.expect(to_string_object.nativeFunctionIdSlot().* != 0);
 
     const fake_exec = try engine.core.function.nativeFunction(ctx, "notRegExpExec", 1);
     defer fake_exec.free(rt);
-    const fake_exec_object: *core.Object = @fieldParentPtr("header", fake_exec.refHeader().?);
+    const fake_exec_object: *core.Object = core.Object.fromHeader(fake_exec.refHeader().?);
     fake_exec_object.nativeFunctionIdSlot().* = exec_object.nativeFunctionIdSlot().*;
     const exec_dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_exec_object);
     defer rt.memory.allocator.free(exec_dispatch_name);
@@ -8717,7 +8717,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
 
     const fake_test = try engine.core.function.nativeFunction(ctx, "notRegExpTest", 1);
     defer fake_test.free(rt);
-    const fake_test_object: *core.Object = @fieldParentPtr("header", fake_test.refHeader().?);
+    const fake_test_object: *core.Object = core.Object.fromHeader(fake_test.refHeader().?);
     fake_test_object.nativeFunctionIdSlot().* = test_object.nativeFunctionIdSlot().*;
     const test_dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_test_object);
     defer rt.memory.allocator.free(test_dispatch_name);
@@ -8725,7 +8725,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
 
     const fake_to_string = try engine.core.function.nativeFunction(ctx, "notRegExpToString", 0);
     defer fake_to_string.free(rt);
-    const fake_to_string_object: *core.Object = @fieldParentPtr("header", fake_to_string.refHeader().?);
+    const fake_to_string_object: *core.Object = core.Object.fromHeader(fake_to_string.refHeader().?);
     fake_to_string_object.nativeFunctionIdSlot().* = to_string_object.nativeFunctionIdSlot().*;
     const to_string_dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_to_string_object);
     defer rt.memory.allocator.free(to_string_dispatch_name);
@@ -8742,7 +8742,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     const direct_args = [_]core.JSValue{input_string.value()};
     const exec_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_exec, &direct_args);
     defer exec_result.free(rt);
-    const exec_array: *core.Object = @fieldParentPtr("header", exec_result.refHeader().?);
+    const exec_array: *core.Object = core.Object.fromHeader(exec_result.refHeader().?);
     try std.testing.expect(exec_array.isArray());
     const first_match = try exec_array.getProperty(core.atom.atomFromUInt32(0));
     defer first_match.free(rt);
@@ -8801,35 +8801,35 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer rt.atoms.free(regexp_key);
     const regexp_value = try global.getProperty(regexp_key);
     defer regexp_value.free(rt);
-    const regexp_object: *core.Object = @fieldParentPtr("header", regexp_value.refHeader().?);
+    const regexp_object: *core.Object = core.Object.fromHeader(regexp_value.refHeader().?);
     const prototype_value = try regexp_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
-    const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
+    const prototype_object: *core.Object = core.Object.fromHeader(prototype_value.refHeader().?);
 
     const search_value = try prototype_object.getProperty(core.atom.predefinedId("Symbol.search", .symbol).?);
     defer search_value.free(rt);
-    const search_object: *core.Object = @fieldParentPtr("header", search_value.refHeader().?);
+    const search_object: *core.Object = core.Object.fromHeader(search_value.refHeader().?);
     try std.testing.expect(search_object.nativeFunctionIdSlot().* != 0);
     const match_value = try prototype_object.getProperty(core.atom.predefinedId("Symbol.match", .symbol).?);
     defer match_value.free(rt);
-    const match_object: *core.Object = @fieldParentPtr("header", match_value.refHeader().?);
+    const match_object: *core.Object = core.Object.fromHeader(match_value.refHeader().?);
     try std.testing.expect(match_object.nativeFunctionIdSlot().* != 0);
     const match_all_value = try prototype_object.getProperty(core.atom.predefinedId("Symbol.matchAll", .symbol).?);
     defer match_all_value.free(rt);
-    const match_all_object: *core.Object = @fieldParentPtr("header", match_all_value.refHeader().?);
+    const match_all_object: *core.Object = core.Object.fromHeader(match_all_value.refHeader().?);
     try std.testing.expect(match_all_object.nativeFunctionIdSlot().* != 0);
     const replace_value = try prototype_object.getProperty(core.atom.predefinedId("Symbol.replace", .symbol).?);
     defer replace_value.free(rt);
-    const replace_object: *core.Object = @fieldParentPtr("header", replace_value.refHeader().?);
+    const replace_object: *core.Object = core.Object.fromHeader(replace_value.refHeader().?);
     try std.testing.expect(replace_object.nativeFunctionIdSlot().* != 0);
     const split_value = try prototype_object.getProperty(core.atom.predefinedId("Symbol.split", .symbol).?);
     defer split_value.free(rt);
-    const split_object: *core.Object = @fieldParentPtr("header", split_value.refHeader().?);
+    const split_object: *core.Object = core.Object.fromHeader(split_value.refHeader().?);
     try std.testing.expect(split_object.nativeFunctionIdSlot().* != 0);
 
     const fake_search = try engine.core.function.nativeFunction(ctx, "notRegExpSearch", 1);
     defer fake_search.free(rt);
-    const fake_search_object: *core.Object = @fieldParentPtr("header", fake_search.refHeader().?);
+    const fake_search_object: *core.Object = core.Object.fromHeader(fake_search.refHeader().?);
     fake_search_object.nativeFunctionIdSlot().* = search_object.nativeFunctionIdSlot().*;
     const search_dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_search_object);
     defer rt.memory.allocator.free(search_dispatch_name);
@@ -8837,19 +8837,19 @@ test "regexp symbol native builtin records ignore dispatch names" {
 
     const fake_match = try engine.core.function.nativeFunction(ctx, "notRegExpMatch", 1);
     defer fake_match.free(rt);
-    const fake_match_object: *core.Object = @fieldParentPtr("header", fake_match.refHeader().?);
+    const fake_match_object: *core.Object = core.Object.fromHeader(fake_match.refHeader().?);
     fake_match_object.nativeFunctionIdSlot().* = match_object.nativeFunctionIdSlot().*;
     const fake_match_all = try engine.core.function.nativeFunction(ctx, "notRegExpMatchAll", 1);
     defer fake_match_all.free(rt);
-    const fake_match_all_object: *core.Object = @fieldParentPtr("header", fake_match_all.refHeader().?);
+    const fake_match_all_object: *core.Object = core.Object.fromHeader(fake_match_all.refHeader().?);
     fake_match_all_object.nativeFunctionIdSlot().* = match_all_object.nativeFunctionIdSlot().*;
     const fake_replace = try engine.core.function.nativeFunction(ctx, "notRegExpReplace", 2);
     defer fake_replace.free(rt);
-    const fake_replace_object: *core.Object = @fieldParentPtr("header", fake_replace.refHeader().?);
+    const fake_replace_object: *core.Object = core.Object.fromHeader(fake_replace.refHeader().?);
     fake_replace_object.nativeFunctionIdSlot().* = replace_object.nativeFunctionIdSlot().*;
     const fake_split = try engine.core.function.nativeFunction(ctx, "notRegExpSplit", 2);
     defer fake_split.free(rt);
-    const fake_split_object: *core.Object = @fieldParentPtr("header", fake_split.refHeader().?);
+    const fake_split_object: *core.Object = core.Object.fromHeader(fake_split.refHeader().?);
     fake_split_object.nativeFunctionIdSlot().* = split_object.nativeFunctionIdSlot().*;
 
     const pattern_string = try core.string.String.createUtf8(rt, "a");
@@ -8870,7 +8870,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
 
     const match_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_match, &one_arg);
     defer match_result.free(rt);
-    const match_array: *core.Object = @fieldParentPtr("header", match_result.refHeader().?);
+    const match_array: *core.Object = core.Object.fromHeader(match_result.refHeader().?);
     const match_zero = try match_array.getProperty(core.atom.atomFromUInt32(0));
     defer match_zero.free(rt);
     try std.testing.expect(match_zero.isString());
@@ -8879,7 +8879,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
 
     const match_all_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_match_all, &one_arg);
     defer match_all_result.free(rt);
-    const match_all_iterator: *core.Object = @fieldParentPtr("header", match_all_result.refHeader().?);
+    const match_all_iterator: *core.Object = core.Object.fromHeader(match_all_result.refHeader().?);
     try std.testing.expectEqual(core.class.ids.regexp_string_iterator, match_all_iterator.class_id);
 
     const replace_args = [_]core.JSValue{ input_string.value(), replacement_string.value() };
@@ -8891,7 +8891,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
 
     const split_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_split, &one_arg);
     defer split_result.free(rt);
-    const split_array: *core.Object = @fieldParentPtr("header", split_result.refHeader().?);
+    const split_array: *core.Object = core.Object.fromHeader(split_result.refHeader().?);
     try std.testing.expect(split_array.isArray());
     try std.testing.expectEqual(@as(u32, 2), split_array.arrayLength());
 
@@ -8944,27 +8944,27 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer rt.atoms.free(regexp_key);
     const regexp_value = try global.getProperty(regexp_key);
     defer regexp_value.free(rt);
-    const regexp_object: *core.Object = @fieldParentPtr("header", regexp_value.refHeader().?);
+    const regexp_object: *core.Object = core.Object.fromHeader(regexp_value.refHeader().?);
     const prototype_value = try regexp_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
-    const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
+    const prototype_object: *core.Object = core.Object.fromHeader(prototype_value.refHeader().?);
 
     const source_key = try rt.internAtom("source");
     defer rt.atoms.free(source_key);
     const source_desc = (try prototype_object.getOwnProperty(rt, source_key)).?;
     defer source_desc.destroy(rt);
-    const source_getter: *core.Object = @fieldParentPtr("header", source_desc.getter.refHeader().?);
+    const source_getter: *core.Object = core.Object.fromHeader(source_desc.getter.refHeader().?);
     try std.testing.expect(source_getter.nativeFunctionIdSlot().* != 0);
     const global_key = try rt.internAtom("global");
     defer rt.atoms.free(global_key);
     const global_desc = (try prototype_object.getOwnProperty(rt, global_key)).?;
     defer global_desc.destroy(rt);
-    const global_getter: *core.Object = @fieldParentPtr("header", global_desc.getter.refHeader().?);
+    const global_getter: *core.Object = core.Object.fromHeader(global_desc.getter.refHeader().?);
     try std.testing.expect(global_getter.nativeFunctionIdSlot().* != 0);
 
     const fake_source = try engine.core.function.nativeFunction(ctx, "notRegExpSourceGetter", 0);
     defer fake_source.free(rt);
-    const fake_source_object: *core.Object = @fieldParentPtr("header", fake_source.refHeader().?);
+    const fake_source_object: *core.Object = core.Object.fromHeader(fake_source.refHeader().?);
     fake_source_object.nativeFunctionIdSlot().* = source_getter.nativeFunctionIdSlot().*;
     const source_dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_source_object);
     defer rt.memory.allocator.free(source_dispatch_name);
@@ -8972,7 +8972,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
 
     const fake_global = try engine.core.function.nativeFunction(ctx, "notRegExpGlobalGetter", 0);
     defer fake_global.free(rt);
-    const fake_global_object: *core.Object = @fieldParentPtr("header", fake_global.refHeader().?);
+    const fake_global_object: *core.Object = core.Object.fromHeader(fake_global.refHeader().?);
     fake_global_object.nativeFunctionIdSlot().* = global_getter.nativeFunctionIdSlot().*;
 
     const pattern_string = try core.string.String.createUtf8(rt, "a/b");
@@ -9031,7 +9031,7 @@ test "vm host native builtin records dispatch by id before name fallback" {
     // using the post-bootstrap realm convenience API.
     const fake_species = try engine.core.function.nativeFunctionWithPrototypeAndCapacity(ctx, null, "notSpeciesGetter", 0, 2);
     defer fake_species.free(rt);
-    const fake_species_object: *core.Object = @fieldParentPtr("header", fake_species.refHeader().?);
+    const fake_species_object: *core.Object = core.Object.fromHeader(fake_species.refHeader().?);
     fake_species_object.setNativeBuiltinIdAndRecord(
         rt,
         core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter)),
@@ -9087,7 +9087,7 @@ test "vm collection constructors use registered prototype methods" {
     const result = try helpers.runMutableVm(&vm_instance, &function);
     defer result.free(rt);
 
-    const object: *core.Object = @fieldParentPtr("header", result.refHeader().?);
+    const object: *core.Object = core.Object.fromHeader(result.refHeader().?);
     const set_key = try rt.internAtom("set");
     defer rt.atoms.free(set_key);
     try std.testing.expect(object.getPrototype() != null);
@@ -10265,7 +10265,7 @@ test "native record calls preflight the native stack and recover" {
 
     const function_value = try core.function.nativeFunction(js.context, "nativeRecordRecurse", 0);
     defer function_value.free(js.runtime);
-    const function_object: *core.Object = @fieldParentPtr("header", function_value.refHeader().?);
+    const function_object: *core.Object = core.Object.fromHeader(function_value.refHeader().?);
     function_object.nativeRecordSlot().* = &NativeRecordStackProbe.record;
 
     const global = try js.context.globalObject();
@@ -11616,7 +11616,7 @@ test "job queue symbol roots preserve weak map values" {
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     try std.testing.expectEqual(@as(usize, 1), weak_map.weakCollectionEntries().len);
-    try std.testing.expectEqual(&value.header, weak_map.weakCollectionEntries()[0].value.refHeader().?);
+    try std.testing.expectEqual(value.header.asHeader(), weak_map.weakCollectionEntries()[0].value.refHeader().?);
 
     queue.deinit();
     _ = rt.runObjectCycleRemoval();
@@ -15465,7 +15465,7 @@ test "dense write leaf consumes reserved appends only inside the qjs capacity wi
     );
     try std.testing.expectEqual(@as(u32, 1), array.fastArrayCount());
     try std.testing.expectEqual(@as(u32, 1), array.arrayLength());
-    try std.testing.expectEqual(&stored.header, array.fastArrayElementAt(0).refHeader().?);
+    try std.testing.expectEqual(stored.header.asHeader(), array.fastArrayElementAt(0).refHeader().?);
     try helpers.expectRefCount(2, &stored.header);
 
     const growth_array = try core.Object.createArray(rt, null);

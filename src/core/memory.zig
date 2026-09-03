@@ -1197,16 +1197,22 @@ pub const MemoryAccount = struct {
     const gc_prefix_size: usize = gc_representation.metadata_size;
 
     /// A GC object is any tagged struct whose first field is either the RC
-    /// 16-byte intrusive header or the trace-only compact 8-byte successor.
-    /// This module stays below gc.zig, so it recognizes the structural ABI
-    /// instead of importing the selected Header alias.
+    /// 16-byte intrusive header, the trace-only compact 8-byte successor, or
+    /// Object's size-0 identity token. This module stays below gc.zig, so it
+    /// recognizes the structural ABI instead of importing the selected Header
+    /// alias.
     inline fn isGcObject(comptime T: type) bool {
         if (@typeInfo(T) != .@"struct") return false;
         if (!@hasDecl(T, "gc_kind_tag")) return false;
         if (!@hasField(T, "header")) return false;
         if (@offsetOf(T, "header") != 0) return false;
         const H = @FieldType(T, "header");
-        if (@typeInfo(H) != .@"struct" or !@hasField(H, "next")) return false;
+        if (@typeInfo(H) != .@"struct") return false;
+        // Size-0 Object identity token: no `next`; GC metadata lives at ptr-8.
+        if (@sizeOf(H) == 0) {
+            return T.gc_kind_tag == gc_representation.object_kind_tag;
+        }
+        if (!@hasField(H, "next")) return false;
         return (@hasField(H, "prev") and @sizeOf(H) == 16) or
             (!@hasField(H, "prev") and @sizeOf(H) == 8);
     }

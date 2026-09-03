@@ -143,7 +143,7 @@ pub const JSValue = extern struct {
         return make(Tag.symbol, @intFromPtr(header) + gc.ref_count_offset_from_payload);
     }
 
-    pub fn object(header: *gc.Header) JSValue {
+    pub fn object(header: anytype) JSValue {
         return make(Tag.object, @intFromPtr(header));
     }
 

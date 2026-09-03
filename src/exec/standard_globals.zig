@@ -3485,7 +3485,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     const map_ctor = try intrinsics.global.getProperty(map_atom);
     defer map_ctor.free(rt);
     try std.testing.expect(map_ctor.isObject());
-    const map_ctor_object: *core.Object = @fieldParentPtr("header", map_ctor.refHeader().?);
+    const map_ctor_object: *core.Object = core.Object.fromHeader(map_ctor.refHeader().?);
     try std.testing.expectEqual(core.class.ids.c_function, map_ctor_object.class_id);
 
     const prototype_atom = try rt.internAtom("prototype");
@@ -3496,7 +3496,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     try std.testing.expectEqual(false, prototype_desc.enumerable.?);
     try std.testing.expectEqual(false, prototype_desc.configurable.?);
     try std.testing.expect(prototype_desc.value.isObject());
-    const map_proto: *core.Object = @fieldParentPtr("header", prototype_desc.value.refHeader().?);
+    const map_proto: *core.Object = core.Object.fromHeader(prototype_desc.value.refHeader().?);
     try std.testing.expectEqual(core.class.ids.object, map_proto.class_id);
 
     const set_atom = try rt.internAtom("set");
@@ -3507,7 +3507,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     try std.testing.expectEqual(false, set_desc.enumerable.?);
     try std.testing.expectEqual(true, set_desc.configurable.?);
     try std.testing.expect(set_desc.value.isObject());
-    const set_func_obj: *core.Object = @fieldParentPtr("header", set_desc.value.refHeader().?);
+    const set_func_obj: *core.Object = core.Object.fromHeader(set_desc.value.refHeader().?);
     try std.testing.expectEqual(core.class.ids.c_function, set_func_obj.class_id);
 }
 

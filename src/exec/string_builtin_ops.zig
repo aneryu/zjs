@@ -610,7 +610,7 @@ fn stringCall(
 fn thisObject(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return core.Object.fromHeader(header);
 }
 
 pub fn charAt(bytes: []const u8, index: usize) []const u8 {
