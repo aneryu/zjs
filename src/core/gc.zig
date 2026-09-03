@@ -3822,6 +3822,9 @@ pub const Registry = struct {
 
     /// O(1) whole-population unmark for the ordinary case. One wrap scrub is
     /// required before reusing epoch 1; 0 always remains newborn/unmarked.
+    /// The wrap walk covers every non-block trace carrier: `gc_obj_list`
+    /// (non-object kinds) and leftover `.object` on `standalone_objects`.
+    /// Block cells use the heap mark epoch, not this word.
     pub fn advanceHeaderMarkEpoch(self: *Registry) void {
         if (self.header_mark_epoch != std.math.maxInt(u16)) {
             self.header_mark_epoch += 1;
@@ -3833,6 +3836,9 @@ pub const Registry = struct {
             if (header == &self.gc_obj_list.sentinel) break;
             @atomicStore(u16, &header.meta().lifetime.trace.mark_epoch, 0, .monotonic);
             cursor = header.next;
+        }
+        for (self.standalone_objects) |header| {
+            @atomicStore(u16, &header.meta().lifetime.trace.mark_epoch, 0, .monotonic);
         }
         self.header_mark_epoch = 1;
     }

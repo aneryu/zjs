@@ -9641,6 +9641,17 @@ test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
     defer rt.shapes.release(obj.shape_ref);
     try std.testing.expectEqual(shape_refs + 1, core.gc.headerRefCount(header));
 
+    InlinePayloadListExitProbe.reset();
+    defer InlinePayloadListExitProbe.reset();
+    const leftover_class = try registerInlinePayloadListExitClass(rt, "EpochWrapLeftover16", 8, 16);
+    const leftover = try core.Object.create(rt, leftover_class, null);
+    defer {
+        leftover.value().free(rt);
+        rt.classes.unregisterDynamic(leftover_class);
+    }
+    try std.testing.expect(standaloneContainsObject(rt, leftover));
+    try std.testing.expect(!core.gc.Registry.isBlockCellHeader(&leftover.header));
+
     rt.gc.setHeaderUnmarked(header);
     try std.testing.expect(!rt.gc.headerMarked(header));
     rt.gc.setHeaderMarked(header);
@@ -9658,11 +9669,14 @@ test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
     rt.gc.header_mark_epoch = std.math.maxInt(u16);
     rt.gc.setHeaderMarked(header);
     rt.gc.setHeaderMarked(&fresh_ctx.header);
+    rt.gc.setHeaderMarked(&leftover.header);
 
-    // The wrap path scrubs every list-carrier epoch before reusing 1.
+    // The wrap path scrubs every non-block carrier epoch before reusing 1,
+    // including leftover `.object` on `standalone_objects`.
     rt.gc.advanceHeaderMarkEpoch();
     try std.testing.expect(!rt.gc.headerMarked(header));
     try std.testing.expect(!rt.gc.headerMarked(&fresh_ctx.header));
+    try std.testing.expect(!rt.gc.headerMarked(&leftover.header));
     try std.testing.expectEqual(shape_refs + 1, core.gc.headerRefCount(header));
     try std.testing.expectEqual(realm_refs + 1, core.gc.headerRefCount(&fresh_ctx.header));
     try rt.gc.verifyIntrusiveList();
