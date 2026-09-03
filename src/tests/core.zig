@@ -2491,6 +2491,56 @@ const InlineObjectLifecycleProbe = struct {
     }
 };
 
+const InlinePayloadListExitProbe = struct {
+    var calls: usize = 0;
+
+    fn reset() void {
+        calls = 0;
+    }
+
+    fn finalize(_: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
+        calls += 1;
+        payload.* = null;
+    }
+};
+
+fn listedKindObjectCount(rt: *core.JSRuntime) usize {
+    var n: usize = 0;
+    var cur = rt.gc.gc_obj_list.sentinel.next;
+    while (cur) |header| {
+        if (header == &rt.gc.gc_obj_list.sentinel) break;
+        if (header.metaConst().flags.kind == .object) n += 1;
+        cur = header.next;
+    }
+    return n;
+}
+
+fn gcListContainsObject(rt: *core.JSRuntime, object: *const core.Object) bool {
+    var cur = rt.gc.gc_obj_list.sentinel.next;
+    while (cur) |header| {
+        if (header == &rt.gc.gc_obj_list.sentinel) break;
+        if (header == &object.header) return true;
+        cur = header.next;
+    }
+    return false;
+}
+
+fn registerInlinePayloadListExitClass(
+    rt: *core.JSRuntime,
+    name: []const u8,
+    payload_size: u32,
+    payload_align: u16,
+) !core.ClassId {
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{
+        .class_name = name,
+        .inline_payload_size = payload_size,
+        .inline_payload_align = payload_align,
+        .payload_finalizer = InlinePayloadListExitProbe.finalize,
+    });
+    return class_id;
+}
+
 const ExternalObjectLifecyclePayload = struct {
     event: u8,
 };
@@ -2905,6 +2955,163 @@ test "inline class finalizer observes the live object allocation until callback 
         InlineObjectLifecycleProbe.allocated_bytes,
     );
     rt.classes.unregisterDynamic(class_id);
+}
+
+test "fitting inline-payload objects are block cells and leave gc_obj_list" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    InlinePayloadListExitProbe.reset();
+    defer InlinePayloadListExitProbe.reset();
+
+    const trailing = try core.Object.createPlainObjectReserved2(rt, null);
+    defer trailing.value().free(rt);
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&trailing.header));
+    try std.testing.expect(!core.gc.headerLinked(&trailing.header));
+
+    const listed_before = listedKindObjectCount(rt);
+    const class_8 = try registerInlinePayloadListExitClass(rt, "InlineListExitFit8", 8, 8);
+    const class_32 = try registerInlinePayloadListExitClass(rt, "InlineListExitFit32", 32, 8);
+    const small = try core.Object.create(rt, class_8, null);
+    defer small.value().free(rt);
+    const medium = try core.Object.create(rt, class_32, null);
+    defer medium.value().free(rt);
+
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&small.header));
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&medium.header));
+    try std.testing.expect(!core.gc.headerLinked(&small.header));
+    try std.testing.expect(!core.gc.headerLinked(&medium.header));
+    try std.testing.expect(!gcListContainsObject(rt, small));
+    try std.testing.expect(!gcListContainsObject(rt, medium));
+    try std.testing.expectEqual(listed_before, listedKindObjectCount(rt));
+    try rt.gc.verifyRepresentationInvariants();
+
+    rt.classes.unregisterDynamic(class_8);
+    rt.classes.unregisterDynamic(class_32);
+}
+
+test "fitting inline-payload objects survive rooted minor and major then die unrooted" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    InlinePayloadListExitProbe.reset();
+    defer InlinePayloadListExitProbe.reset();
+
+    const class_id = try registerInlinePayloadListExitClass(rt, "InlineListExitRootedFit", 8, 8);
+    const object = try core.Object.create(rt, class_id, null);
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&object.header));
+
+    var slot: ?*core.Object = object;
+    var roots = core.runtime.rootObjects(.{&slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    helpers.reclaimNow(rt);
+    try std.testing.expectEqual(@as(usize, 0), InlinePayloadListExitProbe.calls);
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&object.header));
+
+    slot = null;
+    helpers.reclaimNow(rt);
+    try std.testing.expectEqual(@as(usize, 1), InlinePayloadListExitProbe.calls);
+    rt.classes.unregisterDynamic(class_id);
+}
+
+test "fitting inline-payload objects are reclaimed by an unrooted minor" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    InlinePayloadListExitProbe.reset();
+    defer InlinePayloadListExitProbe.reset();
+
+    const class_id = try registerInlinePayloadListExitClass(rt, "InlineListExitUnrootedFit", 32, 8);
+    _ = try core.Object.create(rt, class_id, null);
+    try std.testing.expectEqual(@as(usize, 0), InlinePayloadListExitProbe.calls);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expectEqual(@as(usize, 1), InlinePayloadListExitProbe.calls);
+    rt.classes.unregisterDynamic(class_id);
+}
+
+test "over-aligned inline-payload objects stay on gc_obj_list and take the same GC paths" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    InlinePayloadListExitProbe.reset();
+    defer InlinePayloadListExitProbe.reset();
+
+    const listed_before = listedKindObjectCount(rt);
+    const class_id = try registerInlinePayloadListExitClass(rt, "InlineListExitLeftover16", 8, 16);
+    const object = try core.Object.create(rt, class_id, null);
+    try std.testing.expect(!core.gc.Registry.isBlockCellHeader(&object.header));
+    try std.testing.expect(object.header.metaConst().alloc_info.standalone);
+    try std.testing.expect(core.gc.headerLinked(&object.header));
+    try std.testing.expect(gcListContainsObject(rt, object));
+    try std.testing.expectEqual(listed_before + 1, listedKindObjectCount(rt));
+    try rt.gc.verifyRepresentationInvariants();
+
+    var slot: ?*core.Object = object;
+    var roots = core.runtime.rootObjects(.{&slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    helpers.reclaimNow(rt);
+    try std.testing.expectEqual(@as(usize, 0), InlinePayloadListExitProbe.calls);
+    try std.testing.expect(gcListContainsObject(rt, object));
+
+    slot = null;
+    helpers.reclaimNow(rt);
+    try std.testing.expectEqual(@as(usize, 1), InlinePayloadListExitProbe.calls);
+
+    InlinePayloadListExitProbe.reset();
+    _ = try core.Object.create(rt, class_id, null);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expectEqual(@as(usize, 1), InlinePayloadListExitProbe.calls);
+    rt.classes.unregisterDynamic(class_id);
+}
+
+test "runtime teardown reclaims both inline-payload allocation paths" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    errdefer rt.destroy();
+
+    InlinePayloadListExitProbe.reset();
+    defer InlinePayloadListExitProbe.reset();
+
+    const fit_id = try registerInlinePayloadListExitClass(rt, "InlineListExitTeardownFit", 8, 8);
+    const leftover_id = try registerInlinePayloadListExitClass(rt, "InlineListExitTeardownLeftover", 8, 16);
+    const fit = try core.Object.create(rt, fit_id, null);
+    const leftover = try core.Object.create(rt, leftover_id, null);
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(&fit.header));
+    try std.testing.expect(core.gc.headerLinked(&leftover.header));
+
+    var fit_slot: ?*core.Object = fit;
+    var leftover_slot: ?*core.Object = leftover;
+    var roots = core.runtime.rootObjects(.{ &fit_slot, &leftover_slot });
+    roots.activate(rt);
+    roots.deactivate(rt);
+
+    rt.destroy();
+    try std.testing.expectEqual(@as(usize, 2), InlinePayloadListExitProbe.calls);
 }
 
 test "external class finalizers run synchronously with original object identity in zero-ref FIFO order" {

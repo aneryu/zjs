@@ -740,6 +740,11 @@ adjacent-line prefetch 把 96B 两条相邻线的账早已摊掉大半。
   退出 GC 链表」零尺寸变化可测,再删字段),**前置=强制非块群体走 minor/major/
   teardown 的靶向测试**。④(64B 线轴)据此顺延,判别器已重锚:落地须
   splay 标记线 20.18M→≈12.14M(−40%)、l1d refill −9.2%。
+- **① step 1(2026-09-03)**:剩余非块 `.object` 是 embedder inline-payload 类。
+  对得齐且进得了块堆 size class 的改走 `createWithFam` 块 cell(bitmap 枚举,
+  不入 `gc_obj_list`);过对齐/过大的仍走 standalone 对齐分配并留在链表上。
+  生产 trailing 80B 普通对象尺寸不变。不删 `TraceHeader.next`,不建 ④。
+  靶向测试强制两路走 minor / major / teardown。
 - **gate 口径修复**(234df4f1):committed/live 分母加 superblock 地板——
   raytrace FAIL 是 R8 快照伪影(live-at-exit≈young,38KB 分母);地板后发现
   **该列在 4/6 负载上本就不可复现**(同二进制 5058/5431/5851 milli 漂移),

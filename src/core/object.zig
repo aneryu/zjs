@@ -14,6 +14,7 @@ const value_format = @import("value_format.zig");
 const descriptor = @import("descriptor.zig");
 const function = @import("function.zig");
 const gc = @import("gc.zig");
+const gc_block_heap = @import("gc_block_heap.zig");
 const host_function = @import("host_function.zig");
 const module_mod = @import("module.zig");
 const object_gc = @import("object_gc.zig");
@@ -1635,11 +1636,20 @@ pub const Object = extern struct {
         // The helper publishes a reserved cache-miss Shape before entering the
         // reentrant boundary, then roots it exactly like a published hash hit.
         collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size);
+        // obj64 ① step 1: fitting inline-payload classes take a block cell
+        // (bitmap-enumerated, never linked). Over-aligned or oversized
+        // leftovers keep the standalone aligned blob and stay on gc_obj_list.
+        // Ordinary trailing 80B cells do not use this arm.
+        var inline_via_fam = false;
         const self = if (inline_layout) |layout| blk: {
             // The object-level threshold/force-GC hook just ran above. Enter
             // MemoryAccount directly so this same allocation does not request
             // a second collection (observable to test allocation probes and
             // unnecessarily expensive in force-GC builds).
+            if (inlinePayloadBlockHeapFam(layout)) |fam| {
+                inline_via_fam = true;
+                break :blk try rt.memory.createWithFamNoTrigger(Object, fam);
+            }
             const bytes = try rt.memory.allocAlignedBytesNoTrigger(layout.allocation_size, layout.allocation_alignment);
             break :blk @as(*Object, @ptrFromInt(@intFromPtr(bytes.ptr) + layout.object_offset));
         } else try allocCell(rt, class_id, false);
@@ -1648,8 +1658,12 @@ pub const Object = extern struct {
             if (initialized) {
                 destroyFromHeader(rt, &self.header);
             } else if (inline_layout) |layout| {
-                const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
-                rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
+                if (inline_via_fam) {
+                    rt.memory.destroyWithFam(Object, self, layout.object_size - @sizeOf(Object));
+                } else {
+                    const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
+                    rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
+                }
             } else {
                 freeRawCell(rt, self, class_id, false);
             }
@@ -1707,7 +1721,10 @@ pub const Object = extern struct {
                 }
             }
         }
-        if (inline_layout != null) self.initInlineClassPayloadGcPrefix();
+        // Block-cell / slab FAM prefixes are already stamped; overwriting them
+        // with standalone=true would destroy the block-cell marker and put the
+        // object back on gc_obj_list.
+        if (inline_layout != null and !inline_via_fam) self.initInlineClassPayloadGcPrefix();
         property_storage_owned = false;
         shape_owned = false;
         if (property_template != null) {
@@ -1935,11 +1952,24 @@ pub const Object = extern struct {
         };
     }
 
+    /// FAM bytes when this inline-payload class can live in the collector
+    /// block heap with the payload's required alignment. `null` keeps the
+    /// standalone aligned path (R5 leftover: over-aligned or oversized).
+    fn inlinePayloadBlockHeapFam(layout: InlineClassPayloadLayout) ?usize {
+        if (comptime !gc.block_heap_enabled) return null;
+        const cell = gc.metadata_prefix_size + layout.object_size;
+        if (!gc_block_heap.canAllocCellSize(cell)) return null;
+        const payload_abs = gc.metadata_prefix_size + layout.payload_offset;
+        if (payload_abs % layout.allocation_alignment.toByteUnits() != 0) return null;
+        return layout.object_size - @sizeOf(Object);
+    }
+
     fn initInlineClassPayloadGcPrefix(self: *Object) void {
-        // Inline-payload objects live inside a raw aligned allocation (freed
-        // via freeObjectAllocation with the full layout), so their prefix is a
-        // standalone one: no slab class to stamp, size_class carries encoded
-        // heap bytes once registered.
+        // Leftover inline-payload objects (over-aligned / oversized) live in a
+        // raw aligned allocation and are freed via freeAlignedBytes, so their
+        // prefix is a standalone one: no slab class to stamp, size_class
+        // carries encoded heap bytes once registered. Fitting classes never
+        // reach this helper; they keep the block-cell prefix from createWithFam.
         const meta: *gc.Metadata = @ptrFromInt(@intFromPtr(self) - 8);
         meta.* = .{ .alloc_info = .{ .standalone = true }, .flags = .{ .kind = .object } };
     }
@@ -1978,6 +2008,12 @@ pub const Object = extern struct {
 
     noinline fn freeInlinePayloadObjectAllocation(rt: *JSRuntime, self: *Object, definition: class.Table.DefinitionPlan) void {
         const layout = inlineClassPayloadLayoutForDefinition(definition) orelse unreachable;
+        // Block cells and any createWithFam slab fallback share the FAM free;
+        // only the leftover standalone aligned blob uses object_offset.
+        if (gc.Registry.isBlockCellHeader(&self.header) or !self.header.metaConst().alloc_info.standalone) {
+            rt.memory.destroyWithFam(Object, self, layout.object_size - @sizeOf(Object));
+            return;
+        }
         const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
         rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
     }
