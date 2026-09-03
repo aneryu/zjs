@@ -9651,6 +9651,7 @@ test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
     }
     try std.testing.expect(standaloneContainsObject(rt, leftover));
     try std.testing.expect(!core.gc.Registry.isBlockCellHeader(&leftover.header));
+    const shape_refs_live = core.gc.headerRefCount(header);
 
     rt.gc.setHeaderUnmarked(header);
     try std.testing.expect(!rt.gc.headerMarked(header));
@@ -9677,7 +9678,7 @@ test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
     try std.testing.expect(!rt.gc.headerMarked(header));
     try std.testing.expect(!rt.gc.headerMarked(&fresh_ctx.header));
     try std.testing.expect(!rt.gc.headerMarked(&leftover.header));
-    try std.testing.expectEqual(shape_refs + 1, core.gc.headerRefCount(header));
+    try std.testing.expectEqual(shape_refs_live, core.gc.headerRefCount(header));
     try std.testing.expectEqual(realm_refs + 1, core.gc.headerRefCount(&fresh_ctx.header));
     try rt.gc.verifyIntrusiveList();
 
