@@ -58,3 +58,7 @@ size classes do not change.
 
 If the prefetch arm of 64 vs 96 (or 64 vs 80) is <1.5% cycles and <8%
 refill, the line axis is dead and S2 does not ship.
+
+An x86 directional booking (8 MiB DRAM-bound + in-engine 300k `{a,b}` class
+histogram) is in [docs/obj64-ablation-2026-09-03.md](../../../docs/obj64-ablation-2026-09-03.md).
+It is not an ARM cycles/L2D verdict.
