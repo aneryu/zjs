@@ -1448,6 +1448,11 @@ pub inline fn listSentinel(head: *const IntrusiveHeaderList) *const Header {
 }
 
 pub inline fn headerLinked(header: *const Header) bool {
+    // `.object` is never an intrusive-list member: block cells are bitmap
+    // enumerated and leftover standalone objects live in `standalone_objects`.
+    // Read the kind from the prefix so a later compact Object token can drop
+    // `next` without this predicate loading a missing field.
+    if (header.metaConst().flags.kind == .object) return false;
     return header.next != null;
 }
 
@@ -1927,6 +1932,15 @@ pub const Registry = struct {
     next_external_token_id: u64 = 1,
     pin_entries: []PinEntry = &.{},
     pin_entries_capacity: usize = 0,
+    /// Leftover `.object` carriers that are not block cells (over-aligned or
+    /// oversized embedder inline-payload classes). Publication is no-fail, so
+    /// `prepareStandaloneObject` reserves a slot before the allocation exists.
+    standalone_objects: []*GCObjectHeader = &.{},
+    standalone_objects_capacity: usize = 0,
+    /// Condemned leftover objects still sitting in `standalone_objects` with
+    /// `cycle_visited` set, waiting for a destruction slice. STW sweeps
+    /// destroy them immediately and leave this at zero.
+    standalone_doomed_count: usize = 0,
 
     major_phase: MajorPhase = .idle,
     major_reason: ?RequestReason = null,
@@ -2197,6 +2211,16 @@ pub const Registry = struct {
         var held_shapes: ?*GCObjectHeader = null;
         var held_var_refs: ?*GCObjectHeader = null;
         var held_function_bytecodes: ?*GCObjectHeader = null;
+        // Leftover `.object` carriers are not on `gc_obj_list`. Destroy them
+        // in the same object-first window the list walk uses for listed kinds.
+        while (self.standalone_objects.len != 0) {
+            const h = self.standalone_objects[self.standalone_objects.len - 1];
+            self.removeGcObject(h);
+            self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
+            h.meta().flags.finalizing = true;
+            object.Object.destroyFromHeader(rt, h);
+            rt.drainDeferredClassPayloadFinalizers();
+        }
         while (!listEmpty(&self.gc_obj_list)) {
             // Compact headers have no backlink on tracer-owned kinds. Teardown
             // order is mediated by the holding stacks below, not list order,
@@ -2289,6 +2313,14 @@ pub const Registry = struct {
         }
         self.pin_entries = &.{};
         self.pin_entries_capacity = 0;
+        if (self.standalone_objects_capacity != 0) {
+            self.memory.free(*GCObjectHeader, self.standalone_objects.ptr[0..self.standalone_objects_capacity]);
+        } else if (self.standalone_objects.len != 0) {
+            self.memory.free(*GCObjectHeader, self.standalone_objects);
+        }
+        self.standalone_objects = &.{};
+        self.standalone_objects_capacity = 0;
+        self.standalone_doomed_count = 0;
 
         if (comptime address_registry_enabled) {
             self.address_registry.deinit(addressRegistryAllocator());
@@ -2767,10 +2799,10 @@ pub const Registry = struct {
         std.debug.assert(info_at_entry.standalone == h.metaConst().alloc_info.standalone);
         std.debug.assert(is_block_cell == isBlockCellHeader(h));
         if (comptime address_registry_enabled) {
-            if (tracked and !is_block_cell) self.linkGcObjectTail(h);
+            if (tracked and !is_block_cell) self.trackNonBlockPublication(h);
             self.registerLiveAddressClassified(h, bytes, tracked, standalone, is_block_cell, arm);
             self.observeNewPublication(h, bytes);
-        } else if (tracked) self.linkGcObjectTail(h);
+        } else if (tracked and !is_block_cell) self.trackNonBlockPublication(h);
     }
 
     /// qjs `add_gc_object` for shapes (quickjs.c:6540): rc/kind already live
@@ -2986,6 +3018,12 @@ pub const Registry = struct {
         if (!isCycleCandidate(h)) return;
         // Already unlinked, or condemned on tmp_obj_list / a partition list.
         // qjs remove_gc_object is only called while the node is on gc_obj_list.
+        // Leftover `.object` carriers are never linked; they still need the
+        // standalone side table and address-registry entry dropped.
+        if (h.meta().flags.kind == .object) {
+            self.removeGcObject(h);
+            return;
+        }
         if (!headerLinked(h) or h.meta().flags.cycle_visited) return;
         self.removeGcObject(h);
     }
@@ -3047,15 +3085,76 @@ pub const Registry = struct {
         self.pin_entries_capacity = new_capacity;
     }
 
+    fn ensureStandaloneObjectCapacity(self: *Registry, required: usize) !void {
+        if (required <= self.standalone_objects_capacity) return;
+        var new_capacity = if (self.standalone_objects_capacity == 0) @as(usize, 8) else self.standalone_objects_capacity * 2;
+        while (new_capacity < required) new_capacity *= 2;
+        const next = try self.memory.alloc(*GCObjectHeader, new_capacity);
+        errdefer self.memory.free(*GCObjectHeader, next);
+        @memcpy(next[0..self.standalone_objects.len], self.standalone_objects);
+        if (self.standalone_objects_capacity != 0) {
+            self.memory.free(*GCObjectHeader, self.standalone_objects.ptr[0..self.standalone_objects_capacity]);
+        } else if (self.standalone_objects.len != 0) {
+            self.memory.free(*GCObjectHeader, self.standalone_objects);
+        }
+        self.standalone_objects = next[0..self.standalone_objects.len];
+        self.standalone_objects_capacity = new_capacity;
+    }
+
+    /// Reserve the leftover-object side table before taking a standalone
+    /// allocation, so publication is a no-fail append.
+    pub fn prepareStandaloneObject(self: *Registry) !void {
+        try self.ensureStandaloneObjectCapacity(self.standalone_objects.len + 1);
+    }
+
+    fn standaloneObjectIndex(self: Registry, header: *const GCObjectHeader) ?usize {
+        for (self.standalone_objects, 0..) |entry, index| {
+            if (entry == header) return index;
+        }
+        return null;
+    }
+
+    fn rememberStandaloneObject(self: *Registry, header: *GCObjectHeader) void {
+        std.debug.assert(header.metaConst().flags.kind == .object);
+        std.debug.assert(!isBlockCellHeader(header));
+        std.debug.assert(self.standaloneObjectIndex(header) == null);
+        if (self.standalone_objects.len >= self.standalone_objects_capacity) {
+            self.ensureStandaloneObjectCapacity(self.standalone_objects.len + 1) catch
+                @panic("gc: standalone object slot");
+        }
+        self.standalone_objects.ptr[self.standalone_objects.len] = header;
+        self.standalone_objects = self.standalone_objects.ptr[0 .. self.standalone_objects.len + 1];
+    }
+
+    pub fn forgetStandaloneObject(self: *Registry, header: *GCObjectHeader) void {
+        const index = self.standaloneObjectIndex(header) orelse return;
+        const last = self.standalone_objects.len - 1;
+        if (index != last) self.standalone_objects[index] = self.standalone_objects[last];
+        self.standalone_objects = self.standalone_objects[0..last];
+        if (header.metaConst().flags.cycle_visited and self.standalone_doomed_count != 0) {
+            self.standalone_doomed_count -= 1;
+        }
+    }
+
+    /// Non-block publication: leftover `.object` carriers go on the side
+    /// table; every other tracked kind stays on `gc_obj_list`.
+    inline fn trackNonBlockPublication(self: *Registry, header: *GCObjectHeader) void {
+        if (header.metaConst().flags.kind == .object) {
+            self.rememberStandaloneObject(header);
+            return;
+        }
+        self.linkGcObjectTail(header);
+    }
+
     /// Composite iterator over every PUBLISHED GC object.
     ///
-    /// Two phases behind one `next()`: the intrusive list (slab and
-    /// standalone kinds -- block-served objects no longer link there), then
-    /// the block heap's cells, walked bitmap-word first so an empty block
-    /// costs four word tests. Producing a cell requires alloc-bit AND
-    /// `heap_accounted`, which is exactly the old list membership: husks keep
-    /// their cell but lose their accounting, and a cell between
-    /// `initGcPrefix` and registration is not yet an object.
+    /// Three phases behind one `next()`: the intrusive list (non-object
+    /// kinds), leftover standalone `.object` carriers, then the block heap's
+    /// cells, walked bitmap-word first so an empty block costs four word tests.
+    /// Producing a cell requires alloc-bit AND `heap_accounted`, which is
+    /// exactly the old list membership: husks keep their cell but lose their
+    /// accounting, and a cell between `initGcPrefix` and registration is not
+    /// yet an object.
     ///
     /// In young mode the block phase walks the young-block list instead of
     /// every superblock, filtering per cell on the `young` header bit --
@@ -3075,6 +3174,9 @@ pub const Registry = struct {
         blk_index: usize = 0,
         cell_index: u32 = 0,
         young_block: usize = 0,
+        standalone: []const *GCObjectHeader = &.{},
+        standalone_index: usize = 0,
+        skip_standalone: bool = false,
 
         pub fn next(self: *GcObjectIterator) ?*GCObjectHeader {
             if (self.cursor) |current| {
@@ -3083,6 +3185,15 @@ pub const Registry = struct {
                     return current;
                 }
                 self.cursor = null;
+            }
+            if (!self.skip_standalone) {
+                while (self.standalone_index < self.standalone.len) {
+                    const header = self.standalone[self.standalone_index];
+                    self.standalone_index += 1;
+                    if (header.metaConst().flags.cycle_visited) continue;
+                    if (self.young_only and !header.metaConst().flags.young) continue;
+                    return header;
+                }
             }
             if (comptime !block_heap_enabled) return null;
             const heap = self.heap orelse return null;
@@ -3173,6 +3284,7 @@ pub const Registry = struct {
             .cursor = self.gc_obj_list.sentinel.next,
             .sentinel = &self.gc_obj_list.sentinel,
             .heap = if (comptime block_heap_enabled) &self.block_heap else {},
+            .standalone = self.standalone_objects,
         };
     }
 
@@ -3290,6 +3402,7 @@ pub const Registry = struct {
             .sentinel = &self.gc_obj_list.sentinel,
             .heap = if (comptime block_heap_enabled) &self.block_heap else {},
             .unmarked_only = true,
+            .skip_standalone = true,
         };
     }
 
@@ -3303,6 +3416,7 @@ pub const Registry = struct {
                 (if (self.block_heap.young_blocks) |head| @intFromPtr(head) else 0)
             else
                 0,
+            .standalone = self.standalone_objects,
         };
     }
 
@@ -3318,6 +3432,7 @@ pub const Registry = struct {
                 (if (self.block_heap.young_blocks) |head| @intFromPtr(head) else 0)
             else
                 0,
+            .skip_standalone = true,
         };
     }
 
@@ -3456,6 +3571,13 @@ pub const Registry = struct {
     /// headers (deinit shape self-remove) are a no-op; a linked node is spliced
     /// with no head/tail null branches.
     fn removeGcObject(self: *Registry, header: *GCObjectHeader) void {
+        if (header.metaConst().flags.kind == .object) {
+            if (!isBlockCellHeader(header)) {
+                self.forgetStandaloneObject(header);
+                self.unregisterLiveAddress(header);
+            }
+            return;
+        }
         if (!headerLinked(header)) return;
         const previous = listPrevious(&self.gc_obj_list, header);
         self.removeGcObjectAfter(previous, header);
@@ -3628,7 +3750,11 @@ pub const Registry = struct {
     pub fn restoreCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
         std.debug.assert(header.meta().flags.cycle_visited);
         header.meta().flags.cycle_visited = false;
-        self.appendGcObject(header);
+        if (header.metaConst().flags.kind == .object) {
+            if (!isBlockCellHeader(header)) self.rememberStandaloneObject(header);
+        } else {
+            self.appendGcObject(header);
+        }
         if (comptime address_registry_enabled) {
             const bytes = storedHeapBytes(header) orelse defaultHeapBytes(header);
             self.registerLiveAddress(header, bytes, true);
@@ -4480,6 +4606,11 @@ pub const Registry = struct {
                 return;
             }
         }
+        // Leftover `.object` carriers are not on `gc_obj_list`, so they must
+        // not become the young-suffix anchor (that walk would then follow
+        // `header.next` into unrelated memory once the compact token drops
+        // the field).
+        if (header.metaConst().flags.kind == .object) return;
         // This object was just appended at the tail, so if no suffix was open
         // it starts here.
         if (self.young_head == null) {
@@ -4517,7 +4648,7 @@ pub const Registry = struct {
         }
     }
 
-    inline fn unregisterLiveAddress(self: *Registry, header: *GCObjectHeader) void {
+    pub inline fn unregisterLiveAddress(self: *Registry, header: *GCObjectHeader) void {
         if (comptime !address_registry_enabled) return;
         // Mirror of `registerLiveAddress`: nothing was inserted for a
         // slab-backed object, and `heap_accounted` is cleared by the free path
@@ -4537,8 +4668,12 @@ pub const Registry = struct {
             // the `listDel` follows this call. Freeing the anchor shrinks the
             // suffix to its successor; the suffix never grows here.
             if (self.young_head == header) {
-                const next = header.next;
-                self.young_head = if (next == &self.gc_obj_list.sentinel) null else next;
+                if (header.metaConst().flags.kind == .object) {
+                    self.young_head = null;
+                } else {
+                    const next = header.next;
+                    self.young_head = if (next == &self.gc_obj_list.sentinel) null else next;
+                }
             }
         }
     }
@@ -4838,7 +4973,7 @@ pub const Registry = struct {
             self.block_heap.doomed_blocks != null
         else
             false;
-        if ((doomed_nodes != 0 or block_doomed or self.doomed_cursor != null) and !self.doomed_pending) {
+        if ((doomed_nodes != 0 or block_doomed or self.doomed_cursor != null or self.standalone_doomed_count != 0) and !self.doomed_pending) {
             return error.DoomedPendingMismatch;
         }
     }
@@ -5098,6 +5233,9 @@ pub const Registry = struct {
             if (candidate == &self.zero_ref_list.sentinel) break;
             if (candidate == header) return true;
             queued = candidate.next;
+        }
+        for (self.standalone_objects) |candidate| {
+            if (candidate == header) return true;
         }
         var iterator = self.objectIterator();
         while (iterator.next()) |candidate| {

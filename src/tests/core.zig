@@ -2525,6 +2525,21 @@ fn gcListContainsObject(rt: *core.JSRuntime, object: *const core.Object) bool {
     return false;
 }
 
+fn standaloneContainsObject(rt: *core.JSRuntime, object: *const core.Object) bool {
+    for (rt.gc.standalone_objects) |header| {
+        if (header == &object.header) return true;
+    }
+    return false;
+}
+
+fn objectIteratorContains(rt: *core.JSRuntime, object: *const core.Object) bool {
+    var it = rt.gc.objectIterator();
+    while (it.next()) |header| {
+        if (header == &object.header) return true;
+    }
+    return false;
+}
+
 fn registerInlinePayloadListExitClass(
     rt: *core.JSRuntime,
     name: []const u8,
@@ -2984,6 +2999,8 @@ test "fitting inline-payload objects are block cells and leave gc_obj_list" {
     try std.testing.expect(!core.gc.headerLinked(&medium.header));
     try std.testing.expect(!gcListContainsObject(rt, small));
     try std.testing.expect(!gcListContainsObject(rt, medium));
+    try std.testing.expect(!standaloneContainsObject(rt, small));
+    try std.testing.expect(!standaloneContainsObject(rt, medium));
     try std.testing.expectEqual(listed_before, listedKindObjectCount(rt));
     try rt.gc.verifyRepresentationInvariants();
 
@@ -3045,7 +3062,7 @@ test "fitting inline-payload objects are reclaimed by an unrooted minor" {
     rt.classes.unregisterDynamic(class_id);
 }
 
-test "over-aligned inline-payload objects stay on gc_obj_list and take the same GC paths" {
+test "over-aligned inline-payload objects leave gc_obj_list and take the same GC paths" {
     if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
@@ -3063,9 +3080,11 @@ test "over-aligned inline-payload objects stay on gc_obj_list and take the same 
     const object = try core.Object.create(rt, class_id, null);
     try std.testing.expect(!core.gc.Registry.isBlockCellHeader(&object.header));
     try std.testing.expect(object.header.metaConst().alloc_info.standalone);
-    try std.testing.expect(core.gc.headerLinked(&object.header));
-    try std.testing.expect(gcListContainsObject(rt, object));
-    try std.testing.expectEqual(listed_before + 1, listedKindObjectCount(rt));
+    try std.testing.expect(!core.gc.headerLinked(&object.header));
+    try std.testing.expect(!gcListContainsObject(rt, object));
+    try std.testing.expect(standaloneContainsObject(rt, object));
+    try std.testing.expect(objectIteratorContains(rt, object));
+    try std.testing.expectEqual(listed_before, listedKindObjectCount(rt));
     try rt.gc.verifyRepresentationInvariants();
 
     var slot: ?*core.Object = object;
@@ -3076,7 +3095,9 @@ test "over-aligned inline-payload objects stay on gc_obj_list and take the same 
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 0), InlinePayloadListExitProbe.calls);
-    try std.testing.expect(gcListContainsObject(rt, object));
+    try std.testing.expect(!gcListContainsObject(rt, object));
+    try std.testing.expect(standaloneContainsObject(rt, object));
+    try std.testing.expect(objectIteratorContains(rt, object));
 
     slot = null;
     helpers.reclaimNow(rt);
@@ -3102,7 +3123,8 @@ test "runtime teardown reclaims both inline-payload allocation paths" {
     const fit = try core.Object.create(rt, fit_id, null);
     const leftover = try core.Object.create(rt, leftover_id, null);
     try std.testing.expect(core.gc.Registry.isBlockCellHeader(&fit.header));
-    try std.testing.expect(core.gc.headerLinked(&leftover.header));
+    try std.testing.expect(!core.gc.headerLinked(&leftover.header));
+    try std.testing.expect(standaloneContainsObject(rt, leftover));
 
     var fit_slot: ?*core.Object = fit;
     var leftover_slot: ?*core.Object = leftover;

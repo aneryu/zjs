@@ -1636,10 +1636,10 @@ pub const Object = extern struct {
         // The helper publishes a reserved cache-miss Shape before entering the
         // reentrant boundary, then roots it exactly like a published hash hit.
         collectBeforeObjectAllocationPublishingShape(rt, shape_ref, alloc_size);
-        // obj64 ① step 1: fitting inline-payload classes take a block cell
+        // obj64 ① step 2: fitting inline-payload classes take a block cell
         // (bitmap-enumerated, never linked). Over-aligned or oversized
-        // leftovers keep the standalone aligned blob and stay on gc_obj_list.
-        // Ordinary trailing 80B cells do not use this arm.
+        // leftovers keep the standalone aligned blob and live in the
+        // `standalone_objects` side table, not on `gc_obj_list`.
         var inline_via_fam = false;
         const self = if (inline_layout) |layout| blk: {
             // The object-level threshold/force-GC hook just ran above. Enter
@@ -1650,6 +1650,7 @@ pub const Object = extern struct {
                 inline_via_fam = true;
                 break :blk try rt.memory.createWithFamNoTrigger(Object, fam);
             }
+            try rt.gc.prepareStandaloneObject();
             const bytes = try rt.memory.allocAlignedBytesNoTrigger(layout.allocation_size, layout.allocation_alignment);
             break :blk @as(*Object, @ptrFromInt(@intFromPtr(bytes.ptr) + layout.object_offset));
         } else try allocCell(rt, class_id, false);

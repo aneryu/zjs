@@ -745,6 +745,11 @@ adjacent-line prefetch 把 96B 两条相邻线的账早已摊掉大半。
   不入 `gc_obj_list`);过对齐/过大的仍走 standalone 对齐分配并留在链表上。
   生产 trailing 80B 普通对象尺寸不变。不删 `TraceHeader.next`,不建 ④。
   靶向测试强制两路走 minor / major / teardown。
+- **① step 2(2026-09-03)**: leftover 也退出 `gc_obj_list`,改记在
+  `standalone_objects` 侧表。STW sweep 不再把 `.object` 停到 `tmp_obj_list`
+  (不写 `next`)。Object 头仍是 32B,生产 trailing cell **仍是 80 class**
+  (删 `next` 后头 24B、used 72、class 仍 80,留给 ④)。Pass B 仍暂用
+  `TraceHeader.next`。不建 ④。
 - **gate 口径修复**(234df4f1):committed/live 分母加 superblock 地板——
   raytrace FAIL 是 R8 快照伪影(live-at-exit≈young,38KB 分母);地板后发现
   **该列在 4/6 负载上本就不可复现**(同二进制 5058/5431/5851 milli 漂移),
