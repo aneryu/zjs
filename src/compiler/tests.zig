@@ -3469,7 +3469,7 @@ test "compiler.p5: FunctionDef owners are inert after the FunctionBytecode escap
 
 fn s3bDrainGc(rt: *core.JSRuntime) void {
     var polls: usize = 0;
-    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.morgue.pending) : (polls += 1) {
         std.debug.assert(polls < 100_000);
         _ = rt.pollGC(null, .safepoint) catch break;
     }
@@ -3686,7 +3686,7 @@ test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {
     // plain `u32` arrays on the Zig heap that no scan can read.
     _ = try rt.forceMajorGC(null);
     var polls: usize = 0;
-    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.morgue.pending) : (polls += 1) {
         std.debug.assert(polls < 100_000);
         _ = rt.pollGC(null, .safepoint) catch break;
     }

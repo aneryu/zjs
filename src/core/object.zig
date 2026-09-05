@@ -905,7 +905,7 @@ pub const Object = extern struct {
         // The construction pin is published after the cell is initialized, so
         // reserve its ledger slot now. This is the last fallible side
         // allocation before the qjs-style object boundary.
-        try rt.gc.prepareConstructionRoot();
+        try rt.gc.pins.prepareConstructionRoot(rt.gc.memory);
 
         // qjs creates the public generator object through js_create_from_ctor →
         // JS_NewObjectFromShape, whose js_trigger_gc(sizeof(JSObject))
@@ -937,7 +937,7 @@ pub const Object = extern struct {
         // TGC S4-d spec 2.4: `.generator` is c class (suspended frame, stack,
         // open VarRefs). This shell bypasses `createInternal`, so stamp here.
         self.markNeedsFinalizer(rt);
-        rt.gc.addConstructionRoot(self.gcHeader());
+        rt.gc.pins.addConstructionRoot(self.gcHeader());
         return self;
     }
 
@@ -950,7 +950,7 @@ pub const Object = extern struct {
         const final_shape = try rt.shapes.createObjectRoot(prototype);
         std.debug.assert(final_shape.prop_count == 0);
         self.shape_ref = final_shape;
-        rt.gc.removeConstructionRoot(self.gcHeader());
+        rt.gc.pins.removeConstructionRoot(self.gcHeader());
         rt.registerObjectWithBytes(self, self.bodyBytes()) catch |err| {
             // Only the Shape projection goes back to pristine. Bit7 of this
             // byte is the remembered-set cache owned by `gc_generation`, and
@@ -958,7 +958,7 @@ pub const Object = extern struct {
             // `generation.remembered`, which still holds this address.
             self.gcHeader().meta().lifetime.object_shape_summary &=
                 ~gc.trace_object_shape_summary_mask;
-            rt.gc.addConstructionRoot(self.gcHeader());
+            rt.gc.pins.addConstructionRoot(self.gcHeader());
             self.shape_ref = undefined;
             rt.shapes.dropUnshared(final_shape);
             return err;
@@ -974,7 +974,7 @@ pub const Object = extern struct {
     pub fn destroyGeneratorShell(self: *Object, rt: *JSRuntime) void {
         std.debug.assert(self.class_id == class.ids.generator or self.class_id == class.ids.async_generator);
         std.debug.assert(!self.gcHeader().meta().alloc_info.heap_accounted);
-        rt.gc.removeConstructionRoot(self.gcHeader());
+        rt.gc.pins.removeConstructionRoot(self.gcHeader());
         if (self.flags.is_borrowed_reference_holder) rt.unregisterBorrowedReferenceHolder(self);
         freeClassPayloadAllocation(rt, self.payloadArm().*, self.flags.class_payload_kind);
         self.payloadArm().* = null;
@@ -2691,7 +2691,7 @@ pub const Object = extern struct {
         // cell. The iterator-next cache is different: it is a side table
         // holding a bare `*Object`, so the entry has to go (and the object
         // carries the finalizer bit precisely because of it).
-        if (rt.gc.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
+        if (rt.gc.hot.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
         // The class payloads all share the single `u.payload` union slot,
         // discriminated by `class_payload_kind` — at most ONE is ever live per
         // object. A synchronous callback clears that payload and its
@@ -2780,7 +2780,7 @@ pub const Object = extern struct {
     }
 
     fn clearBorrowedReferencesForDestroyedObject(rt: *JSRuntime, destroyed: *Object) void {
-        if (rt.gc.phase == .deinit) return;
+        if (rt.gc.hot.phase == .deinit) return;
         // The raw address identity only drives borrowed raw-pointer cleanup
         // such as realm-global pointers. Registered weak identities are kept
         // until the qjs-style weak sweep releases them.

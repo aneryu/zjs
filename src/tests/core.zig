@@ -2738,9 +2738,9 @@ fn expectPublishedStandaloneInlineObject(rt: *core.JSRuntime, object: *core.Obje
     try std.testing.expect(rt.gc.nonblock_objects.?.items.items.len >= 1);
 
     var list_matches: usize = 0;
-    var list_cursor = rt.gc.gc_obj_list.sentinel.next_non_object;
+    var list_cursor = rt.gc.lists.objects.sentinel.next_non_object;
     while (list_cursor) |candidate| {
-        if (candidate == &rt.gc.gc_obj_list.sentinel) break;
+        if (candidate == &rt.gc.lists.objects.sentinel) break;
         if (candidate == header) list_matches += 1;
         list_cursor = candidate.nextNonObject();
     }
@@ -3230,7 +3230,7 @@ test "side authority swap-remove condemnation drains every non-block object exac
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
-    try std.testing.expect(rt.gc.doomed_pending);
+    try std.testing.expect(rt.gc.morgue.pending);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.nonblock_objects.?.items.items.len);
 
     const endpoint = core.gc_trace_stw.doomedStateSnapshot(rt);
@@ -3416,9 +3416,9 @@ test "standalone inline object teardown parks its struct free until the drain" {
     const object = try core.Object.create(rt, class_id, null);
     try expectPublishedStandaloneInlineObject(rt, object);
 
-    const old_phase = rt.gc.phase;
-    rt.gc.phase = .tracer_destroy;
-    defer rt.gc.phase = old_phase;
+    const old_phase = rt.gc.hot.phase;
+    rt.gc.hot.phase = .tracer_destroy;
+    defer rt.gc.hot.phase = old_phase;
     core.Object.destroyFromHeader(rt, object.gcHeader());
     // TGC S4-e: destruction is ONE pass. The synchronous payload finalizer
     // ran, the object left every registry, and the standalone allocation went
@@ -4538,7 +4538,7 @@ test "large shared buffers request a major through external pressure" {
     }
     try std.testing.expect(!rt.gcPendingForTest());
     try std.testing.expectEqual(
-        (buffer_count - 1) * buffer_bytes * rt.gc.policy.external_weight,
+        (buffer_count - 1) * buffer_bytes * rt.gc.scheduler.policy.external_weight,
         rt.allocationDebtBytes(),
     );
 
@@ -6597,11 +6597,11 @@ test "process memory snapshot is needed exactly when a policy field consumes it"
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{});
     defer rt.deinit();
-    try std.testing.expect(!rt.gc.policy.needsProcessMemorySnapshot());
-    rt.gc.policy.rss_soft_limit = 1;
-    try std.testing.expect(rt.gc.policy.needsProcessMemorySnapshot());
-    rt.gc.policy.rss_soft_limit = null;
-    try std.testing.expect(!rt.gc.policy.needsProcessMemorySnapshot());
+    try std.testing.expect(!rt.gc.scheduler.policy.needsProcessMemorySnapshot());
+    rt.gc.scheduler.policy.rss_soft_limit = 1;
+    try std.testing.expect(rt.gc.scheduler.policy.needsProcessMemorySnapshot());
+    rt.gc.scheduler.policy.rss_soft_limit = null;
+    try std.testing.expect(!rt.gc.scheduler.policy.needsProcessMemorySnapshot());
 }
 
 test "process memory gate preserves external accounting and still fires when consumed" {
@@ -6837,7 +6837,7 @@ test "external memory token registry audits duplicate releases and leaks" {
     try std.testing.expectEqual(@as(usize, 1), stats.external_token_count);
     try std.testing.expectEqual(@as(usize, 64), stats.external_token_bytes);
     try rt.gc.verifyHeapAccounting(&rt);
-    try std.testing.expect(rt.gc.external_tokens.len != 0);
+    try std.testing.expect(rt.gc.external.entries.len != 0);
 
     token.release();
     stats = rt.gcStats();
@@ -6845,7 +6845,7 @@ test "external memory token registry audits duplicate releases and leaks" {
     try std.testing.expectEqual(@as(usize, 0), stats.external_token_count);
     try std.testing.expectEqual(@as(usize, 1), stats.external_free_count);
     try rt.gc.verifyHeapAccounting(&rt);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.external_tokens.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.external.entries.len);
 
     duplicate_token.release();
     stats = rt.gcStats();
@@ -7150,12 +7150,12 @@ test "gc heap accounting verifier catches pinned header flag drift" {
     defer pin.deinit();
 
     try rt.gc.verifyHeapAccounting(rt);
-    // TGC S4-e: the pin is spelled once, in the ledger, with `pinned_set` as
+    // TGC S4-e: the pin is spelled once, in the ledger, with `pins.set` as
     // its membership index. Drift now means "entry present, index missing",
     // which is exactly what the verifier still names.
-    try std.testing.expect(rt.gc.pinned_set.remove(@intFromPtr(obj.gcHeader())));
+    try std.testing.expect(rt.gc.pins.set.remove(@intFromPtr(obj.gcHeader())));
     try std.testing.expectError(error.PinnedHeaderFlagMismatch, rt.gc.verifyHeapAccounting(rt));
-    try rt.gc.pinned_set.put(rt.memory.persistent_allocator, @intFromPtr(obj.gcHeader()), {});
+    try rt.gc.pins.set.put(rt.memory.persistent_allocator, @intFromPtr(obj.gcHeader()), {});
     try rt.gc.verifyHeapAccounting(rt);
 }
 
@@ -7992,8 +7992,8 @@ test "gc invariant negative: heap accounting audit rejects a pin without an entr
     try rt.gc.verifyHeapAccounting(rt);
 
     {
-        defer _ = rt.gc.pinned_set.remove(@intFromPtr(obj.gcHeader()));
-        try rt.gc.pinned_set.put(rt.memory.persistent_allocator, @intFromPtr(obj.gcHeader()), {});
+        defer _ = rt.gc.pins.set.remove(@intFromPtr(obj.gcHeader()));
+        try rt.gc.pins.set.put(rt.memory.persistent_allocator, @intFromPtr(obj.gcHeader()), {});
         try std.testing.expectError(error.PinnedHeaderMissingEntry, rt.gc.verifyHeapAccounting(rt));
     }
     try rt.gc.verifyHeapAccounting(rt);
@@ -8857,9 +8857,9 @@ test "trace_stw symbol liveness queries follow the mark inside the sweep phase" 
     try std.testing.expect(!unmarked_ref.?.weakRefDeref(rt).isUndefined());
     rt.clearWeakRefKeptAlive();
 
-    const saved_phase = rt.gc.phase;
-    rt.gc.phase = .tracer_destroy;
-    defer rt.gc.phase = saved_phase;
+    const saved_phase = rt.gc.hot.phase;
+    rt.gc.hot.phase = .tracer_destroy;
+    defer rt.gc.hot.phase = saved_phase;
 
     // Inside the sweep the mark is the authority, so an unmarked body must
     // report dead everywhere the atom table answers a liveness question.
@@ -8872,7 +8872,7 @@ test "trace_stw symbol liveness queries follow the mark inside the sweep phase" 
     try std.testing.expect(rt.atoms.symbolBodyHeaderIfLive(rt, unmarked_atom) == null);
 
     // Nothing was mutated: leaving the phase restores the binding answer.
-    rt.gc.phase = saved_phase;
+    rt.gc.hot.phase = saved_phase;
     try std.testing.expect(!unmarked_ref.?.weakRefDeref(rt).isUndefined());
     rt.clearWeakRefKeptAlive();
 }
@@ -9417,8 +9417,8 @@ test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
     defer retained_realm.deinit();
     try std.testing.expect(!rt.gc.headerMarked(&fresh_ctx.header));
     // One short of the reserved condemnation stamp (TGC S4-h): the wrap
-    // path must fire before `header_mark_epoch` could ever equal it.
-    rt.gc.header_mark_epoch = core.gc.condemned_mark_epoch - 1;
+    // path must fire before `marking.header_epoch` could ever equal it.
+    rt.gc.marking.header_epoch = core.gc.condemned_mark_epoch - 1;
     rt.gc.setHeaderMarked(header);
     rt.gc.setHeaderMarked(&fresh_ctx.header);
 
@@ -14695,7 +14695,7 @@ test "incremental retirement clears remembered cache before the next generation"
     try std.testing.expectEqual(@as(u8, 0), owner.gcHeader().metaConst().lifetime.object_shape_summary & core.gc.trace_remembered_mask);
 
     var polls: usize = 0;
-    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.morgue.pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -14831,7 +14831,7 @@ test "the folded barrier gate skips exactly the two owner facts" {
 
     // State 1 -- young, unremembered. The gate retires the call on the young
     // bit alone, without ever naming a target.
-    try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.barrier_gate);
+    try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.hot.barrier_gate);
     try std.testing.expect(owner.gcHeader().metaConst().flags.young);
     try std.testing.expect(rt.gc.barrierOwnerSkips(owner.gcHeader()));
 
@@ -14895,7 +14895,7 @@ test "the barrier gate closes on every phase that needs a richer arm" {
     const child = try core.Object.createPlainObject(rt, null);
 
     // Steady state: the gate is open and a young owner exits for free.
-    try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.barrier_gate);
+    try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.hot.barrier_gate);
     try std.testing.expect(rt.gc.barrierOwnerSkips(young_owner.gcHeader()));
 
     // Major marking. The exact-target shading arm must run for EVERY store,
@@ -14904,14 +14904,14 @@ test "the barrier gate closes on every phase that needs a richer arm" {
     {
         rt.gc.setMajorMarkingActive(true);
         defer rt.gc.setMajorMarkingActive(false);
-        try std.testing.expectEqual(@as(u64, 0), rt.gc.barrier_gate);
+        try std.testing.expectEqual(@as(u64, 0), rt.gc.hot.barrier_gate);
         try std.testing.expect(!rt.gc.barrierOwnerSkips(young_owner.gcHeader()));
         rt.gc.setHeaderUnmarked(child.gcHeader());
         const shaded_before = rt.gc.incremental.stats.shaded;
         rt.gc.generationalBarrierValue(young_owner.gcHeader(), child.value());
         try std.testing.expect(rt.gc.incremental.stats.shaded > shaded_before);
     }
-    try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.barrier_gate);
+    try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.hot.barrier_gate);
 
     // `--gc-stats`. The counter block lives in the slow path, so the gate has
     // to close or the young-owner exits -- 89.9% of all calls -- would stop
@@ -14925,7 +14925,7 @@ test "the barrier gate closes on every phase that needs a richer arm" {
             core.gc_trace_stw.detailed_reports = reports_before;
             rt.gc.refreshBarrierGate();
         }
-        try std.testing.expectEqual(@as(u64, 0), rt.gc.barrier_gate);
+        try std.testing.expectEqual(@as(u64, 0), rt.gc.hot.barrier_gate);
         try std.testing.expect(!rt.gc.barrierOwnerSkips(young_owner.gcHeader()));
 
         const calls_before = rt.gc.generation.stats.barrier_calls;
@@ -14934,7 +14934,7 @@ test "the barrier gate closes on every phase that needs a richer arm" {
         try std.testing.expectEqual(calls_before + 1, rt.gc.generation.stats.barrier_calls);
         try std.testing.expectEqual(young_before + 1, rt.gc.generation.stats.barrier_young_owner);
     }
-    try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.barrier_gate);
+    try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.hot.barrier_gate);
 }
 
 test "the barrier shades exact targets while marking and remembers owners otherwise" {
@@ -15068,7 +15068,7 @@ test "frontier requeue admission checks a prior claim without executing one" {
     defer ctx.destroy();
 
     const owner = try core.Object.createPlainObject(rt, null);
-    rt.gc.incremental_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
+    rt.gc.marking.queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
 
     rt.gc.setHeaderUnmarked(owner.gcHeader());
     try std.testing.expect(rt.gc.frontierSafeHeaderForRequeue(owner.gcHeader()) == null);
@@ -15077,23 +15077,23 @@ test "frontier requeue admission checks a prior claim without executing one" {
     rt.gc.setMajorMarkingActive(true);
     defer {
         rt.gc.setMajorMarkingActive(false);
-        rt.gc.incremental_mark_queue.reset();
+        rt.gc.marking.queue.reset();
     }
 
     // A bulk write through a white owner performs no hidden claim and stores
     // no raw address. Its normal first trace will see the updated edges.
     rt.gc.rememberOwnerForBulkWrite(owner.gcHeader());
     try std.testing.expect(!rt.gc.headerMarked(owner.gcHeader()));
-    try std.testing.expect(rt.gc.incremental_mark_queue.isEmpty());
+    try std.testing.expect(rt.gc.marking.queue.isEmpty());
 
     // Once the ordinary mark path has claimed the owner, the same requeue
     // path may produce the typed entry without another mark store/RMW.
     rt.gc.setHeaderMarked(owner.gcHeader());
     rt.gc.rememberOwnerForBulkWrite(owner.gcHeader());
-    const entry = rt.gc.incremental_mark_queue.pop() orelse
+    const entry = rt.gc.marking.queue.pop() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(owner.gcHeader(), entry);
-    try std.testing.expect(rt.gc.incremental_mark_queue.isEmpty());
+    try std.testing.expect(rt.gc.marking.queue.isEmpty());
 }
 
 test "Shape barrier requeues only an owner with a prior mark claim" {
@@ -15104,25 +15104,25 @@ test "Shape barrier requeues only an owner with a prior mark claim" {
 
     const owner = try core.Object.createPlainObject(rt, null);
     const shape_header = &owner.shape_ref.header;
-    rt.gc.incremental_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
+    rt.gc.marking.queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
 
     rt.gc.setHeaderUnmarked(owner.gcHeader());
     rt.gc.setHeaderUnmarked(shape_header);
     rt.gc.setMajorMarkingActive(true);
     defer {
         rt.gc.setMajorMarkingActive(false);
-        rt.gc.incremental_mark_queue.reset();
+        rt.gc.marking.queue.reset();
     }
 
     const attempts_before = rt.gc.incremental.stats.barrier_requeued_owner;
     rt.gc.shadeForIncrementalMark(owner.gcHeader(), shape_header);
     try std.testing.expect(!rt.gc.headerMarked(owner.gcHeader()));
     try std.testing.expect(!rt.gc.headerMarked(shape_header));
-    try std.testing.expect(rt.gc.incremental_mark_queue.isEmpty());
+    try std.testing.expect(rt.gc.marking.queue.isEmpty());
 
     rt.gc.setHeaderMarked(owner.gcHeader());
     rt.gc.shadeForIncrementalMark(owner.gcHeader(), shape_header);
-    const entry = rt.gc.incremental_mark_queue.pop() orelse
+    const entry = rt.gc.marking.queue.pop() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(owner.gcHeader(), entry);
     try std.testing.expectEqual(
@@ -15144,16 +15144,16 @@ test "incremental abort disables marking before draining every frontier segment"
 
     try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
     try std.testing.expect(rt.gc.incremental.markingActive());
-    try std.testing.expect(rt.gc.mark_stack.len != 0 or
-        !rt.gc.incremental_mark_queue.isEmpty());
+    try std.testing.expect(rt.gc.marking.stack.len != 0 or
+        !rt.gc.marking.queue.isEmpty());
 
     rt.gc.abortIncrementalCycle();
     try std.testing.expect(!rt.gc.incremental.markingActive());
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.mark_stack.len);
-    try std.testing.expect(rt.gc.incremental_mark_queue.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.marking.stack.len);
+    try std.testing.expect(rt.gc.marking.queue.isEmpty());
     try std.testing.expectEqual(
         @as(usize, 0),
-        rt.gc.incremental_mark_queue.segmentPool().stats().active_segments,
+        rt.gc.marking.queue.segmentPool().stats().active_segments,
     );
 }
 
@@ -15592,13 +15592,13 @@ test "incremental begin preserves list-young suffix until finish retirement" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     rt.forcePreciseRootScanForTest();
 
-    // Realms, shapes and other carrier kinds stay on gc_obj_list even when
+    // Realms, shapes and other carrier kinds stay on `lists.objects` even when
     // plain objects use the block heap. Establish that this runtime actually
     // has a list-young suffix.
     var young_before: usize = 0;
-    var before = rt.gc.gc_obj_list.sentinel.next_non_object;
+    var before = rt.gc.lists.objects.sentinel.next_non_object;
     while (before) |header| {
-        if (header == &rt.gc.gc_obj_list.sentinel) break;
+        if (header == &rt.gc.lists.objects.sentinel) break;
         if (header.metaConst().flags.young) young_before += 1;
         before = header.nextNonObject();
     }
@@ -15611,11 +15611,11 @@ test "incremental begin preserves list-young suffix until finish retirement" {
     // Epoch clear is O(1): begin leaves the exact suffix intact while minors
     // are closed. The mandatory finish condemnation walk is the pass that
     // retires survivors and detaches dead carriers.
-    try std.testing.expect(rt.gc.young_head != null);
+    try std.testing.expect(rt.gc.lists.young_head != null);
     var after_begin: usize = 0;
-    var after = rt.gc.gc_obj_list.sentinel.next_non_object;
+    var after = rt.gc.lists.objects.sentinel.next_non_object;
     while (after) |header| {
-        if (header == &rt.gc.gc_obj_list.sentinel) break;
+        if (header == &rt.gc.lists.objects.sentinel) break;
         if (header.metaConst().flags.young) after_begin += 1;
         after = header.nextNonObject();
     }
@@ -15623,14 +15623,14 @@ test "incremental begin preserves list-young suffix until finish retirement" {
     try rt.gc.verifyIntrusiveList();
 
     var polls: usize = 0;
-    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.morgue.pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
-    try std.testing.expect(rt.gc.young_head == null);
-    var committed = rt.gc.gc_obj_list.sentinel.next_non_object;
+    try std.testing.expect(rt.gc.lists.young_head == null);
+    var committed = rt.gc.lists.objects.sentinel.next_non_object;
     while (committed) |header| {
-        if (header == &rt.gc.gc_obj_list.sentinel) break;
+        if (header == &rt.gc.lists.objects.sentinel) break;
         try std.testing.expect(!header.metaConst().flags.young);
         committed = header.nextNonObject();
     }
@@ -15735,7 +15735,7 @@ test "a crossing a minor cannot answer is still answered by a major" {
     // The threshold's answer is an incremental major cycle; drive it to its
     // remark so the completion counter can move.
     var polls: usize = 0;
-    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.morgue.pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -16274,7 +16274,7 @@ test "marking barrier shades grey, not black: the stored object's children survi
     rt.gc.setHeaderMarked(a.gcHeader());
     rt.gc.setHeaderUnmarked(b.gcHeader());
     rt.gc.setHeaderUnmarked(c.gcHeader());
-    rt.gc.incremental_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
+    rt.gc.marking.queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
     rt.gc.setMajorMarkingActive(true);
     defer rt.gc.setMajorMarkingActive(false);
 
@@ -16346,16 +16346,16 @@ test "runtime recovers a frontier OOM through allocation-boundary full GC" {
     const failed_before = rt.gc.stats.failed_collections;
     const completed_before = rt.gc.stats.cycle_gc_count;
     const retirement_commits_before = rt.gc.generation.stats.retirement_commits;
-    rt.gc.incremental_mark_queue.failBackingAllocationsForTest(2);
+    rt.gc.marking.queue.failBackingAllocationsForTest(2);
     try std.testing.expectError(error.OutOfMemory, rt.pollGC(null, .safepoint));
 
     try std.testing.expect(!rt.gc.incremental.markingActive());
     try std.testing.expectEqual(failed_before + 1, rt.gc.stats.failed_collections);
     try std.testing.expectEqual(core.gc.FailureKind.out_of_memory, rt.gc.stats.last_failure);
     try std.testing.expectEqual(core.gc.generation.MajorRetirement.needs_major, rt.gc.generation.major_retirement);
-    const request = rt.gc.pendingMajorRequest().?;
+    const request = rt.gc.scheduler.pendingMajorRequest().?;
     try std.testing.expectEqual(core.gc.RequestReason.collection_failed, request.reason.?);
-    try std.testing.expect(rt.gc.incremental_mark_queue.stats().pool.allocation_failures >= 2);
+    try std.testing.expect(rt.gc.marking.queue.stats().pool.allocation_failures >= 2);
 
     // This is the ordinary allocation boundary that swallowed the failed
     // incremental poll in the reviewer call graph. The pending failure is not
@@ -16364,7 +16364,7 @@ test "runtime recovers a frontier OOM through allocation-boundary full GC" {
     _ = try core.Object.createPlainObject(rt, null);
 
     try std.testing.expect(!rt.gc.hasPendingMajorRequest());
-    try std.testing.expectEqual(core.gc.MajorPhase.idle, rt.gc.major_phase);
+    try std.testing.expectEqual(core.gc.MajorPhase.idle, rt.gc.scheduler.major_phase);
     try std.testing.expectEqual(core.gc.FailureKind.none, rt.gc.stats.last_failure);
     try std.testing.expectEqual(completed_before + 1, rt.gc.stats.cycle_gc_count);
     try std.testing.expect(rt.gc.generation.stats.retirement_commits > retirement_commits_before);
@@ -16409,8 +16409,8 @@ test "incremental marking preserves a frontier beyond both former 65K bounds" {
         try std.testing.expect(increments < 16);
     }
 
-    try std.testing.expectEqual(core.gc.mark_queue.Failure.none, rt.gc.incremental_mark_queue.failure());
-    const frontier = rt.gc.incremental_mark_queue.stats().pool;
+    try std.testing.expectEqual(core.gc.mark_queue.Failure.none, rt.gc.marking.queue.failure());
+    const frontier = rt.gc.marking.queue.stats().pool;
     try std.testing.expect(frontier.peak_active_segments * core.gc.mark_queue.segment_bytes > former_combined_capacity * @sizeOf(*core.gc.Header));
     for (root.arrayElements()) |value| {
         const header = value.cycleMarkHeader().?;
@@ -16447,7 +16447,7 @@ test "an incremental cycle frees threshold garbage across bounded polls" {
     try std.testing.expect(rt.gc.incremental.markingActive());
 
     var polls: usize = 0;
-    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.morgue.pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -16521,7 +16521,7 @@ fn driveOneIncrementalMajorForCensusTest(rt: *core.JSRuntime, garbage: usize) !u
     _ = try rt.pollGC(null, .safepoint);
     try std.testing.expect(rt.gc.incremental.markingActive());
     var polls: usize = 0;
-    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.morgue.pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -16569,7 +16569,7 @@ test "condemning many shapes leaves the transition table exactly consistent" {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
-    try std.testing.expect(rt.gc.doomed_pending);
+    try std.testing.expect(rt.gc.morgue.pending);
 
     // The delist is an unlink, so the flag and the count are already correct
     // here -- not at the destructor. When the delist only spliced buckets, the
@@ -16585,7 +16585,7 @@ test "condemning many shapes leaves the transition table exactly consistent" {
     try std.testing.expectEqual(keeper_shape, twin.shape_ref);
 
     // Destruction has nothing left to unlink, so it must not move the count.
-    while (rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.morgue.pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -16694,7 +16694,7 @@ test "incremental cycle envelope keeps one exact MemoryAccount S T P domain" {
     rt.memory.free(u8, during);
 
     var polls: usize = 0;
-    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.morgue.pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -16736,7 +16736,7 @@ test "synchronous incremental destruction drains more than one parked-free budge
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
-    try std.testing.expect(rt.gc.doomed_pending);
+    try std.testing.expect(rt.gc.morgue.pending);
 
     const endpoint = core.gc_trace_stw.doomedStateSnapshot(rt);
     try std.testing.expect(endpoint.pending);
@@ -16784,9 +16784,9 @@ test "terminal pending stats count accounted block and standalone corpses" {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
-    try std.testing.expect(rt.gc.doomed_pending);
+    try std.testing.expect(rt.gc.morgue.pending);
     try std.testing.expect(rt.gc.block_heap.doomed_blocks != null);
-    const object_morgue = &rt.gc.doomed_by_kind[@intFromEnum(core.gc.GcKind.object)];
+    const object_morgue = &rt.gc.morgue.by_kind[@intFromEnum(core.gc.GcKind.object)];
     try std.testing.expectEqual(&object_morgue.sentinel, object_morgue.sentinel.next_non_object.?);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.nonblock_objects.?.doomed.items.len);
 
@@ -16800,7 +16800,7 @@ test "terminal pending stats count accounted block and standalone corpses" {
     try rt.gc.verifyHeapAccounting(rt);
 
     core.gc_trace_stw.finishPendingDestruction(rt);
-    try std.testing.expect(!rt.gc.doomed_pending);
+    try std.testing.expect(!rt.gc.morgue.pending);
     const settled = rt.gcStats();
     try std.testing.expect(settled.heap_live_bytes < terminal.heap_live_bytes);
     rt.classes.unregisterDynamic(class_id);
@@ -16838,7 +16838,7 @@ test "pending class finalizer keeps the incremental morgue open" {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
-    try std.testing.expect(rt.gc.doomed_pending);
+    try std.testing.expect(rt.gc.morgue.pending);
 
     // Production plugin jobs are enqueued while destruction runs, after the
     // cycle is already condemned. Inject at that same transaction boundary;
@@ -16847,7 +16847,7 @@ test "pending class finalizer keeps the incremental morgue open" {
     try std.testing.expect(try rt.enqueueDeferredClassPayloadFinalizer(class_id, null, .none, 0));
 
     _ = core.gc_trace_stw.destroyDoomedSlice(rt, std.math.maxInt(u64));
-    try std.testing.expect(rt.gc.doomed_pending);
+    try std.testing.expect(rt.gc.morgue.pending);
     // TGC S4-d: the 32 corpses above are PLAIN objects, so they carry no
     // finalizer bit and the sweep reclaims them straight out of the alloc
     // bitmap -- none of them parks. What keeps the transaction open is the
@@ -16855,9 +16855,9 @@ test "pending class finalizer keeps the incremental morgue open" {
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
 
     rt.drainDeferredClassPayloadFinalizers();
-    try std.testing.expect(rt.gc.doomed_pending);
+    try std.testing.expect(rt.gc.morgue.pending);
     core.gc_trace_stw.finishPendingDestruction(rt);
-    try std.testing.expect(!rt.gc.doomed_pending);
+    try std.testing.expect(!rt.gc.morgue.pending);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 }
 
@@ -16888,7 +16888,7 @@ test "incremental block finalizer observes its object without sweep publication"
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
-    try std.testing.expect(rt.gc.doomed_pending);
+    try std.testing.expect(rt.gc.morgue.pending);
     core.gc_trace_stw.finishPendingDestruction(rt);
 
     try std.testing.expectEqual(@as(usize, 1), ExternalObjectLifecycleProbe.calls);
@@ -16928,7 +16928,7 @@ test "a store during an incremental cycle keeps the stored subgraph alive to the
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     var polls: usize = 0;
-    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.morgue.pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -17436,7 +17436,7 @@ test "TGC S3-c: the atom verdict is applied in the pause that took it, not after
     while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
     _ = try core.gc_trace_stw.finishIncrementalCycle(rt, null, .declared_only);
     // The morgue is live: this is exactly the interval the mutator runs in.
-    try std.testing.expect(rt.gc.doomed_pending);
+    try std.testing.expect(rt.gc.morgue.pending);
 
     // The verdict must already be APPLIED. When the sweep waited for the morgue
     // to empty, the entry stayed indexed through every poll of the destruction

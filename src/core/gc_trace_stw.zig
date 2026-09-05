@@ -973,7 +973,7 @@ fn closeYoungGeneration(rt: *JSRuntime) void {
     // over an atom id, which no minor traces, so the table roots it until it
     // is promoted -- which is exactly here.
     rt.atoms.retireYoungSymbolBodies();
-    rt.gc.resetYoungListSuffix();
+    rt.gc.lists.resetYoungSuffix();
     rt.gc.retireGenerationalYoungSet();
     rt.gc.generation.commitMinorRetirement();
 }
@@ -1010,7 +1010,7 @@ fn clearYoungState(rt: *JSRuntime) void {
     rt.gc.block_heap.retireYoungExtents();
     // Same promotion point for the atom table's young symbol bodies (§S3-c).
     rt.atoms.retireYoungSymbolBodies();
-    rt.gc.resetYoungListSuffix();
+    rt.gc.lists.resetYoungSuffix();
     rt.gc.retireGenerationalYoungSet();
 }
 
@@ -1021,13 +1021,13 @@ fn clearYoungState(rt: *JSRuntime) void {
 /// `major_marking_active`; the frontier drains at subsequent polls.
 pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!void {
     std.debug.assert(!rt.gc.incremental.markingActive());
-    rt.gc.incremental_mark_queue.ensureCapacity(gc.Registry.markQueueAllocator());
-    rt.gc.mark_stack.ensure(rt.gc.incremental_mark_queue.segmentPool());
-    rt.gc.mark_stack.reset();
-    rt.gc.incremental_mark_queue.reset();
+    rt.gc.marking.queue.ensureCapacity(gc.Registry.markQueueAllocator());
+    rt.gc.marking.stack.ensure(rt.gc.marking.queue.segmentPool());
+    rt.gc.marking.stack.reset();
+    rt.gc.marking.queue.reset();
     errdefer {
-        rt.gc.mark_stack.reset();
-        rt.gc.incremental_mark_queue.reset();
+        rt.gc.marking.stack.reset();
+        rt.gc.marking.queue.reset();
     }
     // Freeze the decision at major start. The settled account is the live
     // estimate that set this cycle's threshold; current allocation bytes also
@@ -1051,7 +1051,7 @@ pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.Va
     try collector.seedRoots();
     const t1b = profile.nowNanos();
     if (collector.conservative_on) try collector.seedConservativeRoots();
-    try checkFrontierFailure(&rt.gc.incremental_mark_queue);
+    try checkFrontierFailure(&rt.gc.marking.queue);
     const t2 = profile.nowNanos();
     rt.gc.incremental.stats.phase_begin_clear_ns +|= t1 -| t0;
     rt.gc.incremental.stats.phase_begin_precise_seed_ns +|= t1b -| t1;
@@ -1085,7 +1085,7 @@ pub fn incrementalMarkStep(rt: *JSRuntime, budget_ns: u64) CollectError!bool {
 
     _ = try collector.drainSegmentedFrontier(budget_ns, true, false);
     rt.gc.incremental.stats.increments += 1;
-    return rt.gc.mark_stack.len == 0 and rt.gc.incremental_mark_queue.isEmpty();
+    return rt.gc.marking.stack.len == 0 and rt.gc.marking.queue.isEmpty();
 }
 
 /// Final remark and sweep (§8.6, mutator stopped). Re-seeds every root --
@@ -1188,15 +1188,15 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // Every pre-existing list survivor was retired by tracing/condemnation.
     // From here on a non-null anchor belongs to a post-mark publication, so a
     // forward walk is the exact replacement for the old header.prev tail walk.
-    rt.gc.resetYoungListSuffix();
-    rt.gc.doomed_phase = 0;
-    rt.gc.doomed_cursor = null;
-    rt.gc.doomed_destroyed = 0;
-    rt.gc.doomed_bytes = doomed_bytes;
+    rt.gc.lists.resetYoungSuffix();
+    rt.gc.morgue.kind_pass = 0;
+    rt.gc.morgue.cursor = null;
+    rt.gc.morgue.destroyed = 0;
+    rt.gc.morgue.bytes = doomed_bytes;
     rt.gc.incremental.stats.doomed_condemned_headers +|= condemned;
-    rt.gc.doomed_pending = condemned != 0;
-    if (rt.gc.block_heap.doomed_blocks != null) rt.gc.doomed_pending = true;
-    if (!rt.gc.doomed_pending) rt.gc.incremental.stats.cycles_completed += 1;
+    rt.gc.morgue.pending = condemned != 0;
+    if (rt.gc.block_heap.doomed_blocks != null) rt.gc.morgue.pending = true;
+    if (!rt.gc.morgue.pending) rt.gc.incremental.stats.cycles_completed += 1;
     // TGC S3 §2.4. The verdict and its application must share one pause: see
     // `sweepAtomTable`. This used to be deferred to the point the morgue
     // empties, on the pre-flip reasoning that a condemned holder still holds
@@ -1276,12 +1276,12 @@ const doomed_phase_kinds = [_]gc.GcKind{ .object, .realm_context, .module, .func
 const destroy_clock_cadence: usize = 256;
 
 fn morgueIsEmpty(rt: *const JSRuntime) bool {
-    if (rt.gc.doomed_cursor != null) return false;
+    if (rt.gc.morgue.cursor != null) return false;
     if (rt.gc.block_heap.doomed_blocks != null) return false;
     if (rt.gc.nonblock_objects) |authority| {
         if (authority.doomed.items.len != 0) return false;
     }
-    for (&rt.gc.doomed_by_kind) |*bucket| {
+    for (&rt.gc.morgue.by_kind) |*bucket| {
         if (!gc.listEmpty(bucket)) return false;
     }
     return true;
@@ -1306,7 +1306,7 @@ pub fn doomedStateSnapshot(rt: *const JSRuntime) DoomedStateSnapshot {
     const doomed_nonblock_objects = if (rt.gc.nonblock_objects) |authority| authority.doomed.items.len else 0;
     var nonempty_buckets: usize = if (doomed_nonblock_objects != 0) 1 else 0;
     var bucket_headers: usize = doomed_nonblock_objects;
-    for (&rt.gc.doomed_by_kind) |*bucket| {
+    for (&rt.gc.morgue.by_kind) |*bucket| {
         if (!gc.listEmpty(bucket)) nonempty_buckets += 1;
         var header = bucket.sentinel.next_non_object;
         while (header) |current| {
@@ -1325,10 +1325,10 @@ pub fn doomedStateSnapshot(rt: *const JSRuntime) DoomedStateSnapshot {
     }
 
     return .{
-        .pending = rt.gc.doomed_pending,
+        .pending = rt.gc.morgue.pending,
         .nonempty_buckets = nonempty_buckets,
         .bucket_headers = bucket_headers,
-        .cursor_present = rt.gc.doomed_cursor != null,
+        .cursor_present = rt.gc.morgue.cursor != null,
         .doomed_blocks = doomed_blocks,
         .deferred_finalizers = rt.deferred_class_payload_finalizers.len,
         .active_finalizer = rt.active_deferred_class_payload_finalizer != null,
@@ -1354,14 +1354,14 @@ fn auditDeferredPayloadRootsBeforeBlockPublication(rt: *JSRuntime) void {
 pub fn auditDoomedExitInvariant(rt: *const JSRuntime) void {
     if (!gc.invariantChecksEnabled()) return;
     auditDeferredPayloadRootsBeforeBlockPublication(@constCast(rt));
-    if (rt.gc.doomed_pending) return;
+    if (rt.gc.morgue.pending) return;
     if (!morgueIsEmpty(rt)) @panic("gc: closed doomed state retains morgue entries");
 }
 
 /// A new condemnation may reuse every morgue field. Catch a caller that
 /// starts one before the previous destruction transaction has really closed.
 fn assertMorgueEmptyBeforeCondemnation(rt: *const JSRuntime) void {
-    std.debug.assert(!rt.gc.doomed_pending);
+    std.debug.assert(!rt.gc.morgue.pending);
     std.debug.assert(morgueIsEmpty(rt));
 }
 
@@ -1374,7 +1374,7 @@ fn assertMorgueEmptyBeforeCondemnation(rt: *const JSRuntime) void {
 inline fn condemnIntoBucket(rt: *JSRuntime, header: *gc.Header) void {
     const kind = header.metaConst().flags.kind;
     std.debug.assert(kind != .object);
-    gc.listAddTailTraversalOwned(&rt.gc.doomed_by_kind[@intFromEnum(kind)], header);
+    gc.listAddTailTraversalOwned(&rt.gc.morgue.by_kind[@intFromEnum(kind)], header);
 }
 
 /// The condemnation half of every sweep: detach the unmarked, unpinned
@@ -1414,17 +1414,17 @@ fn condemnListSweep(rt: *JSRuntime, sink: anytype, young_only: bool) usize {
     // List carriers are singly linked in trace. Walk them with an explicit
     // predecessor so every condemnation is an O(1) splice.
     const list_head: ?*gc.Header = if (young_only)
-        rt.gc.young_head
+        rt.gc.lists.young_head
     else
-        rt.gc.gc_obj_list.sentinel.next_non_object;
+        rt.gc.lists.objects.sentinel.next_non_object;
     if (list_head) |head| {
         var previous: *gc.Header = if (young_only)
-            rt.gc.young_predecessor orelse unreachable
+            rt.gc.lists.young_predecessor orelse unreachable
         else
-            &rt.gc.gc_obj_list.sentinel;
+            &rt.gc.lists.objects.sentinel;
         var cursor: ?*gc.Header = head;
         while (cursor) |header| {
-            if (header == &rt.gc.gc_obj_list.sentinel) break;
+            if (header == &rt.gc.lists.objects.sentinel) break;
             const next = header.nextNonObject();
             // The mark STAYS on a survivor. §8.2's sticky rule is
             // `allocated && marked` is old, and that mark is what tells the
@@ -1542,9 +1542,9 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
     var destroyed: usize = 0;
     var since_clock: usize = 0;
 
-    const old_phase = rt.gc.phase;
-    rt.gc.phase = .tracer_destroy;
-    defer rt.gc.phase = old_phase;
+    const old_phase = rt.gc.hot.phase;
+    rt.gc.hot.phase = .tracer_destroy;
+    defer rt.gc.hot.phase = old_phase;
 
     // Block corpses first: they are all plain objects, which is exactly the
     // kind order's first pass, so draining them before the list phases keeps
@@ -1615,15 +1615,15 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
     // for it is the synchronous major, whose budget cannot trip.
     if (sweep_string_extents) destroyed += string_mod.sweepExtents(rt);
 
-    while (rt.gc.doomed_phase < doomed_phase_kinds.len + 1) {
-        const final_pass = rt.gc.doomed_phase == doomed_phase_kinds.len;
-        const phase_kind: gc.GcKind = if (final_pass) .shape else doomed_phase_kinds[rt.gc.doomed_phase];
+    while (rt.gc.morgue.kind_pass < doomed_phase_kinds.len + 1) {
+        const final_pass = rt.gc.morgue.kind_pass == doomed_phase_kinds.len;
+        const phase_kind: gc.GcKind = if (final_pass) .shape else doomed_phase_kinds[rt.gc.morgue.kind_pass];
         if (phase_kind == .object) {
             if (rt.gc.nonblock_objects) |authority| {
                 while (authority.doomed.pop()) |h| {
-                    rt.gc.sweep_current = h;
+                    rt.gc.lists.sweep_current = h;
                     Object.destroyFromHeader(rt, h);
-                    rt.gc.sweep_current = null;
+                    rt.gc.lists.sweep_current = null;
                     destroyed += 1;
                     since_clock += 1;
                     if (since_clock == destroy_clock_cadence) {
@@ -1634,12 +1634,12 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
                     }
                 }
             }
-            rt.gc.doomed_phase += 1;
-            rt.gc.doomed_cursor = null;
+            rt.gc.morgue.kind_pass += 1;
+            rt.gc.morgue.cursor = null;
             continue;
         }
-        const bucket = &rt.gc.doomed_by_kind[@intFromEnum(phase_kind)];
-        var cursor = rt.gc.doomed_cursor orelse bucket.sentinel.next_non_object;
+        const bucket = &rt.gc.morgue.by_kind[@intFromEnum(phase_kind)];
+        var cursor = rt.gc.morgue.cursor orelse bucket.sentinel.next_non_object;
         while (cursor) |h| {
             if (h == &bucket.sentinel) break;
             const next = h.nextNonObject();
@@ -1651,7 +1651,7 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
                 // Each kind owns one bucket and destruction consumes it from
                 // the head, including after a budgeted resume.
                 gc.listDelAfterTraversalOwned(bucket, &bucket.sentinel, h);
-                rt.gc.sweep_current = h;
+                rt.gc.lists.sweep_current = h;
                 switch (kind) {
                     .object => Object.destroyFromHeader(rt, h),
                     .realm_context => {
@@ -1679,7 +1679,7 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
                     },
                     else => unreachable,
                 }
-                rt.gc.sweep_current = null;
+                rt.gc.lists.sweep_current = null;
                 if (kind != .function_bytecode) destroyed += 1;
             }
             // Count VISITED nodes, not destroyed ones. The morgue is walked
@@ -1693,14 +1693,14 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
             if (since_clock == destroy_clock_cadence) {
                 since_clock = 0;
                 if (profile.nowNanos() -| started >= budget_ns) {
-                    rt.gc.doomed_cursor = next;
+                    rt.gc.morgue.cursor = next;
                     return .{ .destroyed = destroyed, .morgue_empty = false };
                 }
             }
             cursor = next;
         }
-        rt.gc.doomed_phase += 1;
-        rt.gc.doomed_cursor = null;
+        rt.gc.morgue.kind_pass += 1;
+        rt.gc.morgue.cursor = null;
     }
 
     return .{ .destroyed = destroyed, .morgue_empty = true };
@@ -1711,8 +1711,8 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
 /// as the incremental finish, so the only difference left is the absence of a
 /// resume state and of the sliced transaction's bookkeeping.
 fn destroyCondemnedWhole(rt: *JSRuntime, sweep_string_extents: bool) usize {
-    rt.gc.doomed_phase = 0;
-    rt.gc.doomed_cursor = null;
+    rt.gc.morgue.kind_pass = 0;
+    rt.gc.morgue.cursor = null;
     const result = destroyCondemnedSlice(rt, std.math.maxInt(u64), sweep_string_extents);
     std.debug.assert(result.morgue_empty);
     return result.destroyed;
@@ -1726,9 +1726,9 @@ fn destroyCondemnedWhole(rt: *JSRuntime, sweep_string_extents: bool) usize {
 /// weak-cleared, and invisible to collections (which are gated while the
 /// morgue is open).
 pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
-    std.debug.assert(rt.gc.doomed_pending);
+    std.debug.assert(rt.gc.morgue.pending);
     const result = destroyCondemnedSlice(rt, budget_ns, false);
-    rt.gc.doomed_destroyed += result.destroyed;
+    rt.gc.morgue.destroyed += result.destroyed;
     rt.gc.incremental.stats.doomed_destroyed_objects +|= result.destroyed;
     if (!result.morgue_empty) return result.destroyed;
 
@@ -1743,8 +1743,8 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
         // partial blocks for interval reuse.
         auditDeferredPayloadRootsBeforeBlockPublication(rt);
         rt.gc.block_heap.publishCompletedHotBlocks();
-        rt.gc.doomed_pending = false;
-        rt.gc.doomed_cursor = null;
+        rt.gc.morgue.pending = false;
+        rt.gc.morgue.cursor = null;
         rt.gc.incremental.stats.cycles_completed += 1;
         // TGC S3 §2.4: the atom sweep is NOT here. It belongs to the pause that
         // took the verdict (`finishIncrementalCycle`); running it after the
@@ -1759,14 +1759,14 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
 /// collections and teardown call this: destruction is irreversible, so unlike
 /// an open marking cycle it cannot be aborted, only finished.
 pub fn finishPendingDestruction(rt: *JSRuntime) void {
-    while (rt.gc.doomed_pending) {
+    while (rt.gc.morgue.pending) {
         _ = destroyDoomedSlice(rt, std.math.maxInt(u64));
         // Payload jobs may retain JSValues into this condemnation. Their
         // callbacks therefore run after every resource destructor but before
         // the parked structs are allowed to disappear. The synchronous entry
         // promises completion, so it also owns completing this prerequisite.
         if (rt.hasPendingDeferredClassPayloadFinalizers()) {
-            std.debug.assert(rt.gc.phase == .none);
+            std.debug.assert(rt.gc.hot.phase == .none);
             // Destruction has returned to Phase.none. Publish that idle state
             // to the reentrant callback so its allocations can request the
             // next collection; the active-job guard still prevents that new
@@ -1785,7 +1785,7 @@ pub fn finishPendingDestruction(rt: *JSRuntime) void {
 /// Returns the number of grey entries traced.
 pub fn remarkBarrierQueueForTest(rt: *JSRuntime) CollectError!usize {
     if (!builtin.is_test) @compileError("test-only helper");
-    rt.gc.mark_stack.ensure(rt.gc.incremental_mark_queue.segmentPool());
+    rt.gc.marking.stack.ensure(rt.gc.marking.queue.segmentPool());
     var collector = try Collector.init(rt, null, .declared_only);
     defer collector.deinit();
     return collector.drainBarrierQueue();
@@ -1862,7 +1862,7 @@ const Collector = struct {
             // triggers stay precise so liveness tests are deterministic and
             // a missing test-side root still fails loudly.
             .conservative_on = if (!builtin.is_test)
-                !rt.gc.host_quiescent
+                !rt.gc.scheduler.host_quiescent
             else
                 (rt.test_root_scan_override orelse scan) == .engine_active,
         };
@@ -1967,7 +1967,7 @@ const Collector = struct {
         // object still under construction (the store happens, the barrier
         // correctly skips it), and tracing through the container reaches it
         // here with its fields undefined. Skipping is the only sound answer,
-        // and it is complete: an unpublished object is not on `gc_obj_list`,
+        // and it is complete: an unpublished object is not on `lists.objects`,
         // so no sweep can condemn it, and its edges are covered by the
         // published-grey push the moment registration completes -- or it
         // dies unconstructed, in which case there was nothing to keep.
@@ -2013,8 +2013,8 @@ const Collector = struct {
             // this address to the shared segmented chain; if that allocation
             // also fails, fail the cycle closed before sweep.
             const frontier_header = self.rt.gc.frontierSafeHeaderAfterMarkClaim(header);
-            if (!self.rt.gc.mark_stack.push(frontier_header)) {
-                if (!self.rt.gc.incremental_mark_queue.push(frontier_header)) {
+            if (!self.rt.gc.marking.stack.push(frontier_header)) {
+                if (!self.rt.gc.marking.queue.push(frontier_header)) {
                     self.err = error.OutOfMemory;
                 }
             }
@@ -2118,12 +2118,12 @@ const Collector = struct {
         // are reached through host-create-ref `root_providers` (registered
         // by ownership, unregistered when that ref is consumed) and
         // `traceActiveRoots`.
-        for (self.rt.gc.pin_entries) |entry| {
+        for (self.rt.gc.pins.entries) |entry| {
             // Detached generator shells have a complete payload but no Shape
             // until parameter initialization resolves the final prototype.
             // shade() correctly rejects unpublished objects; mark the block
             // cell directly and trace only its initialized payload.
-            if (self.rt.gc.pinEntryIsConstructionRoot(entry)) {
+            if (self.rt.gc.pins.entryIsConstructionRoot(entry)) {
                 self.rt.gc.setHeaderMarked(entry.header);
                 const object = Object.fromHeader(entry.header);
                 try object.traceDetachedGeneratorShellEdges(self);
@@ -2252,8 +2252,8 @@ const Collector = struct {
         comptime prefetch: bool,
         comptime drain_work: bool,
     ) CollectError!usize {
-        const queue = &self.rt.gc.incremental_mark_queue;
-        const stack = &self.rt.gc.mark_stack;
+        const queue = &self.rt.gc.marking.queue;
+        const stack = &self.rt.gc.marking.stack;
         try checkFrontierFailure(queue);
         const budgeted = budget_ns != std.math.maxInt(u64);
         const started = if (budgeted) profile.nowNanos() else 0;
@@ -2605,9 +2605,9 @@ const Collector = struct {
             );
         }
 
-        const old_phase = self.rt.gc.phase;
-        self.rt.gc.phase = .tracer_destroy;
-        defer self.rt.gc.phase = old_phase;
+        const old_phase = self.rt.gc.hot.phase;
+        self.rt.gc.hot.phase = .tracer_destroy;
+        defer self.rt.gc.hot.phase = old_phase;
 
         // The extent half of the young set, FIRST. The destruction slice
         // covers only the block/bucket carriers, and an extent is in neither;
@@ -2673,11 +2673,11 @@ const Collector = struct {
         // The compact trace header has no predecessor.  Close the retired
         // pre-sweep suffix here; any allocation performed by destruction opens
         // a fresh young tail that clearYoungState can walk forward exactly.
-        self.rt.gc.resetYoungListSuffix();
+        self.rt.gc.lists.resetYoungSuffix();
 
-        const old_phase = self.rt.gc.phase;
-        self.rt.gc.phase = .tracer_destroy;
-        defer self.rt.gc.phase = old_phase;
+        const old_phase = self.rt.gc.hot.phase;
+        self.rt.gc.hot.phase = .tracer_destroy;
+        defer self.rt.gc.hot.phase = old_phase;
 
         const garbage_count = destroyCondemnedWhole(self.rt, true);
         sweepAtomTable(self.rt);

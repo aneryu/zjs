@@ -4407,7 +4407,7 @@ pub const function_bytecode = struct {
             // Pass B receives only the header pointer. Preserve the minimum
             // sizing state it needs to reconstruct this exact FAM length after
             // Pass A has released all owners and nulled their pointers.
-            if (rt.gc.phase == .deinit) {
+            if (rt.gc.hot.phase == .deinit) {
                 layout_value.restoreSizing(self);
             }
         }

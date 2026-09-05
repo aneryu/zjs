@@ -36,7 +36,7 @@ fn traceMachine(machine: *inline_calls.Machine, visitor: *RootVisitor) RootTrace
     try traceFrame(rt, machine.l0.level.frame, visitor);
     try traceStack(machine.l0.level.stack, visitor);
     // A generator/module shell stays deliberately unpublished (off
-    // gc_obj_list, not in the address registry) through parameter init
+    // `lists.objects`, not in the address registry) through parameter init
     // (`createGeneratorObject` -> `runGeneratorParameterInit` ->
     // `finishGeneratorShell`). Its shape_ref is not initialized yet, so the
     // ordinary Object walk would read undefined memory (0xaa autopsy,

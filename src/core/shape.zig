@@ -366,7 +366,7 @@ pub const Registry = struct {
     }
 
     /// Tracing-gc-design.md §4.6: an unpublished Shape is initialized and
-    /// hashed but not yet on `gc_obj_list`. Hash hits are already published.
+    /// hashed but not yet on `lists.objects`. Hash hits are already published.
     pub fn publish(self: *Registry, shape_ref: *Shape) void {
         if (shape_ref.header.meta().alloc_info.heap_accounted) return;
         self.gc_registry.addInitializedShape(&shape_ref.header, shape_ref.accountedAllocationSize());
@@ -1054,11 +1054,11 @@ pub const Registry = struct {
     ///
     /// TGC S4-h: the condemnation test is the reserved mark epoch, which is
     /// what a list carrier's `mark_epoch` field carries once the sweep has
-    /// pulled it off `gc_obj_list` -- the O(1) membership answer the intrusive
+    /// pulled it off `lists.objects` -- the O(1) membership answer the intrusive
     /// list cannot give.
     pub fn dropUnshared(self: *Registry, shape: *Shape) void {
         if (shape.isShared()) return;
-        if (self.gc_registry.phase == .deinit) return;
+        if (self.gc_registry.hot.phase == .deinit) return;
         if (gc.headerCondemned(&shape.header)) return;
         self.destroyShape(shape);
     }

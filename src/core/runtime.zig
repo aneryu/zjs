@@ -1701,13 +1701,13 @@ pub const JSRuntime = struct {
         self.assertNoOutstandingValueHandles();
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
-        self.gc.host_quiescent = true;
+        self.gc.scheduler.host_quiescent = true;
         _ = self.runObjectCycleRemoval();
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         self.clearPendingFinalizationJobs();
         _ = self.runObjectCycleRemoval();
-        self.gc.host_quiescent = false;
+        self.gc.scheduler.host_quiescent = false;
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         self.clearBorrowedWeakCleanupIdentities();
@@ -1874,7 +1874,7 @@ pub const JSRuntime = struct {
     pub fn registerObject(self: *JSRuntime, object: *Object) !void {
         self.assertOwnerThread();
         // qjs add_gc_object (quickjs.c:6540) only links the header into
-        // gc_obj_list; it never re-evaluates the GC threshold. The single
+        // `lists.objects`; it never re-evaluates the GC threshold. The single
         // object-creation threshold check is js_trigger_gc(sizeof(JSObject))
         // at the top of JS_NewObjectFromShape (quickjs.c:5619) — mirrored here
         // by collectBeforeObjectAllocation immediately before the object body
@@ -2244,7 +2244,7 @@ pub const JSRuntime = struct {
                 .live => ctx.runtime_next,
                 .constructing => ctx.construction_next,
             };
-            if (self.gc.phase != .tracer_destroy or
+            if (self.gc.hot.phase != .tracer_destroy or
                 !gc.headerCondemned(&ctx.header))
             {
                 return context_mod.RealmRef.retain(ctx);
@@ -3041,7 +3041,7 @@ pub const JSRuntime = struct {
             // Destruction is irreversible: complete it, then discard any
             // open marking cycle. Order matters only in that both must be
             // resolved before the STW collector below touches the lists.
-            if (self.gc.doomed_pending) {
+            if (self.gc.morgue.pending) {
                 self.gc_running = true;
                 @import("gc_trace_stw.zig").finishPendingDestruction(self);
                 self.gc_running = false;
@@ -3052,7 +3052,7 @@ pub const JSRuntime = struct {
         // `gc_running` covers the major driver. The refcount/cycle phases also
         // invoke allocation and callback boundaries, and a previously queued
         // request must remain pending rather than nest a second collection.
-        if (self.gc_running or self.gc.phase != .none) return .{};
+        if (self.gc_running or self.gc.hot.phase != .none) return .{};
         if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
         if (builtin.mode == .Debug) self.gc.verifyHeapAccounting(self) catch unreachable;
         defer if (builtin.mode == .Debug) {
@@ -3066,18 +3066,18 @@ pub const JSRuntime = struct {
         self.memory.samplePeakAtCollection();
         const start_ns = profile.nowNanos();
 
-        self.gc.beginMajorCycle(self.gc.activeMajorReason() orelse .manual);
+        self.gc.scheduler.beginMajorCycle(self.gc.scheduler.activeMajorReason() orelse .manual);
         const freed = @import("gc_trace_stw.zig").collectCycles(self, roots, scan) catch |err| {
             const mapped: gc.CollectionError = switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.PayloadMarkFailed => error.PayloadMarkFailed,
             };
             self.gc.recordFailure(mapped);
-            self.gc.abortMajorCycle();
+            self.gc.scheduler.abortMajorCycle();
             self.gc.requestGC(.collection_failed, .soon);
             return mapped;
         };
-        self.gc.setMajorPhase(.sweep);
+        self.gc.scheduler.setMajorPhase(.sweep);
 
         const end_ns = profile.nowNanos();
         const elapsed = if (end_ns > start_ns) end_ns - start_ns else 0;
@@ -3091,7 +3091,7 @@ pub const JSRuntime = struct {
             .duration_ns = elapsed -| census,
         };
         self.gc.recordSuccess(result);
-        self.gc.finishMajorCycle();
+        self.gc.scheduler.finishMajorCycle();
         self.resetGCThreshold();
         // Full STW majors free the same block cells as incremental majors.
         // Service the same aged-decommit policy here; otherwise explicit GC,
@@ -3120,7 +3120,7 @@ pub const JSRuntime = struct {
         // reclaim in progress should complete before anything new begins.
         // Destruction is irreversible, so urgency FINISHES it (one pause)
         // where it merely aborts an open marking cycle.
-        if (self.gc.doomed_pending and !self.gc_running and self.gc.phase == .none) {
+        if (self.gc.morgue.pending and !self.gc_running and self.gc.hot.phase == .none) {
             if (mode == .urgent) {
                 self.gc_running = true;
                 @import("gc_trace_stw.zig").finishPendingDestruction(self);
@@ -3130,7 +3130,7 @@ pub const JSRuntime = struct {
                 return self.destroySlicePoll();
             }
         }
-        if (self.gc.incremental.markingActive() and !self.gc_running and self.gc.phase == .none) {
+        if (self.gc.incremental.markingActive() and !self.gc_running and self.gc.hot.phase == .none) {
             if (mode == .urgent) {
                 self.gc.abortIncrementalCycle();
             } else {
@@ -3173,7 +3173,7 @@ pub const JSRuntime = struct {
         // the bar. Instrumented on pdfjs: this line saw 33 crossings against
         // 874 majors -- the other 841 arrived as that pending request, so a
         // minor-first rule written against `allocated_bytes` alone never fired.
-        const crossing = over_threshold or self.gc.pendingAllocationThresholdRequest();
+        const crossing = over_threshold or self.gc.scheduler.pendingAllocationThresholdRequest();
         // §8.5: an automatic poll prefers a minor. A minor only reaches the
         // young set, so allocation churn is reclaimed without a whole-heap
         // trace -- but only here. An explicit `runObjectCycleRemoval` means
@@ -3285,7 +3285,7 @@ pub const JSRuntime = struct {
                         // stale: discard exactly that request, the way
                         // `collectBeforeObjectAllocation` does when a
                         // prospective total falls back under the bar.
-                        _ = self.gc.clearStaleAllocationThresholdRequest();
+                        _ = self.gc.scheduler.clearStaleAllocationThresholdRequest();
                         // Only the threshold's own request is retired by a
                         // minor. A host manual GC, memory pressure or a
                         // failure retry that happened to be queued behind
@@ -3298,7 +3298,7 @@ pub const JSRuntime = struct {
                 }
             }
         }
-        if (self.gc_running or self.gc.phase != .none) return .{};
+        if (self.gc_running or self.gc.hot.phase != .none) return .{};
         const scheduler_point: gc.SchedulerPoint = switch (mode) {
             .normal => .allocation_slow_path,
             .callback_boundary => .callback_boundary,
@@ -3311,11 +3311,11 @@ pub const JSRuntime = struct {
             .callback_boundary, .safepoint => {},
         }
         const over_collection_threshold = over_threshold;
-        const run_major = self.gc.shouldRunMajorAt(scheduler_point, over_collection_threshold);
+        const run_major = self.gc.scheduler.shouldRunMajorAt(scheduler_point, over_collection_threshold);
         if (!run_major) return .{};
 
-        const major_request = self.gc.pendingMajorRequest();
-        if (major_request != null) _ = self.gc.clearMajorRequest();
+        const major_request = self.gc.scheduler.pendingMajorRequest();
+        if (major_request != null) _ = self.gc.scheduler.clearMajorRequest();
         const reason = if (major_request) |request|
             request.reason orelse gc.RequestReason.manual
         else if (over_collection_threshold)
@@ -3359,7 +3359,7 @@ pub const JSRuntime = struct {
             self.gc.recordMajorSlicePause(if (ended > began) ended - began else 0, .begin);
             return .{};
         }
-        self.gc.beginMajorCycle(reason);
+        self.gc.scheduler.beginMajorCycle(reason);
         return try self.tryRunObjectCycleRemovalWithValueRoots(null, mode.rootScan());
     }
 
@@ -3470,7 +3470,7 @@ pub const JSRuntime = struct {
         // only the finish-owned tail, just as the cumulative row does above.
         self.gc.incremental.stats.segment_max_ns[finish_index] =
             @max(prior_finish_max, slice -| mark_ns);
-        if (!self.gc.doomed_pending) return self.finishDoomedCompletion(slice);
+        if (!self.gc.morgue.pending) return self.finishDoomedCompletion(slice);
         // Reset the threshold NOW, pricing the morgue's bytes as already
         // reclaimed. Waiting for the destruction slices left the account
         // over-threshold for the whole window, and worse, the eventual reset
@@ -3483,7 +3483,7 @@ pub const JSRuntime = struct {
     }
 
     fn resetGCThresholdExcludingDoomed(self: *JSRuntime) void {
-        const settled = self.memory.allocated_bytes -| self.gc.doomed_bytes;
+        const settled = self.memory.allocated_bytes -| self.gc.morgue.bytes;
         const saved = self.memory.allocated_bytes;
         // Reuse the one rule rather than duplicating it: present the account
         // net of corpses, compute, restore. Single-threaded, no observer.
@@ -3503,20 +3503,20 @@ pub const JSRuntime = struct {
         const ended = profile.nowNanos();
         const slice = if (ended > began) ended - began else 0;
         self.gc.recordMajorSlicePause(slice, .destroy);
-        if (!self.gc.doomed_pending) return self.finishDoomedCompletion(slice);
+        if (!self.gc.morgue.pending) return self.finishDoomedCompletion(slice);
         return .{};
     }
 
     /// The morgue is empty: deliver the cycle's CollectionResult and reset the
     /// growth threshold from the account the destruction actually shrank.
     fn finishDoomedCompletion(self: *JSRuntime, last_slice_ns: u64) gc.CollectionResult {
-        std.debug.assert(!self.gc.doomed_pending);
+        std.debug.assert(!self.gc.morgue.pending);
         @import("gc_trace_stw.zig").auditDoomedExitInvariant(self);
         const result: gc.CollectionResult = .{
-            .freed_objects = self.gc.doomed_destroyed,
+            .freed_objects = self.gc.morgue.destroyed,
             .duration_ns = last_slice_ns,
         };
-        self.gc.doomed_destroyed = 0;
+        self.gc.morgue.destroyed = 0;
         self.gc.recordIncrementalCycleSuccess(result);
         self.resetGCThreshold();
         _ = self.gc.block_heap.releaseFreeBlockPages(profile.nowNanos());
@@ -3541,15 +3541,15 @@ pub const JSRuntime = struct {
 
     pub fn afterCallbackBoundaryGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
         const result = try self.pollGC(roots, .callback_boundary);
-        _ = self.runDeferredNativeCleanupBudgeted(self.gc.policy.native_cleanup_slice_jobs);
-        _ = self.runDeferredClassPayloadFinalizerBudgeted(self.gc.policy.native_cleanup_slice_jobs);
+        _ = self.runDeferredNativeCleanupBudgeted(self.gc.scheduler.policy.native_cleanup_slice_jobs);
+        _ = self.runDeferredClassPayloadFinalizerBudgeted(self.gc.scheduler.policy.native_cleanup_slice_jobs);
         return result;
     }
 
     pub fn beforeEventLoopIdleGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
         const result = try self.pollGC(roots, .idle);
-        _ = self.runDeferredNativeCleanupBudgeted(self.gc.policy.native_cleanup_slice_jobs);
-        _ = self.runDeferredClassPayloadFinalizerBudgeted(self.gc.policy.native_cleanup_slice_jobs);
+        _ = self.runDeferredNativeCleanupBudgeted(self.gc.scheduler.policy.native_cleanup_slice_jobs);
+        _ = self.runDeferredClassPayloadFinalizerBudgeted(self.gc.scheduler.policy.native_cleanup_slice_jobs);
         return result;
     }
 
@@ -3774,7 +3774,7 @@ pub const JSRuntime = struct {
     /// and any policy that does consume the snapshot reaches the identical
     /// slow path.
     inline fn requestGCForProcessMemoryPressure(self: *JSRuntime) void {
-        if (!self.gc.policy.needsProcessMemorySnapshot()) return;
+        if (!self.gc.scheduler.policy.needsProcessMemorySnapshot()) return;
         self.requestGCForProcessMemoryPressureSlow();
     }
 
@@ -3866,7 +3866,7 @@ pub const JSRuntime = struct {
         // queue is in its decref phase, but starting a nested major collection
         // is not. `gc_running` covers the major driver; the explicit phase guard
         // also covers outer zero-ref drains that run without that flag.
-        if (self.gc_running or self.gc.phase != .none) return self.prospectiveAllocationTotal(size);
+        if (self.gc_running or self.gc.hot.phase != .none) return self.prospectiveAllocationTotal(size);
         if (comptime memory.force_gc_on_allocation_enabled) {
             if (self.memory.trigger_gc_fn == null) return self.prospectiveAllocationTotal(size);
             // The force-GC build option is diagnostic instrumentation, not a
@@ -3903,7 +3903,7 @@ pub const JSRuntime = struct {
         // reenter this function with `draining_...` set: they may request the
         // next GC, but cannot recursively drain the same queue.
         if (self.deferred_class_payload_finalizers.len != 0 and
-            !self.gc_running and self.gc.phase == .none and
+            !self.gc_running and self.gc.hot.phase == .none and
             !self.draining_deferred_class_payload_finalizers)
         {
             @branchHint(.unlikely);
@@ -3936,22 +3936,22 @@ pub const JSRuntime = struct {
         // stale request. Registry request coalescing preserves manual/external/
         // pressure reasons so they cannot be cancelled here.
         if (prospective <= self.malloc_gc_threshold) {
-            _ = self.gc.clearStaleAllocationThresholdRequest();
+            _ = self.gc.scheduler.clearStaleAllocationThresholdRequest();
         }
         // §8.6: allocation debt buys bounded slices of the collector's work.
         // The time budget bounds one slice; the byte interval below also
         // bounds how many allocation-boundary slices one burst can concatenate
         // into a mutator-visible operation. Scheduler/callback/idle polls call
         // pollGC directly and remain unpaced.
-        if (self.gc_running or self.gc.phase != .none) return;
+        if (self.gc_running or self.gc.hot.phase != .none) return;
         // While marking is open the account is over the (not yet reset)
         // threshold, so each boundary re-records `.allocation_threshold` above
         // and this gate stays open for the increments unaided. Destruction is
         // different: the threshold resets at condemn time (net of corpses), so
         // the account may be UNDER it while the morgue still holds memory --
         // the explicit `doomed_pending` term is what keeps the slices moving.
-        if (!self.gc.doomed_pending and !self.gc.hasPendingMajorRequest()) return;
-        const cycle_open = self.gc.doomed_pending or self.gc.incremental.markingActive();
+        if (!self.gc.morgue.pending and !self.gc.hasPendingMajorRequest()) return;
+        const cycle_open = self.gc.morgue.pending or self.gc.incremental.markingActive();
         if (cycle_open) {
             self.gc_assist_debt_bytes +|= size;
             if (self.gc_assist_debt_bytes < gc.incremental_assist_interval_bytes) return;
@@ -4028,7 +4028,7 @@ pub const JSRuntime = struct {
         // A pending morgue uses a provisional threshold net of doomed bytes;
         // no new cycle may begin before destruction completes, and the final
         // reset below will publish the actual settled pair.
-        if (!self.gc.doomed_pending) {
+        if (!self.gc.morgue.pending) {
             self.gc.noteCycleEnvelopeBaseline(self.memory.allocated_bytes, self.malloc_gc_threshold);
         }
         self.gc.resetAllocationDebt();
@@ -4482,7 +4482,7 @@ pub const JSRuntime = struct {
     /// by the active-job guard above while its GC request remains pending.
     inline fn drainDeferredClassPayloadFinalizersAtSafeBoundary(self: *JSRuntime) void {
         if (self.deferred_class_payload_finalizers.len == 0) return;
-        if (self.gc_running or self.gc.phase != .none) return;
+        if (self.gc_running or self.gc.hot.phase != .none) return;
         if (self.draining_deferred_class_payload_finalizers) return;
         self.drainDeferredClassPayloadFinalizers();
     }
@@ -4687,9 +4687,9 @@ pub fn settlePendingDestructionForGateStats(rt: *JSRuntime) void {
     rt.assertOwnerThread();
     rt.assertIdleForTeardown();
     std.debug.assert(!rt.gc_running);
-    std.debug.assert(rt.gc.phase == .none);
+    std.debug.assert(rt.gc.hot.phase == .none);
     std.debug.assert(rt.active_deferred_class_payload_finalizer == null);
-    if (!rt.gc.doomed_pending) {
+    if (!rt.gc.morgue.pending) {
         @import("gc_trace_stw.zig").auditDoomedExitInvariant(rt);
         return;
     }

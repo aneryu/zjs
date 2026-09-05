@@ -88,3 +88,12 @@
 - `IncrementalMarkState` 拆：`last_settled_live_bytes` → `gc.incremental.State`（仍是 write-only，B03 消融候选，未删）；`footprint`（680B）**未进 Registry**——实测进 Registry 会把 `barrier_gate` 从 offset 16 推到 2432、`@sizeOf(Registry)` 6080→6784（正是 K4 要防的），改放 `JSRuntime.gc_mark_footprint`，Registry 字节等同。
 - 门：test 2558/0、roots_diag 2562/0、check + 五个 exe 步 18/18；`--gc-stats` 标签无 `concurrent`，schema 不动。
 - 工具教训：`git worktree add` 后主树 `test262` 已作为目录存在，再 `ln -s` 会把软链套进目录一层导致两条 run_test262 单测 FileNotFound；正确做法 `rm -rf <wt>/test262 && ln -s`。
+
+### 7.6 S5-d Registry 拆分（合入 main `5bf1e85e`）
+- `Registry` 首字段 `hot: HotWords align(64)`（`extern struct { phase: Phase(enum(u8)), barrier_gate: u64 }`）+ comptime 布局契约（`hot` offset 0、`phase` offset 0、`barrier_gate+8 ≤ 64`、`@alignOf ≥ 64`）；此前只有注释没有编译期检查。
+- 子结构：`lists: Lists`（`gc_registry_lists.zig`，连同 `IntrusiveHeaderList` 原语）、`pins: PinLedger`（`gc_registry_pins.zig`）、`external: Tokens`（`gc_registry_heap.zig`，含 `NonBlockObjectAuthority`）、`scheduler: Scheduler`（`gc_registry_scheduler.zig`）、`marking: Marking` 与 `morgue: Morgue`（并入 `gc_incremental.zig`）；verify/statistics 729 行搬到 `gc_registry_diagnostics.zig`，以 decl 别名接回 Registry 命名空间（~200 调用点不动，代价是 6 个 helper 转 pub）。`stats` 留顶层（Diagnostics 组只有它一个字段，包一层只增路径不增内聚——STOP 判据成立）。`memory`/`block_heap`/`generation`/`incremental`/`address_registry`/`heap_accounting_oracle` 本已是独立模块，不动。
+- 结果：`gc.zig` 5,276→3,988 行，Registry 3,673→2,558 行、字段 36→17；`@sizeOf(Registry)` 6080 不变；`barrier_gate` offset 16→8。
+- 机器码（ReleaseFast aarch64）：133 个内联屏障点的 gate 读仍是单条 `ldr xN,[xM,#8]`；`Phase` 改显式 `enum(u8)` 后 `phase` 读少一条 `and`；字段按热度排序后所有子结构 offset 落在 `ldrb` imm12 内，整机 778,654→778,391 指令（−263）。⚠️ 第一版把 `stats`/`space_histogram` 放中间，`block_heap` 被推到 +4936 超出 imm12，`.text` +5,260B——**Zig 同对齐类内按声明序排布，组的声明顺序就是 offset 表**，已在字段注释写明顺序是承重的。
+- init/deinit：`Registry.init` 不可失败（无部分构造），回滚义务在 JSRuntime 一层；各子结构 `deinit` 幂等（test-oom 22/0 覆盖）。
+- 门：test 2558/0、test-oom 22/0、roots_diag 2562/0、五个 exe 步全绿；`-Dzjs_ownership_audit=true` **1 红**（`ownership audit quarantines the most recently freed atom slot` expected 693 found 695 + `atom.internDynamic` 泄漏报告）——在基线 `fc21a7dd` 同样红，**预存缺陷**，已另立 lane 查（见 7.7）。
+- 记录不改：`HeapAccountingIterator` 自带 `doomed_by_kind/doomed_cursor/sweep_current` 与 Registry 旧名同名（迭代器游标，命名陷阱）；`last_settled_live_bytes` 仍 write-only（B03）。

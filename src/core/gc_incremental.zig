@@ -9,6 +9,9 @@
 //! claimed black, so they verify that prior mark and skip a still-white owner.
 
 const std = @import("std");
+const gc = @import("gc.zig");
+const mark_queue = @import("gc_mark_queue.zig");
+const registry_lists = @import("gc_registry_lists.zig");
 
 pub const Stats = struct {
     shaded: usize = 0,
@@ -131,5 +134,82 @@ pub const State = struct {
 
     pub inline fn markingActive(self: *const State) bool {
         return self.major_marking_active;
+    }
+};
+
+/// The mark frontier and the epoch its marks are read under.
+///
+/// The barrier's shared queue lives here rather than inside `gc_mark_queue`
+/// because the barrier reaches it through the Registry and must not import
+/// the queue module to do so.
+pub const Marking = struct {
+    /// Objects the marking barrier shaded GREY: marked, children still to be
+    /// traced. Whole 4 KiB segments move between this shared chain and the
+    /// private tracer stacks.
+    queue: mark_queue.Queue = .{},
+    /// The owner's segmented private LIFO. It persists across slices; old
+    /// whole segments are donated for parallel work while the hot top stays
+    /// local. Allocation failure aborts the cycle before sweep.
+    stack: mark_queue.MarkStack = .{},
+    /// Current mark epoch for non-block trace carriers. Epoch 0 is reserved
+    /// for newborn/unmarked; a major advances this scalar, while minors keep
+    /// it fixed so sticky survivor marks remain valid. Unlike a global parity
+    /// flip, a stale nonzero epoch cannot make a newborn (0) read marked.
+    header_epoch: u16 = 1,
+
+    /// Idempotent: both the private stack and the shared queue reset to their
+    /// empty state, so a Registry torn down twice -- the OOM rollback case --
+    /// does not double-free a segment.
+    pub fn deinit(self: *Marking, allocator: std.mem.Allocator) void {
+        self.stack.deinitStack();
+        self.queue.deinit(allocator);
+    }
+};
+
+/// The morgue: condemned by a cycle's finish, awaiting sliced destruction at
+/// later polls.
+///
+/// Everything here is unreachable (the remark's full trace proved it) and
+/// weak-cleared (processWeak ran first), so the mutator cannot reach it,
+/// cannot re-derive a pointer to it, and cannot observe its destruction
+/// order. What CAN still find it is a conservative scan: a parked corpse
+/// keeps `heap_accounted` until its destructor runs, so a stale stack word
+/// would resolve it and the tracer would walk freed payloads. That is why
+/// minors and new cycles are gated while this list is non-empty -- no
+/// collection, no scan, no resurrection-by-residue.
+pub const Morgue = struct {
+    /// Split by kind at condemnation.
+    ///
+    /// Destruction has to run objects before realms before modules before
+    /// bytecode before var_refs before shapes, and it used to get that order
+    /// by walking ONE list once per kind: a corpse of the last kind was
+    /// stepped over five times before its own pass reached it, and each of
+    /// those steps was a list-node dereference and a budget counter tick.
+    /// Bucketing at condemnation costs nothing extra -- that pass already
+    /// visits every corpse -- and makes destruction visit each exactly once.
+    /// Indexed by `@intFromEnum(kind)`.
+    by_kind: [gc.gc_kind_count]registry_lists.IntrusiveHeaderList = @splat(.{}),
+    /// Sliced-destruction cursor: which kind pass destruction is on. The
+    /// lists are stable between slices -- the mutator cannot touch them -- so
+    /// a plain cursor resumes exactly where the budget ran out.
+    kind_pass: u8 = 0,
+    /// Resume point within the current kind pass. Sound to hold across slices
+    /// because nothing touches the list between them: collections are gated
+    /// and the mutator has no path to a condemned object.
+    cursor: ?*gc.GCObjectHeader = null,
+    pending: bool = false,
+    /// Objects destroyed by the slices of the current morgue, for the
+    /// completion poll's CollectionResult.
+    destroyed: usize = 0,
+    /// Heap bytes the morgue holds: already condemned, not yet returned.
+    /// The growth threshold subtracts this at finish -- pricing the next
+    /// cycle off a heap full of corpses was a compounding feedback loop
+    /// (measured: an 841 MB peak on a ~50 MB live set).
+    bytes: usize = 0,
+
+    /// Bind the per-kind cyclic sentinels. Must run before any condemnation,
+    /// and is idempotent.
+    pub fn init(self: *Morgue) void {
+        for (&self.by_kind) |*head| registry_lists.listInit(head);
     }
 };

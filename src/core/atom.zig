@@ -2130,7 +2130,7 @@ pub const AtomTable = struct {
     /// appears once teardown has actually stripped the object, whereas the
     /// mark is already false for the whole condemned set.
     fn bodyLiveForCurrentPhase(rt: *const JSRuntime, body: *string.String) bool {
-        if (rt.gc.phase != .tracer_destroy) return true;
+        if (rt.gc.hot.phase != .tracer_destroy) return true;
         return rt.gc.headerMarked(body.header());
     }
 

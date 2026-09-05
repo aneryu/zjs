@@ -2375,7 +2375,7 @@ test "runtime Plugin finalizer reentry mutates, allocates, and does not nest GC"
             _ = object;
             const self = active orelse return;
             self.finalizer_calls += 1;
-            self.callback_observed_collector_idle = self.rt.gc.phase == .none and !self.rt.gc_running;
+            self.callback_observed_collector_idle = self.rt.gc.hot.phase == .none and !self.rt.gc_running;
             defer {
                 self.payload_child = core.JSValue.undefinedValue();
             }

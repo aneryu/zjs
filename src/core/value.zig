@@ -476,7 +476,7 @@ pub const JSValue = extern struct {
 
     /// `JS_MarkValue` filter (quickjs.c:6553-6566) widened by one tag: OBJECT /
     /// FUNCTION_BYTECODE / MODULE plus heap BIG_INT, which is a leaf on
-    /// `gc_obj_list` since S1-c (qjs keeps BigInt refcounted; zjs traces it).
+    /// `lists.objects` since S1-c (qjs keeps BigInt refcounted; zjs traces it).
     /// `big_int` sits at -4 so this stays one range compare (`cmn tag, #4`).
     pub inline fn cycleMarkHeader(self: JSValue) ?*gc.Header {
         const tag = self.repr.tag;
