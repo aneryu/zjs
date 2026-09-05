@@ -44,10 +44,15 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const test_shards_option = b.option(usize, "test-shards", "Run the unified suite as this many parallel shard processes (default 8; 1 = unsharded)") orelse 8;
     const test_shards: usize = if (test_filter != null or test_shards_option == 0) 1 else test_shards_option;
     // Debug info is half of the unified compile (measured 2026-09-05: ~60 s
-    // with DWARF, ~30 s without). Opt-in only: a stripped binary still names
-    // the failing test and the error, but its stack traces are bare
-    // addresses, so it is for green-path iteration, not for diagnosing a red.
-    const test_strip = b.option(bool, "test-strip", "Build the unified test binary without debug info (faster compile, bare-address stack traces)") orelse false;
+    // with DWARF, ~30 s without). A stripped binary still names the failing
+    // test and the error, but its error-return traces are bare addresses, so
+    // the default follows the two ways the suite is run: the full run (the
+    // per-change close-out, checkpoint-gate) is the green path and strips;
+    // a `-Dtest-filter` run is somebody diagnosing a red and keeps DWARF.
+    // Both variants sit in the build cache, so alternating between them on
+    // unchanged sources costs no recompile. `-Dtest-strip=false` forces DWARF
+    // on the full run (owner ruling 2026-09-06: strip by default).
+    const test_strip = b.option(bool, "test-strip", "Build the unified test binary without debug info (default: true for the full run, false under -Dtest-filter)") orelse (test_filter == null);
     const unified_tests = b.addTest(.{
         .name = "unified-tests",
         .root_module = b.createModule(.{

@@ -338,8 +338,12 @@ restores the single process). Shard output is captured and replayed only for
 a shard that fails, so a green run prints just the step tree; a run with
 nothing changed is a cache hit and does not re-execute. `-Dtest-filter=<substring>`
 is always a single process with streamed output — use it to watch one test.
-Measured 2026-09-05 (build pool `0-4,10-14`): source change → green in ~75 s
-(compile ~60 s, run ~15 s), previously ~225 s.
+The full run builds the test binary without debug info (`-Dtest-strip`
+defaults to true; a `-Dtest-filter` run keeps DWARF so a red can be
+diagnosed with a symbolised trace, and `-Dtest-strip=false` forces DWARF on
+the full run). Measured 2026-09-06 (build pool, cold cache): compile 36 s,
+shards 3–5 s each; 2026-09-05 with DWARF it was compile ~60 s, run ~15 s;
+before sharding ~225 s.
 
 `build.zig` pins the Zig 0.16 build/test seed to `0` so the compile graph
 stays cacheable. CLI `--seed` is not required. Pass `-Dzjs_test_seed=<u32>`

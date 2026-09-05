@@ -149,6 +149,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 if (@errorReturnTrace()) |trace| {
                     std.debug.dumpErrorReturnTrace(trace);
                 }
+                // The default full run strips debug info (build/tests.zig), so
+                // the trace above is bare addresses. Say how to get names.
+                if (builtin.strip_debug_info) {
+                    std.debug.print("  (stripped build: rerun with -Dtest-filter=\"{s}\" or -Dtest-strip=false for a symbolised trace)\n", .{test_fn.name});
+                }
                 if (fail_fast) break :tests;
             },
         }
