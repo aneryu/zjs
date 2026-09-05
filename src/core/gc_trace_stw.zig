@@ -821,6 +821,11 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     collector.minor_mode = true;
     defer collector.deinit();
 
+    // TGC S4-h (2): trace-coupled retirement, the major's mechanism applied to
+    // the minor. Abandoned on any error, because a half-retired young set is
+    // exactly the split `abandonMajorRetirement` guards against.
+    errdefer rt.gc.generation.abandonMinorRetirement();
+
     var full_reachable: ?FullReachable = null;
     defer if (full_reachable) |*reachable| reachable.deinit();
     if (gc.verify_minor) {
@@ -829,6 +834,29 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
             break :blk null;
         };
     }
+
+    // Open the retirement transaction BEFORE anything can shade, exactly as
+    // both majors do. The binding rule is "a MARK CLAIM owes a retirement",
+    // not "a frontier pop owes one": a minor's marking phase has three entries
+    // that claim a mark WITHOUT a frontier round trip -- `storageCell`'s leaf
+    // claim (S4-g (2)), `shadeExact`'s synchronous shape/realm arm, and
+    // `seedRoots`'s construction-root arm -- and every one of them is reached
+    // during root seeding or the remembered walk. With the window opened after
+    // the remembered walk those claims marked a young block cell and retired
+    // nothing, and `drain` could not repair it because both shade entries
+    // early-return on `headerMarked`. The cell then survived the sweep with
+    // its young bit still set while `closeYoungGeneration` took every young
+    // structure away from under it -- a live cell that is young, on no young
+    // list and in no census. The next minor that re-admits its block to the
+    // young chain clears its mark with `clearYoungBlockMarksStw` (that pass is
+    // block-wide, not young-bit-filtered) and `alloc & ~mark` then condemns it
+    // alive. That is the ReleaseFast failure: `property_storage` cells of live
+    // OLD objects reached through the remembered walk, freed underneath them.
+    //
+    // `traceRememberedOwner` is the one entry that must NOT retire, and it is
+    // handled where it belongs -- at the call, not by keeping the window shut
+    // for the whole phase (see there).
+    rt.gc.generation.beginMinorRetirement();
 
     const phase_stats = detailed_reports;
     var phase_started = if (phase_stats) profile.nowNanos() else 0;
@@ -884,6 +912,12 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     // and standalone occupant is registered, because a missing range hides
     // its objects from the conservative scan that decides what is live.
     if (!rt.gc.addressSetWhole(rt)) {
+        // No sweep runs, but the trace has already retired every block cell it
+        // reached, so the header bits and the young structures disagree. Close
+        // the generation with the bulk promotion pass rather than leave that
+        // split for the next minor to trip over.
+        promoteYoungSurvivorsInBulk(rt);
+        closeYoungGeneration(rt);
         if (phase_stats) {
             rt.gc.generation.stats.minor_sweep_ns_total +|= profile.nowNanos() -| phase_started;
         }
@@ -898,23 +932,15 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     }
 
     // Promotion is the sticky rule made concrete: everything still young
-    // after the sweep survived this collection, so it is old now. Clearing
-    // the bit here is what makes a later write to it hit the remembered-set
-    // path instead of being skipped as "the minor will see it anyway".
-    var survivors = rt.gc.objectIterator(.young);
-    while (survivors.next()) |header| {
-        header.meta().flags.young = false;
-    }
-    if (comptime gc.block_heap_enabled) {
-        _ = rt.gc.block_heap.clearYoungBlocks();
-        rt.gc.block_heap.retireYoungExtents();
-    }
-    // TGC S3-c: a value symbol's body is only reachable from an old holder
-    // over an atom id, which no minor traces, so the table roots it until it
-    // is promoted -- which is exactly here.
-    rt.atoms.retireYoungSymbolBodies();
-    rt.gc.resetYoungListSuffix();
-    rt.gc.retireGenerationalYoungSet();
+    // after the sweep survived this collection, so it is old now. TGC S4-h
+    // (2): the trace did that, cell by cell, on header lines it had already
+    // loaded (`retireTracedYoung`), and `sweepUnmarkedYoung` closed the young
+    // generation between the condemnation and the destruction slice -- so
+    // anything published by a destructor is a NEW young object on a fresh
+    // young list, which is what it should be. The pass that used to stand here
+    // walked the `alloc_info` byte of every allocated cell of every young
+    // block to re-derive the same verdict.
+    //
     // TGC S4-f (2): return this minor's holes to the allocator. Deliberately
     // AFTER `clearYoungBlocks` above -- `publishHotBlock` refuses a block that
     // still carries `flag_young`, and every block a minor touched carries it
@@ -932,6 +958,41 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
         rt.gc.generation.stats.minor_promote_ns_total +|= profile.nowNanos() -| phase_started;
     }
     return reclaimed;
+}
+
+/// Bulk promotion: clear the young bit of every member of the young set.
+///
+/// TGC S4-h (2) removed this from the minor's production path -- the trace
+/// retires block cells and the condemnation walks retire the list and
+/// side-authority halves -- but two arms still need it: the diagnostic
+/// producer (`verify_minor` / `minor_audit`), which only collects pointers,
+/// and the `addressSetWhole` bail-out, which never reaches a sweep at all.
+fn promoteYoungSurvivorsInBulk(rt: *JSRuntime) void {
+    var survivors = rt.gc.objectIterator(.young);
+    while (survivors.next()) |header| {
+        header.meta().flags.young = false;
+    }
+}
+
+/// Close a minor's young generation: retire the extent half, break the
+/// young-block list and the young suffix, and zero the census and the
+/// remembered set built from it.
+///
+/// TGC S4-h (2): this runs between the condemnation and the destruction slice,
+/// so a destructor's own publication starts the NEXT young generation instead
+/// of being stranded in a census that has already been zeroed.
+fn closeYoungGeneration(rt: *JSRuntime) void {
+    if (comptime gc.block_heap_enabled) {
+        rt.gc.block_heap.retireYoungExtents();
+        _ = rt.gc.block_heap.clearYoungBlocks();
+    }
+    // TGC S3-c: a value symbol's body is only reachable from an old holder
+    // over an atom id, which no minor traces, so the table roots it until it
+    // is promoted -- which is exactly here.
+    rt.atoms.retireYoungSymbolBodies();
+    rt.gc.resetYoungListSuffix();
+    rt.gc.retireGenerationalYoungSet();
+    rt.gc.generation.commitMinorRetirement();
 }
 
 /// Retire the young set after a whole-heap collection.
@@ -1976,6 +2037,14 @@ const Collector = struct {
                 self.rt.gc.setHeaderMarked(entry.header);
                 const object = Object.fromHeader(entry.header);
                 try object.traceDetachedGeneratorShellEdges(self);
+                // A mark claim outside the frontier owes the same retirement a
+                // frontier pop does. Guarded on publication because that is
+                // what this arm exists for: an UNPUBLISHED shell is not young
+                // yet and is not in any young structure, so it has nothing to
+                // retire, and `retireTracedYoung` asserts on `heap_accounted`.
+                if (entry.header.metaConst().alloc_info.heap_accounted) {
+                    self.rt.gc.retireTracedYoung(entry.header);
+                }
                 continue;
             }
             self.shadeExact(entry.header);
@@ -2131,11 +2200,22 @@ const Collector = struct {
                     self.err = err;
                 };
                 if (self.err) |err| return err;
-                self.rt.gc.retireTracedYoung(header);
                 return;
             }
         }
-        try self.traceHeader(header);
+        // `traceHeaderEdges`, NOT `traceHeader`: this is the only entry into
+        // the trace that does not claim a mark, so it is the only one that
+        // must not retire. Promoting a header the trace has not proven live
+        // takes it out of the census and off the young list while leaving it
+        // unmarked, and `ZJS_MINOR_AUDIT=fatal` catches the result as a live
+        // old owner holding an unremembered edge into the condemned young set.
+        // A remembered owner CAN be young: the barrier classifies an
+        // unpublished header as old (it reads `flags.young == false`) and
+        // remembers it, and publication then makes it young with the map entry
+        // still standing. The ones that are genuinely live are retired by the
+        // frontier route anyway -- by whatever marked them.
+        try traceHeaderEdges(self.rt, self, header);
+        if (self.err) |err| return err;
     }
 
     fn ephemeronFixedPoint(self: *Collector) CollectError!void {
@@ -2367,6 +2447,13 @@ const Collector = struct {
                     if (header == &self.rt.gc.gc_obj_list.sentinel) break;
                     const next = header.nextNonObject();
                     if (self.rt.gc.headerMarked(header) or self.rt.gc.headerIsPinned(header)) {
+                        // TGC S4-h (2): the list half of promotion. The trace
+                        // deliberately does NOT retire list carriers -- that
+                        // would break `young_head`'s exact-suffix invariant
+                        // while the suffix is still being walked -- so the
+                        // survivor's bit is cleared here, where the walk is
+                        // O(young suffix) and the header is already loaded.
+                        header.meta().flags.young = false;
                         previous = header;
                         cursor = next;
                         continue;
@@ -2388,6 +2475,10 @@ const Collector = struct {
                         continue;
                     }
                     if (self.rt.gc.headerMarked(header) or self.rt.gc.headerIsPinned(header)) {
+                        // Same promotion as the list half above: a side
+                        // authority is not the young suffix, so the trace
+                        // leaves it to this walk (TGC S4-h (2)).
+                        header.meta().flags.young = false;
                         object_index += 1;
                         continue;
                     }
@@ -2453,11 +2544,45 @@ const Collector = struct {
         self.rt.gc.phase = .tracer_destroy;
         defer self.rt.gc.phase = old_phase;
 
-        var reclaimed = self.destroyCondemned(false);
-        // The extent half of the young set. `destroyCondemned(false)` covers
-        // only the block/list carriers, and an extent is in neither; without
-        // this a short-lived >128 B string had to survive to the next major.
-        if (comptime gc.block_heap_enabled) reclaimed += string_mod.sweepYoungExtents(self.rt);
+        // The extent half of the young set, FIRST. `destroyCondemned(false)`
+        // covers only the block/list carriers, and an extent is in neither;
+        // without this a short-lived >128 B string had to survive to the next
+        // major. It runs before the close because it reads both structures the
+        // close retires (`young_extents` and the young bit).
+        var reclaimed: usize = 0;
+        if (comptime gc.block_heap_enabled) {
+            const published_before = self.rt.gc.generation.stats.young_publications;
+            reclaimed += string_mod.sweepYoungExtents(self.rt);
+            // What licenses running this before the close: an extent's death
+            // is an atom handshake plus a mapping return, and neither
+            // PUBLISHES. A GC publication here would be a young object the
+            // close is about to strand -- counted into a census that is about
+            // to be zeroed, on a young list that is about to be broken.
+            // (`young_count` cannot answer this on its own: a death here
+            // legitimately DECREMENTS it, via `forgetUnremembered`.)
+            std.debug.assert(self.rt.gc.generation.stats.young_publications == published_before);
+        }
+
+        // TGC S4-h (2): close the young generation BETWEEN the condemnation and
+        // the destruction slice, not after it.
+        //
+        // Trace-coupled retirement leaves nothing for a bulk promotion pass to
+        // do -- but it also leaves nothing to promote an object a DESTRUCTOR
+        // publishes (finalizer enqueue, FinalizationRegistry job bookkeeping).
+        // Closing first turns that from a hazard into the right answer: the
+        // young list, the young-block list and the census are all empty when
+        // the destructors run, so a sweep-time publication re-links its block
+        // and re-counts itself as what it is, a member of the NEXT young
+        // generation. (After the close it would otherwise be a cell with the
+        // young bit set, no block on the young list, and no census entry --
+        // invisible to the next minor and to `verifyGenerationInvariants`.)
+        // The diagnostic producer above does not clear survivor young bits as
+        // it walks (it only collects pointers), so that arm still needs the
+        // bulk pass. Production does not.
+        if (snapshot_doomed) promoteYoungSurvivorsInBulk(self.rt);
+        closeYoungGeneration(self.rt);
+
+        reclaimed += self.destroyCondemned(false);
         gc.listInit(&self.rt.gc.tmp_obj_list);
 
         // Survivors keep their marks: that is what makes them old.

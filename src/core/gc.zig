@@ -3725,8 +3725,13 @@ pub const Registry = struct {
     /// Non-block populations are deliberately excluded: the condemnation
     /// walk already retires those survivors, and clearing them here would
     /// break `young_head`'s exact-suffix invariant over `gc_obj_list`.
+    ///
+    /// TGC S4-h (2): minors run the same transaction. A minor's trace reads
+    /// the same header line for the same reason, and the walk it replaces --
+    /// `collectMinor`'s `objectIterator(.young)` promotion pass -- streamed
+    /// the `alloc_info` byte of EVERY allocated cell of every young block.
     pub inline fn retireTracedYoung(self: *Registry, h: *GCObjectHeader) void {
-        if (self.generation.major_retirement != .tracing) return;
+        if (!self.generation.retirementOpen()) return;
         // A header the tracer reached must be a published, un-condemned
         // object. Reaching anything else means a stale entry survived in the
         // frontier, and this function WRITES, so the consequence is silent
@@ -4547,6 +4552,7 @@ pub const Registry = struct {
     /// question, and an owned storage cell is not part of it -- see
     /// `kindIsOwnedStorageCell`.
     inline fn noteYoungPublicationCensus(self: *Registry, header: *const GCObjectHeader) void {
+        if (comptime std.debug.runtime_safety) self.generation.stats.young_publications +%= 1;
         self.generation.stats.young_count += 1;
         if (!kindIsOwnedStorageCell(header.metaConst().flags.kind)) {
             self.generation.stats.young_trigger_count += 1;

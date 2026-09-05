@@ -25,6 +25,12 @@ const gc = @import("gc.zig");
 pub const remembered_skip_audit = std.debug.runtime_safety;
 
 pub const Stats = struct {
+    /// Safety-build only (TGC S4-h (2)): monotone count of young publications.
+    /// `sweepUnmarkedYoung` asserts on it that the extent half of the sweep,
+    /// which runs BEFORE the young generation is closed, publishes nothing --
+    /// the census alone cannot answer that, because an extent's death
+    /// legitimately decrements it. Compiled out of ReleaseFast.
+    young_publications: usize = 0,
     young_count: usize = 0,
     /// The minor's SCHEDULING population: `young_count` minus the owned
     /// storage cells (`gc.kindIsOwnedStorageCell`). A property buffer, an
@@ -134,6 +140,14 @@ pub const MajorRetirement = enum {
 
 pub const State = struct {
     major_retirement: MajorRetirement = .clean,
+    /// TGC S4-h (2): a minor is inside its trace-coupled retirement window.
+    /// A minor promotes the same way a major does -- the trace clears the
+    /// young bit of every block cell it reaches -- so the retirement gate has
+    /// to admit both. It is a separate field rather than a fourth
+    /// `MajorRetirement` state because `minorsAllowed` and
+    /// `abandonMajorRetirement` are about the MAJOR's transaction and must
+    /// keep reading the enum alone.
+    minor_retirement: bool = false,
     remembered: std.AutoHashMapUnmanaged(usize, void) = .{},
     low_yield_streak: usize = 0,
     probe_backoff: usize = 1,
@@ -324,6 +338,38 @@ pub const State = struct {
 
     pub fn minorsAllowed(self: *const State) bool {
         return self.major_retirement == .clean;
+    }
+
+    /// The gate `Registry.retireTracedYoung` reads: is SOME collection's
+    /// retirement transaction open right now?
+    pub inline fn retirementOpen(self: *const State) bool {
+        return self.major_retirement == .tracing or self.minor_retirement;
+    }
+
+    /// TGC S4-h (2). Must be called before the minor's first shade, for the
+    /// same reason `beginMajorRetirement` must: the first shade can already
+    /// retire a block cell.
+    pub fn beginMinorRetirement(self: *State) void {
+        self.minor_retirement = true;
+    }
+
+    /// The minor reached its close: the young structures have been retired and
+    /// agree with the header bits again.
+    pub fn commitMinorRetirement(self: *State) void {
+        if (!self.minor_retirement) return;
+        self.minor_retirement = false;
+        self.stats.retirement_commits +|= 1;
+    }
+
+    /// The minor left before its close (an OOM in the trace). Some block cells
+    /// already read old while `young_count` and the young list still describe
+    /// them as young, which is exactly the split `abandonMajorRetirement`
+    /// exists for: keep minors closed until a major repairs it.
+    pub fn abandonMinorRetirement(self: *State) void {
+        if (!self.minor_retirement) return;
+        self.minor_retirement = false;
+        self.major_retirement = .needs_major;
+        self.stats.retirement_abandons +|= 1;
     }
 
     /// Minors this workload has run whose yield did not justify their cost.
