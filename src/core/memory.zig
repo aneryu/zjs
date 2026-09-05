@@ -855,7 +855,7 @@ pub const MemoryAccount = struct {
     inline fn noteAllocDiagnostics(
         self: *MemoryAccount,
         comptime is_create: bool,
-        comptime element_size: usize,
+        element_size: usize,
         count: usize,
         address: usize,
     ) void {
@@ -929,35 +929,81 @@ pub const MemoryAccount = struct {
         return self.allocInternalSlow(T, count, trigger_gc);
     }
 
+    /// Everything the two cold continuations used the comptime type for,
+    /// reduced to values. `allocInternalSlow` / `createInternalSlow` used to
+    /// be instantiated per T (62 + 30 copies, ~60k lines of the ReleaseFast
+    /// IR, every one of them cold); now each is a thin shell over
+    /// `allocSlowErased`, which exists once.
+    const SlowLayout = struct {
+        is_gc: bool,
+        /// Whole payload: `@sizeOf(T) * count` or `@sizeOf(T) + fam_bytes`.
+        payload_bytes: usize,
+        /// `@sizeOf(T)` (alloc) or the payload (create), for the diagnostics
+        /// trace only.
+        element_size: usize,
+        count: usize,
+        alignment: std.mem.Alignment,
+        /// `gcPrefixSize(T)` for a GC kind served standalone, else 0.
+        standalone_prefix: usize,
+        kind_tag: u8,
+        trigger_gc: bool,
+    };
+
     /// Cold continuation of `allocInternal`: arena refill, non-slab classes,
     /// and the slab-disabled/standalone-prefix routes. Re-running the limit
     /// check (and, on refill, the GC trigger request) here is idempotent.
-    noinline fn allocInternalSlow(self: *MemoryAccount, comptime T: type, count: usize, comptime trigger_gc: bool) ![]T {
+    inline fn allocInternalSlow(self: *MemoryAccount, comptime T: type, count: usize, comptime trigger_gc: bool) ![]T {
         const is_gc = comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "gc_kind_tag");
         if (comptime is_gc) std.debug.assert(count == 1);
         const payload_bytes = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
-        const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
-        const slab_index = if (self.small_slab_enabled) SmallObjectSlab.classIndex(payload_bytes, alignment) else null;
-        const prefix = if (comptime is_gc) (if (slab_index != null) 0 else gcPrefixSize(T)) else 0;
-        const bytes = prefix + payload_bytes;
+        const raw = try self.allocSlowErased(.{
+            .is_gc = is_gc,
+            .payload_bytes = payload_bytes,
+            .element_size = @sizeOf(T),
+            .count = count,
+            .alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T),
+            .standalone_prefix = if (comptime is_gc) gcPrefixSize(T) else 0,
+            .kind_tag = if (comptime is_gc) T.gc_kind_tag else 0,
+            .trigger_gc = trigger_gc,
+        }, false);
+        const ptr: [*]T = @ptrCast(@alignCast(raw));
+        return ptr[0..count];
+    }
+
+    /// The one cold allocation body behind `allocInternalSlow` and
+    /// `createInternalSlow`. `is_create` only selects the diagnostics
+    /// counter and the extent-tracking arm (`create` publishes an extent for
+    /// a GC kind; `alloc` never did).
+    noinline fn allocSlowErased(self: *MemoryAccount, l: SlowLayout, comptime is_create: bool) ![*]u8 {
+        const slab_index = if (self.small_slab_enabled) SmallObjectSlab.classIndex(l.payload_bytes, l.alignment) else null;
+        const prefix = if (l.is_gc) (if (slab_index != null) 0 else l.standalone_prefix) else 0;
+        const bytes = prefix + l.payload_bytes;
         try self.checkAllocation(bytes);
-        if (comptime trigger_gc) {
+        if (l.trigger_gc) {
             self.triggerGCBeforeAllocation(bytes);
         }
-        const raw = if (comptime is_gc)
-            try self.rawAllocForGc(bytes, alignment, slab_index)
+        const track_extent = comptime is_create and extent_tracking_enabled;
+        const carrier_reservation = if (comptime track_extent) (if (l.is_gc) try self.reserveGcExtent() else null) else {};
+        const raw = if (l.is_gc)
+            try self.rawAllocForGc(bytes, l.alignment, slab_index)
         else
-            try self.rawAlloc(bytes, alignment);
+            try self.rawAlloc(bytes, l.alignment);
         const obj_addr = @intFromPtr(raw) + prefix;
-        if (comptime is_gc) initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size), slab_index);
-        const ptr: [*]T = if (comptime is_gc)
-            @ptrFromInt(obj_addr)
-        else
-            @ptrCast(@alignCast(raw));
-        const slice = ptr[0..count];
-        self.creditAlloc(if (slab_index != null) payload_bytes else bytes, slab_index);
-        self.noteAllocDiagnostics(false, @sizeOf(T), count, @intFromPtr(slice.ptr));
-        return slice;
+        if (l.is_gc) initGcPrefixTagged(l.kind_tag, @ptrFromInt(obj_addr - gc_prefix_size), slab_index);
+        self.creditAlloc(if (slab_index != null) l.payload_bytes else bytes, slab_index);
+        if (comptime track_extent) {
+            if (carrier_reservation) |reservation| self.commitGcExtent(
+                reservation,
+                obj_addr,
+                @intFromPtr(raw),
+                l.payload_bytes,
+                bytes,
+                l.payload_bytes,
+                l.kind_tag,
+            );
+        }
+        self.noteAllocDiagnostics(is_create, l.element_size, l.count, obj_addr);
+        return @ptrFromInt(obj_addr);
     }
 
     pub fn free(self: *MemoryAccount, comptime T: type, slice: []T) void {
@@ -1347,6 +1393,13 @@ pub const MemoryAccount = struct {
         // The kind must stay inside the low nibble of the shared kind/flags
         // byte (gc.BlockFlags.kind).
         comptime std.debug.assert(T.gc_kind_tag <= gc_representation.kind_mask);
+        initGcPrefixTagged(T.gc_kind_tag, meta, slab_class);
+    }
+
+    /// `initGcPrefix` with the kind already reduced to its byte: the erased
+    /// slow paths carry the tag at runtime.
+    inline fn initGcPrefixTagged(kind_tag: u8, meta: [*]u8, slab_class: ?usize) void {
+        std.debug.assert(kind_tag <= gc_representation.kind_mask);
         // Exact-value stores (no memset-then-overwrite): size_class (bytes
         // 0..2, preserved when the slab header is overlaid), alloc_info + kind
         // as one u16 (byte order fixed by the gc.zig offset asserts), and the
@@ -1356,7 +1409,7 @@ pub const MemoryAccount = struct {
         if (slab_class == null) std.mem.writeInt(u16, meta[0..2], 0, .little);
         if (slab_class) |index| std.debug.assert(index <= alloc_info_class_mask);
         const info: u8 = if (slab_class) |index| @intCast(index) else alloc_info_standalone;
-        std.mem.writeInt(u16, meta[2..4], @as(u16, info) | (@as(u16, T.gc_kind_tag) << 8), .little);
+        std.mem.writeInt(u16, meta[2..4], @as(u16, info) | (@as(u16, kind_tag) << 8), .little);
         const initial_lifetime_word: u32 = 0;
         @as(*align(4) u32, @ptrCast(@alignCast(meta + 4))).* = initial_lifetime_word;
     }
@@ -1441,45 +1494,21 @@ pub const MemoryAccount = struct {
         return self.createInternalSlow(T, fam_bytes, trigger_gc);
     }
 
-    /// Cold continuation of `createInternal`: arena refill, non-slab classes,
-    /// and the slab-disabled/standalone-prefix routes. Re-running the limit
-    /// check (and, on refill, the GC trigger request) here is idempotent.
-    noinline fn createInternalSlow(self: *MemoryAccount, comptime T: type, comptime fam_bytes: usize, comptime trigger_gc: bool) !*T {
+    /// Cold continuation of `createInternal`; see `allocSlowErased`.
+    inline fn createInternalSlow(self: *MemoryAccount, comptime T: type, comptime fam_bytes: usize, comptime trigger_gc: bool) !*T {
         const is_gc = comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "gc_kind_tag");
         const payload_size = comptime @sizeOf(T) + fam_bytes;
-        const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
-        const slab_index = if (self.small_slab_enabled) SmallObjectSlab.classIndex(payload_size, alignment) else null;
-        const prefix = if (comptime is_gc) (if (slab_index != null) 0 else gcPrefixSize(T)) else 0;
-        const bytes = prefix + payload_size;
-        try self.checkAllocation(bytes);
-        if (comptime trigger_gc) {
-            self.triggerGCBeforeAllocation(bytes);
-        }
-        const carrier_reservation = if (comptime is_gc and extent_tracking_enabled)
-            try self.reserveGcExtent()
-        else {};
-        const raw = if (comptime is_gc)
-            try self.rawAllocForGc(bytes, alignment, slab_index)
-        else
-            try self.rawAlloc(bytes, alignment);
-        const obj_addr = @intFromPtr(raw) + prefix;
-        if (comptime is_gc) initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size), slab_index);
-        const ptr: *T = if (comptime is_gc)
-            @ptrFromInt(obj_addr)
-        else
-            @ptrCast(@alignCast(raw));
-        self.creditAlloc(if (slab_index != null) payload_size else bytes, slab_index);
-        if (comptime is_gc and extent_tracking_enabled) self.commitGcExtent(
-            carrier_reservation,
-            obj_addr,
-            @intFromPtr(raw),
-            payload_size,
-            bytes,
-            payload_size,
-            T.gc_kind_tag,
-        );
-        self.noteAllocDiagnostics(true, payload_size, 1, @intFromPtr(ptr));
-        return ptr;
+        const raw = try self.allocSlowErased(.{
+            .is_gc = is_gc,
+            .payload_bytes = payload_size,
+            .element_size = payload_size,
+            .count = 1,
+            .alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T),
+            .standalone_prefix = if (comptime is_gc) gcPrefixSize(T) else 0,
+            .kind_tag = if (comptime is_gc) T.gc_kind_tag else 0,
+            .trigger_gc = trigger_gc,
+        }, true);
+        return @ptrCast(@alignCast(raw));
     }
 
     pub fn destroy(self: *MemoryAccount, comptime T: type, ptr: *T) void {
@@ -2086,7 +2115,7 @@ pub const MemoryAccount = struct {
         self.backing_allocator.rawFree(bytes, alignment, @returnAddress());
     }
 
-    fn traceAlloc(self: *MemoryAccount, comptime element_size: usize, count: usize, address: usize) void {
+    fn traceAlloc(self: *MemoryAccount, element_size: usize, count: usize, address: usize) void {
         const writer = self.trace_writer orelse return;
         if (self.trace_failed) return;
         const bytes = element_size * count;
