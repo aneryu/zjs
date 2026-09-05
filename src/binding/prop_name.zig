@@ -1,7 +1,7 @@
 //! Embedder-facing stable property-name ids backed by Runtime atoms.
 //!
-//! `internStatic` returns one owned atom reference and the binding state must
-//! call `release` against the same Runtime. Property operations borrow the id;
+//! `internStatic` pins the atom for the host and the binding state must call
+//! `release` against the same Runtime (TGC S3 §2.5: `host_pins`). Property operations borrow the id;
 //! reads return the Object getter's owned JSValue result. The extern 32-bit
 //! representation is part of the plugin ABI and deliberately exposes no core
 //! Atom type. This binding helper may import core but, like all binding code,
@@ -25,15 +25,14 @@ pub const PropNameID = extern struct {
     pub fn internStatic(rt: *core.JSRuntime, name: []const u8) !PropNameID {
         const id = try rt.internAtom(name);
         // TGC S3 §2.5: an embedder handle is a root the tracer cannot see, so
-        // it is counted explicitly. Runs beside the `ref_count` the same call
-        // still takes; `host_pins` becomes the only count in S3-c.
+        // it is counted explicitly. `host_pins` is the only count the table
+        // still keeps.
         rt.atoms.pinForHost(id);
         return .{ .value = id };
     }
 
     pub fn release(self: PropNameID, rt: *core.JSRuntime) void {
         rt.atoms.unpinForHost(raw(self));
-        rt.atoms.free(raw(self));
     }
 
     pub fn eql(self: PropNameID, other: PropNameID) bool {

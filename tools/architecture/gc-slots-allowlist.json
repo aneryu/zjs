@@ -1147,14 +1147,6 @@
     },
     {
       "file": "src/core/runtime.zig",
-      "struct": "DeferredWeakValueFree",
-      "field": "value",
-      "type": "JSValue",
-      "kind": "mutable",
-      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
-    },
-    {
-      "file": "src/core/runtime.zig",
       "struct": "JSRuntime",
       "field": "constructing_context_head",
       "type": "?*context_mod.JSContext",

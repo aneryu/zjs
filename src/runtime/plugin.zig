@@ -453,7 +453,6 @@ fn installSource(ctx: *core.JSContext, target_value: core.JSValue, path: []const
     const atoms = try rt.memory.alloc(core.Atom, bindings.len);
     defer rt.memory.free(core.Atom, atoms);
     var atom_count: usize = 0;
-    defer releaseAtoms(rt, atoms[0..atom_count]);
     // TGC S3 §4 class B: `atoms` is a native array, invisible to both the
     // value-root frames and the conservative scan. Root only the filled
     // prefix -- the tail is still `undefined` -- and extend it as ids land.
@@ -816,9 +815,6 @@ fn rollbackDefinedProperties(rt: *core.JSRuntime, target: *core.Object, atoms: [
     }
 }
 
-fn releaseAtoms(rt: *core.JSRuntime, atoms: []const core.Atom) void {
-    for (atoms) |atom_id| rt.atoms.free(atom_id);
-}
 
 fn errorFromStatus(status: ffi.Status) anyerror {
     return switch (status) {
@@ -926,7 +922,6 @@ test "runtime Plugin rejects foreign install and unload before mutation" {
     };
 
     const noop_atom = try rt.internAtom("noop");
-    defer rt.atoms.free(noop_atom);
     const memory_before = rt.memory.allocated_bytes;
     var attempt = Attempt{
         .ctx = ctx,
@@ -979,7 +974,6 @@ test "runtime Plugin installs synchronous bindings on an ordinary target" {
     try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{});
 
     const add_atom = try rt.internAtom("add");
-    defer rt.atoms.free(add_atom);
     const add_descriptor = (try target.getOwnProperty(rt, add_atom)) orelse return error.TestExpectedEqual;
     try std.testing.expect(add_descriptor.value.isObject());
     try std.testing.expectEqual(true, add_descriptor.writable.?);
@@ -998,7 +992,6 @@ test "runtime Plugin installs synchronous bindings on an ordinary target" {
     try std.testing.expectEqual(@as(i32, 2), (try add_object.getProperty(core.atom.ids.length)).asInt32().?);
 
     const default_length_atom = try rt.internAtom("defaultLength");
-    defer rt.atoms.free(default_length_atom);
     const default_length_value = try target.getProperty(default_length_atom);
     const default_length_object = core.Object.fromHeader(default_length_value.refHeader().?);
     try std.testing.expectEqual(core.host_function.ids.external_host, default_length_object.hostFunctionKindSlot().*);
@@ -1008,12 +1001,10 @@ test "runtime Plugin installs synchronous bindings on an ordinary target" {
     try std.testing.expect(!global.hasOwnProperty(add_atom));
     try std.testing.expect(!global.hasOwnProperty(default_length_atom));
     const plugin_name_atom = try rt.internAtom("runtime-test");
-    defer rt.atoms.free(plugin_name_atom);
     try std.testing.expect(!global.hasOwnProperty(plugin_name_atom));
     try std.testing.expect(!target.hasOwnProperty(plugin_name_atom));
 
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("native.add(2, 5)", .{});
@@ -1125,7 +1116,6 @@ test "runtime Plugin loads a dynamic library and installs its binding" {
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("native.add(20, 22)", .{});
@@ -1157,7 +1147,6 @@ test "runtime Plugin load owns a path copy independent from caller storage" {
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("native.add(4, 6)", .{});
@@ -1190,10 +1179,8 @@ test "runtime Plugin treats repeated loads of the same path as independent insta
 
     const global = try ctx.globalObject();
     const left_atom = try rt.internAtom("left");
-    defer rt.atoms.free(left_atom);
     try global.defineOwnProperty(rt, left_atom, core.Descriptor.data(left_value, true, true, true));
     const right_atom = try rt.internAtom("right");
-    defer rt.atoms.free(right_atom);
     try global.defineOwnProperty(rt, right_atom, core.Descriptor.data(right_value, true, true, true));
 
     const result = try ctx.eval("left.add(1, 2) + right.add(10, 20)", .{});
@@ -1216,7 +1203,6 @@ test "runtime Plugin accepts empty descriptors as no-op installs" {
     const target_value = target.value();
 
     const sentinel_atom = try rt.internAtom("sentinel");
-    defer rt.atoms.free(sentinel_atom);
     try target.defineOwnProperty(rt, sentinel_atom, core.Descriptor.data(core.JSValue.int32(17), false, false, true));
 
     try plugin.install(ctx.core, target_value, .{});
@@ -1247,7 +1233,6 @@ test "runtime Plugin install consumes the loaded handle even when install fails"
     const target_value = target.value();
 
     const add_atom = try rt.internAtom("add");
-    defer rt.atoms.free(add_atom);
     try target.defineOwnProperty(rt, add_atom, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
 
     try std.testing.expectError(error.PropertyAlreadyExists, plugin.install(ctx.core, target_value, .{}));
@@ -1353,7 +1338,6 @@ test "runtime Plugin install ignores inherited binding-name properties" {
     defer ctx.destroy();
 
     const key = try rt.internAtom("shadowed");
-    defer rt.atoms.free(key);
 
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
     try prototype.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
@@ -1390,13 +1374,11 @@ test "runtime Plugin install prechecks conflicts before mutating target" {
     const target_value = target.value();
 
     const add_atom = try rt.internAtom("add");
-    defer rt.atoms.free(add_atom);
     try target.defineOwnProperty(rt, add_atom, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
 
     try std.testing.expectError(error.PropertyAlreadyExists, installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{}));
 
     const mul_atom = try rt.internAtom("mul");
-    defer rt.atoms.free(mul_atom);
     try std.testing.expect(!target.hasOwnProperty(mul_atom));
 }
 
@@ -1428,7 +1410,6 @@ test "runtime Plugin install rejects duplicate binding names before mutating tar
     try std.testing.expectEqual(before_records, rt.external_host_functions.len);
 
     const dup_atom = try rt.internAtom("dup");
-    defer rt.atoms.free(dup_atom);
     try std.testing.expect(!target.hasOwnProperty(dup_atom));
 }
 
@@ -1451,7 +1432,6 @@ test "runtime Plugin install rejects non-configurable overwrite" {
     const target_value = target.value();
 
     const add_atom = try rt.internAtom("add");
-    defer rt.atoms.free(add_atom);
     try target.defineOwnProperty(rt, add_atom, core.Descriptor.data(core.JSValue.int32(1), true, true, false));
 
     try std.testing.expectError(error.IncompatibleDescriptor, installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{ .overwrite = true }));
@@ -1477,7 +1457,6 @@ test "runtime Plugin overwrite replaces configurable own properties" {
     const target_value = target.value();
 
     const add_atom = try rt.internAtom("add");
-    defer rt.atoms.free(add_atom);
     try target.defineOwnProperty(rt, add_atom, core.Descriptor.data(core.JSValue.int32(1), false, false, true));
 
     try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{ .overwrite = true });
@@ -1490,7 +1469,6 @@ test "runtime Plugin overwrite replaces configurable own properties" {
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("native.add()", .{});
@@ -1505,8 +1483,6 @@ test "runtime Plugin rollback restores overwritten descriptors" {
 
     const add_atom = try rt.internAtom("add");
     const mul_atom = try rt.internAtom("mul");
-    defer rt.atoms.free(add_atom);
-    defer rt.atoms.free(mul_atom);
 
     try target.defineOwnProperty(rt, add_atom, core.Descriptor.data(core.JSValue.int32(1), false, false, true));
 
@@ -1630,10 +1606,8 @@ test "runtime Plugin install tombstones external host records on binding prepara
     try std.testing.expectError(error.BindingLengthOverflow, installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{}));
 
     const ok_atom = try rt.internAtom("ok");
-    defer rt.atoms.free(ok_atom);
     try std.testing.expect(!target.hasOwnProperty(ok_atom));
     const too_long_atom = try rt.internAtom("tooLong");
-    defer rt.atoms.free(too_long_atom);
     try std.testing.expect(!target.hasOwnProperty(too_long_atom));
 
     try std.testing.expectEqual(base_external_count + 1, rt.external_host_functions.len);
@@ -1695,7 +1669,6 @@ test "runtime Plugin install resolves prop-name descriptors without mutating tar
     const target_value = target.value();
     try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{});
     const cached_atom = try rt.internAtom("cached");
-    defer rt.atoms.free(cached_atom);
     try std.testing.expect(!target.hasOwnProperty(cached_atom));
 }
 
@@ -1736,7 +1709,6 @@ test "runtime Plugin exposes resolved prop-name descriptors through HostServices
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const name = try ctx.eval("native.name()", .{});
@@ -1772,7 +1744,6 @@ test "runtime Plugin call copies error_message into thrown JS error" {
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("try { native.fail(); 'missing'; } catch (e) { e.name + ':' + e.message; }", .{});
@@ -1822,7 +1793,6 @@ test "runtime Plugin status without messages maps to JavaScript error classes" {
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval(
@@ -1863,7 +1833,6 @@ test "runtime Plugin failed raw CallFrame calls do not free borrowed result valu
     try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{});
 
     const fail_atom = try rt.internAtom("fail");
-    defer rt.atoms.free(fail_atom);
     const fail_value = try target.getProperty(fail_atom);
 
     const sentinel = try core.Object.create(rt, core.class.ids.object, null);
@@ -1897,7 +1866,6 @@ test "runtime Plugin maps unknown status values to generic errors" {
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("try { native.fail(); 'missing'; } catch (e) { e.name + ':' + e.message; }", .{});
@@ -1929,7 +1897,6 @@ test "runtime Plugin ignores invalid non-empty error messages" {
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("try { native.fail(); 'missing'; } catch (e) { e.name + ':' + e.message; }", .{});
@@ -1963,7 +1930,6 @@ test "runtime Plugin invalid utf8 error messages fall back to status names" {
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("try { native.fail(); 'missing'; } catch (e) { e.name + ':' + e.message; }", .{});
@@ -1997,7 +1963,6 @@ test "runtime Plugin treats ok return with non-ok frame error_status as failure"
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("try { native.fail(); 'missing'; } catch (e) { e.name + ':' + e.message; }", .{});
@@ -2028,7 +1993,6 @@ test "runtime Plugin out_of_memory status materializes the runtime OOM exception
     try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{});
 
     const fail_atom = try rt.internAtom("fail");
-    defer rt.atoms.free(fail_atom);
     const fail_value = try target.getProperty(fail_atom);
 
     try std.testing.expect(!ctx.hasException());
@@ -2065,7 +2029,6 @@ test "runtime Plugin pending_exception preserves an existing pending exception" 
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("try { native.fail(); 'missing'; } catch (e) { e; }", .{});
@@ -2097,7 +2060,6 @@ test "runtime Plugin pending_exception without a pending value maps to generic e
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("try { native.fail(); 'missing'; } catch (e) { e.name + ':' + e.message; }", .{});
@@ -2129,7 +2091,6 @@ test "runtime Plugin pending_exception without a pending value ignores error mes
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("try { native.fail(); 'missing'; } catch (e) { e.name + ':' + e.message; }", .{});
@@ -2180,7 +2141,6 @@ test "runtime Plugin create opaque service rejects invalid host objects as TypeE
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval(
@@ -2247,7 +2207,6 @@ test "runtime Plugin unwrap opaque service reports expected and actual type diag
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval(
@@ -2321,7 +2280,6 @@ test "runtime Plugin nullable opaque references are represented as JS null" {
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("native.makeMaybe(false) === null && native.check(native.makeMaybe(true))", .{});
@@ -2380,7 +2338,6 @@ test "runtime Plugin host services create and unwrap opaque host objects" {
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval("native.check(native.make())", .{});
@@ -2493,12 +2450,14 @@ test "runtime Plugin finalizer reentry mutates, allocates, and does not nest GC"
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const target_value = target.value();
-    const mutation_atom = try rt.internAtom("finalizerReentered");
-    defer rt.atoms.free(mutation_atom);
-    const payload_read_atom = try rt.internAtom("payloadRead");
-    defer rt.atoms.free(payload_read_atom);
-    const payload_mutation_atom = try rt.internAtom("payloadMutated");
-    defer rt.atoms.free(payload_mutation_atom);
+    var mutation_atom = try rt.internAtom("finalizerReentered");
+    var payload_read_atom = try rt.internAtom("payloadRead");
+    var payload_mutation_atom = try rt.internAtom("payloadMutated");
+    // TGC S3-c: these ids live on the native `State` below and are used after
+    // the forced major, so they need a declared root.
+    var atom_roots = core.runtime.rootAtoms(.{ &mutation_atom, &payload_read_atom, &payload_mutation_atom });
+    atom_roots.activate(rt);
+    defer atom_roots.deactivate(rt);
 
     const payload_child = try core.Object.create(rt, core.class.ids.object, null);
     try payload_child.defineOwnProperty(
@@ -2532,7 +2491,6 @@ test "runtime Plugin finalizer reentry mutates, allocates, and does not nest GC"
     try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{});
 
     const make_atom = try rt.internAtom("make");
-    defer rt.atoms.free(make_atom);
     const make_value = try target.getProperty(make_atom);
     _ = try exec.call.callValue(ctx.core, null, make_value, &.{});
 
@@ -2632,7 +2590,6 @@ test "runtime Plugin deferred opaque wrapper finalizers keep traced payload root
     try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{});
 
     const make_atom = try rt.internAtom("make");
-    defer rt.atoms.free(make_atom);
     const make_value = try target.getProperty(make_atom);
 
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
@@ -2855,7 +2812,6 @@ test "runtime Plugin cycle finalizer skips condemned Realm and clears remaining 
         ffi.OpaqueHostObject.from(@ptrCast(&state), State.type_id),
     );
     const wrapper_atom = try rt.internAtom("__opaqueCondemnedRealmWrapper");
-    defer rt.atoms.free(wrapper_atom);
     const dead_global = try dead.globalObject();
     try dead_global.defineOwnProperty(rt, wrapper_atom, core.Descriptor.data(wrapper, true, true, true));
 
@@ -2938,7 +2894,6 @@ test "runtime Plugin runtime destroy drains opaque wrapper finalizers exactly on
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
 
-    rt.atoms.free(make_atom);
     ctx.destroy();
     rt.destroy();
 
@@ -2994,7 +2949,6 @@ test "runtime Plugin host-owned opaque wrappers can trace without taking ownersh
     try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{});
 
     const make_atom = try rt.internAtom("make");
-    defer rt.atoms.free(make_atom);
     const make_value = try target.getProperty(make_atom);
 
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
@@ -3072,7 +3026,6 @@ test "runtime Plugin opaque wrappers expose only reference branding" {
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
-    defer rt.atoms.free(native_atom);
     try global.defineOwnProperty(rt, native_atom, core.Descriptor.data(target_value, true, true, true));
 
     const result = try ctx.eval(
@@ -3144,10 +3097,8 @@ test "runtime Plugin unwrap accepts opaque wrappers from another plugin with the
 
     const global = try ctx.globalObject();
     const producer_atom = try rt.internAtom("producer");
-    defer rt.atoms.free(producer_atom);
     try global.defineOwnProperty(rt, producer_atom, core.Descriptor.data(producer_value, true, true, true));
     const consumer_atom = try rt.internAtom("consumer");
-    defer rt.atoms.free(consumer_atom);
     try global.defineOwnProperty(rt, consumer_atom, core.Descriptor.data(consumer_value, true, true, true));
 
     const result = try ctx.eval("consumer.check(producer.make())", .{});
@@ -3188,7 +3139,6 @@ test "runtime Plugin unwrap rejects opaque wrappers from another runtime" {
     try installDescriptorForTesting(ctx_a, target_a_value, Producer.descriptor(), .{});
 
     const make_atom = try rt_a.internAtom("make");
-    defer rt_a.atoms.free(make_atom);
     const make_value = try target_a.getProperty(make_atom);
     const wrapper_a = try exec.call.callValue(ctx_a.core, null, make_value, &.{});
 

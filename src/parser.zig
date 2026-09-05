@@ -25,17 +25,15 @@ pub const diagnostics = struct {
                 .memory = account,
                 .atoms = atoms,
                 .message = owned,
-                .filename = atoms.dup(filename),
+                .filename = filename,
                 .position = position,
             };
         }
 
         pub fn deinit(self: *SyntaxError) void {
-            const filename = self.filename;
             const message = self.message;
             self.filename = atom.null_atom;
             self.message = &.{};
-            if (filename != atom.null_atom) self.atoms.free(filename);
             if (message.len != 0) self.memory.free(u8, message);
         }
     };
@@ -851,12 +849,16 @@ pub const parser_core = struct {
         /// TGC S3-b §2.2: interval root for every atom this parse obtains.
         /// Detached at construction because `initRootEmitter` returns the
         /// `State` by value -- the provider stores `&self`, so registration
-        /// waits for `activateAtomScope`, which the owner calls once the
+        /// waits for `activateCompileRoots`, which the owner calls once the
         /// state sits at its final address (the `ReplaceMatchRoots.activate`
         /// convention). A state that never activates records nothing and
         /// costs nothing; production compiles are additionally covered by the
         /// outer scope `compile_entry.compile` opens.
         atom_scope: atom_module.CompileAtomScope,
+
+        /// TGC S3-b: set while this state's compile-value root provider is
+        /// registered. See `traceCompileValueRoots`.
+        compile_value_roots_registered: bool = false,
 
         /// Ephemeral declaration-conflict indices keyed by the FunctionDef
         /// being parsed. They accelerate only parser-time collision queries
@@ -935,7 +937,7 @@ pub const parser_core = struct {
                 .emit_to_function_def = emit_root_to_function_def,
             };
             errdefer state.function_def.deinitInitFailure();
-            state.function_def.atoms.replace(&state.function_def.script_or_module, function.script_or_module);
+            state.function_def.script_or_module = function.script_or_module;
             state.function_def.line_num = 1;
             state.function_def.col_num = 1;
             // A standalone ParseState represents a script/eval-program root,
@@ -1000,13 +1002,15 @@ pub const parser_core = struct {
         /// be released. `anytype` matches `Bytecode.deinit`'s signature
         /// so callers pass their existing runtime pointer.
         pub fn deinit(self: *State, rt: anytype) void {
+            // First: every step below can free a FunctionDef the value
+            // provider walks. The atom scope is the opposite -- it goes last,
+            // because teardown still hands atom ids back to the table.
+            self.deactivateCompileValueRoots();
             self.deinitDeclarationConflictIndices();
-            if (self.current_namespace_atom) |atom_id| {
-                self.function.atoms.free(atom_id);
+            if (self.current_namespace_atom) |_| {
                 self.current_namespace_atom = null;
             }
-            if (self.last_declared_atom) |atom_id| {
-                self.function.atoms.free(atom_id);
+            if (self.last_declared_atom) |_| {
                 self.last_declared_atom = null;
             }
             if (self.source_line_starts.len != 0) {
@@ -1065,22 +1069,76 @@ pub const parser_core = struct {
             self.atom_scope.deinit();
         }
 
-        /// TGC S3-b: register this parse's atom-root provider. Must be called
-        /// exactly once, after the `State` reached its final address and
-        /// before the first token is consumed by a caller-driven parse step.
-        pub fn activateAtomScope(self: *State) Error!void {
+        /// TGC S3-b: precise root for everything GC-typed this compile holds.
+        ///
+        /// Between the first token and `createFunctionBytecode` the compile
+        /// owns real GC cells -- a RegExp literal's two strings, every tagged
+        /// template's frozen array pair, and one `FunctionBytecode` per nested
+        /// function -- and parks all of them in `[]JSValue` cpools hanging off
+        /// Zig-heap `FunctionDef`s (see `FunctionDef.traceCompileRoots` for the
+        /// full inventory). Nothing on the stack points at those arrays and no
+        /// tracer edge reaches them until the artifact is published, so a major
+        /// landing mid-compile frees cells the finalizer is about to read --
+        /// with the provider dropped, the tagged-template test in
+        /// `compiler/tests.zig` aborts on exactly that.
+        ///
+        /// Three storages, because a def can be in exactly one of three states
+        /// and only the first is reachable from the root def:
+        ///   * finished nested defs, linked into their parent's `child_list`
+        ///     (walked recursively from `function_def`);
+        ///   * defs currently being parsed, on `cur_func_stack` -- `addChild`
+        ///     runs only at the END of `parseFunctionBody`, long after
+        ///     `pushFunction`, so for the whole body these are reachable
+        ///     nowhere else;
+        ///   * defs abandoned by speculative rollback, on `discarded_func_head`
+        ///     -- unlinked from the tree but still owning their cpool until
+        ///     `State.deinit`.
+        fn traceCompileValueRoots(self: *State, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+            try self.function.traceCompileRoots(visitor);
+            try self.function_def.traceCompileRoots(visitor);
+            for (self.cur_func_stack) |fd| try fd.traceCompileRoots(visitor);
+            var discarded = self.discarded_func_head;
+            while (discarded) |fd| : (discarded = fd.discard_next) {
+                try fd.traceCompileRoots(visitor);
+            }
+        }
+
+        fn traceCompileValueRootsThunk(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+            const self: *State = @ptrCast(@alignCast(context));
+            try self.traceCompileValueRoots(visitor);
+        }
+
+        fn compileValueRootProvider(self: *State) core.runtime.RootProvider {
+            return .{ .context = @ptrCast(self), .trace = traceCompileValueRootsThunk };
+        }
+
+        /// TGC S3-b: register this parse's atom-root and value-root providers.
+        /// Must be called exactly once, after the `State` reached its final
+        /// address (both providers store `&self`) and before the first
+        /// caller-driven parse step.
+        pub fn activateCompileRoots(self: *State) Error!void {
             self.atom_scope.activate() catch return error.OutOfMemory;
+            if (self.runtime) |rt| {
+                if (comptime core.runtime.value_root_frames_enabled) {
+                    rt.registerRootProvider(self.compileValueRootProvider()) catch return error.OutOfMemory;
+                    self.compile_value_roots_registered = true;
+                }
+            }
+        }
+
+        fn deactivateCompileValueRoots(self: *State) void {
+            if (!self.compile_value_roots_registered) return;
+            self.compile_value_roots_registered = false;
+            self.runtime.?.unregisterRootProvider(self.compileValueRootProvider());
         }
 
         fn setCurrentNamespaceAtom(self: *State, atom_id: ?Atom) void {
-            const replacement = if (atom_id) |atom| self.function.atoms.dup(atom) else null;
-            if (self.current_namespace_atom) |old| self.function.atoms.free(old);
+            const replacement = if (atom_id) |atom| atom else null;
             self.current_namespace_atom = replacement;
         }
 
         fn setLastDeclaredAtom(self: *State, atom_id: Atom) void {
-            const replacement = self.function.atoms.dup(atom_id);
-            if (self.last_declared_atom) |old| self.function.atoms.free(old);
+            const replacement = atom_id;
             self.last_declared_atom = replacement;
         }
 
@@ -2271,7 +2329,7 @@ pub const parser_core = struct {
             const kind = s.peekKind();
             const atom_id = identifierLikeAtom(s);
             if (kind == tok.TOK_IDENT and escapedIdentifierIsReservedWordForCurrentContext(s, atom_id, s.token.payload.ident.has_escape)) return null;
-            return s.function.atoms.dup(atom_id);
+            return atom_id;
         }
 
         fn isReservedLabelIdentifier(s: *State, atom_id: Atom) bool {
@@ -2367,7 +2425,6 @@ pub const parser_core = struct {
         fn truncateClassPrivateElements(self: *State, len: usize) void {
             var i = len;
             while (i < self.class_private_elements.items.len) : (i += 1) {
-                self.function.atoms.free(self.class_private_elements.items[i].atom);
             }
             self.class_private_elements.shrinkRetainingCapacity(len);
         }
@@ -2375,7 +2432,6 @@ pub const parser_core = struct {
         fn truncateClassPrivateBoundNames(self: *State, len: usize) void {
             var i = len;
             while (i < self.class_private_bound_names.items.len) : (i += 1) {
-                self.function.atoms.free(self.class_private_bound_names.items[i]);
             }
             self.class_private_bound_names.shrinkRetainingCapacity(len);
         }
@@ -4333,10 +4389,9 @@ pub const parser_core = struct {
         // it. Keep a local owner instead, so anonymous-function naming does
         // not depend on that downstream operand's lifetime.
         const direct_lhs_atom: ?Atom = if (s.peekKind() == tok.TOK_IDENT)
-            s.function.atoms.dup(s.token.payload.ident.atom)
+            s.token.payload.ident.atom
         else
             null;
-        defer if (direct_lhs_atom) |atom_id| s.function.atoms.free(atom_id);
 
         try parseCondExpr(s, flags);
 
@@ -4501,9 +4556,8 @@ pub const parser_core = struct {
         depth: u8,
         invalid_call: bool = false,
 
-        fn deinit(self: *LValue, s: *State) void {
+        fn deinit(self: *LValue, _: *State) void {
             if (self.owns_name) {
-                s.function.atoms.free(self.name);
                 self.owns_name = false;
             }
         }
@@ -4637,18 +4691,18 @@ pub const parser_core = struct {
                 std.debug.assert(s.emit_phase1_temp);
                 // qjs get_lvalue (quickjs.c:26009-26013): re-emit the retained
                 // scope getter while preserving the assignment target.
-                try emitterAtomOpU16OwnedNoSource(s, opcode.op.scope_get_var, s.function.atoms.dup(lvalue.name), lvalue.scope);
+                try emitterAtomOpU16OwnedNoSource(s, opcode.op.scope_get_var, lvalue.name, lvalue.scope);
             },
             .field => {
                 // qjs get_lvalue (quickjs.c:26015-26018): get_field2 preserves
                 // the base object beneath the loaded value.
-                try emitterAtomOpOwnedNoSource(s, opcode.op.get_field2, s.function.atoms.dup(lvalue.name));
+                try emitterAtomOpOwnedNoSource(s, opcode.op.get_field2, lvalue.name);
             },
             .private_field => {
                 std.debug.assert(s.emit_phase1_temp);
                 // qjs get_lvalue (quickjs.c:26019-26023): the private-field
                 // getter retains its base and phase-1 scope operand.
-                try emitterAtomOpU16OwnedNoSource(s, opcode.op.scope_get_private_field2, s.function.atoms.dup(lvalue.name), lvalue.scope);
+                try emitterAtomOpU16OwnedNoSource(s, opcode.op.scope_get_private_field2, lvalue.name, lvalue.scope);
             },
             .array_element => {
                 // qjs get_lvalue (quickjs.c:26024-26026): get_array_el3 keeps
@@ -4755,7 +4809,7 @@ pub const parser_core = struct {
                     // bump. The operand receives a borrowed duplicate; the descriptor keeps the
                     // retained atom (legacy emitScopeMakeRefForLValueAssumeCapacity contract).
                     const ref_label = try emitterNewLabel(s);
-                    try emitterScopeRefOp(s, opcode.op.scope_make_ref, s.function.atoms.dup(owned_name), ref_label, scope);
+                    try emitterScopeRefOp(s, opcode.op.scope_make_ref, owned_name, ref_label, scope);
                     lvalue.ref_label = ref_label;
                 }
             },
@@ -4852,7 +4906,6 @@ pub const parser_core = struct {
             // emit_label(label) — the ref target binds here, before the mode
             // shuffle; the bind is the provenance boundary the legacy arm expressed
             // as invalidateLastOpcode + deferred absolute publish.
-            s.function.atoms.free(lvalue.name);
             lvalue.owns_name = false;
             // qjs put_lvalue's emit_label is a physical matcher boundary even
             // after scope_make_ref consumes its auxiliary refcount. Preserve
@@ -4975,9 +5028,8 @@ pub const parser_core = struct {
         return !s.curFunc().arguments_allowed;
     }
 
-    fn appendRetainedAtom(list: *std.ArrayList(Atom), allocator: std.mem.Allocator, atoms: *atom_module.AtomTable, atom_id: Atom) Error!void {
-        const retained = atoms.dup(atom_id);
-        errdefer atoms.free(retained);
+    fn appendRetainedAtom(list: *std.ArrayList(Atom), allocator: std.mem.Allocator, _: *atom_module.AtomTable, atom_id: Atom) Error!void {
+        const retained = atom_id;
         try list.append(allocator, retained);
     }
 
@@ -5113,8 +5165,7 @@ pub const parser_core = struct {
         if (level == 4 and flags.in_accepted and s.peekKind() == tok.TOK_PRIVATE_NAME and s.peekNextKind() == tok.TOK_IN) {
             s.features.insert(.private_name);
             const private_atom = findClassPrivateBoundName(s, s.token.payload.ident.atom, 0) orelse return s.failUnexpectedToken();
-            const retained_private_atom = s.function.atoms.dup(private_atom);
-            defer s.function.atoms.free(retained_private_atom);
+            const retained_private_atom = private_atom;
             try s.advance();
             try s.expectToken(tok.TOK_IN);
             if ((try checkArrowHead(s)) or
@@ -5378,14 +5429,14 @@ pub const parser_core = struct {
         try emitterOp(s, opcode.op.iterator_next);
         if (is_async) try emitterOp(s, opcode.op.await);
         try emitterOp(s, opcode.op.iterator_check_object);
-        try emitterAtomOpOwned(s, opcode.op.get_field2, s.function.atoms.dup(done_atom));
+        try emitterAtomOpOwned(s, opcode.op.get_field2, done_atom);
         const label_next = try emitterNewLabel(s);
         try emitterJump(s, opcode.op.if_true, label_next);
 
         const yield_label = try emitterNewLabel(s);
         try emitterBindLabelRaw(s, yield_label);
         if (is_async) {
-            try emitterAtomOpOwned(s, opcode.op.get_field, s.function.atoms.dup(value_atom));
+            try emitterAtomOpOwned(s, opcode.op.get_field, value_atom);
             try emitterOp(s, opcode.op.async_yield_star);
         } else {
             try emitterOp(s, opcode.op.yield_star);
@@ -5408,10 +5459,10 @@ pub const parser_core = struct {
         try emitterJump(s, opcode.op.if_true, label_return1);
         if (is_async) try emitterOp(s, opcode.op.await);
         try emitterOp(s, opcode.op.iterator_check_object);
-        try emitterAtomOpOwned(s, opcode.op.get_field2, s.function.atoms.dup(done_atom));
+        try emitterAtomOpOwned(s, opcode.op.get_field2, done_atom);
         try emitterJump(s, opcode.op.if_false, yield_label);
 
-        try emitterAtomOpOwned(s, opcode.op.get_field, s.function.atoms.dup(value_atom));
+        try emitterAtomOpOwned(s, opcode.op.get_field, value_atom);
 
         try emitterBindLabel(s, label_return1);
         try emitterOp(s, opcode.op.nip);
@@ -5426,7 +5477,7 @@ pub const parser_core = struct {
         try emitterJump(s, opcode.op.if_true, label_throw1);
         if (is_async) try emitterOp(s, opcode.op.await);
         try emitterOp(s, opcode.op.iterator_check_object);
-        try emitterAtomOpOwned(s, opcode.op.get_field2, s.function.atoms.dup(done_atom));
+        try emitterAtomOpOwned(s, opcode.op.get_field2, done_atom);
         try emitterJump(s, opcode.op.if_false, yield_label);
         const goto_next = try emitterNewLabel(s);
         try emitterJump(s, opcode.op.goto, goto_next);
@@ -5437,11 +5488,11 @@ pub const parser_core = struct {
         try emitterJump(s, opcode.op.if_true, label_throw2);
         if (is_async) try emitterOp(s, opcode.op.await);
         try emitterBindLabel(s, label_throw2);
-        try emitterAtomOpU8Owned(s, opcode.op.throw_error, s.function.atoms.dup(atom_module.null_atom), 4);
+        try emitterAtomOpU8Owned(s, opcode.op.throw_error, atom_module.null_atom, 4);
 
         try emitterBindLabel(s, label_next);
         try emitterBindLabel(s, goto_next);
-        try emitterAtomOpOwned(s, opcode.op.get_field, s.function.atoms.dup(value_atom));
+        try emitterAtomOpOwned(s, opcode.op.get_field, value_atom);
         try emitterOp(s, opcode.op.nip);
         try emitterOp(s, opcode.op.nip);
         try emitterOp(s, opcode.op.nip);
@@ -5680,7 +5731,7 @@ pub const parser_core = struct {
                 if (pos + 1 != v2b.code_len) return Error.ParserInvariant;
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
-                try emitterAtomOpOwned(s, opcode.op.push_atom_value, s.function.atoms.dup(atom_module.ids.length));
+                try emitterAtomOpOwned(s, opcode.op.push_atom_value, atom_module.ids.length);
                 try emitterOp(s, opcode.op.delete);
                 try compactAppendedTailReplacement(s, snapshot, pos);
             },
@@ -5702,7 +5753,7 @@ pub const parser_core = struct {
                 if (pos + 1 != v2b.code_len) return Error.ParserInvariant;
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
-                try emitterAtomOpU8Owned(s, opcode.op.throw_error, s.function.atoms.dup(atom_module.null_atom), 3);
+                try emitterAtomOpU8Owned(s, opcode.op.throw_error, atom_module.null_atom, 3);
                 try compactAppendedTailReplacement(s, snapshot, pos);
             },
             else => return emitDeleteNonReference(s),
@@ -6164,7 +6215,6 @@ pub const parser_core = struct {
                     return s.failUnexpectedToken();
                 if (private_name and !s.in_class) return s.failUnexpectedToken();
                 const private_atom = if (private_name) try privateNameAtom(s, raw_name) else null;
-                defer if (private_atom) |atom_id| s.function.atoms.free(atom_id);
                 if (private_atom) |atom_id| {
                     if (!classPrivateNameIsBound(s, atom_id)) return s.failUnexpectedToken();
                 }
@@ -6221,7 +6271,6 @@ pub const parser_core = struct {
                     return s.failUnexpectedToken();
                 if (private_name and !s.in_class) return s.failUnexpectedToken();
                 const private_atom = if (private_name) try privateNameAtom(s, raw_name) else null;
-                defer if (private_atom) |atom_id| s.function.atoms.free(atom_id);
                 if (private_atom) |atom_id| {
                     if (s.last_was_super or !classPrivateNameIsBound(s, atom_id)) return s.failUnexpectedToken();
                 }
@@ -6285,7 +6334,6 @@ pub const parser_core = struct {
                         unreachable;
                     if (private_name and !s.in_class) return s.failUnexpectedToken();
                     const private_atom = if (private_name) try privateNameAtom(s, raw_name) else null;
-                    defer if (private_atom) |atom_id| s.function.atoms.free(atom_id);
                     if (private_atom) |atom_id| {
                         if (!classPrivateNameIsBound(s, atom_id)) return s.failUnexpectedToken();
                     }
@@ -6808,7 +6856,6 @@ pub const parser_core = struct {
                         return;
                     }
                     const concat_atom = try s.function.atoms.internString("concat");
-                    defer s.function.atoms.free(concat_atom);
                     try Emitter.opAtom(s, opcode.op.get_field2, concat_atom);
                 }
                 depth += 1;
@@ -6836,17 +6883,14 @@ pub const parser_core = struct {
 
     fn emitTaggedTemplateSingletonObject(s: *State, bytes: []const u8, raw_bytes: []const u8) Error!void {
         const cooked_atom = try s.function.atoms.internString(bytes);
-        defer s.function.atoms.free(cooked_atom);
         try Emitter.opAtom(s, opcode.op.push_atom_value, cooked_atom);
         try Emitter.opU16(s, opcode.op.array_from, 1);
 
         const raw_atom = try s.function.atoms.internString(raw_bytes);
-        defer s.function.atoms.free(raw_atom);
         try Emitter.opAtom(s, opcode.op.push_atom_value, raw_atom);
         try Emitter.opU16(s, opcode.op.array_from, 1);
 
         const raw_name = try s.function.atoms.internString("raw");
-        defer s.function.atoms.free(raw_name);
         try Emitter.opAtom(s, opcode.op.define_field, raw_name);
     }
 
@@ -6867,6 +6911,14 @@ pub const parser_core = struct {
         template_object: *core.Object,
         raw_array: *core.Object,
         depth: u32 = 0,
+        /// Test seam (TGC S3-b). `init` and `addPart` are the window in which
+        /// the two arrays and the per-part cooked/raw strings exist but the
+        /// template value has not yet reached a cpool slot, so the builder on
+        /// the parse stack is their only holder. Nothing an ordinary test can
+        /// do to the allocator schedules a collection reliably inside that
+        /// window, so the test asks for one directly and asserts the compile
+        /// still produces the right answer.
+        pub var force_gc_in_window_for_test: bool = false;
 
         fn init(rt: *core.JSRuntime) Error!TaggedTemplateObjectBuilder {
             // qjs js_parse_template builds the cooked/raw arrays with
@@ -6907,6 +6959,11 @@ pub const parser_core = struct {
                 core.Descriptor.data(cooked_value, true, true, true),
             ) catch return Error.ParserInvariant;
 
+            if (comptime @import("builtin").is_test) {
+                if (force_gc_in_window_for_test) {
+                    _ = self.rt.forceMajorGC(null) catch {};
+                }
+            }
             const raw = core.string.String.createUtf8(self.rt, raw_bytes) catch return Error.InvalidUtf8;
             const raw_value = raw.value();
             self.raw_array.defineOwnProperty(
@@ -6980,7 +7037,6 @@ pub const parser_core = struct {
                     var index_buf: [16]u8 = undefined;
                     const index_name = std.fmt.bufPrint(&index_buf, "{d}", .{sparse_index}) catch return Error.ParserInvariant;
                     const index_atom = try s.function.atoms.internString(index_name);
-                    defer s.function.atoms.free(index_atom);
                     try Emitter.opAtom(s, opcode.op.define_field, index_atom);
                     sparse_index += 1;
                 } else {
@@ -7097,7 +7153,6 @@ pub const parser_core = struct {
             }
             const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
             const name = name_info.atom;
-            defer if (name_info.retained) s.function.atoms.free(name);
             capacity_hint.noteStaticProperty(name);
             if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
             try emitObjectMethodFunction(s, null, .generator, property_source_start);
@@ -7129,7 +7184,6 @@ pub const parser_core = struct {
             }
             const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
             const name = name_info.atom;
-            defer if (name_info.retained) s.function.atoms.free(name);
             capacity_hint.noteStaticProperty(name);
             if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
             try emitObjectMethodFunction(s, null, func_kind, property_source_start);
@@ -7160,7 +7214,6 @@ pub const parser_core = struct {
 
         if (try parseObjectPropertyName(s)) |name_info| {
             const name = name_info.atom;
-            defer if (name_info.retained) s.function.atoms.free(name);
             const is_getter = !name_info.has_escape and atomNameEquals(s, name, "get");
             const is_setter = !name_info.has_escape and atomNameEquals(s, name, "set");
             // qjs js_parse_property_name retreats to a shorthand ident when
@@ -7231,7 +7284,6 @@ pub const parser_core = struct {
 
         const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
         const name = name_info.atom;
-        defer if (name_info.retained) s.function.atoms.free(name);
         capacity_hint.noteStaticProperty(name);
         if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
         try emitObjectMethodFunction(s, null, func_kind, source_start);
@@ -7252,11 +7304,10 @@ pub const parser_core = struct {
         var retained = false;
         var allow_shorthand = false;
         var has_escape = false;
-        errdefer if (retained) s.function.atoms.free(atom_id);
 
         if (k == tok.TOK_IDENT or (k == tok.TOK_AWAIT and canUseAwaitAsIdentifier(s))) {
             atom_id = if (k == tok.TOK_IDENT)
-                s.function.atoms.dup(s.token.payload.ident.atom)
+                s.token.payload.ident.atom
             else
                 tok.keywordAtom(k);
             retained = k == tok.TOK_IDENT;
@@ -7447,7 +7498,7 @@ pub const parser_core = struct {
     }
 
     fn identifierLikeAtomOwned(s: *State) Atom {
-        return s.function.atoms.dup(identifierLikeAtom(s));
+        return identifierLikeAtom(s);
     }
 
     fn identifierLikeHasInvalidEscapeForBinding(s: *State) bool {
@@ -7687,7 +7738,7 @@ pub const parser_core = struct {
     //
     // ATOM CONVENTION: atoms are BORROWED at this interface. The emitter
     // duplicates into the Builder ledger, which is what the construct arms
-    // used to spell as `s.function.atoms.dup(atom)` at the call site. The
+    // used to spell as `atom` at the call site. The
     // duplication moved, the ownership contract did not.
 
     /// QCP-1 P3: one patch-label identity.
@@ -7771,16 +7822,16 @@ pub const parser_core = struct {
             return emitterOpI32(s, op_id, val);
         }
         inline fn opAtom(s: *State, op_id: u8, atom_id: Atom) Error!void {
-            return emitterAtomOpOwned(s, op_id, s.function.atoms.dup(atom_id));
+            return emitterAtomOpOwned(s, op_id, atom_id);
         }
         inline fn opAtomU8(s: *State, op_id: u8, atom_id: Atom, val: u8) Error!void {
-            return emitterAtomOpU8Owned(s, op_id, s.function.atoms.dup(atom_id), val);
+            return emitterAtomOpU8Owned(s, op_id, atom_id, val);
         }
         inline fn opAtomU16(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
-            return s.builderEmitAtomOpU16Owned(op_id, s.function.atoms.dup(atom_id), val) catch |err| mapBuilderError(err);
+            return s.builderEmitAtomOpU16Owned(op_id, atom_id, val) catch |err| mapBuilderError(err);
         }
         inline fn opAtomU16NoSource(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
-            return emitterAtomOpU16OwnedNoSource(s, op_id, s.function.atoms.dup(atom_id), val);
+            return emitterAtomOpU16OwnedNoSource(s, op_id, atom_id, val);
         }
         inline fn pushConst(s: *State, value: JSValue) Error!void {
             return emitterPushConst(s, value);
@@ -9112,7 +9163,6 @@ pub const parser_core = struct {
 
     fn emitStringLiteralValue(s: *State, bytes: []const u8) Error!void {
         const atom_id = try s.function.atoms.internString(bytes);
-        defer s.function.atoms.free(atom_id);
 
         // QuickJS's emit_push_const(..., as_atom = true) keeps ordinary
         // string atoms as push_atom_value, but a canonical numeric name is a
@@ -9138,7 +9188,6 @@ pub const parser_core = struct {
         try s.expectToken(tok.TOK_ENUM);
         if (s.peekKind() != tok.TOK_IDENT) return s.failExpectedToken(tok.TOK_IDENT);
         const enum_atom = identifierLikeAtomOwned(s);
-        defer s.function.atoms.free(enum_atom);
 
         // Acquire the declaration owner before advance releases the token's
         // identifier retain (qjs next_token/free_token ownership order).
@@ -9167,8 +9216,7 @@ pub const parser_core = struct {
             // Member names are not declaration rows, so retain them explicitly
             // across advance until every atom-bearing emission has duplicated
             // its own owner.
-            const member_atom = s.function.atoms.dup(identifierLikeAtom(s));
-            defer s.function.atoms.free(member_atom);
+            const member_atom = identifierLikeAtom(s);
             try s.advance();
 
             const member_name = s.lex.atoms.name(member_atom) orelse "";
@@ -9260,7 +9308,6 @@ pub const parser_core = struct {
     fn parseNamespaceDeclarationWithIdent(s: *State) Error!void {
         if (s.peekKind() != tok.TOK_IDENT) return s.failExpectedToken(tok.TOK_IDENT);
         const ns_atom = identifierLikeAtomOwned(s);
-        defer s.function.atoms.free(ns_atom);
 
         // FunctionDef must own the name before advance releases the token.
         // Existing declarations already provide that owner.
@@ -9287,10 +9334,9 @@ pub const parser_core = struct {
             try s.pushScopeIdentity();
             const saved_in_namespace = s.in_namespace;
             const saved_namespace_atom = if (s.current_namespace_atom) |atom_id|
-                s.function.atoms.dup(atom_id)
+                atom_id
             else
                 null;
-            defer if (saved_namespace_atom) |atom_id| s.function.atoms.free(atom_id);
             s.in_namespace = true;
             s.setCurrentNamespaceAtom(ns_atom);
             defer {
@@ -9322,10 +9368,9 @@ pub const parser_core = struct {
         try s.pushScopeIdentity();
         const saved_in_namespace = s.in_namespace;
         const saved_namespace_atom = if (s.current_namespace_atom) |atom_id|
-            s.function.atoms.dup(atom_id)
+            atom_id
         else
             null;
-        defer if (saved_namespace_atom) |atom_id| s.function.atoms.free(atom_id);
         s.in_namespace = true;
         s.setCurrentNamespaceAtom(ns_atom);
         defer {
@@ -9398,7 +9443,6 @@ pub const parser_core = struct {
         if (s.labelStartAtomOwned()) |label_atom| {
             // LabelFrame deliberately does not own atoms, so this local owner
             // spans `advance()` and the complete labelled statement.
-            defer s.function.atoms.free(label_atom);
             if (s.isReservedLabelIdentifier(label_atom)) return s.failUnexpectedToken();
             if (s.hasActiveLabel(label_atom)) return s.failUnexpectedToken();
 
@@ -9566,7 +9610,7 @@ pub const parser_core = struct {
             return s.failUnexpectedToken();
         }
         const name_atom = (try parseClass(s, true)) orelse return s.failUnexpectedToken();
-        defer s.function.atoms.free(name_atom);
+        _ = name_atom;
     }
 
     fn parseIdentifierStatement(s: *State, decl_mask: DeclMask) Error!void {
@@ -9917,11 +9961,10 @@ pub const parser_core = struct {
             if (update_atoms.len != 0) {
                 saved_update_atoms = try s.function.memory.alloc(Atom, update_atoms.len);
                 for (update_atoms, saved_update_atoms) |atom_id, *slot| {
-                    slot.* = s.function.atoms.dup(atom_id);
+                    slot.* = atom_id;
                 }
             }
             defer if (saved_update_atoms.len != 0) {
-                for (saved_update_atoms) |atom_id| s.function.atoms.free(atom_id);
                 s.function.memory.free(Atom, saved_update_atoms);
             };
             // qjs TOK_FOR: the update block is moved after the body. v2 detach keeps
@@ -9975,11 +10018,10 @@ pub const parser_core = struct {
         const is_break = s.peekKind() == tok.TOK_BREAK;
         try s.advance();
         var label_atom: ?Atom = null;
-        defer if (label_atom) |atom_id| s.function.atoms.free(atom_id);
         if (!s.gotLineTerminator() and isIdentifierLikeToken(s)) {
             // The identifier token is released by advance; retain the
             // lookup key until the labelled jump has been emitted.
-            const atom_id = s.function.atoms.dup(identifierLikeAtom(s));
+            const atom_id = identifierLikeAtom(s);
             label_atom = atom_id;
             if (s.peekKind() == tok.TOK_IDENT and escapedIdentifierIsReservedWordForCurrentContext(s, atom_id, s.token.payload.ident.has_escape)) return s.failUnexpectedToken();
             try s.advance(); // consume the label name
@@ -10270,7 +10312,6 @@ pub const parser_core = struct {
                 } else {
                     if (!isIdentifierLikeToken(s)) return s.failUnexpectedToken();
                     const catch_atom = identifierLikeAtomOwned(s);
-                    defer s.function.atoms.free(catch_atom);
                     if ((s.is_strict or s.curFunc().is_strict_mode) and
                         (atomNameEquals(s, catch_atom, "eval") or atomNameEquals(s, catch_atom, "arguments")))
                     {
@@ -10394,8 +10435,7 @@ pub const parser_core = struct {
         while (true) {
             if (!isIdentifierLikeToken(s)) return s.failUnexpectedToken();
             if (identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
-            const atom_id = s.function.atoms.dup(identifierLikeAtom(s));
-            defer s.function.atoms.free(atom_id);
+            const atom_id = identifierLikeAtom(s);
             if (atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
             if ((s.is_strict or s.curFunc().is_strict_mode) and
                 (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
@@ -11006,8 +11046,7 @@ pub const parser_core = struct {
                 // qjs js_parse_var takes its own `name` reference before
                 // next_token frees the identifier token (quickjs.c:
                 // 28163-28189). Keep that owner through this declarator.
-                const atom_id = s.function.atoms.dup(token_atom);
-                defer s.function.atoms.free(atom_id);
+                const atom_id = token_atom;
                 if (binding_identifier and s.peekKind() == tok.TOK_IDENT and
                     escapedIdentifierIsReservedWordForBinding(s, atom_id, s.token.payload.ident.has_escape))
                 {
@@ -11202,7 +11241,6 @@ pub const parser_core = struct {
         const var_tok = s.peekKind();
         var target_atom: ?Atom = null;
         var target_atom_owner: ?Atom = null;
-        defer if (target_atom_owner) |atom_id| s.function.atoms.free(atom_id);
         var target_is_lexical_decl = false;
         var target_is_pattern = false;
         var target_is_using_decl = false;
@@ -11569,8 +11607,7 @@ pub const parser_core = struct {
         }
         // qjs js_parse_function_decl2 retains the identifier before
         // next_token releases the token (quickjs.c:36551-36556).
-        const name_atom = s.function.atoms.dup(identifierLikeAtom(s));
-        defer s.function.atoms.free(name_atom);
+        const name_atom = identifierLikeAtom(s);
         s.setLastDeclaredAtom(name_atom);
         if (s.lex.is_module and s.atProgramBodyScope() and hasKnownBinding(s, name_atom)) {
             return s.failUnexpectedToken();
@@ -11619,14 +11656,13 @@ pub const parser_core = struct {
 
         // Parse function name (optional for expressions)
         var owned_name: ?Atom = null;
-        defer if (owned_name) |name_atom| s.function.atoms.free(name_atom);
         const has_name = s.peekKind() == tok.TOK_IDENT or
             (s.peekKind() == tok.TOK_AWAIT and !s.in_async and !s.lex.is_module) or
             (s.peekKind() == tok.TOK_YIELD and !(s.is_strict or s.curFunc().is_strict_mode));
         if (has_name) {
             // qjs js_parse_function_decl2 retains a named-expression atom
             // across next_token (quickjs.c:36551-36556).
-            const name_atom = s.function.atoms.dup(identifierLikeAtom(s));
+            const name_atom = identifierLikeAtom(s);
             owned_name = name_atom;
             if (is_generator and atomNameEquals(s, name_atom, "yield")) return s.failUnexpectedToken();
             if (func_kind == .async and is_generator and atomNameEquals(s, name_atom, "await")) return s.failUnexpectedToken();
@@ -11707,11 +11743,10 @@ pub const parser_core = struct {
 
     fn appendOwnedParserAtom(s: *State, list: *std.ArrayList(Atom), atom_id: Atom) Error!void {
         try list.ensureUnusedCapacity(s.function.memory.allocator, 1);
-        list.appendAssumeCapacity(s.function.atoms.dup(atom_id));
+        list.appendAssumeCapacity(atom_id);
     }
 
     fn deinitOwnedParserAtoms(s: *State, list: *std.ArrayList(Atom)) void {
-        for (list.items) |atom_id| s.function.atoms.free(atom_id);
         list.deinit(s.function.memory.allocator);
     }
 
@@ -11785,7 +11820,6 @@ pub const parser_core = struct {
                 }
                 if (isIdentifierLikeToken(s)) {
                     const param_atom = identifierLikeAtomOwned(s);
-                    defer s.function.atoms.free(param_atom);
                     recordInvalidStrictParameterName(s, &parameters.invalid_strict_name_position, param_atom);
                     if (has_modifier) {
                         if (s.current_parameter_properties) |*props| {
@@ -12083,8 +12117,8 @@ pub const parser_core = struct {
             errdefer if (child_owned_before_push) s.discardFunctionDef(child_fd);
             const child_name = s.pending_function_name orelse if (s.pending_function_is_decl) s.function.name else atom_module.ids.empty_string;
             child_fd.* = function_def_mod.FunctionDef.init(s.function.memory, s.function.atoms, child_name);
-            child_fd.atoms.replace(&child_fd.filename, parent_fd.filename);
-            child_fd.atoms.replace(&child_fd.script_or_module, parent_fd.script_or_module);
+            child_fd.filename = parent_fd.filename;
+            child_fd.script_or_module = parent_fd.script_or_module;
             child_fd.line_num = @intCast(child_source.line_num);
             child_fd.col_num = @intCast(child_source.col_num);
             child_fd.parent = parent_fd;
@@ -12657,8 +12691,8 @@ pub const parser_core = struct {
             var child_owned_before_push = true;
             errdefer if (child_owned_before_push) s.discardFunctionDef(child_fd);
             child_fd.* = function_def_mod.FunctionDef.init(s.function.memory, s.function.atoms, atom_module.ids.empty_string);
-            child_fd.atoms.replace(&child_fd.filename, parent_fd.filename);
-            child_fd.atoms.replace(&child_fd.script_or_module, parent_fd.script_or_module);
+            child_fd.filename = parent_fd.filename;
+            child_fd.script_or_module = parent_fd.script_or_module;
             child_fd.line_num = @intCast(source_start.line_num);
             child_fd.col_num = @intCast(source_start.col_num);
             child_fd.parent = parent_fd;
@@ -12742,7 +12776,6 @@ pub const parser_core = struct {
                 if (isIdentifierLikeToken(s)) {
                     if (identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
                     const param_atom = identifierLikeAtomOwned(s);
-                    defer s.function.atoms.free(param_atom);
                     recordInvalidStrictParameterName(s, &invalid_strict_name_position, param_atom);
                     try appendArrowParamBindingName(s, &param_names, param_atom);
                     for (s.curFunc().vars) |existing| {
@@ -13504,8 +13537,7 @@ pub const parser_core = struct {
             } else {
                 property_info = (try parseObjectPropertyName(s)) orelse return s.failExpectedDescription("property name");
             }
-            defer if (property_info) |property| {
-                if (property.retained) s.function.atoms.free(property.atom);
+            defer if (property_info) |_| {
             };
 
             const explicit_target = s.peekKind() == @as(tok.TokenKind, @intCast(':'));
@@ -14216,7 +14248,6 @@ pub const parser_core = struct {
             // Check if this is a private getter/setter (get #x() or set #x())
             if (s.peekKind() == tok.TOK_PRIVATE_NAME) {
                 const private_atom = try privateNameAtom(s, s.token.payload.ident.atom);
-                defer s.function.atoms.free(private_atom);
                 if (atomNameEquals(s, private_atom, "#constructor")) return s.failUnexpectedToken();
                 try registerClassPrivateElement(s, private_atom, if (is_getter) .getter else .setter);
                 try preparePrivateAccessorBinding(s, private_atom, is_getter);
@@ -14240,7 +14271,6 @@ pub const parser_core = struct {
                     try s.emitScopePutVarInit(private_atom);
                 } else {
                     const setter_atom = try privateSetterAtom(s, private_atom);
-                    defer s.function.atoms.free(setter_atom);
                     _ = try addPrivateClassBinding(s, setter_atom, .private_setter);
                     try s.emitScopePutVarInit(setter_atom);
                 }
@@ -14255,7 +14285,6 @@ pub const parser_core = struct {
                 // Regular getter/setter - parse property name (identifier, string, or number)
                 const prop_name = (try parseObjectPropertyName(s)) orelse return s.failExpectedDescription("property name");
                 const prop_atom = prop_name.atom;
-                defer if (prop_name.retained) s.function.atoms.free(prop_atom);
                 if (!s.is_static and prop_atom == atom_module.ids.constructor) return s.failUnexpectedToken();
                 if (s.is_static and prop_atom == atom_module.ids.prototype) return s.failUnexpectedToken();
                 if (s.peekKind() != '(') {
@@ -14284,7 +14313,6 @@ pub const parser_core = struct {
         // Check for private field (#x)
         if (s.peekKind() == tok.TOK_PRIVATE_NAME) {
             const private_atom = try privateNameAtom(s, s.token.payload.ident.atom);
-            defer s.function.atoms.free(private_atom);
             if (atomNameEquals(s, private_atom, "#constructor")) return s.failUnexpectedToken();
             try s.advance();
             if (s.peekKind() == '(') {
@@ -14348,7 +14376,6 @@ pub const parser_core = struct {
         // Check for method or field
         if (try parseObjectPropertyName(s)) |prop_name| {
             const prop_atom = prop_name.atom;
-            defer if (prop_name.retained) s.function.atoms.free(prop_atom);
             const has_line_terminator_after_name = s.gotLineTerminator();
             const is_constructor = !s.is_static and prop_atom == atom_module.ids.constructor;
             if (s.is_static and prop_atom == atom_module.ids.prototype and s.peekKind() == '(') return s.failUnexpectedToken();
@@ -14459,8 +14486,7 @@ pub const parser_core = struct {
                 return s.failUnexpectedToken();
             }
         }
-        const retained = s.function.atoms.dup(atom_id);
-        errdefer s.function.atoms.free(retained);
+        const retained = atom_id;
         try s.class_private_elements.append(s.function.memory.allocator, .{
             .atom = retained,
             .kind = kind,
@@ -14540,10 +14566,10 @@ pub const parser_core = struct {
         if (kind == tok.TOK_IDENT) {
             const atom_id = s.token.payload.ident.atom;
             if (escapedIdentifierIsReservedClassName(s, atom_id, s.token.payload.ident.has_escape)) return null;
-            return s.function.atoms.dup(atom_id);
+            return atom_id;
         }
         if (kind == tok.TOK_AWAIT and canUseAwaitAsIdentifier(s)) {
-            return s.function.atoms.dup(tok.keywordAtom(kind));
+            return tok.keywordAtom(kind);
         }
         return null;
     }
@@ -14769,8 +14795,8 @@ pub const parser_core = struct {
         child_fd.* = function_def_mod.FunctionDef.init(s.function.memory, s.function.atoms, atom_class_fields_init);
         var child_moved = false;
         errdefer if (!child_moved) s.discardFunctionDef(child_fd);
-        child_fd.atoms.replace(&child_fd.filename, parent_fd.filename);
-        child_fd.atoms.replace(&child_fd.script_or_module, parent_fd.script_or_module);
+        child_fd.filename = parent_fd.filename;
+        child_fd.script_or_module = parent_fd.script_or_module;
         child_fd.line_num = @intCast(s.token.line_num);
         child_fd.col_num = @intCast(s.token.col_num);
         child_fd.parent = parent_fd;
@@ -14797,7 +14823,7 @@ pub const parser_core = struct {
             const skip = v2b.newLabel() catch |err| return mapBuilderError(err);
             v2b.emitJump(opcode.op.if_false, skip) catch |err| return mapBuilderError(err);
             v2b.emitOp(opcode.op.push_this) catch |err| return mapBuilderError(err);
-            v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, s.function.atoms.dup(atom_module.ids.home_object), 0) catch |err| return mapBuilderError(err);
+            v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, atom_module.ids.home_object, 0) catch |err| return mapBuilderError(err);
             v2b.emitOp(opcode.op.add_brand) catch |err| return mapBuilderError(err);
             v2b.bindLabel(skip) catch |err| return mapBuilderError(err);
             v2b.invalidateLastOpcode();
@@ -14867,7 +14893,7 @@ pub const parser_core = struct {
     fn privateNameAtom(s: *State, atom_id: Atom) Error!Atom {
         s.features.insert(.private_name);
         if (findClassPrivateBoundName(s, atom_id, 0)) |private_atom| {
-            return s.function.atoms.dup(private_atom);
+            return private_atom;
         }
         return newClassPrivateAtom(s, atom_id);
     }
@@ -14875,7 +14901,7 @@ pub const parser_core = struct {
     fn privateNameDeclarationAtom(s: *State, atom_id: Atom, bound_start: usize) Error!Atom {
         s.features.insert(.private_name);
         if (findClassPrivateBoundName(s, atom_id, bound_start)) |private_atom| {
-            return s.function.atoms.dup(private_atom);
+            return private_atom;
         }
         return newClassPrivateAtom(s, atom_id);
     }
@@ -14984,7 +15010,6 @@ pub const parser_core = struct {
         if (kind != .method) return Error.ParserInvariant;
 
         const key_atom = try classComputedFieldTempAtom(s);
-        defer s.function.atoms.free(key_atom);
         _ = try s.defineVar(key_atom, .const_);
         try s.emitScopePutVarInit(key_atom);
         // qjs js_parse_class: restore the class stack after saving a
@@ -15040,7 +15065,6 @@ pub const parser_core = struct {
         if (kind != .method) return Error.ParserInvariant;
 
         const key_atom = try classComputedFieldTempAtom(s);
-        defer s.function.atoms.free(key_atom);
         _ = try s.defineVar(key_atom, .const_);
         try s.emitScopePutVarInit(key_atom);
 
@@ -15135,7 +15159,6 @@ pub const parser_core = struct {
                 prev_kind != tok.TOK_QUESTION_MARK_DOT)
             {
                 const private_atom = try privateNameDeclarationAtom(s, scan_token.payload.ident.atom, bound_start);
-                defer s.function.atoms.free(private_atom);
                 try registerClassPrivateBoundName(s, private_atom);
             }
 
@@ -15263,7 +15286,6 @@ pub const parser_core = struct {
 
         // Parse class name (required for declarations, optional for expressions)
         var class_name: ?Atom = null;
-        defer if (class_name) |name_atom| s.function.atoms.free(name_atom);
         if (is_decl) {
             class_name = classNameAtomOwned(s) orelse return s.failExpectedDescription("class name");
             try s.advance();
@@ -15565,7 +15587,7 @@ pub const parser_core = struct {
             // qjs emit_class_field_init (quickjs.c:25184-25207): the skip target is a
             // LabelId bound at the shared drop (legacy absolute base+20).
             const v2b = fd.v2_builder.?;
-            v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, fd.atoms.dup(atom_class_fields_init), @intCast(fd.scope_level)) catch |err| return mapBuilderError(err);
+            v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, atom_class_fields_init, @intCast(fd.scope_level)) catch |err| return mapBuilderError(err);
             v2b.emitOp(opcode.op.dup) catch |err| return mapBuilderError(err);
             const skip = v2b.newLabel() catch |err| return mapBuilderError(err);
             v2b.emitJump(opcode.op.if_false, skip) catch |err| return mapBuilderError(err);
@@ -15602,8 +15624,8 @@ pub const parser_core = struct {
         child_fd.* = function_def_mod.FunctionDef.init(s.function.memory, s.function.atoms, name_atom);
         var child_moved = false;
         errdefer if (!child_moved) s.discardFunctionDef(child_fd);
-        child_fd.atoms.replace(&child_fd.filename, parent_fd.filename);
-        child_fd.atoms.replace(&child_fd.script_or_module, parent_fd.script_or_module);
+        child_fd.filename = parent_fd.filename;
+        child_fd.script_or_module = parent_fd.script_or_module;
         child_fd.line_num = @intCast(s.token.line_num);
         child_fd.col_num = @intCast(s.token.col_num);
         child_fd.parent = parent_fd;
@@ -15697,7 +15719,6 @@ pub const parser_core = struct {
     fn parseImport(s: *State) Error!void {
         try s.advance();
         var default_local_name: ?Atom = null;
-        defer if (default_local_name) |name| s.function.atoms.free(name);
 
         // Side-effect import: import 'module'
         if (s.peekKind() == tok.TOK_STRING) {
@@ -15712,7 +15733,7 @@ pub const parser_core = struct {
 
         // Default import: import x from 'module'
         if (s.peekKind() == tok.TOK_IDENT) {
-            const local_name = s.function.atoms.dup(s.token.payload.ident.atom);
+            const local_name = s.token.payload.ident.atom;
             default_local_name = local_name;
             try validateModuleImportBindingName(s, local_name);
             try s.advance();
@@ -15739,8 +15760,7 @@ pub const parser_core = struct {
             if (s.peekKind() != tok.TOK_IDENT) {
                 return s.failExpectedDescription("binding name");
             }
-            const local_name = s.function.atoms.dup(s.token.payload.ident.atom);
-            defer s.function.atoms.free(local_name);
+            const local_name = s.token.payload.ident.atom;
             try validateModuleImportBindingName(s, local_name);
             try s.advance();
             const request_index = try parseFromClause(s);
@@ -15765,26 +15785,24 @@ pub const parser_core = struct {
                 const import_name_was_string = s.peekKind() == tok.TOK_STRING;
                 const import_name_owned = try moduleImportNameAtomOwned(s);
                 var import_name_live = true;
-                errdefer if (import_name_live) s.function.atoms.free(import_name_owned);
                 try s.advance();
 
                 // Optional 'as' for renaming
                 var local_name_owned: Atom = undefined;
                 var local_name_live = false;
-                errdefer if (local_name_live) s.function.atoms.free(local_name_owned);
                 if (s.isIdent("as")) {
                     try s.advance();
                     if (s.peekKind() != tok.TOK_IDENT) {
                         return s.failExpectedDescription("binding name");
                     }
-                    local_name_owned = s.function.atoms.dup(s.token.payload.ident.atom);
+                    local_name_owned = s.token.payload.ident.atom;
                     local_name_live = true;
                     try validateModuleImportBindingName(s, local_name_owned);
                     try s.advance();
                 } else if (import_name_was_string) {
                     return s.failExpectedDescription("'as'");
                 } else {
-                    local_name_owned = s.function.atoms.dup(import_name_owned);
+                    local_name_owned = import_name_owned;
                     local_name_live = true;
                     try validateModuleImportBindingName(s, local_name_owned);
                 }
@@ -15914,7 +15932,6 @@ pub const parser_core = struct {
 
     fn addModuleRequestFromCurrentString(s: *State) Error!u32 {
         const module_name = try moduleStringAtom(s);
-        defer s.function.atoms.free(module_name);
         const record = s.function.ensureModule();
         return record.addRequest(module_name) catch return error.OutOfMemory;
     }
@@ -15933,8 +15950,8 @@ pub const parser_core = struct {
     /// token; string names are newly interned and already owned here.
     fn moduleImportNameAtomOwned(s: *State) Error!Atom {
         return switch (s.peekKind()) {
-            tok.TOK_IDENT => s.function.atoms.dup(s.token.payload.ident.atom),
-            tok.TOK_NULL...tok.TOK_AWAIT => s.function.atoms.dup(tok.keywordAtom(s.peekKind())),
+            tok.TOK_IDENT => s.token.payload.ident.atom,
+            tok.TOK_NULL...tok.TOK_AWAIT => tok.keywordAtom(s.peekKind()),
             else => try moduleStringAtom(s),
         };
     }
@@ -15957,17 +15974,13 @@ pub const parser_core = struct {
     }
 
     fn freeModuleImportSpecs(s: *State, imports: *std.ArrayList(ModuleImportSpec)) void {
-        for (imports.items) |entry| {
-            s.function.atoms.free(entry.import_name);
-            s.function.atoms.free(entry.local_name);
+        for (imports.items) |_| {
         }
         imports.deinit(s.function.memory.allocator);
     }
 
     fn freeModuleExportSpecs(s: *State, exports: *std.ArrayList(ModuleExportSpec)) void {
-        for (exports.items) |entry| {
-            s.function.atoms.free(entry.export_name);
-            s.function.atoms.free(entry.import_name);
+        for (exports.items) |_| {
         }
         exports.deinit(s.function.memory.allocator);
     }
@@ -15985,7 +15998,6 @@ pub const parser_core = struct {
             if (s.peekKind() == tok.TOK_CLASS) {
                 if (hasExportDefaultClassName(s)) {
                     const name_atom = (try parseClass(s, true)) orelse return Error.ParserInvariant;
-                    defer s.function.atoms.free(name_atom);
                     try addModuleExportName(s, atom_default, name_atom);
                 } else {
                     _ = try parseClass(s, false);
@@ -15997,7 +16009,6 @@ pub const parser_core = struct {
                 return;
             } else if (s.peekKind() == tok.TOK_FUNCTION) {
                 if (exportDefaultFunctionNameOwned(s)) |name_atom| {
-                    defer s.function.atoms.free(name_atom);
                     const source_start = s.currentFunctionSourceStart();
                     try parseFunctionDecl(s, .normal, source_start);
                     try addModuleExportName(s, atom_default, name_atom);
@@ -16011,7 +16022,6 @@ pub const parser_core = struct {
                 const source_start = s.currentFunctionSourceStart();
                 try s.advance();
                 if (exportDefaultFunctionNameOwned(s)) |name_atom| {
-                    defer s.function.atoms.free(name_atom);
                     try parseFunctionDecl(s, .async, source_start);
                     try addModuleExportName(s, atom_default, name_atom);
                 } else {
@@ -16046,10 +16056,8 @@ pub const parser_core = struct {
                 }
                 const local_name_owned = try moduleImportNameAtomOwned(s);
                 var local_name_live = true;
-                errdefer if (local_name_live) s.function.atoms.free(local_name_owned);
-                var export_name_owned = s.function.atoms.dup(local_name_owned);
+                var export_name_owned = local_name_owned;
                 var export_name_live = true;
-                errdefer if (export_name_live) s.function.atoms.free(export_name_owned);
                 try s.advance();
 
                 // Optional 'as' for renaming
@@ -16061,7 +16069,6 @@ pub const parser_core = struct {
                     if (s.peekKind() == tok.TOK_STRING and !isWellFormedModuleString(s.token.payload.str.bytes)) {
                         return s.failUnexpectedToken();
                     }
-                    s.function.atoms.free(export_name_owned);
                     export_name_live = false;
                     export_name_owned = try moduleImportNameAtomOwned(s);
                     export_name_live = true;
@@ -16115,7 +16122,6 @@ pub const parser_core = struct {
                 export_name_owned = true;
                 try s.advance();
             }
-            defer if (export_name_owned) s.function.atoms.free(export_name);
             const request_index = try parseFromClause(s);
             if (is_namespace) {
                 try addModuleIndirectExport(s, request_index, export_name, atom_star, true);
@@ -16145,7 +16151,6 @@ pub const parser_core = struct {
             }
             const func_kind: ParseFunctionKind = if (is_async) .async else .normal;
             const name_atom = exportDefaultFunctionNameOwned(s);
-            defer if (name_atom) |name| s.function.atoms.free(name);
             try parseFunctionDecl(s, func_kind, source_start);
             if (name_atom) |name| try addModuleExportName(s, name, name);
             return;
@@ -16154,7 +16159,6 @@ pub const parser_core = struct {
         // export class
         if (next_tok == tok.TOK_CLASS) {
             const name_atom = (try parseClass(s, true)) orelse return Error.ParserInvariant;
-            defer s.function.atoms.free(name_atom);
             try addModuleExportName(s, name_atom, name_atom);
             return;
         }
@@ -16167,7 +16171,6 @@ pub const parser_core = struct {
                 try s.advance(); // consume async
                 const func_kind: ParseFunctionKind = .async;
                 const name_atom = exportDefaultFunctionNameOwned(s);
-                defer if (name_atom) |name| s.function.atoms.free(name);
                 try parseFunctionDecl(s, func_kind, source_start);
                 if (name_atom) |name| try addModuleExportName(s, name, name);
                 return;
@@ -16201,10 +16204,10 @@ pub const parser_core = struct {
             var second: tok.Token = undefined;
             s.lex.nextInto(&second) catch return null;
             defer s.lex.freeToken(&second);
-            if (second.val == tok.TOK_IDENT) return s.function.atoms.dup(second.payload.ident.atom);
+            if (second.val == tok.TOK_IDENT) return second.payload.ident.atom;
             return null;
         }
-        if (first.val == tok.TOK_IDENT) return s.function.atoms.dup(first.payload.ident.atom);
+        if (first.val == tok.TOK_IDENT) return first.payload.ident.atom;
         return null;
     }
 
@@ -16256,10 +16259,9 @@ pub const parser_core = struct {
                 return s.failExpectedDescription("import attribute key");
             }
             const key_atom = if (s.peekKind() == tok.TOK_IDENT)
-                s.function.atoms.dup(s.token.payload.ident.atom)
+                s.token.payload.ident.atom
             else
                 try moduleStringAtom(s);
-            defer s.function.atoms.free(key_atom);
             try s.advance();
 
             try s.expectToken(':');
@@ -16269,7 +16271,6 @@ pub const parser_core = struct {
                 return s.failExpectedDescription("string attribute value");
             }
             const value_atom = try moduleStringAtom(s);
-            defer s.function.atoms.free(value_atom);
             try addModuleImportAttribute(s, request_index, key_atom, value_atom);
             try s.advance();
 
@@ -16291,6 +16292,8 @@ pub const parser_core = struct {
 
     pub const ParseState = State;
     pub const Feature = FeatureImpl;
+    /// TGC S3-b test seam, see `TaggedTemplateObjectBuilder`.
+    pub const TaggedTemplateBuilderTestHook = TaggedTemplateObjectBuilder;
 };
 pub const compile_entry = struct {
     const std = @import("std");
@@ -16554,9 +16557,8 @@ pub const compile_entry = struct {
             }
             if (already_restored) continue;
 
-            const retained = rt.atoms.dup(seed.var_name);
+            const retained = seed.var_name;
             state.class_private_bound_names.append(rt.memory.allocator, retained) catch |err| {
-                rt.atoms.free(retained);
                 return err;
             };
             restored_any = true;
@@ -16577,7 +16579,7 @@ pub const compile_entry = struct {
     ) bytecode.Bytecode {
         var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, filename_atom);
         if (options.script_or_module) |script_or_module| {
-            function.atoms.replace(&function.script_or_module, script_or_module);
+            function.script_or_module = script_or_module;
         }
         function.line_num = 1;
         function.col_num = 1;
@@ -16613,7 +16615,6 @@ pub const compile_entry = struct {
         try atom_scope.activate();
 
         const filename_atom = try rt.internAtom(options.filename);
-        defer rt.atoms.free(filename_atom);
         // QuickJS learns directive strictness while parsing the directive
         // prologue. Only an explicit host option is known before tokenization;
         // comments and source substrings are never a second strictness source.
@@ -16734,8 +16735,9 @@ pub const compile_entry = struct {
         }
         var state = try parser_core.ParseState.initCanonicalRootWithRuntime(rt, &lex, function);
         defer state.deinit(rt);
-        // TGC S3-b: the parse's own interval root, nested inside `compile`'s.
-        try state.activateAtomScope();
+        // TGC S3-b: the parse's own interval roots (atoms + cpool values),
+        // nested inside the scope `compile` opened.
+        try state.activateCompileRoots();
         errdefer pending_diagnostic.* = state.pending_diagnostic;
         state.is_strict = options.mode == .module or effective_strict;
         // QuickJS creates the root program FunctionDef as eval bytecode for all

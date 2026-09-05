@@ -4473,7 +4473,6 @@ test "iterator_ops.createIteratorResult roots direct function bytecode value whi
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_atom = try rt.internAtom("value");
-    defer rt.atoms.free(value_atom);
     {
         const stored = try iterator_result.getProperty(value_atom);
         try std.testing.expect(stored.same(result_value));
@@ -4850,9 +4849,8 @@ pub fn definePropertiesOnTarget(
         const desc_value = try object_ops.getValueProperty(ctx, output, global, properties_value, key, caller_function, caller_frame);
         const desc_object = object_ops.objectFromValue(desc_value) orelse return error.TypeError;
         const desc = try object_ops.descriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
-        const pending_key = ctx.runtime.atoms.dup(key);
+        const pending_key = key;
         var pending_key_owned = true;
-        errdefer if (pending_key_owned) ctx.runtime.atoms.free(pending_key);
         try pending.append(ctx.runtime.memory.allocator, .{ .atom_id = pending_key, .desc = desc });
         pending_key_owned = false;
     }
@@ -4915,7 +4913,6 @@ pub fn inOp(
         return error.TypeError;
     };
     const key = try object_ops.toPropertyKeyAtom(ctx, output, global, lhs, caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(key);
     const found = if (object.proxyTarget() != null)
         try object_ops.hasValueProperty(ctx, output, global, rhs, object, key, caller_function, caller_frame)
     else

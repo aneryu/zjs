@@ -273,7 +273,6 @@ test "over-reserved property storage is freed by prop_size not prop_count" {
     defer rt.destroy();
 
     const name = try rt.internAtom("x");
-    defer rt.atoms.free(name);
 
     const first = try core.Object.create(rt, core.class.ids.object, null);
     try first.reserveOwnPropertyCapacity(rt, 8);
@@ -303,7 +302,6 @@ test "first named property allocates initial_prop_size slots" {
     const object = try core.Object.create(rt, core.class.ids.object, null);
     try std.testing.expect(!object.hasPropertyStorage());
     const name = try rt.internAtom("x");
-    defer rt.atoms.free(name);
     try object.defineOwnDataPropertyAssumingNewFromRootedAtom(rt, name, core.JSValue.int32(1));
     try std.testing.expectEqual(@as(usize, core.shape.initial_prop_size), object.shape_ref.prop_size);
     try std.testing.expectEqual(@as(u32, 1), object.shape_ref.prop_count);
@@ -387,7 +385,6 @@ test "shape-sized trailing property storage grows externally and compacts in pla
     };
     var atoms: [names.len]core.Atom = undefined;
     for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
-    defer for (atoms) |name| rt.atoms.free(name);
 
     for (atoms, 0..) |name, index| {
         try object.defineOwnProperty(
@@ -426,7 +423,6 @@ test "slots2 spill OOM rollback restores inline representation" {
     const names = [_][]const u8{ "m_oom_0", "m_oom_1", "m_oom_2" };
     var atoms: [names.len]core.Atom = undefined;
     for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
-    defer for (atoms) |name| rt.atoms.free(name);
     for (atoms[0..2], 0..) |name, index| {
         try object.defineOwnProperty(
             rt,
@@ -484,9 +480,7 @@ test "plain object destroy slim frees two data slots and the value buffer" {
     defer rt.destroy();
 
     const car = try rt.internAtom("car");
-    defer rt.atoms.free(car);
     const cdr = try rt.internAtom("cdr");
-    defer rt.atoms.free(cdr);
 
     const baseline_objects = rt.gc.liveCount();
     const pair = try core.Object.create(rt, core.class.ids.object, null);
@@ -510,10 +504,11 @@ test "proven object release preserves generic JSValue ownership semantics" {
     const value = object.value();
     const retained = value;
     // The refcount steps are only meaningful where the count is the ownership
-    // record. Under the tracer an object's count is not maintained at all
-    // (`gc.refCountRemoved`), so what survives here is the part that is still
-    // a claim about ownership: dropping both references, and only both, must
-    // make the object collectable.
+    // record. No `gc.Header` kind carries a count any more (the whole family --
+    // `refCountRemoved`, `headerRefCount`, `gc.retain`/`gc.release` -- was
+    // deleted through TGC S1-S3), so what survives here is the part that is
+    // still a claim about ownership: dropping both references, and only both,
+    // must make the object collectable.
 
     retained.freeObjectAssumeObject(rt);
     {
@@ -926,9 +921,7 @@ test "caller-owned ClassIdSlot is process-stable while definitions stay per Runt
     try std.testing.expectEqual(class_id, try second_rt.newClassId(class_id));
 
     const first_name = first_rt.classes.className(class_id).?;
-    defer first_rt.atoms.free(first_name);
     const second_name = second_rt.classes.className(class_id).?;
-    defer second_rt.atoms.free(second_name);
     try std.testing.expectEqualStrings("ProcessStableClassFirstRuntime", first_rt.atoms.name(first_name).?);
     try std.testing.expectEqualStrings("ProcessStableClassSecondRuntime", second_rt.atoms.name(second_name).?);
 
@@ -1104,7 +1097,6 @@ test "RealmContext participates in cycle collection through typed RealmRef edges
     var realm_owner = core.RealmRef.retain(ctx);
     try realm_record.installOwnedRealmRef(rt, &realm_owner);
     const record_key = try rt.internAtom("realmCycleRecord");
-    defer rt.atoms.free(record_key);
     try global.defineOwnProperty(
         rt,
         record_key,
@@ -1157,7 +1149,6 @@ test "FunctionBytecode RealmRef edge participates in realm-global cycle collecti
     var fb_value_alive = true;
 
     const cycle_key = try rt.internAtom("functionBytecodeRealmCycle");
-    defer rt.atoms.free(cycle_key);
     try global.defineOwnProperty(
         rt,
         cycle_key,
@@ -1187,7 +1178,6 @@ test "FinalizationRegistry RealmRef edge participates in realm-global cycle coll
     const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
     try std.testing.expectEqual(ctx, registry.finalizationRegistryRealmContext().?);
     const cycle_key = try rt.internAtom("finalizationRegistryRealmCycle");
-    defer rt.atoms.free(cycle_key);
     try global.defineOwnProperty(
         rt,
         cycle_key,
@@ -1340,10 +1330,9 @@ test "atom replace handles self-assignment without releasing dynamic atom" {
     defer rt.destroy();
 
     var slot = try rt.internAtom("dynamic-atom-self-replace");
-    rt.atoms.replace(&slot, slot);
+    slot = slot;
 
     try std.testing.expectEqualStrings("dynamic-atom-self-replace", rt.atoms.name(slot).?);
-    rt.atoms.free(slot);
 }
 
 test "runtime takes typed Promise jobs without allocation" {
@@ -1509,7 +1498,6 @@ test "private brand property owns exactly one stored symbol value across replace
             core.Descriptor.data(initial, true, true, true),
         );
     }
-    rt.atoms.free(brand);
     try std.testing.expect(rt.atoms.name(brand) != null);
 
     {
@@ -1535,14 +1523,21 @@ test "atom table interns predefined dynamic and integer atoms" {
     try std.testing.expectEqual(core.atom.atomFromUInt32(123), try rt.internAtom("123"));
     try std.testing.expectEqual(@as(u32, 123), core.atom.atomToUInt32(core.atom.atomFromUInt32(123)));
 
-    const first = try rt.internAtom("customName");
+    var first = try rt.internAtom("customName");
     const second = try rt.internAtom("customName");
     try std.testing.expectEqual(first, second);
     try std.testing.expectEqualStrings("customName", rt.atoms.name(first).?);
 
-    rt.atoms.free(first);
-    try std.testing.expect(rt.atoms.name(second) != null);
-    rt.atoms.free(second);
+    // TGC S3-c: an entry lives while a root names it and dies at the first
+    // major that cannot reach it.
+    {
+        var roots = core.runtime.rootAtoms(.{&first});
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expect(rt.atoms.name(second) != null);
+    }
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(second) == null);
 }
 
@@ -1555,8 +1550,6 @@ test "symbol atoms are unique even with the same description" {
     try std.testing.expect(a != b);
     try std.testing.expectEqual(core.atom.AtomKind.symbol, rt.atoms.kind(a).?);
     try std.testing.expectEqualStrings("desc", rt.atoms.name(a).?);
-    rt.atoms.free(a);
-    rt.atoms.free(b);
 }
 
 test "registered symbol index ignores unique symbols and private names" {
@@ -1564,12 +1557,14 @@ test "registered symbol index ignores unique symbols and private names" {
     defer rt.destroy();
 
     const registry_name = "Symbol.for:registry-isolation";
-    const unique = try rt.atoms.newSymbol(registry_name, .symbol);
-    defer rt.atoms.free(unique);
-    const private = try rt.atoms.newSymbol(registry_name, .private);
-    defer rt.atoms.free(private);
+    var unique = try rt.atoms.newSymbol(registry_name, .symbol);
+    var private = try rt.atoms.newSymbol(registry_name, .private);
+    // TGC S3-c: bare ids need a declared root to survive a major.
+    var keep_roots = core.runtime.rootAtoms(.{ &unique, &private });
+    keep_roots.activate(rt);
+    defer keep_roots.deactivate(rt);
 
-    const registered = try rt.atoms.internSymbol(registry_name);
+    var registered = try rt.atoms.internSymbol(registry_name);
     const registered_again = try rt.atoms.internSymbol(registry_name);
     try std.testing.expect(unique != registered);
     try std.testing.expect(private != registered);
@@ -1578,9 +1573,14 @@ test "registered symbol index ignores unique symbols and private names" {
     try std.testing.expect(!rt.atoms.isRegisteredSymbol(private));
     try std.testing.expect(rt.atoms.isRegisteredSymbol(registered));
 
-    rt.atoms.free(registered);
-    try std.testing.expect(rt.atoms.isRegisteredSymbol(registered_again));
-    rt.atoms.free(registered_again);
+    {
+        var registry_roots = core.runtime.rootAtoms(.{&registered});
+        registry_roots.activate(rt);
+        defer registry_roots.deactivate(rt);
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expect(rt.atoms.isRegisteredSymbol(registered_again));
+    }
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expect(!rt.atoms.isRegisteredSymbol(registered_again));
     try std.testing.expect(rt.atoms.name(unique) != null);
     try std.testing.expect(rt.atoms.name(private) != null);
@@ -1594,13 +1594,9 @@ test "registered value symbols keep a single registry ref" {
     const registered = try rt.atoms.internRegisteredValueSymbol(registry_name);
     const registered_again = try rt.atoms.internRegisteredValueSymbol(registry_name);
     try std.testing.expectEqual(registered, registered_again);
-    try std.testing.expectEqual(@as(usize, 1), rt.atoms.refCount(registered).?);
 
     const manual = try rt.atoms.internSymbol(registry_name);
     try std.testing.expectEqual(registered, manual);
-    try std.testing.expectEqual(@as(usize, 2), rt.atoms.refCount(registered).?);
-    rt.atoms.free(manual);
-    try std.testing.expectEqual(@as(usize, 1), rt.atoms.refCount(registered).?);
 }
 
 test "atom table deinit balances live empty dynamic symbol bytes" {
@@ -1608,7 +1604,7 @@ test "atom table deinit balances live empty dynamic symbol bytes" {
     var atoms = core.atom.AtomTable.init(&account);
 
     const freed = try atoms.newSymbol("", .symbol);
-    atoms.free(freed);
+    _ = freed;
 
     const sym = try atoms.newSymbol("", .symbol);
     try std.testing.expectEqual(core.atom.AtomKind.symbol, atoms.kind(sym).?);
@@ -1629,7 +1625,6 @@ test "ownership audit quarantines the most recently freed atom slot" {
     var atoms = core.atom.AtomTable.init(&account);
 
     const first = try atoms.internString("zjs-ownership-audit-first");
-    atoms.free(first);
     // The next intern must not be handed the slot that just died: that reuse
     // is exactly what makes a borrowed-atom use-after-free look alive.
     const second = try atoms.internString("zjs-ownership-audit-second");
@@ -1637,10 +1632,8 @@ test "ownership audit quarantines the most recently freed atom slot" {
 
     // Recycling is delayed, not disabled: the quarantined slot is released as
     // soon as another slot dies, so the table does not grow without bound.
-    atoms.free(second);
     const third = try atoms.internString("zjs-ownership-audit-third");
     try std.testing.expectEqual(first, third);
-    atoms.free(third);
 
     atoms.deinit();
     try std.testing.expect(!account.hasOutstandingAllocations());
@@ -1650,12 +1643,17 @@ test "GC leaves atom-owned unique symbol atoms until release" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-unrooted-symbol");
+    var symbol_atom = try rt.atoms.newValueSymbol("gc-unrooted-symbol");
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
+    {
+        var roots = core.runtime.rootAtoms(.{&symbol_atom});
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    }
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    rt.atoms.free(symbol_atom);
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1663,10 +1661,12 @@ test "GC leaves manually owned unique symbol atoms alone" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const symbol_atom = try rt.atoms.newSymbol("gc-manual-symbol", .symbol);
+    var symbol_atom = try rt.atoms.newSymbol("gc-manual-symbol", .symbol);
+    var roots = core.runtime.rootAtoms(.{&symbol_atom});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    rt.atoms.free(symbol_atom);
 }
 
 test "GC keeps rooted unique symbol atoms until the root is gone" {
@@ -1690,17 +1690,18 @@ test "GC keeps atom-owned unique symbol atoms until the atom owner releases" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-atom-owned-symbol");
-    const retained_atom = rt.atoms.dup(symbol_atom);
-    try std.testing.expectEqual(symbol_atom, retained_atom);
-
+    var symbol_atom = try rt.atoms.newValueSymbol("gc-atom-owned-symbol");
+    // TGC S3-c: "the atom owner" is now a declared root, not a count.
+    {
+        var roots = core.runtime.rootAtoms(.{&symbol_atom});
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    }
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-
-    rt.atoms.free(retained_atom);
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    rt.atoms.free(symbol_atom);
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1759,7 +1760,6 @@ test "GC keeps context lexical object unique symbol atoms" {
     ctx.lexicals = env;
 
     const property_name = try rt.internAtom("context-lexical-symbol-slot");
-    defer rt.atoms.free(property_name);
     const lexical_symbol = try rt.atoms.newValueSymbol("gc-context-lexical-object-symbol");
     const lexical_value = try rt.takeSymbolValue(lexical_symbol);
     try env.defineOwnProperty(rt, property_name, core.Descriptor.data(lexical_value, true, true, true));
@@ -1887,9 +1887,7 @@ test "GC keeps module registry unique symbol atoms until release" {
     defer ctx.destroy();
 
     const module_name = try rt.internAtom("gc-module-symbols.mjs");
-    defer rt.atoms.free(module_name);
     const binding_name = try rt.internAtom("localSymbol");
-    defer rt.atoms.free(binding_name);
 
     const binding_symbol = try rt.atoms.newValueSymbol("gc-module-binding-symbol");
     const binding_cell = try core.VarRef.createClosed(rt, try rt.takeSymbolValue(binding_symbol));
@@ -1919,12 +1917,17 @@ test "GC sweeps unique symbol atoms after description string cache" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-cached-symbol-description");
+    var symbol_atom = try rt.atoms.newValueSymbol("gc-cached-symbol-description");
     _ = try rt.atoms.toStringValue(rt, symbol_atom);
 
+    {
+        var roots = core.runtime.rootAtoms(.{&symbol_atom});
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    }
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    rt.atoms.free(symbol_atom);
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1962,7 +1965,6 @@ test "GC keeps object-held and registered symbol atoms" {
     obj_roots.activate(rt);
     defer obj_roots.deactivate(rt);
     const key = try rt.internAtom("symbolValue");
-    defer rt.atoms.free(key);
 
     const object_symbol = try rt.atoms.newValueSymbol("gc-object-held-symbol");
     const object_symbol_value = try rt.takeSymbolValue(object_symbol);
@@ -1975,10 +1977,12 @@ test "GC keeps object-held and registered symbol atoms" {
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(object_symbol) == null);
 
-    const registered = try rt.atoms.internSymbol("Symbol.for:gc-registered-symbol");
+    var registered = try rt.atoms.internSymbol("Symbol.for:gc-registered-symbol");
+    var registry_roots = core.runtime.rootAtoms(.{&registered});
+    registry_roots.activate(rt);
+    defer registry_roots.deactivate(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(registered) != null);
-    rt.atoms.free(registered);
 }
 
 test "runtime teardown keeps unique symbol property keys live through shape destruction" {
@@ -2161,7 +2165,10 @@ test "atom table retains its cached string until the atom dies" {
     try std.testing.expect(predefined_again.asStringBodyRaw() == predefined.asStringBodyRaw());
     try std.testing.expectEqual(predefined_allocations, rt.memory.allocation_count);
 
-    const atom_id = try rt.internAtom("ownedAtomName");
+    var atom_id = try rt.internAtom("ownedAtomName");
+    var atom_roots = core.runtime.rootAtoms(.{&atom_id});
+    atom_roots.activate(rt);
+    defer atom_roots.deactivate(rt);
     const atom_string = try core.string.String.createAtomBacked(rt, atom_id);
     // The table caches the materialized string; repeat conversions reuse it.
     const again = try core.string.String.createAtomBacked(rt, atom_id);
@@ -2175,9 +2182,12 @@ test "atom table retains its cached string until the atom dies" {
     // Releasing the string does not release the atom: `atom_id` is a weak
     // back-pointer, and the table keeps its own string reference.
     try std.testing.expect(rt.atoms.name(atom_id) != null);
-    // The last atom reference frees the entry together with its string.
-    rt.atoms.free(atom_id);
+    // TGC S3-c: the first major that cannot reach the entry retires it
+    // together with its cached string.
+    atom_roots.deactivate(rt);
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(atom_id) == null);
+    atom_roots.activate(rt);
 }
 
 test "class table registers QuickJS standard classes and dynamic classes" {
@@ -2198,7 +2208,6 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expect(!rt.classes.isRegistered(core.class.ids.proxy));
 
     const object_name = rt.classes.className(core.class.ids.object).?;
-    defer rt.atoms.free(object_name);
     try std.testing.expectEqual(core.atom.ids.Object, object_name);
 
     const dynamic_id = try rt.newClassId(core.class.invalid_class_id);
@@ -2209,7 +2218,6 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expect(record.has_exotic);
     try std.testing.expectEqual(core.class.PayloadKind.none, record.payload_kind);
     const dynamic_name = rt.classes.className(dynamic_id).?;
-    defer rt.atoms.free(dynamic_name);
     try std.testing.expectEqualStrings("HostThing", rt.atoms.name(dynamic_name).?);
 
     try std.testing.expectError(error.DuplicateClass, rt.classes.register(dynamic_id, .{ .class_name = "Again" }));
@@ -2886,7 +2894,6 @@ test "inline class finalizer reentry keeps definition pinned while growing the t
 
     const object = try core.Object.create(rt, target_id, null);
     const property_atom = try rt.internAtom("owned-before-inline-finalizer");
-    defer rt.atoms.free(property_atom);
     InlineClassFinalizerReentry.property_atom = property_atom;
     try object.defineOwnProperty(rt, property_atom, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try std.testing.expect(object.hasPropertyStorage());
@@ -3235,9 +3242,7 @@ test "external class finalizers run synchronously with original object identity 
 
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const first_atom = try rt.internAtom("first-finalized");
-    defer rt.atoms.free(first_atom);
     const second_atom = try rt.internAtom("second-finalized");
-    defer rt.atoms.free(second_atom);
     try holder.defineOwnProperty(rt, first_atom, core.Descriptor.data(first.value(), true, true, true));
     try holder.defineOwnProperty(rt, second_atom, core.Descriptor.data(second.value(), true, true, true));
 
@@ -3573,7 +3578,6 @@ test "ordinary property delete publishes absence before synchronous finalizer re
     defer object_roots.deactivate(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     const key = try rt.internAtom("reentrant_property_delete");
-    defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value.value(), true, true, true));
 
     payload_finalizer_calls = 0;
@@ -3604,7 +3608,6 @@ test "IC-R1: in-place delete mutates the shape Property word" {
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("ic_r1_field");
-    defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
 
     const index = object.findProperty(key) orelse return error.TestUnexpectedResult;
@@ -3937,7 +3940,6 @@ test "array iterator target clear publishes null before synchronous finalizer re
     const target = try core.Object.createArray(rt, null);
     const held = try core.Object.create(rt, reentrant_id, null);
     const held_key = try rt.internAtom("held");
-    defer rt.atoms.free(held_key);
     try target.defineOwnProperty(rt, held_key, core.Descriptor.data(held.value(), true, true, true));
     iterator.iteratorTargetSlot().* = target.value();
 
@@ -3992,7 +3994,6 @@ test "runtime cycle removal follows class payload mark hooks" {
     external.payloadArm().* = @ptrCast(payload);
 
     const key = try rt.internAtom("external");
-    defer rt.atoms.free(key);
     try payloadless.defineOwnProperty(rt, key, core.Descriptor.data(external.value(), true, true, true));
 
     payload_finalizer_calls = 0;
@@ -4116,7 +4117,6 @@ test "runtime cycle removal synchronously finalizes class payload object slots o
     external.payloadArm().* = @ptrCast(payload);
 
     const key = try rt.internAtom("external");
-    defer rt.atoms.free(key);
     try child.defineOwnProperty(rt, key, core.Descriptor.data(external.value(), true, true, true));
 
     payload_finalizer_calls = 0;
@@ -5032,7 +5032,7 @@ test "bytecode function state uses the inline qjs function arm" {
     fb.closureVar()[0] = engine.bytecode.function_bytecode.BytecodeClosureVar.init(.{
         .closure_type = .ref,
         .var_idx = 0,
-        .var_name = rt.atoms.dup(core.atom.ids.empty_string),
+        .var_name = core.atom.ids.empty_string,
     });
     fb.publishFixtureNoFail(rt);
     const attach_alloc_calls = rt.memory.alloc_calls;
@@ -5060,7 +5060,6 @@ test "module namespace uses shape-only live-binding storage" {
 
     const namespace = try core.Object.create(rt, core.class.ids.module_ns, null);
     const export_name = try rt.internAtom("value");
-    defer rt.atoms.free(export_name);
 
     const cell = try core.VarRef.createClosed(rt, core.JSValue.int32(17));
     cell.is_const = true;
@@ -5097,7 +5096,6 @@ test "shapes retain property atoms and compare transitions" {
     var second = try rt.shapes.create(null);
     try rt.shapes.addProperty(&first, name_atom, 0b000011);
     try rt.shapes.addProperty(&second, name_atom, 0b000011);
-    rt.atoms.free(name_atom);
 
     try std.testing.expect(first.isHashed());
     try std.testing.expectEqual(@as(usize, 1), first.prop_count);
@@ -5114,7 +5112,6 @@ test "shape shared bit and prototype transitions are tracked" {
     defer rt.destroy();
 
     const name_atom = try rt.internAtom("shapeProtoProp");
-    defer rt.atoms.free(name_atom);
 
     const proto_one = try core.Object.create(rt, core.class.ids.object, null);
     const proto_two = try core.Object.create(rt, core.class.ids.object, null);
@@ -5140,7 +5137,6 @@ test "restorePropertyLayout rebuilds a baseline layout after FAM relocation" {
     const names = [_][]const u8{ "p0", "p1", "p2", "p3", "p4", "p5" };
     var atoms: [6]core.Atom = undefined;
     for (names, 0..) |name, i| atoms[i] = try rt.internAtom(name);
-    defer for (atoms) |a| rt.atoms.free(a);
 
     var shape = try rt.shapes.create(null);
     // Six properties exceed the initial capacity (2), forcing at least one FAM
@@ -5232,8 +5228,6 @@ test "ordinary object additions reuse transition shapes" {
 
     const a = try rt.internAtom("shared_a");
     const b = try rt.internAtom("shared_b");
-    defer rt.atoms.free(a);
-    defer rt.atoms.free(b);
 
     try first.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try first.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
@@ -5257,7 +5251,6 @@ test "trace object shape summary follows append kind delete and compaction" {
         const name = try std.fmt.bufPrint(&name_buf, "trace_summary_{d}", .{index});
         slot.* = try rt.internAtom(name);
     }
-    defer for (atoms) |name| rt.atoms.free(name);
 
     try std.testing.expectEqual(@as(u8, 0), object.traceShapeSummary());
     try std.testing.expect(object.traceShapeSummaryMatches());
@@ -5396,7 +5389,6 @@ test "pure property value replacement preserves a shared shape until flags chang
     const second = try core.Object.create(rt, core.class.ids.object, null);
 
     const key = try rt.internAtom("shared_replace");
-    defer rt.atoms.free(key);
 
     try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, false, true));
     try second.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), true, false, true));
@@ -5433,7 +5425,6 @@ test "unique transition shape appends in place across FAM relocation" {
     const names = [_][]const u8{ "unique_0", "unique_1", "unique_2", "unique_3", "unique_4" };
     var atoms: [names.len]core.Atom = undefined;
     for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
-    defer for (atoms) |name| rt.atoms.free(name);
 
     const initial_shape = object.shape_ref;
     const initial_hashed_count = rt.shapes.shape_hash_count;
@@ -5478,7 +5469,6 @@ test "first property append OOM restores the no-storage sentinel" {
     try std.testing.expectEqual(object.shape_ref, peer.shape_ref);
 
     const name = try rt.internAtom("first_property_oom");
-    defer rt.atoms.free(name);
 
     // Permit exactly the first value-buffer allocation. The following shape
     // allocation must fail after prop_values has temporarily left its sentinel.
@@ -5513,10 +5503,6 @@ test "failed new property definition rolls back retained entry" {
     const c = try rt.internAtom("rollback_c");
     const d = try rt.internAtom("rollback_d");
     const e = try rt.internAtom("rollback_e");
-    defer rt.atoms.free(a);
-    defer rt.atoms.free(b);
-    defer rt.atoms.free(c);
-    defer rt.atoms.free(d);
 
     try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
@@ -5533,7 +5519,9 @@ test "failed new property definition rolls back retained entry" {
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expect(!object.hasOwnProperty(e));
 
-    rt.atoms.free(e);
+    // TGC S3-c: the rollback left no holder edge on `e`, so the next major is
+    // what retires it (the rc-era `free(e)` said the same thing).
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(e) == null);
 }
 
@@ -5550,7 +5538,12 @@ test "unique shape append OOM rolls back shape and value storage together" {
     const names = [_][]const u8{ "oom_shape_a", "oom_shape_b", "oom_shape_c", "oom_shape_d", "oom_shape_e" };
     var atoms: [names.len]core.Atom = undefined;
     for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
-    defer for (atoms) |name| rt.atoms.free(name);
+    // TGC S3-c: bare ids on a Zig array are invisible to the tracer, and the
+    // relocation under test allocates (so it can run a major).
+    var atoms_slice: []core.Atom = &atoms;
+    var atom_roots = core.runtime.rootAtomList(&atoms_slice);
+    atom_roots.activate(rt);
+    defer atom_roots.deactivate(rt);
 
     for (atoms[0..4], 0..) |name, index| {
         try object.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
@@ -5599,7 +5592,6 @@ test "property compaction removes tombstones without mutating shared sibling sha
     };
     var atoms: [names.len]core.Atom = undefined;
     for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
-    defer for (atoms) |name| rt.atoms.free(name);
 
     const template = try core.Object.create(rt, core.class.ids.object, null);
     for (atoms, 0..) |name, index| {
@@ -5657,7 +5649,6 @@ test "context lexicals property alias releases context strong reference" {
     ctx.lexicals = env;
 
     const env_key = try rt.internAtom("env");
-    defer rt.atoms.free(env_key);
     try global.defineOwnProperty(rt, env_key, core.Descriptor.data(env.value(), true, true, true));
 
     ctx.destroy();
@@ -5682,10 +5673,6 @@ test "failed auto-init property definition rolls back retained entry" {
     const c = try rt.internAtom("auto_rollback_c");
     const d = try rt.internAtom("auto_rollback_d");
     const e = try rt.internAtom("auto_rollback_e");
-    defer rt.atoms.free(a);
-    defer rt.atoms.free(b);
-    defer rt.atoms.free(c);
-    defer rt.atoms.free(d);
 
     try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
@@ -5705,7 +5692,6 @@ test "failed auto-init property definition rolls back retained entry" {
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expect(!object.hasOwnProperty(e));
 
-    rt.atoms.free(e);
     try std.testing.expect(rt.atoms.name(e) == null);
 }
 
@@ -5725,10 +5711,6 @@ test "failed realm auto-init property definition rolls back borrowed holder regi
     const c = try rt.internAtom("realm_auto_rollback_c");
     const d = try rt.internAtom("realm_auto_rollback_d");
     const e = try rt.internAtom("realm_auto_rollback_e");
-    defer rt.atoms.free(a);
-    defer rt.atoms.free(b);
-    defer rt.atoms.free(c);
-    defer rt.atoms.free(d);
 
     try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
@@ -5747,7 +5729,8 @@ test "failed realm auto-init property definition rolls back borrowed holder regi
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expect(!object.hasOwnProperty(e));
 
-    rt.atoms.free(e);
+    // TGC S3-c: the rollback left no holder edge on `e`.
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(e) == null);
 }
 
@@ -5760,7 +5743,6 @@ test "property replacement preserves references under memory cap" {
     const replacement = try core.Object.create(rt, core.class.ids.object, null);
 
     const key = try rt.internAtom("rollback_replace");
-    defer rt.atoms.free(key);
 
     try object.defineOwnProperty(rt, key, core.Descriptor.data(old_value.value(), true, true, true));
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
@@ -5789,7 +5771,6 @@ test "definePlainDataPropertyKnownFast refcounted append and duplicate-key repla
     const baseline_live = rt.gc.liveCountKind(.object);
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("refcounted-literal-dup-key");
-    defer rt.atoms.free(key);
 
     const first = try core.Object.create(rt, core.class.ids.object, null);
     const second = try core.Object.create(rt, core.class.ids.object, null);
@@ -5826,7 +5807,6 @@ test "definePlainDataPropertyKnownFast barriers follow committed slot and shape 
     const first = try core.Object.create(rt, core.class.ids.object, null);
     const replacement = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("literal-barrier-count");
-    defer rt.atoms.free(key);
 
     const reports_before = core.gc_trace_stw.detailed_reports;
     core.gc_trace_stw.detailed_reports = true;
@@ -5868,19 +5848,25 @@ test "definePlainDataPropertyKnownFast refcounted define survives forced GC at e
 
     const baseline_live = rt.gc.liveCountKind(.object);
     const holder = try core.Object.create(rt, core.class.ids.object, null);
-    const key = try rt.internAtom("refcounted-literal-force-gc");
-    defer rt.atoms.free(key);
+    var key = try rt.internAtom("refcounted-literal-force-gc");
 
     // A two-object cycle whose only JS-heap root is the value handed to
     // define. Trial deletion treats the live RC as an external root; tracing
     // names the in-flight value through the mutation-window frame (§4.6).
     var cyclic = try core.Object.create(rt, core.class.ids.object, null);
     var partner = try core.Object.create(rt, core.class.ids.object, null);
-    const partner_key = try rt.internAtom("refcounted-literal-partner");
+    var partner_key = try rt.internAtom("refcounted-literal-partner");
+    // TGC S3-c: `definePlainDataPropertyKnownFast` is the trusted
+    // bytecode-operand leg (`caller_holds_atom_ref`), so it declares no atom
+    // root of its own. Production callers read the id out of a traced
+    // FunctionBytecode; this test has to stand in for that root itself, and
+    // the forced GC below is exactly the window it protects.
+    var key_roots = core.runtime.rootAtoms(.{ &key, &partner_key });
+    key_roots.activate(rt);
+    defer key_roots.deactivate(rt);
     try cyclic.defineOwnProperty(rt, partner_key, core.Descriptor.data(partner.value(), true, true, true));
     try partner.defineOwnProperty(rt, partner_key, core.Descriptor.data(cyclic.value(), true, true, true));
     dropGcPtr(&partner);
-    rt.atoms.free(partner_key);
 
     const replacement = try core.Object.create(rt, core.class.ids.object, null);
 
@@ -5926,7 +5912,6 @@ test "definePlainDataPropertyKnownFast OOM sweep leaves refcounted value owned b
     const baseline_live = rt.gc.liveCountKind(.object);
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("refcounted-literal-oom-key");
-    defer rt.atoms.free(key);
 
     const child = try core.Object.create(rt, core.class.ids.object, null);
     _ = child.value();
@@ -5986,7 +5971,6 @@ test "object data property self-assignment keeps stored object alive" {
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const stored = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("self_assign");
-    defer rt.atoms.free(key);
 
     try holder.defineOwnProperty(rt, key, core.Descriptor.data(stored.value(), true, true, true));
 
@@ -6010,7 +5994,6 @@ test "json parse data property self-assignment keeps stored object alive" {
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const stored = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("self_assign_json");
-    defer rt.atoms.free(key);
 
     try holder.defineJsonParseDataProperty(rt, key, stored.value());
 
@@ -6066,7 +6049,6 @@ test "prototype replacement clones shared transition shape" {
     const second = try core.Object.create(rt, core.class.ids.object, null);
 
     const key = try rt.internAtom("shared_proto_key");
-    defer rt.atoms.free(key);
 
     try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try second.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
@@ -6089,7 +6071,6 @@ test "failed prototype replacement preserves prototype and refcounts" {
     const second = try core.Object.create(rt, core.class.ids.object, null);
 
     const key = try rt.internAtom("failed_proto_key");
-    defer rt.atoms.free(key);
 
     try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try second.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
@@ -6141,9 +6122,6 @@ test "shape transition cache releases chained shapes" {
     const a = try rt.internAtom("release_a");
     const b = try rt.internAtom("release_b");
     const c = try rt.internAtom("release_c");
-    defer rt.atoms.free(a);
-    defer rt.atoms.free(b);
-    defer rt.atoms.free(c);
 
     var objects: [32]*core.Object = undefined;
     for (&objects, 0..) |*slot, index| {
@@ -6175,13 +6153,11 @@ test "large object property lookup uses shape hash across delete and re-add" {
         const name = try std.fmt.bufPrint(&name_buf, "prop_{d}", .{i});
         const key = try rt.internAtom(name);
         try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(@intCast(i)), true, true, true));
-        rt.atoms.free(key);
     }
 
     try std.testing.expect(obj.shape_ref.hasPropertyHash());
 
     const target = try rt.internAtom("prop_96");
-    defer rt.atoms.free(target);
     const before = try obj.getProperty(target);
     try std.testing.expectEqual(@as(?i32, 96), before.asInt32());
 
@@ -6629,7 +6605,6 @@ test "runtime exposes stable gc stats snapshot" {
     defer token.release();
 
     const key = try rt.internAtom("statsChild");
-    defer rt.atoms.free(key);
     try owner.defineOwnProperty(&rt, key, core.Descriptor.data(child.value(), true, true, true));
 
     const snapshot = rt.gcStats();
@@ -6887,7 +6862,6 @@ test "object child edge tracing exposes mutable value slots" {
     const array_obj = try core.Object.createArray(rt, null);
 
     const key = try rt.internAtom("traceSlot");
-    defer rt.atoms.free(key);
     try array_obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(401), true, true, true));
     try std.testing.expect(try array_obj.appendDenseArrayIndex(rt, 0, core.atom.atomFromUInt32(0), core.JSValue.int32(402)));
 
@@ -7260,11 +7234,8 @@ test "trace shape summary: incremental writers track the Shape projection" {
     defer rt.destroy();
 
     const key_a = try rt.internAtom("trace-summary-a");
-    defer rt.atoms.free(key_a);
     const key_b = try rt.internAtom("trace-summary-b");
-    defer rt.atoms.free(key_b);
     const key_c = try rt.internAtom("trace-summary-c");
-    defer rt.atoms.free(key_c);
 
     const undef = core.JSValue.undefinedValue();
     const data_desc = core.Descriptor.data(undef, true, true, true);
@@ -7362,11 +7333,8 @@ test "trace shape summary: appends preserve the leased remembered bit" {
     defer ctx.destroy();
 
     const key_a = try rt.internAtom("trace-summary-bit7-a");
-    defer rt.atoms.free(key_a);
     const key_b = try rt.internAtom("trace-summary-bit7-b");
-    defer rt.atoms.free(key_b);
     const key_c = try rt.internAtom("trace-summary-bit7-c");
-    defer rt.atoms.free(key_c);
 
     const owner = try core.Object.createPlainObject(rt, null);
     var owner_slot: ?*core.Object = owner;
@@ -7483,7 +7451,6 @@ test "representation audit cross-checks the remembered object cache and map" {
     defer ctx.destroy();
 
     const edge_key = try rt.internAtom("remembered-representation-audit");
-    defer rt.atoms.free(edge_key);
     const owner = try core.Object.createPlainObject(rt, null);
     try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
     var owner_slot: ?*core.Object = owner;
@@ -7629,7 +7596,6 @@ test "forget fuses the remembered map removal with its own cache bit" {
     defer ctx.destroy();
 
     const edge_key = try rt.internAtom("remembered-forget-fusion");
-    defer rt.atoms.free(edge_key);
     const owner = try core.Object.createPlainObject(rt, null);
     try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
     var owner_slot: ?*core.Object = owner;
@@ -7907,7 +7873,6 @@ test "object traceChildEdgesFallible propagates visitor errors" {
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     const child = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("trace-error-child");
-    defer rt.atoms.free(key);
 
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(child.value(), true, true, true));
 
@@ -7933,9 +7898,7 @@ test "ordinary object trace visits data slots and TMASK accessor edges" {
     const data_child = try core.Object.create(rt, core.class.ids.object, null);
     const getter = try core.Object.create(rt, core.class.ids.object, null);
     const data_key = try rt.internAtom("ordinary-data");
-    defer rt.atoms.free(data_key);
     const acc_key = try rt.internAtom("ordinary-acc");
-    defer rt.atoms.free(acc_key);
 
     try obj.defineOwnProperty(rt, data_key, core.Descriptor.data(data_child.value(), true, true, true));
     try obj.defineOwnProperty(rt, acc_key, core.Descriptor.accessor(getter.value(), core.JSValue.undefinedValue(), true, true));
@@ -8040,7 +8003,6 @@ test "zero-ref release drains a deep acyclic object chain iteratively" {
     defer rt.destroy();
 
     const key = try rt.internAtom("deep-zero-ref-next");
-    defer rt.atoms.free(key);
     _ = try createDeepOwnedPropertyChain(rt, key, deep_gc_chain_length);
 
     helpers.reclaimNow(rt);
@@ -8054,7 +8016,6 @@ test "cycle scan preserves a deeply rooted object chain without recursion" {
     defer rt.destroy();
 
     const key = try rt.internAtom("deep-cycle-scan-next");
-    defer rt.atoms.free(key);
     const head = try createDeepOwnedPropertyChain(rt, key, deep_gc_chain_length);
     var head_slot: ?*core.Object = head;
     var obj_roots = core.runtime.rootObjects(.{&head_slot});
@@ -8118,9 +8079,7 @@ test "closed object property cycle is released by runtime cycle removal" {
     var left = try core.Object.create(rt, core.class.ids.object, null);
     var right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("left");
-    defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("right");
-    defer rt.atoms.free(right_key);
 
     try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
     try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
@@ -8138,7 +8097,6 @@ test "fast array iterator-next cache cycle is released by runtime cycle removal"
     std.debug.assert(it.flags.fast_array);
     var next_obj = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("iterator");
-    defer rt.atoms.free(key);
 
     try next_obj.defineOwnProperty(rt, key, core.Descriptor.data(it.value(), true, true, true));
     const slot = try it.cachedIteratorNextSlot(rt);
@@ -8301,7 +8259,6 @@ test "module trace edges visit function, namespace, meta and thrown values" {
     defer ctx.destroy();
 
     const module_name = try rt.internAtom("cycle-mark-parity.mjs");
-    defer rt.atoms.free(module_name);
     const record = try publishEmptyModule(rt, &ctx.modules, module_name);
     const func_obj = try core.Object.create(rt, core.class.ids.object, null);
     const ns = try core.Object.create(rt, core.class.ids.module_ns, null);
@@ -8330,7 +8287,6 @@ test "strong Map and Set entry cycles are released by runtime cycle removal" {
     const set = try core.Object.create(rt, core.class.ids.set, null);
     const set_value = try core.Object.create(rt, core.class.ids.object, null);
     const back_key = try rt.internAtom("collection");
-    defer rt.atoms.free(back_key);
     try map_key.defineOwnProperty(rt, back_key, core.Descriptor.data(map.value(), true, true, true));
     try map_value.defineOwnProperty(rt, back_key, core.Descriptor.data(map.value(), true, true, true));
     try set_value.defineOwnProperty(rt, back_key, core.Descriptor.data(set.value(), true, true, true));
@@ -8356,7 +8312,6 @@ test "ordinary error stack and callsite cycles are released by runtime cycle rem
     const stack = try core.Object.create(rt, core.class.ids.object, null);
     const callsite = try core.Object.create(rt, core.class.ids.object, null);
     const back_key = try rt.internAtom("owner");
-    defer rt.atoms.free(back_key);
     try stack.defineOwnProperty(rt, back_key, core.Descriptor.data(owner.value(), true, true, true));
     try callsite.defineOwnProperty(rt, back_key, core.Descriptor.data(owner.value(), true, true, true));
 
@@ -8375,7 +8330,6 @@ test "accessor getter and setter self-cycle is released by runtime cycle removal
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("accessor");
-    defer rt.atoms.free(key);
 
     // Pins accessor getter/setter property slots, object.zig:8399-8408.
     try object.defineOwnProperty(rt, key, core.Descriptor.accessor(object.value(), object.value(), true, true));
@@ -8413,7 +8367,6 @@ test "arguments payload value-slice cycle is released by runtime cycle removal" 
     const arguments = try core.Object.create(rt, arguments_class, null);
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("arguments-payload");
-    defer rt.atoms.free(key);
 
     // Pins ArgumentsPayload.var_refs value-slice edges, object.zig:8670-8672.
     const payload: *core.object.ArgumentsPayload = @ptrCast(@alignCast(arguments.payloadArm().*.?));
@@ -8447,9 +8400,7 @@ test "fallible GC API reports reclaimed objects and no failure" {
     const left = try core.Object.create(rt, core.class.ids.object, null);
     const right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("gc-result-left");
-    defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("gc-result-right");
-    defer rt.atoms.free(right_key);
 
     try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
     try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
@@ -8470,9 +8421,7 @@ test "trace_stw collects a closed property cycle" {
     const left = try core.Object.create(rt, core.class.ids.object, null);
     const right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("left");
-    defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("right");
-    defer rt.atoms.free(right_key);
     try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
     try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
     try expectClosedPropertyCycleReclaimed(rt, rt.runObjectCycleRemoval());
@@ -8493,9 +8442,7 @@ test "trace_stw ephemeron keeps value only when table and key are live" {
     try appendWeakCollectionEntry(rt, weakmap, key, value.value());
 
     const map_atom = try rt.internAtom("wm");
-    defer rt.atoms.free(map_atom);
     const key_atom = try rt.internAtom("wk");
-    defer rt.atoms.free(key_atom);
     try global.defineOwnProperty(rt, map_atom, core.Descriptor.data(weakmap.value(), true, true, true));
     try global.defineOwnProperty(rt, key_atom, core.Descriptor.data(key.value(), true, true, true));
 
@@ -8525,11 +8472,9 @@ test "trace_stw ephemeron value does not keep its key alive" {
     try appendWeakCollectionEntry(rt, weakmap, key, value.value());
 
     const map_atom = try rt.internAtom("wm");
-    defer rt.atoms.free(map_atom);
     try global.defineOwnProperty(rt, map_atom, core.Descriptor.data(weakmap.value(), true, true, true));
 
     const back = try rt.internAtom("key");
-    defer rt.atoms.free(back);
     try value.defineOwnProperty(rt, back, core.Descriptor.data(key.value(), true, true, true));
     dropGcPtr(&key);
 
@@ -8551,7 +8496,6 @@ test "trace_stw WeakRef deref keep-alive lasts until job end" {
     const target_header = target.gcHeader();
     try weak_ref.setWeakRefTarget(rt, target.value());
     const wr_atom = try rt.internAtom("wr");
-    defer rt.atoms.free(wr_atom);
     try global.defineOwnProperty(rt, wr_atom, core.Descriptor.data(weak_ref.value(), true, true, true));
 
     _ = weak_ref.weakRefDeref(rt);
@@ -8772,9 +8716,7 @@ test "trace_stw survivor classes on a known graph" {
     var left = try core.Object.create(rt, core.class.ids.object, null);
     var right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("surv-left");
-    defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("surv-right");
-    defer rt.atoms.free(right_key);
     try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
     try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
     dropGcPtr(&left);
@@ -9548,9 +9490,7 @@ test "pollGC runs pending collection and clears pending flag" {
     var left = try core.Object.create(rt, core.class.ids.object, null);
     var right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("poll-left");
-    defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("poll-right");
-    defer rt.atoms.free(right_key);
 
     try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
     try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
@@ -9754,7 +9694,6 @@ test "persistent value handle keeps object and nested symbols alive" {
     const key = try rt.atoms.newValueSymbol("persistent-handle-symbol-key");
     const value = object.value();
     try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.boolean(true), true, true, true));
-    rt.atoms.free(key);
 
     const handle = try rt.createPersistentValue(value);
 
@@ -9900,7 +9839,6 @@ test "weak persistent value clears object cycle target during gc" {
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const self_key = try rt.internAtom("weak-persistent-cycle-self");
-    defer rt.atoms.free(self_key);
     try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target.value(), true, true, true));
 
     var clear_count: usize = 0;
@@ -9948,7 +9886,6 @@ test "function home object cycle is released by runtime cycle removal" {
     const home = try core.Object.create(rt, core.class.ids.object, null);
     const function = try core.Object.create(rt, core.class.ids.bytecode_function, null);
     const method_key = try rt.internAtom("method");
-    defer rt.atoms.free(method_key);
 
     try function.setFunctionHomeObject(rt, home);
     try home.defineOwnProperty(rt, method_key, core.Descriptor.data(function.value(), true, true, true));
@@ -9963,7 +9900,6 @@ test "async continuation function cycle is released by runtime cycle removal" {
     const continuation = try core.Object.create(rt, core.class.ids.c_function_data, null);
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     const key = try rt.internAtom("continuation");
-    defer rt.atoms.free(key);
 
     (try continuation.functionAsyncContinuationSlot(rt)).* = promise.value();
     try promise.defineOwnProperty(rt, key, core.Descriptor.data(continuation.value(), true, true, true));
@@ -9978,7 +9914,6 @@ test "async generator promise cycle is released by runtime cycle removal" {
     const generator = try core.Object.create(rt, core.class.ids.async_generator, null);
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     const key = try rt.internAtom("generator");
-    defer rt.atoms.free(key);
 
     generator.generatorAsyncPromiseSlot().* = promise.value();
     try promise.defineOwnProperty(rt, key, core.Descriptor.data(generator.value(), true, true, true));
@@ -10000,9 +9935,7 @@ test "materialized native function cycle is released by runtime cycle removal" {
     // compatibility path.
     try global.setCachedFunctionProto(rt, global);
     const cached_key = try rt.internAtom("cached");
-    defer rt.atoms.free(cached_key);
     const global_key = try rt.internAtom("global");
-    defer rt.atoms.free(global_key);
 
     try global.defineAutoInitPropertyWithRealmAndNative(
         rt,
@@ -10031,11 +9964,9 @@ test "function bytecode constant object cycle is released by runtime cycle remov
     defer rt.destroy();
 
     const name = try rt.internAtom("fn");
-    defer rt.atoms.free(name);
     const function = try core.Object.create(rt, core.class.ids.bytecode_function, null);
     const captured = try core.Object.create(rt, core.class.ids.object, null);
     const function_key = try rt.internAtom("function");
-    defer rt.atoms.free(function_key);
 
     const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
         .name = name,
@@ -10167,14 +10098,11 @@ test "shared function bytecode constant object cycle is released by runtime cycl
     defer rt.destroy();
 
     const name = try rt.internAtom("sharedFn");
-    defer rt.atoms.free(name);
     const first = try core.Object.create(rt, core.class.ids.bytecode_function, null);
     const second = try core.Object.create(rt, core.class.ids.bytecode_function, null);
     const captured = try core.Object.create(rt, core.class.ids.object, null);
     const first_key = try rt.internAtom("first");
-    defer rt.atoms.free(first_key);
     const second_key = try rt.internAtom("second");
-    defer rt.atoms.free(second_key);
 
     const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
         .name = name,
@@ -10199,13 +10127,12 @@ test "cycle teardown frees bytecode function captures before FB metadata" {
     const global = try core.Object.create(rt, core.class.ids.object, null);
     const function = try core.Object.create(rt, core.class.ids.bytecode_function, null);
     const function_key = try rt.internAtom("capturedFunction");
-    defer rt.atoms.free(function_key);
 
     const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .closure_var_count = 1 });
     fb.closureVar()[0] = engine.bytecode.function_bytecode.BytecodeClosureVar.init(.{
         .closure_type = .ref,
         .var_idx = 0,
-        .var_name = rt.atoms.dup(core.atom.ids.empty_string),
+        .var_name = core.atom.ids.empty_string,
     });
     fb.publishFixtureNoFail(rt);
 
@@ -10224,13 +10151,10 @@ test "nested function bytecode constant object cycle is released by runtime cycl
     defer rt.destroy();
 
     const outer_name = try rt.internAtom("outerFn");
-    defer rt.atoms.free(outer_name);
     const inner_name = try rt.internAtom("innerFn");
-    defer rt.atoms.free(inner_name);
     const function = try core.Object.create(rt, core.class.ids.bytecode_function, null);
     const captured = try core.Object.create(rt, core.class.ids.object, null);
     const function_key = try rt.internAtom("function");
-    defer rt.atoms.free(function_key);
 
     const outer = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
         .name = outer_name,
@@ -10263,13 +10187,10 @@ test "cyclic internal function bytecode references are released by runtime cycle
     defer rt.destroy();
 
     const outer_name = try rt.internAtom("outerCycleFn");
-    defer rt.atoms.free(outer_name);
     const inner_name = try rt.internAtom("innerCycleFn");
-    defer rt.atoms.free(inner_name);
     const function = try core.Object.create(rt, core.class.ids.bytecode_function, null);
     const captured = try core.Object.create(rt, core.class.ids.object, null);
     const function_key = try rt.internAtom("function");
-    defer rt.atoms.free(function_key);
 
     const outer = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
         .name = outer_name,
@@ -10310,11 +10231,9 @@ test "class payload function bytecode constant object cycle is released by runti
     });
 
     const name = try rt.internAtom("payloadFn");
-    defer rt.atoms.free(name);
     const external = try core.Object.create(rt, external_id, null);
     const captured = try core.Object.create(rt, core.class.ids.object, null);
     const external_key = try rt.internAtom("external");
-    defer rt.atoms.free(external_key);
 
     const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
         .name = name,
@@ -10352,7 +10271,6 @@ test "realm context owns cached prototype references" {
     const function_proto = try core.Object.create(rt, core.class.ids.object, null);
     const promise_proto = try core.Object.create(rt, core.class.ids.object, null);
     const global_key = try rt.internAtom("global");
-    defer rt.atoms.free(global_key);
 
     try global.setCachedFunctionProto(rt, function_proto);
     try global.setCachedPromiseProto(rt, promise_proto);
@@ -10378,7 +10296,6 @@ test "auto-init slot owns its Realm until the property is deleted" {
     ctx.global = global;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const lazy_key = try rt.internAtom("lazy");
-    defer rt.atoms.free(lazy_key);
 
     try holder.defineAutoInitPropertyWithRealmAndNative(
         rt,
@@ -10423,9 +10340,7 @@ test "typed MODULE_NS auto-init publishes a normal value or the same VarRef cell
     const value_holder = try core.Object.create(rt, core.class.ids.object, null);
     const cell_holder = try core.Object.create(rt, core.class.ids.object, null);
     const value_key = try rt.internAtom("module_namespace_value");
-    defer rt.atoms.free(value_key);
     const cell_key = try rt.internAtom("module_namespace_cell");
-    defer rt.atoms.free(cell_key);
     const flags = core.property.Flags.data(true, false, true);
 
     var value_fixture = ModuleAutoInitFixture{
@@ -10465,7 +10380,6 @@ test "MODULE_NS auto-init failure retains its slot Realm and retries once per re
     defer ctx.destroy();
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("module_namespace_retry");
-    defer rt.atoms.free(key);
     var fixture = ModuleAutoInitFixture{
         .expected_realm = &ctx.header,
         .result = .{ .fail_once = core.JSValue.int32(88) },
@@ -10491,7 +10405,6 @@ test "MODULE_NS auto-init reentry cannot overwrite the replacement property" {
     defer ctx.destroy();
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("module_namespace_reentry");
-    defer rt.atoms.free(key);
     var fixture = ModuleAutoInitFixture{
         .expected_realm = &ctx.header,
         .result = .{ .reenter = .{
@@ -10520,7 +10433,6 @@ test "auto-init slot exposes the typed Realm and module owner edges" {
     defer ctx.destroy();
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("module_namespace_clone");
-    defer rt.atoms.free(key);
     var fixture = ModuleAutoInitFixture{
         .expected_realm = &ctx.header,
         .result = .{ .value = core.JSValue.int32(1) },
@@ -10543,9 +10455,7 @@ test "unmaterialized MODULE_NS slot participates in Realm cycle marking" {
     ctx.global = global;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const lazy_key = try rt.internAtom("module_namespace_cycle");
-    defer rt.atoms.free(lazy_key);
     const holder_key = try rt.internAtom("holder");
-    defer rt.atoms.free(holder_key);
     var fixture = ModuleAutoInitFixture{
         .expected_realm = &ctx.header,
         .result = .{ .value = core.JSValue.int32(1) },
@@ -10923,7 +10833,6 @@ test "data to auto-init replacement stays traceable across allocation GC" {
     ctx.global = global;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("allocation-gc-auto-init-replacement");
-    defer rt.atoms.free(key);
     const flags = core.property.Flags.data(true, true, true);
 
     try holder.defineOwnProperty(
@@ -10964,7 +10873,6 @@ test "data to auto-init replacement rolls back descriptor OOM and retries in sam
     try global.setCachedRealmValue(rt, .array_prototype, array_prototype.value());
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("oom-auto-init-replacement");
-    defer rt.atoms.free(key);
     const flags = core.property.Flags.data(true, true, true);
 
     try holder.defineOwnProperty(
@@ -11017,7 +10925,6 @@ test "replacing auto-init transfers the owned Realm edge" {
     second_ctx.global = second_global;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("lazy_replace_realm");
-    defer rt.atoms.free(key);
 
     try holder.defineAutoInitPropertyWithRealmAndNative(
         rt,
@@ -11059,7 +10966,6 @@ test "replacing auto-init rolls back descriptor OOM and retries in same runtime"
     second_ctx.global = second_global;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("oom-replace-realm");
-    defer rt.atoms.free(key);
 
     try holder.defineAutoInitPropertyWithRealmAndNative(
         rt,
@@ -11106,7 +11012,6 @@ test "deleting auto-init releases its owned Realm edge" {
     ctx.global = global;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("lazy_delete_realm");
-    defer rt.atoms.free(key);
 
     try holder.definePerformanceAutoInitProperty(rt, key, core.property.Flags.data(true, false, true), global);
 
@@ -11132,14 +11037,14 @@ test "ordinary auto-init replacement releases each owned Realm edge" {
     var holder_roots = core.runtime.rootObjects(.{&holder_slot});
     holder_roots.activate(rt);
     defer holder_roots.deactivate(rt);
-    const define_key = try rt.internAtom("lazy_define_realm");
-    defer rt.atoms.free(define_key);
-    const set_key = try rt.internAtom("lazy_set_realm");
-    defer rt.atoms.free(set_key);
-    const own_set_key = try rt.internAtom("lazy_own_set_realm");
-    defer rt.atoms.free(own_set_key);
-    const simple_set_key = try rt.internAtom("lazy_simple_set_realm");
-    defer rt.atoms.free(simple_set_key);
+    var define_key = try rt.internAtom("lazy_define_realm");
+    var set_key = try rt.internAtom("lazy_set_realm");
+    var own_set_key = try rt.internAtom("lazy_own_set_realm");
+    var simple_set_key = try rt.internAtom("lazy_simple_set_realm");
+    // TGC S3-c: bare ids held across the collections below.
+    var key_roots = core.runtime.rootAtoms(.{ &define_key, &set_key, &own_set_key, &simple_set_key });
+    key_roots.activate(rt);
+    defer key_roots.deactivate(rt);
 
     try holder.definePerformanceAutoInitProperty(rt, define_key, core.property.Flags.data(true, false, true), global);
 
@@ -11179,15 +11084,10 @@ test "specialized auto-init producers retain the same typed Realm owner" {
     const replace_holder = try core.Object.create(rt, core.class.ids.object, null);
 
     const navigator_key = try rt.internAtom("navigator");
-    defer rt.atoms.free(navigator_key);
     const performance_key = try rt.internAtom("performance");
-    defer rt.atoms.free(performance_key);
     const namespace_key = try rt.internAtom("Math");
-    defer rt.atoms.free(namespace_key);
     const host_key = try rt.internAtom("gc");
-    defer rt.atoms.free(host_key);
     const replace_key = try rt.internAtom("replace");
-    defer rt.atoms.free(replace_key);
 
     const flags = core.property.Flags.data(true, false, true);
     try navigator_holder.defineNavigatorAutoInitProperty(rt, navigator_key, flags, global);
@@ -11247,7 +11147,6 @@ test "materialized auto-init true C function owns its construction realm" {
     try global.setCachedFunctionProto(rt, global);
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const host_key = try rt.internAtom("gc");
-    defer rt.atoms.free(host_key);
 
     try holder.defineHostAutoInitProperty(
         rt,
@@ -11708,7 +11607,6 @@ test "weak map cycle sweep clears index after removing dead keys" {
     const map = try core.Object.create(rt, core.class.ids.weakmap, null);
 
     const self_key = try rt.internAtom("self");
-    defer rt.atoms.free(self_key);
 
     var keys: [8]?*core.Object = @splat(null);
     var key_roots: [8]core.runtime.ObjectRootValue = undefined;
@@ -11837,7 +11735,6 @@ test "finalization registry unregister cannot remove queued cleanup cell" {
     defer target_roots.deactivate(rt);
     var target_value = target.value();
     const self_key = try rt.internAtom("gc-finalization-unregister-pending-self");
-    defer rt.atoms.free(self_key);
     try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target_value, true, true, true));
     try registry.appendFinalizationRegistryCell(
         rt,
@@ -11940,9 +11837,7 @@ test "object allocation threshold triggers runtime cycle removal" {
     var left = try core.Object.create(rt, core.class.ids.object, null);
     var right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("left");
-    defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("right");
-    defer rt.atoms.free(right_key);
 
     try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
     try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
@@ -11982,7 +11877,6 @@ test "object allocation collects reclaimable cycles before memory-limit rejectio
 
     var object = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("gc-before-limit-self");
-    defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(object.value(), true, true, true));
     dropGcPtr(&object);
 
@@ -12013,7 +11907,6 @@ test "cache-miss root shape is owned before the object allocation GC boundary" {
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
 
     const key = try rt.internAtom("cache-miss-shape-before-object-gc");
-    defer rt.atoms.free(key);
     const garbage = try core.Object.create(rt, core.class.ids.object, null);
     try garbage.defineOwnProperty(rt, key, core.Descriptor.data(garbage.value(), true, true, true));
 
@@ -12185,7 +12078,6 @@ test "proxy target handler cycle is released by runtime cycle removal" {
     const proxy = try core.Object.create(rt, core.class.ids.proxy, null);
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("proxy");
-    defer rt.atoms.free(key);
 
     proxy.proxyTargetSlot().* = target.value();
     proxy.proxyHandlerSlot().* = target.value();
@@ -12206,11 +12098,8 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
     ext_roots.activate(rt);
     defer ext_roots.deactivate(rt);
     const left_key = try rt.internAtom("left");
-    defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("right");
-    defer rt.atoms.free(right_key);
     const external_key = try rt.internAtom("external");
-    defer rt.atoms.free(external_key);
 
     try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
     try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
@@ -12232,9 +12121,7 @@ test "module namespace shape VarRef cycle is released by runtime cycle removal" 
     const namespace = try core.Object.create(rt, core.class.ids.module_ns, null);
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("namespace");
-    defer rt.atoms.free(key);
     const export_name = try rt.internAtom("value");
-    defer rt.atoms.free(export_name);
 
     try target.defineOwnProperty(rt, key, core.Descriptor.data(namespace.value(), true, true, true));
     const cell = try core.VarRef.createClosed(rt, target.value());
@@ -12251,7 +12138,6 @@ test "mapped arguments var-ref cycle is released by runtime cycle removal" {
     const arguments = try core.Object.create(rt, core.class.ids.mapped_arguments, null);
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("arguments");
-    defer rt.atoms.free(key);
 
     const refs = try arguments.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 1);
     refs[0] = try core.VarRef.createClosed(rt, target.value());
@@ -12296,7 +12182,6 @@ test "array buffer and linked typed array cycle survives arbitrary finalizer ord
     const view = try core.Object.create(rt, core.class.ids.object, null);
     try view.initTypedArrayView(rt, buffer_value, 0, 4, 2, 6);
     const view_key = try rt.internAtom("linked-view");
-    defer rt.atoms.free(view_key);
     try buffer.defineOwnProperty(rt, view_key, core.Descriptor.data(view.value(), true, true, true));
 
     // buffer -> view through the property, view -> buffer through the owned
@@ -12327,7 +12212,6 @@ test "realm module registry keeps published record addresses stable" {
     defer ctx.destroy();
 
     const first_name = try rt.internAtom("stable-first.mjs");
-    defer rt.atoms.free(first_name);
     const first = try publishEmptyModule(rt, &ctx.modules, first_name);
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(core.ModuleRecord, "header"));
     try std.testing.expectEqual(core.gc.GcKind.module, first.header.meta().flags.kind);
@@ -12337,7 +12221,6 @@ test "realm module registry keeps published record addresses stable" {
         const text = try std.fmt.bufPrint(&buffer, "stable-{d}.mjs", .{index});
         const name = try rt.internAtom(text);
         _ = try publishEmptyModule(rt, &ctx.modules, name);
-        rt.atoms.free(name);
         try std.testing.expectEqual(first, ctx.modules.find(first_name).?);
     }
 }
@@ -12351,9 +12234,7 @@ test "module registries isolate records between realms" {
     defer second_ctx.destroy();
 
     const module_name = try rt.internAtom("shared-name.mjs");
-    defer rt.atoms.free(module_name);
     const binding_name = try rt.internAtom("only-in-first");
-    defer rt.atoms.free(binding_name);
 
     var first_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
     defer first_pending.deinit(rt);
@@ -12378,10 +12259,7 @@ test "module registry trace keeps a linked record alive" {
     defer ctx.destroy();
 
     const module_name = try rt.internAtom("finalizer-self-unlink.mjs");
-    defer rt.atoms.free(module_name);
-    const owner_atom_refs = rt.atoms.refCount(module_name).?;
     _ = try publishEmptyModule(rt, &ctx.modules, module_name);
-    try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
     try std.testing.expectEqual(@as(usize, 1), ctx.modules.count);
 
     // Registry membership is a strong traced edge from the live Realm.
@@ -12389,7 +12267,6 @@ test "module registry trace keeps a linked record alive" {
     try std.testing.expect(ctx.modules.head != null);
     try std.testing.expectEqual(@as(usize, 1), ctx.modules.count);
     try std.testing.expect(ctx.modules.find(module_name) != null);
-    try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
     try rt.gc.verifyHeapAccounting(rt);
 }
 
@@ -12401,10 +12278,7 @@ test "explicitly rooted module outlives realm registry teardown" {
     defer if (ctx_alive) ctx.destroy();
 
     const module_name = try rt.internAtom("retained-after-realm.mjs");
-    defer rt.atoms.free(module_name);
-    const owner_atom_refs = rt.atoms.refCount(module_name).?;
     const record = try publishEmptyModule(rt, &ctx.modules, module_name);
-    try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
 
     ctx.destroy();
     ctx_alive = false;
@@ -12419,13 +12293,11 @@ test "explicitly rooted module outlives realm registry teardown" {
     }
     try std.testing.expect(rt.firstContext() == null);
     try std.testing.expect(record.registry == null);
-    try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
 
     // The name Atom is owned by the record, not by this handle, so it comes
     // back when the record is torn down. The realm registry has already let
     // go and no root frame names the record, so the collection reaches it.
     helpers.reclaimNow(rt);
-    try std.testing.expectEqual(owner_atom_refs, rt.atoms.refCount(module_name).?);
 }
 
 test "module namespace strong edge participates in realm object cycle collection" {
@@ -12436,7 +12308,6 @@ test "module namespace strong edge participates in realm object cycle collection
     defer if (ctx_alive) ctx.destroy();
 
     const module_name = try rt.internAtom("realm-module-cycle.mjs");
-    defer rt.atoms.free(module_name);
     const record = try publishEmptyModule(rt, &ctx.modules, module_name);
 
     const realm_record = try core.Object.create(rt, core.class.ids.object, null);
@@ -12467,7 +12338,6 @@ test "Nth module allocation OOM leaves registry and Atom ownership recoverable" 
 
     var names: [64]core.Atom = undefined;
     var names_initialized: usize = 0;
-    defer for (names[0..names_initialized]) |name| rt.atoms.free(name);
     var buffer: [48]u8 = undefined;
     while (names_initialized < names.len) : (names_initialized += 1) {
         const text = try std.fmt.bufPrint(&buffer, "nth-oom-{d}.mjs", .{names_initialized});
@@ -12492,14 +12362,11 @@ test "Nth module allocation OOM leaves registry and Atom ownership recoverable" 
     try std.testing.expect(failed > 1);
     try std.testing.expectEqual(failed, ctx.modules.count);
     try std.testing.expect(ctx.modules.find(names[failed]) == null);
-    try std.testing.expectEqual(@as(usize, 1), rt.atoms.refCount(names[failed]).?);
-    try std.testing.expectEqual(@as(usize, 2), rt.atoms.refCount(names[failed - 1]).?);
 
     failing_allocator.fail_index = std.math.maxInt(usize);
     const recovered = try publishEmptyModule(rt, &ctx.modules, names[failed]);
     try std.testing.expectEqual(recovered, ctx.modules.find(names[failed]).?);
     try std.testing.expectEqual(failed + 1, ctx.modules.count);
-    try std.testing.expectEqual(@as(usize, 2), rt.atoms.refCount(names[failed]).?);
 }
 
 test "runtime memory usage counts linked and explicitly rooted unlinked modules" {
@@ -12514,7 +12381,6 @@ test "runtime memory usage counts linked and explicitly rooted unlinked modules"
     try std.testing.expectEqual(@as(usize, 0), empty.module_bytes);
 
     const module_name = try rt.internAtom("memory-usage-module.mjs");
-    defer rt.atoms.free(module_name);
     const record = try publishEmptyModule(rt, &ctx.modules, module_name);
     const linked = rt.memoryUsage();
     try std.testing.expectEqual(@as(usize, 1), linked.module_count);
@@ -12561,13 +12427,6 @@ test "module publication retains indexed metadata and all strong value edges" {
     const attr_key = try rt.internAtom("type");
     const attr_value = try rt.internAtom("json");
     defer {
-        rt.atoms.free(module_name);
-        rt.atoms.free(dep_name);
-        rt.atoms.free(import_name);
-        rt.atoms.free(local_name);
-        rt.atoms.free(export_name);
-        rt.atoms.free(attr_key);
-        rt.atoms.free(attr_value);
     }
 
     const dependency = try publishEmptyModule(rt, &ctx.modules, dep_name);
@@ -12628,15 +12487,17 @@ test "pending module metadata and publication OOM are atomic" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const module_name = try rt.internAtom("oom-main.mjs");
-    defer rt.atoms.free(module_name);
+    var module_name = try rt.internAtom("oom-main.mjs");
 
-    const dep_name = try rt.internAtom("oom-dep.mjs");
-    defer rt.atoms.free(dep_name);
-    const import_name = try rt.internAtom("oom-import");
-    defer rt.atoms.free(import_name);
-    const local_name = try rt.internAtom("oom-local");
-    defer rt.atoms.free(local_name);
+    var dep_name = try rt.internAtom("oom-dep.mjs");
+    var import_name = try rt.internAtom("oom-import");
+    var local_name = try rt.internAtom("oom-local");
+    // TGC S3-c: without declared roots the collection the failed allocation
+    // runs would retire these entries and hand their bytes back as headroom,
+    // so the OOM under test would not reproduce.
+    var name_roots = core.runtime.rootAtoms(.{ &module_name, &dep_name, &import_name, &local_name });
+    name_roots.activate(rt);
+    defer name_roots.deactivate(rt);
 
     var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
     defer pending.deinit(rt);
@@ -12648,8 +12509,6 @@ test "pending module metadata and publication OOM are atomic" {
 
     try std.testing.expectEqual(@as(usize, 1), pending.requests.len);
     try std.testing.expectEqual(@as(usize, 0), pending.imports.len);
-    try std.testing.expectEqual(@as(usize, 1), rt.atoms.refCount(import_name).?);
-    try std.testing.expectEqual(@as(usize, 1), rt.atoms.refCount(local_name).?);
     try std.testing.expectEqual(@as(usize, 0), ctx.modules.count);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
@@ -12680,15 +12539,6 @@ test "module registry resolves local indirect star and ambiguous exports" {
     const local_a_name = try rt.internAtom("localA");
     const local_b_name = try rt.internAtom("localB");
     defer {
-        rt.atoms.free(main_name);
-        rt.atoms.free(dep_a_name);
-        rt.atoms.free(dep_b_name);
-        rt.atoms.free(dep_c_name);
-        rt.atoms.free(unique_name);
-        rt.atoms.free(value_name);
-        rt.atoms.free(other_name);
-        rt.atoms.free(local_a_name);
-        rt.atoms.free(local_b_name);
     }
 
     var dep_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
@@ -12752,9 +12602,6 @@ test "existing published module generation is not overwritten by pending definit
     const old_export_name = try rt.internAtom("old");
     const replacement_export_name = try rt.internAtom("replacement");
     defer {
-        rt.atoms.free(module_name);
-        rt.atoms.free(old_export_name);
-        rt.atoms.free(replacement_export_name);
     }
 
     var first_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
@@ -12798,17 +12645,6 @@ test "indexed module resolution is pure across not-found ambiguous and cyclic gr
     const local_a_name = try rt.internAtom("local-a");
     const local_b_name = try rt.internAtom("local-b");
     defer {
-        rt.atoms.free(dep_name);
-        rt.atoms.free(missing_name);
-        rt.atoms.free(unresolved_name);
-        rt.atoms.free(cycle_a_name);
-        rt.atoms.free(cycle_b_name);
-        rt.atoms.free(ambiguous_name);
-        rt.atoms.free(amb_a_name);
-        rt.atoms.free(amb_b_name);
-        rt.atoms.free(value_name);
-        rt.atoms.free(local_a_name);
-        rt.atoms.free(local_b_name);
     }
 
     var dep_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
@@ -12899,12 +12735,6 @@ test "module resolution follows local exports of ordinary imports" {
     const foo_name = try rt.internAtom("foo");
     const source_local_name = try rt.internAtom("source-local");
     defer {
-        rt.atoms.free(source_name);
-        rt.atoms.free(direct_name);
-        rt.atoms.free(imported_name);
-        rt.atoms.free(root_name);
-        rt.atoms.free(foo_name);
-        rt.atoms.free(source_local_name);
     }
 
     var source_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
@@ -12972,16 +12802,6 @@ test "module resolution normalizes namespace re-export bindings" {
     const default_name = try rt.internAtom("default");
     const star_atom = core.atom.predefinedId("*", .string).?;
     defer {
-        rt.atoms.free(target_name);
-        rt.atoms.free(star_a_name);
-        rt.atoms.free(star_b_name);
-        rt.atoms.free(import_a_name);
-        rt.atoms.free(import_b_name);
-        rt.atoms.free(star_root_name);
-        rt.atoms.free(import_root_name);
-        rt.atoms.free(mixed_root_name);
-        rt.atoms.free(foo_name);
-        rt.atoms.free(default_name);
     }
 
     const target = try publishEmptyModule(rt, &ctx.modules, target_name);
@@ -13151,7 +12971,6 @@ test "ordinary objects define own data properties and descriptors" {
     const obj = try core.Object.create(rt, core.class.ids.object, null);
 
     const key = try rt.internAtom("answer");
-    defer rt.atoms.free(key);
 
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(42), true, true, true));
     const desc = (try obj.getOwnProperty(rt, key)).?;
@@ -13172,7 +12991,6 @@ test "define property enforces non-configurable and non-writable invariants" {
     const obj = try core.Object.create(rt, core.class.ids.object, null);
 
     const key = try rt.internAtom("locked");
-    defer rt.atoms.free(key);
 
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), false, false, false));
     try std.testing.expectError(
@@ -13193,7 +13011,6 @@ test "accessor descriptors store getter setter placeholders" {
     const obj = try core.Object.create(rt, core.class.ids.object, null);
 
     const key = try rt.internAtom("accessor");
-    defer rt.atoms.free(key);
 
     // qjs `JSProperty` stores getter/setter as `JSObject*` (object or NULL);
     // accessor get/set are always callable objects or undefined, so use object
@@ -13217,7 +13034,6 @@ test "prototype traversal and cycle checks are enforced" {
     const child = try core.Object.create(rt, core.class.ids.object, proto);
 
     const key = try rt.internAtom("inherited");
-    defer rt.atoms.free(key);
     try proto.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(11), true, true, true));
 
     try std.testing.expect(!child.hasOwnProperty(key));
@@ -13236,10 +13052,6 @@ test "own keys follow index string symbol ordering" {
     const index_2 = try rt.internAtom("2");
     const index_1 = try rt.internAtom("1");
     const sym = try rt.atoms.newSymbol("sym", .symbol);
-    defer rt.atoms.free(str_b);
-    defer rt.atoms.free(index_2);
-    defer rt.atoms.free(index_1);
-    defer rt.atoms.free(sym);
 
     try obj.defineOwnProperty(rt, str_b, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try obj.defineOwnProperty(rt, index_2, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
@@ -13263,8 +13075,6 @@ test "extensibility seal and freeze update descriptor flags" {
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("x");
     const other = try rt.internAtom("y");
-    defer rt.atoms.free(key);
-    defer rt.atoms.free(other);
 
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     obj.preventExtensions();
@@ -13294,8 +13104,6 @@ test "array length tracks sparse indices and truncation" {
 
     const index_5 = try rt.internAtom("5");
     const index_1 = try rt.internAtom("1");
-    defer rt.atoms.free(index_5);
-    defer rt.atoms.free(index_1);
 
     try array_obj.defineOwnProperty(rt, index_5, core.Descriptor.data(core.JSValue.int32(5), true, true, true));
     try std.testing.expectEqual(@as(u32, 6), array_obj.arrayLength());
@@ -13332,8 +13140,6 @@ test "array element storage mode moves between dense and sparse" {
 
     const index_0 = try rt.internAtom("0");
     const index_100 = try rt.internAtom("100");
-    defer rt.atoms.free(index_0);
-    defer rt.atoms.free(index_100);
 
     try std.testing.expect(try array_obj.appendDenseArrayIndex(rt, 0, index_0, core.JSValue.int32(0)));
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array_obj.arrayElementStorageMode());
@@ -13362,7 +13168,7 @@ fn exoticDelete(_: *core.Object, _: core.Atom) bool {
 
 fn exoticOwnKeys(_: *core.Object, rt: *core.JSRuntime) ![]core.Atom {
     const keys = try rt.memory.alloc(core.Atom, 1);
-    keys[0] = rt.atoms.dup(core.atom.ids.length);
+    keys[0] = core.atom.ids.length;
     return keys;
 }
 
@@ -13385,9 +13191,7 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
     exotic_define_calls = 0;
     exotic_delete_calls = 0;
     const key = try rt.internAtom("hooked");
-    defer rt.atoms.free(key);
     const real_key = try rt.internAtom("real-own");
-    defer rt.atoms.free(real_key);
 
     const desc = (try obj.getOwnProperty(rt, key)).?;
     try std.testing.expectEqual(@as(?i32, 99), desc.value.asInt32());
@@ -13473,7 +13277,6 @@ test "finalization registry pending jobs preserve callback and held symbols" {
 
     const target_sym = try rt.atoms.newValueSymbol("finalization-target-symbol");
     try target_obj.defineOwnProperty(rt, target_sym, core.Descriptor.data(core.JSValue.boolean(true), true, true, true));
-    rt.atoms.free(target_sym);
 
     const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
     registry.finalizationRegistryCleanupCallbackSlot().* = cleanup_val;
@@ -14484,9 +14287,7 @@ test "the minor reclaims young cycles and parks no deferred frees" {
     defer ctx.destroy();
 
     const left_key = try rt.internAtom("minor-drain-left");
-    defer rt.atoms.free(left_key);
     const right_key = try rt.internAtom("minor-drain-right");
-    defer rt.atoms.free(right_key);
 
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     const bytes_before = rt.memory.allocated_bytes;
@@ -14599,7 +14400,6 @@ test "old-to-young edge survives a minor only because the barrier remembered it"
     defer ctx.destroy();
 
     const edge_key = try rt.internAtom("stage5-old-to-young-edge");
-    defer rt.atoms.free(edge_key);
 
     // Create the slot while the owner is young. The deletion mutant below must
     // isolate the VALUE barrier: adding a brand-new property to an old object
@@ -14662,7 +14462,6 @@ test "object remembered bit is consumed and rebuilt across consecutive minors" {
     defer ctx.destroy();
 
     const edge_key = try rt.internAtom("remembered-bit-two-minors");
-    defer rt.atoms.free(edge_key);
     const owner = try core.Object.createPlainObject(rt, null);
     try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
     var owner_slot: ?*core.Object = owner;
@@ -14712,7 +14511,6 @@ test "incremental retirement clears remembered cache before the next generation"
     defer ctx.destroy();
 
     const edge_key = try rt.internAtom("remembered-bit-cycle-retirement");
-    defer rt.atoms.free(edge_key);
     const owner = try core.Object.createPlainObject(rt, null);
     try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
     var owner_slot: ?*core.Object = owner;
@@ -14881,7 +14679,6 @@ test "the folded barrier gate skips exactly the two owner facts" {
     defer ctx.destroy();
 
     const edge_key = try rt.internAtom("barrier-gate-fold");
-    defer rt.atoms.free(edge_key);
     const owner = try core.Object.createPlainObject(rt, null);
     try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
     var owner_slot: ?*core.Object = owner;
@@ -15429,7 +15226,6 @@ test "a rooted or remembered young string extent survives the minor" {
     rt.forcePreciseRootScanForTest();
 
     const edge_key = try rt.internAtom("young-extent-remembered");
-    defer rt.atoms.free(edge_key);
     const owner = try core.Object.createPlainObject(rt, null);
     var owner_slot: ?*core.Object = owner;
     var object_roots = core.runtime.rootObjects(.{&owner_slot});
@@ -15637,7 +15433,7 @@ test "independent runtimes collect without touching each other" {
     }
 }
 
-test "a crossed whole-heap threshold is answered by a major, never by a minor" {
+test "a crossing a minor cannot answer is still answered by a major" {
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -15658,26 +15454,225 @@ test "a crossed whole-heap threshold is answered by a major, never by a minor" {
         _ = try core.Object.create(rt, core.class.ids.object, null);
     }
 
-    const minors_before = rt.gc.generation.stats.minor_collections;
-    const collections_before = rt.gc.stats.collections;
+    const majors_before = rt.gcStats().major_gc_count;
 
-    // Put the heap over its whole-heap threshold. A minor cannot answer this:
-    // it does not look at the old generation, which is where a heap past its
-    // threshold has its garbage. Answering it with a minor and returning was
-    // the defect that let earley-boyer run 13,642 minors and zero majors.
-    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    // A threshold no minor can ever bring the account back under: whatever the
+    // young collection reclaims, the second verdict still reads "over". That is
+    // the earley-boyer shape -- the garbage a crossed threshold is complaining
+    // about lives in the old generation, which a minor never looks at. Letting
+    // a minor answer the crossing and RETURN was the defect that ran 13,642
+    // minors and zero majors, promoted 6.8M objects, and finished holding
+    // 435MB where refcounting held 3MB. The minor may now run first; what it
+    // may not do is consume the crossing.
+    rt.setGCThreshold(0);
     _ = try rt.pollGC(null, .safepoint);
     // The threshold's answer is an incremental major cycle; drive it to its
-    // remark so the completion counter can move. What must NOT move, at any
-    // of these polls, is the minor counter.
+    // remark so the completion counter can move.
     var polls: usize = 0;
     while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
 
-    try std.testing.expectEqual(minors_before, rt.gc.generation.stats.minor_collections);
-    try std.testing.expect(rt.gc.stats.collections > collections_before);
+    try std.testing.expect(rt.gcStats().major_gc_count > majors_before);
+}
+
+// TGC S2-g. The mirror of the test above, and the case S2 created: an account
+// pushed over the threshold by YOUNG garbage. Under refcounting a dead string
+// left `allocated_bytes` the instant it died, so a crossing really was proof of
+// old garbage; under the tracer a string body is a collector carrier and stays
+// accounted until a collection frees it. pdfjs then answered pure string churn
+// with 908 whole-heap majors where the refcounting baseline ran 6. The repair
+// is order plus a second reading: minor first, re-derive the crossing from the
+// account the minor left, and only then decide about the major.
+test "young churn that crosses the threshold is paid by the minor, not by a major" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // Deliberately NO explicit poll and NO stress knob: the crossing has to be
+    // found where pdfjs finds it, at the allocation boundary
+    // `String.createUninitialized` reaches (TGC S2-f), which is the `normal`
+    // poll mode. That is the whole shape of the defect -- a scheduler arm that
+    // only the scheduler modes can reach never sees a string workload at all.
+    const majors_before = rt.gcStats().major_gc_count;
+    const minors_before = rt.gc.generation.stats.minor_collections;
+    // The headroom is sized so that a crossing arrives with a young set past
+    // `minor_crossing_young_floor`: 1MB of ~336B bodies is ~3k young strings,
+    // which is the population the crossing minor is meant to reclaim. Below
+    // the floor the crossing is a whole-heap major's business, by design.
+    rt.setGCThreshold(rt.memory.allocated_bytes + 1024 * 1024);
+
+    var buf: [320]u8 = @splat('x');
+    var i: usize = 0;
+    while (i < 65536) : (i += 1) {
+        buf[0] = @truncate(i);
+        buf[1] = @truncate(i >> 8);
+        _ = try core.string.String.createLatin1(rt, &buf);
+    }
+    helpers.finishGcCycles(rt);
+
+    // ~22MB of churn against 1MB of headroom is ~20 crossings, and on the old
+    // rule ~20 whole-heap cycles -- for a live set that never grows.
+    try std.testing.expect(rt.gc.generation.stats.minor_collections > minors_before);
+    try std.testing.expect(rt.gcStats().major_gc_count <= majors_before + 1);
+}
+
+// TGC S2-g. The old generation grows every round and the minor reclaims almost
+// nothing, so the second verdict must keep reading "over" and the majors must
+// keep coming -- earley-boyer's shape, expressed as growth rather than as a
+// single crossing.
+test "an old generation that keeps growing keeps triggering majors" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const stress_before = core.gc.stress_collect;
+    core.gc.stress_collect = true;
+    defer core.gc.stress_collect = stress_before;
+
+    // The root of the growing chain, held for the whole test.
+    const anchor = try core.Object.create(rt, core.class.ids.object, null);
+    var anchor_slot: ?*core.Object = anchor;
+    var anchor_roots = [_]core.runtime.ObjectRootValue{.{ .object = &anchor_slot }};
+    var roots = core.runtime.ValueRootFrame{ .objects = &anchor_roots };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    const link = try rt.internAtom("link");
+
+    const majors_before = rt.gcStats().major_gc_count;
+    const account_before = rt.memory.allocated_bytes;
+    rt.setGCThreshold(account_before + 16 * 1024);
+
+    var head = anchor;
+    var i: usize = 0;
+    while (i < 2048) : (i += 1) {
+        const next = try core.Object.create(rt, core.class.ids.object, null);
+        try head.defineOwnDataPropertyAssumingNewFromRootedAtom(rt, link, next.value());
+        head = next;
+        _ = try rt.pollGC(&roots, .safepoint);
+    }
+    helpers.finishGcCycles(rt);
+
+    // The chain really did outgrow the bar it started under.
+    try std.testing.expect(rt.memory.allocated_bytes > account_before + 16 * 1024);
+    // Nothing on that chain is collectable, so every minor comes back empty and
+    // the account only rises. The crossing survives its second reading and the
+    // whole-heap collector keeps being the answer.
+    try std.testing.expect(rt.gcStats().major_gc_count > majors_before);
+}
+
+// TGC S2-g regression. The scheduler change made an ALLOCATION BOUNDARY a
+// place a minor runs, and since S2-f `String.createUninitialized` is such a
+// boundary. Both tests below are about the window that opened: an array can be
+// aged, and its not-yet-installed elements collected, in the middle of one
+// native operation that is still building it.
+//
+// The symptom was silent -- `regexp.js` printed "Wrong checksum." with no
+// assertion, in Debug and under `ZJS_GC_STRESS=1` alike -- because a condemned
+// young string cell is simply handed to the next allocation, so the array ends
+// up naming another string's bytes rather than freed memory.
+test "a dense buffer adopted by an aged array is remembered for the next minor" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const out = try core.Object.createArray(rt, null);
+    var out_slot: ?*core.Object = out;
+    var out_roots = core.runtime.rootObjects(.{&out_slot});
+    out_roots.activate(rt);
+    defer out_roots.deactivate(rt);
+
+    // What an allocation-boundary minor does to an array under construction:
+    // the array survives (it is a root) and is therefore PROMOTED, before a
+    // single element has reached it. `createArray` being two statements ago
+    // does not make the owner young.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!out.gcHeader().metaConst().flags.young);
+
+    // Deletion probe: drop `rememberOwnerForBulkWrite` from
+    // `adoptDenseArrayElementsAssumingEmpty` and the minor below reclaims 2.
+    const elements = try rt.memory.alloc(core.JSValue, 2);
+    elements[0] = (try core.string.String.createLatin1(rt, "adopted-element-zero")).value();
+    elements[1] = (try core.string.String.createLatin1(rt, "adopted-element-one")).value();
+    try std.testing.expect(elements[0].cycleMarkHeader().?.metaConst().flags.young);
+    out.adoptDenseArrayElementsAssumingEmpty(rt, elements);
+    out.flags.may_have_indexed_properties = true;
+
+    // The verdict is the reclaim count, not the bytes: a condemned string cell
+    // still READS correctly until something reuses it, which is why the
+    // production symptom was a wrong checksum a thousand allocations later
+    // rather than a fault at the store. Nothing else is young here, so a
+    // non-zero reclaim is the two adopted strings and nothing else.
+    const reclaimed = (try core.gc_trace_stw.collectMinor(rt, null, .declared_only)).?;
+    try std.testing.expectEqual(@as(usize, 0), reclaimed);
+
+    try helpers.expectStringValueBytes(out.arrayElements()[0], "adopted-element-zero");
+    try helpers.expectStringValueBytes(out.arrayElements()[1], "adopted-element-one");
+}
+
+// TGC S2-g regression, the JS-visible half: `RegExp.prototype.exec` stages its
+// match and capture substrings in a NATIVE `JSValue` buffer and only adopts it
+// into the result array at the end. Native memory is not a traced carrier and
+// not a range the conservative scan walks, so only the machine word holding the
+// most recent substring is a root -- and every further `stringSliceValue` is an
+// allocation boundary that may now run a minor. The staged prefix has to be a
+// declared root slice for the length of the fill.
+//
+// Proven red by deletion (drop the two `rooted_elements = elements[0..initialized]`
+// publications): `bad=4` in a ReleaseFast test build. Debug is the weaker arm --
+// its unoptimised frames spill every intermediate, so the conservative scan is a
+// much wider net there and the same run comes back `bad=0`. Keep the assertion
+// exact anyway: it is the release build that ships.
+test "regexp capture strings survive a minor taken inside the match-array fill" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
+
+    var engine_instance = try helpers.TestEngine.init(std.testing.allocator);
+    defer engine_instance.deinit();
+    const rt = engine_instance.runtime;
+
+    // No stress knob: under `stress_collect` the minors all land at the
+    // interrupt safepoints BETWEEN bytecodes, which is precisely where this
+    // defect is not. The crossing has to be discovered where `exec` finds it,
+    // at the `String.createUninitialized` allocation boundary inside the fill
+    // (TGC S2-f), so the only lever is the threshold.
+    const threshold_before = rt.malloc_gc_threshold;
+    rt.setGCThreshold(rt.memory.allocated_bytes + 128 * 1024);
+    defer rt.setGCThreshold(threshold_before);
+
+    const result = try engine_instance.evalWithOptions(
+        \\(function () {
+        \\  var letters = "abcdefghijk";
+        \\  var parts = [];
+        \\  for (var p = 0; p < letters.length; p++) {
+        \\    var seg = "";
+        \\    for (var q = 0; q < 30; q++) seg += letters.charAt(p);
+        \\    parts.push(seg);
+        \\  }
+        \\  var input = parts.join("-");
+        \\  var re = /([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)/;
+        \\  var bad = 0;
+        \\  for (var i = 0; i < 6000; i++) {
+        \\    var m = re.exec(input);
+        \\    if (m[0] !== input) bad++;
+        \\    for (var c = 0; c < parts.length; c++) {
+        \\      if (m[c + 1] !== parts[c]) bad++;
+        \\    }
+        \\  }
+        \\  return "bad=" + bad;
+        \\})()
+    , .{ .filename = "<repl>" });
+    try helpers.expectStringValueBytes(result, "bad=0");
 }
 
 test "a minor does not move the major's threshold" {
@@ -15916,7 +15911,6 @@ test "marking barrier shades grey, not black: the stored object's children survi
     const b = try core.Object.create(rt, core.class.ids.object, null);
     const c = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("edge");
-    defer rt.atoms.free(key);
     try b.defineOwnProperty(rt, key, core.Descriptor.data(c.value(), true, true, true));
 
     // The interleaving a one-call STW major cannot express, constructed by
@@ -16204,7 +16198,6 @@ test "condemning many shapes leaves the transition table exactly consistent" {
     // which walks the whole table per corpse is doing quadratic work. Distinct
     // property names mean distinct shapes rather than one shared transition.
     const keeper_key = try rt.internAtom("delist-keeper");
-    defer rt.atoms.free(keeper_key);
     const keeper = try core.Object.create(rt, core.class.ids.object, null);
     try keeper.definePlainDataPropertyKnownFast(rt, keeper_key, core.JSValue.int32(1));
     const keeper_shape = keeper.shape_ref;
@@ -16217,7 +16210,6 @@ test "condemning many shapes leaves the transition table exactly consistent" {
     while (index < 192) : (index += 1) {
         const name = try std.fmt.bufPrint(&name_buffer, "delist-dead-{d}", .{index});
         const key = try rt.internAtom(name);
-        defer rt.atoms.free(key);
         const dead = try core.Object.create(rt, core.class.ids.object, null);
         try dead.definePlainDataPropertyKnownFast(rt, key, core.JSValue.int32(@intCast(index)));
     }
@@ -16580,7 +16572,6 @@ test "a store during an incremental cycle keeps the stored subgraph alive to the
     const b = try core.Object.create(rt, core.class.ids.object, null);
     const c = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("edge");
-    defer rt.atoms.free(key);
     try b.defineOwnProperty(rt, key, core.Descriptor.data(c.value(), true, true, true));
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
@@ -16677,11 +16668,12 @@ test "runtime teardown owns a detached generator shell" {
 }
 
 // ---------------------------------------------------------------------------
-// TGC S3-a: atom tracing infrastructure (docs/tracing-gc-s3-spec.md).
+// TGC S3: tracing-owned atom liveness (docs/tracing-gc-s3-spec.md).
 //
-// Every assertion below reads `DynamicAtom.mark_epoch`, not liveness: with
-// `gc.atom_tracer_owned` off the marks decide nothing, so these tests are what
-// prove the edges exist before the switch can be trusted to use them.
+// The edge tests below read `DynamicAtom.mark_epoch` directly: that is the
+// mechanism the sweep then acts on, and pinning it separately keeps an edge
+// regression from hiding behind some other root that happens to keep the
+// entry alive.
 // ---------------------------------------------------------------------------
 
 fn s3AtomEntry(rt: *core.JSRuntime, id: core.Atom) *core.atom.DynamicAtom {
@@ -16711,7 +16703,6 @@ test "TGC S3: a shape property key is an atom trace edge" {
     try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     // Hand the id over: from here the entry is reachable only through the
     // shape's property array.
-    rt.atoms.free(key);
 
     try s3RunMajor(rt);
     try std.testing.expectEqual(s3MarkEpoch(rt), s3AtomEntry(rt, key).mark_epoch);
@@ -16730,7 +16721,6 @@ test "TGC S3: an inline bytecode atom operand is an atom trace edge" {
     );
 
     const operand = try rt.internAtom("zjsS3BytecodeOperand");
-    defer rt.atoms.free(operand);
 
     try s3RunMajor(rt);
     try std.testing.expectEqual(s3MarkEpoch(rt), s3AtomEntry(rt, operand).mark_epoch);
@@ -16746,7 +16736,6 @@ test "TGC S3: a module record name is an atom trace edge" {
     const module_name = try rt.internAtom("zjs-s3-module-edge.mjs");
     const record = try publishEmptyModule(rt, &ctx.modules, module_name);
     // Only the record names the atom now.
-    rt.atoms.free(module_name);
 
     var record_roots = [_]core.runtime.HeaderRootValue{.{ .header = &record.header }};
     var record_frame = core.runtime.ValueRootFrame{ .headers = &record_roots };
@@ -16774,30 +16763,28 @@ test "TGC S3: an id-held value symbol keeps its body marked" {
     try rt.gc.pinHeader(object.gcHeader());
     defer rt.gc.unpinHeader(object.gcHeader());
     try object.defineOwnProperty(rt, symbol_atom, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
-    rt.atoms.free(symbol_atom);
 
     try s3RunMajor(rt);
     try std.testing.expectEqual(s3MarkEpoch(rt), s3AtomEntry(rt, symbol_atom).mark_epoch);
     try std.testing.expect(rt.gc.headerMarked(body_header));
 }
 
-test "TGC S3: the shadow audit reports an atom rc holds but no edge reaches" {
+test "TGC S3-c: an atom no edge and no root reaches is retired by the major" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
-    // A bare native id: `ref_count` keeps it, nothing declares it. This is
-    // exactly the N-class temporary S3-b has to give a root, and until then
-    // the audit is what names it.
+    // A bare native id nothing declares. Before the flip `ref_count` kept it
+    // and the shadow audit named it; now the sweep retires it.
     const orphan = try rt.internAtom("zjs-s3-orphan-atom");
-    defer rt.atoms.free(orphan);
+    const entry_index = orphan - core.atom.first_dynamic_atom;
 
-    rt.atoms.atom_audit_missing_edge = 0;
     try s3RunMajor(rt);
-    try std.testing.expect(rt.atoms.atom_audit_missing_edge >= 1);
-    try std.testing.expect(s3AtomEntry(rt, orphan).mark_epoch != s3MarkEpoch(rt));
+    try std.testing.expect(rt.atoms.entries[entry_index].mark_epoch != s3MarkEpoch(rt));
+    try std.testing.expect(rt.atoms.name(orphan) == null);
+    try std.testing.expect(!rt.atoms.entries[entry_index].slotOccupied());
 }
 
 // ---------------------------------------------------------------------------
@@ -16811,34 +16798,31 @@ test "TGC S3-b: a compile scope roots an atom no holder edge names" {
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
-    // Same shape as the orphan probe above -- a bare id `ref_count` holds and
+    // Same shape as the orphan probe above -- a bare id nothing declares and
     // no tracer edge reaches -- except a compile scope is open. That is the
     // front end's exact situation between interning an identifier and
     // publishing the FunctionBytecode that will finally name it.
     const ident = try rt.internAtom("zjsS3CompileScopeIdent");
-    defer rt.atoms.free(ident);
+    const entry_index = ident - core.atom.first_dynamic_atom;
     {
         var scope = core.atom.CompileAtomScope.init(&rt.atoms);
         defer scope.deinit();
         try scope.activate();
-        // Recording is ambient, so obtaining the id inside the scope is all a
-        // call site has to do -- this `dup` stands in for the ~267 front-end
-        // sites that hand an id to a FunctionDef / Builder field.
-        rt.atoms.free(rt.atoms.dup(ident));
+        // Recording is ambient: every `internX` inside an open scope records,
+        // and `note` is the same seam for an id obtained before it opened.
+        scope.note(ident);
 
-        rt.atoms.atom_audit_missing_edge = 0;
         try s3RunMajor(rt);
-        try std.testing.expectEqual(s3MarkEpoch(rt), s3AtomEntry(rt, ident).mark_epoch);
-        try std.testing.expectEqual(@as(usize, 0), rt.atoms.atom_audit_missing_edge);
+        try std.testing.expectEqual(s3MarkEpoch(rt), rt.atoms.entries[entry_index].mark_epoch);
+        try std.testing.expect(rt.atoms.name(ident) != null);
     }
 
     // Scope closed: the id is an unrooted native temporary again, so the next
-    // major must NOT reach it and the shadow audit must say so. Without this
-    // half the assertion above could be satisfied by any other root.
-    rt.atoms.atom_audit_missing_edge = 0;
+    // major must NOT reach it and must retire the entry. Without this half the
+    // assertion above could be satisfied by any other root.
     try s3RunMajor(rt);
-    try std.testing.expect(s3AtomEntry(rt, ident).mark_epoch != s3MarkEpoch(rt));
-    try std.testing.expect(rt.atoms.atom_audit_missing_edge >= 1);
+    try std.testing.expect(rt.atoms.entries[entry_index].mark_epoch != s3MarkEpoch(rt));
+    try std.testing.expect(rt.atoms.name(ident) == null);
 }
 
 test "TGC S3-b: a compile scope on a runtime-less table records without registering" {
@@ -16854,12 +16838,224 @@ test "TGC S3-b: a compile scope on a runtime-less table records without register
     try std.testing.expect(scope.rt == null);
 
     const id = try scope.intern("zjsS3FixtureIdent");
-    defer table.free(id);
     // Ambient and explicit recording agree, and the direct-mapped filter keeps
     // a repeat from growing the list.
-    table.free(scope.dup(id));
+    try std.testing.expectEqual(id, scope.noteExisting(id));
     try std.testing.expectEqual(@as(usize, 1), scope.ids.items.len);
     try std.testing.expectEqual(id, scope.ids.items[0]);
+}
+
+fn s3OccupiedEntryCount(rt: *core.JSRuntime) usize {
+    var total: usize = 0;
+    for (rt.atoms.entries) |entry| total += @intFromBool(entry.slotOccupied());
+    return total;
+}
+
+test "TGC S3-c: the atom entry census falls back after a major" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    // Settle whatever startup left unreachable, so the baseline is a real
+    // floor rather than "everything interned so far".
+    try s3RunMajor(rt);
+    const baseline = s3OccupiedEntryCount(rt);
+
+    // 10k spellings nothing keeps: no holder edge, no root frame, no host pin.
+    // Under refcounting these could only be reclaimed by an explicit `free`.
+    var buffer: [64]u8 = undefined;
+    var index: usize = 0;
+    while (index < 10_000) : (index += 1) {
+        const name = try std.fmt.bufPrint(&buffer, "zjsS3CensusProbe{d}", .{index});
+        _ = try rt.internAtom(name);
+    }
+    const peak = s3OccupiedEntryCount(rt);
+    try std.testing.expect(peak >= baseline + 10_000);
+
+    try s3RunMajor(rt);
+    const after = s3OccupiedEntryCount(rt);
+    // Not "== baseline": black allocation keeps anything interned inside an
+    // open marking window alive for that cycle, so the claim is that the
+    // census collapses back to the floor rather than tracking the peak.
+    try std.testing.expect(after < baseline + 1_000);
+}
+
+test "TGC S3-c: a young symbol body a shape names by id survives a minor" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    var object: ?*core.Object = try core.Object.createPlainObject(rt, null);
+    var object_roots = core.runtime.rootObjects(.{&object});
+    object_roots.activate(rt);
+    defer object_roots.deactivate(rt);
+
+    const symbol_atom = try rt.atoms.newValueSymbol("zjsS3YoungSymbolBody");
+    const entry = s3AtomEntry(rt, symbol_atom);
+    // Materialize the body and drop the JSValue: the body is YOUNG and its
+    // only holder is the shape, which reaches it over an atom id. A minor
+    // traces neither the atom table's entries nor (usefully) that id -- an
+    // entry already stamped for this epoch short-circuits `visitAtom`, and
+    // before the first major the epoch is 0, which every fresh entry already
+    // reads. Without the young-body root the minor sweeps the body and the
+    // destroy handshake retires a live holder's entry.
+    _ = try rt.symbolValue(symbol_atom);
+    try object.?.defineOwnProperty(rt, symbol_atom, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(entry.slotOccupied());
+    try std.testing.expect(entry.str != null);
+    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).isUndefined());
+
+    // Repeated minors keep it: the first one promoted the body, after which
+    // the major's `visitAtom` rules are the only authority again.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).isUndefined());
+
+    // The shape edge is what keeps it across majors, not the young list.
+    try s3RunMajor(rt);
+    try std.testing.expectEqual(s3MarkEpoch(rt), entry.mark_epoch);
+    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).isUndefined());
+
+    // Drop the holder: with no edge left the major retires the entry.
+    object = null;
+    try s3RunMajor(rt);
+    try s3RunMajor(rt);
+    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+}
+
+test "TGC S3-c: a thousand fresh symbol keys survive the minors taken while they accumulate" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    // The `staging/sm/object/getOwnPropertySymbols.js` shape, in Zig: an
+    // object accumulating 1000 symbol keys while minors run underneath.
+    var object: ?*core.Object = try core.Object.createPlainObject(rt, null);
+    var object_roots = core.runtime.rootObjects(.{&object});
+    object_roots.activate(rt);
+    defer object_roots.deactivate(rt);
+
+    var ids: [1000]core.Atom = undefined;
+    var buffer: [64]u8 = undefined;
+    for (&ids, 0..) |*slot, index| {
+        const name = try std.fmt.bufPrint(&buffer, "zjsS3SymbolKey{d}", .{index});
+        slot.* = try rt.atoms.newValueSymbol(name);
+        _ = try rt.symbolValue(slot.*);
+        try object.?.defineOwnProperty(rt, slot.*, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+        if (index % 64 == 63) _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    }
+
+    var alive: usize = 0;
+    for (ids) |id| alive += @intFromBool(!rt.atoms.symbolValueIfLive(rt, id).isUndefined());
+    try std.testing.expectEqual(@as(usize, 1000), alive);
+}
+
+test "TGC S3-c: a symbol interned inside a marking window keeps its body" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    const object = try core.Object.createPlainObject(rt, null);
+    try rt.gc.pinHeader(object.gcHeader());
+    defer rt.gc.unpinHeader(object.gcHeader());
+
+    try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
+    try std.testing.expect(rt.gc.concurrent.markingActive());
+    const epoch = s3MarkEpoch(rt);
+
+    // Interned INSIDE the window, so §2.3 black allocation stamps the entry at
+    // birth. The stamp says "this ENTRY is live this cycle"; it shades nothing,
+    // and the body is minted white one line later. Every subsequent edge --
+    // the store's insertion barrier and the shape walk in the final remark --
+    // reaches an already-stamped entry, so an epoch-gated `markAtomAtEpoch`
+    // hands back no body and the major sweeps it out from under a live holder.
+    const symbol_atom = try rt.atoms.newValueSymbol("zjsS3BlackAllocSymbolBody");
+    try std.testing.expectEqual(epoch, s3AtomEntry(rt, symbol_atom).mark_epoch);
+    _ = try rt.symbolValue(symbol_atom);
+    try object.defineOwnProperty(rt, symbol_atom, core.Descriptor.data(core.JSValue.int32(5), true, true, true));
+
+    helpers.finishGcCycles(rt);
+    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).isUndefined());
+    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+}
+
+test "TGC S3-c: a shape key keeps its atom, and the next major after the shape dies retires it" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    const key = try rt.internAtom("zjsS3ShapeKeyLifetime");
+    var object: ?*core.Object = try core.Object.createPlainObject(rt, null);
+    var object_roots = core.runtime.rootObjects(.{&object});
+    object_roots.activate(rt);
+    defer object_roots.deactivate(rt);
+    try object.?.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+
+    // The shape's property array is the only thing naming the id now.
+    try s3RunMajor(rt);
+    try std.testing.expect(rt.atoms.name(key) != null);
+    try s3RunMajor(rt);
+    try std.testing.expect(rt.atoms.name(key) != null);
+
+    // Drop the object: the shape becomes garbage and the edge with it.
+    object = null;
+    try s3RunMajor(rt);
+    try s3RunMajor(rt);
+    try std.testing.expect(rt.atoms.name(key) == null);
+}
+
+test "TGC S3-c: a WeakRef'd symbol still leaves a weak shell instead of a recycled slot" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    const symbol_atom = try rt.atoms.newValueSymbol("zjsS3WeakShellSymbol");
+    const entry_index = symbol_atom - core.atom.first_dynamic_atom;
+    {
+        var symbol_value = try rt.takeSymbolValue(symbol_atom);
+        var symbol_roots = core.runtime.rootValues(.{&symbol_value});
+        symbol_roots.activate(rt);
+        defer symbol_roots.deactivate(rt);
+        // A raw weak reference, the same accounting `WeakRef` takes.
+        rt.atoms.retainSymbolWeakRef(symbol_atom);
+        try s3RunMajor(rt);
+        try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).isUndefined());
+    }
+
+    // Body unreachable: the entry must become a SHELL (unindexed, no body,
+    // still occupying its slot) so the WeakRef can observe the death, not a
+    // free slot the next intern could hand back under the same id.
+    try s3RunMajor(rt);
+    try std.testing.expect(rt.atoms.symbolValueIfLive(rt, symbol_atom).isUndefined());
+    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+    try std.testing.expect(rt.atoms.entries[entry_index].slotOccupied());
+    try std.testing.expect(rt.atoms.entries[entry_index].str == null);
+
+    // A second major must not re-run the verdict on the shell.
+    try s3RunMajor(rt);
+    try std.testing.expect(rt.atoms.entries[entry_index].slotOccupied());
+
+    // The last weak reference retires the shell.
+    rt.atoms.releaseSymbolWeakRef(rt, symbol_atom);
+    try std.testing.expect(!rt.atoms.entries[entry_index].slotOccupied());
 }
 
 test "TGC S3: the insertion barrier shades an atom stored during marking" {
@@ -16877,7 +17073,6 @@ test "TGC S3: the insertion barrier shades an atom stored during marking" {
     // Interned BEFORE the window opens, so black allocation cannot be what
     // marks it -- only the store's barrier can.
     const key = try rt.internAtom("zjsS3BarrierKey");
-    defer rt.atoms.free(key);
 
     try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
     try std.testing.expect(rt.gc.concurrent.markingActive());
@@ -16888,4 +17083,51 @@ test "TGC S3: the insertion barrier shades an atom stored during marking" {
     try std.testing.expectEqual(epoch, s3AtomEntry(rt, key).mark_epoch);
 
     helpers.finishGcCycles(rt);
+}
+
+test "TGC S3-c: the atom verdict is applied in the pause that took it, not after the morgue drains" {
+    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    // An atom nothing names, plus enough garbage that the finish leaves a
+    // morgue to destroy in later slices -- the incremental path's normal shape.
+    const spelling = "zjsS3DeferredSweepWindow";
+    const doomed_id = try rt.internAtom(spelling);
+    var filler: usize = 0;
+    while (filler < 512) : (filler += 1) _ = try core.Object.createPlainObject(rt, null);
+
+    try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
+    while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
+    _ = try core.gc_trace_stw.finishIncrementalCycle(rt, null, .declared_only);
+    // The morgue is live: this is exactly the interval the mutator runs in.
+    try std.testing.expect(rt.gc.doomed_pending);
+
+    // The verdict must already be APPLIED. When the sweep waited for the morgue
+    // to empty, the entry stayed indexed through every poll of the destruction
+    // run, so `internString` handed the condemned id straight back -- and the
+    // deferred sweep then retired it and recycled the slot under whatever live
+    // holder had just stored it (pdfjs: an `objs` shape keyed `font_p0_1`).
+    try std.testing.expect(rt.atoms.name(doomed_id) == null);
+
+    // Re-intern in the window and give the id a live holder, then let the
+    // destruction slices run: the holder must still name a valid entry.
+    const reborn = try rt.internAtom(spelling);
+    var object: ?*core.Object = try core.Object.createPlainObject(rt, null);
+    var object_roots = core.runtime.rootObjects(.{&object});
+    object_roots.activate(rt);
+    defer object_roots.deactivate(rt);
+    try object.?.defineOwnProperty(rt, reborn, core.Descriptor.data(core.JSValue.int32(9), true, true, true));
+
+    helpers.finishGcCycles(rt);
+    try std.testing.expect(rt.atoms.name(reborn) != null);
+    try std.testing.expectEqualStrings(spelling, rt.atoms.name(reborn).?);
+    try std.testing.expectEqual(
+        @as(i32, 9),
+        (try object.?.getOwnProperty(rt, reborn)).?.value.asInt32().?,
+    );
 }

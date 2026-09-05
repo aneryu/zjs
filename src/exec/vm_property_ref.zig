@@ -251,7 +251,6 @@ pub fn getRefValue(
         return;
     }
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
-    defer ctx.runtime.atoms.free(atom_id);
     const object = try property_ops.expectObject(obj);
     const still_exists = try hasObjectBinding(ctx, output, global, obj, object, atom_id, function, frame);
     if (!still_exists) {
@@ -317,7 +316,6 @@ pub fn putRefValue(
         return;
     }
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
-    defer ctx.runtime.atoms.free(atom_id);
     const object = try property_ops.expectObject(obj);
     const still_exists = try hasObjectBinding(ctx, output, global, obj, object, atom_id, function, frame);
     if (!still_exists and runtime_strict) return error.ReferenceError;
@@ -426,7 +424,6 @@ pub noinline fn deletePropertyVm(
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    defer ctx.runtime.atoms.free(atom_id);
     if (obj.isNull() or obj.isUndefined()) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;

@@ -1,28 +1,38 @@
 #!/usr/bin/env node
 'use strict';
 
-// Borrowed-atom escape rule.
+// Borrowed-atom rule (TGC S3-c).
 //
-// `8c8787cd` made identifier / private-name token atoms actually die
-// (qjs `free_token`, quickjs.c:22190). Before it every identifier token
-// leaked one retain, so "read an atom out of a token, then advance(), then
-// keep using it" was safe by accident. After it that shape is a
-// use-after-free -- and `docs/borrowed_atom_audit.md` §4 proved one instance
-// (`exportDefaultFunctionName` / `exportDefaultClassName`, fixed in
-// `ada949be`) was reachable: the returned atom was already dead at the moment
-// of return and only survived because the next intern of the identical string
-// popped the same LIFO free slot.
+// Before S3-c an atom id was a REFERENCE: `AtomTable.dup`/`free` decided the
+// entry's life, and reading an id out of a token that `free_token` then
+// released was a use-after-free (`docs/borrowed_atom_audit.md` §4 proved one
+// reachable instance, `ada949be`). The rule that fell out of it was ownership:
+// "dup before the id escapes its owner".
 //
-// That slot-reuse luck is exactly why no black-box regression test can fail on
-// this bug class. The two mechanical replacements are:
+// `docs/tracing-gc-s3-spec.md` retired that model. There is no count: the
+// tracer decides an entry's life once per major, and a bare `u32` is invisible
+// to it -- neither a `ValueRootValue` nor the conservative stack scan can
+// report an integer. So the rule became a ROOTING rule:
 //
-//   * `-Dzjs_ownership_audit` (build option, one-slot quarantine in
-//     `AtomTable.finalizeDeadEntry`) -- breaks the luck at run time so an
-//     existing test panics on a real escape;
-//   * this checker -- forbids the source shape at review time so the pattern
-//     cannot be reintroduced.
+//   A bare atom id must not be held across a safepoint unless something
+//   reports it: a declared `rootAtoms` / `rootAtomList` / `rootAtomSlots`
+//   frame, an open `CompileAtomScope`, an embedder `pinForHost`, or a holder
+//   edge the collector walks (a shape key, bytecode operand, module record
+//   field, class-table name -- all stored through `noteHolderStore`).
 //
-// See `docs/borrowed_atom_audit.md` §8 for what each does and does not catch.
+// An id that is NOT held across a safepoint is unconstrained: predefined ids
+// (`atom.ids.*`) and tagged integers are never entries at all.
+//
+// See `docs/borrowed_atom_audit.md` §8 for what this checker does and does not
+// catch, and what the run-time counterparts are
+// (`-Dzjs_ownership_audit`'s one-slot quarantine, which still breaks the
+// free-slot reuse luck that hides a stale id).
+//
+// WHAT IS DETECTED. Proving "crosses a safepoint" from source would need the
+// whole call graph, so this checker keeps the syntactic proxy the ownership
+// rule already used -- an id read out of a short-lived owner that then
+// outlives the construct that produced it -- and changes only what makes such
+// a hold LEGAL.
 //
 // A *borrowed atom* is an atom id read straight out of a short-lived owner:
 //
@@ -32,52 +42,46 @@
 //     `@as` and friends are transparent, so the scan passes through them);
 //   * the result of a same-file helper that itself returns a borrowed atom
 //     (`identifierLikeAtom`, `classNameAtom`, ...), discovered by fixed point;
-//   * a local bound or reassigned to either of the above without taking
-//     ownership. Ownership is judged by position, not by "this statement
-//     mentions dup", so `return if (c) atoms.dup(a) else t.payload.ident.atom`
-//     still reports the else branch, and `nm = atoms.dup(nm)` ends the borrow.
+//   * a local bound or reassigned to either of the above.
 //
-// A borrowed atom must not escape its owner's lifetime. Three escapes are
-// flagged, reported once per borrowing site under the highest-priority
-// pattern:
+// Three holds are flagged, reported once per borrowing site under the
+// highest-priority pattern:
 //
-//   rule A  `borrowed-return`            returning it (the `ada949be` bug);
+//   rule A  `borrowed-return`            returning it;
 //   rule B  `borrowed-state-store`       storing it into a long-lived
-//                                        `State` atom field (the field
-//                                        outlives the token);
+//                                        `State` atom field;
 //   rule C  `borrowed-use-after-release` reading it on a line after an
 //                                        un-deferred `advance()` /
-//                                        `freeToken()` in the same function.
+//                                        `freeToken()` in the same function
+//                                        (both can intern, so both are
+//                                        safepoints for the id).
 //
 // A fourth rule covers the neighbouring shape the audit filed as B-6:
 //
-//   rule D  `owned-escape-state-store`   storing a local whose only owner is
-//                                        a `defer ...free(local)` into a
-//                                        long-lived `State` atom field that
-//                                        the same function never restores --
-//                                        the field keeps the id after the
-//                                        owner dies.
+//   rule D  `owned-escape-state-store`   storing a local that this function
+//                                        drops at scope exit into a
+//                                        long-lived `State` atom field the
+//                                        same function never restores.
 //
 // Three ways to be legal, in the order a reader should prefer them:
 //
-//   1. take ownership in the escaping expression itself -- `.dup(`,
-//      `.internString(`, `.newSymbol(`, or a `*Owned(` call;
-//   2. name the function `...Owned` (established convention:
-//      `moduleImportNameAtomOwned`, `exportDefaultFunctionNameOwned`) -- this
-//      exempts rule A only, only for a forwarded borrow (a helper result or a
-//      tainted local, which cannot be proved here), only if the function
-//      really produces an owner somewhere, and never for a directly returned
-//      token payload read: that is the `ada949be` shape itself;
+//   1. be COVERED: the enclosing function declares a root frame
+//      (`rootAtoms(` / `rootAtomList(` / `rootAtomSlots(`), pins for a host
+//      (`pinForHost(`), or opens a `CompileAtomScope`; or the file is one of
+//      `compile_scope_sources` below, whose every atom is obtained under the
+//      front end's ambient `CompileAtomScope` (`parser.State.atom_scope` /
+//      `compile_entry.compile`). File-level coverage is verified, not
+//      asserted: the scope must really be installed in `src/parser.zig`, or
+//      this checker fails before it reports anything;
+//   2. name the function `...Owned` -- kept as the established convention for
+//      "the id you get back outlives this call", now meaning "the callee put
+//      it somewhere the tracer can see" rather than "you own a count";
 //   3. write `// borrowed-atom: <reason>` on the line directly above the
 //      escaping line (rule C also accepts it above the borrowing line, which
 //      is where a deliberate long borrow is best explained). The reason must
 //      be non-empty; it is the contract the code otherwise fails to state.
 //
-// Everything else needs an allowlist entry. The allowlist is seeded from the
-// audit's class-B sites: correct today, but only because some unrelated third
-// party (a `defineVar` dup, an outer dup, a scope var row) happens to hold a
-// retain. The ruling calls those follow-ups rather than violations -- they
-// must stay visible and must not grow silently, hence the cap.
+// Everything else needs an allowlist entry.
 //
 // Allowlist shape mirrors oom-panics-allowlist.json: source / pattern /
 // reason / exit_milestone, plus optional `fn` (enclosing function name) and
@@ -109,14 +113,35 @@ const pattern_priority = [
 ];
 
 const rule_text = {
-  'borrowed-return': 'A: a borrowed atom must not be returned (dup it, or name the function ...Owned)',
-  'borrowed-state-store': 'B: a borrowed atom must not be stored into a long-lived State atom field',
-  'borrowed-use-after-release': 'C: a borrowed atom must not be read after advance()/freeToken() released its token',
-  'owned-escape-state-store': 'D: a long-lived State atom field must not keep an id whose only owner is a defer-freed local',
+  'borrowed-return': 'A: a bare atom id must not be returned out of an uncovered function (declare a root frame, or name the function ...Owned)',
+  'borrowed-state-store': 'B: a bare atom id must not be stored into a long-lived State atom field from an uncovered function',
+  'borrowed-use-after-release': 'C: a bare atom id must not be read across advance()/freeToken() from an uncovered function',
+  'owned-escape-state-store': 'D: a long-lived State atom field must not keep an id this function drops at scope exit',
 };
 
 const marker_re = /^\s*\/\/\s*borrowed-atom:\s*(\S.*)$/;
-const ownership_producer_re = /\.dup\(|\.internString\(|\.newSymbol\(|\.intern\(|\b[A-Za-z_]\w*Owned\(/;
+// A function that really produces a tracer-visible id: it interns one, hands
+// it to a holder through the S3 barrier, or forwards a `...Owned` result.
+const ownership_producer_re = /\.internString\(|\.newSymbol\(|\.intern\(|noteHolderStore\(|\b[A-Za-z_]\w*Owned\(/;
+// TGC S3-c coverage: what makes an in-function hold legal.
+const coverage_producer_re = /\brootAtoms\(|\brootAtomList\(|\brootAtomSlots\(|\bpinForHost\(|CompileAtomScope\b|\batom_scope\b/;
+// Files whose atom ids are all obtained under the front end's ambient
+// `CompileAtomScope`. `compile_scope_witness` is what keeps this list honest:
+// if the scope stops being installed, the exemption fails loudly instead of
+// silently covering nothing.
+const compile_scope_sources = new Set([
+  'src/lexer.zig',
+  'src/parser.zig',
+  'src/bytecode.zig',
+]);
+const compile_scope_witness = {
+  source: 'src/parser.zig',
+  // Needle 2 is the activation itself rather than the name of whatever
+  // function performs it: `activateAtomScope` was folded into
+  // `activateCompileRoots` and the stale name silently turned this checker
+  // red instead of the exemption it guards.
+  needles: ['atom_scope: atom_module.CompileAtomScope', 'self.atom_scope.activate()'],
+};
 const borrowed_read_re = /([A-Za-z_][\w.]*)\.payload\.\w+\.atom\b/g;
 // Un-deferred token consumption: `advance()` frees `s.token` (qjs next_token
 // -> free_token), `freeToken()` frees a lookahead token. `defer` lines are not
@@ -460,6 +485,7 @@ function hasMarkerAbove(rawLines, lineIndex) {
 }
 
 function analyzeFile(source, state) {
+  const fileCovered = compile_scope_sources.has(source) || source.startsWith('src/compiler/');
   const rawLines = fs.readFileSync(path.join(repoRoot, source), 'utf8').split('\n');
   const codeLines = rawLines.map(stripCode);
   const fns = functionsOf(codeLines);
@@ -482,7 +508,7 @@ function analyzeFile(source, state) {
 
   // Pass B: escapes.
   for (const fn of fns) {
-    const analysis = analyzeFunction(fn, rawLines, codeLines, fields, helpers, { helperScanOnly: false, stats });
+    const analysis = analyzeFunction(fn, rawLines, codeLines, fields, helpers, { helperScanOnly: false, stats, fileCovered });
     for (const finding of analysis.findings) findings.push({ ...finding, source });
   }
 
@@ -502,6 +528,9 @@ function analyzeFunction(fn, rawLines, codeLines, fields, helpers, options) {
   // returned token payload read: that is the `ada949be` shape itself, and no
   // name may legalise it.
   const ownedExemptForward = fn.name.endsWith('Owned') && fnProducesOwner;
+  // TGC S3-c: a function that declares a root frame / opens a compile scope /
+  // pins for a host reports its ids, so nothing it holds is bare.
+  const fnCovered = coverage_producer_re.test(bodyText);
   const receivers = stateReceivers(codeLines, fn);
   const inDefer = deferBlockLines(codeLines, fn.startLine, fn.endLine);
 
@@ -621,6 +650,7 @@ function analyzeFunction(fn, rawLines, codeLines, fields, helpers, options) {
   }
 
   if (options.helperScanOnly) return { returnsBorrowed, findings: [] };
+  if (fnCovered || options.fileCovered) return { returnsBorrowed, findings: [] };
 
   // Rule C: read after an un-deferred release, inside the window this site owns.
   for (const site of borrowSites) {
@@ -664,6 +694,17 @@ function entryMatchesFinding(entry, finding) {
     entry.pattern === finding.pattern &&
     (entry.fn === undefined || entry.fn === finding.fn) &&
     (entry.contains === undefined || finding.text.includes(entry.contains));
+}
+
+// The file-level compile-scope exemption is only sound while the scope is
+// really installed; check the witness before trusting it.
+{
+  const witnessText = fs.readFileSync(path.join(repoRoot, compile_scope_witness.source), 'utf8');
+  for (const needle of compile_scope_witness.needles) {
+    if (!witnessText.includes(needle)) {
+      fail(`compile-scope exemption witness missing from ${compile_scope_witness.source}: ${needle}`);
+    }
+  }
 }
 
 const allowlist = readAllowlist();
@@ -714,8 +755,9 @@ if (violations.length !== 0 || stale.length !== 0 || nonUnique.length !== 0 || o
       console.error(`  ${violation.source}:${violation.lineno}: in ${violation.fn}: ${violation.text}`);
       console.error(`    rule ${rule_text[violation.pattern]}`);
       console.error(`    escapes: ${violation.detail}`);
-      console.error('    fix: dup in the escaping expression, rename the function ...Owned, or');
-      console.error('         write "// borrowed-atom: <reason>" above the line');
+      console.error('    fix: declare a rootAtoms/rootAtomList/rootAtomSlots frame (or open a');
+      console.error('         CompileAtomScope), rename the function ...Owned, or write');
+      console.error('         "// borrowed-atom: <reason>" above the line');
     }
   }
   if (stale.length !== 0) {

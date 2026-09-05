@@ -448,7 +448,6 @@ fn defineGlobalThisProperty(rt: *core.JSRuntime, global: *core.Object) !void {
 
 fn defineConstantPropertyAssumingNew(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     try object.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(value, false, false, false));
 }
 
@@ -798,7 +797,6 @@ test "createPromiseSettlementRecord roots direct symbol payload while defining s
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_atom = try rt.internAtom("value");
-    defer rt.atoms.free(value_atom);
     {
         const value = try record.getProperty(value_atom);
         try std.testing.expect(value.same(payload_value));
@@ -1105,7 +1103,6 @@ pub fn callObjectStatic(
         const object = try expectObjectArg(object_value);
         const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
         const key = try atomFromPropertyKey(rt, key_value);
-        defer rt.atoms.free(key);
         var desc = (try object.getOwnProperty(rt, key)) orelse return core.JSValue.undefinedValue();
         materializeMappedArgumentsDescriptorValue(rt, object, key, &desc);
         return descriptorObject(rt, desc);
@@ -1163,7 +1160,6 @@ pub fn callObjectStatic(
         const object = try expectObjectArg(object_value);
         const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
         const key = try atomFromPropertyKey(rt, key_value);
-        defer rt.atoms.free(key);
         if (try object.getOwnProperty(rt, key) != null) return core.JSValue.boolean(true);
         return core.JSValue.boolean(false);
     }
@@ -1225,7 +1221,6 @@ pub fn callObjectStatic(
         if (args.len < 3) return error.TypeError;
         const object = try expectObjectArg(args[0]);
         const key = try atomFromPropertyKey(rt, args[1]);
-        defer rt.atoms.free(key);
         const desc_object = try expectObjectArg(args[2]);
         const desc = try descriptorFromObjectBare(rt, desc_object);
         object.defineOwnProperty(rt, key, desc) catch |err| switch (err) {
@@ -1408,7 +1403,6 @@ fn objectPrototypeHasOwn(ctx: *core.JSContext, global: ?*core.Object, receiver: 
     const rt = ctx.runtime;
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const key = try atomFromPropertyKey(rt, key_value);
-    defer rt.atoms.free(key);
     const receiver_value = try objectStaticToObjectValue(ctx, global, receiver);
     const object = try expectObjectArg(receiver_value);
     if (try object.getOwnProperty(rt, key) != null) return core.JSValue.boolean(true);
@@ -1419,7 +1413,6 @@ fn objectPrototypePropertyIsEnumerable(ctx: *core.JSContext, global: ?*core.Obje
     const rt = ctx.runtime;
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const key = try atomFromPropertyKey(rt, key_value);
-    defer rt.atoms.free(key);
     const receiver_value = try objectStaticToObjectValue(ctx, global, receiver);
     const object = try expectObjectArg(receiver_value);
     const desc = (try object.getOwnProperty(rt, key)) orelse return core.JSValue.boolean(false);
@@ -1446,7 +1439,6 @@ fn objectPrototypeDefineAccessor(ctx: *core.JSContext, global: ?*core.Object, re
     if (!isCallableObjectValue(accessor_value)) return error.TypeError;
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const key = try atomFromPropertyKey(rt, key_value);
-    defer rt.atoms.free(key);
     const desc = if (getter)
         core.Descriptor.accessor(accessor_value, core.JSValue.undefinedValue(), true, true)
     else
@@ -1465,7 +1457,6 @@ fn objectPrototypeLookupAccessor(ctx: *core.JSContext, global: ?*core.Object, re
     const object = try expectObjectArg(receiver_value);
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const key = try atomFromPropertyKey(rt, key_value);
-    defer rt.atoms.free(key);
     var cursor: ?*core.Object = object;
     while (cursor) |current| : (cursor = current.getPrototype()) {
         const desc = (try current.getOwnProperty(rt, key)) orelse continue;
@@ -2370,7 +2361,6 @@ test "descriptorObject roots direct symbol value while creating descriptor objec
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_key = try rt.internAtom("value");
-    defer rt.atoms.free(value_key);
     {
         const stored = try descriptor.getProperty(value_key);
         try std.testing.expect(stored.same(symbol_value));

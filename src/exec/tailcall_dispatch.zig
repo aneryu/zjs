@@ -976,7 +976,6 @@ inline fn pushForwardedAndEnter(
 /// success the pair contracts to the property result; on error it is removed
 /// before the caller's catch machinery runs.
 fn completeProxyGetContinuation(vm: *Vm, result: JSValue, atom_id: core.Atom) HostError!void {
-    defer vm.ctx.runtime.atoms.free(atom_id);
     const rt = vm.ctx.runtime;
     var rooted_result = result;
     var root_frame = core.runtime.rootValues(.{&rooted_result});
@@ -2641,6 +2640,11 @@ fn opBinaryFloat(comptime kind: BinOp) Handler {
 /// proved both operands are strings, so no coercion or observable user code is
 /// skipped; `addStringsOwned` consumes both just as the former inline body did.
 fn op_add_strings(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    // `addStringsOwned` allocates, so it can collect, and `Stack.liveValues`
+    // stops at the published `top_ptr`: without this the two operands (and
+    // every value pushed since the last publish) are outside the root set for
+    // the duration of the concatenation. Same shape as `op_push_atom_value`.
+    vm.publish(pc, sp);
     const result = value_ops.addStringsOwned(vm.ctx.runtime, (sp - 2)[0], (sp - 1)[0]) catch |err| {
         // addStringsOwned consumed both operands. Publish the shortened stack
         // only on the exceptional path, then use h_binary's catch materializer.
@@ -3006,16 +3010,30 @@ pub fn opFclosure(comptime wide_index: bool) Handler {
 }
 
 /// qjs OP_push_atom_value: decode the atom and push its retained string/symbol
-/// value directly in the register-resident dispatcher. A cached atom conversion
-/// cannot run user code; only the allocation/error path needs published state.
+/// value directly in the register-resident dispatcher.
+///
+/// Only the CACHED conversion may run unpublished. `sp` is register-resident
+/// and `Stack.liveValues` -- the tracer's view of the operand stack -- stops at
+/// `stack.top_ptr`, so every value pushed since the last publish is unrooted
+/// until this handler publishes. The miss arm allocates the materialized body
+/// (`String.createUtf8`), which can collect, so it publishes first: an array
+/// literal is a run of these pushes, and a miss on the ninth element used to
+/// collect the eight strings already sitting above `top_ptr` (test262
+/// `staging/sm/RegExp/unicode-disallow-extended.js`). Before TGC S3-c the
+/// atom table's `entries[].str` root hid it.
 pub fn op_push_atom_value(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     const atom_id = readInt(u32, pc + 1);
-    const value = vm.ctx.runtime.atoms.toStringValueForPush(vm.ctx.runtime, atom_id) catch |err| {
-        vm.publish(pc, sp);
+    if (vm.ctx.runtime.atoms.cachedPushValue(atom_id)) |cached| {
+        sp[0] = cached;
+        return cont(pc + 5, sp + 1, var_buf, vm);
+    }
+    vm.publish(pc, sp);
+    const value = vm.ctx.runtime.atoms.toStringValue(vm.ctx.runtime, atom_id) catch |err| {
         return vm.fail(err);
     };
-    sp[0] = value;
-    return cont(pc + 5, sp + 1, var_buf, vm);
+    const live_sp = vm.stack.topPtr();
+    live_sp[0] = value;
+    return cont(pc + 5, live_sp + 1, var_buf, vm);
 }
 
 /// QJS OP_special_object/THIS_FUNC is a register-resident
@@ -3891,8 +3909,7 @@ fn op_get_static_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     vm.stack.setTopPtr(sp);
     const receiver = vm.stack.values[operand_len - 1];
     if (tryInlineProxyTrap(false, var_buf, vm, vm.property_holder, vm.property_atom)) |outcome| return outcome;
-    const retained_atom = vm.ctx.runtime.atoms.dup(vm.property_atom);
-    defer vm.ctx.runtime.atoms.free(retained_atom);
+    const retained_atom = vm.property_atom;
     const value = object_ops.getProxyProperty(
         vm.ctx,
         vm.output,
@@ -3970,8 +3987,7 @@ fn op_get_array_el_atom_key_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]J
     const receiver = vm.stack.values[operand_len - 2];
     const atom_id = vm_property_field.existingPropertyKeyAtomForFastPath(key) orelse unreachable;
     if (tryInlineProxyTrap(true, var_buf, vm, vm.property_holder, atom_id)) |outcome| return outcome;
-    const retained_atom = vm.ctx.runtime.atoms.dup(atom_id);
-    defer vm.ctx.runtime.atoms.free(retained_atom);
+    const retained_atom = atom_id;
     const value = object_ops.getProxyProperty(
         vm.ctx,
         vm.output,

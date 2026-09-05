@@ -357,7 +357,8 @@ pub const GCPollMode = enum {
     safepoint,
     urgent,
 
-    /// Whether this poll may be answered with a minor collection.
+    /// Whether this poll may be ANSWERED with a minor collection -- that is,
+    /// whether a minor alone may be the whole result the caller receives.
     ///
     /// A minor only proves young objects dead, so it is progress rather than
     /// a full collection. Modes that exist to make progress can take it;
@@ -365,6 +366,12 @@ pub const GCPollMode = enum {
     /// whole heap examined. `normal` cannot either: it is the allocation
     /// threshold, and answering that with a young-only pass would quietly
     /// weaken what every existing caller of a threshold collection receives.
+    ///
+    /// This is NOT the same question as "may a minor RUN at this poll". A
+    /// crossed threshold runs one first at every non-urgent mode, `normal`
+    /// included, because `pollGC` re-derives the crossing from the account the
+    /// minor leaves behind: the threshold's promise is kept by the second
+    /// reading, not by withholding the young collection. See `pollGC`.
     pub fn acceptsMinor(self: GCPollMode) bool {
         return switch (self) {
             .idle, .safepoint, .callback_boundary => true,
@@ -1652,9 +1659,7 @@ pub const JSRuntime = struct {
         const backtrace_capacity = self.backtrace_capacity;
         self.backtrace_frames = &.{};
         self.backtrace_capacity = 0;
-        for (backtrace_frames) |frame| {
-            self.atoms.free(frame.function_name);
-            self.atoms.free(frame.filename);
+        for (backtrace_frames) |_| {
         }
         if (backtrace_capacity != 0) {
             self.memory.free(context_mod.BacktraceFrame, backtrace_frames.ptr[0..backtrace_capacity]);
@@ -2898,15 +2903,6 @@ pub const JSRuntime = struct {
         return self.symbolValue(atom_id);
     }
 
-    pub fn dupValue(self: *JSRuntime, value: JSValue) JSValue {
-        _ = self;
-        return value;
-    }
-
-    pub fn freeValue(self: *JSRuntime, value: JSValue) void {
-        value.free(self);
-    }
-
     pub fn createValueHandle(self: *JSRuntime, value: JSValue) !JSValueHandle {
         return JSValueHandle.initDup(self, value);
     }
@@ -3122,24 +3118,76 @@ pub const JSRuntime = struct {
                 return self.incrementalMarkPoll(roots, mode);
             }
         }
-        // Is the whole-heap threshold already crossed? Asked BEFORE the minor
-        // is offered, because a minor cannot answer this question: it does not
-        // reach the old generation, which is where a heap over its threshold
-        // has put its garbage. Offering the minor first let it free a handful
-        // of young objects, report success, and return -- and the major check
-        // below was never reached. Nothing then ever collected the old
-        // generation: earley-boyer performed 13,642 minors and zero majors,
-        // promoted 6.8M objects, and finished holding 435MB where refcounting
-        // held 3MB, with every one of those minors paying 1.12ms to trace a
-        // heap that large. See `docs/tracing-gc-design.md` §8.5.
-        const over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
+        // Is the whole-heap threshold already crossed? The crossing decides
+        // the ORDER of the two collections below, and it is asked TWICE: once
+        // here, and again on the account a minor leaves behind.
+        //
+        // A minor may not ANSWER a crossing. It does not reach the old
+        // generation, which is where a heap over its threshold has put its
+        // garbage. Letting it free a handful of young objects, report success
+        // and return meant the major check below was never reached, and
+        // nothing ever collected the old generation: earley-boyer performed
+        // 13,642 minors and zero majors, promoted 6.8M objects, and finished
+        // holding 435MB where refcounting held 3MB, with every one of those
+        // minors paying 1.12ms to trace a heap that large. See
+        // `docs/tracing-gc-design.md` §8.5.
+        //
+        // The first repair skipped the minor entirely on a crossing, which
+        // reads the crossing as PROOF that the garbage is old. Since S2 that
+        // inference is false: string bodies are collector carriers, so a dead
+        // young string stays in `allocated_bytes` until a collection frees it,
+        // and pure allocation churn drives the account past the threshold with
+        // nothing old behind it at all. pdfjs paid 908 whole-heap majors where
+        // the refcounting baseline paid 6.
+        //
+        // So the order is generational -- minor first -- and the verdict is
+        // the SECOND reading. Old-generation garbage survives the minor, the
+        // account is still over, and the major runs exactly as it did before:
+        // earley-boyer's repair is a consequence of the re-read, not of
+        // withholding the minor. Young churn is answered by the young
+        // collection, and the crossing is simply gone.
+        var over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
+        // The crossing is usually REPORTED, not observed here.
+        // `collectBeforeObjectAllocation` tests `allocated_bytes + size` and
+        // records `.allocation_threshold`/`.soon` BEFORE the allocation lands,
+        // then polls; the poll's own account is still one allocation short of
+        // the bar. Instrumented on pdfjs: this line saw 33 crossings against
+        // 874 majors -- the other 841 arrived as that pending request, so a
+        // minor-first rule written against `allocated_bytes` alone never fired.
+        const crossing = over_threshold or self.gc.pendingAllocationThresholdRequest();
         // §8.5: an automatic poll prefers a minor. A minor only reaches the
         // young set, so allocation churn is reclaimed without a whole-heap
         // trace -- but only here. An explicit `runObjectCycleRemoval` means
         // "collect everything", and answering it with a minor would silently
         // change what that call promises.
+        //
+        // A crossing widens the offer to `normal` as well. `acceptsMinor` asks
+        // whether a minor may BE the answer; a crossing asks the cheap
+        // collection first and then re-reads the account, so the minor is a
+        // precondition of the major rather than a substitute for it, and the
+        // caller of a threshold collection still receives everything it did.
+        // This matters because the crossing is almost always DISCOVERED at a
+        // `normal` poll: `collectBeforeObjectAllocation` is the boundary
+        // `String.createUninitialized` reaches on the very allocation that
+        // goes over (TGC S2-f), so an offer restricted to the scheduler modes
+        // never gets asked. Measured on pdfjs: unchanged at 909 majors when
+        // this read `acceptsMinor()` alone.
+        //
+        // `urgent` and `idle` keep out of the crossing arm, and one test
+        // covers both: they are the precise-scanning modes. `urgent`'s caller
+        // is out of headroom and wants the whole heap examined rather than one
+        // more pause before it; `idle`'s precise scan is host-quiescent by
+        // design, and a synchronous minor needs the conservative one -- see
+        // `pollScansConservatively`.
+        //
+        // The crossing also asks a different SIZE question of the young set --
+        // see `Registry.shouldTryMinorBeforeMajor`.
         if (comptime gc.generation_enabled) {
-            if (!over_threshold and mode.acceptsMinor() and !self.gc_running and self.gc.shouldTryMinor()) {
+            const offer_minor = if (crossing)
+                self.pollScansConservatively(mode) and self.gc.shouldTryMinorBeforeMajor()
+            else
+                mode.acceptsMinor() and self.gc.shouldTryMinor();
+            if (offer_minor and !self.gc_running) {
                 self.gc_running = true;
                 defer self.gc_running = false;
                 self.memory.samplePeakAtCollection();
@@ -3164,25 +3212,50 @@ pub const JSRuntime = struct {
                         elapsed,
                         @import("gc_trace_stw.zig").detailed_reports,
                     );
-                    if (freed > 0) {
-                        const result: gc.CollectionResult = .{
-                            .freed_objects = freed,
-                            .duration_ns = elapsed,
-                        };
-                        // NOT `recordSuccess`: that would push a minor's
-                        // duration into the major pause ring and count it as a
-                        // whole-heap cycle. The minor's own pause accounting is
-                        // the `generation.stats` update just above.
-                        self.gc.recordMinorSuccess(result);
-                        // Deliberately NOT `resetGCThreshold()`. That sets the
-                        // major threshold to 1.5x the CURRENT footprint and
-                        // clears the allocation debt, and a minor has no claim
-                        // to either: it did not look at the old generation, so
-                        // the footprint it is measuring is mostly old garbage
-                        // it cannot see. Resetting here raised the bar by half
-                        // on every minor, so the more garbage accumulated the
-                        // further the major receded -- the threshold outran the
-                        // heap it was meant to bound. Both belong to the major.
+                    const result: gc.CollectionResult = .{
+                        .freed_objects = freed,
+                        .duration_ns = elapsed,
+                    };
+                    // NOT `recordSuccess`: that would push a minor's duration
+                    // into the major pause ring and count it as a whole-heap
+                    // cycle. The minor's own pause accounting is the
+                    // `generation.stats` update just above. This holds on the
+                    // fall-through below too -- a minor that precedes a major
+                    // in the same poll contributes its reclaim to the freed
+                    // account but never its time to the major's pause ring.
+                    if (freed > 0) self.gc.recordMinorSuccess(result);
+                    // Deliberately NOT `resetGCThreshold()`. That sets the
+                    // major threshold to 1.5x the CURRENT footprint and
+                    // clears the allocation debt, and a minor has no claim
+                    // to either: it did not look at the old generation, so
+                    // the footprint it is measuring is mostly old garbage
+                    // it cannot see. Resetting here raised the bar by half
+                    // on every minor, so the more garbage accumulated the
+                    // further the major receded -- the threshold outran the
+                    // heap it was meant to bound. Both belong to the major.
+                    if (crossing) {
+                        // The second verdict, on the account this minor left
+                        // behind. Still over means the garbage the threshold
+                        // is complaining about was not young, so fall through
+                        // to the major with the crossing intact.
+                        over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
+                        if (!over_threshold) {
+                            // The crossing WAS young churn and is now paid.
+                            // The threshold condition is level-triggered, so
+                            // the `.allocation_threshold`/`.soon` request an
+                            // allocation boundary recorded on the way up is
+                            // stale: discard exactly that request, the way
+                            // `collectBeforeObjectAllocation` does when a
+                            // prospective total falls back under the bar.
+                            _ = self.gc.clearStaleAllocationThresholdRequest();
+                            // Only the threshold's own request is retired by a
+                            // minor. A host manual GC, memory pressure or a
+                            // failure retry that happened to be queued behind
+                            // it is a promise to someone: leave the poll on its
+                            // major path so this call still keeps it.
+                            if (!self.gc.hasPendingMajorRequest()) return result;
+                        }
+                    } else if (freed > 0) {
                         return result;
                     }
                 }
@@ -3459,12 +3532,43 @@ pub const JSRuntime = struct {
         self.gc.requestGC(.manual, .soon);
     }
 
+    /// Does a collection started at this poll decide liveness with the
+    /// conservative pass over the mutator's native frames?
+    ///
+    /// A minor DESTROYS synchronously, unlike the threshold's major, which
+    /// only opens an incremental cycle and sweeps at a later poll. Running one
+    /// from an arbitrary allocation boundary is therefore only sound while the
+    /// scan covers the Zig locals the interrupted caller is holding -- the
+    /// shape `Object.create` acquires before its own boundary, for one. That
+    /// is exactly the promise `GCPollMode.rootScan` makes for the engine
+    /// triggers, and exactly what `test_root_scan_override` withdraws: pacing
+    /// tests declare their frame quiescent so reclamation is deterministic,
+    /// which an allocation boundary in the middle of a constructor is not.
+    /// Those polls keep the pre-S2-g order (major without a preceding minor).
+    fn pollScansConservatively(self: *const JSRuntime, mode: GCPollMode) bool {
+        const scan = if (comptime builtin.is_test)
+            self.test_root_scan_override orelse mode.rootScan()
+        else
+            mode.rootScan();
+        return scan == .engine_active;
+    }
+
     /// Declare that this test keeps every collectable reference either in a
     /// linked ValueRootFrame or scrubbed (dropGcPtr), so even engine-trigger
     /// collection entries may scan precisely. See `test_root_scan_override`.
     pub fn forcePreciseRootScanForTest(self: *JSRuntime) void {
         if (!builtin.is_test) @compileError("test-only helper");
         self.test_root_scan_override = .declared_only;
+    }
+
+    /// Close a `forcePreciseRootScanForTest` window: collections taken from
+    /// here on derive their scan from the poll mode again. A test that wants
+    /// the precise regime only over a BOUNDED window must call this before
+    /// handing control back to code whose GC-visible state lives in native
+    /// locals, which `.declared_only` cannot see by construction.
+    pub fn restoreDefaultRootScanForTest(self: *JSRuntime) void {
+        if (!builtin.is_test) @compileError("test-only helper");
+        self.test_root_scan_override = null;
     }
 
     pub fn gcPendingForTest(self: JSRuntime) bool {
@@ -3894,9 +3998,9 @@ pub const JSRuntime = struct {
     }
 
     /// Return a cached single-byte (latin1) string for an ASCII byte
-    /// (0..127), creating it lazily on the first request. The returned
-    /// pointer is borrowed; callers that need to participate in normal
-    /// ref-counting should call `gc.retain(&result.header)` themselves.
+    /// (0..127), creating it lazily on the first request. The cache slot is
+    /// itself a root, so the body outlives every borrow of it; there is no
+    /// per-caller retain to take (ref-counting was deleted in TGC S1-S3).
     /// Returns `null` for non-ASCII bytes (the caller must allocate).
     pub fn singleByteString(self: *JSRuntime, byte: u8) !?*string.String {
         if (byte > 0x7f) return null;

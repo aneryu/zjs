@@ -1326,7 +1326,6 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_key = try rt.internAtom("value");
-    defer rt.atoms.free(value_key);
     {
         const stored = try result.getProperty(value_key);
         try std.testing.expect(stored.same(result_payload));

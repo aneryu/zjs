@@ -455,7 +455,6 @@ pub fn iteratorCall(
 
     const atom_name: []const u8 = if ((flags & 1) != 0) "throw" else "return";
     const atom_id = try ctx.runtime.internAtom(atom_name);
-    defer ctx.runtime.atoms.free(atom_id);
     const method = try object_ops.getValueProperty(ctx, output, global, iterator_value, atom_id, function, frame);
     if (method.isUndefined() or method.isNull()) {
         try stack.pushOwned(core.JSValue.boolean(true));
@@ -798,7 +797,7 @@ fn buildCollectionEntryPair(rt: *core.JSRuntime, is_set: bool, entry: core.objec
     const elements = try rt.memory.alloc(core.JSValue, 2);
     elements[0] = entry.key;
     elements[1] = if (is_set) entry.key else entry.value;
-    pair.adoptDenseArrayElementsAssumingEmpty(elements);
+    pair.adoptDenseArrayElementsAssumingEmpty(rt, elements);
     // Match the flag the old defineOwnProperty path set via markIndexedProperties.
     pair.flags.may_have_indexed_properties = true;
     return pair.value();
@@ -1844,7 +1843,6 @@ pub fn iteratorZipCollectKeyed(
                 const key = property_ops.propertyKeyAtom(ctx.runtime, key_value) catch |err| {
                     return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
                 };
-                defer ctx.runtime.atoms.free(key);
                 const pad_value = object_ops.getValueProperty(ctx, output, global, padding, key, caller_function, caller_frame) catch |err| {
                     return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
                 };
@@ -2541,7 +2539,6 @@ test "iteratorCreateHelper roots direct function bytecode callback while creatin
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
 
     const next_key = try rt.internAtom("next");
-    defer rt.atoms.free(next_key);
     try iterator.defineOwnProperty(rt, next_key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
 
     const helper_prototype = try core.Object.create(rt, core.class.ids.object, null);
@@ -2596,7 +2593,6 @@ fn iteratorZipPutResult(
     if (keys) |key_store| {
         const key_value = iteratorZipGetIndex(key_store, index);
         const atom_id = try property_ops.propertyKeyAtom(rt, key_value);
-        defer rt.atoms.free(atom_id);
         try results.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
         return;
     }

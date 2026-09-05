@@ -225,12 +225,10 @@ test "constructValue fallback roots callee while defining constructor property" 
     try global.setCachedRealmValue(rt, .object_prototype, object_proto.value());
 
     const name = try rt.internAtom("FallbackConstructor");
-    defer rt.atoms.free(name);
     const constructor = try functionObject(ctx, name);
     const constructor_object = try expectObject(constructor);
 
     const marker_key = try rt.internAtom("marker");
-    defer rt.atoms.free(marker_key);
     const marker_atom = try rt.atoms.newValueSymbol("gc-construct-fallback-callee-symbol");
     const marker_value = try rt.takeSymbolValue(marker_atom);
     try constructor_object.defineOwnProperty(rt, marker_key, core.Descriptor.data(marker_value, true, true, true));
@@ -239,7 +237,6 @@ test "constructValue fallback roots callee while defining constructor property" 
     const instance = try expectObject(instance_value);
 
     const constructor_key = try rt.internAtom("constructor");
-    defer rt.atoms.free(constructor_key);
     const stored_constructor = try instance.getProperty(constructor_key);
     try std.testing.expect(stored_constructor.same(constructor));
 
@@ -324,7 +321,6 @@ test "constructErrorObject roots direct symbol message while creating error" {
 
     try std.testing.expect(rt.atoms.name(message_atom) != null);
     const message_key = try rt.internAtom("message");
-    defer rt.atoms.free(message_key);
     const message_value = try object.getProperty(message_key);
     try expectStringValue(rt, "Symbol(gc-construct-error-message-symbol)", message_value);
 
@@ -384,11 +380,9 @@ test "constructDOMExceptionObject roots direct symbol args while creating error"
     try std.testing.expect(rt.atoms.name(message_atom) != null);
     try std.testing.expect(rt.atoms.name(name_atom) != null);
     const message_key = try rt.internAtom("message");
-    defer rt.atoms.free(message_key);
     const message_value = try object.getProperty(message_key);
     try expectStringValue(rt, "Symbol(gc-dom-exception-message-symbol)", message_value);
     const name_key = try rt.internAtom("name");
-    defer rt.atoms.free(name_key);
     const name_value = try object.getProperty(name_key);
     try expectStringValue(rt, "Symbol(gc-dom-exception-name-symbol)", name_value);
 
@@ -994,7 +988,6 @@ fn isNativeCollectionAdder(rt: *core.JSRuntime, value: core.JSValue, expected: [
 
 fn getCollectionAdder(rt: *core.JSRuntime, collection: *core.Object, name: []const u8) !core.JSValue {
     const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     var cursor: ?*core.Object = collection;
     while (cursor) |object| {
         if (try object.getOwnProperty(rt, key)) |desc| {

@@ -440,7 +440,6 @@ pub fn reflectSetCall(
     const object = property_ops.expectObject(args[0]) catch return error.TypeError;
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(atom_id);
     if (object.class_id == core.class.ids.module_ns) return core.JSValue.boolean(false);
     if (!object.isArray() or atom_id != core.atom.ids.length) {
         const receiver_value = if (args.len >= 4) args[3] else args[0];
@@ -568,7 +567,6 @@ pub fn reflectHasCall(
     if (args.len < 2) return error.TypeError;
     const object = object_ops.objectFromValue(args[0]) orelse return error.TypeError;
     const key = try object_ops.toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(key);
     const found = if (object.proxyTarget() != null)
         try object_ops.hasValueProperty(ctx, output, global, args[0], object, key, caller_function, caller_frame)
     else
@@ -625,7 +623,6 @@ pub fn reflectGetCall(
     if (args.len < 2) return error.TypeError;
     const object = object_ops.objectFromValue(args[0]) orelse return error.TypeError;
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(atom_id);
     const receiver = if (args.len >= 3) args[2] else args[0];
     return try object_ops.getValuePropertyWithReceiver(ctx, output, global, args[0], object, receiver, atom_id, caller_function, caller_frame);
 }

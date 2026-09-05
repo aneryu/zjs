@@ -653,7 +653,6 @@ pub fn defineNativeDataMethodWithNativeId(rt: *core.JSRuntime, global: *core.Obj
 /// rather than a predefined-atom constant (`object_ops` CallSite prototype).
 pub fn defineNativeDataMethodNamedWithNativeId(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, name: []const u8, length: i32, native_builtin_id: i32) !void {
     const atom_id = try rt.internAtom(name);
-    defer rt.atoms.free(atom_id);
     const method = try core.function.nativeFunctionForGlobal(rt, global, name, length);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     method_object.setNativeBuiltinIdAndRecord(rt, native_builtin_id);

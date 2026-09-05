@@ -66,7 +66,6 @@ pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object,
 ///   opts out via `ErrorOptions.capture_stack = false`.
 pub fn createNamedErrorWithoutStack(rt: *core.JSRuntime, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
     const ctor_key = try rt.internAtom(name);
-    defer rt.atoms.free(ctor_key);
     const ctor_value = try global.getProperty(ctor_key);
     return buildNamedErrorObject(rt, ctor_value, name, message);
 }
@@ -141,13 +140,11 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     // (JS_ThrowError2 discipline: only `message` is an own property).
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const message_key = try rt.internAtom("message");
-    defer rt.atoms.free(message_key);
     {
         const stored = try object.getProperty(message_key);
         try std.testing.expect(stored.isString());
     }
     const constructor_key = try rt.internAtom("constructor");
-    defer rt.atoms.free(constructor_key);
     {
         const stored = try object.getProperty(constructor_key);
         try std.testing.expect(!stored.same(ctor_value));
@@ -155,7 +152,6 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     // Non-object ctor (symbol) => no prototype; the degraded fallback stamps
     // an own self-describing `name`.
     const name_key = try rt.internAtom("name");
-    defer rt.atoms.free(name_key);
     {
         const stored = try object.getProperty(name_key);
         try std.testing.expect(stored.isString());
@@ -382,9 +378,9 @@ pub fn callSiteMethodById(rt: *core.JSRuntime, object: *core.Object, id: core.fu
 }
 
 pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, current_function_value: core.JSValue) !core.Atom {
-    const function_object = objectFromValue(current_function_value) orelse return ctx.runtime.atoms.dup(fallback);
-    const name_desc = (try function_object.getOwnProperty(ctx.runtime, core.atom.ids.name)) orelse return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
-    if (name_desc.kind != .data or !name_desc.value.isString()) return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
+    const function_object = objectFromValue(current_function_value) orelse return fallback;
+    const name_desc = (try function_object.getOwnProperty(ctx.runtime, core.atom.ids.name)) orelse return core.atom.ids.empty_string;
+    if (name_desc.kind != .data or !name_desc.value.isString()) return core.atom.ids.empty_string;
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);
@@ -396,8 +392,7 @@ pub fn resolveBacktraceFunctionName(ctx: *core.JSContext, frame: *core.Backtrace
     const function_value = frame.function_value;
     if (function_value.isUndefined()) return frame.function_name;
     frame.function_value = core.JSValue.undefinedValue();
-    const resolved = backtraceFunctionNameAtom(ctx, frame.function_name, function_value) catch ctx.runtime.atoms.dup(core.atom.ids.empty_string);
-    ctx.runtime.atoms.free(frame.function_name);
+    const resolved = backtraceFunctionNameAtom(ctx, frame.function_name, function_value) catch core.atom.ids.empty_string;
     frame.function_name = resolved;
     return frame.function_name;
 }

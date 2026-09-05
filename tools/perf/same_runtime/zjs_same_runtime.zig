@@ -103,7 +103,6 @@ pub fn main(init: std.process.Init) !void {
         engineFatal(context, allocator, "compile/top-level execution", error.JSException);
     }
     top_level_executions += 1;
-    eval_result.free(runtime);
     const promise_jobs_ns = eval_timing.promise_jobs_ns;
     const eval_total_ns = elapsedNanosSince(eval_total_start);
 
@@ -112,7 +111,6 @@ pub fn main(init: std.process.Init) !void {
     const run_function = context.getProperty(global_object.value(), "run") catch |err|
         engineFatal(context, allocator, "run lookup", err);
     if (!context.isCallable(run_function)) {
-        run_function.free(runtime);
         fatal("global property 'run' is not callable", .{});
     }
 
@@ -126,7 +124,6 @@ pub fn main(init: std.process.Init) !void {
         if (result.isException()) {
             engineFatal(context, allocator, "warmup invocation", error.JSException);
         }
-        result.free(runtime);
     }
 
     var result_checksum: ?[]u8 = null;
@@ -145,7 +142,6 @@ pub fn main(init: std.process.Init) !void {
             result_checksum = context.toOwnedUtf8(result, allocator) catch |err|
                 engineFatal(context, allocator, "checksum conversion", err);
         }
-        result.free(runtime);
     }
     const checksum = result_checksum orelse fatal("no steady invocation produced a checksum", .{});
     defer allocator.free(checksum);
@@ -163,7 +159,6 @@ pub fn main(init: std.process.Init) !void {
     std.mem.sort(u64, sorted_samples, {}, lessThanU64);
     const stats = calculateStats(sorted_samples);
 
-    run_function.free(runtime);
 
     const memory_usage = runtime.memoryUsage();
     const peak_rss_bytes = peakRssBytes();
@@ -302,7 +297,6 @@ fn engineFatal(
         } else |_| {
             std.debug.print("error: {s} failed with exception ({s})\n", .{ stage, @errorName(err) });
         }
-        exception.free(context.runtimePtr());
     } else {
         std.debug.print("error: {s} failed: {s}\n", .{ stage, @errorName(err) });
     }

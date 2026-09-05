@@ -326,7 +326,7 @@ pub const String = struct {
     /// the same string with zero conversion.
     /// Rope-backed strings are flattened by the content read.
     pub fn internAtom(self: *String, rt: *JSRuntime) !u32 {
-        if (self.atom_id != no_atom_id) return rt.atoms.dup(self.atom_id);
+        if (self.atom_id != no_atom_id) return self.atom_id;
         _ = self.contentHash();
         var utf8 = std.ArrayList(u8).empty;
         defer utf8.deinit(rt.memory.allocator);
@@ -1337,10 +1337,11 @@ pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.GCObjectHeader) void {
         return;
     }
     const body: *String = @ptrCast(@alignCast(header));
-    // Symbol bodies carry a dynamic atom id: the table must drop (or weaken)
-    // its entry before the body's memory is recycled. A string-kind atom body
-    // cannot be condemned while its entry lives (`AtomTable.traceRoots`
-    // reports it), so `onSymbolBodyDead` only ever sees symbols.
+    // Bodies carry a dynamic atom id: the table must stop naming the body
+    // before its memory is recycled. TGC S3-c made the two kinds differ --
+    // a string atom's `str` is a droppable cache (the handshake just unbinds
+    // it), a value symbol's body IS the entry's identity (the handshake
+    // retires or weakens the entry).
     const atom_id = body.atom_id;
     if (atom_id != String.no_atom_id and !atom_mod.isConst(atom_id) and !atom_mod.isTaggedInt(atom_id)) {
         rt.atoms.onSymbolBodyDead(atom_id, body);
@@ -1362,13 +1363,32 @@ pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.GCObjectHeader) void {
 pub fn destroyAllStringCarriersForDeinit(rt: *JSRuntime) void {
     var cells = std.ArrayList(*gc.GCObjectHeader).empty;
     defer cells.deinit(std.heap.page_allocator);
-    var it = rt.gc.objectIterator(.all);
-    while (it.next()) |header| {
-        if (header.metaConst().flags.kind != .string) continue;
-        if (!gc.Registry.isBlockCellHeader(header)) continue;
-        cells.append(std.heap.page_allocator, header) catch @panic("gc: deinit string carrier list");
+    // One reservation for the whole live string population is the common
+    // path; the walk below then appends into reserved memory and never
+    // allocates. Teardown must not abort on a failed reservation, so the
+    // fallback is a slower shape of the same work rather than a `@panic`:
+    // destroy what was recorded plus the one cell that did not fit, then
+    // restart the walk over a strictly smaller population. Progress is at
+    // least one cell per pass, so this terminates with zero spare memory.
+    cells.ensureTotalCapacity(std.heap.page_allocator, rt.gc.liveCountKind(.string)) catch {};
+    while (true) {
+        cells.clearRetainingCapacity();
+        var overflow: ?*gc.GCObjectHeader = null;
+        var it = rt.gc.objectIterator(.all);
+        while (it.next()) |header| {
+            if (header.metaConst().flags.kind != .string) continue;
+            if (!gc.Registry.isBlockCellHeader(header)) continue;
+            cells.append(std.heap.page_allocator, header) catch {
+                // The iterator is abandoned here, so destroying out of the
+                // walk cannot disturb it.
+                overflow = header;
+                break;
+            };
+        }
+        for (cells.items) |header| destroyCellFromHeader(rt, header);
+        const pending = overflow orelse break;
+        destroyCellFromHeader(rt, pending);
     }
-    for (cells.items) |header| destroyCellFromHeader(rt, header);
     const heap = &rt.gc.block_heap;
     // Major epochs are even; the next one matches no recorded extent mark.
     _ = heap.sweepStringExtents(heap.mark_epoch +% 2, @ptrCast(rt), destroyDeadStringExtent);
@@ -1656,11 +1676,9 @@ test "string compare short-circuits equal interned atom ids" {
 
     const first = try String.createUtf8(rt, "length");
     const first_atom = try first.internAtom(rt);
-    defer rt.atoms.free(first_atom);
 
     const second = try String.createUtf8(rt, "length");
     const second_atom = try second.internAtom(rt);
-    defer rt.atoms.free(second_atom);
 
     try std.testing.expectEqual(first_atom, second_atom);
     try std.testing.expect(first != second);

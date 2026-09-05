@@ -141,7 +141,6 @@ pub fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*co
 /// Kept for embedder fallbacks where no class table has been published.
 pub fn constructorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object, constructor_name: []const u8) ?*core.Object {
     const ctor_key = rt.internAtom(constructor_name) catch return null;
-    defer rt.atoms.free(ctor_key);
     return constructorPrototypeFromGlobalAtom(rt, global, ctor_key);
 }
 
@@ -780,9 +779,7 @@ test "aggregateErrorConstructWithPrototype preserves direct symbol errors and ca
     try std.testing.expect(rt.atoms.name(error_atom) != null);
     try std.testing.expect(rt.atoms.name(cause_atom) != null);
     const errors_key = try rt.internAtom("errors");
-    defer rt.atoms.free(errors_key);
     const cause_key = try rt.internAtom("cause");
-    defer rt.atoms.free(cause_key);
     {
         const stored_errors_value = try aggregate.getProperty(errors_key);
         const stored_errors = objectFromValue(stored_errors_value) orelse return error.TypeError;
@@ -865,9 +862,7 @@ test "suppressedErrorConstructWithPrototype roots direct symbol args while creat
     try std.testing.expect(rt.atoms.name(error_atom) != null);
     try std.testing.expect(rt.atoms.name(suppressed_atom) != null);
     const error_key = try rt.internAtom("error");
-    defer rt.atoms.free(error_key);
     const suppressed_key = try rt.internAtom("suppressed");
-    defer rt.atoms.free(suppressed_key);
     {
         const stored_error = try object.getProperty(error_key);
         const stored_suppressed = try object.getProperty(suppressed_key);
@@ -974,7 +969,6 @@ test "errorConstructWithPrototype preserves direct symbol cause" {
 
     try std.testing.expect(rt.atoms.name(cause_atom) != null);
     const cause_key = try rt.internAtom("cause");
-    defer rt.atoms.free(cause_key);
     {
         const stored_cause = try object.getProperty(cause_key);
         try std.testing.expect(stored_cause.same(cause_value));
@@ -1215,7 +1209,6 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
         defer decoded_name.deinit(rt.memory.allocator);
         try appendDecodedRegExpGroupName(rt, &decoded_name, name);
         const atom = try rt.internAtom(decoded_name.items);
-        defer rt.atoms.free(atom);
         // TGC S3 §4 class B: bare group-name id held across the property
         // define (and, in the indices form, a fresh pair object).
         var group_atom_roots = core.runtime.rootAtoms(.{&atom});
@@ -1257,7 +1250,6 @@ pub noinline fn populateRegExpGroupsFromCaptureValues(
         defer decoded_name.deinit(rt.memory.allocator);
         try appendDecodedRegExpGroupName(rt, &decoded_name, name);
         const atom = try rt.internAtom(decoded_name.items);
-        defer rt.atoms.free(atom);
         // TGC S3 §4 class B: bare group-name id held across the property
         // define (and, in the indices form, a fresh pair object).
         var group_atom_roots = core.runtime.rootAtoms(.{&atom});
@@ -1565,7 +1557,6 @@ pub fn constructCollectionWithPrototypeFromVm(
 
     const adder_name: []const u8 = if (kind == 1 or kind == 3) "set" else "add";
     const adder_key = try ctx.runtime.internAtom(adder_name);
-    defer ctx.runtime.atoms.free(adder_key);
     const adder = try getValueProperty(ctx, output, global, collection_value, adder_key, null, null);
     if (!isCallableValue(adder)) return error.TypeError;
 
@@ -1876,7 +1867,6 @@ test "destructuringObjectRest roots direct symbol values while creating rest obj
 
     const source = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     const key = try rt.internAtom("kept");
-    defer rt.atoms.free(key);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-destructuring-object-rest-symbol");
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
     try source.defineOwnProperty(rt, key, core.Descriptor.data(symbol_value, true, true, true));
@@ -1945,7 +1935,6 @@ pub fn objectRestOwnKeys(
         defer key_value = core.JSValue.undefinedValue();
         if (!key_value.isString() and !key_value.isSymbol()) return error.TypeError;
         const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
-        errdefer ctx.runtime.atoms.free(atom_id);
         if (atomListContains(out, atom_id)) return error.TypeError;
         try appendOwnedAtom(ctx.runtime, &out, atom_id);
     }
@@ -1966,7 +1955,6 @@ pub fn objectRestOwnPropertyDescriptor(
 pub fn objectRestKeyExcluded(ctx: *core.JSContext, excluded: []const core.JSValue, key: core.Atom) !bool {
     for (excluded) |value| {
         const excluded_key = try property_ops.propertyKeyAtom(ctx.runtime, value);
-        defer ctx.runtime.atoms.free(excluded_key);
         if (excluded_key == key) return true;
     }
     return false;
@@ -2859,7 +2847,6 @@ test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
         core.Descriptor.data(symbol_prototype.value(), true, true, true),
     );
     const symbol_ctor_atom = try rt.internAtom("Symbol");
-    defer rt.atoms.free(symbol_ctor_atom);
     try global.defineOwnProperty(
         rt,
         symbol_ctor_atom,
@@ -3088,7 +3075,6 @@ pub fn definePropertyWithKind(
     const object = property_ops.expectObject(args[0]) catch return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not an object"));
     if (args.len < 2) return error.TypeError;
     const atom_id = try toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(atom_id);
     if (args.len < 3) return error.TypeError;
     const desc_object = property_ops.expectObject(args[2]) catch return error.TypeError;
     const desc = try descriptorFromObject(ctx, output, global, args[2], desc_object, object, atom_id, caller_function, caller_frame);
@@ -3128,8 +3114,7 @@ pub const PendingPropertyDescriptor = struct {
     atom_id: core.Atom,
     desc: core.Descriptor,
 
-    pub fn destroy(self: PendingPropertyDescriptor, rt: *core.JSRuntime) void {
-        rt.atoms.free(self.atom_id);
+    pub fn destroy(_: PendingPropertyDescriptor, _: *core.JSRuntime) void {
     }
 };
 
@@ -3334,7 +3319,6 @@ pub fn reflectDeletePropertyCall(
     if (args.len < 2) return error.TypeError;
     const object = try property_ops.expectObject(args[0]);
     const atom_id = try toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(atom_id);
     return core.JSValue.boolean(try deleteValueProperty(ctx, output, global, args[0], object, atom_id, caller_function, caller_frame));
 }
 
@@ -3349,7 +3333,6 @@ pub fn reflectGetOwnPropertyDescriptorCall(
     if (args.len < 2) return error.TypeError;
     const object = objectFromValue(args[0]) orelse return error.TypeError;
     const atom_id = try toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(atom_id);
     var desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, atom_id, caller_function, caller_frame) orelse return core.JSValue.undefinedValue();
     try call_mod.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, object, atom_id, &desc);
     return try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
@@ -3419,7 +3402,6 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_key = try rt.internAtom("value");
-    defer rt.atoms.free(value_key);
     {
         const stored = try descriptor.getProperty(value_key);
         try std.testing.expect(stored.same(desc_value));
@@ -3946,7 +3928,6 @@ pub noinline fn getSuperValue(
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    defer ctx.runtime.atoms.free(atom_id);
     if (obj.isUndefined() or obj.isNull()) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
@@ -3986,7 +3967,6 @@ pub noinline fn putSuperValue(
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    defer ctx.runtime.atoms.free(atom_id);
     const prototype = try property_ops.expectObject(obj);
     setSuperPropertyValue(ctx, output, global, receiver, prototype, atom_id, value, function, frame) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -4102,7 +4082,6 @@ pub fn privateIn(
         try hasPrivateBrand(ctx.runtime, obj, key)
     else blk: {
         const atom_id = try toPropertyKeyAtom(ctx, output, global, key, function, frame);
-        defer ctx.runtime.atoms.free(atom_id);
         const object = try property_ops.expectObject(obj);
         break :blk object.hasOwnProperty(atom_id);
     };
@@ -4187,7 +4166,6 @@ pub noinline fn defineClass(
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
-        defer ctx.runtime.atoms.free(name_atom);
         name_value = try functionNameValueFromAtom(ctx.runtime, name_atom, null);
         try defineFunctionNameProperty(ctx.runtime, ctor_object, name_value);
         name_value = core.JSValue.undefinedValue();
@@ -4266,7 +4244,6 @@ pub noinline fn defineMethodComputed(
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    defer ctx.runtime.atoms.free(atom_id);
     defineObjectMethodValue(ctx.runtime, stack, atom_id, value, flags) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
@@ -4366,7 +4343,6 @@ fn ensureHomeObjectBrand(rt: *core.JSRuntime, home: *core.Object) !core.Atom {
     const name = rt.atoms.name(core.atom.ids.Private_brand) orelse "<brand>";
     if (!home.isExtensible()) return error.NotExtensible;
     const brand_atom = try rt.atoms.newSymbol(name, .private);
-    defer rt.atoms.free(brand_atom);
     const brand_value = try rt.symbolValue(brand_atom);
     try home.defineOwnProperty(rt, core.atom.ids.Private_brand, core.Descriptor.data(brand_value, true, true, true));
     return brand_atom;

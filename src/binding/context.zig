@@ -163,14 +163,6 @@ pub const JSContext = struct {
         return self.core.runtime;
     }
 
-    pub fn dupValue(self: *JSContext, val: JSValue) JSValue {
-        return self.core.dupValue(val);
-    }
-
-    pub fn freeValue(self: *JSContext, val: JSValue) void {
-        self.core.freeValue(val);
-    }
-
     pub fn createValueHandle(self: *JSContext, val: JSValue) !core.runtime.JSValueHandle {
         return self.core.createValueHandle(val);
     }
@@ -270,7 +262,6 @@ pub const JSContext = struct {
     ) !void {
         const object = try Object.expect(target);
         const key = try self.core.runtime.internAtom(property_name);
-        defer self.core.runtime.atoms.free(key);
         // TGC S3 §4 class B: `key` is a bare id held across a define that can
         // allocate a shape and collect.
         var key_roots = core.runtime.rootAtoms(.{&key});
@@ -349,7 +340,6 @@ pub const JSContext = struct {
 
     pub fn getProperty(self: *JSContext, val: JSValue, property_name: []const u8) !JSValue {
         const key = try self.core.runtime.internAtom(property_name);
-        defer self.core.runtime.atoms.free(key);
         // TGC S3 §4 class B: the getter below can run a JS accessor.
         var key_roots = core.runtime.rootAtoms(.{&key});
         key_roots.activate(self.core.runtime);
@@ -363,13 +353,11 @@ pub const JSContext = struct {
         defer roots.deactivate(self.core.runtime);
         const global = options.realm_global orelse try self.globalObject();
         const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, roots.values[1], null, null);
-        defer self.core.runtime.atoms.free(key);
         return exec.object_ops.getValueProperty(self.core, options.output, global, roots.values[0], key, null, null);
     }
 
     pub fn deleteProperty(self: *JSContext, val: JSValue, property_name: []const u8) !bool {
         const key = try self.core.runtime.internAtom(property_name);
-        defer self.core.runtime.atoms.free(key);
         // TGC S3 §4 class B: delete can reach a proxy trap.
         var key_roots = core.runtime.rootAtoms(.{&key});
         key_roots.activate(self.core.runtime);
@@ -383,13 +371,11 @@ pub const JSContext = struct {
         defer roots.deactivate(self.core.runtime);
         const global = options.realm_global orelse try self.globalObject();
         const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, roots.values[1], null, null);
-        defer self.core.runtime.atoms.free(key);
         return self.deletePropertyAtom(roots.values[0], key, .{ .output = options.output, .realm_global = global });
     }
 
     pub fn hasOwnProperty(self: *JSContext, val: JSValue, property_name: []const u8) !bool {
         const key = try self.core.runtime.internAtom(property_name);
-        defer self.core.runtime.atoms.free(key);
         // TGC S3 §4 class B: hasOwn can reach a proxy trap.
         var key_roots = core.runtime.rootAtoms(.{&key});
         key_roots.activate(self.core.runtime);
@@ -403,7 +389,6 @@ pub const JSContext = struct {
         defer roots.deactivate(self.core.runtime);
         const global = options.realm_global orelse try self.globalObject();
         const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, roots.values[1], null, null);
-        defer self.core.runtime.atoms.free(key);
         return self.hasOwnPropertyAtom(roots.values[0], key, .{ .output = options.output, .realm_global = global });
     }
 
@@ -413,7 +398,6 @@ pub const JSContext = struct {
         defer roots.deactivate(self.core.runtime);
         const global = options.realm_global orelse try self.globalObject();
         const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, roots.values[1], null, null);
-        defer self.core.runtime.atoms.free(key);
         return self.ownPropertyDescriptorAtom(roots.values[0], key, .{ .output = options.output, .realm_global = global });
     }
 
@@ -669,7 +653,6 @@ pub const JSContext = struct {
         const function_value = try self.createExternalFunction(name, length, ptr, call, finalizer, .{ .realm_global = global_object });
 
         const property_name = try rt.internAtom(name);
-        defer rt.atoms.free(property_name);
         // TGC S3 §4 class B.
         var name_roots = core.runtime.rootAtoms(.{&property_name});
         name_roots.activate(rt);

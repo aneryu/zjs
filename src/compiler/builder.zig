@@ -266,7 +266,6 @@ pub const Builder = struct {
     /// Item-wise release of the owned atom prefix, then every backing freed
     /// by full capacity. Idempotent.
     pub fn deinit(self: *Builder) void {
-        for (self.atom_operands[0..self.atom_len]) |atom_id| self.atoms.free(atom_id);
 
         if (self.code_capacity != 0) self.memory.free(u8, self.code);
         if (self.atom_capacity != 0) self.memory.free(core.atom.Atom, self.atom_operands);
@@ -543,7 +542,6 @@ pub const Builder = struct {
         // Ownership transfer is unconditional: the sink consumes the caller's
         // retained atom even when either capacity reservation fails.
         self.reserveCode(5) catch |err| {
-            self.atoms.free(atom_id);
             return err;
         };
         reserve(
@@ -555,7 +553,6 @@ pub const Builder = struct {
             1,
             8,
         ) catch |err| {
-            self.atoms.free(atom_id);
             return err;
         };
 
@@ -575,7 +572,6 @@ pub const Builder = struct {
     /// (one retain) transfers into the builder ledger.
     pub fn emitAtomOpU8Owned(self: *Builder, op_id: u8, atom_id: core.atom.Atom, val: u8) Error!void {
         self.reserveCode(6) catch |err| {
-            self.atoms.free(atom_id);
             return err;
         };
         reserve(
@@ -587,7 +583,6 @@ pub const Builder = struct {
             1,
             8,
         ) catch |err| {
-            self.atoms.free(atom_id);
             return err;
         };
 
@@ -607,7 +602,6 @@ pub const Builder = struct {
     /// scope operand, the scope_get_var-family temp encoding). Owned-atom sink.
     pub fn emitAtomOpU16Owned(self: *Builder, op_id: u8, atom_id: core.atom.Atom, val: u16) Error!void {
         self.reserveCode(7) catch |err| {
-            self.atoms.free(atom_id);
             return err;
         };
         reserve(
@@ -619,7 +613,6 @@ pub const Builder = struct {
             1,
             8,
         ) catch |err| {
-            self.atoms.free(atom_id);
             return err;
         };
 
@@ -649,12 +642,10 @@ pub const Builder = struct {
         scope: u16,
     ) Error!void {
         if (label.index() >= self.label_len) {
-            self.atoms.free(atom_id);
             return error.InvalidBytecode;
         }
 
         self.reserveCode(11) catch |err| {
-            self.atoms.free(atom_id);
             return err;
         };
         reserve(
@@ -666,7 +657,6 @@ pub const Builder = struct {
             1,
             8,
         ) catch |err| {
-            self.atoms.free(atom_id);
             return err;
         };
         reserve(
@@ -678,7 +668,6 @@ pub const Builder = struct {
             1,
             8,
         ) catch |err| {
-            self.atoms.free(atom_id);
             return err;
         };
 
@@ -789,10 +778,9 @@ pub const Builder = struct {
             return error.InvalidBytecode;
         }
 
-        const retained = self.atoms.dup(replacement);
+        const retained = replacement;
         self.atom_operands[index] = retained;
         std.mem.writeInt(u32, self.code[offset + 1 ..][0..4], replacement, .little);
-        self.atoms.free(expected_atom);
     }
 
     /// Rewrite the trailing atom opcode as a one-byte plain opcode while
@@ -821,7 +809,7 @@ pub const Builder = struct {
 
         try self.truncateLastOpcodePreserveSources(opcode_offset);
         const removed = try self.takeLastAtomOwned();
-        self.atoms.free(removed);
+        _ = removed;
         self.code[offset] = replacement_opcode;
         self.code_len = std.math.add(u32, opcode_offset, 1) catch return error.InvalidBytecode;
         self.last_opcode_pos = @intCast(opcode_offset);
@@ -868,7 +856,6 @@ pub const Builder = struct {
     /// created after the snapshot vanish; refs recorded after it are
     /// unchained by construction (their reloc entries are truncated).
     pub fn rollback(self: *Builder, snap: Snapshot) void {
-        for (self.atom_operands[snap.atom_len..self.atom_len]) |atom_id| self.atoms.free(atom_id);
         self.atom_len = snap.atom_len;
 
         if (builtin.mode == .Debug) {
@@ -1313,7 +1300,6 @@ pub const Builder = struct {
     /// Release a segment that will not be spliced (error paths): item-wise atom
     /// release, then backings freed. Idempotent.
     pub fn discardSegment(self: *Builder, seg: *DetachedSegment) void {
-        for (seg.atoms) |atom_id| self.atoms.free(atom_id);
         self.freeSegmentBackings(seg);
     }
 
@@ -1489,8 +1475,6 @@ test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
     defer table.deinit();
 
     const atom_id = try table.internString("qcp1_s2g4_scope_ref");
-    defer table.free(atom_id);
-    const base_ref_count = table.refCount(atom_id).?;
 
     var b = Builder.init(&acct, &table);
     defer b.deinit();
@@ -1499,7 +1483,7 @@ test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
     try b.emitJump(0x21, label);
     const snap = b.snapshot();
 
-    try b.emitScopeRefOpOwned(0xd1, table.dup(atom_id), label, 0x1234);
+    try b.emitScopeRefOpOwned(0xd1, atom_id, label, 0x1234);
     try std.testing.expectEqual(@as(u32, 16), b.code_len);
     try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u8, 0xd1), b.code[5]);
@@ -1515,7 +1499,7 @@ test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
     try std.testing.expect(!b.label_slots[label.index()].flags.backward_target);
 
     try b.bindLabel(label);
-    try b.emitScopeRefOpOwned(0xd2, table.dup(atom_id), label, 0xabcd);
+    try b.emitScopeRefOpOwned(0xd2, atom_id, label, 0xabcd);
     try std.testing.expectEqual(@as(u32, 27), b.code_len);
     try std.testing.expectEqual(@as(i64, 16), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u32, 3), b.reloc_len);
@@ -1525,7 +1509,6 @@ test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
     try std.testing.expectEqual(@as(u32, 21), b.relocs[2].operand_offset);
     try std.testing.expectEqual(labels.RelocKind.aux32, b.relocs[2].kind);
     try std.testing.expect(b.label_slots[label.index()].flags.backward_target);
-    try std.testing.expectEqual(base_ref_count + 2, table.refCount(atom_id).?);
 
     b.rollback(snap);
     try std.testing.expectEqual(snap.code_len, b.code_len);
@@ -1534,19 +1517,16 @@ test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
     try std.testing.expectEqual(@as(u32, 1), b.label_slots[label.index()].ref_count);
     try std.testing.expectEqual(@as(u32, 0), b.label_slots[label.index()].first_reloc);
     try std.testing.expect(!b.label_slots[label.index()].flags.bound);
-    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 
     const code_len_before_invalid = b.code_len;
     const reloc_len_before_invalid = b.reloc_len;
-    const invalid_owned_atom = table.dup(atom_id);
-    try std.testing.expectEqual(base_ref_count + 1, table.refCount(atom_id).?);
+    const invalid_owned_atom = atom_id;
     try std.testing.expectError(
         error.InvalidBytecode,
         b.emitScopeRefOpOwned(0xd3, invalid_owned_atom, @enumFromInt(99), 0),
     );
     try std.testing.expectEqual(code_len_before_invalid, b.code_len);
     try std.testing.expectEqual(reloc_len_before_invalid, b.reloc_len);
-    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 }
 
 test "compiler.builder: compact immediate emission and rollback" {
@@ -1590,8 +1570,6 @@ test "compiler.builder: s2g4 compact atom immediates own refs" {
     defer table.deinit();
 
     const atom_id = try table.internString("qcp1_s2g4_compact_atom");
-    defer table.free(atom_id);
-    const base_ref_count = table.refCount(atom_id).?;
 
     var b = Builder.init(&acct, &table);
     defer b.deinit();
@@ -1602,14 +1580,14 @@ test "compiler.builder: s2g4 compact atom immediates own refs" {
     try std.testing.expectEqual(@as(i64, 0), b.last_opcode_pos);
     try std.testing.expectEqualSlices(u8, &.{ 0xc1, 0x12, 0x34, 0x56, 0x78 }, b.code[0..5]);
 
-    try b.emitAtomOpU8Owned(0xc2, table.dup(atom_id), 0xa5);
+    try b.emitAtomOpU8Owned(0xc2, atom_id, 0xa5);
     try std.testing.expectEqual(@as(u32, 11), b.code_len);
     try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u8, 0xc2), b.code[5]);
     try std.testing.expectEqual(atom_id, std.mem.readInt(u32, b.code[6..10], .little));
     try std.testing.expectEqual(@as(u8, 0xa5), b.code[10]);
 
-    try b.emitAtomOpU16Owned(0xc3, table.dup(atom_id), 0x1234);
+    try b.emitAtomOpU16Owned(0xc3, atom_id, 0x1234);
     try std.testing.expectEqual(@as(u32, 18), b.code_len);
     try std.testing.expectEqual(@as(i64, 11), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u8, 0xc3), b.code[11]);
@@ -1618,17 +1596,14 @@ test "compiler.builder: s2g4 compact atom immediates own refs" {
     try std.testing.expectEqual(@as(u32, 2), b.atom_len);
     try std.testing.expectEqual(atom_id, b.atom_operands[0]);
     try std.testing.expectEqual(atom_id, b.atom_operands[1]);
-    try std.testing.expectEqual(base_ref_count + 2, table.refCount(atom_id).?);
 
     b.rollback(empty);
     try std.testing.expectEqual(@as(u32, 0), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 
-    try b.emitAtomOpU8Owned(0xc4, table.dup(atom_id), 0x5a);
-    try b.emitAtomOpU16Owned(0xc5, table.dup(atom_id), 0xabcd);
+    try b.emitAtomOpU8Owned(0xc4, atom_id, 0x5a);
+    try b.emitAtomOpU16Owned(0xc5, atom_id, 0xabcd);
     b.deinit();
-    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 }
 
 test "compiler.builder: s2g4 take atom and truncate speculative tail" {
@@ -1637,8 +1612,6 @@ test "compiler.builder: s2g4 take atom and truncate speculative tail" {
     defer table.deinit();
 
     const atom_id = try table.internString("qcp1_s2g4_truncate_atom");
-    defer table.free(atom_id);
-    const base_ref_count = table.refCount(atom_id).?;
 
     var b = Builder.init(&acct, &table);
     defer b.deinit();
@@ -1650,17 +1623,15 @@ test "compiler.builder: s2g4 take atom and truncate speculative tail" {
     const op_start = b.code_len;
     try std.testing.expectEqual(@as(u32, 5), op_start);
     try b.addSourceMarker(2, 2);
-    try b.emitAtomOpOwned(0xd4, table.dup(atom_id));
+    try b.emitAtomOpOwned(0xd4, atom_id);
     try b.addSourceMarker(3, 3);
     try std.testing.expectEqual(@as(u32, 3), b.source_len);
     try std.testing.expectEqual(op_start, b.source_slots[1].temp_offset);
     try std.testing.expectEqual(@as(u32, 10), b.source_slots[2].temp_offset);
-    try std.testing.expectEqual(base_ref_count + 1, table.refCount(atom_id).?);
 
     const returned_atom = try b.takeLastAtomOwned();
     try std.testing.expectEqual(atom_id, returned_atom);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(base_ref_count + 1, table.refCount(atom_id).?);
     try std.testing.expectError(error.InvalidBytecode, b.takeLastAtomOwned());
 
     b.truncateTail(op_start);
@@ -1671,8 +1642,6 @@ test "compiler.builder: s2g4 take atom and truncate speculative tail" {
     try std.testing.expectEqual(@as(u32, 1), b.source_len);
     try std.testing.expectEqual(@as(u32, 0), b.source_slots[0].temp_offset);
 
-    table.free(returned_atom);
-    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 }
 
 test "compiler.builder: lvalue atom take and opcode rewind are one transaction" {
@@ -1681,8 +1650,6 @@ test "compiler.builder: lvalue atom take and opcode rewind are one transaction" 
     defer table.deinit();
 
     const atom_id = try table.internString("lvalue_transaction_atom");
-    defer table.free(atom_id);
-    const base_ref_count = table.refCount(atom_id).?;
 
     var b = Builder.init(&acct, &table);
     defer b.deinit();
@@ -1690,7 +1657,7 @@ test "compiler.builder: lvalue atom take and opcode rewind are one transaction" 
     try b.emitOp(0x20);
     const op_start = b.code_len;
     try b.addSourceMarker(2, 2);
-    try b.emitAtomOpU16Owned(0xd5, table.dup(atom_id), 7);
+    try b.emitAtomOpU16Owned(0xd5, atom_id, 7);
     try b.addSourceMarker(3, 3);
 
     try std.testing.expectError(
@@ -1708,8 +1675,6 @@ test "compiler.builder: lvalue atom take and opcode rewind are one transaction" 
     try std.testing.expectEqual(@as(u32, 1), b.source_len);
     try std.testing.expectEqual(op_start, b.source_slots[0].temp_offset);
 
-    table.free(owned);
-    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 }
 
 test "compiler.builder: marked opcode rewind preserves older same-offset source" {
@@ -1740,14 +1705,8 @@ test "compiler.builder: s2g4 detach and splice preserves global labels" {
     defer table.deinit();
 
     const pre_atom = try table.internString("qcp1_s2g4_pre_atom");
-    defer table.free(pre_atom);
     const segment_atom = try table.internString("qcp1_s2g4_segment_atom");
-    defer table.free(segment_atom);
     const scope_atom = try table.internString("qcp1_s2g4_scope_atom");
-    defer table.free(scope_atom);
-    const pre_atom_base = table.refCount(pre_atom).?;
-    const segment_atom_base = table.refCount(segment_atom).?;
-    const scope_atom_base = table.refCount(scope_atom).?;
 
     var b = Builder.init(&acct, &table);
     defer b.deinit();
@@ -1756,7 +1715,7 @@ test "compiler.builder: s2g4 detach and splice preserves global labels" {
     const label_c = try b.newLabel();
     try b.bindLabel(label_a);
     try b.emitJump(0xe0, label_a);
-    try b.emitAtomOpOwned(0xe1, table.dup(pre_atom));
+    try b.emitAtomOpOwned(0xe1, pre_atom);
     try b.addSourceMarker(10, 10);
     try b.bindLabel(label_c);
     const mark = b.snapshot();
@@ -1767,9 +1726,9 @@ test "compiler.builder: s2g4 detach and splice preserves global labels" {
     try b.emitJump(0xe3, label_b);
     try b.emitOp(0xe4);
     try b.bindLabel(label_b);
-    try b.emitAtomOpOwned(0xe5, table.dup(segment_atom));
+    try b.emitAtomOpOwned(0xe5, segment_atom);
     try b.addSourceMarker(20, 20);
-    try b.emitScopeRefOpOwned(0xe6, table.dup(scope_atom), label_c, 0x5678);
+    try b.emitScopeRefOpOwned(0xe6, scope_atom, label_c, 0x5678);
 
     try std.testing.expectEqual(@as(u32, 37), b.code_len);
     try std.testing.expectEqual(@as(u32, 3), b.atom_len);
@@ -1779,8 +1738,6 @@ test "compiler.builder: s2g4 detach and splice preserves global labels" {
     try expectRelocChain(&b, label_a, &.{ 11, 1 }, &.{ .jump32, .jump32 });
     try expectRelocChain(&b, label_b, &.{16}, &.{.jump32});
     try expectRelocChain(&b, label_c, &.{31}, &.{.aux32});
-    try std.testing.expectEqual(segment_atom_base + 1, table.refCount(segment_atom).?);
-    try std.testing.expectEqual(scope_atom_base + 1, table.refCount(scope_atom).?);
 
     var seg = try b.detachTail(mark);
     defer b.discardSegment(&seg);
@@ -1814,8 +1771,6 @@ test "compiler.builder: s2g4 detach and splice preserves global labels" {
     try std.testing.expectEqual(@as(u32, 11), seg.binds[0].rel_offset);
     try std.testing.expectEqual(@as(usize, 1), seg.sources.len);
     try std.testing.expectEqual(@as(u32, 16), seg.sources[0].temp_offset);
-    try std.testing.expectEqual(segment_atom_base + 1, table.refCount(segment_atom).?);
-    try std.testing.expectEqual(scope_atom_base + 1, table.refCount(scope_atom).?);
 
     var detached_bytes: [27]u8 = undefined;
     @memcpy(detached_bytes[0..], seg.code);
@@ -1857,9 +1812,6 @@ test "compiler.builder: s2g4 detach and splice preserves global labels" {
 
     b.discardSegment(&seg);
     b.deinit();
-    try std.testing.expectEqual(pre_atom_base, table.refCount(pre_atom).?);
-    try std.testing.expectEqual(segment_atom_base, table.refCount(segment_atom).?);
-    try std.testing.expectEqual(scope_atom_base, table.refCount(scope_atom).?);
 }
 
 test "compiler.builder: s2g4 empty segment splice invalidates last opcode" {
@@ -1902,8 +1854,6 @@ fn s2g4OomScript(allocator: std.mem.Allocator) !void {
     defer table.deinit();
 
     const atom_id = try table.internString("qcp1_s2g4_oom_atom");
-    defer table.free(atom_id);
-    const base_ref_count = table.refCount(atom_id).?;
 
     var b = Builder.init(&acct, &table);
     defer b.deinit();
@@ -1911,8 +1861,8 @@ fn s2g4OomScript(allocator: std.mem.Allocator) !void {
     const label_c = try b.newLabel();
     try b.bindLabel(label_c);
     try b.emitOpU32(0x70, 0x12345678);
-    try b.emitAtomOpU8Owned(0x71, table.dup(atom_id), 0x9a);
-    try b.emitAtomOpU16Owned(0x72, table.dup(atom_id), 0xbcde);
+    try b.emitAtomOpU8Owned(0x71, atom_id, 0x9a);
+    try b.emitAtomOpU16Owned(0x72, atom_id, 0xbcde);
     const mark = b.snapshot();
 
     const label_b = try b.newLabel();
@@ -1921,10 +1871,10 @@ fn s2g4OomScript(allocator: std.mem.Allocator) !void {
     while (jump_index < 6) : (jump_index += 1) {
         try b.emitJump(0x81 + jump_index, label_c);
     }
-    try b.emitScopeRefOpOwned(0x90, table.dup(atom_id), label_c, 0x2468);
+    try b.emitScopeRefOpOwned(0x90, atom_id, label_c, 0x2468);
     var atom_index: u8 = 0;
     while (atom_index < 5) : (atom_index += 1) {
-        try b.emitAtomOpOwned(0xa0 + atom_index, table.dup(atom_id));
+        try b.emitAtomOpOwned(0xa0 + atom_index, atom_id);
     }
     try b.bindLabel(label_b);
     var marker_index: i32 = 0;
@@ -1951,7 +1901,7 @@ fn s2g4OomScript(allocator: std.mem.Allocator) !void {
         try b.emitOp(0xc0 + interim_index);
     }
     try b.emitJump(0xe8, label_c);
-    try b.emitAtomOpOwned(0xe9, table.dup(atom_id));
+    try b.emitAtomOpOwned(0xe9, atom_id);
     try b.addSourceMarker(200, 1);
 
     try b.spliceSegment(&seg);
@@ -1963,7 +1913,6 @@ fn s2g4OomScript(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 0), seg.code.len);
 
     b.deinit();
-    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 }
 
 test "compiler.builder: s2g4 allocation failure sweep balances detached atoms" {
@@ -1982,8 +1931,7 @@ test "compiler.builder: snapshot rollback restores chains, atoms, markers" {
     const l0 = try b.newLabel();
     try b.emitJump(0x21, l0);
     const atom_id = try table.internString("qcp1a_smoke");
-    defer table.free(atom_id);
-    try b.emitAtomOpOwned(0x30, table.dup(atom_id));
+    try b.emitAtomOpOwned(0x30, atom_id);
     try b.addSourceMarker(1, 1);
     const snap = b.snapshot();
 
@@ -1993,8 +1941,7 @@ test "compiler.builder: snapshot rollback restores chains, atoms, markers" {
     try b.emitJump(0x22, l1);
     try b.bindLabel(l1);
     try b.bindLabel(l0);
-    const ref_count_before_post_atom = table.refCount(atom_id);
-    try b.emitAtomOpOwned(0x30, table.dup(atom_id));
+    try b.emitAtomOpOwned(0x30, atom_id);
     try b.addSourceMarker(2, 2);
     b.invalidateLastOpcode();
 
@@ -2009,7 +1956,6 @@ test "compiler.builder: snapshot rollback restores chains, atoms, markers" {
     try std.testing.expect(!b.label_slots[l0.index()].flags.bound);
     try std.testing.expectEqual(labels.unbound, b.label_slots[l0.index()].bound_offset);
     try std.testing.expectEqual(snap.last_opcode_pos, b.last_opcode_pos);
-    try std.testing.expectEqual(ref_count_before_post_atom, table.refCount(atom_id));
 
     try b.emitJump(0x21, l0);
     b.deinit();
@@ -2022,20 +1968,13 @@ test "compiler.builder: inferred-name patches keep code and atom ownership in lo
     defer table.deinit();
 
     const placeholder = try table.internString("builder-name-placeholder");
-    defer table.free(placeholder);
     const inferred = try table.internString("builder-inferred-name");
-    defer table.free(inferred);
-    const placeholder_base = table.refCount(placeholder).?;
-    const inferred_base = table.refCount(inferred).?;
 
     var b = Builder.init(&acct, &table);
     defer b.deinit();
 
-    try b.emitAtomOpOwned(0x40, table.dup(placeholder));
-    try std.testing.expectEqual(placeholder_base + 1, table.refCount(placeholder).?);
+    try b.emitAtomOpOwned(0x40, placeholder);
     try b.replaceAtomOperand(0, 0, 0x40, placeholder, inferred);
-    try std.testing.expectEqual(placeholder_base, table.refCount(placeholder).?);
-    try std.testing.expectEqual(inferred_base + 1, table.refCount(inferred).?);
     try std.testing.expectEqual(inferred, std.mem.readInt(u32, b.code[1..5], .little));
     try std.testing.expectEqual(inferred, b.atom_operands[0]);
 
@@ -2054,5 +1993,4 @@ test "compiler.builder: inferred-name patches keep code and atom ownership in lo
     try std.testing.expectEqual(@as(u32, 5), b.source_slots[0].temp_offset);
 
     b.deinit();
-    try std.testing.expectEqual(inferred_base, table.refCount(inferred).?);
 }

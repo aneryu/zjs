@@ -676,7 +676,6 @@ test "Frame setLocal preserves inline locals while growing" {
     defer rt.destroy();
 
     const name = try rt.internAtom("frame-inline-local-growth-test");
-    defer rt.atoms.free(name);
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
 

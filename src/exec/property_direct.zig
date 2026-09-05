@@ -409,7 +409,6 @@ test "fast own data property replacement retains private brand atom" {
             core.Descriptor.data(initial, true, true, true),
         );
     }
-    rt.atoms.free(brand);
     try std.testing.expect(rt.atoms.name(brand) != null);
 
     const lookup_value = try rt.symbolValue(brand);
@@ -433,9 +432,6 @@ test "global own data slot helpers preserve lookup and write ownership" {
     const name = try rt.internAtom("globalSlotFunction");
     const key = try rt.internAtom("globalSlotAdapter");
     const other_key = try rt.internAtom("globalSlotOther");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(key);
-    defer rt.atoms.free(other_key);
 
     const initial = try core.string.String.createAscii(rt, "initial");
     try global.defineOwnProperty(rt, key, core.Descriptor.data(initial.value(), true, true, true));
@@ -446,7 +442,7 @@ test "global own data slot helpers preserve lookup and write ownership" {
     function.closure_var[0] = bytecode.function_bytecode.BytecodeClosureVar.init(.{
         .closure_type = .global_decl,
         .var_idx = 0,
-        .var_name = rt.atoms.dup(key),
+        .var_name = key,
     });
     var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
     const execution_function = execution_adapter.init(&function);
@@ -519,8 +515,6 @@ test "global own data slot helpers reject readonly and accessor writes" {
 
     const readonly_key = try rt.internAtom("readonlyGlobalSlot");
     const accessor_key = try rt.internAtom("accessorGlobalSlot");
-    defer rt.atoms.free(readonly_key);
-    defer rt.atoms.free(accessor_key);
 
     try global.defineOwnProperty(rt, readonly_key, core.Descriptor.data(core.JSValue.int32(1), false, true, true));
     const readonly_lookup = globalOwnDataPropertyBorrowedLookup(global, readonly_key).?;

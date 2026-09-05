@@ -7,14 +7,16 @@ previous version described the three-phase trial-deletion cycle collector,
 which was deleted with the rc build on 2026-08-29. Target state and migration:
 [`tracing-gc-completion-plan.md`](tracing-gc-completion-plan.md).
 
-## Ownership is mixed today; the target is all-tracing
+## Ownership is all-tracing
 
 The collector is a non-moving, generational (sticky mark bit), incrementally
 marking stop-the-world tracer (`src/core/gc_trace_stw.zig`). It owns every
 `gc.Header` kind: `object`, `function_bytecode`, `var_ref`, `module`,
-`shape`, `realm_context`, `big_int` (`JSValue.isTracerOwned`;
-`refCountRemoved`, `gc.zig`). Only the string family (its own
-`StringHeader`) still counts.
+`shape`, `realm_context`, `big_int` (`JSValue.isTracerOwned`) plus the string
+family (S2, 2026-09-03) and the dynamic atom table (S3, 2026-09-04). No kind
+carries a reference count any more: `RefCountHeader`/`StringHeader`,
+`headerRefCount`, `gc.retain`/`gc.release`, the `refCountRemoved` predicate
+and `AtomTable.dup`/`free` are all deleted.
 
 Shape (S1-a, 2026-09-03) keeps no count at all. `ShapeOwnership.shared` is a
 sticky copy-on-write bit set on the second adoption (`Shape.markShared`); an
@@ -172,9 +174,11 @@ pending. Both passes disappear with S4.
   before (missing barrier, missing edge). Suite green is not evidence about
   the collector.
 - `ZJS_GC_STRESS=1` collects at every safepoint; `ZJS_GC_VERIFY_MINOR=1`
-  cross-checks every minor against a full trace; `ZJS_MINOR_AUDIT=1` reports
-  live objects holding edges into the condemned set. S0 wires these into the
-  gates (`test-gc-stress`, `test262-stress`).
+  cross-checks every minor against a full trace (reporting `precise`
+  disagreements only -- `=verbose` adds the expected `conservative_only`
+  ones); `ZJS_MINOR_AUDIT=1` reports live objects holding edges into the
+  condemned set. S0 wires these into the gates (`test-gc-stress`,
+  `test262-stress`).
 - The leak census only sees destroy-side misses.
 - `--gc-stats` measures behaviour; numbers there are single-run readings, not
   verdicts.

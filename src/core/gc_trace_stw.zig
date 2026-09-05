@@ -111,11 +111,26 @@ pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) Co
 }
 
 /// TGC S3 §2.4: run the atom table's sweep for the major that just finished.
-/// Both major paths call this after the string bodies have been dealt with, so
-/// every `entry.str` that survives to here is either null (the
-/// `onSymbolBodyDead` handshake unbound it) or a marked cell.
 ///
-/// With `gc.atom_tracer_owned` off this only produces the §2.6 audit reading.
+/// MUST run with the mutator stopped, in the same pause that took the verdict.
+/// The verdict is "no `visitAtom` edge, no marked body, no host pin, not born
+/// this epoch", and it is only true of the heap AS OF THE END OF MARKING. The
+/// entry is still indexed until this sweep unindexes it, so if the mutator gets
+/// to run in between it can re-obtain the id from `internString` (a hash hit on
+/// an entry the trace found unreachable), store it into a surviving holder
+/// through `noteHolderStore` -- whose insertion barrier is disarmed, marking is
+/// over -- and then watch this sweep retire the entry and recycle the slot under
+/// a live shape key. That is exactly what deferring the call to
+/// `destroyDoomedSlice`'s drain-complete did: the incremental path condemns at
+/// finish and destroys in later slices, so the window was every interrupt poll
+/// of a whole destruction run (pdfjs: a live `objs` shape kept the key
+/// `font_p0_1` while its id was rebound to another spelling).
+///
+/// Both major paths therefore call this inside their own pause, after
+/// condemnation. Unmarked string cells are condemned but NOT yet destroyed on
+/// the incremental path, so `sweepDead` also has to unbind the cached bodies
+/// that did not survive (see its "doomed cache" arm) -- that is the part the
+/// destroy handshake used to do before the mutator could look.
 fn sweepAtomTable(rt: *JSRuntime) void {
     const epoch = if (comptime gc.block_heap_enabled) rt.gc.block_heap.mark_epoch else 0;
     rt.atoms.sweepDead(rt, epoch);
@@ -757,6 +772,7 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     if (builtin.mode == .Debug) rt.gc.verifyIntrusiveList() catch unreachable;
 
     var collector = try Collector.init(rt, extra_roots, scan);
+    collector.minor_mode = true;
     defer collector.deinit();
 
     var full_reachable: ?FullReachable = null;
@@ -847,6 +863,10 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
         _ = rt.gc.block_heap.clearYoungBlocks();
         rt.gc.block_heap.retireYoungStringExtents();
     }
+    // TGC S3-c: a value symbol's body is only reachable from an old holder
+    // over an atom id, which no minor traces, so the table roots it until it
+    // is promoted -- which is exactly here.
+    rt.atoms.retireYoungSymbolBodies();
     rt.gc.resetYoungListSuffix();
     rt.gc.retireGenerationalYoungSet();
     rt.gc.generation.noteMinorPromotion(young_before -| reclaimed);
@@ -889,6 +909,8 @@ fn clearYoungState(rt: *JSRuntime) void {
         // are promoted here, and the list is closed.
         rt.gc.block_heap.retireYoungStringExtents();
     }
+    // Same promotion point for the atom table's young symbol bodies (§S3-c).
+    rt.atoms.retireYoungSymbolBodies();
     rt.gc.resetYoungListSuffix();
     rt.gc.retireGenerationalYoungSet();
 }
@@ -1151,13 +1173,14 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     }
     if (rt.gc.doomed_pending) rt.gc.beginDeferredFreeProducerSequence();
     if (!rt.gc.doomed_pending) rt.gc.concurrent.stats.cycles_completed += 1;
-    // TGC S3 §2.4. The incremental path condemns here and destroys in later
-    // slices, so the atom sweep belongs at the point the morgue empties
-    // (`destroyDoomedSlice`), not here -- a condemned shape still holds its
-    // property-key refs until its destructor runs, and reading the table
-    // before that turns every dead holder into a phantom "missing edge".
-    // Only the nothing-to-destroy case closes the cycle right here.
-    if (!rt.gc.doomed_pending) sweepAtomTable(rt);
+    // TGC S3 §2.4. The verdict and its application must share one pause: see
+    // `sweepAtomTable`. This used to be deferred to the point the morgue
+    // empties, on the pre-flip reasoning that a condemned holder still holds
+    // its property-key REFS until its destructor runs. Refs are gone -- the
+    // sweep reads mark stamps, which a corpse cannot set -- and the delay cost
+    // a mutator window in which a retired-but-still-indexed atom could be
+    // re-interned into a live holder.
+    sweepAtomTable(rt);
     auditDoomedExitInvariant(rt);
 
     const t_end = profile.nowNanos();
@@ -1515,9 +1538,10 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
         rt.gc.doomed_pending = false;
         rt.gc.doomed_cursor = null;
         rt.gc.concurrent.stats.cycles_completed += 1;
-        // TGC S3 §2.4: the morgue is empty, so every dead holder has released
-        // its atom ids and the table can be read (see `finishIncrementalCycle`).
-        sweepAtomTable(rt);
+        // TGC S3 §2.4: the atom sweep is NOT here. It belongs to the pause that
+        // took the verdict (`finishIncrementalCycle`); running it after the
+        // mutator has had a whole destruction run's worth of polls lets a
+        // re-interned id be retired under a live holder. See `sweepAtomTable`.
     }
     auditDoomedExitInvariant(rt);
     return destroyed;
@@ -1599,6 +1623,11 @@ const Collector = struct {
     /// the frontier survives between increments. The work list is untouched
     /// in this mode, which also means the collector's arena never allocates.
     shade_to_queue: bool = false,
+    /// Minor mode: `seedRoots` adds the atom table's not-yet-promoted symbol
+    /// bodies (`AtomTable.young_symbol_atoms`). A major must NOT take those
+    /// as roots -- it is the collection that is entitled to retire a symbol
+    /// whose last holder died in the cycle that created it.
+    minor_mode: bool = false,
 
     fn init(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) std.mem.Allocator.Error!Collector {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -1884,6 +1913,10 @@ const Collector = struct {
             .visit_atom = Adaptor.visitAtom,
         };
         try self.rt.traceActiveRoots(&visitor);
+        // TGC S3-c: the minor's extra root set. A young symbol body's only
+        // holder can be an OLD shape naming it by atom id -- an edge no minor
+        // traces and no barrier records.
+        if (self.minor_mode) try self.rt.atoms.traceYoungSymbolBodies(&visitor);
         // `runObjectCycleRemovalWithValueRoots` passes a frame that is not
         // necessarily linked on `active_value_roots`. Trial deletion ignored
         // it because RC>0 already kept those values; STW must visit it.
@@ -2168,6 +2201,10 @@ const Collector = struct {
                 const reachability = reachable.entries.get(@intFromPtr(header)) orelse continue;
                 violations += 1;
                 if (reachability == .precise) precise_violations += 1;
+                // A conservative-only hit is expected by construction (see
+                // `gc.verify_minor_verbose`); printing it is opt-in so the
+                // precise ones, which are the actual finding, are visible.
+                if (reachability != .precise and !gc.verify_minor_verbose) continue;
                 const kind = header.metaConst().flags.kind;
                 if (kind == .object) {
                     const o = Object.fromHeader(header);
@@ -2179,12 +2216,14 @@ const Collector = struct {
             if (violations != 0) {
                 defer if (gc.verify_minor_fatal and precise_violations != 0)
                     @panic("VERIFY-MINOR: precisely reachable object condemned by a minor");
-                std.debug.print("VERIFY-MINOR {d} of {d} condemned objects are reachable by a full trace ({d} precise, {d} conservative-only)\n", .{
-                    violations,
-                    doomed.items.len,
-                    precise_violations,
-                    violations - precise_violations,
-                });
+                if (precise_violations != 0 or gc.verify_minor_verbose) {
+                    std.debug.print("VERIFY-MINOR {d} of {d} condemned objects are reachable by a full trace ({d} precise, {d} conservative-only)\n", .{
+                        violations,
+                        doomed.items.len,
+                        precise_violations,
+                        violations - precise_violations,
+                    });
+                }
             }
         }
         if (gc.minor_audit) self.auditCondemnedYoung(doomed.items);
@@ -2357,7 +2396,11 @@ const Collector = struct {
                 const child = h orelse return;
                 for (a.doomed) |d| {
                     if (d != child) continue;
-                    const c = Object.fromHeader(child);
+                    // The condemned cell is not necessarily an object: since
+                    // TGC S2 a string body is an ordinary tracer cell and can
+                    // be the child of a live owner's edge, so read the class
+                    // only when the kind really is `.object`.
+                    const c: ?*Object = if (child.metaConst().flags.kind == .object) Object.fromHeader(child) else null;
                     if (a.owner_kind == .object) {
                         const o = Object.fromHeader(a.owner_ptr);
                         var where: []const u8 = "unknown";
@@ -2430,9 +2473,16 @@ const Collector = struct {
                         }
                         std.debug.print("MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d} owner_marked={}\n", .{ o.class_id, @tagName(o.flags.class_payload_kind), where, a.rt.atoms.name(@intCast(hit_atom)) orelse "?", o.shape_ref.prop_count, a.rt.gc.headerMarked(o.gcHeader()) });
                     }
-                    std.debug.print("MINOR-AUDIT owner={s}/ptr{x} owner_young={} owner_remembered={} -> child class={d}/{s} child_young={} child_marked={}\n", .{
-                        @tagName(a.owner_kind), @intFromPtr(a.owner_ptr),             a.owner_young,                 a.owner_remembered,
-                        c.class_id,             @tagName(c.flags.class_payload_kind), child.metaConst().flags.young, a.rt.gc.headerMarked(child),
+                    std.debug.print("MINOR-AUDIT owner={s}/ptr{x} owner_young={} owner_remembered={} -> child kind={s} class={d}/{s} child_young={} child_marked={}\n", .{
+                        @tagName(a.owner_kind),
+                        @intFromPtr(a.owner_ptr),
+                        a.owner_young,
+                        a.owner_remembered,
+                        @tagName(child.metaConst().flags.kind),
+                        if (c) |o| o.class_id else 0,
+                        if (c) |o| @tagName(o.flags.class_payload_kind) else "-",
+                        child.metaConst().flags.young,
+                        a.rt.gc.headerMarked(child),
                     });
                     if (gc.minor_audit_fatal) @panic("MINOR-AUDIT: live owner holds an unremembered edge into the condemned young set");
                     return;

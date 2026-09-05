@@ -588,7 +588,6 @@ pub const object = struct {
 
     pub fn getProperty(rt: *JSRuntime, obj: *Object, name: []const u8) !value.Value {
         const key = try rt.internAtom(name);
-        defer rt.atoms.free(key);
         return try toCore(obj).getProperty(key);
     }
 
@@ -602,13 +601,11 @@ pub const object = struct {
 
     pub fn defineValueProperty(rt: *JSRuntime, obj: *Object, name: []const u8, v: value.Value) !void {
         const key = try rt.internAtom(name);
-        defer rt.atoms.free(key);
         try toCore(obj).defineOwnProperty(rt, key, zjs_core.Descriptor.data(v, true, true, true));
     }
 
     pub fn defineHiddenValueProperty(rt: *JSRuntime, obj: *Object, name: []const u8, v: value.Value) !void {
         const key = try rt.internAtom(name);
-        defer rt.atoms.free(key);
         try toCore(obj).defineOwnProperty(rt, key, zjs_core.Descriptor.data(v, false, false, false));
     }
 
@@ -620,7 +617,6 @@ pub const object = struct {
         setter: value.Value,
     ) !void {
         const key = try rt.internAtom(name);
-        defer rt.atoms.free(key);
         try toCore(obj).defineOwnProperty(rt, key, zjs_core.Descriptor.accessor(getter, setter, true, true));
     }
 
@@ -671,14 +667,12 @@ pub const object = struct {
         const rt = ctx.runtimePtr();
         const global = fromCore(try ctx.globalObject());
         const key = try rt.internAtom(name);
-        defer rt.atoms.free(key);
         const flags = zjs_core.property.Flags.data(true, true, true);
         try toCore(global).defineEmptyArrayAutoInitProperty(rt, key, flags, toCore(global));
     }
 
     pub fn constructorPrototypeObject(rt: *JSRuntime, global: *Object, name: []const u8) !?*Object {
         const key = try rt.internAtom(name);
-        defer rt.atoms.free(key);
         return constructorPrototypeObjectByAtom(rt, global, key);
     }
 

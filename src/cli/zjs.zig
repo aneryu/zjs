@@ -1132,15 +1132,15 @@ fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const engi
     });
 }
 
-/// TGC S3 §2.6 shadow audit. `missing-edge` counts entries `ref_count` kept
-/// alive that no `visitAtom` edge, root, barrier or black allocation reached
-/// -- the reading that must be 0 before `gc.atom_tracer_owned` can flip.
-/// `over-marked` is the informational mirror. `entries` is the dynamic atom
-/// table's slot count, so the two are readable as a rate.
+/// TGC S3 §2.6 audit. `stale-edge` counts holder edges that named an entry the
+/// sweep had already retired -- it must be 0. `shell-edge` is the
+/// informational mirror (an edge reaching a WeakRef'd shell, which is legal).
+/// `entries` is the dynamic atom table's slot count, so the two are readable
+/// as a rate.
 fn dumpAtomAuditStats(writer: *std.Io.Writer, rt: *const zjs.JSRuntime) !void {
-    try writer.print("gc: atom audit missing-edge {d}, over-marked {d}, entries {d}\n", .{
-        rt.atoms.atom_audit_missing_edge,
-        rt.atoms.atom_audit_over_marked,
+    try writer.print("gc: atom audit stale-edge {d}, shell-edge {d}, entries {d}\n", .{
+        rt.atoms.atom_audit_stale_edge,
+        rt.atoms.atom_audit_shell_edge,
         rt.atoms.entries.len,
     });
 }

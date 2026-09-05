@@ -696,19 +696,15 @@ test "standard Array prototype guard publication and invalidation are realm loca
 
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const other_key = try js.runtime.internAtom("__arrayGuardOther");
-    defer js.runtime.atoms.free(other_key);
     const other_value = try global.getProperty(other_key);
     const other_global = try core.Object.expect(other_value);
     const prototype_mutation_key = try js.runtime.internAtom("__arrayGuardPrototypeMutation");
-    defer js.runtime.atoms.free(prototype_mutation_key);
     const prototype_mutation_value = try global.getProperty(prototype_mutation_key);
     const prototype_mutation_global = try core.Object.expect(prototype_mutation_value);
     const failed_prototype_mutation_key = try js.runtime.internAtom("__arrayGuardFailedPrototypeMutation");
-    defer js.runtime.atoms.free(failed_prototype_mutation_key);
     const failed_prototype_mutation_value = try global.getProperty(failed_prototype_mutation_key);
     const failed_prototype_mutation_global = try core.Object.expect(failed_prototype_mutation_value);
     const oom_mutation_key = try js.runtime.internAtom("__arrayGuardOomMutation");
-    defer js.runtime.atoms.free(oom_mutation_key);
     const oom_mutation_value = try global.getProperty(oom_mutation_key);
     const oom_mutation_global = try core.Object.expect(oom_mutation_value);
 
@@ -3284,7 +3280,6 @@ test "Array species does not confuse a foreign native named Array with the intri
 
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const foreign_global_atom = try js.runtime.internAtom("__arraySpeciesForeignGlobal");
-    defer js.runtime.atoms.free(foreign_global_atom);
     const foreign_global_value = try global.getProperty(foreign_global_atom);
     const foreign_global = try core.Object.expect(foreign_global_value);
     const foreign_realm = js.runtime.contextForGlobalIncludingConstructing(foreign_global) orelse return error.TestUnexpectedResult;
@@ -3295,13 +3290,11 @@ test "Array species does not confuse a foreign native named Array with the intri
     const fake_array = try core.function.nativeFunction(foreign_realm, "Array", 1);
     const fake_array_object = try core.Object.expect(fake_array);
     const species_ctor_atom = try js.runtime.internAtom("__arraySpeciesResultCtor");
-    defer js.runtime.atoms.free(species_ctor_atom);
     const species_ctor = try global.getProperty(species_ctor_atom);
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.TestUnexpectedResult;
     try fake_array_object.defineOwnProperty(js.runtime, species_atom, core.Descriptor.data(species_ctor, true, false, true));
 
     const fake_array_atom = try js.runtime.internAtom("__arraySpeciesNamedNative");
-    defer js.runtime.atoms.free(fake_array_atom);
     try global.defineOwnProperty(js.runtime, fake_array_atom, core.Descriptor.data(fake_array, true, false, true));
 
     const result = try js.eval(
@@ -4918,12 +4911,9 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
     const closure_value = try engine.exec.closure.create(rt, 39, 0, 0, 0);
 
     const registered_atom = try rt.atoms.internGlobalSymbol("registered");
-    defer rt.atoms.free(registered_atom);
 
     const map_name = try rt.internAtom("map");
-    defer rt.atoms.free(map_name);
     const key_name = try rt.internAtom("obj3");
-    defer rt.atoms.free(key_name);
 
     var globals = [_]engine.exec.globals.Slot{
         .{ .name = map_name, .value = map_value },
@@ -4963,9 +4953,7 @@ test "host WeakMap mutation closure links entries into existing weak index" {
     const closure_value = try engine.exec.closure.create(rt, 39, 0, 0, 0);
 
     const map_name = try rt.internAtom("map");
-    defer rt.atoms.free(map_name);
     const key_name = try rt.internAtom("obj3");
-    defer rt.atoms.free(key_name);
 
     var globals = [_]engine.exec.globals.Slot{
         .{ .name = map_name, .value = map_value },
@@ -5371,21 +5359,17 @@ test "Set.prototype.symmetricDifference tracks receiver mutations from a set-lik
     const setlike_value = setlike.value();
 
     const size_key = try rt.internAtom("size");
-    defer rt.atoms.free(size_key);
     try setlike.defineOwnProperty(rt, size_key, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
 
     const noop = try engine.exec.closure.create(rt, 13, 0, 0, 0);
 
     const has_key = try rt.internAtom("has");
-    defer rt.atoms.free(has_key);
     try setlike.defineOwnProperty(rt, has_key, core.Descriptor.data(noop, true, true, true));
 
     const keys_key = try rt.internAtom("keys");
-    defer rt.atoms.free(keys_key);
     try setlike.defineOwnProperty(rt, keys_key, core.Descriptor.data(noop, true, true, true));
 
     const base_set_name = try rt.internAtom("baseSet");
-    defer rt.atoms.free(base_set_name);
     var globals = [_]engine.exec.globals.Slot{
         .{ .name = base_set_name, .value = base_set_value },
     };
@@ -5418,7 +5402,6 @@ test "host map closure releases appended value when entry allocation fails" {
     const closure_value = try engine.exec.closure.create(rt, 38, 0, 0, 0);
 
     const map_name = try rt.internAtom("map");
-    defer rt.atoms.free(map_name);
     var globals = [_]engine.exec.globals.Slot{
         .{ .name = map_name, .value = map_value },
     };
@@ -5450,7 +5433,6 @@ test "host map closure rolls back appended entry when size update fails" {
     const closure_value = try engine.exec.closure.create(rt, 39, 0, 0, 0);
 
     const map_name = try rt.internAtom("map");
-    defer rt.atoms.free(map_name);
     var globals = [_]engine.exec.globals.Slot{
         .{ .name = map_name, .value = map_value },
     };
@@ -6278,8 +6260,6 @@ fn fillOwnPropertyStorageForFailure(rt: *core.JSRuntime, object: *core.Object) !
         var name_buf: [32]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "fill_{d}", .{index});
         const atom_id = try rt.internAtom(name);
-        errdefer rt.atoms.free(atom_id);
         try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
-        rt.atoms.free(atom_id);
     }
 }

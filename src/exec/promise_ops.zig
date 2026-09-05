@@ -366,7 +366,6 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     const state = try createPromiseResolvingState(rt);
     var state_alive = true;
     const marker_key = try rt.internAtom("marker");
-    defer rt.atoms.free(marker_key);
     const state_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-resolving-state-symbol");
     {
         const state_marker_value = try rt.takeSymbolValue(state_symbol);
@@ -542,7 +541,6 @@ test "promiseReactionJob roots reaction and value while allocating job" {
 
     const reaction = try core.Object.create(rt, core.class.ids.object, null);
     const marker_key = try rt.internAtom("marker");
-    defer rt.atoms.free(marker_key);
     const reaction_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-reaction-record-symbol");
     {
         const reaction_marker_value = try rt.takeSymbolValue(reaction_symbol);
@@ -1264,7 +1262,6 @@ test "Promise resolving OOM keeps FIFO owner after then getter and resolver coll
     var probe = PromiseJobOomProbe{ .fail = false };
     const getter = try promiseJobOomProbeFunction(ctx, &probe, "thenGetterOomProbe");
     const then_key = try rt.internAtom("then");
-    defer rt.atoms.free(then_key);
     try thenable.defineOwnProperty(
         rt,
         then_key,
@@ -1306,7 +1303,6 @@ test "Promise resolving getter throw plus settle OOM rejects once after resolver
     var probe = PromiseJobOomProbe{ .fail = true };
     const getter = try promiseJobOomProbeFunction(ctx, &probe, "thenGetterThrowOomProbe");
     const then_key = try rt.internAtom("then");
-    defer rt.atoms.free(then_key);
     try thenable.defineOwnProperty(
         rt,
         then_key,
@@ -1777,7 +1773,6 @@ pub fn promiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *core
             key_value = core.JSValue.undefinedValue();
         }
         const key_atom = try property_ops.propertyKeyAtom(rt, key_value);
-        defer rt.atoms.free(key_atom);
         value = try values.getProperty(index_atom);
         defer {
             value = core.JSValue.undefinedValue();
@@ -1821,7 +1816,6 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
     const answer_atom = try rt.internAtom("answer");
-    defer rt.atoms.free(answer_atom);
     {
         const stored = try result.getProperty(answer_atom);
         try std.testing.expectEqual(value_symbol, stored.asSymbolAtom().?);
@@ -1862,7 +1856,6 @@ test "promiseSettlementRecord roots direct symbol payload while defining status"
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_atom = try rt.internAtom("value");
-    defer rt.atoms.free(value_atom);
     {
         const value = try record.getProperty(value_atom);
         try std.testing.expectEqual(symbol_atom, value.asSymbolAtom().?);

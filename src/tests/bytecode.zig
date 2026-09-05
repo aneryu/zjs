@@ -46,15 +46,22 @@ test "constant pool retains owned unique symbol atoms until release" {
     defer if (pool_alive) pool.deinit(rt);
 
     const borrowed_symbol = try rt.atoms.newValueSymbol("gc-bytecode-constant-pool-symbol");
-    const borrowed_value = try rt.symbolValue(borrowed_symbol);
+    var borrowed_value = try rt.symbolValue(borrowed_symbol);
+    // TGC S3-c: a value-symbol entry lives exactly as long as its BODY is
+    // reachable. The native `Pool`/`FunctionDef` is not itself a root provider
+    // (that gap is tracked with the compile-time cpool roots), so the test
+    // declares the value root the compile pipeline owes it.
+    var value_roots = core.runtime.rootValues(.{&borrowed_value});
+    value_roots.activate(rt);
     _ = try pool.append(borrowed_value);
-    rt.atoms.free(borrowed_symbol);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(borrowed_symbol) != null);
 
     pool.deinit(rt);
     pool_alive = false;
+    borrowed_value = core.JSValue.undefinedValue();
+    value_roots.deactivate(rt);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(borrowed_symbol) == null);
@@ -69,13 +76,22 @@ test "constant pool appendOwned retains unique symbol atoms until release" {
     defer if (pool_alive) pool.deinit(rt);
 
     const owned_symbol = try rt.atoms.newValueSymbol("gc-bytecode-constant-pool-owned-symbol");
-    _ = try pool.appendOwned(try rt.takeSymbolValue(owned_symbol));
+    var owned_value = try rt.takeSymbolValue(owned_symbol);
+    // TGC S3-c: a value-symbol entry lives exactly as long as its BODY is
+    // reachable. The native `Pool`/`FunctionDef` is not itself a root provider
+    // (that gap is tracked with the compile-time cpool roots), so the test
+    // declares the value root the compile pipeline owes it.
+    var value_roots = core.runtime.rootValues(.{&owned_value});
+    value_roots.activate(rt);
+    _ = try pool.appendOwned(owned_value);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(owned_symbol) != null);
 
     pool.deinit(rt);
     pool_alive = false;
+    owned_value = core.JSValue.undefinedValue();
+    value_roots.deactivate(rt);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(owned_symbol) == null);
@@ -89,10 +105,6 @@ test "function bytecode owns code constants module and debug metadata" {
     const filename = try rt.internAtom("input.js");
     const local = try rt.internAtom("x");
     const dep = try rt.internAtom("dep.mjs");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(filename);
-    defer rt.atoms.free(local);
-    defer rt.atoms.free(dep);
 
     var function_bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function_bc.deinit(rt);
@@ -131,45 +143,36 @@ test "script or module metadata owns each bytecode transfer" {
 
     const display_filename = try rt.internAtom("<eval>");
     const referrer = try rt.internAtom("/fixture/scripts/main.mjs");
-    defer rt.atoms.free(display_filename);
-    defer rt.atoms.free(referrer);
-    const base_ref_count = rt.atoms.refCount(referrer).?;
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, display_filename);
     var function_alive = true;
     defer if (function_alive) function.deinit(rt);
-    function.atoms.replace(&function.script_or_module, referrer);
-    try std.testing.expectEqual(base_ref_count + 1, rt.atoms.refCount(referrer).?);
+    function.script_or_module = referrer;
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, display_filename);
     var fd_alive = true;
     defer if (fd_alive) fd.deinit(rt);
     _ = try fd.appendScope(-1);
-    fd.atoms.replace(&fd.script_or_module, referrer);
+    fd.script_or_module = referrer;
     try emitTestBody(&fd, &.{bytecode.opcode.op.return_undef}, &.{});
-    try std.testing.expectEqual(base_ref_count + 2, rt.atoms.refCount(referrer).?);
 
     const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
     try std.testing.expectEqual(display_filename, fb.filenameAtom());
     try std.testing.expectEqual(referrer, fb.scriptOrModule());
     try std.testing.expectEqual(atom_module.null_atom, fd.script_or_module);
-    try std.testing.expectEqual(base_ref_count + 2, rt.atoms.refCount(referrer).?);
 
     // The published FB is the referrer atom's second owner, and the atom table
     // only balances when the FB is torn down -- which the tracer defers to a
     // collection. Nothing names the FB from here on, so the collection reaches
     // it; `function` and `fd` are native-stack carriers the sweep never visits.
     helpers.reclaimNow(rt);
-    try std.testing.expectEqual(base_ref_count + 1, rt.atoms.refCount(referrer).?);
 
     fd.deinit(rt);
     fd_alive = false;
-    try std.testing.expectEqual(base_ref_count + 1, rt.atoms.refCount(referrer).?);
 
     function.deinit(rt);
     function_alive = false;
-    try std.testing.expectEqual(base_ref_count, rt.atoms.refCount(referrer).?);
 }
 
 test "bytecode setCode owns exactly the visible code bytes" {
@@ -217,8 +220,13 @@ test "bytecode module record add failure releases duplicated atom references" {
     var record = bytecode.module.Record.init(&rt.memory, &rt.atoms);
     defer record.deinit();
 
-    const import_name = try rt.internAtom("oom-bytecode-import");
-    const local_name = try rt.internAtom("oom-bytecode-local");
+    var import_name = try rt.internAtom("oom-bytecode-import");
+    var local_name = try rt.internAtom("oom-bytecode-local");
+    // TGC S3-c: without a declared root the failed allocation's collection
+    // would retire these entries and hand their bytes back as headroom, so the
+    // OOM under test would not reproduce.
+    var name_roots = core.runtime.rootAtoms(.{ &import_name, &local_name });
+    name_roots.activate(rt);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, record.addImport(0, import_name, local_name, 0, false));
@@ -226,8 +234,8 @@ test "bytecode module record add failure releases duplicated atom references" {
 
     try std.testing.expectEqual(@as(usize, 0), record.imports.len);
 
-    rt.atoms.free(import_name);
-    rt.atoms.free(local_name);
+    name_roots.deactivate(rt);
+    _ = rt.runObjectCycleRemoval();
 
     try std.testing.expect(rt.atoms.name(import_name) == null);
     try std.testing.expect(rt.atoms.name(local_name) == null);
@@ -309,19 +317,19 @@ fn emitTestBody(
             .atom => {
                 const a = atoms[atom_index];
                 atom_index += 1;
-                try b.emitAtomOpOwned(op_id, fd.atoms.dup(a));
+                try b.emitAtomOpOwned(op_id, a);
             },
             .atom_u8 => {
                 const a = atoms[atom_index];
                 atom_index += 1;
-                try b.emitAtomOpU8Owned(op_id, fd.atoms.dup(a), operands[4]);
+                try b.emitAtomOpU8Owned(op_id, a, operands[4]);
             },
             .atom_u16 => {
                 const a = atoms[atom_index];
                 atom_index += 1;
                 try b.emitAtomOpU16Owned(
                     op_id,
-                    fd.atoms.dup(a),
+                    a,
                     std.mem.readInt(u16, operands[4..6], .little),
                 );
             },
@@ -357,7 +365,6 @@ test "createFunctionBytecode rejects a cross-runtime compile context before movi
     defer foreign_realm.destroy();
 
     const name = try owner_rt.internAtom("cross-runtime-function-bytecode");
-    defer owner_rt.atoms.free(name);
     var fd = function_def.FunctionDef.init(&owner_rt.memory, &owner_rt.atoms, name);
     defer fd.deinit(owner_rt);
     _ = try fd.appendScope(-1);
@@ -993,7 +1000,6 @@ test "FunctionDef: init/deinit" {
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
-    defer rt.atoms.free(name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -1015,7 +1021,6 @@ test "FunctionDef appendByteCode does not infer direct eval from atom operand by
     defer rt.destroy();
 
     const name = try rt.internAtom("operand-bytes");
-    defer rt.atoms.free(name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -1036,7 +1041,6 @@ test "FunctionDef: cpool transfers refcounted owned values" {
     defer rt.destroy();
 
     const name = try rt.internAtom("cpool-owned");
-    defer rt.atoms.free(name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -1050,22 +1054,28 @@ test "FunctionDef: cpool retains unique symbol atoms until release" {
     defer rt.destroy();
 
     const name = try rt.internAtom("cpool-symbol");
-    defer rt.atoms.free(name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     var fd_alive = true;
     defer if (fd_alive) fd.deinit(rt);
 
     const borrowed_symbol = try rt.atoms.newValueSymbol("gc-function-def-cpool-symbol");
-    const borrowed_value = try rt.symbolValue(borrowed_symbol);
+    var borrowed_value = try rt.symbolValue(borrowed_symbol);
+    // TGC S3-c: a value-symbol entry lives exactly as long as its BODY is
+    // reachable. The native `Pool`/`FunctionDef` is not itself a root provider
+    // (that gap is tracked with the compile-time cpool roots), so the test
+    // declares the value root the compile pipeline owes it.
+    var value_roots = core.runtime.rootValues(.{&borrowed_value});
+    value_roots.activate(rt);
     _ = try fd.appendCpool(borrowed_value);
-    rt.atoms.free(borrowed_symbol);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(borrowed_symbol) != null);
 
     fd.deinit(rt);
     fd_alive = false;
+    borrowed_value = core.JSValue.undefinedValue();
+    value_roots.deactivate(rt);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(borrowed_symbol) == null);
@@ -1076,20 +1086,28 @@ test "FunctionDef: cpool appendOwned retains unique symbol atoms until release" 
     defer rt.destroy();
 
     const name = try rt.internAtom("cpool-owned-symbol");
-    defer rt.atoms.free(name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     var fd_alive = true;
     defer if (fd_alive) fd.deinit(rt);
 
     const owned_symbol = try rt.atoms.newValueSymbol("gc-function-def-cpool-owned-symbol");
-    _ = try fd.appendCpoolOwned(try rt.takeSymbolValue(owned_symbol));
+    var owned_value = try rt.takeSymbolValue(owned_symbol);
+    // TGC S3-c: a value-symbol entry lives exactly as long as its BODY is
+    // reachable. The native `Pool`/`FunctionDef` is not itself a root provider
+    // (that gap is tracked with the compile-time cpool roots), so the test
+    // declares the value root the compile pipeline owes it.
+    var value_roots = core.runtime.rootValues(.{&owned_value});
+    value_roots.activate(rt);
+    _ = try fd.appendCpoolOwned(owned_value);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(owned_symbol) != null);
 
     fd.deinit(rt);
     fd_alive = false;
+    owned_value = core.JSValue.undefinedValue();
+    value_roots.deactivate(rt);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(owned_symbol) == null);
@@ -1101,8 +1119,6 @@ test "FunctionDef: add var" {
 
     const name = try rt.internAtom("x");
     const var_name = try rt.internAtom("var_x");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(var_name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -1125,7 +1141,6 @@ test "FunctionDef: add scope" {
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
-    defer rt.atoms.free(name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -1143,8 +1158,6 @@ test "FunctionDef final scope proof reseals late arguments links and rejects cyc
 
     const name = try rt.internAtom("scope-proof-arguments");
     const parameter = try rt.internAtom("parameter");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(parameter);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -1184,8 +1197,6 @@ test "compiler-v2 run rejects cyclic scope links before trusted lookup" {
 
     const name = try rt.internAtom("scope-proof-run");
     const local = try rt.internAtom("local");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(local);
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
@@ -1198,7 +1209,7 @@ test "compiler-v2 run rejects cyclic scope links before trusted lookup" {
     const input = try attachV2Builder(&fd);
     try input.emitAtomOpU16Owned(
         bytecode.opcode.op.scope_get_var,
-        rt.atoms.dup(local),
+        local,
         0,
     );
     try input.emitOp(bytecode.opcode.op.return_undef);
@@ -1217,9 +1228,6 @@ test "compiler-v2 parent miss proves corrupt and cyclic synthetic ancestors" {
     const name = try rt.internAtom("scope-proof-parent-run");
     const requested = try rt.internAtom("requested");
     const parent_local = try rt.internAtom("parent-local");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(requested);
-    defer rt.atoms.free(parent_local);
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
@@ -1239,7 +1247,7 @@ test "compiler-v2 parent miss proves corrupt and cyclic synthetic ancestors" {
     const input = try attachV2Builder(&child);
     try input.emitAtomOpU16Owned(
         bytecode.opcode.op.scope_get_var,
-        rt.atoms.dup(requested),
+        requested,
         0,
     );
     try input.emitOp(bytecode.opcode.op.return_undef);
@@ -1268,8 +1276,6 @@ test "FunctionDef: closure_var" {
 
     const name = try rt.internAtom("test");
     const cv_name = try rt.internAtom("captured");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(cv_name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -1292,7 +1298,6 @@ test "FunctionDef: LabelSlot and JumpSlot" {
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
-    defer rt.atoms.free(name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -1364,8 +1369,6 @@ test "finalize: runs the full v2 lowering pipeline" {
 
     const name = try rt.internAtom("test");
     const x_atom = try rt.internAtom("x");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(x_atom);
 
     var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
@@ -1381,7 +1384,7 @@ test "finalize: runs the full v2 lowering pipeline" {
     // return_undef ; leave_scope <idx=0>
     const b = try attachV2Builder(&fd);
     try b.emitOpU16(op.enter_scope, 0);
-    try b.emitAtomOpU16Owned(op.scope_get_var, rt.atoms.dup(x_atom), 0);
+    try b.emitAtomOpU16Owned(op.scope_get_var, x_atom, 0);
     const tail = try b.newLabel();
     try b.bindLabel(tail);
     try b.emitOp(op.return_undef);
@@ -1408,7 +1411,6 @@ test "parent finalization failure releases its published child realm owner" {
     defer realm.destroy();
 
     const name = try rt.internAtom("parent-finalize-failure");
-    defer rt.atoms.free(name);
     var parent = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     var parent_alive = true;
     defer if (parent_alive) parent.deinit(rt);
@@ -1459,7 +1461,6 @@ test "parent finalization moves an existing child FunctionBytecode cpool owner w
     defer realm.destroy();
 
     const name = try rt.internAtom("cpool-owner-transfer");
-    defer rt.atoms.free(name);
 
     const child_fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name, .realm = realm });
     child_fb.publishFixtureNoFail(rt);
@@ -1537,9 +1538,6 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     const name = try rt.internAtom("inner");
     const arg_name = try rt.internAtom("arg");
     const captured_name = try rt.internAtom("captured");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(arg_name);
-    defer rt.atoms.free(captured_name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     var fd_alive = true;
@@ -1562,7 +1560,7 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     // metadata for var_ref-based global access.
     const op = bytecode.opcode.op;
     const b = try attachV2Builder(&fd);
-    try b.emitAtomOpOwned(op.push_atom_value, rt.atoms.dup(name));
+    try b.emitAtomOpOwned(op.push_atom_value, name);
     // The marker lands on the instruction boundary just past the 5-byte
     // push_atom_value; the source-loc entry contract rejects mid-instruction pcs.
     try b.addSourceMarker(8, 5);
@@ -1593,9 +1591,6 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
         .var_name = captured_name,
     });
     const source_owner_ptr = fd.source_text.?.ptr;
-    const name_refs_before = rt.atoms.refCount(name).?;
-    const arg_refs_before = rt.atoms.refCount(arg_name).?;
-    const captured_refs_before = rt.atoms.refCount(captured_name).?;
 
     const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
@@ -1608,9 +1603,6 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     try std.testing.expectEqual(atom_module.null_atom, fd.closure_var[0].var_name);
     try std.testing.expect(fd.cpool[0].isUndefined());
     try std.testing.expect(fd.source_text == null);
-    try std.testing.expectEqual(name_refs_before, rt.atoms.refCount(name).?);
-    try std.testing.expectEqual(arg_refs_before, rt.atoms.refCount(arg_name).?);
-    try std.testing.expectEqual(captured_refs_before, rt.atoms.refCount(captured_name).?);
     try std.testing.expect(fb.hasDebug());
     try std.testing.expect(fb.hasExtension());
     try std.testing.expectEqual(
@@ -1628,7 +1620,6 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     // consuming the FB to prove every moved owner survives independently.
     fd.deinit(rt);
     fd_alive = false;
-    try std.testing.expectEqual(name_refs_before, rt.atoms.refCount(name).?);
     try std.testing.expectEqualStrings("async function* inner(arg) {}", fb.sourceText().?);
     try std.testing.expectEqual(arg_name, fb.argVarDefs()[0].var_name);
     try std.testing.expectEqual(captured_name, fb.closureVar()[0].var_name);
@@ -1706,40 +1697,36 @@ test "finalize rejects a same-count mismatched inline atom owner before transfer
     const function_name = try rt.internAtom("mismatched_owner_function");
     const encoded_atom = try rt.internAtom("encoded_owner");
     const ledger_atom = try rt.internAtom("ledger_owner");
-    defer rt.atoms.free(function_name);
-    defer rt.atoms.free(encoded_atom);
-    defer rt.atoms.free(ledger_atom);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
     defer fd.deinit(rt);
 
     const op = bytecode.opcode.op;
     const b = try attachV2Builder(&fd);
-    try b.emitAtomOpOwned(op.push_atom_value, rt.atoms.dup(encoded_atom));
+    try b.emitAtomOpOwned(op.push_atom_value, encoded_atom);
     try b.emitOp(op.drop);
     try b.emitOp(op.return_undef);
     // Desynchronise the ledger from the inline operand bytes. The producer
     // writes both from one owned value, so this state is only reachable by
     // corrupting the stream after emission -- which is precisely the
     // invariant the finalizer's owner check exists to catch.
-    rt.atoms.free(b.atom_operands[0]);
-    b.atom_operands[0] = rt.atoms.dup(ledger_atom);
+    b.atom_operands[0] = ledger_atom;
 
-    const encoded_refs = rt.atoms.refCount(encoded_atom).?;
-    const ledger_refs = rt.atoms.refCount(ledger_atom).?;
     try std.testing.expectError(error.InvalidBytecode, createTestFunctionBytecode(&fd, rt));
 
     // Rejection transfers nothing and releases nothing: both owners are still
     // exactly where they were before the call, for `fd.deinit` to reclaim.
-    try std.testing.expectEqual(encoded_refs, rt.atoms.refCount(encoded_atom).?);
-    try std.testing.expectEqual(ledger_refs, rt.atoms.refCount(ledger_atom).?);
 }
 
 test "FunctionDef source replacement preserves the prior NUL owner across OOM and retry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const name = try rt.internAtom("source-owner-retry");
-    defer rt.atoms.free(name);
+    var name = try rt.internAtom("source-owner-retry");
+    // TGC S3-c: keep the collection the failed allocation runs from turning
+    // this entry's bytes into headroom.
+    var name_roots = core.runtime.rootAtoms(.{&name});
+    name_roots.activate(rt);
+    defer name_roots.deactivate(rt);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -1766,7 +1753,6 @@ test "abrupt FunctionBytecode finalization leaves the same runtime reusable" {
     const realm = try core.RealmContext.create(rt);
     defer realm.destroy();
     const name = try rt.internAtom("finalize-recovery");
-    defer rt.atoms.free(name);
 
     var failed_fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     var failed_fd_alive = true;
@@ -1817,11 +1803,8 @@ test "final bytecode vardefs are compact arguments plus locals" {
     defer rt.destroy();
 
     const function_name = try rt.internAtom("compact-vardefs");
-    defer rt.atoms.free(function_name);
     const arg_name = try rt.internAtom("arg");
-    defer rt.atoms.free(arg_name);
     const local_name = try rt.internAtom("local");
-    defer rt.atoms.free(local_name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
     defer fd.deinit(rt);
@@ -1901,7 +1884,6 @@ test "legacy execution adapter delegates synthetic var-ref name mirrors" {
     try std.testing.expect(!@hasField(bytecode.FunctionDef, "backtrace_barrier"));
 
     const name = try rt.internAtom("legacy-var-ref-name");
-    defer rt.atoms.free(name);
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     defer function.deinit(rt);
     try std.testing.expect(!@hasField(@TypeOf(function.flags), "backtrace_barrier"));
@@ -1915,7 +1897,7 @@ test "legacy execution adapter delegates synthetic var-ref name mirrors" {
     function.open_var_ref_count = 1;
     try function.setCode(&.{bytecode.opcode.op.return_undef});
     function.var_ref_names = try rt.memory.alloc(atom_module.Atom, 1);
-    function.var_ref_names[0] = rt.atoms.dup(name);
+    function.var_ref_names[0] = name;
 
     var adapter: bytecode.LegacyExecutionAdapter = undefined;
     const execution_function = adapter.init(&function);
@@ -1968,7 +1950,6 @@ test "function bytecode separates strict and sloppy simple inline eligibility" {
     defer rt.destroy();
 
     const name = try rt.internAtom("simple-inline");
-    defer rt.atoms.free(name);
 
     {
         var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
@@ -2096,8 +2077,6 @@ test "function bytecode publishes exact-args leaf bytes by mode and geometry" {
 
     const name = try rt.internAtom("exact-args-leaf");
     const arg_name = try rt.internAtom("value");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(arg_name);
 
     const Mode = struct { strict: bool, arrow: bool, captured_arg: bool };
     const modes = [_]Mode{
@@ -2116,7 +2095,7 @@ test "function bytecode publishes exact-args leaf bytes by mode and geometry" {
         if (mode.arrow) fd.func_type = .arrow;
         _ = try fd.appendScope(-1);
         _ = try fd.appendArg(.{
-            .var_name = rt.atoms.dup(arg_name),
+            .var_name = arg_name,
             .scope_level = 0,
             .is_lexical = false,
         });
@@ -2181,9 +2160,6 @@ test "function bytecode publishes capture leaf kind by mode and geometry" {
     const name = try rt.internAtom("capture-leaf");
     const capture_name = try rt.internAtom("held");
     const arg_name = try rt.internAtom("value");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(capture_name);
-    defer rt.atoms.free(arg_name);
 
     const Mode = struct { strict: bool, arrow: bool };
     const modes = [_]Mode{
@@ -2240,7 +2216,7 @@ test "function bytecode publishes capture leaf kind by mode and geometry" {
         fd.func_kind = .normal;
         fd.has_simple_parameter_list = true;
         _ = try fd.appendArg(.{
-            .var_name = rt.atoms.dup(arg_name),
+            .var_name = arg_name,
             .scope_level = 0,
             .is_lexical = false,
         });
@@ -2412,9 +2388,6 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
     const name = try rt.internAtom("leaf-balance");
     const capture_name = try rt.internAtom("held");
     const arg_name = try rt.internAtom("value");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(capture_name);
-    defer rt.atoms.free(arg_name);
 
     const op = bytecode.opcode.op;
     // The `function k(){ 1; }` body: parser-elided trailing drop leaves the
@@ -2474,7 +2447,7 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
         fd.func_kind = .normal;
         fd.has_simple_parameter_list = true;
         _ = try fd.appendArg(.{
-            .var_name = rt.atoms.dup(arg_name),
+            .var_name = arg_name,
             .scope_level = 0,
             .is_lexical = false,
         });
@@ -2510,9 +2483,6 @@ test "direct eval reserves identity for visible function-scope locals and argume
     const function_name = try rt.internAtom("direct-eval-open-bindings");
     const local_name = try rt.internAtom("local");
     const arg_name = try rt.internAtom("arg");
-    defer rt.atoms.free(function_name);
-    defer rt.atoms.free(local_name);
-    defer rt.atoms.free(arg_name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
     defer fd.deinit(rt);
@@ -2554,8 +2524,6 @@ test "surviving local references reserve compact open VarRef storage" {
 
     const function_name = try rt.internAtom("open-ref-frame-sizing");
     const local_name = try rt.internAtom("value");
-    defer rt.atoms.free(function_name);
-    defer rt.atoms.free(local_name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
     defer fd.deinit(rt);
@@ -2568,7 +2536,7 @@ test "surviving local references reserve compact open VarRef storage" {
     const ref_tail = try b.newLabel();
     try b.emitScopeRefOpOwned(
         bytecode.opcode.op.scope_make_ref,
-        rt.atoms.dup(local_name),
+        local_name,
         ref_tail,
         0,
     );
@@ -2593,7 +2561,6 @@ test "sloppy function-name references lower to an uncaptured dummy object proper
     defer rt.destroy();
 
     const function_name = try rt.internAtom("function-name-dummy-ref");
-    defer rt.atoms.free(function_name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
     defer fd.deinit(rt);
@@ -2611,7 +2578,7 @@ test "sloppy function-name references lower to an uncaptured dummy object proper
     const ref_tail = try b.newLabel();
     try b.emitScopeRefOpOwned(
         bytecode.opcode.op.scope_make_ref,
-        rt.atoms.dup(function_name),
+        function_name,
         ref_tail,
         0,
     );
@@ -2648,8 +2615,6 @@ test "surviving argument references lower to make_arg_ref and reserve storage" {
 
     const function_name = try rt.internAtom("arg-open-ref-frame-sizing");
     const arg_name = try rt.internAtom("value");
-    defer rt.atoms.free(function_name);
-    defer rt.atoms.free(arg_name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
     defer fd.deinit(rt);
@@ -2666,7 +2631,7 @@ test "surviving argument references lower to make_arg_ref and reserve storage" {
     const ref_tail = try b.newLabel();
     try b.emitScopeRefOpOwned(
         bytecode.opcode.op.scope_make_ref,
-        rt.atoms.dup(arg_name),
+        arg_name,
         ref_tail,
         0,
     );
@@ -2694,8 +2659,6 @@ test "direct Bytecode retains compact open VarRef frame sizing" {
 
     const function_name = try rt.internAtom("direct-open-ref-frame-sizing");
     const local_name = try rt.internAtom("value");
-    defer rt.atoms.free(function_name);
-    defer rt.atoms.free(local_name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
     defer fd.deinit(rt);
@@ -2710,7 +2673,7 @@ test "direct Bytecode retains compact open VarRef frame sizing" {
     const ref_tail = try b.newLabel();
     try b.emitScopeRefOpOwned(
         bytecode.opcode.op.scope_make_ref,
-        rt.atoms.dup(local_name),
+        local_name,
         ref_tail,
         0,
     );
@@ -2731,7 +2694,6 @@ test "mapped frames use the exact compile-time open-binding count for every fram
     defer rt.destroy();
 
     const function_name = try rt.internAtom("mapped-arg-open-ref-frame-sizing");
-    defer rt.atoms.free(function_name);
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
     defer function.deinit(rt);
     function.open_var_ref_count = 2;
@@ -2766,8 +2728,6 @@ test "createFunctionBytecode: final declaration metadata lives only in ClosureVa
 
     const name = try rt.internAtom("global-var-records");
     const global_name = try rt.internAtom("globalDecl");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(global_name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -2815,7 +2775,6 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     defer rt.destroy();
 
     const name = try rt.internAtom("large_payload_function");
-    defer rt.atoms.free(name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -2880,7 +2839,7 @@ fn populateFunctionDefForFinalizeFailure(
 ) !void {
     const op = bytecode.opcode.op;
     const b = try attachV2Builder(fd);
-    try b.emitAtomOpOwned(op.push_atom_value, fd.atoms.dup(name));
+    try b.emitAtomOpOwned(op.push_atom_value, name);
     // The marker lands on the instruction boundary just past the 5-byte
     // push_atom_value; the source-loc entry contract rejects mid-instruction pcs.
     try b.addSourceMarker(8, 5);
@@ -2913,13 +2872,10 @@ fn runFunctionBytecodeFinalizeOomLifecycle(allocator: std.mem.Allocator) !void {
 
     const name = try rt.internAtom("oom-finalize-function");
     var name_owned = true;
-    errdefer if (name_owned) rt.atoms.free(name);
     const arg_name = try rt.internAtom("oom-finalize-arg");
     var arg_name_owned = true;
-    errdefer if (arg_name_owned) rt.atoms.free(arg_name);
     const captured_name = try rt.internAtom("oom-finalize-captured");
     var captured_name_owned = true;
-    errdefer if (captured_name_owned) rt.atoms.free(captured_name);
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     var fd_owned = true;
     errdefer if (fd_owned) fd.deinit(rt);
@@ -2934,11 +2890,8 @@ fn runFunctionBytecodeFinalizeOomLifecycle(allocator: std.mem.Allocator) !void {
 
     fd.deinit(rt);
     fd_owned = false;
-    rt.atoms.free(captured_name);
     captured_name_owned = false;
-    rt.atoms.free(arg_name);
     arg_name_owned = false;
-    rt.atoms.free(name);
     name_owned = false;
     realm.destroy();
     realm_owned = false;
@@ -2972,15 +2925,12 @@ test "installCodeWithCapacity/installAtomOperandsWithCapacity account the full b
     defer rt.destroy();
 
     const name = try rt.internAtom("capacity-carry-replacement");
-    defer rt.atoms.free(name);
     const base_bytes = rt.memory.allocated_bytes;
     const base_count = rt.memory.allocation_count;
-    const base_refs = rt.atoms.refCount(name).?;
 
     var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     var bc_live = true;
     defer if (bc_live) bc.deinit(rt);
-    const pre_install_refs = rt.atoms.refCount(name).?;
 
     const first_code = [_]u8{ 1, 2, 3, 4, 5 };
     const first_code_backing = try rt.memory.alloc(u8, 16);
@@ -2991,19 +2941,17 @@ test "installCodeWithCapacity/installAtomOperandsWithCapacity account the full b
     try std.testing.expectEqualSlices(u8, &first_code, bc.code);
 
     const first_atom_backing = try rt.memory.alloc(core.atom.Atom, 8);
-    for (first_atom_backing[0..3]) |*slot| slot.* = rt.atoms.dup(name);
+    for (first_atom_backing[0..3]) |*slot| slot.* = name;
     bc.installAtomOperandsWithCapacity(first_atom_backing[0..3], first_atom_backing.len);
     try std.testing.expectEqual(@as(usize, 3), bc.atom_operands.len);
     try std.testing.expectEqual(@as(usize, 8), bc.atom_operands_capacity);
-    try std.testing.expectEqual(pre_install_refs + 3, rt.atoms.refCount(name).?);
 
     const second_code = [_]u8{ 9, 8 };
     const second_code_backing = try rt.memory.alloc(u8, 6);
     @memcpy(second_code_backing[0..second_code.len], &second_code);
     const second_atom_backing = try rt.memory.alloc(core.atom.Atom, 6);
-    for (second_atom_backing[0..2]) |*slot| slot.* = rt.atoms.dup(name);
+    for (second_atom_backing[0..2]) |*slot| slot.* = name;
 
-    for (bc.atom_operands) |old| rt.atoms.free(old);
     bc.installAtomOperandsWithCapacity(second_atom_backing[0..2], second_atom_backing.len);
     bc.installCodeWithCapacity(second_code_backing[0..second_code.len], second_code_backing.len);
 
@@ -3012,13 +2960,11 @@ test "installCodeWithCapacity/installAtomOperandsWithCapacity account the full b
     try std.testing.expectEqualSlices(u8, &second_code, bc.code);
     try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
     try std.testing.expectEqual(@as(usize, 6), bc.atom_operands_capacity);
-    try std.testing.expectEqual(pre_install_refs + 2, rt.atoms.refCount(name).?);
 
     bc.deinit(rt);
     bc_live = false;
     try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(base_count, rt.memory.allocation_count);
-    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
 }
 
 test "capacity-carry install with zero used length still owns and frees the backing" {
@@ -3026,10 +2972,8 @@ test "capacity-carry install with zero used length still owns and frees the back
     defer rt.destroy();
 
     const name = try rt.internAtom("capacity-carry-zero-used");
-    defer rt.atoms.free(name);
     const base_bytes = rt.memory.allocated_bytes;
     const base_count = rt.memory.allocation_count;
-    const base_refs = rt.atoms.refCount(name).?;
 
     var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     var bc_live = true;
@@ -3049,7 +2993,6 @@ test "capacity-carry install with zero used length still owns and frees the back
     bc_live = false;
     try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(base_count, rt.memory.allocation_count);
-    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
 }
 
 test "phase-3 exact-fit replacement frees the carried capacity once and releases atom refs once" {
@@ -3057,10 +3000,8 @@ test "phase-3 exact-fit replacement frees the carried capacity once and releases
     defer rt.destroy();
 
     const name = try rt.internAtom("capacity-carry-phase-3-replacement");
-    defer rt.atoms.free(name);
     const base_bytes = rt.memory.allocated_bytes;
     const base_count = rt.memory.allocation_count;
-    const base_refs = rt.atoms.refCount(name).?;
 
     var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     var bc_live = true;
@@ -3072,22 +3013,19 @@ test "phase-3 exact-fit replacement frees the carried capacity once and releases
     bc.installCodeWithCapacity(carried_code_backing[0..carried_code.len], carried_code_backing.len);
 
     const carried_atom_backing = try rt.memory.alloc(core.atom.Atom, 8);
-    for (carried_atom_backing[0..3]) |*slot| slot.* = rt.atoms.dup(name);
+    for (carried_atom_backing[0..3]) |*slot| slot.* = name;
     bc.installAtomOperandsWithCapacity(carried_atom_backing[0..3], carried_atom_backing.len);
-    const carried_refs = rt.atoms.refCount(name).?;
 
     const fresh_code = try rt.memory.alloc(u8, bc.code.len);
     @memcpy(fresh_code, bc.code);
     const fresh_atoms = try rt.memory.alloc(core.atom.Atom, bc.atom_operands.len);
-    for (fresh_atoms) |*slot| slot.* = rt.atoms.dup(name);
+    for (fresh_atoms) |*slot| slot.* = name;
     const bytes_with_both_generations = rt.memory.allocated_bytes;
     const count_with_both_generations = rt.memory.allocation_count;
 
-    for (bc.atom_operands) |old| rt.atoms.free(old);
     bc.installCode(fresh_code);
     bc.installAtomOperands(fresh_atoms);
 
-    try std.testing.expectEqual(carried_refs, rt.atoms.refCount(name).?);
     const carried_code_charge = core.memory.MemoryAccount.accountedSizeForRequest(16 * @sizeOf(u8), .@"1");
     const carried_atom_charge = core.memory.MemoryAccount.accountedSizeForRequest(8 * @sizeOf(core.atom.Atom), std.mem.Alignment.of(core.atom.Atom));
     const fresh_code_charge = core.memory.MemoryAccount.accountedSizeForRequest(fresh_code.len * @sizeOf(u8), .@"1");
@@ -3107,7 +3045,6 @@ test "phase-3 exact-fit replacement frees the carried capacity once and releases
     bc_live = false;
     try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(base_count, rt.memory.allocation_count);
-    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
 }
 
 test "four-ledger phase-boundary ownership accounting compile-only" {
@@ -3136,7 +3073,6 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
             @as(usize, 0),
             ownership.publishedFunctionBytecodeCount(&window.function),
         );
-        try std.testing.expectEqual(@as(usize, 0), try ownership.atomResidual(b1));
 
         // The resolver consumes the compact Builder and publishes the final
         // artifact in one step, so the intermediate resolve_variables product
@@ -3155,19 +3091,17 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
             .{ .realm = realm },
         );
         var b3 = try window.sampleNext(.final, &b1);
-        // Finalization moved ownership under published FunctionBytecodes,
-        // which the census does not descend into. That residual is what the
-        // remaining boundaries must carry unchanged.
-        const emit_residual = try ownership.atomResidual(b3);
+        // Finalization moves ownership under published FunctionBytecodes,
+        // which the census does not descend into. TGC S3-c retired the atom
+        // ledger that measured that residual, so what remains checkable here
+        // is the structural fact it was derived from.
         if (shape.tier == .nested_function_bytecode) {
             try std.testing.expect(ownership.publishedFunctionBytecodeCount(&window.function) > 0);
-            try std.testing.expect(emit_residual > 0);
         } else {
             try std.testing.expectEqual(
                 @as(usize, 0),
                 ownership.publishedFunctionBytecodeCount(&window.function),
             );
-            try std.testing.expectEqual(@as(usize, 0), emit_residual);
         }
 
         window.discardTemporaries();
@@ -3177,13 +3111,8 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
         ownership.setBuilderCommitted(&b3, committed);
         ownership.setBuilderCommitted(&b4, committed);
 
-        try ownership.expectAtomAccount(b1, 0);
-        try ownership.expectAtomAccount(b3, emit_residual);
         // The published-FB residual is a constant of the compile: it appears at
         // the emit boundary and must survive the temporaries discard untouched.
-        try ownership.expectAtomAccount(b4, emit_residual);
-        try ownership.expectAtomTransition(b1, b3, true);
-        try ownership.expectAtomTransition(b3, b4, false);
         try ownership.expectB1(b1);
         try ownership.expectB3(b1, b3);
         try ownership.expectB4(b1, b3, b4);

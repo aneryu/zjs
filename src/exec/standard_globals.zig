@@ -751,7 +751,6 @@ fn temporaryStringAtom(rt: *core.JSRuntime, name: []const u8) !core.Atom {
 fn freeTemporaryStringAtom(rt: *core.JSRuntime, atom_id: core.Atom) void {
     if (core.atom.isConst(atom_id) or core.atom.isTaggedInt(atom_id)) return;
     rt.atoms.unpinForHost(atom_id);
-    rt.atoms.free(atom_id);
 }
 
 fn createBuiltinAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
@@ -3045,7 +3044,6 @@ fn defineRegExpLegacyAccessor(
 ) !void {
     const realm_global = ctor.nativeFunctionRealmGlobalPtr() orelse return error.InvalidBuiltinRegistry;
     const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     const getter_id = core.function.nativeBuiltinId(.regexp, @intFromEnum(getter_method));
     if (setter_method) |method| {
         try defineLazyNativeAccessorPairAtom(
@@ -3449,7 +3447,6 @@ test "intrinsic bootstrap registers global builtin domains through object proper
 
     for (standard_global_domains) |name| {
         const atom_id = try rt.internAtom(name);
-        defer rt.atoms.free(atom_id);
         try std.testing.expect(intrinsics.global.hasOwnProperty(atom_id));
         const desc = (try intrinsics.global.getOwnProperty(rt, atom_id)).?;
         try std.testing.expectEqual(true, desc.writable.?);
@@ -3458,14 +3455,12 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     }
 
     const map_atom = try rt.internAtom("Map");
-    defer rt.atoms.free(map_atom);
     const map_ctor = try intrinsics.global.getProperty(map_atom);
     try std.testing.expect(map_ctor.isObject());
     const map_ctor_object = core.Object.fromHeader(map_ctor.refHeader().?);
     try std.testing.expectEqual(core.class.ids.c_function, map_ctor_object.class_id);
 
     const prototype_atom = try rt.internAtom("prototype");
-    defer rt.atoms.free(prototype_atom);
     const prototype_desc = (try map_ctor_object.getOwnProperty(rt, prototype_atom)).?;
     try std.testing.expectEqual(false, prototype_desc.writable.?);
     try std.testing.expectEqual(false, prototype_desc.enumerable.?);
@@ -3475,7 +3470,6 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     try std.testing.expectEqual(core.class.ids.object, map_proto.class_id);
 
     const set_atom = try rt.internAtom("set");
-    defer rt.atoms.free(set_atom);
     const set_desc = (try map_proto.getOwnProperty(rt, set_atom)).?;
     try std.testing.expectEqual(true, set_desc.writable.?);
     try std.testing.expectEqual(false, set_desc.enumerable.?);

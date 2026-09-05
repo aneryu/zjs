@@ -310,7 +310,6 @@ fn runPropertyLookup(allocator: std.mem.Allocator, iterations: usize, warmup: us
     const rt = try core.JSRuntime.create(allocator);
     defer rt.destroy();
     const object = try core.Object.create(rt, core.class.ids.object, null);
-    defer object.value().free(rt);
 
     const names = [_][]const u8{ "p0", "p1", "p2", "p3" };
     const values = [_]i32{ 11, 23, 37, 53 };
@@ -318,7 +317,6 @@ fn runPropertyLookup(allocator: std.mem.Allocator, iterations: usize, warmup: us
     for (names, 0..) |name, index| {
         atoms[index] = try rt.internAtom(name);
     }
-    defer for (atoms) |atom_id| rt.atoms.free(atom_id);
     for (atoms, values) |atom_id, value| {
         try object.defineOwnProperty(
             rt,
@@ -327,10 +325,10 @@ fn runPropertyLookup(allocator: std.mem.Allocator, iterations: usize, warmup: us
         );
     }
 
-    const warmup_checksum = try propertyLookupLoop(rt, object, &atoms, warmup, hash_offset);
+    const warmup_checksum = try propertyLookupLoop(object, &atoms, warmup, hash_offset);
     const memory_before = rt.memoryUsage();
     const start = monotonicNanos();
-    const checksum = try propertyLookupLoop(rt, object, &atoms, iterations, warmup_checksum);
+    const checksum = try propertyLookupLoop(object, &atoms, iterations, warmup_checksum);
     const elapsed = elapsedNanosSince(start);
     const memory_after = rt.memoryUsage();
     return .{
@@ -344,7 +342,7 @@ fn runPropertyLookup(allocator: std.mem.Allocator, iterations: usize, warmup: us
         .entry = "core.Object.getProperty",
         .comparable = true,
         .checksum_comparable = true,
-        .caliber_note = "runtime object atom and properties built before timing; returned JSValue dup and free are timed",
+        .caliber_note = "runtime object atom and properties built before timing",
         .memory = .{
             .allocation_count_before = memory_before.allocation_count,
             .allocation_count_after = memory_after.allocation_count,
@@ -356,7 +354,6 @@ fn runPropertyLookup(allocator: std.mem.Allocator, iterations: usize, warmup: us
 }
 
 fn propertyLookupLoop(
-    rt: *core.JSRuntime,
     object: *core.Object,
     atoms: *const [4]core.Atom,
     iterations: usize,
@@ -370,11 +367,9 @@ fn propertyLookupLoop(
         );
         const value = try object.getProperty(atoms[index]);
         const int_value = value.asInt32() orelse {
-            value.free(rt);
             return error.UnexpectedPropertyValue;
         };
         checksum = mixU64(checksum, @as(u32, @bitCast(int_value)));
-        value.free(rt);
     }
     return checksum;
 }
@@ -384,7 +379,6 @@ fn runTypedArray(allocator: std.mem.Allocator, iterations: usize, warmup: usize)
     defer rt.destroy();
 
     const buffer_value = try core.typed_array.arrayBufferConstructLength(rt, 1024 * 4, null, null);
-    defer buffer_value.free(rt);
     const buffer = core.Object.fromHeader(buffer_value.refHeader() orelse return error.ExpectedArrayBufferObject);
     const view_value = try core.typed_array.typedArrayConstructFullBuffer(
         rt,
@@ -394,7 +388,6 @@ fn runTypedArray(allocator: std.mem.Allocator, iterations: usize, warmup: usize)
         buffer,
         null,
     );
-    defer view_value.free(rt);
     const view = core.Object.fromHeader(view_value.refHeader() orelse return error.ExpectedTypedArrayObject);
     const backing = buffer.byteStorage();
     var index: u32 = 0;
@@ -449,11 +442,9 @@ fn typedArrayLoop(
         );
         const value = try core.typed_array.typedArrayGetIndex(rt, view, index);
         const int_value = value.asInt32() orelse {
-            value.free(rt);
             return error.UnexpectedTypedArrayValue;
         };
         checksum = mixU64(checksum, @as(u32, @bitCast(int_value)));
-        value.free(rt);
     }
     return checksum;
 }

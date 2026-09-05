@@ -369,7 +369,6 @@ test "object literal roots direct function bytecode values while creating object
     defer rt.destroy();
 
     const key = try rt.internAtom("value");
-    defer rt.atoms.free(key);
     const names = [_]core.Atom{key};
 
     const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
@@ -427,7 +426,6 @@ test "object entryArrayValue roots direct function bytecode value while creating
     defer rt.destroy();
 
     const key = try rt.internAtom("entryKey");
-    defer rt.atoms.free(key);
 
     const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
     var fb_published = false;
@@ -648,7 +646,6 @@ pub fn objectHasOwnCall(
     const object = objectFromValue(object_value) orelse return error.TypeError;
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(atom_id);
     // qjs `js_object_hasOwn` -> `JS_GetOwnPropertyInternal(ctx, NULL, p, atom)`:
     // the desc==NULL existence mode (quickjs.c:8854) -- no descriptor is built,
     // no value is dup'd, and auto-init instantiation is delayed. Proxies still
@@ -671,7 +668,6 @@ pub fn objectPrototypeOwnPropertyCall(
 
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(atom_id);
 
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
     const object_value = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
@@ -706,7 +702,6 @@ pub fn objectPrototypeDefineAccessorCall(
     if (!isCallableValue(accessor_value)) return error.TypeError;
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const key = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(key);
 
     const desc = if (getter) core.Descriptor{
         .kind = .accessor,
@@ -754,7 +749,6 @@ pub fn objectPrototypeLookupAccessorCall(
     var object = objectFromValue(object_value) orelse return error.TypeError;
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const key = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(key);
 
     while (true) {
         const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, object, key);
@@ -802,7 +796,6 @@ pub fn objectFromEntriesCall(
             try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return err;
         };
-        defer ctx.runtime.atoms.free(key);
         createDataPropertyOrThrow(ctx, output, global, out_value, out, key, value, caller_function, caller_frame) catch |err| {
             try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return err;
@@ -854,7 +847,6 @@ pub fn objectGroupByCall(
             try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return err;
         };
-        defer ctx.runtime.atoms.free(key);
         try appendObjectGroupByValue(ctx, output, global, out_value, out, key, step.value, caller_function, caller_frame);
         index += 1;
     }
@@ -1023,7 +1015,6 @@ test "Object.groupBy new group define failure releases group once" {
     out.preventExtensions();
 
     const key = try rt.internAtom("group");
-    defer rt.atoms.free(key);
 
     try std.testing.expectError(
         error.TypeError,
@@ -1077,7 +1068,6 @@ pub fn getOwnPropertyDescriptorCall(
     const object = objectFromValue(object_value) orelse return error.TypeError;
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(atom_id);
     var desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, atom_id, caller_function, caller_frame) orelse return core.JSValue.undefinedValue();
     try call.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, object, atom_id, &desc);
     const desc_value = try descriptorObjectFromDescriptor(ctx.runtime, global, desc);

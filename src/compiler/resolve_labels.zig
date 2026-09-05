@@ -511,10 +511,6 @@ const Resolver = struct {
     last_bound_output: u32 = std.math.maxInt(u32),
 
     fn deinit(self: *Resolver) void {
-        if (self.output_atoms_owned) {
-            for (self.output_atoms[0..self.output_atom_len]) |atom_id|
-                self.atoms.free(atom_id);
-        }
         if (self.output_atom_capacity != 0)
             self.memory.free(core.atom.Atom, self.output_atoms);
         if (self.output_capacity != 0) self.memory.free(u8, self.output);
@@ -3629,8 +3625,6 @@ const Resolver = struct {
         self.output_atom_capacity = 0;
         self.output_atom_len = 0;
         self.output_atoms_owned = false;
-        for (self.function.atom_operands) |old_atom|
-            self.atoms.free(old_atom);
         self.function.installAtomOperandsWithCapacity(owned_atoms, owned_atom_capacity);
 
         const owned_sources = self.output_sources[0..self.output_source_len];
@@ -3733,7 +3727,6 @@ const ResolveLabelsTestHarness = struct {
         harness.rt = try core.JSRuntime.create(allocator);
         errdefer harness.rt.destroy();
         harness.name_atom = try harness.rt.atoms.internString("qcp1-s4-pass-a");
-        errdefer harness.rt.atoms.free(harness.name_atom);
         harness.function = bytecode.Bytecode.init(
             &harness.rt.memory,
             &harness.rt.atoms,
@@ -3754,7 +3747,6 @@ const ResolveLabelsTestHarness = struct {
     fn deinit(harness: *ResolveLabelsTestHarness) void {
         harness.fd.deinit(harness.rt);
         harness.function.deinit(harness.rt);
-        harness.rt.atoms.free(harness.name_atom);
         harness.rt.destroy();
     }
 
@@ -3933,11 +3925,10 @@ test "compiler.resolve_labels: discarded field store delays tail sources" {
     const input = harness.input();
 
     const field = try harness.rt.atoms.internString("qcp1-s4-field-store");
-    defer harness.rt.atoms.free(field);
     try input.addSourceMarker(10, 2);
     try input.emitOp(op.insert2);
     try input.addSourceMarker(20, 4);
-    try input.emitAtomOpOwned(op.put_field, harness.rt.atoms.dup(field));
+    try input.emitAtomOpOwned(op.put_field, field);
     try input.addSourceMarker(30, 6);
     try input.emitOp(op.drop);
     try input.addSourceMarker(40, 8);
@@ -3973,7 +3964,7 @@ test "compiler.resolve_labels: typeof string fold preserves legacy source reloca
     try input.addSourceMarker(20, 4);
     try input.emitAtomOpOwned(
         op.push_atom_value,
-        harness.rt.atoms.dup(core.atom.ids.undefined_),
+        core.atom.ids.undefined_,
     );
     try input.addSourceMarker(30, 6);
     try input.emitOp(op.strict_eq);
@@ -4017,7 +4008,7 @@ test "compiler.resolve_labels: typeof branch keeps equal next-op source" {
     try input.addSourceMarker(20, 4);
     try input.emitAtomOpOwned(
         op.push_atom_value,
-        harness.rt.atoms.dup(core.atom.ids.undefined_),
+        core.atom.ids.undefined_,
     );
     try input.addSourceMarker(30, 6);
     try input.emitOp(op.strict_neq);
@@ -4391,7 +4382,7 @@ test "compiler.resolve_labels: folded typeof branch threads through dead goto" {
     try input.emitOp(op.typeof);
     try input.emitAtomOpOwned(
         op.push_atom_value,
-        harness.rt.atoms.dup(core.atom.ids.undefined_),
+        core.atom.ids.undefined_,
     );
     try input.emitOp(op.neq);
     try input.emitJump(op.if_false, through);
@@ -4731,7 +4722,6 @@ test "compiler.resolve_labels: post-update tails publish sources afterward" {
     const input = harness.input();
 
     const field = try harness.rt.atoms.internString("qcp1-s4-post-field");
-    defer harness.rt.atoms.free(field);
 
     try input.addSourceMarker(10, 1);
     try input.emitOp(op.post_inc);
@@ -4745,7 +4735,7 @@ test "compiler.resolve_labels: post-update tails publish sources afterward" {
     try input.addSourceMarker(50, 5);
     try input.emitOp(op.perm3);
     try input.addSourceMarker(60, 6);
-    try input.emitAtomOpOwned(op.put_field, harness.rt.atoms.dup(field));
+    try input.emitAtomOpOwned(op.put_field, field);
     try input.addSourceMarker(70, 7);
     try input.emitOp(op.drop);
 
@@ -4821,16 +4811,14 @@ test "compiler.resolve_labels: dropped atom and length field balance ownership" 
     const input = harness.input();
 
     const named = try harness.rt.atoms.internString("qcp1-s4-dropped");
-    defer harness.rt.atoms.free(named);
-    const base_refs = harness.rt.atoms.refCount(named).?;
     try input.emitAtomOpOwned(
         op.push_atom_value,
-        harness.rt.atoms.dup(named),
+        named,
     );
     try input.emitOp(op.drop);
     try input.emitAtomOpOwned(
         op.get_field,
-        harness.rt.atoms.dup(core.atom.ids.length),
+        core.atom.ids.length,
     );
 
     var product = try harness.resolve();
@@ -4838,7 +4826,6 @@ test "compiler.resolve_labels: dropped atom and length field balance ownership" 
     try std.testing.expectEqualSlices(u8, &.{op.get_length}, harness.function.code);
     try std.testing.expectEqual(@as(usize, 0), harness.function.atom_operands.len);
     product.deinitUncommitted();
-    try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(named).?);
 }
 
 test "compiler.resolve_labels: shared with probes resolve operand-relative done label" {
@@ -4847,7 +4834,6 @@ test "compiler.resolve_labels: shared with probes resolve operand-relative done 
     defer harness.deinit();
 
     const name = try harness.rt.atoms.internString("qcp1-s4-with-probe");
-    defer harness.rt.atoms.free(name);
     _ = try harness.fd.appendScope(-1);
     harness.fd.var_object_idx = try harness.fd.appendVar(.{
         .var_name = core.atom.ids.var_object,
@@ -4871,7 +4857,7 @@ test "compiler.resolve_labels: shared with probes resolve operand-relative done 
     });
     try harness.input().emitAtomOpU16Owned(
         op.scope_get_var,
-        harness.rt.atoms.dup(name),
+        name,
         0,
     );
     try harness.input().emitOp(op.return_undef);
@@ -4953,8 +4939,6 @@ fn resolveLabelsOomScript(allocator: std.mem.Allocator) !void {
     const input = harness.input();
 
     const name = try harness.rt.atoms.internString("qcp1-s4-oom");
-    defer harness.rt.atoms.free(name);
-    const base_refs = harness.rt.atoms.refCount(name).?;
     const body = try input.newLabel();
     const target = try input.newLabel();
     try input.addSourceMarker(10, 1);
@@ -4964,16 +4948,14 @@ fn resolveLabelsOomScript(allocator: std.mem.Allocator) !void {
     while (index < 30) : (index += 1)
         try input.emitOpU32(op.push_i32, 1);
     try input.addSourceMarker(20, 2);
-    try input.emitAtomOpOwned(op.get_field, harness.rt.atoms.dup(name));
+    try input.emitAtomOpOwned(op.get_field, name);
     try input.bindLabel(target);
     try input.addSourceMarker(30, 3);
     try input.emitJump(op.if_false, body);
     try input.emitOp(op.object);
-    try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(name).?);
 
     var product = harness.resolve() catch |err| {
         try std.testing.expectEqual(@as(usize, 0), harness.function.code.len);
-        try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(name).?);
         return err;
     };
     var product_live = true;
@@ -4984,7 +4966,6 @@ fn resolveLabelsOomScript(allocator: std.mem.Allocator) !void {
         try std.testing.expectEqual(@as(usize, 0), harness.function.atom_operands.len);
         product.deinitUncommitted();
         product_live = false;
-        try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(name).?);
         return err;
     };
 
@@ -4996,7 +4977,6 @@ fn resolveLabelsOomScript(allocator: std.mem.Allocator) !void {
     );
     product.deinitUncommitted();
     product_live = false;
-    try std.testing.expectEqual(base_refs + 2, harness.rt.atoms.refCount(name).?);
 }
 
 test "compiler.resolve_labels: allocation failure sweep is transactional" {

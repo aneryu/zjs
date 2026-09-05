@@ -269,13 +269,11 @@ fn expectClosure(value: core.JSValue) !*core.Object {
 
 fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
     const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), true, true, true));
 }
 
 fn getIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !i32 {
     const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     const value = try object.getProperty(key);
     return value.asInt32() orelse error.TypeError;
 }
@@ -381,7 +379,6 @@ test "closure iteratorResult roots direct function bytecode value while creating
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_atom = try rt.internAtom("value");
-    defer rt.atoms.free(value_atom);
     {
         const stored = try iterator_result.getProperty(value_atom);
         try std.testing.expect(stored.same(result_value));
@@ -413,7 +410,6 @@ fn createTestFunctionBytecodeValue(rt: *core.JSRuntime, symbol_name: []const u8)
 
 fn expectObjectPropertySame(rt: *core.JSRuntime, object: *core.Object, name: []const u8, expected: core.JSValue) !void {
     const atom_id = try rt.internAtom(name);
-    defer rt.atoms.free(atom_id);
     const stored = try object.getProperty(atom_id);
     try std.testing.expect(stored.same(expected));
 }
@@ -428,7 +424,6 @@ test "appendRecordToGlobalArray roots direct function bytecode fields while crea
     defer rt.destroy();
 
     const results_name = try rt.internAtom("results");
-    defer rt.atoms.free(results_name);
     const results = try core.Object.createArray(rt, null);
     var globals = [_]globals_mod.Slot{
         .{ .name = results_name, .value = results.value() },
@@ -467,7 +462,6 @@ test "appendWeakMapAdderRecord roots direct function bytecode fields while creat
     defer rt.destroy();
 
     const results_name = try rt.internAtom("results");
-    defer rt.atoms.free(results_name);
     const results = try core.Object.createArray(rt, null);
     var globals = [_]globals_mod.Slot{
         .{ .name = results_name, .value = results.value() },
@@ -506,7 +500,6 @@ test "appendPairToGlobalArray roots direct function bytecode entries while creat
     defer rt.destroy();
 
     const results_name = try rt.internAtom("results");
-    defer rt.atoms.free(results_name);
     const results = try core.Object.createArray(rt, null);
     var globals = [_]globals_mod.Slot{
         .{ .name = results_name, .value = results.value() },
@@ -541,7 +534,6 @@ test "appendToGlobalArray roots direct function bytecode value while appending" 
     defer rt.destroy();
 
     const results_name = try rt.internAtom("results");
-    defer rt.atoms.free(results_name);
     const results = try core.Object.createArray(rt, null);
     var globals = [_]globals_mod.Slot{
         .{ .name = results_name, .value = results.value() },
@@ -849,7 +841,6 @@ fn appendToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: [
 fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {
     const global = try getGlobalThisObject(rt, globals);
     const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     return try global.getProperty(key);
 }
 
@@ -867,7 +858,6 @@ fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const 
     defer root_frame.deactivate(rt);
 
     const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(rooted_value, true, true, true));
 }
 

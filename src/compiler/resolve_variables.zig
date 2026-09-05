@@ -68,7 +68,6 @@ pub const ResolvedProduct = struct {
     /// Idempotent, and `deinitUncommitted` remains correct whether or not this
     /// ran.
     pub fn releaseConsumedStreams(self: *ResolvedProduct) void {
-        for (self.atom_operands[0..self.atom_len]) |atom_id| self.atoms.free(atom_id);
 
         if (self.code_capacity != 0) self.memory.free(u8, self.code);
         if (self.atom_capacity != 0) self.memory.free(core.atom.Atom, self.atom_operands);
@@ -88,7 +87,6 @@ pub const ResolvedProduct = struct {
     /// Item-wise release of the owned atom prefix, then free each backing by
     /// full capacity. Idempotent. Mirrors Builder.deinit discipline.
     pub fn deinitUncommitted(self: *ResolvedProduct) void {
-        for (self.atom_operands[0..self.atom_len]) |atom_id| self.atoms.free(atom_id);
 
         if (self.code_capacity != 0) self.memory.free(u8, self.code);
         if (self.atom_capacity != 0) self.memory.free(core.atom.Atom, self.atom_operands);
@@ -558,7 +556,7 @@ const Resolver = struct {
             .kind = kind,
             .is_with = rules.evalVarObjectProbeIsWith(probe),
         }).encode();
-        self.product.atom_operands[atom_start] = self.ctx.function.atoms.dup(atom_id);
+        self.product.atom_operands[atom_start] = atom_id;
         out_atom_idx = 1;
         out_idx += probe_size;
         if (out_idx != code_need) return error.InvalidBytecode;
@@ -1109,7 +1107,7 @@ const Resolver = struct {
         const output_start: usize = @intCast(self.product.code_len);
         @memcpy(self.product.code[output_start..][0..bytes.len], bytes);
         if (atom_id) |input_atom| {
-            self.product.atom_operands[self.product.atom_len] = self.product.atoms.dup(input_atom);
+            self.product.atom_operands[self.product.atom_len] = input_atom;
             self.product.atom_len += 1;
         }
         self.product.code_len = next_code_len;
@@ -1180,7 +1178,7 @@ const Resolver = struct {
             self.product.code[output_start..][0..byte_count],
             self.code[input_start..][0..byte_count],
         );
-        self.product.atom_operands[self.product.atom_len] = self.product.atoms.dup(atom_id);
+        self.product.atom_operands[self.product.atom_len] = atom_id;
         self.product.atom_len += 1;
         self.product.code_len += byte_count;
     }
@@ -2560,7 +2558,6 @@ const ResolveTestHarness = struct {
         errdefer harness.rt.destroy();
 
         harness.name_atom = try harness.rt.atoms.internString("qcp1-s3-pass-a");
-        errdefer harness.rt.atoms.free(harness.name_atom);
 
         harness.function = bytecode.Bytecode.init(
             &harness.rt.memory,
@@ -2584,7 +2581,6 @@ const ResolveTestHarness = struct {
     fn deinit(harness: *ResolveTestHarness) void {
         harness.fd.deinit(harness.rt);
         harness.function.deinit(harness.rt);
-        harness.rt.atoms.free(harness.name_atom);
         harness.rt.destroy();
     }
 
@@ -2723,21 +2719,8 @@ fn expectOwnedAtomRelease(
         try std.testing.expectEqual(atom_id, owned);
     }
 
-    const before_product = harness.rt.atoms.refCount(atom_id).?;
-    const product_atom_len = product.atom_len;
     product.deinitUncommitted();
-    try std.testing.expectEqual(
-        before_product - product_atom_len,
-        harness.rt.atoms.refCount(atom_id).?,
-    );
-
-    const before_input = harness.rt.atoms.refCount(atom_id).?;
-    const input_atom_len = harness.input().atom_len;
     harness.deinitInput();
-    try std.testing.expectEqual(
-        before_input - input_atom_len,
-        harness.rt.atoms.refCount(atom_id).?,
-    );
 }
 
 test "compiler.resolve_variables: copy-through and source carry" {
@@ -2935,23 +2918,20 @@ test "compiler.resolve_variables: scope_make_ref after terminal owns nothing" {
     defer harness.deinit();
 
     const local = try harness.rt.atoms.internString("qcp1-s3r-dead-make-ref");
-    defer harness.rt.atoms.free(local);
     _ = try harness.fd.appendScope(-1);
     _ = try harness.fd.addScopeVar(local, .normal, 0, false, false);
-    const base_refs = harness.rt.atoms.refCount(local).?;
 
     const put_tail = try harness.input().newLabel();
     try harness.input().emitOp(op.return_undef);
     try harness.input().emitScopeRefOpOwned(
         op.scope_make_ref,
-        harness.rt.atoms.dup(local),
+        local,
         put_tail,
         0,
     );
     try harness.input().bindLabel(put_tail);
     try harness.input().emitOp(op.nop);
     try harness.input().emitOp(op.put_ref_value);
-    try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(local).?);
     var snapshot = try TestInputSnapshot.init(harness.input());
     defer snapshot.deinit();
 
@@ -2965,9 +2945,7 @@ test "compiler.resolve_variables: scope_make_ref after terminal owns nothing" {
     try snapshot.expectUnchanged(harness.input());
 
     product.deinitUncommitted();
-    try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(local).?);
     harness.deinitInput();
-    try std.testing.expectEqual(base_refs, harness.rt.atoms.refCount(local).?);
 }
 
 test "compiler.resolve_variables: empty gosub finalizer removal and non-empty retention" {
@@ -3021,12 +2999,9 @@ test "compiler.resolve_variables: set_name null drops and named atom copies" {
     const input = harness.input();
 
     const named = try harness.rt.atoms.internString("qcp1-s3-set-name");
-    defer harness.rt.atoms.free(named);
-    const base_refs = harness.rt.atoms.refCount(named).?;
 
     try input.emitAtomOpOwned(op.set_name, core.atom.null_atom);
-    try input.emitAtomOpOwned(op.set_name, harness.rt.atoms.dup(named));
-    try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(named).?);
+    try input.emitAtomOpOwned(op.set_name, named);
 
     var expected = [_]u8{ op.set_name, 0, 0, 0, 0 };
     std.mem.writeInt(u32, expected[1..5], named, .little);
@@ -3035,12 +3010,9 @@ test "compiler.resolve_variables: set_name null drops and named atom copies" {
     defer product.deinitUncommitted();
     try expectProductCode(&product, &expected);
     try std.testing.expectEqualSlices(core.atom.Atom, &.{named}, product.atom_operands[0..product.atom_len]);
-    try std.testing.expectEqual(base_refs + 2, harness.rt.atoms.refCount(named).?);
 
     product.deinitUncommitted();
-    try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(named).?);
     harness.deinitInput();
-    try std.testing.expectEqual(base_refs, harness.rt.atoms.refCount(named).?);
 }
 
 test "compiler.resolve_variables: erased temp ops and optional-chain rewrites" {
@@ -3050,12 +3022,10 @@ test "compiler.resolve_variables: erased temp ops and optional-chain rewrites" {
     const input = harness.input();
 
     const field = try harness.rt.atoms.internString("qcp1-s3-field");
-    defer harness.rt.atoms.free(field);
-    const base_refs = harness.rt.atoms.refCount(field).?;
 
     try input.emitOp(op.nop);
     try input.emitOpU32(op.set_class_name, 0x1234_5678);
-    try input.emitAtomOpOwned(op.get_field_opt_chain, harness.rt.atoms.dup(field));
+    try input.emitAtomOpOwned(op.get_field_opt_chain, field);
     try input.emitOp(op.get_array_el_opt_chain);
 
     var expected = [_]u8{ op.get_field, 0, 0, 0, 0, op.get_array_el };
@@ -3065,12 +3035,9 @@ test "compiler.resolve_variables: erased temp ops and optional-chain rewrites" {
     defer product.deinitUncommitted();
     try expectProductCode(&product, &expected);
     try std.testing.expectEqualSlices(core.atom.Atom, &.{field}, product.atom_operands[0..product.atom_len]);
-    try std.testing.expectEqual(base_refs + 2, harness.rt.atoms.refCount(field).?);
 
     product.deinitUncommitted();
-    try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(field).?);
     harness.deinitInput();
-    try std.testing.expectEqual(base_refs, harness.rt.atoms.refCount(field).?);
 }
 
 test "compiler.resolve_variables: match-barrier nop preserves legacy tail shape" {
@@ -3199,11 +3166,9 @@ test "compiler.resolve_variables: scope_get_var global reuses legacy topology" {
     const input = harness.input();
 
     const scoped_name = try harness.rt.atoms.internString("qcp1-s3-global");
-    defer harness.rt.atoms.free(scoped_name);
-    const base_refs = harness.rt.atoms.refCount(scoped_name).?;
     try input.emitAtomOpU16Owned(
         op.scope_get_var,
-        harness.rt.atoms.dup(scoped_name),
+        scoped_name,
         0,
     );
     try input.emitOp(op.return_undef);
@@ -3224,9 +3189,7 @@ test "compiler.resolve_variables: scope_get_var global reuses legacy topology" {
     );
 
     try snapshot.expectUnchanged(input);
-    try std.testing.expectEqual(base_refs + 2, harness.rt.atoms.refCount(scoped_name).?);
     try expectOwnedAtomRelease(&harness, &product, scoped_name);
-    try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(scoped_name).?);
 }
 
 test "compiler.resolve_variables: local scope_get_var matches the pinned QuickJS form" {
@@ -3236,10 +3199,9 @@ test "compiler.resolve_variables: local scope_get_var matches the pinned QuickJS
     harness.fd.use_short_opcodes = true;
 
     const x = try harness.rt.atoms.internString("qcp1-s3-local-x");
-    defer harness.rt.atoms.free(x);
     _ = try harness.fd.appendScope(-1);
     _ = try harness.fd.addScopeVar(x, .normal, 0, false, false);
-    try harness.input().emitAtomOpU16Owned(op.scope_get_var, harness.rt.atoms.dup(x), 0);
+    try harness.input().emitAtomOpU16Owned(op.scope_get_var, x, 0);
     try harness.input().emitOp(op.return_undef);
     var snapshot = try TestInputSnapshot.init(harness.input());
     defer snapshot.deinit();
@@ -3259,12 +3221,11 @@ test "compiler.resolve_variables: argument scope_get_var matches the pinned Quic
     harness.fd.use_short_opcodes = true;
 
     const argument = try harness.rt.atoms.internString("qcp1-s3-argument-a");
-    defer harness.rt.atoms.free(argument);
     _ = try harness.fd.appendScope(-1);
     _ = try harness.fd.appendArg(.{ .var_name = argument, .scope_level = 0 });
     try harness.input().emitAtomOpU16Owned(
         op.scope_get_var,
-        harness.rt.atoms.dup(argument),
+        argument,
         0,
     );
     try harness.input().emitOp(op.return_undef);
@@ -3286,17 +3247,16 @@ test "compiler.resolve_variables: lexical TDZ get and put match the pinned Quick
     harness.fd.use_short_opcodes = true;
 
     const lexical = try harness.rt.atoms.internString("qcp1-s3-lexical-tdz");
-    defer harness.rt.atoms.free(lexical);
     _ = try harness.fd.appendScope(-1);
     _ = try harness.fd.addScopeVar(lexical, .normal, 0, true, false);
     try harness.input().emitAtomOpU16Owned(
         op.scope_get_var,
-        harness.rt.atoms.dup(lexical),
+        lexical,
         0,
     );
     try harness.input().emitAtomOpU16Owned(
         op.scope_put_var,
-        harness.rt.atoms.dup(lexical),
+        lexical,
         0,
     );
     try harness.input().emitOp(op.return_undef);
@@ -3323,12 +3283,11 @@ test "compiler.resolve_variables: const scope_put_var throw matches the pinned Q
     harness.fd.use_short_opcodes = true;
 
     const constant = try harness.rt.atoms.internString("qcp1-s3-const");
-    defer harness.rt.atoms.free(constant);
     _ = try harness.fd.appendScope(-1);
     _ = try harness.fd.addScopeVar(constant, .normal, 0, true, true);
     try harness.input().emitAtomOpU16Owned(
         op.scope_put_var,
-        harness.rt.atoms.dup(constant),
+        constant,
         0,
     );
     try harness.input().emitOp(op.return_undef);
@@ -3358,12 +3317,11 @@ test "compiler.resolve_variables: lexical scope_put_var_init matches the pinned 
     harness.fd.use_short_opcodes = true;
 
     const lexical = try harness.rt.atoms.internString("qcp1-s3-lexical-init");
-    defer harness.rt.atoms.free(lexical);
     _ = try harness.fd.appendScope(-1);
     _ = try harness.fd.addScopeVar(lexical, .normal, 0, true, false);
     try harness.input().emitAtomOpU16Owned(
         op.scope_put_var_init,
-        harness.rt.atoms.dup(lexical),
+        lexical,
         0,
     );
     try harness.input().emitOp(op.return_undef);
@@ -3384,7 +3342,6 @@ test "compiler.resolve_variables: enter and leave scope match the pinned QuickJS
     defer harness.deinit();
 
     const captured = try harness.rt.atoms.internString("qcp1-s3-captured-lexical");
-    defer harness.rt.atoms.free(captured);
     _ = try harness.fd.appendScope(-1);
     const local_index = try harness.fd.addScopeVar(captured, .normal, 0, true, false);
     try harness.fd.captureLocal(@intCast(local_index));
@@ -3413,7 +3370,6 @@ test "compiler.resolve_variables: apply_eval scope head matches the pinned Quick
     defer harness.deinit();
 
     const captured = try harness.rt.atoms.internString("qcp1-s3-eval-captured");
-    defer harness.rt.atoms.free(captured);
     _ = try harness.fd.appendScope(-1);
     for (0..255) |_| {
         _ = try harness.fd.addScopeVar(captured, .normal, 0, false, false);
@@ -3441,7 +3397,6 @@ test "compiler.resolve_variables: later apply_eval capture closes an earlier sco
     defer harness.deinit();
 
     const captured = try harness.rt.atoms.internString("qcp1-s3-eval-close-before-call");
-    defer harness.rt.atoms.free(captured);
     _ = try harness.fd.appendScope(-1);
     const local_index = try harness.fd.addScopeVar(captured, .normal, 0, true, false);
     try harness.input().emitOpU16(op.leave_scope, 0);
@@ -3482,13 +3437,12 @@ test "compiler.resolve_variables: local scope_make_ref fold matches the pinned Q
     harness.fd.use_short_opcodes = true;
 
     const local = try harness.rt.atoms.internString("qcp1-s3-make-ref-fold");
-    defer harness.rt.atoms.free(local);
     _ = try harness.fd.appendScope(-1);
     _ = try harness.fd.addScopeVar(local, .normal, 0, false, false);
     const tail = try harness.input().newLabel();
     try harness.input().emitScopeRefOpOwned(
         op.scope_make_ref,
-        harness.rt.atoms.dup(local),
+        local,
         tail,
         0,
     );
@@ -3530,13 +3484,12 @@ test "compiler.resolve_variables: local scope_make_ref non-fold matches the pinn
     harness.fd.use_short_opcodes = true;
 
     const local = try harness.rt.atoms.internString("qcp1-s3-make-ref-live");
-    defer harness.rt.atoms.free(local);
     _ = try harness.fd.appendScope(-1);
     _ = try harness.fd.addScopeVar(local, .normal, 0, false, false);
     const tail = try harness.input().newLabel();
     try harness.input().emitScopeRefOpOwned(
         op.scope_make_ref,
-        harness.rt.atoms.dup(local),
+        local,
         tail,
         0,
     );
@@ -3565,7 +3518,6 @@ test "compiler.resolve_variables: dynamic environment probe uses product label" 
     harness.fd.use_short_opcodes = true;
 
     const dynamic_name = try harness.rt.atoms.internString("qcp1-s3-dynamic-name");
-    defer harness.rt.atoms.free(dynamic_name);
     _ = try harness.fd.appendScope(-1);
     harness.fd.var_object_idx = try harness.fd.addScopeVar(
         core.atom.ids.var_object,
@@ -3576,7 +3528,7 @@ test "compiler.resolve_variables: dynamic environment probe uses product label" 
     );
     try harness.input().emitAtomOpU16Owned(
         op.scope_get_var,
-        harness.rt.atoms.dup(dynamic_name),
+        dynamic_name,
         0,
     );
     try harness.input().emitOp(op.return_undef);
@@ -3609,16 +3561,15 @@ test "compiler.resolve_variables: scope delete and get_ref match the pinned Quic
     defer harness.deinit();
 
     const global = try harness.rt.atoms.internString("qcp1-s3-ref-global");
-    defer harness.rt.atoms.free(global);
     _ = try harness.fd.appendScope(-1);
     try harness.input().emitAtomOpU16Owned(
         op.scope_delete_var,
-        harness.rt.atoms.dup(global),
+        global,
         0,
     );
     try harness.input().emitAtomOpU16Owned(
         op.scope_get_ref,
-        harness.rt.atoms.dup(global),
+        global,
         0,
     );
     try harness.input().emitOp(op.return_undef);
@@ -3652,12 +3603,11 @@ test "compiler.resolve_variables: private field resolution matches the pinned Qu
     harness.fd.use_short_opcodes = true;
 
     const private_name = try harness.rt.atoms.internString("#qcp1-s3-private");
-    defer harness.rt.atoms.free(private_name);
     _ = try harness.fd.appendScope(-1);
     _ = try harness.fd.addScopeVar(private_name, .private_field, 0, true, false);
     try harness.input().emitAtomOpU16Owned(
         op.scope_get_private_field,
-        harness.rt.atoms.dup(private_name),
+        private_name,
         0,
     );
     try harness.input().emitOp(op.return_undef);
@@ -3679,7 +3629,6 @@ test "compiler.resolve_variables: direct eval redeclaration prefix matches the p
     defer harness.deinit();
 
     const redeclared = try harness.rt.atoms.internString("qcp1-s3-eval-redecl");
-    defer harness.rt.atoms.free(redeclared);
     harness.fd.is_direct_eval = true;
     _ = try harness.fd.addClosureVar(.{
         .closure_type = .ref,
@@ -3719,7 +3668,6 @@ test "compiler.resolve_variables: eval function declaration hoist enters v2 prod
     defer harness.deinit();
 
     const declared = try harness.rt.atoms.internString("qcp1-s3-eval-function-hoist");
-    defer harness.rt.atoms.free(declared);
     harness.fd.is_eval = true;
     harness.fd.body_scope = harness.fd.appendScope(-1) catch return error.OutOfMemory;
     try harness.fd.appendGlobalVar(.{
@@ -3806,29 +3754,25 @@ fn resolveVariablesOomScript(allocator: std.mem.Allocator) !void {
     const input = harness.input();
 
     const live_atom = try harness.rt.atoms.internString("qcp1-s3-oom-live");
-    defer harness.rt.atoms.free(live_atom);
     const dead_atom = try harness.rt.atoms.internString("qcp1-s3-oom-dead");
-    defer harness.rt.atoms.free(dead_atom);
-    const live_atom_base_refs = harness.rt.atoms.refCount(live_atom).?;
-    const dead_atom_base_refs = harness.rt.atoms.refCount(dead_atom).?;
 
     const live_label = try input.newLabel();
     const dead_label = try input.newLabel();
     var atom_emit_index: u8 = 0;
     while (atom_emit_index < 10) : (atom_emit_index += 1) {
         try input.addSourceMarker(100 + atom_emit_index, 1);
-        try input.emitAtomOpOwned(op.push_atom_value, harness.rt.atoms.dup(live_atom));
+        try input.emitAtomOpOwned(op.push_atom_value, live_atom);
     }
     try input.emitJump(op.if_false, live_label);
     try input.emitOp(op.return_undef);
     try input.addSourceMarker(200, 2);
-    try input.emitAtomOpOwned(op.push_atom_value, harness.rt.atoms.dup(dead_atom));
+    try input.emitAtomOpOwned(op.push_atom_value, dead_atom);
     try input.emitJump(op.goto, dead_label);
     try input.bindLabel(dead_label);
     try input.emitOp(op.drop);
     try input.bindLabel(live_label);
     try input.addSourceMarker(300, 3);
-    try input.emitAtomOpOwned(op.get_field_opt_chain, harness.rt.atoms.dup(live_atom));
+    try input.emitAtomOpOwned(op.get_field_opt_chain, live_atom);
     try input.emitOp(op.return_undef);
 
     const code_len = input.code_len;
@@ -3836,8 +3780,6 @@ fn resolveVariablesOomScript(allocator: std.mem.Allocator) !void {
     const source_len = input.source_len;
     const live_label_refs = input.label_slots[live_label.index()].ref_count;
     const dead_label_refs = input.label_slots[dead_label.index()].ref_count;
-    const live_atom_refs = harness.rt.atoms.refCount(live_atom).?;
-    const dead_atom_refs = harness.rt.atoms.refCount(dead_atom).?;
 
     var product = harness.resolve() catch |err| {
         try expectOomInputUnchanged(
@@ -3848,11 +3790,7 @@ fn resolveVariablesOomScript(allocator: std.mem.Allocator) !void {
             live_label_refs,
             dead_label_refs,
         );
-        try std.testing.expectEqual(live_atom_refs, harness.rt.atoms.refCount(live_atom).?);
-        try std.testing.expectEqual(dead_atom_refs, harness.rt.atoms.refCount(dead_atom).?);
         harness.deinitInput();
-        try std.testing.expectEqual(live_atom_base_refs, harness.rt.atoms.refCount(live_atom).?);
-        try std.testing.expectEqual(dead_atom_base_refs, harness.rt.atoms.refCount(dead_atom).?);
         return err;
     };
     defer product.deinitUncommitted();
@@ -3866,11 +3804,7 @@ fn resolveVariablesOomScript(allocator: std.mem.Allocator) !void {
         dead_label_refs,
     );
     product.deinitUncommitted();
-    try std.testing.expectEqual(live_atom_refs, harness.rt.atoms.refCount(live_atom).?);
-    try std.testing.expectEqual(dead_atom_refs, harness.rt.atoms.refCount(dead_atom).?);
     harness.deinitInput();
-    try std.testing.expectEqual(live_atom_base_refs, harness.rt.atoms.refCount(live_atom).?);
-    try std.testing.expectEqual(dead_atom_base_refs, harness.rt.atoms.refCount(dead_atom).?);
 }
 
 test "compiler.resolve_variables: allocation failure sweep is transactional" {

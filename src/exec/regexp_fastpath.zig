@@ -497,7 +497,6 @@ pub fn appendNamedCaptureSubstitution(
     defer name.deinit(ctx.runtime.memory.allocator);
     try appendUtf16UnitsAsUtf8(ctx.runtime, &name, replacement[name_start..name_end]);
     const atom = try ctx.runtime.internAtom(name.items);
-    defer ctx.runtime.atoms.free(atom);
     // TGC S3 §4 class B: the group name is held across a property get that
     // can run a JS accessor, plus the ToString of its result.
     var group_atom_roots = core.runtime.rootAtoms(.{&atom});

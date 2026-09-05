@@ -123,11 +123,9 @@ test "F1: freeToken releases its identifier atom owner" {
     var lx = env.lexer("lexer_token_owned_probe_s5");
     var tok = try lx.next();
     try std.testing.expectEqual(t.TOK_IDENT, tok.val);
-    const atom_id = tok.payload.ident.atom;
-    try std.testing.expectEqual(@as(usize, 1), env.rt.atoms.refCount(atom_id).?);
+    try std.testing.expect(env.rt.atoms.name(tok.payload.ident.atom) != null);
 
     lx.freeToken(&tok);
-    try std.testing.expectEqual(@as(?usize, null), env.rt.atoms.refCount(atom_id));
 }
 
 test "F1: replacing a token releases its owner and stays safe on lexer error" {
@@ -136,11 +134,9 @@ test "F1: replacing a token releases its owner and stays safe on lexer error" {
 
     var lx = env.lexer("lexer_replace_owned_probe @");
     var tok = try lx.next();
-    const atom_id = tok.payload.ident.atom;
-    try std.testing.expectEqual(@as(usize, 1), env.rt.atoms.refCount(atom_id).?);
+    try std.testing.expect(env.rt.atoms.name(tok.payload.ident.atom) != null);
 
     try std.testing.expectError(error.InvalidIdentifier, lx.nextIntoReplacing(&tok));
-    try std.testing.expectEqual(@as(?usize, null), env.rt.atoms.refCount(atom_id));
     switch (tok.payload) {
         .none => {},
         else => return error.TestUnexpectedResult,
@@ -237,7 +233,6 @@ test "direct eval this is a scope_get_var against the caller seed" {
     defer rt.destroy();
 
     const this_atom = try rt.internAtom("this");
-    defer rt.atoms.free(this_atom);
     const seeds = [_]parser.EvalClosureSeed{.{
         .var_name = this_atom,
         .closure_type = .local,
@@ -793,7 +788,6 @@ fn restoreFinalizedFragmentView(function: *engine.bytecode.Bytecode) !void {
 /// (including get_loc/put_loc for vars in `function_def.vars`).
 fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
@@ -808,7 +802,6 @@ fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
 
 fn parseExprWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
@@ -825,7 +818,6 @@ fn parseExprWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.bytecod
 
 fn parseExprStrict(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
@@ -846,7 +838,6 @@ fn parseExprStrict(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
 /// return the produced final-form bytecode for byte-sequence comparison.
 fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
@@ -862,7 +853,6 @@ fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
 
 fn parseTSStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
@@ -880,7 +870,6 @@ fn parseTSStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
 
 fn parseTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
@@ -901,7 +890,6 @@ fn parseTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
 
 fn parseStatementWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
@@ -918,7 +906,6 @@ fn parseStatementWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.by
 
 fn parseModuleStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     function.flags.is_module = true;
     errdefer function.deinit(env.rt);
@@ -936,7 +923,6 @@ fn parseModuleStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecod
 
 fn parseModuleRefStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     function.flags.is_module = true;
     errdefer function.deinit(env.rt);
@@ -1531,7 +1517,6 @@ fn expectModuleStarExport(
 
 fn parseFunctionBodyStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
@@ -1547,7 +1532,6 @@ fn parseFunctionBodyStatement(env: *TestEnv, src: []const u8) !engine.bytecode.B
 /// the strict-only PTC fold in resolve_labels keys off `fd.is_strict_mode`.
 fn parseStrictFunctionBodyStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
@@ -2253,7 +2237,6 @@ test "F4: logical producer uses one source-less shared merge label" {
 
     for (fixtures) |fixture| {
         const name = try env.rt.internAtom("runtime-expression");
-        defer env.rt.atoms.free(name);
         var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
         defer function.deinit(env.rt);
         var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, fixture.source);
@@ -2745,7 +2728,6 @@ test "M3.1 F4: the program root's scope marker and source authority are stream e
     defer env.deinit();
 
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "x;");
@@ -3981,7 +3963,6 @@ test "W5: production with atom-label target threads past destructuring fallback 
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const y_atom = try env.rt.internAtom("y");
-    defer env.rt.atoms.free(y_atom);
 
     var root = try parseStatementWithTopLevelChildren(
         &env,
@@ -4517,8 +4498,6 @@ test "F5: sloppy var initializer captures dynamic reference before RHS" {
 
     const name = try env.rt.internAtom("test");
     const x_atom = try env.rt.internAtom("x");
-    defer env.rt.atoms.free(name);
-    defer env.rt.atoms.free(x_atom);
 
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
@@ -4574,8 +4553,6 @@ test "F5: destructuring dynamic reference publishes an exact long-tail label" {
 
     const name = try env.rt.internAtom("destructuring-long-ref");
     const target_atom = try env.rt.internAtom("target");
-    defer env.rt.atoms.free(name);
-    defer env.rt.atoms.free(target_atom);
 
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
@@ -5799,7 +5776,6 @@ test "F7: private name in uses scope temp before resolver" {
     defer env.deinit();
 
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "class C { #x; m(o) { return #x in o; } }");
@@ -5828,7 +5804,6 @@ test "unresolved descendant lookup threads direct eval var objects inside-out" {
     defer env.deinit();
 
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms,
@@ -5895,7 +5870,6 @@ test "direct eval pseudo var objects follow eval and parameter-expression gates"
     defer env.deinit();
 
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms,
@@ -5928,7 +5902,6 @@ test "direct eval pseudo var objects follow eval and parameter-expression gates"
     try std.testing.expectEqual(@as(i32, -1), rest.arg_var_object_idx);
 
     const eval_name = try env.rt.internAtom("eval-test");
-    defer env.rt.atoms.free(eval_name);
     var eval_function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, eval_name);
     defer eval_function.deinit(env.rt);
     var eval_lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "eval('')");
@@ -5950,7 +5923,6 @@ test "parameter pre-scan balances regexp and template delimiters like QuickJS" {
     defer env.deinit();
 
     const name = try env.rt.internAtom("parameter-balanced-scan");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms,
@@ -5973,7 +5945,6 @@ test "parameter initializer direct eval emits active global-declaration carriers
     defer rt.destroy();
 
     const x_atom = try rt.internAtom("parameterEvalHoist");
-    defer rt.atoms.free(x_atom);
     const cases = [_]struct {
         source: []const u8,
         function_declaration: bool,
@@ -6620,7 +6591,6 @@ fn publishPhase1Stream(function: *engine.bytecode.Bytecode, state: *ParseState) 
 
 fn parseRawStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("scope-events");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
@@ -6635,7 +6605,6 @@ fn parseRawStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
 
 fn parseRawExprWithRuntime(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("runtime-expression");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
@@ -6842,7 +6811,6 @@ test "M-SCOPE event producers: structural body and namespace scopes stay identit
     }
 
     const name = try env.rt.internAtom("scope-body-identities");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
     var lex = QjsLexer.init(
@@ -6960,7 +6928,6 @@ fn expectContinueTargetFollowsBodyLeave(
     target_event: usize,
 ) !void {
     const name = try env.rt.internAtom("scope-events");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, source);
@@ -7016,7 +6983,6 @@ test "M-SCOPE negative contract: return cleanup and throw synthesize no scope le
 
     {
         const name = try env.rt.internAtom("return-scope-events");
-        defer env.rt.atoms.free(name);
         var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
         defer function.deinit(env.rt);
         var lex = QjsLexer.init(
@@ -7061,7 +7027,6 @@ test "F10.1a FunctionDef: program root has var scope 0 and body scope 1" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7084,18 +7049,13 @@ test "F10.1a FunctionDef: QuickJS root declaration rows keep body and block orig
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
     const a_atom = try env.rt.internAtom("a");
-    defer env.rt.atoms.free(a_atom);
     const b_atom = try env.rt.internAtom("b");
-    defer env.rt.atoms.free(b_atom);
     const c_atom = try env.rt.internAtom("c");
-    defer env.rt.atoms.free(c_atom);
     const d_atom = try env.rt.internAtom("d");
-    defer env.rt.atoms.free(d_atom);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "var a; let b; { var c; let d; }");
     var state = try ParseState.init(&lex, &function);
@@ -7123,7 +7083,6 @@ test "F10.1a FunctionDef: function vars retain parser origins without entering l
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7160,7 +7119,6 @@ test "F10.1a FunctionDef: every parsed function body has identity except class f
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7315,7 +7273,6 @@ test "parser declaration index rebuilds after bypassed linked and function-var w
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("declaration-index-bypass");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7326,7 +7283,6 @@ test "parser declaration index rebuilds after bypassed linked and function-var w
 
     var padding_atoms: [declaration_index_padding_count]core.Atom = undefined;
     var initialized_atoms: usize = 0;
-    defer for (padding_atoms[0..initialized_atoms]) |atom_id| env.rt.atoms.free(atom_id);
     var atom_buffer: [48]u8 = undefined;
     for (&padding_atoms, 0..) |*slot, index| {
         const atom_name = try std.fmt.bufPrint(&atom_buffer, "declaration_index_atom_{d}", .{index});
@@ -7336,7 +7292,6 @@ test "parser declaration index rebuilds after bypassed linked and function-var w
     }
 
     const linked_collision = try env.rt.internAtom("linked_collision");
-    defer env.rt.atoms.free(linked_collision);
     _ = try state.function_def.addScopeVar(
         linked_collision,
         .normal,
@@ -7350,7 +7305,6 @@ test "parser declaration index rebuilds after bypassed linked and function-var w
     );
 
     const origin_collision = try env.rt.internAtom("origin_collision");
-    defer env.rt.atoms.free(origin_collision);
     _ = try state.function_def.appendVar(.{
         .var_name = origin_collision,
         .scope_level = 0,
@@ -7375,7 +7329,6 @@ fn runParserDeclarationIndexOomRetry(
     defer atoms.deinit();
 
     const name = try atoms.internString("parser-declaration-index-oom");
-    defer atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&account, &atoms, name);
     defer function.deinit(cleanup_rt);
     var lex = QjsLexer.init(failing.allocator(), &atoms, "");
@@ -7385,7 +7338,6 @@ fn runParserDeclarationIndexOomRetry(
 
     var declaration_atoms: [declaration_index_padding_count]core.Atom = undefined;
     var initialized_atoms: usize = 0;
-    defer for (declaration_atoms[0..initialized_atoms]) |atom_id| atoms.free(atom_id);
     var atom_buffer: [48]u8 = undefined;
     for (&declaration_atoms, 0..) |*slot, index| {
         const atom_name = try std.fmt.bufPrint(&atom_buffer, "oom_declaration_index_atom_{d}", .{index});
@@ -7442,7 +7394,6 @@ test "F10.1a FunctionDef: empty ordinary block does not create a scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7463,7 +7414,6 @@ test "F10.1a FunctionDef: non-empty ordinary block pushes and pops one scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7481,7 +7431,6 @@ test "F10.1a FunctionDef: nested blocks build parent chain" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7505,12 +7454,10 @@ test "F10.1a FunctionDef: nested scope inherits the visible lexical head" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
     const outer_atom = try env.rt.internAtom("outer");
-    defer env.rt.atoms.free(outer_atom);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ let outer; { 0; } }");
     var state = try ParseState.init(&lex, &function);
@@ -7531,12 +7478,10 @@ test "F10.1a FunctionDef: let registers as lexical, non-const" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
     const x_atom = try env.rt.internAtom("x");
-    defer env.rt.atoms.free(x_atom);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "let x = 1;");
     var state = try ParseState.init(&lex, &function);
@@ -7559,7 +7504,6 @@ test "F10.1a FunctionDef: const registers as lexical + const" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7578,7 +7522,6 @@ test "F10.1a FunctionDef: top-level block var registers as global var" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7600,7 +7543,6 @@ test "F10.1a FunctionDef: let in nested block attaches to inner scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7621,12 +7563,10 @@ test "F10.1a FunctionDef: simple catch binding keeps catch provenance" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
     const caught_atom = try env.rt.internAtom("caught");
-    defer env.rt.atoms.free(caught_atom);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "try {} catch (caught) {}");
     var state = try ParseState.init(&lex, &function);
@@ -7650,14 +7590,11 @@ test "F10.1a FunctionDef: catch has binding wrapper and body scopes" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
     const caught_atom = try env.rt.internAtom("caught");
-    defer env.rt.atoms.free(caught_atom);
     const body_atom = try env.rt.internAtom("body");
-    defer env.rt.atoms.free(body_atom);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "try {} catch (caught) { let body; }");
     var state = try ParseState.init(&lex, &function);
@@ -7683,12 +7620,10 @@ test "F10.1a FunctionDef: for-of lexical head owns one binding" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
     const x_atom = try env.rt.internAtom("x");
-    defer env.rt.atoms.free(x_atom);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "for (let x of [1]) { x; }");
     var state = try ParseState.init(&lex, &function);
@@ -7728,7 +7663,6 @@ test "F10.1a FunctionDef: assignment for-of still owns a head scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7749,7 +7683,6 @@ test "F10.1a FunctionDef: if statement owns one wrapper scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7767,7 +7700,6 @@ test "F10.1a FunctionDef: classic for always owns a head scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7785,7 +7717,6 @@ test "F10.1a FunctionDef: with scope emits its enter event" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -7816,12 +7747,10 @@ test "F10.1a FunctionDef: class has name and private scopes" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
     const class_atom = try env.rt.internAtom("C");
-    defer env.rt.atoms.free(class_atom);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "class C {}");
     var state = try ParseState.init(&lex, &function);
@@ -7846,16 +7775,12 @@ test "F10.1a FunctionDef: findVar locates by name" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
     const x_atom = try env.rt.internAtom("x");
-    defer env.rt.atoms.free(x_atom);
     const y_atom = try env.rt.internAtom("y");
-    defer env.rt.atoms.free(y_atom);
     const z_atom = try env.rt.internAtom("z");
-    defer env.rt.atoms.free(z_atom);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "let x; let y;");
     var state = try ParseState.init(&lex, &function);
@@ -7873,7 +7798,6 @@ test "F10.1b Nested function: cur_func stack management" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -9096,7 +9020,6 @@ test "QuickJS global eval capture stays distinct from appended declaration carri
     defer rt.destroy();
 
     const x_atom = try rt.internAtom("x");
-    defer rt.atoms.free(x_atom);
     const seed = [_]parser.EvalClosureSeed{.{
         .var_name = x_atom,
         .closure_type = .global,
@@ -9160,7 +9083,6 @@ test "QuickJS direct eval hoist target walk distinguishes closure var-object and
     defer rt.destroy();
 
     const f_atom = try rt.internAtom("f");
-    defer rt.atoms.free(f_atom);
     const closure_seed = [_]parser.EvalClosureSeed{
         .{ .var_name = f_atom, .closure_type = .arg, .var_idx = 0, .var_kind = .normal },
         .{ .var_name = atom.ids.var_object, .closure_type = .local, .var_idx = 1, .var_kind = .normal },
@@ -9212,7 +9134,6 @@ test "F10.1c Nested function: bytecode dual-buffering" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
 
@@ -10022,7 +9943,6 @@ test "direct eval propagates script or module identity without changing display 
 
     const referrer = try rt.internAtom("/fixture/scripts/main.mjs");
     var owns_referrer = true;
-    defer if (owns_referrer) rt.atoms.free(referrer);
 
     var parsed = try compileForTest(
         rt,
@@ -10035,7 +9955,6 @@ test "direct eval propagates script or module identity without changing display 
     );
     defer parsed.deinit();
 
-    rt.atoms.free(referrer);
     owns_referrer = false;
     try std.testing.expectEqualStrings("<eval>", rt.atoms.name(parsed.filenameAtom()).?);
     try std.testing.expectEqualStrings("/fixture/scripts/main.mjs", rt.atoms.name(parsed.scriptOrModuleAtom()).?);
@@ -10976,7 +10895,6 @@ test "final bytecode authorizes plain var-ref stores before execution" {
     // closure table: mutable ref -> value-preserving store, const ref ->
     // throw_error.
     const mutable_atom = try rt.internAtom("mutableEval");
-    defer rt.atoms.free(mutable_atom);
     const mutable_seed = [_]parser.EvalClosureSeed{.{
         .var_name = mutable_atom,
         .closure_type = .ref,
@@ -11001,7 +10919,6 @@ test "final bytecode authorizes plain var-ref stores before execution" {
     try std.testing.expectEqual(@as(usize, 1), countVarRefStoresRecursive(&mutable_eval));
 
     const fixed_atom = try rt.internAtom("fixedEval");
-    defer rt.atoms.free(fixed_atom);
     const fixed_seed = [_]parser.EvalClosureSeed{.{
         .var_name = fixed_atom,
         .closure_type = .ref,
@@ -11028,7 +10945,6 @@ test "assignment target scan ignores atom operand bytes" {
 
     var held_atoms = std.ArrayList(core.Atom).empty;
     defer {
-        for (held_atoms.items) |atom_id| rt.atoms.free(atom_id);
         held_atoms.deinit(std.testing.allocator);
     }
 
@@ -12215,11 +12131,8 @@ test "module import local names are compiled as module var refs" {
     try std.testing.expect(fn_bc.closureVar().len >= 3);
 
     const x = try rt.internAtom("x");
-    defer rt.atoms.free(x);
     const renamed = try rt.internAtom("renamed");
-    defer rt.atoms.free(renamed);
     const ns = try rt.internAtom("ns");
-    defer rt.atoms.free(ns);
 
     var found_x = false;
     var found_renamed = false;
@@ -12424,7 +12337,6 @@ test "direct eval closure seed lowers unresolved read to var ref" {
     defer rt.destroy();
 
     const x_atom = try rt.internAtom("x");
-    defer rt.atoms.free(x_atom);
     const seed = [_]parser.EvalClosureSeed{.{
         .var_name = x_atom,
         .closure_type = .arg,
@@ -12461,21 +12373,13 @@ test "direct eval rebuilds private grammar bindings from ordered closure rows" {
     defer rt.destroy();
 
     const near_x = try rt.atoms.newSymbol("#x", .private);
-    defer rt.atoms.free(near_x);
     const method = try rt.atoms.newSymbol("#method", .private);
-    defer rt.atoms.free(method);
     const getter = try rt.atoms.newSymbol("#getter", .private);
-    defer rt.atoms.free(getter);
     const setter = try rt.atoms.newSymbol("#setter", .private);
-    defer rt.atoms.free(setter);
     const setter_companion = try rt.atoms.newSymbol("#setter<set>", .private);
-    defer rt.atoms.free(setter_companion);
     const pair = try rt.atoms.newSymbol("#pair", .private);
-    defer rt.atoms.free(pair);
     const pair_companion = try rt.atoms.newSymbol("#pair<set>", .private);
-    defer rt.atoms.free(pair_companion);
     const far_x = try rt.atoms.newSymbol("#x", .private);
-    defer rt.atoms.free(far_x);
     try std.testing.expect(near_x != far_x);
 
     const seeds = [_]parser.EvalClosureSeed{
@@ -12531,7 +12435,6 @@ test "only direct eval enables private grammar from closure seeds" {
     defer rt.destroy();
 
     const private_x = try rt.atoms.newSymbol("#x", .private);
-    defer rt.atoms.free(private_x);
     const seeds = [_]parser.EvalClosureSeed{.{
         .var_name = private_x,
         .closure_type = .ref,
@@ -12555,7 +12458,6 @@ test "direct eval ref closure seed preserves table identity only" {
     defer rt.destroy();
 
     const x_atom = try rt.internAtom("x");
-    defer rt.atoms.free(x_atom);
     const seed = [_]parser.EvalClosureSeed{.{
         .var_name = x_atom,
         .closure_type = .ref,
@@ -12615,7 +12517,6 @@ test "QuickJS direct eval destructuring declares through the variable object" {
     defer rt.destroy();
 
     const binding_atom = try rt.internAtom("evalDestructFallback");
-    defer rt.atoms.free(binding_atom);
     const seed = [_]parser.EvalClosureSeed{.{
         .var_name = atom.ids.var_object,
         .closure_type = .local,
@@ -12780,7 +12681,6 @@ test "bytecode constants retain values through Phase 4 structures" {
     defer rt.destroy();
 
     const name = try rt.internAtom("emit");
-    defer rt.atoms.free(name);
 
     var function_bc = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function_bc.deinit(rt);
@@ -12849,7 +12749,6 @@ test "QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit rele
     var env = try LexerTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     defer function.deinit(env.rt);
     var lex = env.lexer("1 + 2");
@@ -12864,8 +12763,7 @@ test "QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit rele
     try state.builderEmitJump(qop.goto, label); // marker + 5-byte jump
     try state.builderEmitOp(qop.add); // marker + 1-byte op
     const atom_id = try env.rt.internAtom("s2p_probe");
-    try state.builderEmitAtomOpOwned(qop.get_var, env.rt.atoms.dup(atom_id));
-    env.rt.atoms.free(atom_id);
+    try state.builderEmitAtomOpOwned(qop.get_var, atom_id);
     try state.builderBindLabel(label);
     try state.builderAddSourceMarker(3, 7);
 
@@ -12885,12 +12783,13 @@ test "QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit rele
     // testing allocator turns any leak into a test failure.
 }
 
-/// Sum every live strong retain held by the runtime atom table. Mirrors the
-/// L0 compile-product invariant the compiler-v2 comparator checks around a
-/// compile: a finished compile must return the table to its entry balance.
-pub fn atomStrongRefTotal(rt: *const core.JSRuntime) usize {
+/// Count the OCCUPIED entries of the runtime atom table. TGC S3-c retired the
+/// retain counter, so the table-level invariant a compile has to satisfy is
+/// stated on entries instead of on retains: after a compile product is dropped
+/// and collected, the table must be back to the set of entries it had before.
+pub fn atomLiveEntryTotal(rt: *const core.JSRuntime) usize {
     var total: usize = 0;
-    for (rt.atoms.entries) |entry| total +|= entry.strongRefCount();
+    for (rt.atoms.entries) |entry| total +|= @intFromBool(entry.slotOccupied());
     return total;
 }
 
@@ -12946,14 +12845,14 @@ test "parser releases identifier and private-name token atoms" {
     // release, so the compile products are unreachable and need no root frame.
     helpers.reclaimNow(rt);
 
-    const before = atomStrongRefTotal(rt);
+    const before = atomLiveEntryTotal(rt);
     {
         var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "token-ownership.js" });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error == null);
     }
     helpers.reclaimNow(rt);
-    const after = atomStrongRefTotal(rt);
+    const after = atomLiveEntryTotal(rt);
     try std.testing.expectEqual(before, after);
 }
 
@@ -12983,14 +12882,14 @@ test "parser releases module and import-attribute token atoms" {
     // rather than by the release above; both samples bracket a collection.
     helpers.reclaimNow(rt);
 
-    const before = atomStrongRefTotal(rt);
+    const before = atomLiveEntryTotal(rt);
     {
         var parsed = try compileForTest(rt, source, .{ .mode = .module, .filename = "token-ownership-module.js" });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error == null);
     }
     helpers.reclaimNow(rt);
-    const after = atomStrongRefTotal(rt);
+    const after = atomLiveEntryTotal(rt);
     try std.testing.expectEqual(before, after);
 }
 
@@ -13032,14 +12931,14 @@ test "parser returns the atom table to balance across every token-bearing constr
         // compile product's FunctionBytecodes and module record, which the
         // tracer -- not the release above -- decides to reclaim.
         helpers.reclaimNow(rt);
-        const before = atomStrongRefTotal(rt);
+        const before = atomLiveEntryTotal(rt);
         {
             var parsed = try compileForTest(rt, c.src, options);
             defer parsed.deinit();
             try std.testing.expect(parsed.syntax_error == null);
         }
         helpers.reclaimNow(rt);
-        const after = atomStrongRefTotal(rt);
+        const after = atomLiveEntryTotal(rt);
         if (before != after) {
             std.debug.print("atom balance case {d} ({s}): before={d} after={d}\n", .{ index, c.file, before, after });
             return error.TestExpectedEqual;
@@ -13213,14 +13112,6 @@ pub const phase_ownership = struct {
         },
     };
 
-    pub const AtomLedger = struct {
-        created: usize,
-        transferred: usize,
-        escaped: usize,
-        released: usize,
-        outstanding: usize,
-    };
-
     pub const RelocLedger = struct {
         created: usize,
         bound: usize,
@@ -13246,7 +13137,6 @@ pub const phase_ownership = struct {
     };
 
     pub const Snapshot = struct {
-        atom: AtomLedger,
         reloc: RelocLedger,
         builder: BuilderLedger,
         source: SourceLedger,
@@ -13258,7 +13148,6 @@ pub const phase_ownership = struct {
     };
 
     const Baseline = struct {
-        atom_strong_refs: usize,
         acquisitions: usize,
         releases: usize,
         allocation_count: usize,
@@ -13271,7 +13160,6 @@ pub const phase_ownership = struct {
         /// breaks the owned == allocated - released identity.
         fn capture(rt: *const core.JSRuntime) Baseline {
             return .{
-                .atom_strong_refs = atomStrongRefTotal(rt),
                 .acquisitions = rt.memory.alloc_calls + rt.memory.create_calls,
                 .releases = rt.memory.free_calls + rt.memory.destroy_calls,
                 .allocation_count = rt.memory.allocation_count,
@@ -13285,64 +13173,13 @@ pub const phase_ownership = struct {
         valid: bool = true,
     };
 
-    fn atomSlotCount(rt: *const core.JSRuntime, atom_id: atom.Atom) usize {
-        return @intFromBool(rt.atoms.refCount(atom_id) != null);
-    }
-
-    fn functionDefAtomOwners(rt: *const core.JSRuntime, fd: *const engine.bytecode.FunctionDef) usize {
-        // One count per release performed by FunctionDefImpl.deinit: the three
-        // header atoms, every named row/atom operand/symbol constant/closure
-        // row, then the same census recursively for child_list.
-        var count = atomSlotCount(rt, fd.func_name) +
-            atomSlotCount(rt, fd.filename) +
-            atomSlotCount(rt, fd.script_or_module);
-        for (fd.vars) |row| count += atomSlotCount(rt, row.var_name);
-        for (fd.args) |row| count += atomSlotCount(rt, row.var_name);
-        for (fd.global_vars) |row| count += atomSlotCount(rt, row.var_name);
-        for (fd.atom_operands) |atom_id| count += atomSlotCount(rt, atom_id);
-        // The compact Builder owns the parser's atom operands until
-        // resolve_variables consumes it; Builder.deinit releases exactly this
-        // prefix, so it is an owner slot the census must see.
-        if (fd.v2_builder) |b| {
-            for (b.atom_operands[0..b.atom_len]) |atom_id| count += atomSlotCount(rt, atom_id);
-        }
-        for (fd.cpool) |value| {
-            if (value.asSymbolAtom()) |atom_id| count += atomSlotCount(rt, atom_id);
-        }
-        for (fd.closure_var) |row| count += atomSlotCount(rt, row.var_name);
-        for (fd.child_list) |child| count += functionDefAtomOwners(rt, child);
-        return count;
-    }
-
-    fn bytecodeAtomOwners(rt: *const core.JSRuntime, function: *const engine.bytecode.Bytecode) usize {
-        // Mirrors BytecodeImpl.deinit exactly: three header atoms followed by
-        // atom_operands, argdefs, vardefs, var_ref_names, and closure_var.
-        // FunctionBytecode values in constants are intentionally not walked;
-        // the tier-2 residual measures that published ownership graph.
-        var count = atomSlotCount(rt, function.name) +
-            atomSlotCount(rt, function.filename) +
-            atomSlotCount(rt, function.script_or_module);
-        for (function.atom_operands) |atom_id| count += atomSlotCount(rt, atom_id);
-        for (function.argdefs) |row| count += atomSlotCount(rt, row.var_name);
-        for (function.vardefs) |row| count += atomSlotCount(rt, row.var_name);
-        for (function.var_ref_names) |atom_id| count += atomSlotCount(rt, atom_id);
-        for (function.closure_var) |row| count += atomSlotCount(rt, row.var_name);
-        return count;
-    }
-
-    fn parseStateAtomOwners(rt: *const core.JSRuntime, state: *const ParseState) usize {
-        // Parser.State.deinit releases the namespace/declaration slots and
-        // class_private_bound_names, while its Lexer.freeToken call releases
-        // an identifier/private-name token.
-        var count: usize = switch (state.token.payload) {
-            .ident => |ident| atomSlotCount(rt, ident.atom),
-            else => 0,
-        };
-        if (state.current_namespace_atom) |atom_id| count += atomSlotCount(rt, atom_id);
-        if (state.last_declared_atom) |atom_id| count += atomSlotCount(rt, atom_id);
-        for (state.class_private_bound_names.items) |atom_id| count += atomSlotCount(rt, atom_id);
-        return count;
-    }
+    // TGC S3-c: the atom ledger of this census measured `DynamicAtom.ref_count`
+    // against a structural owner-slot walk. The tracer has no counterpart to
+    // the measured half (an id stored in N owner slots is still ONE table
+    // entry), so the ledger was retired together with the counter; the
+    // table-level invariant it guarded now lives in the
+    // `atomLiveEntryTotal` balance tests above. The reloc / builder / source
+    // ledgers are unchanged.
 
     fn pendingFixupCount(state: *const ParseState) usize {
         var count = state.break_fixups.items.len + state.continue_fixups.items.len;
@@ -13428,6 +13265,11 @@ pub const phase_ownership = struct {
         b1_source_created: usize,
 
         pub fn init(self: *Window, rt: *core.JSRuntime, shape: *const Shape) !void {
+            // TGC S3-c: atom entries are reclaimed by the collector now, so a
+            // major inside the measured window can drop the runtime's LIVE
+            // allocation count below a baseline that still counted atom
+            // spellings nothing names. Collect first, then measure.
+            _ = rt.runObjectCycleRemoval();
             self.* = .{
                 .rt = rt,
                 .shape = shape,
@@ -13493,6 +13335,11 @@ pub const phase_ownership = struct {
             if (!self.artifact_live) return;
             self.function.deinit(self.rt);
             self.artifact_live = false;
+            // TGC S3-c: dropping the last holder no longer retires the atom
+            // entries this window interned; the collector does. The terminal
+            // sample asserts the window is back to zero live allocations, so
+            // the collection has to happen before it is taken.
+            _ = self.rt.runObjectCycleRemoval();
         }
 
         pub fn sampleB1(self: *Window) !Snapshot {
@@ -13506,27 +13353,7 @@ pub const phase_ownership = struct {
         }
 
         fn sample(self: *Window, phase: CodePhase, previous: ?*const Snapshot) !Snapshot {
-            const current_atom_total = atomStrongRefTotal(self.rt);
-            try std.testing.expect(current_atom_total >= self.baseline.atom_strong_refs);
-            const atom_outstanding = current_atom_total - self.baseline.atom_strong_refs;
-
-            const direct_artifact_owners = if (self.artifact_live)
-                bytecodeAtomOwners(self.rt, &self.function)
-            else
-                0;
-            const temporary_owners = if (self.state_live)
-                functionDefAtomOwners(self.rt, &self.state.function_def) + parseStateAtomOwners(self.rt, &self.state)
-            else
-                0;
-            const atom_created = direct_artifact_owners + temporary_owners;
-            // Direct Bytecode owners are both transferred and escaped: they
-            // are the exact subset that survives Parser.State.deinit.
-            // Released is a boundary difference, not a production counter.
-            const atom_released = if (previous) |prev|
-                if (prev.atom.created >= atom_created) prev.atom.created - atom_created else 0
-            else
-                0;
-
+            _ = previous;
             const code_census = switch (phase) {
                 // Before lowering the relocation population lives in the
                 // Builder, not in any byte stream.
@@ -13569,13 +13396,6 @@ pub const phase_ownership = struct {
                 0;
 
             return .{
-                .atom = .{
-                    .created = atom_created,
-                    .transferred = direct_artifact_owners,
-                    .escaped = direct_artifact_owners,
-                    .released = atom_released,
-                    .outstanding = atom_outstanding,
-                },
                 .reloc = .{
                     .created = reloc_created,
                     .bound = reloc_bound,
@@ -13619,18 +13439,6 @@ pub const phase_ownership = struct {
         snapshot.builder.committed = committed;
     }
 
-    /// Strong retains the structural census cannot see. The census walks the
-    /// FunctionDef tree, the mutable Bytecode and Parser.State; it deliberately
-    /// does not descend into a published FunctionBytecode, so the residual is
-    /// exactly the ownership that finalization moved under an FB. It must be
-    /// zero everywhere no FB has been published yet, and it can never be
-    /// negative: `outstanding < created` would mean a counted owner slot no
-    /// longer holds the retain it is responsible for releasing.
-    pub fn atomResidual(snapshot: Snapshot) !usize {
-        try std.testing.expect(snapshot.atom.outstanding >= snapshot.atom.created);
-        return snapshot.atom.outstanding - snapshot.atom.created;
-    }
-
     pub fn expectCommon(snapshot: Snapshot) !void {
         try std.testing.expect(snapshot.builder.allocated >= snapshot.builder.released);
         try std.testing.expectEqual(
@@ -13640,32 +13448,6 @@ pub const phase_ownership = struct {
         try std.testing.expect(snapshot.builder.committed <= snapshot.builder.owned);
         try std.testing.expectEqual(snapshot.source.outstanding, snapshot.source.created);
         try std.testing.expectEqual(snapshot.source.outstanding, snapshot.source.attached);
-    }
-
-    /// The measured strong-ref delta must equal the structural census plus the
-    /// exact FB-resident residual expected at this boundary — not merely be
-    /// bounded by it.
-    pub fn expectAtomAccount(snapshot: Snapshot, residual: usize) !void {
-        try std.testing.expectEqual(
-            snapshot.atom.created + residual,
-            snapshot.atom.outstanding,
-        );
-    }
-
-    /// Check the boundary-to-boundary movement of the census. `outstanding` is
-    /// already pinned exactly at every boundary by `expectAtomAccount`, so any
-    /// growth there is accounted for by construction; what this adds is the
-    /// direction constraint: a step that only consumes or only discards must
-    /// never grow the census. `allow_census_growth` is set exactly for the emit
-    /// step, which legitimately publishes new owner slots (arg/var/var-ref name
-    /// tables on the artifact).
-    pub fn expectAtomTransition(previous: Snapshot, current: Snapshot, allow_census_growth: bool) !void {
-        const expected_released = if (previous.atom.created >= current.atom.created)
-            previous.atom.created - current.atom.created
-        else
-            0;
-        try std.testing.expectEqual(expected_released, current.atom.released);
-        if (!allow_census_growth) try std.testing.expect(current.atom.created <= previous.atom.created);
     }
 
     pub fn expectB1(snapshot: Snapshot) !void {
@@ -13688,8 +13470,6 @@ pub const phase_ownership = struct {
 
     pub fn expectB4(b1: Snapshot, b3: Snapshot, b4: Snapshot) !void {
         try expectCommon(b4);
-        try std.testing.expectEqual(b4.atom.created, b4.atom.transferred);
-        try std.testing.expectEqual(b4.atom.transferred, b4.atom.escaped);
         try std.testing.expectEqual(@as(usize, 0), b4.reloc.outstanding);
         try std.testing.expectEqual(@as(usize, 0), b4.reloc.pending_fixups);
         try std.testing.expectEqual(b1.reloc.created, b4.reloc.discarded);
@@ -13708,10 +13488,6 @@ pub const phase_ownership = struct {
 
     pub fn expectTerminal(snapshot: Snapshot) !void {
         try expectCommon(snapshot);
-        try std.testing.expectEqual(@as(usize, 0), snapshot.atom.created);
-        try std.testing.expectEqual(@as(usize, 0), snapshot.atom.transferred);
-        try std.testing.expectEqual(@as(usize, 0), snapshot.atom.escaped);
-        try std.testing.expectEqual(@as(usize, 0), snapshot.atom.outstanding);
         try std.testing.expectEqual(@as(usize, 0), snapshot.reloc.created);
         try std.testing.expectEqual(@as(usize, 0), snapshot.reloc.outstanding);
         try std.testing.expectEqual(@as(usize, 0), snapshot.builder.owned);
@@ -13794,8 +13570,7 @@ test "four-ledger phase-boundary ownership accounting parse-only" {
             .nested_function_bytecode => try std.testing.expect(window.state.function_def.child_list.len > 0),
         }
 
-        try std.testing.expectEqual(@as(usize, 0), try phase_ownership.atomResidual(b1));
-        try phase_ownership.expectAtomAccount(b1, 0);
+
         try phase_ownership.expectB1(b1);
 
         window.discardTemporaries();
@@ -13807,10 +13582,7 @@ test "four-ledger phase-boundary ownership accounting parse-only" {
 
         try std.testing.expect(std.meta.eql(b1, before_discard));
         try phase_ownership.expectCommon(b1);
-        try phase_ownership.expectAtomAccount(b4, 0);
-        try phase_ownership.expectAtomTransition(before_discard, b4, false);
         try phase_ownership.expectCommon(b4);
-        try std.testing.expectEqual(b4.atom.created, b4.atom.transferred);
         try std.testing.expectEqual(b4.builder.owned, b4.builder.committed);
         try std.testing.expect(b4.builder.owned <= before_discard.builder.owned);
         // The parser's relocations and source markers are owned by the compact

@@ -453,7 +453,6 @@ test "QuickJS global declaration validation does not materialize auto-init prope
     _ = try global.ensureGlobalPayload(rt);
 
     const binding_name = try rt.internAtom("qjs-pass1-auto-init-binding");
-    defer rt.atoms.free(binding_name);
     try global.defineAutoInitPropertyWithRealm(
         rt,
         binding_name,
@@ -472,7 +471,7 @@ test "QuickJS global declaration validation does not materialize auto-init prope
     function.closure_var[0] = core.function_bytecode.BytecodeClosureVar.init(.{
         .closure_type = .global_decl,
         .var_idx = 0,
-        .var_name = rt.atoms.dup(binding_name),
+        .var_name = binding_name,
     });
 
     var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;

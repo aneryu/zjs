@@ -832,7 +832,6 @@ test "collection iteratorResult roots direct function bytecode value while creat
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_atom = try rt.internAtom("value");
-    defer rt.atoms.free(value_atom);
     {
         const stored = try iterator_result.getProperty(value_atom);
         try std.testing.expect(stored.same(result_value));

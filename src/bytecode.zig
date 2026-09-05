@@ -2816,21 +2816,10 @@ pub const constant = struct {
     const bigint_mod = @import("core/bigint.zig");
     const JSValue = @import("core/value.zig").JSValue;
 
-    fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-        if (value.asSymbolAtom()) |atom_id| _ = atoms.dup(atom_id);
-        return value;
-    }
-
-    fn takeOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-        if (value.asSymbolAtom()) |atom_id| _ = atoms.dup(atom_id);
-        return value;
-    }
-
-    fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
+    fn freeOwnedValue(value: JSValue, rt: anytype) void {
         // A constant-pool BigInt that never reached a published
         // FunctionBytecode is still reserved: nothing else will free it.
         if (bigint_mod.BigInt.destroyIfReservedValue(rt, value)) return;
-        if (value.asSymbolAtom()) |atom_id| atoms.free(atom_id);
     }
 
     pub const Pool = struct {
@@ -2848,7 +2837,7 @@ pub const constant = struct {
             for (values) |*slot| {
                 const value = slot.*;
                 slot.* = JSValue.undefinedValue();
-                freeOwnedValue(self.atoms, value, rt);
+                freeOwnedValue(value, rt);
             }
             if (values.len != 0) self.memory.free(JSValue, values);
         }
@@ -2858,7 +2847,7 @@ pub const constant = struct {
             const next = try self.memory.alloc(JSValue, self.values.len + 1);
             errdefer self.memory.free(JSValue, next);
             @memcpy(next[0..old_values.len], old_values);
-            next[old_values.len] = dupOwnedValue(self.atoms, value);
+            next[old_values.len] = value;
             self.values = next;
             if (old_values.len != 0) self.memory.free(JSValue, old_values);
             return @intCast(self.values.len - 1);
@@ -2869,7 +2858,7 @@ pub const constant = struct {
             const next = try self.memory.alloc(JSValue, self.values.len + 1);
             errdefer self.memory.free(JSValue, next);
             @memcpy(next[0..old_values.len], old_values);
-            next[old_values.len] = takeOwnedValue(self.atoms, value);
+            next[old_values.len] = value;
             self.values = next;
             if (old_values.len != 0) self.memory.free(JSValue, old_values);
             return @intCast(self.values.len - 1);
@@ -2902,16 +2891,14 @@ pub const debug = struct {
             return .{
                 .memory = account,
                 .atoms = atoms,
-                .filename = atoms.dupForHolder(filename),
+                .filename = atoms.noteHolderStore(filename),
             };
         }
 
         pub fn deinit(self: *Table) void {
-            const filename = self.filename;
             const positions = self.positions;
             self.filename = atom.null_atom;
             self.positions = &.{};
-            if (filename != atom.null_atom) self.atoms.free(filename);
             if (positions.len != 0) self.memory.free(SourcePosition, positions);
         }
 
@@ -3008,23 +2995,13 @@ pub const module = struct {
             self.import_attributes = &.{};
             self.has_top_level_await = false;
 
-            for (requests) |request| self.atoms.free(request.module_name);
-            for (imports) |entry| {
-                self.atoms.free(entry.import_name);
-                self.atoms.free(entry.local_name);
+            for (imports) |_| {
             }
-            for (exports) |entry| {
-                self.atoms.free(entry.export_name);
-                self.atoms.free(entry.local_name);
+            for (exports) |_| {
             }
-            for (indirect_exports) |entry| {
-                self.atoms.free(entry.export_name);
-                self.atoms.free(entry.import_name);
+            for (indirect_exports) |_| {
             }
-            for (star_exports) |entry| self.atoms.free(entry.export_name);
-            for (import_attributes) |entry| {
-                self.atoms.free(entry.key);
-                self.atoms.free(entry.value);
+            for (import_attributes) |_| {
             }
             if (requests.len != 0) self.memory.free(Request, requests);
             if (imports.len != 0) self.memory.free(Import, imports);
@@ -3036,8 +3013,7 @@ pub const module = struct {
 
         pub fn addRequest(self: *Record, module_name: atom.Atom) !u32 {
             const index = self.requests.len;
-            const owned_module_name = self.atoms.dup(module_name);
-            errdefer self.atoms.free(owned_module_name);
+            const owned_module_name = module_name;
             try append(self.memory, Request, &self.requests, .{ .module_name = owned_module_name });
             return @intCast(index);
         }
@@ -3050,10 +3026,8 @@ pub const module = struct {
             var_idx: u16,
             is_namespace: bool,
         ) !void {
-            const owned_import_name = self.atoms.dup(import_name);
-            errdefer self.atoms.free(owned_import_name);
-            const owned_local_name = self.atoms.dup(local_name);
-            errdefer self.atoms.free(owned_local_name);
+            const owned_import_name = import_name;
+            const owned_local_name = local_name;
             try append(self.memory, Import, &self.imports, .{
                 .request_index = request_index,
                 .import_name = owned_import_name,
@@ -3064,10 +3038,8 @@ pub const module = struct {
         }
 
         pub fn addExport(self: *Record, export_name: atom.Atom, local_name: atom.Atom) !void {
-            const owned_export_name = self.atoms.dup(export_name);
-            errdefer self.atoms.free(owned_export_name);
-            const owned_local_name = self.atoms.dup(local_name);
-            errdefer self.atoms.free(owned_local_name);
+            const owned_export_name = export_name;
+            const owned_local_name = local_name;
             try append(self.memory, Export, &self.exports, .{
                 .export_name = owned_export_name,
                 .local_name = owned_local_name,
@@ -3081,10 +3053,8 @@ pub const module = struct {
             import_name: atom.Atom,
             is_namespace: bool,
         ) !void {
-            const owned_export_name = self.atoms.dup(export_name);
-            errdefer self.atoms.free(owned_export_name);
-            const owned_import_name = self.atoms.dup(import_name);
-            errdefer self.atoms.free(owned_import_name);
+            const owned_export_name = export_name;
+            const owned_import_name = import_name;
             try append(self.memory, IndirectExport, &self.indirect_exports, .{
                 .request_index = request_index,
                 .export_name = owned_export_name,
@@ -3094,8 +3064,7 @@ pub const module = struct {
         }
 
         pub fn addStarExport(self: *Record, request_index: u32, export_name: atom.Atom) !void {
-            const owned_export_name = self.atoms.dup(export_name);
-            errdefer self.atoms.free(owned_export_name);
+            const owned_export_name = export_name;
             try append(self.memory, StarExport, &self.star_exports, .{
                 .request_index = request_index,
                 .export_name = owned_export_name,
@@ -3103,10 +3072,8 @@ pub const module = struct {
         }
 
         pub fn addImportAttribute(self: *Record, request_index: u32, key: atom.Atom, value: atom.Atom) !void {
-            const owned_key = self.atoms.dup(key);
-            errdefer self.atoms.free(owned_key);
-            const owned_value = self.atoms.dup(value);
-            errdefer self.atoms.free(owned_value);
+            const owned_key = key;
+            const owned_value = value;
             try append(self.memory, ImportAttribute, &self.import_attributes, .{
                 .request_index = request_index,
                 .key = owned_key,
@@ -4227,13 +4194,13 @@ pub const function_bytecode = struct {
             fb.stack_size = options.stack_size;
             fb.var_ref_count = options.var_ref_count;
 
-            fb.func_name = rt.atoms.dupForHolder(options.name);
+            fb.func_name = rt.atoms.noteHolderStore(options.name);
             if (options.has_debug) {
                 const dbg = fb.debugInfoMut().?;
-                dbg.filename = rt.atoms.dupForHolder(if (options.filename == atom.null_atom) options.name else options.filename);
+                dbg.filename = rt.atoms.noteHolderStore(if (options.filename == atom.null_atom) options.name else options.filename);
             }
             if (options.script_or_module != atom.null_atom) {
-                fb.hotExtensionRequiredMut().script_or_module = rt.atoms.dupForHolder(options.script_or_module);
+                fb.hotExtensionRequiredMut().script_or_module = rt.atoms.noteHolderStore(options.script_or_module);
             }
             if (options.realm) |realm| fb.realm = context.RealmRef.retain(realm);
             dupBytecodeAtoms(byte_code, &rt.atoms);
@@ -4283,7 +4250,7 @@ pub const function_bytecode = struct {
         /// In every atom operand format (`atom`, `atom_u8`, `atom_u16`,
         /// `atom_label_u8`, `atom_label_u16`) the 4-byte atom is the first
         /// operand at `pc + 1`; `hasAtomOperandFmt` selects those formats.
-        pub fn dupBytecodeAtoms(byte_code: []const u8, atoms: *atom.AtomTable) void {
+        pub fn dupBytecodeAtoms(byte_code: []const u8, _: *atom.AtomTable) void {
             var pc: usize = 0;
             while (pc < byte_code.len) {
                 const op_id = byte_code[pc];
@@ -4291,7 +4258,7 @@ pub const function_bytecode = struct {
                 if (size == 0) break; // unknown id: bail rather than loop
                 if (pc + size <= byte_code.len and hasAtomOperandFmt(op_id)) {
                     const atom_id = std.mem.readInt(u32, byte_code[pc + 1 ..][0..4], .little);
-                    _ = atoms.dup(atom_id);
+                    _ = atom_id;
                 }
                 pc += size;
             }
@@ -4300,7 +4267,7 @@ pub const function_bytecode = struct {
         /// Walk finalized bytecode and free one owner per atom-operand opcode.
         /// Production received these refs by move; fixtures may pair this with
         /// `dupBytecodeAtoms`. Both paths use the same inline owner topology.
-        pub fn freeBytecodeAtoms(byte_code: []const u8, atoms: *atom.AtomTable) void {
+        pub fn freeBytecodeAtoms(byte_code: []const u8, _: *atom.AtomTable) void {
             var pc: usize = 0;
             while (pc < byte_code.len) {
                 const op_id = byte_code[pc];
@@ -4308,7 +4275,7 @@ pub const function_bytecode = struct {
                 if (size == 0) break;
                 if (pc + size <= byte_code.len and hasAtomOperandFmt(op_id)) {
                     const atom_id = std.mem.readInt(u32, byte_code[pc + 1 ..][0..4], .little);
-                    atoms.free(atom_id);
+                    _ = atom_id;
                 }
                 pc += size;
             }
@@ -4372,7 +4339,9 @@ pub const function_bytecode = struct {
             const debug_ptr = self.debugInfoMut();
             const byte_code = layout_value.byteCodeSliceMut(self);
             const vardefs = layout_value.vardefsSliceMut(self);
+            _ = vardefs;
             const closure_var = layout_value.closureVarSliceMut(self);
+            _ = closure_var;
 
             // Small-inline CallerState lives in the hot pad and is found via
             // the live code pointer. Tear it down before the code pointer is
@@ -4386,7 +4355,6 @@ pub const function_bytecode = struct {
             // buffer is freed, as qjs does in free_function_bytecode.
             freeBytecodeAtoms(byte_code, atoms);
             // The compact vardef table owns arg_count + var_count atom refs.
-            for (vardefs) |*v| atoms.free(v.var_name);
             self.vardefs = null;
 
             // Match QuickJS's owner order: constant-pool child functions and
@@ -4399,7 +4367,6 @@ pub const function_bytecode = struct {
             // `closure_var[i].var_name` and was
             // removed; every reader now derives the var-ref name from
             // `closure_var[i].var_name` (see `Bytecode.varRefName`).
-            for (closure_var) |*cv| atoms.free(cv.var_name);
             self.closure_var = null;
             self.closure_var_count = 0;
 
@@ -4408,16 +4375,12 @@ pub const function_bytecode = struct {
             // the reference that keeps this same realm alive during teardown.
             self.realm.deinit();
 
-            const func_name = self.func_name;
             self.func_name = atom.null_atom;
-            atoms.free(func_name);
 
             // Source and pc2line remain exact independent allocations; every
             // table and code byte above lives in the main FAM.
             if (debug_ptr) |dbg| {
-                const filename = dbg.filename;
                 dbg.filename = atom.null_atom;
-                atoms.free(filename);
                 std.debug.assert(dbg.pc2line_len >= 0);
                 const pc2line_len: usize = @intCast(dbg.pc2line_len);
                 const pc2line_buf: []u8 = if (pc2line_len == 0)
@@ -4438,9 +4401,7 @@ pub const function_bytecode = struct {
             }
 
             if (hot_extension_ptr) |hot| {
-                const script_or_module = hot.script_or_module;
                 hot.script_or_module = atom.null_atom;
-                if (script_or_module != atom.null_atom) atoms.free(script_or_module);
             }
 
             // Pass B receives only the header pointer. Preserve the minimum
@@ -4677,24 +4638,14 @@ pub const function_def = struct {
     const bigint_mod = @import("core/bigint.zig");
     const function_bytecode_mod = function_bytecode;
     const memory = @import("core/memory.zig");
+    const runtime_mod = @import("core/runtime.zig");
     const JSValue = @import("core/value.zig").JSValue;
     const compiler = @import("compiler/root.zig");
 
-    fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-        if (value.asSymbolAtom()) |atom_id| _ = atoms.dup(atom_id);
-        return value;
-    }
-
-    fn takeOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-        if (value.asSymbolAtom()) |atom_id| _ = atoms.dup(atom_id);
-        return value;
-    }
-
-    fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
+    fn freeOwnedValue(value: JSValue, rt: anytype) void {
         // A constant-pool BigInt that never reached a published
         // FunctionBytecode is still reserved: nothing else will free it.
         if (bigint_mod.BigInt.destroyIfReservedValue(rt, value)) return;
-        if (value.asSymbolAtom()) |atom_id| atoms.free(atom_id);
     }
 
     pub const FunctionKind = function_bytecode_mod.FunctionKind;
@@ -4830,7 +4781,7 @@ pub const function_def = struct {
     }
 
     fn freeGrowableAtomSlice(
-        atoms: *atom.AtomTable,
+        _: *atom.AtomTable,
         mem: *memory.MemoryAccount,
         slice: *[]atom.Atom,
         capacity: *usize,
@@ -4839,7 +4790,6 @@ pub const function_def = struct {
         const old_capacity = capacity.*;
         slice.* = &.{};
         capacity.* = 0;
-        for (items) |atom_id| atoms.free(atom_id);
         if (old_capacity != 0) {
             mem.free(atom.Atom, items.ptr[0..old_capacity]);
         } else if (items.len != 0) {
@@ -4849,7 +4799,7 @@ pub const function_def = struct {
 
     fn freeGrowableNamedSlice(
         comptime T: type,
-        atoms: *atom.AtomTable,
+        _: *atom.AtomTable,
         mem: *memory.MemoryAccount,
         slice: *[]T,
         capacity: *usize,
@@ -4858,7 +4808,6 @@ pub const function_def = struct {
         const old_capacity = capacity.*;
         slice.* = &.{};
         capacity.* = 0;
-        for (items) |*item| atoms.free(item.var_name);
         if (old_capacity != 0) {
             mem.free(T, items.ptr[0..old_capacity]);
         } else if (items.len != 0) {
@@ -5033,9 +4982,9 @@ pub const function_def = struct {
             return .{
                 .memory = account,
                 .atoms = atoms,
-                .func_name = atoms.dup(name),
-                .filename = atoms.dup(name),
-                .script_or_module = atoms.dup(name),
+                .func_name = name,
+                .filename = name,
+                .script_or_module = name,
             };
         }
 
@@ -5051,15 +5000,9 @@ pub const function_def = struct {
         }
 
         pub fn deinitInitFailure(self: *FunctionDefImpl) void {
-            const func_name = self.func_name;
-            const filename = self.filename;
-            const script_or_module = self.script_or_module;
             self.func_name = atom.null_atom;
             self.filename = atom.null_atom;
             self.script_or_module = atom.null_atom;
-            self.atoms.free(func_name);
-            self.atoms.free(filename);
-            self.atoms.free(script_or_module);
             // A root emitter attaches its Builder before the first token is
             // lexed (`ParseState.initRootEmitter`), so an initializer that
             // fails after that point owns one exactly like a fully built
@@ -5234,9 +5177,7 @@ pub const function_def = struct {
             self.global_vars_capacity = 0;
             self.global_var_count = 0;
             for (globals) |*gv| {
-                const name = gv.var_name;
                 gv.var_name = atom.null_atom;
-                self.atoms.free(name);
             }
             if (capacity != 0) self.memory.free(GlobalVar, globals.ptr[0..capacity]);
         }
@@ -5400,7 +5341,7 @@ pub const function_def = struct {
         pub fn appendVar(self: *FunctionDefImpl, var_def: VarDef) !i32 {
             const tail = try growSliceBy(VarDef, self.memory, &self.vars, &self.vars_capacity, 1);
             tail[0] = var_def;
-            tail[0].var_name = self.atoms.dup(var_def.var_name);
+            tail[0].var_name = var_def.var_name;
             self.var_count += 1;
             const idx: i32 = @intCast(self.vars.len - 1);
             return idx;
@@ -5409,7 +5350,7 @@ pub const function_def = struct {
         pub fn appendGlobalVar(self: *FunctionDefImpl, global_var: GlobalVar) !void {
             const tail = try growSliceBy(GlobalVar, self.memory, &self.global_vars, &self.global_vars_capacity, 1);
             tail[0] = global_var;
-            tail[0].var_name = self.atoms.dup(global_var.var_name);
+            tail[0].var_name = global_var.var_name;
             self.global_var_count = @intCast(self.global_vars.len);
         }
 
@@ -5419,7 +5360,7 @@ pub const function_def = struct {
         pub fn appendArg(self: *FunctionDefImpl, var_def: VarDef) !i32 {
             const tail = try growSliceBy(VarDef, self.memory, &self.args, &self.args_capacity, 1);
             tail[0] = var_def;
-            tail[0].var_name = self.atoms.dup(var_def.var_name);
+            tail[0].var_name = var_def.var_name;
             self.arg_count = @intCast(self.args.len);
             self.defined_arg_count = @intCast(self.args.len);
             return @intCast(self.args.len - 1);
@@ -5470,7 +5411,7 @@ pub const function_def = struct {
         pub fn addClosureVar(self: *FunctionDefImpl, init_value: ClosureVar.Init) !i32 {
             const tail = try growSliceBy(ClosureVar, self.memory, &self.closure_var, &self.closure_var_capacity, 1);
             tail[0] = ClosureVar.init(init_value);
-            tail[0].var_name = self.atoms.dup(init_value.var_name);
+            tail[0].var_name = init_value.var_name;
             self.closure_var_count = @intCast(self.closure_var.len);
             // Maintain the dynamic-env possibility flag at the single growth
             // point (qjs:32973 var_object_test precondition; see the field
@@ -5583,7 +5524,7 @@ pub const function_def = struct {
 
         pub fn appendAtomOperand(self: *FunctionDefImpl, atom_id: atom.Atom) !void {
             const tail = try growSliceBy(atom.Atom, self.memory, &self.atom_operands, &self.atom_operands_capacity, 1);
-            tail[0] = self.atoms.dup(atom_id);
+            tail[0] = atom_id;
         }
 
         /// Reserve atom-operand capacity without retaining or publishing an
@@ -5599,7 +5540,7 @@ pub const function_def = struct {
             const used = self.atom_operands.len;
             std.debug.assert(used < self.atom_operands_capacity);
             self.atom_operands = self.atom_operands.ptr[0 .. used + 1];
-            self.atom_operands[used] = self.atoms.dup(atom_id);
+            self.atom_operands[used] = atom_id;
         }
 
         /// Remove the final operand entry without releasing its atom.  The
@@ -5613,16 +5554,48 @@ pub const function_def = struct {
 
         pub fn appendCpool(self: *FunctionDefImpl, value: JSValue) !u32 {
             const tail = try growSliceBy(JSValue, self.memory, &self.cpool, &self.cpool_capacity, 1);
-            tail[0] = dupOwnedValue(self.atoms, value);
+            tail[0] = value;
             self.cpool_count = @intCast(self.cpool.len);
             return @intCast(self.cpool.len - 1);
         }
 
         pub fn appendCpoolOwned(self: *FunctionDefImpl, value: JSValue) !u32 {
             const tail = try growSliceBy(JSValue, self.memory, &self.cpool, &self.cpool_capacity, 1);
-            tail[0] = takeOwnedValue(self.atoms, value);
+            tail[0] = value;
             self.cpool_count = @intCast(self.cpool.len);
             return @intCast(self.cpool.len - 1);
+        }
+
+        /// TGC S3-b: precise root for the GC values this def holds while the
+        /// compile is in flight.
+        ///
+        /// `cpool` is the only GC-typed storage a `FunctionDef` owns, and it is
+        /// the one that matters. What lands there: a RegExp literal's pattern
+        /// and compiled-bytecode strings, a tagged template's frozen array
+        /// pair, the cpool-string form of a numeric-name literal, and one
+        /// reserved slot per nested function that
+        /// `installChildFunctionBytecodes` later fills with the child's
+        /// `FunctionBytecode`. (Ordinary string literals do NOT: they become
+        /// `push_atom_value` atoms, which is the S3-b atom half. A cpool
+        /// BigInt is present but is deliberately unregistered until the
+        /// artifact is published, so the tracer neither marks nor sweeps it.)
+        ///
+        /// Until `createFunctionBytecode` publishes the artifact that plain
+        /// `[]JSValue` on the Zig heap is the ONLY holder -- it is not on the
+        /// stack, so even the conservative scan cannot see it, and no tracer
+        /// edge reaches it. `cpool_count` is maintained equal to `cpool.len`
+        /// at every growth point, so the slice is the live set.
+        ///
+        /// The child walk recurses. Depth is the source's function-nesting
+        /// depth, which the parser already bounded with its own native
+        /// stack-overflow guard while using frames orders of magnitude larger
+        /// than this one, so anything that parsed can be walked here.
+        pub fn traceCompileRoots(
+            self: *FunctionDefImpl,
+            visitor: *runtime_mod.RootVisitor,
+        ) runtime_mod.RootTraceError!void {
+            try visitor.values(self.cpool);
+            for (self.child_list) |child| try child.traceCompileRoots(visitor);
         }
 
         /// Truncate `byte_code` to `target_len` bytes, leaving capacity intact so
@@ -5638,21 +5611,14 @@ pub const function_def = struct {
             std.debug.assert(target_len <= self.atom_operands.len);
             var i: usize = target_len;
             while (i < self.atom_operands.len) : (i += 1) {
-                self.atoms.free(self.atom_operands[i]);
             }
             self.atom_operands = self.atom_operands.ptr[0..target_len];
         }
 
         pub fn deinit(self: *FunctionDefImpl, rt: anytype) void {
-            const func_name = self.func_name;
-            const filename = self.filename;
-            const script_or_module = self.script_or_module;
             self.func_name = atom.null_atom;
             self.filename = atom.null_atom;
             self.script_or_module = atom.null_atom;
-            self.atoms.free(func_name);
-            self.atoms.free(filename);
-            self.atoms.free(script_or_module);
 
             // Parse-time/error-path backstop; successful v2 lowering
             // releases the builder at its consumption point.
@@ -5695,7 +5661,7 @@ pub const function_def = struct {
             for (old_cpool) |*slot| {
                 const value = slot.*;
                 slot.* = JSValue.undefinedValue();
-                freeOwnedValue(self.atoms, value, rt);
+                freeOwnedValue(value, rt);
             }
             if (old_cpool_capacity != 0) self.memory.free(JSValue, old_cpool.ptr[0..old_cpool_capacity]);
 
@@ -6762,7 +6728,7 @@ pub const binding_rules = struct {
     }
 
     fn writeThrowVarError(
-        func: *bytecode_function.Bytecode,
+        _: *bytecode_function.Bytecode,
         output: []u8,
         out_idx: *usize,
         output_atoms: []atom.Atom,
@@ -6773,16 +6739,16 @@ pub const binding_rules = struct {
         output[out_idx.*] = opcode.op.throw_error;
         std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
         output[out_idx.* + 5] = error_type;
-        output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+        output_atoms[out_atom_idx.*] = atom_id;
         out_idx.* += throw_error_instr_size;
         out_atom_idx.* += 1;
     }
 
-    fn writeThrowVarRedeclaration(func: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: u32) void {
+    fn writeThrowVarRedeclaration(_: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: u32) void {
         output[out_idx.*] = opcode.op.throw_error;
         std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
         output[out_idx.* + 5] = JS_THROW_VAR_REDECL;
-        output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+        output_atoms[out_atom_idx.*] = atom_id;
         out_idx.* += throw_error_instr_size;
         out_atom_idx.* += 1;
     }
@@ -6821,9 +6787,7 @@ pub const binding_rules = struct {
         defer rt.destroy();
 
         const name = try rt.internAtom("resolved-closure-opcode-selection");
-        defer rt.atoms.free(name);
         const binding = try rt.internAtom("same-name-closure");
-        defer rt.atoms.free(binding);
 
         var fd = function_def_mod.FunctionDef.init(&rt.memory, &rt.atoms, name);
         defer fd.deinit(rt);
@@ -8077,7 +8041,7 @@ pub const binding_rules = struct {
 
     fn writeLoweredScopeDeleteVar(
         ctx: *const JSContext,
-        func: *bytecode_function.Bytecode,
+        _: *bytecode_function.Bytecode,
         output: []u8,
         out_idx: *usize,
         output_atoms: []atom.Atom,
@@ -8089,7 +8053,7 @@ pub const binding_rules = struct {
             if (isEvalNonLexicalLocal(ctx, loc_idx)) {
                 output[out_idx.*] = opcode.op.delete_var;
                 std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
-                output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+                output_atoms[out_atom_idx.*] = atom_id;
                 out_idx.* += 5;
                 out_atom_idx.* += 1;
             } else {
@@ -8105,7 +8069,7 @@ pub const binding_rules = struct {
         } else {
             output[out_idx.*] = opcode.op.delete_var;
             std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
-            output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+            output_atoms[out_atom_idx.*] = atom_id;
             out_idx.* += 5;
             out_atom_idx.* += 1;
         }
@@ -8169,7 +8133,7 @@ pub const binding_rules = struct {
     /// assignments then update that object property, leaving the immutable
     /// self-binding untouched (quickjs.c:33012-33024, 33310-33322).
     fn writeFunctionNameDummyRef(
-        func: *bytecode_function.Bytecode,
+        _: *bytecode_function.Bytecode,
         output: []u8,
         out_idx: *usize,
         output_atoms: []atom.Atom,
@@ -8184,13 +8148,13 @@ pub const binding_rules = struct {
 
         output[out_idx.*] = opcode.op.define_field;
         std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
-        output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+        output_atoms[out_atom_idx.*] = atom_id;
         out_idx.* += 5;
         out_atom_idx.* += 1;
 
         output[out_idx.*] = opcode.op.push_atom_value;
         std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
-        output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+        output_atoms[out_atom_idx.*] = atom_id;
         out_idx.* += 5;
         out_atom_idx.* += 1;
     }
@@ -8210,7 +8174,7 @@ pub const binding_rules = struct {
                 output[out_idx.*] = opcode.op.make_arg_ref;
                 std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
                 std.mem.writeInt(u16, output[out_idx.* + 5 ..][0..2], arg_idx, .little);
-                output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+                output_atoms[out_atom_idx.*] = atom_id;
                 out_idx.* += 7;
                 out_atom_idx.* += 1;
             },
@@ -8218,7 +8182,7 @@ pub const binding_rules = struct {
                 if (isEvalNonLexicalLocal(ctx, loc_idx)) {
                     output[out_idx.*] = opcode.op.make_var_ref;
                     std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
-                    output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+                    output_atoms[out_atom_idx.*] = atom_id;
                     out_idx.* += 5;
                     out_atom_idx.* += 1;
                 } else if (localWriteThrowsReadOnly(ctx, loc_idx)) {
@@ -8238,7 +8202,7 @@ pub const binding_rules = struct {
                     output[out_idx.*] = opcode.op.make_loc_ref;
                     std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
                     std.mem.writeInt(u16, output[out_idx.* + 5 ..][0..2], loc_idx, .little);
-                    output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+                    output_atoms[out_atom_idx.*] = atom_id;
                     out_idx.* += 7;
                     out_atom_idx.* += 1;
                 }
@@ -8261,14 +8225,14 @@ pub const binding_rules = struct {
                 output[out_idx.*] = opcode.op.make_var_ref_ref;
                 std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
                 std.mem.writeInt(u16, output[out_idx.* + 5 ..][0..2], ref_idx, .little);
-                output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+                output_atoms[out_atom_idx.*] = atom_id;
                 out_idx.* += 7;
                 out_atom_idx.* += 1;
             }
         } else {
             output[out_idx.*] = opcode.op.make_var_ref;
             std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
-            output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+            output_atoms[out_atom_idx.*] = atom_id;
             out_idx.* += 5;
             out_atom_idx.* += 1;
         }
@@ -10566,7 +10530,6 @@ pub const pipeline_finalize = struct {
 
         for (fd.cpool, cpool) |*source, *out| {
             out.* = source.*;
-            if (source.*.asSymbolAtom()) |atom_id| fd.atoms.free(atom_id);
             source.* = JSValue.undefinedValue();
         }
         fd.cpool_count = 0;
@@ -10811,7 +10774,6 @@ pub const pipeline_finalize = struct {
         if (function.vardefs.len != 0) {
             const vardefs = function.vardefs;
             function.vardefs = &.{};
-            for (vardefs) |*v| function.atoms.free(v.var_name);
             function.memory.free(fb_mod.BytecodeVarDef, vardefs);
         }
         if (fd.vars.len == 0) return;
@@ -10819,12 +10781,11 @@ pub const pipeline_finalize = struct {
         const vardefs = try function.memory.alloc(fb_mod.BytecodeVarDef, fd.vars.len);
         var initialized: usize = 0;
         errdefer {
-            for (vardefs[0..initialized]) |*v| function.atoms.free(v.var_name);
             function.memory.free(fb_mod.BytecodeVarDef, vardefs);
         }
         for (fd.vars, 0..) |v, idx| {
             vardefs[idx] = fb_mod.BytecodeVarDef.fromCompile(v, v.scope_next);
-            vardefs[idx].var_name = function.atoms.dupForHolder(v.var_name);
+            vardefs[idx].var_name = function.atoms.noteHolderStore(v.var_name);
             initialized += 1;
         }
         function.vardefs = vardefs;
@@ -10834,7 +10795,6 @@ pub const pipeline_finalize = struct {
         if (function.argdefs.len != 0) {
             const argdefs = function.argdefs;
             function.argdefs = &.{};
-            for (argdefs) |*arg| function.atoms.free(arg.var_name);
             function.memory.free(fb_mod.BytecodeVarDef, argdefs);
         }
         if (fd.args.len == 0) return;
@@ -10842,12 +10802,11 @@ pub const pipeline_finalize = struct {
         const argdefs = try function.memory.alloc(fb_mod.BytecodeVarDef, fd.args.len);
         var initialized: usize = 0;
         errdefer {
-            for (argdefs[0..initialized]) |*arg| function.atoms.free(arg.var_name);
             function.memory.free(fb_mod.BytecodeVarDef, argdefs);
         }
         for (fd.args, argdefs) |arg, *out| {
             out.* = fb_mod.BytecodeVarDef.fromCompile(arg, arg.scope_next);
-            out.var_name = function.atoms.dupForHolder(arg.var_name);
+            out.var_name = function.atoms.noteHolderStore(arg.var_name);
             initialized += 1;
         }
         function.argdefs = argdefs;
@@ -10857,13 +10816,11 @@ pub const pipeline_finalize = struct {
         if (function.var_ref_names.len != 0) {
             const var_ref_names = function.var_ref_names;
             function.var_ref_names = &.{};
-            for (var_ref_names) |atom_id| function.atoms.free(atom_id);
             function.memory.free(atom.Atom, var_ref_names);
         }
         if (function.closure_var.len != 0) {
             const closure_var = function.closure_var;
             function.closure_var = &.{};
-            for (closure_var) |*cv| function.atoms.free(cv.var_name);
             function.memory.free(fb_mod.BytecodeClosureVar, closure_var);
         }
         if (fd.closure_var.len == 0) return;
@@ -10873,14 +10830,12 @@ pub const pipeline_finalize = struct {
         var initialized: usize = 0;
         var initialized_closure: usize = 0;
         errdefer {
-            for (names[0..initialized]) |atom_id| function.atoms.free(atom_id);
-            for (closure_var[0..initialized_closure]) |*cv| function.atoms.free(cv.var_name);
             function.memory.free(fb_mod.BytecodeClosureVar, closure_var);
         }
         for (fd.closure_var, 0..) |cv, idx| {
-            names[idx] = fd.atoms.dupForHolder(cv.var_name);
+            names[idx] = fd.atoms.noteHolderStore(cv.var_name);
             closure_var[idx] = cv;
-            closure_var[idx].var_name = fd.atoms.dupForHolder(cv.var_name);
+            closure_var[idx].var_name = fd.atoms.noteHolderStore(cv.var_name);
             initialized += 1;
             initialized_closure += 1;
         }
@@ -10934,7 +10889,6 @@ pub const pipeline_finalize = struct {
             const old_value = parent.cpool[idx];
             parent.cpool[idx] = value;
             if (!bigint_mod.BigInt.destroyIfReservedValue(rt, old_value)) {
-                if (old_value.asSymbolAtom()) |atom_id| parent.atoms.free(atom_id);
             }
         }
     }
@@ -11002,29 +10956,26 @@ const function_mod = struct {
         if (old_buf.len != 0) mem.free(T, old_buf);
     }
 
-    fn freeOwnedAtomSlice(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]atom.Atom) void {
+    fn freeOwnedAtomSlice(_: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]atom.Atom) void {
         const items = slot.*;
         slot.* = &.{};
-        for (items) |atom_id| atoms.free(atom_id);
         if (items.len != 0) mem.free(atom.Atom, items);
     }
 
-    fn freeOwnedVarDefSlice(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]function_bytecode_mod.BytecodeVarDef) void {
+    fn freeOwnedVarDefSlice(_: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]function_bytecode_mod.BytecodeVarDef) void {
         const items = slot.*;
         slot.* = &.{};
-        for (items) |*v| atoms.free(v.var_name);
         if (items.len != 0) mem.free(function_bytecode_mod.BytecodeVarDef, items);
     }
 
-    fn freeOwnedClosureVarSlice(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]function_bytecode_mod.BytecodeClosureVar) void {
+    fn freeOwnedClosureVarSlice(_: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]function_bytecode_mod.BytecodeClosureVar) void {
         const items = slot.*;
         slot.* = &.{};
-        for (items) |*cv| atoms.free(cv.var_name);
         if (items.len != 0) mem.free(function_bytecode_mod.BytecodeClosureVar, items);
     }
 
     fn freeGrowableAtomSlice(
-        atoms: *atom.AtomTable,
+        _: *atom.AtomTable,
         mem: *memory.MemoryAccount,
         slice: *[]atom.Atom,
         capacity: *usize,
@@ -11033,7 +10984,6 @@ const function_mod = struct {
         const old_capacity = capacity.*;
         slice.* = &.{};
         capacity.* = 0;
-        for (items) |atom_id| atoms.free(atom_id);
         if (old_capacity != 0) {
             mem.free(atom.Atom, items.ptr[0..old_capacity]);
         } else if (items.len != 0) {
@@ -11203,23 +11153,17 @@ const function_mod = struct {
             return .{
                 .memory = account,
                 .atoms = atoms,
-                .name = atoms.dup(name),
-                .filename = atoms.dup(name),
-                .script_or_module = atoms.dup(name),
+                .name = name,
+                .filename = name,
+                .script_or_module = name,
                 .constants = constant.Pool.init(account, atoms),
             };
         }
 
         pub fn deinit(self: *BytecodeImpl, rt: anytype) void {
-            const name = self.name;
-            const filename = self.filename;
-            const script_or_module = self.script_or_module;
             self.name = atom.null_atom;
             self.filename = atom.null_atom;
             self.script_or_module = atom.null_atom;
-            self.atoms.free(name);
-            self.atoms.free(filename);
-            self.atoms.free(script_or_module);
             freeGrowableAtomSlice(self.atoms, self.memory, &self.atom_operands, &self.atom_operands_capacity);
             freeOwnedVarDefSlice(self.atoms, self.memory, &self.argdefs);
             freeOwnedVarDefSlice(self.atoms, self.memory, &self.vardefs);
@@ -11512,9 +11456,23 @@ const function_mod = struct {
             return self.constants.append(value);
         }
 
+        /// TGC S3-b: precise root for the mutable carrier's constant pool.
+        /// The parser emits into this pool instead of a `FunctionDef` when
+        /// `emit_to_function_def` is off (parser-only fixtures) and
+        /// `syncFunctionDefCpool` copies a def's pool into it, so it holds the
+        /// same string/BigInt/RegExp cells with the same "Zig heap, no edge,
+        /// no stack slot" exposure. `module_record` and `debug_table` are
+        /// atom-only builders and need nothing here.
+        pub fn traceCompileRoots(
+            self: *BytecodeImpl,
+            visitor: *runtime.RootVisitor,
+        ) runtime.RootTraceError!void {
+            try visitor.values(self.constants.values);
+        }
+
         pub fn retainAtomOperand(self: *BytecodeImpl, atom_id: atom.Atom) !void {
             const tail = try growSliceBy(atom.Atom, self.memory, &self.atom_operands, &self.atom_operands_capacity, 1);
-            tail[0] = self.atoms.dup(atom_id);
+            tail[0] = atom_id;
         }
 
         pub fn reserveAtomOperands(self: *BytecodeImpl, additional: usize) !void {
@@ -11528,7 +11486,7 @@ const function_mod = struct {
             const used = self.atom_operands.len;
             std.debug.assert(used < self.atom_operands_capacity);
             self.atom_operands = self.atom_operands.ptr[0 .. used + 1];
-            self.atom_operands[used] = self.atoms.dup(atom_id);
+            self.atom_operands[used] = atom_id;
         }
 
         /// Root-bytecode counterpart of FunctionDef.takeLastAtomOperand.
@@ -11545,7 +11503,6 @@ const function_mod = struct {
             std.debug.assert(target_len <= self.atom_operands.len);
             var i: usize = target_len;
             while (i < self.atom_operands.len) : (i += 1) {
-                self.atoms.free(self.atom_operands[i]);
             }
             self.atom_operands = self.atom_operands.ptr[0..target_len];
         }

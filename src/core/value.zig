@@ -491,12 +491,6 @@ pub const JSValue = extern struct {
         return tag >= tracer_owned_first_tag and tag <= Tag.object;
     }
 
-    pub inline fn dup(self: JSValue) JSValue {
-        return self;
-    }
-
-    pub fn free(_: JSValue, _: anytype) void {}
-
     /// Compatibility release for an owner held by an active bytecode frame;
     /// the assertions preserve its caller contract.
     pub inline fn freeDuringActiveBytecode(_: JSValue, rt: anytype) void {
@@ -516,9 +510,6 @@ pub const JSValue = extern struct {
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
     }
-
-    /// Compatibility no-op used by the plain-object teardown fast path.
-    pub inline fn freeFromPlainObjectDestroy(_: JSValue, _: anytype) void {}
 
     /// Read a 16-byte JSValue slot as two 64-bit integer loads. Hot
     /// property/operand slots are written and read across handlers as 64-bit
@@ -547,11 +538,6 @@ pub const JSValue = extern struct {
     pub inline fn releaseObjectAssumeObjectNeedsDestroy(self: JSValue, rt: anytype) bool {
         std.debug.assert(self.tagOf() == Tag.object);
         _ = rt;
-        return false;
-    }
-
-    /// Any-tag compatibility twin; traced values never require a destroy tail.
-    pub inline fn releaseRefCountedNeedsDestroy(_: JSValue, _: anytype) bool {
         return false;
     }
 

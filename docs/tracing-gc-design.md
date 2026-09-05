@@ -2297,7 +2297,8 @@ allocation history.
 | `ZJS_GC_STRESS=<ticks>` | Collect at every safepoint that has anything young, and shorten the safepoint cadence to `<ticks>`. `off` disables collection entirely. |
 | `ZJS_GC_NO_MINOR=1` | Majors only. |
 | `ZJS_MINOR_AUDIT=1` | After the minor picks its condemned set, report any live object still holding an edge into it, naming the owner, the slot, and whether the owner was remembered. |
-| `ZJS_GC_VERIFY_MINOR=1` | Before each minor, recompute what a full trace would keep; afterwards report every condemned object that trace reached. |
+| `ZJS_GC_VERIFY_MINOR=1` | Before each minor, recompute what a full trace would keep; afterwards report every condemned object that trace reached -- `precise` ones only. |
+| `ZJS_GC_VERIFY_MINOR=verbose` | The same, plus the `conservative_only` disagreements. They are expected by construction (see below) and there are ~1000 of them in one `test-gc-stress` run, so they are off by default; roots-diag builds turn this on. |
 
 Choosing between the last two matters. `ZJS_MINOR_AUDIT` answers "does some
 live object still name this?", which finds a missing barrier only when the

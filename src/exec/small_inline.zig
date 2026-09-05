@@ -218,11 +218,6 @@ pub fn destroyCallerState(rt: *JSRuntime, fb: *FunctionBytecode) void {
     setCallerState(fb, null);
     var i: u8 = 0;
     while (i < state.inlined_len) : (i += 1) {
-        const site = state.inlined[i];
-        rt.atoms.free(site.callee_name);
-        rt.atoms.free(site.callee_file);
-        const fwd = state.apply_forward[i];
-        if (fwd.method_atom != core.atom.null_atom) rt.atoms.free(fwd.method_atom);
     }
     setBorrowedRealm(fb, null);
     rt.memory.destroy(CallerState, state);
@@ -1152,7 +1147,7 @@ fn cloneAndExpand(
         0;
     spec.stack_size = caller.stack_size + extra_stack;
     spec.var_ref_count = caller.openVarRefCount();
-    spec.func_name = rt.atoms.dupForHolder(caller.funcName());
+    spec.func_name = rt.atoms.noteHolderStore(caller.funcName());
 
     const dst_code = new_layout.byteCodeSliceMut(spec);
     @memcpy(dst_code[0..new_len], combined[0..new_len]);
@@ -1167,7 +1162,7 @@ fn cloneAndExpand(
     const dst_vars = new_layout.vardefsSliceMut(spec);
     for (src_vars, 0..) |src_v, i| {
         dst_vars[i] = src_v;
-        dst_vars[i].var_name = rt.atoms.dupForHolder(src_v.var_name);
+        dst_vars[i].var_name = rt.atoms.noteHolderStore(src_v.var_name);
     }
     var vi = src_vars.len;
     while (vi < dst_vars.len) : (vi += 1) {
@@ -1178,17 +1173,17 @@ fn cloneAndExpand(
     const dst_cv = new_layout.closureVarSliceMut(spec);
     for (src_cv, dst_cv) |src, *dst| {
         dst.* = src;
-        dst.var_name = rt.atoms.dupForHolder(src.var_name);
+        dst.var_name = rt.atoms.noteHolderStore(src.var_name);
     }
 
     // Dup every atom embedded in the copied + rewritten code.
     var atom_it = FunctionBytecode.BytecodeAtomIterator{ .byte_code = dst_code };
     while (atom_it.next()) |a| {
-        _ = rt.atoms.dupForHolder(a);
+        _ = rt.atoms.noteHolderStore(a);
     }
 
     if (spec.debugInfoMut()) |dbg| {
-        dbg.filename = rt.atoms.dupForHolder(caller.filenameAtom());
+        dbg.filename = rt.atoms.noteHolderStore(caller.filenameAtom());
         const src_pc2 = caller.pc2lineBuf();
         if (src_pc2.len != 0) {
             const copy = rt.memory.alloc(u8, src_pc2.len) catch {
@@ -1200,7 +1195,7 @@ fn cloneAndExpand(
         }
     }
     if (spec.hotExtensionMut()) |hot| {
-        hot.script_or_module = rt.atoms.dupForHolder(caller.scriptOrModule());
+        hot.script_or_module = rt.atoms.noteHolderStore(caller.scriptOrModule());
         var facts = caller.callFacts();
         // Extra TAKE locals forbid Fast leaf / exact-args (those frames
         // assert var_count==0). They do not invalidate simple_inline_base:
@@ -1227,12 +1222,12 @@ fn cloneAndExpand(
         var oi: u8 = 0;
         while (oi < src_state.inlined_len and oi < max_sites) : (oi += 1) {
             var copy = src_state.inlined[oi];
-            copy.callee_name = rt.atoms.dupForHolder(copy.callee_name);
-            copy.callee_file = rt.atoms.dupForHolder(copy.callee_file);
+            copy.callee_name = rt.atoms.noteHolderStore(copy.callee_name);
+            copy.callee_file = rt.atoms.noteHolderStore(copy.callee_file);
             state.inlined[oi] = copy;
             var fwd = src_state.apply_forward[oi];
             if (fwd.method_atom != core.atom.null_atom)
-                fwd.method_atom = rt.atoms.dupForHolder(fwd.method_atom);
+                fwd.method_atom = rt.atoms.noteHolderStore(fwd.method_atom);
             state.apply_forward[oi] = fwd;
         }
         state.inlined_len = src_state.inlined_len;
@@ -1250,8 +1245,8 @@ fn cloneAndExpand(
             .pc_hi = item.pc_hi,
             .call_pc = item.call_pc,
             .callee_fb = callee,
-            .callee_name = rt.atoms.dupForHolder(callee.funcName()),
-            .callee_file = rt.atoms.dupForHolder(callee.filenameAtom()),
+            .callee_name = rt.atoms.noteHolderStore(callee.funcName()),
+            .callee_file = rt.atoms.noteHolderStore(callee.filenameAtom()),
             .parent = 0xFF,
             .kind = kind,
             .this_slot = item.this_slot,
@@ -1267,7 +1262,7 @@ fn cloneAndExpand(
         state.apply_forward[state.inlined_len] = if (item.forward_call_rel != 0xFFFFFFFF)
             .{
                 .method_atom = if (item.method_atom != 0)
-                    rt.atoms.dupForHolder(@as(core.Atom, @intCast(item.method_atom)))
+                    rt.atoms.noteHolderStore(@as(core.Atom, @intCast(item.method_atom)))
                 else
                     core.atom.null_atom,
                 .call_pc = item.pc_lo + item.forward_call_rel,

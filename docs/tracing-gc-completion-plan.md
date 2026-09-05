@@ -70,6 +70,9 @@ BlockFlags(u8): kind:u4 | young:1 | needs_finalizer:1 | finalizing:1 | reserved:
 
 ## 3. 分期
 
+> **进度（2026-09-05）**：S0/S1 已合入；S2（string 家族，含 S2-e/f/g 分配器与调度）与 S3（atom 弱化，S3-a/b/c）已在 main 落地（规格与执行记录：`docs/tracing-gc-s2-spec.md` §7、`docs/tracing-gc-s3-spec.md` §7）；S3-d 清理与 S3 阶段末的 pdfjs 语义回归修复进行中；S4 勘察进行中。`JSValue.dup/free` 与调用点已在 owner 的消融裁剪中删除（原 S3 步 4/5 提前完成）。
+
+
 两条并行 track：**T-M 对象模型**（S1→S4 串行）与 **T-R 根集**（R3→R1，与 T-M 并行）。S0 与 S5 是公共首尾。每期开工前 driver 出函数/偏移级规格（先例 `gc-v2-m-cut-object-layout.md`），codex 实现，对抗 ≤1 轮，driver 亲读关键 diff。
 
 ### S0 止血与安全网（1-2 lane-week）

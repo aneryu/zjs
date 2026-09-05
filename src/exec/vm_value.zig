@@ -112,7 +112,6 @@ pub noinline fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack,
     try stack.reserveAdditional(1);
     const value = value: {
         const fresh_atom = try ctx.runtime.atoms.newSymbol(name, .private);
-        errdefer ctx.runtime.atoms.free(fresh_atom);
         break :value try ctx.runtime.takeSymbolValue(fresh_atom);
     };
     stack.pushOwnedAssumeCapacity(value);
@@ -570,12 +569,14 @@ test "push private symbol creates a fresh runtime atom per execution" {
     defer ctx.destroy();
 
     const function_name = try rt.internAtom("pushPrivateSymbolNoRetain");
-    defer rt.atoms.free(function_name);
     const template_name = "pushPrivateSymbolNoRetainName";
-    const template_atom = try rt.atoms.newSymbol(template_name, .private);
+    var template_atom = try rt.atoms.newSymbol(template_name, .private);
     var template_atom_released = false;
-    defer if (!template_atom_released) rt.atoms.free(template_atom);
-    const template_ref_count = rt.atoms.refCount(template_atom).?;
+    // TGC S3-c: the template id lives on a non-GC `Bytecode` operand array, so
+    // it needs a declared root to survive a major.
+    var template_roots = core.runtime.rootAtoms(.{&template_atom});
+    template_roots.activate(rt);
+    defer if (!template_atom_released) template_roots.deactivate(rt);
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
     defer function.deinit(rt);
@@ -606,7 +607,6 @@ test "push private symbol creates a fresh runtime atom per execution" {
         try std.testing.expect(first_atom != second_atom);
         try std.testing.expectEqualStrings(template_name, rt.atoms.name(first_atom).?);
         try std.testing.expectEqualStrings(template_name, rt.atoms.name(second_atom).?);
-        try std.testing.expectEqual(template_ref_count, rt.atoms.refCount(template_atom).?);
         try std.testing.expectEqual(@as(usize, 3), countLivePrivateAtomsNamed(rt, template_name));
     }
 
@@ -614,8 +614,9 @@ test "push private symbol creates a fresh runtime atom per execution" {
     try std.testing.expect(rt.atoms.name(first_atom) == null);
     try std.testing.expect(rt.atoms.name(second_atom) == null);
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
-    rt.atoms.free(template_atom);
+    template_roots.deactivate(rt);
     template_atom_released = true;
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(template_atom) == null);
 }
 
@@ -647,11 +648,14 @@ test "push private symbol stack failure does not retain transient private atom" 
     defer ctx.destroy();
 
     const function_name = try rt.internAtom("pushPrivateSymbolStackFailure");
-    defer rt.atoms.free(function_name);
     const template_name = "pushPrivateSymbolStackFailureName";
-    const template_atom = try rt.atoms.newSymbol(template_name, .private);
+    var template_atom = try rt.atoms.newSymbol(template_name, .private);
     var template_atom_released = false;
-    defer if (!template_atom_released) rt.atoms.free(template_atom);
+    // TGC S3-c: the template id lives on a non-GC `Bytecode` operand array, so
+    // it needs a declared root to survive a major.
+    var template_roots = core.runtime.rootAtoms(.{&template_atom});
+    template_roots.activate(rt);
+    defer if (!template_atom_released) template_roots.deactivate(rt);
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
     defer function.deinit(rt);
@@ -665,15 +669,19 @@ test "push private symbol stack failure does not retain transient private atom" 
     var stack = stack_mod.Stack.init(&rt.memory, 0);
     defer stack.deinit(rt);
 
-    const calibration_atom = try rt.atoms.newSymbol(template_name, .private);
-    rt.atoms.free(calibration_atom);
+    // TGC S3-c: `free` no longer retires an entry -- a major does. The
+    // calibration atom exists to warm one recyclable slot, so it has to be
+    // collected before the measurement.
+    _ = try rt.atoms.newSymbol(template_name, .private);
+    _ = rt.runObjectCycleRemoval();
     const allocated_before = rt.memory.allocated_bytes;
     try std.testing.expectError(error.StackOverflow, pushPrivateSymbol(ctx, &stack, execution_function, &frame));
     try std.testing.expectEqual(allocated_before, rt.memory.allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
 
-    rt.atoms.free(template_atom);
+    template_roots.deactivate(rt);
     template_atom_released = true;
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(template_atom) == null);
 }
 
@@ -684,10 +692,12 @@ test "push private symbol releases fresh atom on allocation failure" {
     defer ctx.destroy();
 
     const function_name = try rt.internAtom("pushPrivateSymbolAllocationFailure");
-    defer rt.atoms.free(function_name);
     const template_name = "pushPrivateSymbolAllocationFailureName";
-    const template_atom = try rt.atoms.newSymbol(template_name, .private);
-    defer rt.atoms.free(template_atom);
+    var template_atom = try rt.atoms.newSymbol(template_name, .private);
+    // TGC S3-c: the template id lives on a non-GC `Bytecode` operand array.
+    var template_roots = core.runtime.rootAtoms(.{&template_atom});
+    template_roots.activate(rt);
+    defer template_roots.deactivate(rt);
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
     defer function.deinit(rt);
@@ -705,9 +715,10 @@ test "push private symbol releases fresh atom on allocation failure" {
     // Warm one recyclable atom-table slot and measure the exact transient
     // description allocation. The following limit then admits newSymbol but
     // rejects the first symbol-body allocation in takeSymbolValue.
-    const calibration_atom = try rt.atoms.newSymbol(template_name, .private);
+    _ = try rt.atoms.newSymbol(template_name, .private);
     const allocated_with_atom = rt.memory.allocated_bytes;
-    rt.atoms.free(calibration_atom);
+    // TGC S3-c: `free` no longer retires an entry -- a major does.
+    _ = rt.runObjectCycleRemoval();
     const allocated_before = rt.memory.allocated_bytes;
     try std.testing.expect(allocated_with_atom > allocated_before);
     const atom_allocation_bytes = allocated_with_atom - allocated_before;

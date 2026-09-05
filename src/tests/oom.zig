@@ -1008,7 +1008,6 @@ test "oom recovery canary: ordinary GLOBAL selector retries auto-init" {
     const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
 
     const name = try rt.internAtom("__oomGlobalSelectorAutoInit");
-    defer rt.atoms.free(name);
     try global.definePerformanceAutoInitProperty(
         rt,
         name,
@@ -1165,7 +1164,6 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
     defer rt.destroy();
 
     const name = try rt.internAtom("oom-function-bytecode-fixture");
-    defer rt.atoms.free(name);
     const fixture_options: zjs.bytecode.FunctionBytecode.FixtureOptions = .{
         .name = name,
         .arg_count = 3,
@@ -1228,7 +1226,7 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
         closure.* = zjs.bytecode.function_bytecode.BytecodeClosureVar.init(.{
             .closure_type = .ref,
             .var_idx = @intCast(index),
-            .var_name = rt.atoms.dup(name),
+            .var_name = name,
         });
     }
 

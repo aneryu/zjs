@@ -437,7 +437,6 @@ pub const Table = struct {
         for (records) |rec| {
             if (rec.isRegistered()) {
                 rec.finalizeBindingData();
-                self.atoms.free(rec.class_name);
             }
         }
         for (registration_states) |state| std.debug.assert(!state.isPinned());
@@ -463,7 +462,6 @@ pub const Table = struct {
         if (id == invalid_class_id) return error.InvalidClassId;
         try self.ensureCapacity(@as(usize, id) + 1);
         const name_atom = try self.atoms.internString(def.class_name);
-        defer self.atoms.free(name_atom);
         try self.registerAtom(id, name_atom, def);
     }
 
@@ -602,7 +600,7 @@ pub const Table = struct {
     pub fn className(self: *Table, id: ClassId) ?atom.Atom {
         self.assertOwnerThread();
         if (!self.isRegistered(id)) return null;
-        return self.atoms.dup(self.records[id].class_name);
+        return self.records[id].class_name;
     }
 
     pub fn findByName(self: *const Table, name: []const u8) ?ClassId {
@@ -725,7 +723,7 @@ pub const Table = struct {
         if (state.generation == 0) state.generation = 1;
         self.records[id] = .{
             .id = id,
-            .class_name = self.atoms.dupForHolder(name_atom),
+            .class_name = self.atoms.noteHolderStore(name_atom),
             .binding_identity = def.binding_identity,
             .binding_data = def.binding_data,
             .binding_data_finalizer = def.binding_data_finalizer,
@@ -829,7 +827,6 @@ pub const Table = struct {
         // Publish the empty slot before invoking/freeing definition-owned data:
         // reentrant registration never observes a half-cleared old definition.
         old_definition.finalizeBindingData();
-        self.atoms.free(old_definition.class_name);
     }
 };
 

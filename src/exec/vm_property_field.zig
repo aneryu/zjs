@@ -113,7 +113,6 @@ pub noinline fn setName(
             if (value.isObject()) {
                 const object = try property_ops.expectObject(value);
                 const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
-                defer ctx.runtime.atoms.free(atom_id);
                 const name_value = try call_runtime.functionNameValueFromAtom(ctx.runtime, atom_id, null);
                 try object_ops.defineFunctionNameProperty(ctx.runtime, object, name_value);
             }
@@ -1029,7 +1028,6 @@ pub inline fn putArrayElementAfterFastMiss(
         }
     }
     const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
-    defer ctx.runtime.atoms.free(atom_id);
     _ = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
@@ -1073,8 +1071,7 @@ pub noinline fn getArrayElement(
                 // String.atom_id is a weak cache, while a symbol value carries
                 // its atom id in the live body. A Proxy/getter can re-enter;
                 // retain either borrowed id across the complete lookup.
-                const retained_atom = ctx.runtime.atoms.dup(atom_id);
-                defer ctx.runtime.atoms.free(retained_atom);
+                const retained_atom = atom_id;
                 const value = object_ops.getValueProperty(ctx, output, global, obj, retained_atom, function, frame) catch |err| {
                     if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
@@ -1098,7 +1095,6 @@ pub noinline fn getArrayElement(
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
-            defer ctx.runtime.atoms.free(atom_id);
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -1132,7 +1128,6 @@ pub noinline fn getArrayElement(
                 return err;
             };
             const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
-            defer ctx.runtime.atoms.free(atom_id);
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -1166,7 +1161,6 @@ pub noinline fn getArrayElement(
                 return err;
             };
             const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
-            defer ctx.runtime.atoms.free(atom_id);
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;

@@ -246,7 +246,6 @@ pub noinline fn defineArrayEl(
         return try handleLiteralRuntimeError(ctx, output, stack, frame, catch_target, global, err);
     const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, rooted_index, function, frame) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, frame, catch_target, global, err);
-    defer ctx.runtime.atoms.free(atom_id);
     object_ops.createDataPropertyOrThrow(ctx, output, global, rooted_array, object_value, atom_id, rooted_value, function, frame) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, frame, catch_target, global, err);
     try stack.push(rooted_index);

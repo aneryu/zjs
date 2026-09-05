@@ -129,9 +129,10 @@ pub fn namespace(comptime token: type) type {
                         if (s.raw_bytes.len > 0 and !self.isSourceSlice(s.raw_bytes)) self.allocator.free(s.raw_bytes);
                     },
                     // qjs free_token releases every identifier/private-name atom
-                    // (keywords are predefined and therefore no-op on free),
-                    // quickjs.c:22190-22208.
-                    .ident => |ident| self.atoms.free(ident.atom),
+                    // here (quickjs.c:22190-22208). TGC S3-c: the token's id is
+                    // an ordinary borrow now -- the compile scope roots it and
+                    // the sweep retires it, so dropping the payload is all that
+                    // is left.
                     else => {},
                 }
             }
@@ -163,7 +164,7 @@ pub fn namespace(comptime token: type) type {
                 switch (tok.payload) {
                     .ident => |ident| {
                         var retained = ident;
-                        retained.atom = self.atoms.dup(ident.atom);
+                        retained.atom = ident.atom;
                         copy.payload = .{ .ident = retained };
                     },
                     .str => |str| {

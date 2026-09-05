@@ -1046,7 +1046,7 @@ test "TGC S3: a host-defined property name stays reachable across a major taken 
         rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     }
 
-    rt.atoms.atom_audit_missing_edge = 0;
+    rt.atoms.atom_audit_stale_edge = 0;
     probe.active = true;
     ctx.defineDataProperty(object, "zjsS3HostDefinedPropertyName", zjs.JSValue.int32(42), .{}) catch |err| {
         probe.active = false;
@@ -1055,7 +1055,7 @@ test "TGC S3: a host-defined property name stays reachable across a major taken 
     probe.active = false;
 
     try std.testing.expect(probe.majors > 0);
-    try std.testing.expectEqual(@as(usize, 0), rt.atoms.atom_audit_missing_edge);
+    try std.testing.expectEqual(@as(usize, 0), rt.atoms.atom_audit_stale_edge);
 
     const answer = try ctx.getProperty(object, "zjsS3HostDefinedPropertyName");
     try std.testing.expectEqual(@as(?i32, 42), answer.asInt32());

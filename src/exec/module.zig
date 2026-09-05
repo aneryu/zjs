@@ -148,7 +148,7 @@ fn pendingDefinitionFromArtifact(
 
     for (parsed.requests, 0..) |request, request_index| {
         const resolved = if (resolved_request_names) |names|
-            runtime.atoms.dup(names[request_index])
+            names[request_index]
         else
             try resolvedRequestAtomForParsed(
                 runtime,
@@ -157,7 +157,6 @@ fn pendingDefinitionFromArtifact(
                 @intCast(request_index),
                 referrer_path,
             );
-        defer runtime.atoms.free(resolved);
         const installed_index = pending.addRequest(resolved) catch |err|
             return pendingMetadataError(err);
         if (installed_index != @as(u32, @intCast(request_index))) return error.InvalidBytecode;
@@ -758,7 +757,6 @@ fn resolvedRequestAtomForParsed(
     referrer_path: ?[]const u8,
 ) !core.Atom {
     const resolved = try resolvedRequestAtom(runtime, request_atom, referrer_path);
-    errdefer runtime.atoms.free(resolved);
     // TGC S3 §4 class B: the resolved specifier is a bare id held across the
     // tagged-name formatting allocation below.
     var resolved_roots = core.runtime.rootAtoms(.{&resolved});
@@ -769,7 +767,6 @@ fn resolvedRequestAtomForParsed(
     const resolved_name = runtime.atoms.name(resolved) orelse return error.InvalidAtom;
     const tagged_name = try syntheticModuleRegistryName(runtime.memory.allocator, resolved_name, kind);
     defer runtime.memory.allocator.free(tagged_name);
-    runtime.atoms.free(resolved);
     return runtime.internAtom(tagged_name);
 }
 
@@ -1003,7 +1000,6 @@ fn preloadFileModuleGraphInnerMode(
     }
     try appendTrackedPath(allocator, seen, path);
     const module_name = try runtime.internAtom(path);
-    defer runtime.atoms.free(module_name);
     // TGC S3 §4 class B: held across compilation of the module source.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
     module_name_roots.activate(runtime);
@@ -1202,7 +1198,6 @@ fn preloadSyntheticFileModuleTracked(
 ) !*core.module.ModuleRecord {
     const runtime = ctx.runtime;
     const module_name = try runtime.internAtom(path);
-    defer runtime.atoms.free(module_name);
     // TGC S3 §4 class B: held across the synthetic record build.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
     module_name_roots.activate(runtime);
@@ -1347,16 +1342,16 @@ fn markImmutableArrayBuffer(rt: *core.JSRuntime, object: *core.Object) !void {
 }
 
 fn resolvedRequestAtom(runtime: *core.JSRuntime, request_atom: core.Atom, referrer_path: ?[]const u8) !core.Atom {
-    const referrer = referrer_path orelse return runtime.atoms.dup(request_atom);
+    const referrer = referrer_path orelse return request_atom;
     const specifier = runtime.atoms.name(request_atom) orelse return error.InvalidAtom;
-    if (std.mem.startsWith(u8, specifier, "node:")) return runtime.atoms.dup(request_atom);
+    if (std.mem.startsWith(u8, specifier, "node:")) return request_atom;
     if (std.fs.path.isAbsolute(specifier)) {
         const resolved = try std.fs.path.resolve(runtime.memory.allocator, &.{specifier});
         defer runtime.memory.allocator.free(resolved);
         return runtime.internAtom(resolved);
     }
     if (!(std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../"))) {
-        return runtime.atoms.dup(request_atom);
+        return request_atom;
     }
     const base = std.fs.path.dirname(referrer) orelse ".";
     const resolved = try std.fs.path.resolve(runtime.memory.allocator, &.{ base, specifier });

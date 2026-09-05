@@ -1046,7 +1046,6 @@ test "test262 globals do not retain local namespace object reference" {
     try installTest262Globals(rt, ctx, global);
 
     const ns_key = try rt.internAtom("$262");
-    defer rt.atoms.free(ns_key);
     const ns_val = try global.getProperty(ns_key);
     var weak = try rt.createWeakPersistentValue(ns_val, null, null);
     defer weak.deinit();

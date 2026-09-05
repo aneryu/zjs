@@ -1119,7 +1119,6 @@ test "JSObject prototype methods enforce realm-local binding" {
     const value_b = try binding_b.new(.{ .value = 20 });
 
     const touch_key = try rt.internAtom("touch");
-    defer rt.atoms.free(touch_key);
     const touch_a = try objectFromValue(value_a).?.getProperty(touch_key);
 
     try std.testing.expectError(error.JSException, ctx_a.callFunction(touch_a, &.{}, .{ .this_value = value_b }));
@@ -1179,7 +1178,6 @@ test "JSObject install does not export constructors to the global object" {
     try ObjectType.install(ctx.core);
     const global = try ctx.globalObject();
     const name_atom = try rt.internAtom("KernelBindingNoGlobalConstructor");
-    defer rt.atoms.free(name_atom);
     try std.testing.expect(!global.hasOwnProperty(name_atom));
 
     const binding = try ObjectType.binding(ctx.core);
@@ -1370,7 +1368,6 @@ test "JSObject installs prototype method with typed self and arguments" {
 
     const object = objectFromValue(value).?;
     const add_key = try rt.internAtom("add");
-    defer rt.atoms.free(add_key);
     const add_value = try object.getProperty(add_key);
 
     const add_object = objectFromValue(add_value).?;
@@ -1407,17 +1404,16 @@ test "JSObject keeps static property names in runtime binding state" {
     _ = try ctx.globalObject();
 
     const method_atom = try rt.internAtom(method_name);
-    defer rt.atoms.free(method_atom);
 
     try ObjectType.install(ctx);
     const binding = try ObjectType.binding(ctx);
     const class_id = binding.class_id;
     ctx.destroy();
 
-    const before_unregister = rt.atoms.refCount(method_atom).?;
-    try std.testing.expect(before_unregister >= 2);
+    // TGC S3-c: the class table's name atom is a tracer edge now, so the
+    // surviving claim is that the name is still resolvable up to unregister.
+    try std.testing.expect(rt.atoms.name(method_atom) != null);
     rt.classes.unregisterDynamic(class_id);
-    try std.testing.expectEqual(before_unregister - 1, rt.atoms.refCount(method_atom).?);
 }
 
 test "JSObject typed method borrows utf8 string and byte slices" {
@@ -1479,7 +1475,6 @@ test "JSObject typed method borrows utf8 string and byte slices" {
 
     const object = objectFromValue(value).?;
     const mix_key = try rt.internAtom("mix");
-    defer rt.atoms.free(mix_key);
     const mix_value = try object.getProperty(mix_key);
 
     const result = try ctx.callFunction(mix_value, &.{
@@ -1604,7 +1599,6 @@ test "JSObject typed method errors become pending JS exceptions" {
 
 pub fn objectProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !core.JSValue {
     const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     return try object.getProperty(key);
 }
 

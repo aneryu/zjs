@@ -18,7 +18,6 @@ pub const Slot = struct {
 
 pub fn getByName(rt: *runtime.JSRuntime, slots: []const Slot, name: []const u8) !value.JSValue {
     const atom_id = try rt.internAtom(name);
-    defer rt.atoms.free(atom_id);
     return getByAtom(slots, atom_id);
 }
 
@@ -33,7 +32,6 @@ pub fn getByAtom(slots: []const Slot, atom_id: atom.Atom) value.JSValue {
 
 pub fn setExistingByName(rt: *runtime.JSRuntime, slots: []Slot, name: []const u8, next_value: value.JSValue) !void {
     const atom_id = try rt.internAtom(name);
-    defer rt.atoms.free(atom_id);
     for (slots) |*slot| {
         if (slot.name == atom_id) {
             const duplicated = next_value;

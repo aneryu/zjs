@@ -44,14 +44,13 @@ pub fn optionalGetPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_i
 pub fn propertyIn(rt: *core.JSRuntime, object_value: core.JSValue, key_value: core.JSValue) !core.JSValue {
     const object = try expectObject(object_value);
     const key = try propertyKeyAtom(rt, key_value);
-    defer rt.atoms.free(key);
     var found = object.hasProperty(key);
     if (!found and value_ops.atomNameEql(rt, key, "toString")) found = true;
     return core.JSValue.boolean(found);
 }
 
 pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
-    if (value.asSymbolAtom()) |atom_id| return rt.atoms.dup(atom_id);
+    if (value.asSymbolAtom()) |atom_id| return atom_id;
     if (value.isString()) {
         const string_value = value.asStringBody().?;
         return string_value.internAtom(rt);

@@ -464,9 +464,11 @@ pub const JSContext = struct {
     }
 
     /// Returns an owned context. Caller must release that host reference with
-    /// `destroy` exactly once. `destroy` is not "tear down this realm": it is
-    /// one `gc.release`, and `createRealm` transfers the child's create-ref
-    /// onto the realm-record value instead of returning it here.
+    /// `destroy` exactly once. `destroy` is not "tear down this realm": it
+    /// only drops the host create-ref root provider (`gc.release` was deleted
+    /// in TGC S1-b; the realm dies in the next major that finds it
+    /// unreachable), and `createRealm` transfers the child's create-ref onto
+    /// the realm-record value instead of returning it here.
     pub fn create(rt: *JSRuntime) !*JSContext {
         return createWithOptions(rt, .{});
     }
@@ -917,14 +919,6 @@ pub const JSContext = struct {
         rt.destroyRuntime(JSContext, self);
     }
 
-    pub fn dupValue(self: *JSContext, value: JSValue) JSValue {
-        return self.runtime.dupValue(value);
-    }
-
-    pub fn freeValue(self: *JSContext, value: JSValue) void {
-        self.runtime.freeValue(value);
-    }
-
     pub fn createValueHandle(self: *JSContext, value: JSValue) !runtime_mod.JSValueHandle {
         return self.runtime.createValueHandle(value);
     }
@@ -1255,17 +1249,15 @@ pub const JSContext = struct {
     }
 
     pub fn freeBacktraceFrameSnapshot(self: *JSContext, frames: []BacktraceFrame) void {
-        for (frames) |frame| {
-            self.runtime.atoms.free(frame.function_name);
-            self.runtime.atoms.free(frame.filename);
+        for (frames) |_| {
         }
         if (frames.len != 0) self.runtime.memory.free(BacktraceFrame, frames);
     }
 
     fn dupBacktraceFrame(self: *JSContext, frame: BacktraceFrame) BacktraceFrame {
         return .{
-            .function_name = self.runtime.atoms.dupForHolder(frame.function_name),
-            .filename = self.runtime.atoms.dupForHolder(frame.filename),
+            .function_name = self.runtime.atoms.noteHolderStore(frame.function_name),
+            .filename = self.runtime.atoms.noteHolderStore(frame.filename),
             .line_num = frame.line_num,
             .col_num = frame.col_num,
             .pc = frame.currentPc(),
@@ -1278,8 +1270,8 @@ pub const JSContext = struct {
 
     fn dupActiveBacktraceFrameFromSnapshot(self: *JSContext, snapshot: ActiveBacktraceSnapshot) BacktraceFrame {
         return .{
-            .function_name = self.runtime.atoms.dupForHolder(snapshot.function_name),
-            .filename = self.runtime.atoms.dupForHolder(snapshot.filename),
+            .function_name = self.runtime.atoms.noteHolderStore(snapshot.function_name),
+            .filename = self.runtime.atoms.noteHolderStore(snapshot.filename),
             .line_num = snapshot.line_num,
             .col_num = snapshot.col_num,
             .pc = snapshot.pc,
@@ -1316,8 +1308,8 @@ pub const JSContext = struct {
         }
         const stored_function_value = if (function_value.isObject()) function_value else JSValue.undefinedValue();
         self.runtime.backtrace_frames.ptr[self.runtime.backtrace_frames.len] = .{
-            .function_name = self.runtime.atoms.dupForHolder(function_name),
-            .filename = self.runtime.atoms.dupForHolder(filename),
+            .function_name = self.runtime.atoms.noteHolderStore(function_name),
+            .filename = self.runtime.atoms.noteHolderStore(filename),
             .line_num = line_num,
             .col_num = col_num,
             .location_data = location_data,
@@ -1330,10 +1322,7 @@ pub const JSContext = struct {
     pub fn popBacktraceFrame(self: *JSContext) void {
         if (self.runtime.backtrace_frames.len == 0) return;
         const idx = self.runtime.backtrace_frames.len - 1;
-        const entry = self.runtime.backtrace_frames[idx];
         self.runtime.backtrace_frames = self.runtime.backtrace_frames.ptr[0..idx];
-        self.runtime.atoms.free(entry.function_name);
-        self.runtime.atoms.free(entry.filename);
     }
 
     pub fn updateBacktracePc(self: *JSContext, pc: usize) void {

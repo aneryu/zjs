@@ -260,6 +260,10 @@ fn defineMethodData(
     defer root_frame.deactivate(rt);
 
     const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
+    // TGC S3 §4 class B: `defineOwnProperty` allocates (shape transition), so
+    // the bare id has to be a root for the whole window.
+    var key_roots = runtime.rootAtoms(.{&key});
+    key_roots.activate(rt);
+    defer key_roots.deactivate(rt);
     try target.defineOwnProperty(rt, key, Descriptor.data(rooted_value, writable, enumerable, configurable));
 }

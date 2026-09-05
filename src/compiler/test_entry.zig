@@ -38,7 +38,6 @@ pub const Program = struct {
         p.state.deinit(rt);
         p.lexer.deinit();
         p.function.deinit(rt);
-        rt.atoms.free(p.name_atom);
     }
 };
 
@@ -67,7 +66,6 @@ pub fn parseAndCompileV2TestProgram(
     options: Options,
 ) !Program {
     const name_atom = try rt.atoms.internString(name);
-    errdefer rt.atoms.free(name_atom);
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name_atom);
     errdefer function.deinit(rt);

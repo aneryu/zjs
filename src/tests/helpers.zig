@@ -40,7 +40,6 @@ pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void {
 
 pub fn makeFunction(rt: *core.JSRuntime, code: []const u8) !engine.bytecode.Bytecode {
     const name = try rt.internAtom("exec");
-    defer rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     errdefer function.deinit(rt);
     try setCodeAndStackSize(&function, code);
@@ -49,7 +48,6 @@ pub fn makeFunction(rt: *core.JSRuntime, code: []const u8) !engine.bytecode.Byte
 
 pub fn makeUncheckedFunction(rt: *core.JSRuntime, code: []const u8) !engine.bytecode.Bytecode {
     const name = try rt.internAtom("exec");
-    defer rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     errdefer function.deinit(rt);
     try function.setCode(code);
@@ -247,7 +245,6 @@ const ExceptionInfo = struct {
 
 fn getPropertyString(rt: *core.JSRuntime, obj: *core.Object, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
     const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     const val = try obj.getProperty(key);
     if (!val.isString()) return null;
 
@@ -435,7 +432,6 @@ pub const TestEngine = struct {
         const function_value = try self.createExternalHostFunctionValue(name, length, ptr, call, finalizer);
 
         const property_name = try self.runtime.internAtom(name);
-        defer self.runtime.atoms.free(property_name);
         try global_object.defineOwnProperty(self.runtime, property_name, core.Descriptor.data(function_value, true, false, true));
     }
 
@@ -536,7 +532,7 @@ pub fn sharedTestEngine() *TestEngine {
                 shared_engine_baseline_shape_props.?[idx] = prop;
                 shared_engine_baseline_shape_props.?[idx].hash_next = core.shape.no_property_index;
                 if (prop.atom_id != core.atom.null_atom) {
-                    _ = eng.runtime.atoms.dup(prop.atom_id);
+                    _ = prop.atom_id;
                 }
             }
         }
@@ -577,7 +573,7 @@ pub fn deinitSharedTestEngine() void {
     owned.deinit();
 }
 
-fn releaseSharedEngineBaselineSnapshot(rt: *core.JSRuntime) void {
+fn releaseSharedEngineBaselineSnapshot(_: *core.JSRuntime) void {
     if (shared_engine_baseline_var_refs) |var_refs| {
         std.heap.page_allocator.free(var_refs);
         shared_engine_baseline_var_refs = null;
@@ -587,8 +583,7 @@ fn releaseSharedEngineBaselineSnapshot(rt: *core.JSRuntime) void {
         shared_engine_baseline_properties = null;
     }
     if (shared_engine_baseline_shape_props) |baseline_shape_props| {
-        for (baseline_shape_props) |prop| {
-            if (prop.atom_id != core.atom.null_atom) rt.atoms.free(prop.atom_id);
+        for (baseline_shape_props) |_| {
         }
         std.heap.page_allocator.free(baseline_shape_props);
         shared_engine_baseline_shape_props = null;
@@ -743,7 +738,6 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
 pub const vm_helpers = struct {
     pub fn parseAndRunWithTopLevelChildren(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue {
         const name = try rt.internAtom("test");
-        defer rt.atoms.free(name);
         var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         defer function.deinit(rt);
 
@@ -764,7 +758,6 @@ pub const vm_helpers = struct {
 
     pub fn parseStmtAndRunWithTopLevelChildren(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue {
         const name = try rt.internAtom("test");
-        defer rt.atoms.free(name);
         var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         defer function.deinit(rt);
 
@@ -844,7 +837,6 @@ pub fn createTailOpcodeFixture(
     stack_size: u16,
 ) !core.JSValue {
     const name = try js.runtime.internAtom(name_bytes);
-    defer js.runtime.atoms.free(name);
     const fb = try zjs.bytecode.FunctionBytecode.createFixture(js.runtime, .{
         .name = name,
         .realm = js.context,

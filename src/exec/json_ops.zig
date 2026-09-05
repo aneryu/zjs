@@ -240,6 +240,9 @@ pub fn parseWithRecord(rt: *core.JSRuntime, global: ?*core.Object, value: core.J
 
 fn jsonParseFullWithRecord(comptime T: type, rt: *core.JSRuntime, global: ?*core.Object, units: []const T) !JsonParseWithRecord {
     var parser = JsonUnitParser(T){ .rt = rt, .global = global, .units = units };
+    var pending_roots = JsonPendingRecordRoots{ .runtime = rt, .head = &parser.pending_records };
+    try pending_roots.activate();
+    defer pending_roots.deactivate();
     parser.skipWhitespace();
     var record: JsonParseRecord = undefined;
     const value = try parser.parseValueRecord(&record);
@@ -355,7 +358,6 @@ const JsonParseRecord = union(enum) {
             },
             .object => |*o| {
                 for (o.entries) |*entry| {
-                    rt.atoms.free(entry.atom);
                     entry.record.deinit(rt);
                 }
                 rt.memory.allocator.free(o.entries);
@@ -363,27 +365,137 @@ const JsonParseRecord = union(enum) {
         }
     }
 
-    /// Append every cached record value into `out` so the GC roots the whole
-    /// tree for the duration of the reviver walk. qjs keeps them alive via the
-    /// ref-counted `pr->value` fields; zjs needs an explicit root slice.
-    fn collectValues(self: *const JsonParseRecord, allocator: std.mem.Allocator, out: *std.ArrayList(core.JSValue)) std.mem.Allocator.Error!void {
-        switch (self.*) {
-            .primitive => |p| try out.append(allocator, p.value),
-            .array => |a| {
-                try out.append(allocator, a.value);
-                for (a.elements) |*element| try element.collectValues(allocator, out);
-            },
-            .object => |o| {
-                try out.append(allocator, o.value);
-                for (o.entries) |*entry| try entry.record.collectValues(allocator, out);
-            },
-        }
-    }
 };
 
 const JsonParseRecordEntry = struct {
     atom: core.Atom,
     record: JsonParseRecord,
+};
+
+/// TGC S3 §2.2 root G: the parse-record tree is a native (non-GC) tree that
+/// holds both atom ids and JSValues. Once the reviver deletes a property the
+/// record is the ONLY holder of that key's atom, and the walk between two
+/// reviver calls allocates freely, so the tree needs a root provider of its
+/// own -- the `PendingDescriptorRoots` pattern in call_runtime.zig.
+///
+/// The value half was previously covered by a flat `collectValues` snapshot;
+/// reporting the slots in place instead keeps them mutable (a moving
+/// collector could rewrite them) and drops the parallel array.
+const JsonRecordRoots = struct {
+    runtime: *core.JSRuntime,
+    /// Null until `parseWithRecord` has handed the tree over. The provider is
+    /// armed BEFORE the parse so the hand-off itself -- `registerRootProvider`
+    /// grows an array, and a growth is an allocation, and an allocation is a
+    /// collection point -- happens with the tree already covered.
+    record: ?*JsonParseRecord = null,
+    registered: bool = false,
+
+    fn traceRecord(record: *JsonParseRecord, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        switch (record.*) {
+            .primitive => |*p| try visitor.value(&p.value),
+            .array => |*a| {
+                try visitor.value(&a.value);
+                for (a.elements) |*element| try traceRecord(element, visitor);
+            },
+            .object => |*o| {
+                try visitor.value(&o.value);
+                for (o.entries) |*entry| {
+                    try visitor.atomRoot(entry.atom);
+                    try traceRecord(&entry.record, visitor);
+                }
+            },
+        }
+    }
+
+    fn traceRoots(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        const self: *JsonRecordRoots = @ptrCast(@alignCast(context));
+        const record = self.record orelse return;
+        try traceRecord(record, visitor);
+    }
+
+    fn provider(self: *JsonRecordRoots) core.runtime.RootProvider {
+        return .{ .context = @ptrCast(self), .trace = traceRoots };
+    }
+
+    fn activate(self: *JsonRecordRoots) !void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        try self.runtime.registerRootProvider(self.provider());
+        self.registered = true;
+    }
+
+    fn deactivate(self: *JsonRecordRoots) void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        if (!self.registered) return;
+        self.runtime.unregisterRootProvider(self.provider());
+        self.registered = false;
+    }
+};
+
+/// One in-flight object/array parse. `JsonRecordRoots` cannot help here: the
+/// record tree does not exist until the whole parse returns, while the halves
+/// already built live in native `ArrayList`s the collector cannot see.
+///
+/// For every key but a duplicate that does not matter -- a recorded child
+/// value is also the parent object's property value, and the parent is rooted
+/// by `parseObject`'s own value frame. A duplicate key breaks exactly that
+/// invariant: parsing `{"x":{},"x":1}` overwrites the property, after which
+/// the FIRST occurrence's value is reachable only from `entries` -- and the
+/// reviver walk still needs it, because `findObjectEntry` returns the first
+/// entry. The rest of the parse allocates freely (source spans, key atoms,
+/// list growth), so that value can be collected before the walk reads it.
+///
+/// `pending` covers the one moment a completed child record is in neither
+/// place: after the recursive call filled the caller's `child_slot_storage`
+/// and before the appending `ArrayList` grew to hold it.
+const JsonPendingRecordFrame = struct {
+    previous: ?*JsonPendingRecordFrame,
+    entries: ?*std.ArrayList(JsonParseRecordEntry) = null,
+    elements: ?*std.ArrayList(JsonParseRecord) = null,
+    pending: ?*JsonParseRecord = null,
+};
+
+/// One provider for the whole recursion: the parser owns the chain head and
+/// each `parseObject`/`parseArray` pushes and pops its frame. Registering per
+/// frame instead would make `registerRootProvider`'s duplicate scan quadratic
+/// in the nesting depth.
+const JsonPendingRecordRoots = struct {
+    runtime: *core.JSRuntime,
+    head: *?*JsonPendingRecordFrame,
+    registered: bool = false,
+
+    fn traceRoots(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        const self: *JsonPendingRecordRoots = @ptrCast(@alignCast(context));
+        var cursor = self.head.*;
+        while (cursor) |frame| : (cursor = frame.previous) {
+            if (frame.entries) |list| {
+                for (list.items) |*entry| {
+                    try visitor.atomRoot(entry.atom);
+                    try JsonRecordRoots.traceRecord(&entry.record, visitor);
+                }
+            }
+            if (frame.elements) |list| {
+                for (list.items) |*element| try JsonRecordRoots.traceRecord(element, visitor);
+            }
+            if (frame.pending) |slot| try JsonRecordRoots.traceRecord(slot, visitor);
+        }
+    }
+
+    fn provider(self: *JsonPendingRecordRoots) core.runtime.RootProvider {
+        return .{ .context = @ptrCast(self), .trace = traceRoots };
+    }
+
+    fn activate(self: *JsonPendingRecordRoots) !void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        try self.runtime.registerRootProvider(self.provider());
+        self.registered = true;
+    }
+
+    fn deactivate(self: *JsonPendingRecordRoots) void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        if (!self.registered) return;
+        self.runtime.unregisterRootProvider(self.provider());
+        self.registered = false;
+    }
 };
 
 fn JsonUnitParser(comptime T: type) type {
@@ -392,6 +504,8 @@ fn JsonUnitParser(comptime T: type) type {
         global: ?*core.Object,
         units: []const T,
         index: usize = 0,
+        /// Innermost in-flight object/array record frame (`JsonPendingRecordRoots`).
+        pending_records: ?*JsonPendingRecordFrame = null,
 
         const Self = @This();
 
@@ -493,10 +607,16 @@ fn JsonUnitParser(comptime T: type) type {
             var entries = std.ArrayList(JsonParseRecordEntry).empty;
             errdefer if (record != null) {
                 for (entries.items) |*entry| {
-                    self.rt.atoms.free(entry.atom);
                     entry.record.deinit(self.rt);
                 }
                 entries.deinit(self.rt.memory.allocator);
+            };
+            // TGC S3-d: the entries built so far are native memory. Declared
+            // after the errdefer above so the pop runs BEFORE the free.
+            var pending_frame = JsonPendingRecordFrame{ .previous = self.pending_records, .entries = &entries };
+            if (record != null) self.pending_records = &pending_frame;
+            defer if (record != null) {
+                self.pending_records = pending_frame.previous;
             };
             self.skipWhitespace();
             if (self.peek() == @as(T, '}')) {
@@ -508,7 +628,6 @@ fn JsonUnitParser(comptime T: type) type {
                 self.skipWhitespace();
                 if (self.peek() != @as(T, '"')) return error.SyntaxError;
                 const key_atom = try self.parseKeyAtom();
-                defer self.rt.atoms.free(key_atom);
                 // TGC S3 §4 class B: the key is a bare id held across the
                 // recursive value parse, which allocates freely.
                 var key_atom_roots = core.runtime.rootAtoms(.{&key_atom});
@@ -525,10 +644,13 @@ fn JsonUnitParser(comptime T: type) type {
                 // child_slot_storage). A dup key adds a separate entry
                 // (json_parse_record_add, quickjs.c:49405).
                 if (child_slot) |slot| {
-                    entries.append(self.rt.memory.allocator, .{ .atom = self.rt.atoms.dup(key_atom), .record = slot.* }) catch |err| {
+                    pending_frame.pending = slot;
+                    entries.append(self.rt.memory.allocator, .{ .atom = key_atom, .record = slot.* }) catch |err| {
+                        pending_frame.pending = null;
                         slot.deinit(self.rt);
                         return err;
                     };
+                    pending_frame.pending = null;
                 }
                 try object.defineJsonParseDataProperty(self.rt, key_atom, child);
                 self.skipWhitespace();
@@ -558,6 +680,14 @@ fn JsonUnitParser(comptime T: type) type {
                 for (elements.items) |*element| element.deinit(self.rt);
                 elements.deinit(self.rt.memory.allocator);
             };
+            // Array elements are never overwritten, so their values stay
+            // reachable through the array itself; the frame is here for the
+            // duplicate-key orphan a nested OBJECT element can carry.
+            var pending_frame = JsonPendingRecordFrame{ .previous = self.pending_records, .elements = &elements };
+            if (record != null) self.pending_records = &pending_frame;
+            defer if (record != null) {
+                self.pending_records = pending_frame.previous;
+            };
             self.skipWhitespace();
             if (self.peek() == @as(T, ']')) {
                 self.index += 1;
@@ -572,10 +702,13 @@ fn JsonUnitParser(comptime T: type) type {
                 // Append the element record BEFORE storing into the array so any
                 // later failure is covered by the `elements` errdefer.
                 if (child_slot) |slot| {
+                    pending_frame.pending = slot;
                     elements.append(self.rt.memory.allocator, slot.*) catch |err| {
+                        pending_frame.pending = null;
                         slot.deinit(self.rt);
                         return err;
                     };
+                    pending_frame.pending = null;
                 }
                 if (!try object.appendDenseArrayLiteralIndex(self.rt, index, child)) {
                     // The parser owns this fresh array, so this fallback cannot
@@ -1002,7 +1135,6 @@ const SimpleJsonParser = struct {
             if (self.peek() != '"') return error.UnsupportedSimpleJson;
             const key_text = try self.parseSimpleStringBytes();
             const key = try self.rt.internAtom(key_text);
-            defer self.rt.atoms.free(key);
             // TGC S3 §4 class B.
             var key_roots = core.runtime.rootAtoms(.{&key});
             key_roots.activate(self.rt);
@@ -1235,7 +1367,6 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
 
     var list = std.ArrayList(core.Atom).empty;
     errdefer {
-        for (list.items) |atom| rt.atoms.free(atom);
         list.deinit(rt.memory.allocator);
     }
     // TGC S3 §4 class B: the accumulated ids live in a native array across
@@ -1252,10 +1383,8 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
         defer item_root_frame.deactivate(rt);
         const atom = try stringifyPropertyListAtom(rt, rooted_item) orelse continue;
         if (atomListContains(list.items, atom)) {
-            rt.atoms.free(atom);
             continue;
         }
-        errdefer rt.atoms.free(atom);
         try list.append(rt.memory.allocator, atom);
     }
     return try list.toOwnedSlice(rt.memory.allocator);
@@ -1364,7 +1493,6 @@ fn atomListContains(list: []const core.Atom, atom: core.Atom) bool {
 }
 
 fn freePropertyList(rt: *core.JSRuntime, list: []core.Atom) void {
-    for (list) |atom| rt.atoms.free(atom);
     if (list.len != 0) rt.memory.allocator.free(list);
 }
 
@@ -1447,7 +1575,6 @@ const JsonStringifyPropertyList = struct {
     has_property_list: bool = false,
 
     fn deinit(self: JsonStringifyPropertyList, rt: *core.JSRuntime) void {
-        for (self.items) |atom| rt.atoms.free(atom);
         rt.memory.allocator.free(self.items);
     }
 };
@@ -1458,8 +1585,7 @@ const SimpleJsonResult = enum {
     fallback,
 };
 
-fn deinitLengthIndexAtom(rt: *core.JSRuntime, atom: anytype) void {
-    if (atom.owned) rt.atoms.free(atom.atom);
+fn deinitLengthIndexAtom(_: *core.JSRuntime, _: anytype) void {
 }
 
 pub fn jsonParseCall(
@@ -1489,27 +1615,26 @@ pub fn jsonParseCall(
     // internalize can attach context.source and run the same-value guard,
     // mirroring qjs js_json_parse (JS_ParseJSON3 with a live pr,
     // quickjs.c:49834).
+    // Root every cached record value AND every recorded key atom for the
+    // duration of the walk (qjs keeps both alive via the ref-counted
+    // JSONParseRecord fields; TGC S3 needs an explicit provider). Armed
+    // BEFORE the parse and left tracing nothing until the tree exists:
+    // `activate` can grow the provider array, and that allocation is a
+    // collection point the finished tree must not be exposed to.
+    var record_roots = JsonRecordRoots{ .runtime = ctx.runtime };
+    try record_roots.activate();
+    defer record_roots.deactivate();
+
     var parse_result = try parseWithRecord(ctx.runtime, global, text);
-    // The record tree is freed after the walk returns and, crucially, after the
-    // record-value root frame below is popped (deinit registered first => runs
-    // last), so the borrowed record values stay rooted for the whole walk.
-    defer parse_result.record.deinit(ctx.runtime);
+    record_roots.record = &parse_result.record;
+    // The record tree is freed only after the walk returns, and the provider
+    // stops naming it in the same statement that frees it.
+    defer {
+        record_roots.record = null;
+        parse_result.record.deinit(ctx.runtime);
+    }
     parsed = parse_result.value;
     parse_result.value = core.JSValue.undefinedValue();
-
-    // Root every cached record value for the duration of the walk (qjs keeps
-    // them alive via the ref-counted JSONParseRecord.value fields).
-    var record_values = std.ArrayList(core.JSValue).empty;
-    defer record_values.deinit(ctx.runtime.memory.allocator);
-    try parse_result.record.collectValues(ctx.runtime.memory.allocator, &record_values);
-    var record_root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .mutable = &record_values.items },
-    };
-    var record_root_frame = core.runtime.ValueRootFrame{
-        .slices = &record_root_slices,
-    };
-    record_root_frame.activate(ctx.runtime);
-    defer record_root_frame.deactivate(ctx.runtime);
 
     const holder = try core.Object.create(ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(ctx.runtime, global));
     holder_value = holder.value();
@@ -2033,7 +2158,6 @@ pub fn jsonStringifyPropertyList(
 
     var list = std.ArrayList(core.Atom).empty;
     errdefer {
-        for (list.items) |atom| ctx.runtime.atoms.free(atom);
         list.deinit(ctx.runtime.memory.allocator);
     }
 
@@ -2047,10 +2171,8 @@ pub fn jsonStringifyPropertyList(
         item = try object_ops.getValueProperty(ctx, output, global, rooted_replacer, index_key.atom, caller_function, caller_frame);
         const atom = try jsonStringifyPropertyListAtom(ctx, output, global, item, caller_function, caller_frame) orelse continue;
         if (jsonAtomListContains(list.items, atom)) {
-            ctx.runtime.atoms.free(atom);
             continue;
         }
-        errdefer ctx.runtime.atoms.free(atom);
         try list.append(ctx.runtime.memory.allocator, atom);
     }
 
@@ -2445,4 +2567,98 @@ pub fn jsonObjectInStack(items: []const *core.Object, object: *core.Object) bool
 pub fn jsonAppendIndent(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), gap: []const u8, depth: usize) !void {
     var index: usize = 0;
     while (index < depth) : (index += 1) try buffer.appendSlice(rt.memory.allocator, gap);
+}
+
+// TGC S3-d: allocation-point majors while the parse-record tree is being
+// built. The tree is native memory on the general allocator, which the
+// conservative pass does not walk; the padding tail in the source below is
+// what pushes the shadowed value out of the stack slots and registers that
+// pass DOES walk.
+const S3DupKeyMajorProbe = struct {
+    rt: *core.JSRuntime,
+    active: bool = false,
+    majors: usize = 0,
+
+    fn trigger(context: ?*anyopaque, size: usize) void {
+        _ = size;
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (!self.active) return;
+        const saved_fn = self.rt.memory.trigger_gc_fn;
+        const saved_ctx = self.rt.memory.trigger_gc_ctx;
+        self.rt.memory.trigger_gc_fn = null;
+        self.rt.memory.trigger_gc_ctx = null;
+        defer {
+            self.rt.memory.trigger_gc_fn = saved_fn;
+            self.rt.memory.trigger_gc_ctx = saved_ctx;
+        }
+        const before = self.rt.gc.block_heap.mark_epoch;
+        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
+        if (self.rt.gc.block_heap.mark_epoch != before) self.majors += 1;
+    }
+};
+
+test "TGC S3-d: a duplicate JSON key's shadowed record value survives majors taken mid-parse" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // `findObjectEntry` returns the FIRST entry for a key (qjs
+    // json_parse_record_find), so the reviver walk reads the record of the
+    // SHADOWED occurrence -- whose value the second occurrence has already
+    // overwritten on the object. From that overwrite to the end of the parse
+    // its only holder is the native `entries` list, and the parse keeps
+    // allocating (source spans, key atoms, list growth).
+    const source = "{\"zjsS3DupKey\":{\"zjsS3DupInner\":\"zjsS3DupPayload\"},\"zjsS3DupKey\":1," ++
+        "\"zjsS3DupPadA\":[[[[[[[[1,2,3,4],5],6],7],8],9],10],11]," ++
+        "\"zjsS3DupPadB\":{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":{\"f\":\"gggggggggggggggg\"}}}}}}," ++
+        "\"zjsS3DupPadC\":[\"hhhhhhhhhhhhhhhh\",\"iiiiiiiiiiiiiiii\",\"jjjjjjjjjjjjjjjj\"]}";
+    var text = (try core.string.String.createAscii(rt, source)).value();
+    var text_roots = core.runtime.rootValues(.{&text});
+    text_roots.activate(rt);
+    defer text_roots.deactivate(rt);
+
+    const saved_fn = rt.memory.trigger_gc_fn;
+    const saved_ctx = rt.memory.trigger_gc_ctx;
+    var probe = S3DupKeyMajorProbe{ .rt = rt };
+    rt.memory.trigger_gc_fn = S3DupKeyMajorProbe.trigger;
+    rt.memory.trigger_gc_ctx = &probe;
+    defer {
+        rt.memory.trigger_gc_fn = saved_fn;
+        rt.memory.trigger_gc_ctx = saved_ctx;
+    }
+
+    probe.active = true;
+    var parse_result = parseWithRecord(rt, null, text) catch |err| {
+        probe.active = false;
+        return err;
+    };
+    probe.active = false;
+    defer parse_result.record.deinit(rt);
+
+    var parsed = parse_result.value;
+    var parsed_roots = core.runtime.rootValues(.{&parsed});
+    parsed_roots.activate(rt);
+    defer parsed_roots.deactivate(rt);
+
+    // Guard against a vacuous pass: the window has to have been crossed.
+    try std.testing.expect(probe.majors > 0);
+
+    var key = try rt.internAtom("zjsS3DupKey");
+    var inner = try rt.internAtom("zjsS3DupInner");
+    var key_roots = core.runtime.rootAtoms(.{ &key, &inner });
+    key_roots.activate(rt);
+    defer key_roots.deactivate(rt);
+
+    // The last occurrence won as the property value...
+    const parsed_object = object_ops.objectFromValue(parsed) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?i32, 1), (try parsed_object.getProperty(key)).asInt32());
+
+    // ...while the record still names the first, and that object is still
+    // live enough to read its own property back.
+    const shadowed_record = parse_result.record.findObjectEntry(key) orelse return error.TestUnexpectedResult;
+    const shadowed_object = object_ops.objectFromValue(shadowed_record.recordValue()) orelse
+        return error.TestUnexpectedResult;
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try core.string.appendValueUtf8(rt, &bytes, try shadowed_object.getProperty(inner));
+    try std.testing.expectEqualStrings("zjsS3DupPayload", bytes.items);
 }

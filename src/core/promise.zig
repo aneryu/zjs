@@ -222,11 +222,8 @@ test "withResolvers roots promise and resolving functions while creating result"
     const result = core.Object.fromHeader(result_value.refHeader() orelse return error.TypeError);
 
     const promise_key = try rt.internAtom("promise");
-    defer rt.atoms.free(promise_key);
     const resolve_key = try rt.internAtom("resolve");
-    defer rt.atoms.free(resolve_key);
     const reject_key = try rt.internAtom("reject");
-    defer rt.atoms.free(reject_key);
 
     const promise_value = try result.getProperty(promise_key);
     const resolve_value = try result.getProperty(resolve_key);

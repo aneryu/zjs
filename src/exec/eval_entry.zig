@@ -57,7 +57,6 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
             options.filename;
         break :blk try rt.internAtom(module_name_bytes);
     } else core.atom.null_atom;
-    defer if (module_name != core.atom.null_atom) rt.atoms.free(module_name);
     // TGC S3 §4 class B: bare id held across compilation and evaluation of
     // the whole module body.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});

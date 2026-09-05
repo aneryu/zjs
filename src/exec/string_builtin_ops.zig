@@ -2061,7 +2061,6 @@ test "string wrapper iterator split and match helpers keep values under GC" {
     const match_item = try match_object.getProperty(core.atom.atomFromUInt32(0));
     try std.testing.expect((stringValueFromReceiver(match_item) orelse return error.TypeError).eqlBytes("ba"));
     const input_key = try rt.internAtom("input");
-    defer rt.atoms.free(input_key);
     const input_value = try match_object.getProperty(input_key);
     try std.testing.expect((stringValueFromReceiver(input_value) orelse return error.TypeError).eqlBytes("ababa"));
 }

@@ -772,7 +772,7 @@ pub const Registry = struct {
         self.rehashShape(shape, old_hash);
     }
 
-    pub fn markPropertyDeleted(self: *Registry, shape: *Shape, index: usize, flags: u6) void {
+    pub fn markPropertyDeleted(_: *Registry, shape: *Shape, index: usize, flags: u6) void {
         std.debug.assert(index < shape.prop_count);
         const props = shape.props();
         const prop = &props[index];
@@ -804,7 +804,6 @@ pub const Registry = struct {
         prop.flags = flags;
         prop.atom_id = atom.null_atom;
         shape.incrementDeletedPropCount();
-        self.atoms.free(removed_atom);
     }
 
     /// Remove deleted shape/property slots while preserving the relative order
@@ -957,7 +956,7 @@ pub const Registry = struct {
             new_shape.props()[index] = .{
                 .hash_next = no_property_index,
                 .flags = prop.flags,
-                .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.dupForHolder(prop.atom_id),
+                .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.noteHolderStore(prop.atom_id),
             };
         }
         errdefer self.freePropertyAtoms(new_shape.props()[0..baseline_props.len]);
@@ -981,8 +980,7 @@ pub const Registry = struct {
 
         // Discard the OLD layout: free its prop atoms (NOT carried over) + block.
         const old_prop_count = old.prop_count;
-        for (old.props()[0..old_prop_count]) |prop| {
-            if (prop.atom_id != atom.null_atom) self.atoms.free(prop.atom_id);
+        for (old.props()[0..old_prop_count]) |_| {
         }
         self.memory.destroyWithFam(Shape, old, old_fam_bytes);
 
@@ -1067,8 +1065,7 @@ pub const Registry = struct {
         // the single block freed last (qjs js_free_shape0 releases atoms +
         // proto, then the one allocation).
         const prop_count = shape.prop_count;
-        for (shape.props()[0..prop_count]) |prop| {
-            if (prop.atom_id != atom.null_atom) self.atoms.free(prop.atom_id);
+        for (shape.props()[0..prop_count]) |_| {
         }
         self.memory.destroyWithFam(Shape, shape, fam_bytes);
     }
@@ -1111,7 +1108,7 @@ pub const Registry = struct {
             shape.props()[index] = .{
                 .hash_next = no_property_index,
                 .flags = prop.flags,
-                .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.dupForHolder(prop.atom_id),
+                .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.noteHolderStore(prop.atom_id),
             };
         }
         errdefer self.freePropertyAtoms(shape.props()[0..shape.prop_count]);
@@ -1135,9 +1132,8 @@ pub const Registry = struct {
         // already preflight a larger owner capacity hit this as a no-op.
         try self.reservePropertyAppend(shape_ptr, @as(usize, shape_ptr.*.prop_count) + 1);
 
-        const retained_atom = self.atoms.dupForHolder(atom_id);
+        const retained_atom = self.atoms.noteHolderStore(atom_id);
         var retained_atom_owned = true;
-        errdefer if (retained_atom_owned) self.atoms.free(retained_atom);
 
         const shape = shape_ptr.*;
         const index = shape.prop_count;
@@ -1154,9 +1150,8 @@ pub const Registry = struct {
         if (shape.hasPropertyHash()) self.linkPropertyHash(shape, index);
     }
 
-    fn freePropertyAtoms(self: *Registry, props: []const Property) void {
-        for (props) |prop| {
-            if (prop.atom_id != atom.null_atom) self.atoms.free(prop.atom_id);
+    fn freePropertyAtoms(_: *Registry, props: []const Property) void {
+        for (props) |_| {
         }
     }
 

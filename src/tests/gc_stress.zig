@@ -32,7 +32,6 @@ test "gc stress deterministic tiny heap preserves live roots" {
     defer frame.deactivate(&rt);
 
     const edge_key = try rt.internAtom("tiny-heap-edge");
-    defer rt.atoms.free(edge_key);
 
     for (&objects, 0..) |*slot, index| {
         slot.* = try core.Object.create(&rt, core.class.ids.object, null);
@@ -90,7 +89,6 @@ test "gc stress deterministic object cycles are reclaimed" {
     }
 
     const edge_key = try rt.internAtom("stress-edge");
-    defer rt.atoms.free(edge_key);
 
     for (objects) |obj| {
         const target_index = random.uintLessThan(usize, objects.len);
@@ -202,9 +200,7 @@ test "gc stress weak map dead cyclic keys clear values" {
     }
 
     const self_key = try rt.internAtom("stress-weak-dead-self");
-    defer rt.atoms.free(self_key);
     const peer_key = try rt.internAtom("stress-weak-dead-peer");
-    defer rt.atoms.free(peer_key);
 
     for (keys, values) |key, value| {
         try key.?.defineOwnProperty(rt, self_key, core.Descriptor.data(key.?.value(), true, true, true));
@@ -251,12 +247,10 @@ test "gc stress finalization registry dead target queues pending job" {
     var target = try core.Object.create(rt, core.class.ids.object, null);
     var target_value = target.value();
     const self_key = try rt.internAtom("stress-finalization-target-self");
-    defer rt.atoms.free(self_key);
     try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target_value, true, true, true));
 
     var held = try core.Object.create(rt, core.class.ids.object, null);
     const held_key = try rt.internAtom("stress-finalization-held");
-    defer rt.atoms.free(held_key);
     try held.defineOwnProperty(rt, held_key, core.Descriptor.data(core.JSValue.int32(@intCast(random.intRangeLessThan(i16, 1, 2048))), true, true, true));
 
     try registry.appendFinalizationRegistryCell(
@@ -324,7 +318,6 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
     }
 
     const function_key = try rt.internAtom("stress-bytecode-function");
-    defer rt.atoms.free(function_key);
     for (captured, 0..) |captured_obj, index| {
         const target_index = (index + step) % count;
         try captured_obj.?.defineOwnProperty(rt, function_key, core.Descriptor.data(functions[target_index].?.value(), true, true, true));

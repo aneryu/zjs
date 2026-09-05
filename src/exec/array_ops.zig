@@ -970,7 +970,6 @@ pub fn arrayBufferSpeciesConstructor(
 ) !core.JSValue {
     const default_name = if (shared) "SharedArrayBuffer" else "ArrayBuffer";
     const default_atom = try ctx.runtime.internAtom(default_name);
-    defer ctx.runtime.atoms.free(default_atom);
     const default_constructor = try global.getProperty(default_atom);
     const constructor_value = try getValueProperty(ctx, output, global, receiver, core.atom.ids.constructor, null, null);
     if (constructor_value.isUndefined()) {
@@ -2290,7 +2289,7 @@ pub fn arraySliceCall(
                 const elements = try ctx.runtime.memory.alloc(core.JSValue, count);
                 const src = object.arrayElements()[start .. start + count];
                 for (src, 0..) |v, i| elements[i] = v;
-                out.adoptDenseArrayElementsAssumingEmpty(elements);
+                out.adoptDenseArrayElementsAssumingEmpty(ctx.runtime, elements);
                 out.flags.may_have_indexed_properties = true;
             }
             return out_value;
@@ -2419,7 +2418,6 @@ pub fn typedArraySliceSubarrayCall(
 pub fn typedArrayConstructorForObject(rt: *core.JSRuntime, global: *core.Object, object: *core.Object) !core.JSValue {
     const name = typedArrayNameFromKind(object.typedArrayKind()) orelse return error.TypeError;
     const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     const constructor = try global.getProperty(key);
     if (!constructor.isObject()) {
         return error.TypeError;
@@ -2517,7 +2515,7 @@ fn fastDenseArraySplice(
         const elements = try rt.memory.alloc(core.JSValue, actual_delete_count);
         const src = object.arrayElements()[actual_start .. actual_start + actual_delete_count];
         for (src, 0..) |v, i| elements[i] = v;
-        removed.adoptDenseArrayElementsAssumingEmpty(elements);
+        removed.adoptDenseArrayElementsAssumingEmpty(rt, elements);
         removed.flags.may_have_indexed_properties = true;
     }
 
@@ -4218,7 +4216,6 @@ fn fromAsyncArrayLikeStep(
     }
     const items = fromAsyncStateGet(rt, state, core.atom.ids.items);
     const index_atom = try propertyAtomFromLengthIndex(rt, @intFromFloat(k));
-    defer if (index_atom.owned) rt.atoms.free(index_atom.atom);
     const k_value = try getValueProperty(ctx, output, global, items, index_atom.atom, caller_function, caller_frame);
     try fromAsyncAwait(ctx, output, global, state, k_value, from_async_phase_array_value);
 }
@@ -4237,7 +4234,6 @@ fn fromAsyncDefineElement(
     const target = fromAsyncStateGet(rt, state, core.atom.ids.target);
     const target_object = objectFromValue(target) orelse return error.TypeError;
     const index_atom = try propertyAtomFromLengthIndex(rt, @intFromFloat(fromAsyncStateNumber(rt, state, core.atom.ids.k)));
-    defer if (index_atom.owned) rt.atoms.free(index_atom.atom);
     try createDataPropertyOrThrow(ctx, output, global, target, target_object, index_atom.atom, value, caller_function, caller_frame);
 }
 
@@ -6441,7 +6437,7 @@ pub fn objectEntryArrayValue(
     const elements = try ctx.runtime.memory.alloc(core.JSValue, 2);
     elements[0] = key_value;
     elements[1] = value;
-    entry.adoptDenseArrayElementsAssumingEmpty(elements);
+    entry.adoptDenseArrayElementsAssumingEmpty(ctx.runtime, elements);
     entry.flags.may_have_indexed_properties = true;
 
     return entry_value;
@@ -6456,7 +6452,6 @@ test "objectEntryArrayValue roots direct symbol value while creating entry array
 
     const source = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     const key = try rt.internAtom("entry");
-    defer rt.atoms.free(key);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-object-entry-symbol");
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
     try source.defineOwnProperty(rt, key, core.Descriptor.data(symbol_value, true, true, true));
@@ -6487,7 +6482,6 @@ test "objectEnumerableOwnPropertiesCall roots direct symbol values while creatin
 
     const source = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     const key = try rt.internAtom("value");
-    defer rt.atoms.free(key);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-object-values-symbol");
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
     try source.defineOwnProperty(rt, key, core.Descriptor.data(symbol_value, true, true, true));
@@ -6961,7 +6955,6 @@ pub const LengthIndexAtom = struct {
     pub fn deinit(self: LengthIndexAtom, rt: *core.JSRuntime) void {
         if (self.owned) {
             rt.atoms.unpinForHost(self.atom);
-            rt.atoms.free(self.atom);
         }
     }
 };

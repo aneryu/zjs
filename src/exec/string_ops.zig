@@ -305,6 +305,17 @@ fn stringConcatSlow(
         values.deinit(rt.memory.allocator);
     }
     try values.ensureTotalCapacity(rt.memory.allocator, args.len + 1);
+    // `values` is malloc memory: not a traced carrier, not a range the
+    // conservative scan walks. Every `toStringForAnnexB` below allocates (and
+    // may run a user `toString`), so without this the string appended at
+    // iteration `i` is reachable from nothing but this buffer when iteration
+    // `i+1` collects -- the same hole as the regexp match-array staging buffer.
+    // The capacity is reserved above, so `items.ptr` is stable and the list's
+    // own `items` slice can BE the root slice; every `appendAssumeCapacity`
+    // then extends the rooted prefix for free.
+    var values_root = ValueSliceRoot{};
+    values_root.init(rt, &values.items);
+    defer values_root.deinit();
 
     const receiver_string = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     values.appendAssumeCapacity(receiver_string);
@@ -1873,7 +1884,10 @@ pub fn replaceRegExpLegacySlot(rt: *core.JSRuntime, owner: *core.Object, slot: *
         if (old.same(value)) return;
     }
     const next_value = value;
-    try owner.setOptionalValueSlot(rt, slot, next_value);
+    // NOT `setOptionalValueSlot`: that remembers the receiver, and the
+    // receiver here is the global object while the slot lives in the REALM's
+    // `regexp_legacy_statics`. See `Object.setRealmRegExpLegacySlot`.
+    owner.setRealmRegExpLegacySlot(rt, slot, next_value);
 }
 
 pub fn stringAtomId(value: core.JSValue) ?core.Atom {
@@ -2423,8 +2437,25 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     const elements = try rt.memory.alloc(core.JSValue, element_count);
     var initialized: usize = 0;
     var transferred = false;
+    // The staging buffer is native memory, so the collector cannot see it:
+    // it is neither a traced carrier nor a range the conservative scan walks,
+    // and only the machine word holding the LAST substring is a root. Every
+    // `stringSliceValue` below allocates, and since TGC S2-f a string body
+    // allocation is a collection boundary (`String.createUninitialized` ->
+    // `collectBeforeObjectAllocation`), so the capture written at iteration
+    // `i` can be condemned by the minor that iteration `i+1` triggers.
+    // Nothing asserts, because a young string cell is simply reused: the
+    // array ends up holding a live pointer to another string's bytes, which
+    // is how this arrived -- as a wrong regexp checksum, not a crash.
+    // Publish the initialized prefix as a root slice, growing it with the
+    // fill, exactly like `argsFromArray`.
+    var rooted_elements: []core.JSValue = elements[0..0];
+    var elements_root = ValueSliceRoot{};
+    elements_root.init(rt, &rooted_elements);
+    defer elements_root.deinit();
     errdefer {
         if (!transferred) {
+            rooted_elements = elements[0..0];
             rt.memory.free(core.JSValue, elements);
         }
     }
@@ -2434,6 +2465,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     // of duplicating it here and releasing a second owner in the caller.
     elements[0] = try stringSliceValue(rt, input_value, found.index, found.len);
     initialized = 1;
+    rooted_elements = elements[0..initialized];
 
     var capture_index: usize = 0;
     while (capture_index < found.capture_count) : (capture_index += 1) {
@@ -2446,13 +2478,15 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
             elements[element_index] = capture_value;
         }
         initialized += 1;
+        rooted_elements = elements[0..initialized];
     }
 
     if (groups) |groups_object| {
         try populateRegExpGroupsFromCaptureValues(rt, groups_object, found, elements[0..element_count]);
     }
 
-    out.adoptDenseArrayElementsAssumingEmpty(elements[0..element_count]);
+    out.adoptDenseArrayElementsAssumingEmpty(rt, elements[0..element_count]);
+    rooted_elements = elements[0..0];
     transferred = true;
     out.flags.may_have_indexed_properties = true;
 }
@@ -2856,7 +2890,6 @@ pub fn arraySearchCall(
             .includes => "includes",
         };
         const method_atom = try ctx.runtime.internAtom(name);
-        defer ctx.runtime.atoms.free(method_atom);
         const array_method = try array_proto.getProperty(method_atom);
         if (objectFromValue(array_method) != function_object and !is_typed_array) return null;
     }

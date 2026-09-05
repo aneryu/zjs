@@ -42,9 +42,7 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
 
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const plain_key = try js.runtime.internAtom("__w2RawTail");
-    defer js.runtime.atoms.free(plain_key);
     const method_key = try js.runtime.internAtom("__w2RawMethodTail");
-    defer js.runtime.atoms.free(method_key);
     try global.defineOwnProperty(
         js.runtime,
         plain_key,

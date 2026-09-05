@@ -305,9 +305,8 @@ pub const ReturnContinuation = struct {
     /// depth operand for `.for_of_next`, and zero for `.next`/`.to_boolean`.
     payload: u32,
 
-    pub fn deinit(self: *ReturnContinuation, rt: *core.JSRuntime) void {
+    pub fn deinit(self: *ReturnContinuation, _: *core.JSRuntime) void {
         if (self.action == .proxy_get and self.payload != core.atom.null_atom) {
-            rt.atoms.free(@intCast(self.payload));
         }
         self.action = .next;
         self.payload = 0;
@@ -4052,7 +4051,7 @@ pub const Machine = struct {
         }
         entry.continuation_payload = switch (return_action) {
             .next => 0,
-            .proxy_get => self.ctx.runtime.atoms.dup(@intCast(continuation_payload)),
+            .proxy_get => @intCast(continuation_payload),
             .for_of_next => continuation_payload,
             .to_boolean => 0,
             .native_boundary => 0,

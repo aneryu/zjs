@@ -49,15 +49,6 @@ pub const space_model_enabled: bool = address_registry_enabled;
 /// 64 KiB block heap.
 pub const block_heap_enabled: bool = trace_stw_enabled;
 
-/// TGC S3 (`docs/tracing-gc-s3-spec.md` §2.6): the atom table's liveness is
-/// decided by the tracer instead of `DynamicAtom.ref_count`. While this is
-/// `false` the whole S3-a machinery still runs -- `Collector.visitAtom` edges,
-/// the insertion barrier, black allocation and `AtomTable.sweepDead` -- but
-/// `sweepDead` only AUDITS (it reports entries rc keeps alive that the trace
-/// did not reach) and never retires an entry, so liveness is bit-for-bit the
-/// refcounted one. Flipping it to `true` makes `sweepDead` the killer.
-pub const atom_tracer_owned: bool = false;
-
 const BlockHeapMod = @import("gc_block_heap.zig");
 const gc_space = @import("gc_space.zig");
 
@@ -117,11 +108,30 @@ pub var minor_audit: bool = false;
 /// `ZJS_MINOR_AUDIT=fatal`: the audit above panics on its first hit instead
 /// of only printing, so a gate that runs the suite under it turns red.
 pub var minor_audit_fatal: bool = false;
+/// `ZJS_ATOM_AUDIT=fatal`: a holder edge that names an atom entry the sweep
+/// already retired panics on the spot instead of only printing. The default
+/// Debug behaviour is the print plus the `atom_audit_stale_edge` counter, so a
+/// latent site surfaces in the suite output without turning every unrelated
+/// test in the same binary red (`docs/tracing-gc-s3-spec.md` §2.6).
+pub var atom_audit_fatal: bool = false;
+
 /// `ZJS_GC_VERIFY_MINOR=fatal`: a PRECISE condemned-but-reachable violation
-/// panics. Conservative-only violations stay a report: the verifier's probe
-/// runs on a deeper native frame than the minor it checks, so register and
-/// stack residue differ between the two scans by construction.
+/// panics. Conservative-only violations are not violations at all: the
+/// verifier's probe runs on a deeper native frame than the minor it checks,
+/// so register and stack residue differ between the two scans by
+/// construction.
 pub var verify_minor_fatal: bool = false;
+
+/// `ZJS_GC_VERIFY_MINOR=verbose` (or any roots-diag build): print the
+/// conservative-only condemned-but-reachable reports too.
+///
+/// They are the overwhelming majority -- a `test-gc-stress` run emits ~1000
+/// such lines and zero precise ones -- and by the paragraph above every one
+/// of them is expected. A gate whose normal output is a thousand lines of
+/// expected noise is a gate nobody reads, so the default is: report precise
+/// violations (which is what `fatal` acts on), stay silent otherwise. The
+/// verdict itself is unchanged; only the printing is gated.
+pub var verify_minor_verbose: bool = roots_diag_enabled;
 
 /// TGC S0 L3: sites of stores that static reading found unbarriered. The
 /// probe below counts, per site, the state the generational barrier exists
@@ -180,6 +190,10 @@ fn readStressFromEnv() void {
         minor_audit = text.len != 0 and !std.mem.eql(u8, text, "0");
         minor_audit_fatal = std.mem.eql(u8, text, "fatal");
     }
+    if (std.c.getenv("ZJS_ATOM_AUDIT")) |raw| {
+        const text = std.mem.span(raw);
+        atom_audit_fatal = std.mem.eql(u8, text, "fatal");
+    }
     if (std.c.getenv("ZJS_GC_ARENA_AUDIT")) |raw| {
         const text = std.mem.span(raw);
         arena_audit = text.len != 0 and !std.mem.eql(u8, text, "0");
@@ -188,6 +202,7 @@ fn readStressFromEnv() void {
         const text = std.mem.span(raw);
         verify_minor = text.len != 0 and !std.mem.eql(u8, text, "0");
         verify_minor_fatal = std.mem.eql(u8, text, "fatal");
+        verify_minor_verbose = roots_diag_enabled or std.mem.eql(u8, text, "verbose");
     }
     if (comptime roots_diag_enabled) {
         if (std.c.getenv("ZJS_GC_VERIFY_MAJOR_ALL")) |raw| {
@@ -240,6 +255,30 @@ const ConcurrentState = concurrent.State;
 /// rather than a match for it; the pause budget is what argues against going
 /// further, and that trade is measurable once the block space lands.
 pub const minor_young_threshold: usize = 16 * 1024;
+
+/// The young set a crossed whole-heap threshold needs before a minor is run
+/// ahead of the major (`Registry.shouldTryMinorBeforeMajor`).
+///
+/// Lower than `minor_young_threshold` because the crossing minor's alternative
+/// is a whole-heap trace, not idleness, so it pays for itself at a far smaller
+/// young set. pdfjs crosses at ~10k young objects and so never cleared the 16k
+/// bar at all.
+///
+/// Not ZERO, which is where TGC S2-g's first landing put it, and which broke
+/// earley-boyer: a crossing arriving just after an ordinary minor found a
+/// young set of a few dozen live objects, reclaimed none of them, and three
+/// such probes in a row tripped `low_yield_limit`. Suspension then withheld
+/// the ORDINARY minors too -- the ones holding the young set down -- so it grew
+/// to 10.9M objects, the account to 910MB against a 5.6MB live set, and the 2x
+/// threshold rule compounded the rest: maxrss 81MB -> 2.6GB, wall 22.8s ->
+/// 26.1s. A degenerate probe must not get a vote in a measurement about
+/// whether this workload's young objects die.
+///
+/// Frozen at 1k on that pair (ReleaseFast, fixed work, CPU19). earley-boyer is
+/// at parity with the pre-S2-g scheduler at every value tried; pdfjs pays for
+/// a higher floor in majors: 1k -> 24 majors / 4.63s / 145MB, 4k -> 281 / 5.25s
+/// / 123MB, 16k (i.e. no separate floor) -> 904 / 6.7s / 111MB.
+pub const minor_crossing_young_floor: usize = minor_young_threshold / 16;
 
 /// Bytes the major threshold must leave free above the live set, so that a
 /// nursery can actually fill.
@@ -2066,6 +2105,20 @@ pub const Registry = struct {
         return request;
     }
 
+    /// Is the pending major request the collector pacing itself off the
+    /// allocation threshold -- exactly the request
+    /// `clearStaleAllocationThresholdRequest` is willing to discard?
+    ///
+    /// A threshold crossing is usually REPORTED rather than observed: the
+    /// allocation boundary tests `allocated_bytes + size` and records the
+    /// request before the allocation lands, so the poll it then makes can read
+    /// its own account as still under the bar. A scheduler that wants to act
+    /// on crossings has to accept both forms.
+    pub fn pendingAllocationThresholdRequest(self: Registry) bool {
+        const request = self.pendingMajorRequest() orelse return false;
+        return request.reason == .allocation_threshold and request.urgency == .soon;
+    }
+
     pub fn clearStaleAllocationThresholdRequest(self: *Registry) bool {
         const request = self.pendingMajorRequest() orelse return false;
         if (request.reason != .allocation_threshold or request.urgency != .soon) return false;
@@ -3652,6 +3705,34 @@ pub const Registry = struct {
         // `cycle_visited` headers, the bit `detachCycleCandidate` already
         // stamps on everything in the morgue.
         return self.generation.stats.young_count >= minor_young_threshold;
+    }
+
+    /// The same minor, asked at a crossed whole-heap threshold, where only the
+    /// SIZE question differs. `shouldTryMinor` asks "is the young set big
+    /// enough that a root scan pays for itself"; here the alternative is not
+    /// "do nothing" but "trace the whole heap", so the bar is
+    /// `minor_crossing_young_floor` instead of `minor_young_threshold`.
+    ///
+    /// The 16k-object bar is what made the S2-g repair a no-op on its first
+    /// measurement. pdfjs allocates ~1KB per publication, so ~10 MB of young
+    /// garbage -- the amount that crosses a 24 MB threshold over a 13.6 MB
+    /// live set -- is only ~10k objects, and every crossing therefore found
+    /// `shouldTryMinor` false and went straight to a whole-heap major: 904 of
+    /// them.
+    ///
+    /// Every other guard is retained verbatim, including the suspension (a
+    /// minor proven to reclaim nothing must not be prepended to the major) and
+    /// the stress-knob ordering.
+    pub inline fn shouldTryMinorBeforeMajor(self: *const Registry) bool {
+        if (self.phase != .none) return false;
+        if (!self.generation.minorsAllowed()) return false;
+        if (stress_collect) return self.generation.stats.young_count != 0;
+        if (self.generation.stats.young_count < minor_crossing_young_floor) return false;
+        if (self.generation.minorSuspended()) return false;
+        if (comptime concurrent_enabled) {
+            if (self.concurrent.markingActive()) return false;
+        }
+        return true;
     }
 
     /// Generational write barrier (§8.3). Lives on the Registry because the

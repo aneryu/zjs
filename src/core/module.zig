@@ -200,25 +200,16 @@ pub const PendingDefinition = struct {
         self.synthetic_kind = .none;
         self.has_top_level_await = false;
 
-        for (requests) |entry| self.atoms.free(entry.module_name);
-        for (imports) |entry| {
-            self.atoms.free(entry.import_name);
-            self.atoms.free(entry.local_name);
+        for (imports) |_| {
         }
         for (exports) |*entry| {
-            self.atoms.free(entry.export_name);
-            self.atoms.free(entry.local_name);
             if (entry.retained_cell) |cell| {
                 std.debug.assert(VarRef.fromValue(cell) != null);
             }
         }
-        for (indirect_exports) |entry| {
-            self.atoms.free(entry.export_name);
-            self.atoms.free(entry.import_name);
+        for (indirect_exports) |_| {
         }
-        for (import_attributes) |entry| {
-            self.atoms.free(entry.key);
-            self.atoms.free(entry.value);
+        for (import_attributes) |_| {
         }
 
         if (requests.len != 0) self.memory.free(RequestEntry, requests);
@@ -231,8 +222,7 @@ pub const PendingDefinition = struct {
 
     pub fn addRequest(self: *PendingDefinition, module_name: atom.Atom) !u32 {
         const index = std.math.cast(u32, self.requests.len) orelse return error.ModuleMetadataOverflow;
-        const owned_name = self.atoms.dupForHolder(module_name);
-        errdefer self.atoms.free(owned_name);
+        const owned_name = self.atoms.noteHolderStore(module_name);
         try append(self.memory, RequestEntry, &self.requests, .{ .module_name = owned_name });
         return index;
     }
@@ -246,10 +236,8 @@ pub const PendingDefinition = struct {
         is_namespace: bool,
     ) !void {
         try self.validateRequestIndex(request_index);
-        const owned_import_name = self.atoms.dupForHolder(import_name);
-        errdefer self.atoms.free(owned_import_name);
-        const owned_local_name = self.atoms.dupForHolder(local_name);
-        errdefer self.atoms.free(owned_local_name);
+        const owned_import_name = self.atoms.noteHolderStore(import_name);
+        const owned_local_name = self.atoms.noteHolderStore(local_name);
         try append(self.memory, ImportEntry, &self.imports, .{
             .request_index = request_index,
             .import_name = owned_import_name,
@@ -266,10 +254,8 @@ pub const PendingDefinition = struct {
         var_idx: u16,
     ) !void {
         if (self.exports.len > std.math.maxInt(u32)) return error.ModuleMetadataOverflow;
-        const owned_export_name = self.atoms.dupForHolder(export_name);
-        errdefer self.atoms.free(owned_export_name);
-        const owned_local_name = self.atoms.dupForHolder(local_name);
-        errdefer self.atoms.free(owned_local_name);
+        const owned_export_name = self.atoms.noteHolderStore(export_name);
+        const owned_local_name = self.atoms.noteHolderStore(local_name);
         try append(self.memory, ExportEntry, &self.exports, .{
             .export_name = owned_export_name,
             .local_name = owned_local_name,
@@ -286,10 +272,8 @@ pub const PendingDefinition = struct {
     ) !void {
         try self.validateRequestIndex(request_index);
         if (self.indirect_exports.len > std.math.maxInt(u32)) return error.ModuleMetadataOverflow;
-        const owned_export_name = self.atoms.dupForHolder(export_name);
-        errdefer self.atoms.free(owned_export_name);
-        const owned_import_name = self.atoms.dupForHolder(import_name);
-        errdefer self.atoms.free(owned_import_name);
+        const owned_export_name = self.atoms.noteHolderStore(export_name);
+        const owned_import_name = self.atoms.noteHolderStore(import_name);
         try append(self.memory, IndirectExportEntry, &self.indirect_exports, .{
             .request_index = request_index,
             .export_name = owned_export_name,
@@ -310,10 +294,8 @@ pub const PendingDefinition = struct {
         value: atom.Atom,
     ) !void {
         try self.validateRequestIndex(request_index);
-        const owned_key = self.atoms.dupForHolder(key);
-        errdefer self.atoms.free(owned_key);
-        const owned_value = self.atoms.dupForHolder(value);
-        errdefer self.atoms.free(owned_value);
+        const owned_key = self.atoms.noteHolderStore(key);
+        const owned_value = self.atoms.noteHolderStore(value);
         try append(self.memory, ImportAttributeEntry, &self.import_attributes, .{
             .request_index = request_index,
             .key = owned_key,
@@ -418,7 +400,7 @@ pub const ModuleRecord = struct {
         self.* = .{
             .memory = account,
             .atoms = atoms,
-            .module_name = atoms.dupForHolder(name),
+            .module_name = atoms.noteHolderStore(name),
         };
     }
 
@@ -494,25 +476,16 @@ pub const ModuleRecord = struct {
         self.resetLinkTransientNoFail();
         self.eval_exception = null;
 
-        for (requests) |entry| self.atoms.free(entry.module_name);
-        for (imports) |entry| {
-            self.atoms.free(entry.import_name);
-            self.atoms.free(entry.local_name);
+        for (imports) |_| {
         }
         for (exports) |*entry| {
-            self.atoms.free(entry.export_name);
-            self.atoms.free(entry.local_name);
             if (entry.retained_cell) |cell| {
                 std.debug.assert(VarRef.fromValue(cell) != null);
             }
         }
-        for (indirect_exports) |entry| {
-            self.atoms.free(entry.export_name);
-            self.atoms.free(entry.import_name);
+        for (indirect_exports) |_| {
         }
-        for (import_attributes) |entry| {
-            self.atoms.free(entry.key);
-            self.atoms.free(entry.value);
+        for (import_attributes) |_| {
         }
         if (requests.len != 0) self.memory.free(RequestEntry, requests);
         if (imports.len != 0) self.memory.free(ImportEntry, imports);
@@ -526,10 +499,8 @@ pub const ModuleRecord = struct {
         const self: *ModuleRecord = @alignCast(@fieldParentPtr("header", header));
         if (self.registry) |registry| registry.unlink(self);
 
-        const owned_module_name = self.module_name;
         self.module_name = atom.null_atom;
         self.clearForDestroy(rt);
-        self.atoms.free(owned_module_name);
 
         if (rt.gc.phase == .tracer_destroy) {
             rt.gc.deferCycleStructFree(header);

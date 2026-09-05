@@ -2240,6 +2240,24 @@ pub const Object = extern struct {
         }
     }
 
+    /// Store into one of the realm's `RegExpLegacyStatics` slots
+    /// (`RegExp.lastMatch`, `$1`..`$9`, `input`, ...).
+    ///
+    /// Same ownership rule as `setCachedRealmValue` directly above, and the
+    /// same reason: `regexp_legacy_statics` hangs off the RealmContext and is
+    /// traced from `JSContext.traceChildEdges`, never from the global object.
+    /// Remembering the global would re-trace the global at the next minor and
+    /// stop at the old, already-marked realm without ever reaching the value --
+    /// and every value stored here is a substring `exec` just allocated, i.e.
+    /// young.
+    pub fn setRealmRegExpLegacySlot(self: *Object, rt: *JSRuntime, slot: *?JSValue, next_value: ?JSValue) void {
+        slot.* = next_value;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return;
+        if (next_value) |stored| {
+            if (ctx.header.metaConst().alloc_info.heap_accounted) rt.gc.generationalBarrier(&ctx.header, stored.cycleMarkHeader());
+        }
+    }
+
     pub fn cachedRealmValue(self: *const Object, rt: *const JSRuntime, slot: RealmValueSlot) ?JSValue {
         const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
         return ctx.cached_values[@intFromEnum(slot)];
@@ -4304,7 +4322,18 @@ pub const Object = extern struct {
         return true;
     }
 
-    pub fn adoptDenseArrayElementsAssumingEmpty(self: *Object, elements: []JSValue) void {
+    /// Adopt a fully initialized dense element buffer into an empty array.
+    ///
+    /// This is a BULK WRITE and takes the same remembered-set obligation
+    /// `appendUninitializedFastArraySlot` does. `self` being freshly created
+    /// does not make it young: every caller allocates the buffer (and usually
+    /// the elements) after `createArray`, and since TGC S2-f a string body
+    /// allocation is a collection boundary too, so a minor can run in that
+    /// window and promote the array before a single element reaches it. The
+    /// array then holds young children with no record, and the next minor
+    /// condemns them -- `initRegExpMatchArrayDenseElementsFromValue` is where
+    /// that was first observed, as a silent wrong result rather than a fault.
+    pub fn adoptDenseArrayElementsAssumingEmpty(self: *Object, rt: *JSRuntime, elements: []JSValue) void {
         std.debug.assert(self.isArray());
         std.debug.assert(self.arrayArm().*.count == 0);
         std.debug.assert(self.arrayArm().*.capacity == 0);
@@ -4314,6 +4343,7 @@ pub const Object = extern struct {
         // Fully-dense adoption: the logical length equals the dense extent.
         self.arrayArm().*.length = @intCast(elements.len);
         self.flags.fast_array = true;
+        rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
     }
 
     /// Adopt a fully initialized qjs-style dense element buffer for an
@@ -4332,6 +4362,9 @@ pub const Object = extern struct {
         self.arrayArm().*.length = @intCast(elements.len);
         self.flags.fast_array = true;
         if (elements.len != 0) self.markIndexedProperties(rt);
+        // Same bulk write, same obligation as the array form above.
+        // `markIndexedProperties` is a flag set, not a barrier.
+        rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
     }
 
     /// Pop the last element of a FULLY DENSE fast array (count == length),
@@ -5550,9 +5583,12 @@ pub const Object = extern struct {
         // fields are filled (the sites array is built after the Error exists,
         // with allocations in between). Found by the S0 gc-stress gate:
         // MINOR-AUDIT reported an old, unremembered call-site object holding
-        // a condemned young function. `callsite_file` is a string and needs
-        // nothing; the barrier tolerates it anyway.
+        // a condemned young function. `callsite_file` needs the same barrier:
+        // it is a freshly built filename STRING, and since TGC S2 a string body
+        // is a collector carrier, so the old "strings are never condemned"
+        // exemption that left it out is gone.
         rt.gc.generationalBarrier(self.gcHeader(), next_function.cycleMarkHeader());
+        rt.gc.generationalBarrier(self.gcHeader(), next_file.cycleMarkHeader());
     }
 
     pub fn isCallSite(self: *const Object, rt: *const JSRuntime) bool {
@@ -5591,6 +5627,14 @@ pub const Object = extern struct {
         payload.error_stack = next_value;
         payload.error_stack_sites = null;
         payload.error_stack_site_count = 0;
+        // Same old-to-young payload store as `setErrorStackSites`. This used
+        // to need no barrier because the value is a string and strings were
+        // not registered with the collector; TGC S2 made a string body an
+        // ordinary tracer cell, so an Error promoted by a minor between its
+        // creation and its stack capture holds an unremembered young child
+        // (`ZJS_MINOR_AUDIT=fatal` reports it as owner_remembered=false ->
+        // child kind=string).
+        rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
     }
 
     pub fn errorStack(self: *const Object, rt: *const JSRuntime) ?JSValue {
@@ -5606,9 +5650,7 @@ pub const Object = extern struct {
         payload.error_stack_site_count = capturedStackSiteCount(sites_value);
         // The sites array is built after the Error instance exists, so a minor
         // in between promotes the instance and leaves this an old-to-young
-        // payload store with no funnel to catch it. `setErrorStack` next to it
-        // needs nothing: its value is a string, and strings are not registered
-        // with the collector at all, so they are never condemned.
+        // payload store with no funnel to catch it.
         rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
     }
 
@@ -7124,8 +7166,8 @@ pub const Object = extern struct {
     // / `valueReferencesVisited` survive: they are used by the weak-collection
     // cycle sweep (`sweepCycleGarbageWeakCollectionEntries`). The object/var_ref
     // edge-nulling pre-pass that used to drive them during destruction was deleted
-    // (STEP 3) — the REMOVE_CYCLES gate in `gc.releaseAndDestroy` now defends
-    // against cascades, exactly as qjs relies on its `__JS_FreeValueRT` gate.
+    // (STEP 3); `gc.releaseAndDestroy` and its REMOVE_CYCLES gate went with the
+    // rc build, and the tracer's sweep has no cascade to defend against.
     fn clearValueReferenceToVisited(
         rt: *JSRuntime,
         stored: *JSValue,
@@ -7635,7 +7677,10 @@ pub const Object = extern struct {
         };
         for (names) |name| {
             const key = try rt.internAtom(name);
-            defer rt.atoms.free(key);
+            // TGC S3 §4 class B: the define below allocates.
+            var key_roots = runtime_mod.rootAtoms(.{&key});
+            key_roots.activate(rt);
+            defer key_roots.deactivate(rt);
             try object.defineOwnPropertyAssumingNew(
                 rt,
                 key,
@@ -7708,7 +7753,10 @@ pub const Object = extern struct {
         realm_global: ?*Object,
     ) !void {
         const key = try rt.internAtom(name);
-        defer rt.atoms.free(key);
+        // TGC S3 §4 class B: the define below allocates.
+        var key_roots = runtime_mod.rootAtoms(.{&key});
+        key_roots.activate(rt);
+        defer key_roots.deactivate(rt);
         try target.defineHostAutoInitPropertyWithExternalId(
             rt,
             key,
@@ -8116,6 +8164,13 @@ pub const Object = extern struct {
             const entry = self.propertyEntry(index);
             const next_value = new_value;
             entry.slot = .{ .data = next_value };
+            // Duplicate-key overwrite writes the slot directly, so it inherits
+            // no barrier from `addProperty`; and `ensureUniqueShapeForMutation`
+            // above allocates, which since TGC S2-f is a collection boundary
+            // that can promote `self` between the parse of the key and this
+            // store. Every sibling direct `entry.slot = .{ .data = ... }` in
+            // this file barriers on the next line.
+            rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
             self.updateShapePropertyFlags(rt, index, property.Flags.data(true, true, true));
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
@@ -9506,7 +9561,6 @@ pub const Object = extern struct {
     }
 
     pub fn freeKeys(rt: *JSRuntime, keys: []atom.Atom) void {
-        for (keys) |key| rt.atoms.free(key);
         if (keys.len != 0) rt.memory.free(atom.Atom, keys);
     }
 
@@ -9839,24 +9893,19 @@ pub const Object = extern struct {
         );
     }
 
-    /// Default entry point: the caller does NOT guarantee an independent live
-    /// `atom_id` ref, so a local dup/free guard roots the atom across the shape
-    /// allocations below (which can trigger GC, whose object/shape sweep frees
-    /// prop atoms — dropping an otherwise-unrooted atom to ref_count 0 mid-call).
+    /// Default entry point: the caller does NOT promise an independent root
+    /// for `atom_id`, so the impl declares one across the allocations below.
     pub fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         return self.appendPreparedPropertyEntryImpl(false, false, rt, atom_id, entry_flags, slot);
     }
 
     /// `caller_holds_atom_ref == true` is the trusted bytecode-operand leg: the
-    /// caller already holds a live `atom_id` ref for the whole call. That is
-    /// true for OP_define_field, OP_put_field, and the simple-constructor field
-    /// table: all three borrow atoms from immutable FunctionBytecode retained
-    /// by the active function/frame. With that external root the local dup/free
-    /// guard is pure redundancy (the atom cannot reach ref_count 0 under a GC
-    /// from the shape allocations), so elide it. qjs add_property likewise
-    /// relies on the caller-held bytecode atom and takes only the Shape's owning
-    /// JS_DupAtom. MUST NOT be used with a transient/just-interned atom that has
-    /// no other root than the elided guard.
+    /// caller already reports `atom_id` to the collector for the whole call.
+    /// That is true for OP_define_field, OP_put_field and the simple-constructor
+    /// field table: all three borrow atoms from an immutable FunctionBytecode
+    /// the active frame keeps traced, so the local root frame below is pure
+    /// redundancy and is elided. MUST NOT be used with a transient /
+    /// just-interned atom that has no other root.
     ///
     /// `named_put_no_index == true` is the OP_put_field ordinary miss
     /// (`setOrDefineOwnDataPropertyForPutFieldOwned`): tagged-int and
@@ -9864,6 +9913,25 @@ pub const Object = extern struct {
     /// matches qjs add_property's probe-free named add (quickjs.c:9884-9890)
     /// and must not `bl atomIsArrayIndex`.
     inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, comptime named_put_no_index: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+        // TGC S3-c: this is the successor of the rc-era `dup`/`free` pair that
+        // used to span this call. A caller that cannot promise an independent
+        // root for `atom_id` gets a declared one here, because the shape and
+        // value growth below allocates and a major inside it would otherwise
+        // retire a just-interned id -- after which the shape would name a
+        // recycled slot. The frame must span the WHOLE call, so the comptime
+        // flag selects between two arms rather than gating a `defer` that
+        // would fire at the end of an inner block.
+        if (comptime !caller_holds_atom_ref) {
+            var rooted_atom_id = atom_id;
+            var atom_roots = runtime_mod.rootAtoms(.{&rooted_atom_id});
+            atom_roots.activate(rt);
+            defer atom_roots.deactivate(rt);
+            return appendPreparedPropertyEntryRooted(named_put_no_index, self, rt, rooted_atom_id, entry_flags, slot);
+        }
+        return appendPreparedPropertyEntryRooted(named_put_no_index, self, rt, atom_id, entry_flags, slot);
+    }
+
+    inline fn appendPreparedPropertyEntryRooted(comptime named_put_no_index: bool, self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         if (comptime runtime_mod.value_root_frames_enabled) {
             var holder: ?*Object = self;
             var in_flight: JSValue = if (entry_flags.kind == .data) slot.data else JSValue.undefinedValue();
@@ -9875,7 +9943,6 @@ pub const Object = extern struct {
             defer val_roots.deactivate(rt);
             const live_slot: property.Slot = if (entry_flags.kind == .data) .{ .data = in_flight } else slot;
             return appendPreparedPropertyEntryWork(
-                caller_holds_atom_ref,
                 named_put_no_index,
                 self,
                 rt,
@@ -9885,7 +9952,6 @@ pub const Object = extern struct {
             );
         }
         return appendPreparedPropertyEntryWork(
-            caller_holds_atom_ref,
             named_put_no_index,
             self,
             rt,
@@ -9895,14 +9961,7 @@ pub const Object = extern struct {
         );
     }
 
-    inline fn appendPreparedPropertyEntryWork(comptime caller_holds_atom_ref: bool, comptime named_put_no_index: bool, self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
-        // Root the atom across the shape allocations below unless the caller
-        // already holds a live ref. The dup/free must span the WHOLE function
-        // (defer at function scope), so gate via comptime rather than a runtime
-        // `if` block — a `defer` inside an `if` would fire at the block's end,
-        // before the allocations it must protect.
-        if (!caller_holds_atom_ref) _ = rt.atoms.dup(atom_id);
-        defer if (!caller_holds_atom_ref) rt.atoms.free(atom_id);
+    inline fn appendPreparedPropertyEntryWork(comptime named_put_no_index: bool, self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         // qjs add_property invalidates the standard Array-prototype marker
         // before any fallible shape/property growth. The invalidation is
         // intentionally sticky even if the later allocation fails.
@@ -10032,7 +10091,7 @@ pub const Object = extern struct {
 
     fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize, is_array_index: bool) !void {
         // No local atom guard: appendPreparedPropertyEntryImpl reaches this
-        // either with its own `atoms.dup(atom_id)` guard or through a trusted
+        // either with its own `atom_id` guard or through a trusted
         // bytecode-operand leg whose FunctionBytecode independently roots the
         // atom. In both cases `atom_id` survives any GC triggered by the shape
         // allocations below. A second dup/free here would duplicate that root;
@@ -10613,7 +10672,6 @@ test "object value refs keep nested symbol bodies without external symbol roots"
     var object_value = object.value();
 
     const key = try rt.internAtom("external-object-root-symbol-slot");
-    defer rt.atoms.free(key);
     const nested_value = try rt.newSymbolValue("external-object-root-nested-symbol");
     const nested_symbol = nested_value.asSymbolAtom().?;
     try object.defineOwnProperty(rt, key, descriptor.Descriptor.data(nested_value, true, true, true));
@@ -10931,7 +10989,7 @@ fn appendAtom(rt: *JSRuntime, keys: *[]atom.Atom, atom_id: atom.Atom) OwnKeysErr
     const next = try rt.allocRuntime(atom.Atom, keys.*.len + 1);
     errdefer rt.memory.free(atom.Atom, next);
     @memcpy(next[0..keys.*.len], keys.*);
-    next[keys.*.len] = rt.atoms.dup(atom_id);
+    next[keys.*.len] = atom_id;
     const old = keys.*;
     keys.* = next;
     if (old.len != 0) rt.memory.free(atom.Atom, old);
@@ -10995,7 +11053,7 @@ fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue, prototype: ?*
     const elements = try rt.memory.alloc(JSValue, 2);
     elements[0] = key_value;
     elements[1] = rooted_value;
-    arr.adoptDenseArrayElementsAssumingEmpty(elements);
+    arr.adoptDenseArrayElementsAssumingEmpty(rt, elements);
     arr.flags.may_have_indexed_properties = true;
     return arr.value();
 }

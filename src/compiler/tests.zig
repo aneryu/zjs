@@ -36,7 +36,6 @@ const V2Parse = struct {
         h.rt = try core.JSRuntime.create(std.testing.allocator);
         errdefer h.rt.destroy();
         h.name_atom = try h.rt.atoms.internString("s2g1");
-        errdefer h.rt.atoms.free(h.name_atom);
         h.function = bytecode_mod.Bytecode.init(&h.rt.memory, &h.rt.atoms, h.name_atom);
         errdefer h.function.deinit(h.rt);
         h.lex = parser_mod.Lexer.init(std.testing.allocator, &h.rt.atoms, src);
@@ -63,7 +62,6 @@ const V2Parse = struct {
     fn deinit(h: *V2Parse) void {
         h.state.deinit(h.rt);
         h.function.deinit(h.rt);
-        h.rt.atoms.free(h.name_atom);
         h.rt.destroy();
     }
 };
@@ -85,12 +83,14 @@ const V2Exec = struct {
         h.ctx = try core.JSContext.create(h.rt);
         errdefer h.ctx.destroy();
         h.name_atom = try h.rt.atoms.internString("compiler-s4-exec");
-        errdefer h.rt.atoms.free(h.name_atom);
         h.function = bytecode_mod.Bytecode.init(&h.rt.memory, &h.rt.atoms, h.name_atom);
         errdefer h.function.deinit(h.rt);
         h.lex = parser_mod.Lexer.init(std.testing.allocator, &h.rt.atoms, src);
         errdefer h.lex.deinit();
         h.state = try P.ParseState.initCanonicalRootWithRuntime(h.rt, &h.lex, &h.function);
+        // TGC S3-b: `h` is a stack local and `h.state` never moves after this
+        // assignment, so the providers may register here.
+        try h.state.activateCompileRoots();
         h.state.function_def.is_global_var = true;
         h.state.top_level_functions_as_children = true;
         try h.state.beginProgramEmission();
@@ -102,7 +102,6 @@ const V2Exec = struct {
         h.lex.deinit();
         h.function.deinit(h.rt);
         h.ctx.destroy();
-        h.rt.atoms.free(h.name_atom);
         h.rt.destroy();
     }
 };
@@ -197,6 +196,13 @@ fn installedFunctionHasShortOpcode(fb: *const bytecode_mod.FunctionBytecode) !bo
 /// tree to v2, finalize through the production packed-FB pipeline, and execute
 /// it on the VM. The returned completion value is owned by the caller.
 fn compileAndRun(h: *V2Exec) !core.JSValue {
+    return compileAndRunWithHook(h, null);
+}
+
+/// `compileAndRun` with a hook that runs after the parse and before
+/// `createFunctionBytecode` -- the window in which the FunctionDef tree owns
+/// every constant and no artifact has been published (TGC S3-b).
+fn compileAndRunWithHook(h: *V2Exec, before_finalize: ?*const fn (*V2Exec) anyerror!void) !core.JSValue {
     try h.state.enableReturnCompletion();
     try P.parseProgramStatements(
         &h.state,
@@ -204,6 +210,7 @@ fn compileAndRun(h: *V2Exec) !core.JSValue {
     );
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
     try h.state.finalizeEvalReturn();
+    if (before_finalize) |hook| try hook(h);
 
     const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
         &h.state.function_def,
@@ -585,26 +592,21 @@ test "compiler.tests: atom ownership balances across rollback and deinit" {
     defer rt.destroy();
 
     const atom = try rt.atoms.internString("compiler_atom_ownership");
-    defer rt.atoms.free(atom);
-    const base = rt.atoms.refCount(atom).?;
 
     var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
     defer b.deinit();
 
-    try b.emitAtomOpOwned(0x80, rt.atoms.dup(atom));
-    try b.emitAtomOpOwned(0x81, rt.atoms.dup(atom));
-    try b.emitAtomOpOwned(0x82, rt.atoms.dup(atom));
+    try b.emitAtomOpOwned(0x80, atom);
+    try b.emitAtomOpOwned(0x81, atom);
+    try b.emitAtomOpOwned(0x82, atom);
     const snap = b.snapshot();
 
-    try b.emitAtomOpOwned(0x83, rt.atoms.dup(atom));
-    try b.emitAtomOpOwned(0x84, rt.atoms.dup(atom));
-    try std.testing.expectEqual(base + 5, rt.atoms.refCount(atom).?);
+    try b.emitAtomOpOwned(0x83, atom);
+    try b.emitAtomOpOwned(0x84, atom);
 
     b.rollback(snap);
-    try std.testing.expectEqual(base + 3, rt.atoms.refCount(atom).?);
 
     b.deinit();
-    try std.testing.expectEqual(base, rt.atoms.refCount(atom).?);
 }
 
 test "compiler.tests: rollback restores a shared label reloc chain" {
@@ -791,7 +793,6 @@ test "compiler.s2g1: optional chain field" {
     defer h.deinit();
 
     const field_atom = try h.rt.atoms.internString("b");
-    defer h.rt.atoms.free(field_atom);
 
     try P.parseExpr(&h.state);
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -975,7 +976,6 @@ test "compiler.s2g1: optional chain atom ownership" {
     defer h.deinit();
 
     const field_atom = try h.rt.atoms.internString("b");
-    defer h.rt.atoms.free(field_atom);
 
     try P.parseExpr(&h.state);
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -1901,7 +1901,6 @@ test "compiler.s2g4: plain field assignment rewinds getter" {
     defer h.deinit();
 
     const field_atom = try h.rt.atoms.internString("b");
-    defer h.rt.atoms.free(field_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -1933,7 +1932,6 @@ test "compiler.s2g4: compound field assignment reemits getter" {
     defer h.deinit();
 
     const field_atom = try h.rt.atoms.internString("b");
-    defer h.rt.atoms.free(field_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -1995,7 +1993,6 @@ test "compiler.s2g4: postfix field update preserves old value" {
     defer h.deinit();
 
     const field_atom = try h.rt.atoms.internString("b");
-    defer h.rt.atoms.free(field_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -2055,9 +2052,7 @@ test "compiler.s2g4: minimal class expression and default constructor" {
     defer h.deinit();
 
     const empty_atom = try h.rt.atoms.internString("");
-    defer h.rt.atoms.free(empty_atom);
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
-    defer h.rt.atoms.free(fields_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -2122,9 +2117,7 @@ test "compiler.s2g4: class declaration stores local binding" {
     defer h.deinit();
 
     const class_atom = try h.rt.atoms.internString("C");
-    defer h.rt.atoms.free(class_atom);
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
-    defer h.rt.atoms.free(fields_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -2190,11 +2183,8 @@ test "compiler.s2g4: named class method splices runtime definition" {
     defer h.deinit();
 
     const empty_atom = try h.rt.atoms.internString("");
-    defer h.rt.atoms.free(empty_atom);
     const method_atom = try h.rt.atoms.internString("m");
-    defer h.rt.atoms.free(method_atom);
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
-    defer h.rt.atoms.free(fields_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -2276,7 +2266,6 @@ test "compiler.s2g4: explicit constructor rolls back parent closure" {
     defer h.deinit();
 
     const empty_atom = try h.rt.atoms.internString("");
-    defer h.rt.atoms.free(empty_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -2339,9 +2328,7 @@ test "compiler.s2g4: derived default constructor returns checked this" {
     defer h.deinit();
 
     const empty_atom = try h.rt.atoms.internString("");
-    defer h.rt.atoms.free(empty_atom);
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
-    defer h.rt.atoms.free(fields_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -2404,13 +2391,9 @@ test "compiler.s2g4: instance field uses dormant brand prologue" {
     defer h.deinit();
 
     const empty_atom = try h.rt.atoms.internString("");
-    defer h.rt.atoms.free(empty_atom);
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
-    defer h.rt.atoms.free(fields_atom);
     const home_atom = try h.rt.atoms.internString("<home_object>");
-    defer h.rt.atoms.free(home_atom);
     const field_atom = try h.rt.atoms.internString("x");
-    defer h.rt.atoms.free(field_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -2476,11 +2459,8 @@ test "compiler.s2g4: private method patches instance brand prologue" {
     defer h.deinit();
 
     const empty_atom = try h.rt.atoms.internString("");
-    defer h.rt.atoms.free(empty_atom);
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
-    defer h.rt.atoms.free(fields_atom);
     const home_atom = try h.rt.atoms.internString("<home_object>");
-    defer h.rt.atoms.free(home_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -2569,9 +2549,7 @@ test "compiler.s2g4: static block nests closure in static initializer" {
     defer h.deinit();
 
     const empty_atom = try h.rt.atoms.internString("");
-    defer h.rt.atoms.free(empty_atom);
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
-    defer h.rt.atoms.free(fields_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -2653,11 +2631,8 @@ test "compiler.s2g4: static field emits through static initializer" {
     defer h.deinit();
 
     const empty_atom = try h.rt.atoms.internString("");
-    defer h.rt.atoms.free(empty_atom);
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
-    defer h.rt.atoms.free(fields_atom);
     const field_atom = try h.rt.atoms.internString("x");
-    defer h.rt.atoms.free(field_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -2720,7 +2695,6 @@ test "compiler.s2g4: computed method splices key and closure" {
     defer h.deinit();
 
     const empty_atom = try h.rt.atoms.internString("");
-    defer h.rt.atoms.free(empty_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -2777,9 +2751,7 @@ test "compiler.s2g4: getter child keeps return terminal" {
     defer h.deinit();
 
     const empty_atom = try h.rt.atoms.internString("");
-    defer h.rt.atoms.free(empty_atom);
     const getter_atom = try h.rt.atoms.internString("g");
-    defer h.rt.atoms.free(getter_atom);
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
@@ -3495,6 +3467,177 @@ test "compiler.p5: FunctionDef owners are inert after the FunctionBytecode escap
     try std.testing.expect(owners.child_functions >= 1);
 }
 
+fn s3bDrainGc(rt: *core.JSRuntime) void {
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+        std.debug.assert(polls < 100_000);
+        _ = rt.pollGC(null, .safepoint) catch break;
+    }
+}
+
+/// Every GC-typed cpool slot in the def tree must be marked by the major that
+/// just ran. `undefined` placeholders (a nested function's reserved slot,
+/// filled only by `installChildFunctionBytecodes`) carry no header and are
+/// skipped; `counted` accumulates the slots that were actually checked so a
+/// caller can prove the walk saw something.
+fn s3bExpectDefTreeMarked(
+    rt: *core.JSRuntime,
+    fd: *const bytecode_mod.function_def.FunctionDef,
+    counted: *usize,
+) !void {
+    for (fd.cpool) |value| {
+        const header = value.cycleMarkHeader() orelse continue;
+        // A parse-time cpool BigInt is deliberately NOT on the GC list:
+        // `BigInt.register` runs only when the FunctionBytecode is published,
+        // and until then the compiler owns it by hand
+        // (`destroyIfReservedValue`). It is outside the tracer, so it can be
+        // neither marked nor swept; the script's `typeof` check is what proves
+        // that path still works under collection pressure.
+        if (value.isBigInt() and !core.bigint.BigInt.fromHeader(header).isRegistered()) continue;
+        counted.* += 1;
+        try std.testing.expect(rt.gc.headerMarked(header));
+    }
+    for (fd.child_list) |child| try s3bExpectDefTreeMarked(rt, child, counted);
+}
+
+fn s3bMajorBeforeFinalize(h: *V2Exec) anyerror!void {
+    // The parse is done and nothing is published: string literal bodies and
+    // the tagged-template arrays live only in `FunctionDef.cpool`, a Zig-heap
+    // `[]JSValue` that neither the conservative stack scan nor any tracer edge
+    // reaches. Only `State.traceCompileValueRoots` can keep them.
+    _ = try h.rt.forceMajorGC(null);
+    s3bDrainGc(h.rt);
+    var counted: usize = 0;
+    try s3bExpectDefTreeMarked(h.rt, &h.state.function_def, &counted);
+    // The RegExp literal's pattern string and its compiled-bytecode string.
+    try std.testing.expect(counted >= 2);
+    // Two nested functions really did become child defs.
+    try std.testing.expect(h.state.function_def.child_list.len >= 2);
+}
+
+test "TGC S3-b: a major between parse and finalize keeps cpool constants alive" {
+    // Ordinary string literals become `push_atom_value` atoms (qjs
+    // emit_push_const as_atom), so they are the S3-b atom half. The literals
+    // that DO put GC cells in the cpool are the RegExp (a pattern string and a
+    // compiled-bytecode string) and the wide BigInt. The nested function and
+    // the arrow each reserve a child cpool slot that finalize later fills with
+    // a FunctionBytecode. The script returns a number, so a freed or recycled
+    // constant shows up as a wrong answer, not merely as a crash.
+    const source =
+        \\var s3bRe = /s3b-(alpha|beta)+/g;
+        \\var s3bBig = 123456789012345678901234567890n;
+        \\var s3bOuter = function (a) {
+        \\  var inner = function (b) { return b + "-in"; };
+        \\  return inner(a);
+        \\};
+        \\var s3bArrow = (q) => q + "-ar";
+        \\(s3bRe.test("s3b-alpha") ? 1 : 0) +
+        \\(typeof s3bBig === "bigint" ? 2 : 0) +
+        \\(s3bOuter("x") === "x-in" ? 4 : 0) +
+        \\(s3bArrow("y") === "y-ar" ? 8 : 0);
+    ;
+    var h: V2Exec = undefined;
+    try V2Exec.init(&h, source);
+    defer h.deinit();
+
+    const collections_before = h.rt.gc.stats.collections;
+    const saved_threshold = h.rt.gcThreshold();
+    h.rt.setGCThreshold(0);
+    const result = compileAndRunWithHook(&h, s3bMajorBeforeFinalize) catch |err| {
+        h.rt.setGCThreshold(saved_threshold);
+        return err;
+    };
+    h.rt.setGCThreshold(saved_threshold);
+    try std.testing.expect(h.rt.gc.stats.collections > collections_before);
+    try std.testing.expectEqual(@as(i32, 15), result.asInt32().?);
+}
+
+fn s3bExpectTemplateArraysMarked(h: *V2Exec) anyerror!void {
+    _ = try h.rt.forceMajorGC(null);
+    s3bDrainGc(h.rt);
+    var counted: usize = 0;
+    try s3bExpectDefTreeMarked(h.rt, &h.state.function_def, &counted);
+    // The frozen cooked array (the raw array hangs off its `raw` property).
+    try std.testing.expect(counted >= 1);
+    // The tagged template's frozen array pair is an OBJECT in some cpool.
+    var objects: usize = 0;
+    for (h.state.function_def.child_list) |child| {
+        for (child.cpool) |value| {
+            if (value.isObject()) objects += 1;
+        }
+    }
+    for (h.state.function_def.cpool) |value| {
+        if (value.isObject()) objects += 1;
+    }
+    try std.testing.expect(objects >= 1);
+
+    // The precise window ends HERE, with the compile. Everything above is
+    // what the test wants scanned exactly (a stack ghost would make the
+    // in-window collection prove nothing); everything below is
+    // `compileAndRunWithHook` holding the published FunctionBytecode, then
+    // the function object, then the VM stack in NATIVE LOCALS -- state
+    // `.declared_only` cannot see and is not supposed to. Under
+    // `ZJS_GC_STRESS` the tick-driven collection lands in exactly that gap
+    // and reclaims the FunctionBytecode, and the first `realmContext` read
+    // of the run then faults on a recycled cell. The conservative scan is
+    // production's answer to that gap, so restore it.
+    h.rt.restoreDefaultRootScanForTest();
+}
+
+test "TGC S3-b: a collection inside the tagged-template window keeps cooked and raw" {
+    // The tagged template's frozen cooked/raw pair is one of the few GC
+    // OBJECTS a compile creates, and it lands in a `FunctionDef.cpool` -- here
+    // the ARROW's def, one level down from the root, which is what makes this
+    // a test of the recursive `child_list` walk and not just of the root pool.
+    //
+    // Two collections are forced. One lands inside
+    // `TaggedTemplateObjectBuilder.addPart`, the window where the builder on
+    // the parse stack is the only holder (`force_gc_in_window_for_test`), and
+    // one lands between parse and finalize. The root scan is precise, so the
+    // stack holds nothing. Cooked and raw differ (a real newline vs the
+    // two-character escape), so the script can only answer 15 if both arrays
+    // came through with their contents.
+    //
+    // Finding: the in-window collection is survivable without any root of its
+    // own -- freshly allocated cells are not condemned by the cycle they are
+    // born into -- so no provider entry was added for that window. The cpool
+    // half is different and is exactly what `traceCompileValueRoots` covers:
+    // dropping it turns this test red.
+    const source =
+        \\var s3bTagFn = function (strings, sub) {
+        \\  return (strings[0] === "a\nb" ? 1 : 0) +
+        \\         (strings.raw[0] === "a\\nb" ? 2 : 0) +
+        \\         (sub === "Z" ? 4 : 0) +
+        \\         (strings[1] === "c" ? 8 : 0);
+        \\};
+        \\var s3bMake = (v) => s3bTagFn`a\nb${v}c`;
+        \\s3bMake("Z");
+    ;
+    var h: V2Exec = undefined;
+    try V2Exec.init(&h, source);
+    defer h.deinit();
+    // Precise for the COMPILE only; `s3bExpectTemplateArraysMarked` closes the
+    // window at its end, before the FunctionBytecode becomes a native local.
+    h.rt.forcePreciseRootScanForTest();
+    defer h.rt.restoreDefaultRootScanForTest();
+
+    const collections_before = h.rt.gc.stats.collections;
+    const saved_threshold = h.rt.gcThreshold();
+    h.rt.setGCThreshold(0);
+    P.TaggedTemplateBuilderTestHook.force_gc_in_window_for_test = true;
+    const result = compileAndRunWithHook(&h, s3bExpectTemplateArraysMarked) catch |err| {
+        P.TaggedTemplateBuilderTestHook.force_gc_in_window_for_test = false;
+        h.rt.setGCThreshold(saved_threshold);
+        return err;
+    };
+    P.TaggedTemplateBuilderTestHook.force_gc_in_window_for_test = false;
+    h.rt.setGCThreshold(saved_threshold);
+
+    // Keep the test honest: if no collection landed, it proves nothing.
+    try std.testing.expect(h.rt.gc.stats.collections > collections_before);
+    try std.testing.expectEqual(@as(i32, 15), result.asInt32().?);
+}
+
 test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {
     // Identifiers only -- no string literals, no nested functions -- so the
     // FunctionDef cpool stays empty and the forced major has nothing but atom
@@ -3522,7 +3665,6 @@ test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {
     defer ctx.destroy();
 
     const name_atom = try rt.atoms.internString("s3b-parse-scope");
-    defer rt.atoms.free(name_atom);
     var function = bytecode_mod.Bytecode.init(&rt.memory, &rt.atoms, name_atom);
     defer function.deinit(rt);
     var lex = parser_mod.Lexer.init(std.testing.allocator, &rt.atoms, source);
@@ -3530,7 +3672,7 @@ test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {
 
     var state = try P.ParseState.initCanonicalRootWithRuntime(rt, &lex, &function);
     defer state.deinit(rt);
-    try state.activateAtomScope();
+    try state.activateCompileRoots();
     state.function_def.is_global_var = true;
     state.top_level_functions_as_children = true;
     try state.beginProgramEmission();
@@ -3552,7 +3694,6 @@ test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {
 
     for (idents) |name| {
         const id = try rt.atoms.internString(name);
-        defer rt.atoms.free(id);
         const entry = &rt.atoms.entries[id - core.atom.first_dynamic_atom];
         std.testing.expectEqual(epoch, entry.mark_epoch) catch |err| {
             std.debug.print("unmarked parse-time atom: {s}\n", .{name});
@@ -3586,8 +3727,6 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
 
     {
         const probe = try rt.atoms.internString("escapeAuditProbeName");
-        defer rt.atoms.free(probe);
-        const baseline = rt.atoms.refCount(probe).?;
 
         try state.enableReturnCompletion();
         try P.parseProgramStatements(
@@ -3609,27 +3748,14 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
             .{ .realm = ctx },
         );
         _ = core.JSValue.functionBytecode(&fb_slice[0].header);
-        const after_compile = rt.atoms.refCount(probe).?;
-        try std.testing.expect(after_compile > baseline);
-
-        // The compiler releases its producer at the consumption point, so the
-        // only refs left after publication are the artifact's own. Account for
-        // them exactly rather than weakening the FB-owner check.
-        try std.testing.expectEqual(
-            baseline + phase1_probe_refs,
-            after_compile,
-        );
 
         state.deinit(rt);
         lex.deinit();
         function.deinit(rt);
 
-        // Compiler teardown releases no artifact-owned atom: the escaped refs
-        // are exactly the ones the published FunctionBytecode owns.
-        try std.testing.expectEqual(
-            baseline + phase1_probe_refs,
-            rt.atoms.refCount(probe).?,
-        );
+        // TGC S3-c: the count ledger is gone, so the surviving claim is the
+        // one that matters -- compiler teardown does not retire an atom the
+        // published FunctionBytecode still names.
         try std.testing.expect(rt.atoms.name(probe) != null);
 
         // The escaped refs are owned by the published FunctionBytecode and
@@ -3638,10 +3764,8 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
         // FunctionBytecode is the thing that must die, and `ctx` is reached
         // through the host create-ref's root provider.
         _ = rt.runObjectCycleRemoval();
-        try std.testing.expectEqual(baseline, rt.atoms.refCount(probe).?);
     }
 
-    rt.atoms.free(name_atom);
     ctx.destroy();
     rt.destroy();
 }

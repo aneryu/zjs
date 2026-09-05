@@ -321,7 +321,6 @@ pub const IteratorPayload = struct {
         destroyOptionalValue(rt, &self.zip_keys);
         const atom_keys = self.atom_keys;
         self.atom_keys = &.{};
-        for (atom_keys) |atom_id| rt.atoms.free(atom_id);
         if (atom_keys.len != 0) rt.memory.free(atom.Atom, atom_keys);
     }
 
@@ -1112,9 +1111,7 @@ pub const FunctionPayload = struct {
     pub fn destroyNative(self: *FunctionPayload, rt: *JSRuntime) void {
         const fields = &self.native;
         fields.realm.deinit();
-        const native_dispatch_name = fields.native_dispatch_name;
         fields.native_dispatch_name = atom.null_atom;
-        rt.atoms.free(native_dispatch_name);
         self.destroyRare(rt);
     }
 

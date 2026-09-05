@@ -336,7 +336,6 @@ fn settleModuleEvaluationWaiters(
     var namespace = core.JSValue.undefinedValue();
     if (!rejected) {
         const module_name = try state.runtime.internAtom(path);
-        defer state.runtime.atoms.free(module_name);
         // TGC S3 §4 class B: bare module-name id held across module work.
         var module_name_roots = core.runtime.rootAtoms(.{&module_name});
         module_name_roots.activate(state.runtime);
@@ -375,7 +374,6 @@ fn takeRecordedModuleEvaluationRejection(
     path: []const u8,
 ) !?core.JSValue {
     const module_name = try runtime.internAtom(path);
-    defer runtime.atoms.free(module_name);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
     module_name_roots.activate(runtime);
@@ -393,7 +391,6 @@ fn moduleDependencyRejection(
 ) !?core.JSValue {
     const runtime = context.runtime;
     const module_name = try runtime.internAtom(path);
-    defer runtime.atoms.free(module_name);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
     module_name_roots.activate(runtime);
@@ -441,7 +438,6 @@ fn recordModuleEvaluationRejection(
 ) !void {
     const runtime = context.runtime;
     const module_name = try runtime.internAtom(path);
-    defer runtime.atoms.free(module_name);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
     module_name_roots.activate(runtime);
@@ -877,7 +873,6 @@ pub fn evalFileModuleGraphWithOutput(
     }
     try exec.module.preloadFileModuleGraphWithOrder(io, allocator, context, source_text, normalized_filename, max_source_size, &module_postorder);
     const root_module_name = try runtime.internAtom(normalized_filename);
-    defer runtime.atoms.free(root_module_name);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var root_module_name_roots = core.runtime.rootAtoms(.{&root_module_name});
     root_module_name_roots.activate(runtime);
@@ -946,7 +941,6 @@ pub fn evalFileModuleGraphWithOutput(
 fn preloadedModuleNeedsEvaluation(context: *core.JSContext, path: []const u8) bool {
     const runtime = context.runtime;
     const module_name = runtime.internAtom(path) catch return true;
-    defer runtime.atoms.free(module_name);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
     module_name_roots.activate(runtime);
@@ -973,7 +967,6 @@ pub fn evalFileModuleGraphWithHostHooks(
     try preloadFileModuleGraphWithHostHooks(allocator, runtime, context, host_hooks, source_text, filename, &module_postorder);
 
     const root_module_name = try runtime.internAtom(filename);
-    defer runtime.atoms.free(root_module_name);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var root_module_name_roots = core.runtime.rootAtoms(.{&root_module_name});
     root_module_name_roots.activate(runtime);
@@ -1083,7 +1076,6 @@ fn evalPreloadedFileModuleStep(
     var input_continuation = continuation_value;
 
     const module_name = try runtime.internAtom(filename);
-    defer runtime.atoms.free(module_name);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
     module_name_roots.activate(runtime);
@@ -1229,7 +1221,6 @@ fn enqueueDeferredModuleStart(
 ) !void {
     const runtime = context.runtime;
     const module_name = try runtime.internAtom(filename);
-    defer runtime.atoms.free(module_name);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
     module_name_roots.activate(runtime);
@@ -1661,7 +1652,6 @@ fn hasActiveAsyncDependency(
 ) !bool {
     const runtime = context.runtime;
     const module_name = try runtime.internAtom(filename);
-    defer runtime.atoms.free(module_name);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
     module_name_roots.activate(runtime);
@@ -1777,7 +1767,6 @@ fn evalDynamicImportModule(
     defer allocator.free(target_path);
 
     const module_name = try runtime.internAtom(target_path);
-    defer runtime.atoms.free(module_name);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
     module_name_roots.activate(runtime);
@@ -1872,7 +1861,6 @@ fn evalDynamicImportModule(
 
     for (postorder.items) |path| {
         const module_atom = try runtime.internAtom(path);
-        defer runtime.atoms.free(module_atom);
         // TGC S3 §4 class B: bare module-name id held across module work.
         var module_atom_roots = core.runtime.rootAtoms(.{&module_atom});
         module_atom_roots.activate(runtime);
@@ -1966,7 +1954,6 @@ fn evalDynamicImportModuleWithHostHooks(
     defer allocator.free(resolved.path);
 
     const resolved_atom = try runtime.internAtom(resolved.path);
-    defer runtime.atoms.free(resolved_atom);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var resolved_atom_roots = core.runtime.rootAtoms(.{&resolved_atom});
     resolved_atom_roots.activate(runtime);
@@ -2017,7 +2004,6 @@ fn evalDynamicImportModuleWithHostHooks(
 
     for (postorder.items) |path| {
         const module_atom = try runtime.internAtom(path);
-        defer runtime.atoms.free(module_atom);
         // TGC S3 §4 class B: bare module-name id held across module work.
         var module_atom_roots = core.runtime.rootAtoms(.{&module_atom});
         module_atom_roots.activate(runtime);
@@ -2200,7 +2186,6 @@ fn preloadFileModuleGraphWithHostHooksInner(
     seen_owns_path = true;
 
     const module_name = try runtime.internAtom(path);
-    defer runtime.atoms.free(module_name);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
     module_name_roots.activate(runtime);
@@ -2246,7 +2231,6 @@ fn preloadFileModuleGraphWithHostHooksInner(
         try allocator.alloc(core.Atom, request_count);
     var resolved_atom_count: usize = 0;
     defer {
-        for (resolved_atoms[0..resolved_atom_count]) |atom_id| runtime.atoms.free(atom_id);
         if (resolved_atoms.len != 0) allocator.free(resolved_atoms);
     }
     // TGC S3 §4 class B: a native []Atom filled by a re-entrant host hook.

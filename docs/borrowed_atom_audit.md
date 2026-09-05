@@ -347,6 +347,34 @@ red → green shape for this bug class: not a black-box regression, but a
 
 ## 8. Static rule `check_borrowed_atoms.js` (forbid the "borrow escapes" source shape)
 
+> **TGC S3-c update (2026-09-04).** `DynamicAtom.ref_count` and
+> `AtomTable.dup`/`free`/`replace` are gone
+> (`docs/tracing-gc-s3-spec.md` §2.1/§5): an atom id is no longer a
+> reference, and the tracer decides an entry's life once per major. The
+> failure mechanism §1.1 describes is unchanged in kind (a stale id names a
+> recycled slot) but its cause moved: it is no longer "the last count was
+> dropped", it is **"nothing reported the id to the collector"**. The rule
+> this section states is therefore now a **rooting** rule, not an ownership
+> rule:
+>
+> **A bare atom id must not be held across a safepoint unless something
+> reports it — a declared `rootAtoms` / `rootAtomList` / `rootAtomSlots`
+> frame, an open `CompileAtomScope`, an embedder `pinForHost`, or a holder
+> edge the collector walks (shape key, bytecode operand, module record
+> field, class-table name — all stored through `noteHolderStore`).**
+>
+> Everything below is retained as written, with three substitutions:
+> "take ownership / dup it" now reads "declare a root frame or open a
+> compile scope"; "the owner's lifetime" reads "the window between two
+> safepoints"; and the §8.2 legal-shape list gains a first entry, **file- or
+> function-level coverage**, which is how the front end (`src/parser.zig`,
+> `src/lexer.zig`, `src/bytecode.zig`, `src/compiler/**`) satisfies the rule
+> wholesale: every id it obtains is recorded in the ambient
+> `parser.State.atom_scope` / `compile_entry.compile` scope. That exemption
+> is verified, not asserted — the checker fails if the scope stops being
+> installed in `src/parser.zig`. Section numbering is deliberately
+> unchanged.
+
 Landing: `tools/architecture/check_borrowed_atoms.js` +
 `tools/architecture/borrowed-atoms-allowlist.json`, run by
 `mise run checkpoint-gate` and `zig build engine-production-gate` (same
@@ -361,7 +389,7 @@ each cover only half:
 | | `-Dzjs_ownership_audit` (§7) | `check_borrowed_atoms.js` (this section) |
 |---|---|---|
 | When it fires | runtime | review / CI static |
-| Criterion | after one-slot quarantine, a stale id hits `dup`'s `hasLiveValue` assert or reads a wrong value | source shape: a borrowed atom escapes the token lifetime |
+| Criterion | after one-slot quarantine, a stale id reads a wrong value (S3-c: `name()` reports it dead) | source shape: a bare id is held past a safepoint with nothing reporting it |
 | Catches | a crossed borrow that actually executed, including paths this document did not think of | every newly written same-shape site, even with no test coverage today |
 | Misses | paths with no test coverage; ReleaseFast (asserts compiled out); unreachable code (e.g. C-3) | ownership that only exists at runtime (a third-party sink happens to dup); cross-function / cross-file propagation; see §8.6 |
 
@@ -393,11 +421,12 @@ Three sources of a **borrowed atom**:
    the chain. Rebinding to an owned value (`nm = atoms.dup(nm);`)
    **closes** that borrow site's window.
 
-Ownership is judged **by position**, not "this statement mentioned `dup`":
-`.dup(x)` puts `x` in argument position, so a "duped read" is not a
-borrowed read at all. Thus the else arm of
-`return if (c) atoms.dup(a) else t.payload.ident.atom;` still fails — a
-whole-statement "contains dup, so allow" rule would miss it.
+Reads are judged **by position**, not by "this statement mentioned a
+producer": a read in argument position is consumed inside the token
+lifetime, so the else arm of a mixed `return if (c) ... else
+t.payload.ident.atom;` is still judged on its own. (Under S3-c the `dup`
+that used to sit in the `if` arm is gone; the position test is what keeps
+the branch-wise judgement.)
 
 **Four escape rules** (one report per borrow site, highest-priority rule
 wins):
@@ -418,8 +447,13 @@ and a neighboring struct's own `self.<atom field>` is not mis-fired.
 
 **Three legal shapes** (preferred order):
 
-1. Take ownership in the escaping expression itself: `.dup(` /
-   `.internString(` / `.newSymbol(` / call some `*Owned(`;
+1. Be **covered**: the enclosing function declares a root frame
+   (`rootAtoms(` / `rootAtomList(` / `rootAtomSlots(`), pins for a host
+   (`pinForHost(`), or opens a `CompileAtomScope`; or the file is one of
+   the front-end sources listed in `compile_scope_sources`, whose every
+   atom is obtained under the ambient compile scope (verified against a
+   witness in `src/parser.zig`, so the exemption cannot outlive the scope
+   it names);
 2. Function name ends in `Owned` (existing convention:
    `moduleImportNameAtomOwned`, `exportDefaultFunctionNameOwned`) —
    **exempts only `borrowed-return`**, and only "forwarding someone
@@ -463,14 +497,12 @@ predefineds, helpers that return owned, the `retained_name` shape, and the
 Properties established by a synthetic red/green matrix at landing time
 (full table in git history):
 
-- the pre-fix class-C `return` shape is red; the fixed `return dup(...)`
-  form is green;
-- mixed branches are judged per-position (`return if (c) dup(a) else
-  t.payload...;` is red);
-- an `Owned` suffix with only an unrelated dup does not exempt a direct
+- the pre-fix class-C `return` shape is red in an uncovered function;
+- mixed branches are judged per-position;
+- an `Owned` suffix with no producer in the body does not exempt a direct
   token-payload return;
 - transparent builtins (`@as(...)`) and rebinding through intermediate
-  locals are followed; owned rebind (`nm = atoms.dup(nm)`) closes the
+  locals are followed; rebinding to a non-borrowed value closes the
   window;
 - compare results are not atoms (no false contagion); comments, string
   literals, and non-`State` receivers do not fire.
@@ -521,3 +553,12 @@ node tools/architecture/check_borrowed_atoms.js --list   # list each finding + t
   `exit_milestone` (how to turn it into a local contract).
 - **`test` / `comptime` blocks are not function bodies**, so their code is
   not analyzed; the scan range also excludes `src/tests/`.
+- **Coverage is per function / per file, not per id** (S3-c). A function
+  that declares one `rootAtoms` frame is treated as covered for every id it
+  holds, and a front-end file is covered wholesale by its ambient compile
+  scope. That is deliberately coarse: proving "this id crosses this
+  safepoint unrooted" needs the call graph. The run-time counterparts are
+  what close the gap — `-Dzjs_ownership_audit`'s one-slot quarantine (§7)
+  and the S3 tests that force a major inside the window
+  (`src/tests/core.zig` "TGC S3-*", `src/tests/exec.zig`'s JSON /
+  host-define probes, which go red the moment their frame is deleted).
