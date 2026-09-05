@@ -93,6 +93,23 @@ functions (emission byte-identical); the lexer lifted verbatim to
 `src/lexer.zig` (parser.zig 20,769 → 17,408). Remaining work is the
 `parser_core` split itself, under emission-identity.
 
+### Q21 — dense-array element cell traced only while `fast_array`
+
+`Object.traceChildEdges` visits the `.array_storage` cell behind
+`arrayArm().values` only when `flags.fast_array` is set (or the owner is a
+mapped arguments object). `updateArrayStorageMode` clears the flag with the
+arm intact and `recomputeArrayStorageMode` sets it again over the same
+buffer, so an array that spends a major in the non-fast state can have its
+element extent swept and then read through it once dense again. Found while
+chasing the 2026-09-05 gate_smoke false positive (which turned out to be a
+doomed owner, not this); not reproduced on a workload yet. A first cut that
+guarded on `isArray() or arguments or mapped_arguments` plus `capacity != 0`
+and traced `values[0..count]` segfaulted on pdfjs -- most likely an
+`arguments`-class object whose arm word is a payload pointer, so the class
+guard has to follow `assertArmReadable`, not the class id alone. Gate: the
+deletion-probe test sketch is a fast array, `flags.fast_array = false`, one
+major, `liveCountKind(.array_storage)` still 1.
+
 ## `call_runtime.zig` candidate domains
 
 The `src/exec/call_runtime.zig` decomposition map was executed through

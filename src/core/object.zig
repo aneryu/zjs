@@ -4213,6 +4213,11 @@ pub const Object = extern struct {
         self.arrayArm().*.capacity = @intCast(count);
         self.arrayArm().*.length = @intCast(count);
         self.markIndexedProperties(rt);
+        // Same bulk write, same obligation as `adoptDenseArrayElements`: the
+        // cell allocation above is a collection boundary, so a minor can
+        // promote `self` before the cell exists, and the store then makes an
+        // old-to-young edge nobody recorded.
+        rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
 
         const refs = self.argumentsVarRefsMut();
         @memset(refs, null);
@@ -4517,7 +4522,6 @@ pub const Object = extern struct {
         self.arrayArm().*.length -= 1;
         return self.arrayArm().*.values[@intCast(self.arrayArm().*.count)];
     }
-
 
     /// TGC S4-b: dropping the dense extent is the whole release -- the
     /// `.array_storage` cell the arm pointed at is returned by the sweep once
@@ -6106,7 +6110,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(self.payloadSlot().*.?));
     }
 
-
     fn iteratorPayload(self: *Object) ?*IteratorPayload {
         if (self.flags.class_payload_kind != .iterator) return null;
         const ptr = self.payloadArm().* orelse return null;
@@ -6274,7 +6277,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-
     fn globalPayload(self: *Object) ?*GlobalPayload {
         if (self.flags.class_payload_kind != .global) return null;
         const ptr = self.payloadArm().* orelse return null;
@@ -6286,7 +6288,6 @@ pub const Object = extern struct {
         const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
-
 
     fn destroyRealmRecordPayload(self: *Object, rt: *JSRuntime) void {
         if (self.flags.class_payload_kind != .realm_record) return;
@@ -6350,7 +6351,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-
     fn boundFunctionPayload(self: *Object) ?*BoundFunctionPayload {
         if (self.flags.class_payload_kind != .bound_function) return null;
         const ptr = self.payloadArm().* orelse return null;
@@ -6362,7 +6362,6 @@ pub const Object = extern struct {
         const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
-
 
     fn proxyPayload(self: *Object) ?*ProxyPayload {
         if (self.flags.class_payload_kind != .proxy) return null;
@@ -6376,7 +6375,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-
     fn argumentsPayload(self: *Object) ?*ArgumentsPayload {
         if (self.flags.class_payload_kind != .arguments) return null;
         const ptr = self.payloadArm().* orelse return null;
@@ -6388,7 +6386,6 @@ pub const Object = extern struct {
         const ptr = self.payloadArm().* orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
-
 
     fn objectDataPayload(self: *Object) ?*ObjectDataPayload {
         if (self.flags.class_payload_kind != .object_data) return null;
@@ -6402,7 +6399,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-
     fn varRefPayload(self: *Object) ?*VarRefPayload {
         if (self.flags.class_payload_kind != .var_ref) return null;
         return @ptrCast(@alignCast(self.payloadArm().*.?));
@@ -6413,7 +6409,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
-
     pub fn promisePayload(self: *Object) ?*PromisePayload {
         if (self.flags.class_payload_kind != .promise) return null;
         return @ptrCast(@alignCast(self.payloadArm().*.?));
@@ -6423,7 +6418,6 @@ pub const Object = extern struct {
         if (self.flags.class_payload_kind != .promise) return null;
         return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
-
 
     fn generatorPayload(self: *Object) ?*GeneratorPayload {
         if (self.flags.class_payload_kind != .generator) return null;

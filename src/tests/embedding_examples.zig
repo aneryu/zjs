@@ -783,14 +783,17 @@ test "public API surface snapshot matches the checked-in name lists" {
     // whose retain/release operations tracing erases. It remains an internal
     // helper exposed through the known broad JSValue surface; pin the leak
     // rather than pretending the declaration did not land.
-    // 90 -> 84 on 2026-09-05: the six refcount compatibility shells
-    // (`freeDuringActiveBytecode`, `freeObjectAssumeObject*`,
-    // `releaseObjectAssumeObjectNeedsDestroy*`,
-    // `releaseRefCountedNeedsDestroyDuringActiveBytecode`) were deleted. They
-    // had already decayed to assertion-only bodies with a constant `false`
-    // predicate, and every remaining caller was a test asserting the no-op.
+    // 90 -> 80 across the tracing-GC completion (2026-09-05): the refcount
+    // surface left with the collector it served -- `dup`, `free`,
+    // `freeFromPlainObjectDestroy`, `releaseRefCountedNeedsDestroy` and the
+    // six compatibility shells (`freeDuringActiveBytecode`,
+    // `freeObjectAssumeObject*`, `releaseObjectAssumeObjectNeedsDestroy*`,
+    // `releaseRefCountedNeedsDestroyDuringActiveBytecode`), which had already
+    // decayed to assertion-only bodies with a constant `false` predicate.
+    // The pin was written as 84 before the last four went; this test is not
+    // part of `zig build test`, so it went unnoticed until checkpoint-gate.
     const jsvalue_decl_count = @typeInfo(zjs.JSValue).@"struct".decls.len;
-    try std.testing.expectEqual(@as(usize, 84), jsvalue_decl_count);
+    try std.testing.expectEqual(@as(usize, 80), jsvalue_decl_count);
 
     // JSRuntime is likewise a public type with a deliberately broad internal
     // surface. Pin its declaration count so additions and removals require an
@@ -815,5 +818,8 @@ test "public API surface snapshot matches the checked-in name lists" {
     // The tracing-only cleanup removed the deferred-value queue, then seven
     // write-only borrowed-cleanup state methods. The prior pin was already one
     // below reflection's actual count; the measured surface is now 164.
-    try std.testing.expectEqual(@as(usize, 164), jsruntime_decl_count);
+    // 164 -> 162 across the tracing-GC completion (2026-09-05): `dupValue`
+    // and `freeValue` went with the refcount surface; the test-only
+    // `restoreDefaultRootScanForTest` (R1-a precise-root probes) arrived.
+    try std.testing.expectEqual(@as(usize, 162), jsruntime_decl_count);
 }

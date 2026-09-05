@@ -23,6 +23,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var require_tests = false;
     var repeat_count: usize = 1;
     var leak_census = false;
+    // `--shard i/N`: run only the tests whose index is congruent to i mod N,
+    // so one compiled binary can be run N times in parallel by the build
+    // graph (compile once, run wide). Round-robin rather than contiguous
+    // ranges: the slow tests cluster by family, and ranges would put them
+    // all on one shard.
+    var shard_index: usize = 0;
+    var shard_count: usize = 1;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--list")) {
@@ -36,6 +43,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
             if (repeat_count == 0) return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "--leak-census")) {
             leak_census = true;
+        } else if (std.mem.eql(u8, arg, "--shard")) {
+            const shard_arg = args.next() orelse return error.InvalidArgs;
+            const slash = std.mem.indexOfScalar(u8, shard_arg, '/') orelse return error.InvalidArgs;
+            shard_index = try std.fmt.parseUnsigned(usize, shard_arg[0..slash], 10);
+            shard_count = try std.fmt.parseUnsigned(usize, shard_arg[slash + 1 ..], 10);
+            if (shard_count == 0 or shard_index >= shard_count) return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "--range")) {
             const range_arg = args.next() orelse return error.InvalidArgs;
             const range = try parseRange(range_arg, test_fns.len);
@@ -60,6 +73,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.debug.print("Running {} tests with timing", .{test_fns.len});
     if (filter) |pattern| std.debug.print(" matching \"{s}\"", .{pattern});
     if (start_index != 0 or end_index != test_fns.len) std.debug.print(" in range {}..{}", .{ start_index, end_index });
+    if (shard_count != 1) std.debug.print(" on shard {}/{}", .{ shard_index, shard_count });
     if (repeat_count != 1) std.debug.print(" for {} passes", .{repeat_count});
     std.debug.print("...\n", .{});
     if (leak_census) {
@@ -87,6 +101,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         const test_index = invocation_index % test_fns.len;
         const test_fn = test_fns[test_index];
         if (test_index < start_index or test_index >= end_index) {
+            filtered_count += 1;
+            continue;
+        }
+        if (test_index % shard_count != shard_index) {
             filtered_count += 1;
             continue;
         }
@@ -175,13 +193,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     std.sort.heap(Entry, timings.items, {}, sort_helper.lessThan);
 
-    std.debug.print("\nTop 20 Slowest Test Cases:\n", .{});
-    for (timings.items[0..@min(20, timings.items.len)], 0..) |entry, i| {
+    // A sharded run prints N of these; keep each one short.
+    const slowest_shown: usize = if (shard_count == 1) 20 else 5;
+    std.debug.print("\nTop {} Slowest Test Cases", .{slowest_shown});
+    if (shard_count != 1) std.debug.print(" (shard {}/{})", .{ shard_index, shard_count });
+    std.debug.print(":\n", .{});
+    for (timings.items[0..@min(slowest_shown, timings.items.len)], 0..) |entry, i| {
         const ms = @as(f64, @floatFromInt(entry.duration_ns)) / 1_000_000.0;
         std.debug.print("{d:2}. {s}: {d:.3} ms\n", .{ i + 1, entry.name, ms });
     }
 
-    std.debug.print("\nSummary: {} passed; {} skipped; {} failed; {} filtered.\n", .{ ok_count, skip_count, fail_count, filtered_count });
+    std.debug.print("\nSummary", .{});
+    if (shard_count != 1) std.debug.print(" (shard {}/{})", .{ shard_index, shard_count });
+    std.debug.print(": {} passed; {} skipped; {} failed; {} filtered.\n", .{ ok_count, skip_count, fail_count, filtered_count });
     if (require_tests and ok_count + skip_count + fail_count == 0) {
         std.debug.print("FAIL: test selection matched no tests.\n", .{});
         std.process.exit(1);

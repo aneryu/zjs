@@ -67,6 +67,15 @@ S2-h2 nursery 按字节触发（无配置支配 16K 计数，4MiB 让 eb maxrss 
 4. S5-b 析构合一后 deltablue 稳定多 1 次 major（18→19）：析构 kind 次序改变 ⇒ cell 复用次序 ⇒ 阈值边界相位位移，insn/cycles/objectsFreed 均 <0.05%，S5-a 自身复跑包络已覆盖该读数；回退面只有分桶次序（合一的前提）。**owner 2026-09-05 裁决：接受。**
 5. push：S0–S5 全部落在本地 main（未 push），S5 末全门 + STRESS test262 + Stage 0 均绿；等 owner 确认。
 
+## 6a. S5 后清账（2026-09-05 晚，driver）
+
+批门禁（`mise run batch-gate` 的 gate_smoke 半段）与 checkpoint-gate 在 S4/S5 阶段末都没跑过，落下两笔：
+
+1. **checkpoint-gate 红**：`test-embedding` 的公共 API 声明数 pin（JSValue 84 / JSRuntime 164）在 rc 表面删除后没更新（实测 80 / 162，消失的正是 `dup/free/dupValue/freeValue` 等十个 rc 声明）。已重钉（`79170834`）。
+2. **gate_smoke 红**：pdfjs 的 arena-audit 运行报 `PROPERTY STORAGE AUDIT: DanglingArrayStorageCell`，且对代码布局敏感（加一行冷路径打印就消失，改动前的 `d30ae3a0` 单独构建 6/6 复现）。用同一二进制的环境变量开关逐个证伪了五个假设（mapped-arguments 采纳缺屏障、审计跳 condemned 戳、标记期 bulk-write 只 requeue 不登记、young extent 被 major 标记后未晋升、trace 只在 `fast_array` 时访问元素 cell），最后由 doomed 位定案：**owner 是本次 major 位图判死的尸体**（块 cell 判死不盖 header 戳，所以 `headerCondemned` 读不出来），它的 6035 元素 extent 在 finish 时被同步的 `sweepExtents` 先回收，而 `verifyObjectPropertyStorageLayouts` 在销毁切片之前遍历到这个尸体——**审计误报，不是健全性缺陷**（`ZJS_GC_VERIFY_MINOR` / `ZJS_MINOR_AUDIT` 全程静默）。修法：审计跳过已判死 owner（块 cell 看 doomed 位，其余看戳）；审计失败时打印 owner class/capacity/cell 地址且不解引用 cell。
+   - 顺手补上的两处屏障（按代码自己的约定应有）：`allocateMappedArgumentsVarRefsAssumingEmpty` 采纳 var-ref 表后 `rememberOwnerForBulkWrite`；`createArgumentsObject` 填完表再登记一次。环境开关证明它们与本次失败无关，保留为防御。
+   - 未动的疑点（入 backlog）：`Object.traceChildEdges` 只在 `fast_array` 时访问元素 cell，而 `recomputeArrayStorageMode` 可以在 capacity 不变的情况下把 `fast_array` 清掉再置回；理论上存在"非 fast 期间 extent 被 major 回收、再 fast 后悬空"的窗口。按 class+capacity 访问的尝试在 pdfjs 上 SIGSEGV（疑为 `arguments` 类的 arm 与 payload 重叠），需要先把 arm 可读性判据弄清再改。
+
 ## 7. S5 收官摘要
 
 S5-a 恒真门/过期面板（−294）、S5-b 析构与凝判路径合一（−171）、S5-c `concurrent→incremental`（+9）、S5-d Registry 拆分（gc.zig 5,444→3,988 行，`@sizeOf(Registry)` 不变，屏障读仍单条 `ldr`，整机 −263 指令）、atom ownership audit 单槽隔离缺陷修复。细节与门见 `tracing-gc-s5-spec.md` §7。GC 战役收官，下一方向按 `type-directed-optimization-plan.md` v1.3 校准批转 TS/AOT。

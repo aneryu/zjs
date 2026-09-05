@@ -2288,6 +2288,12 @@ noinline fn createMappedArgumentsObject(
         const initial = args[index];
         refs[index] = try core.VarRef.createClosed(ctx.runtime, initial);
     }
+    // Every `refs[index]` store above is an edge into the table, and each
+    // `captureArg` / `createClosed` between them is an allocation that can run
+    // a minor. A minor retires the remembered set once it has traced the
+    // owner, so a var ref created after it lands in an old table with no
+    // record; remember the owner once more now that the table is complete.
+    ctx.runtime.gc.rememberOwnerForBulkWrite(object.gcHeader());
     return object.value();
 }
 
@@ -3115,8 +3121,7 @@ pub const PendingPropertyDescriptor = struct {
     atom_id: core.Atom,
     desc: core.Descriptor,
 
-    pub fn destroy(_: PendingPropertyDescriptor, _: *core.JSRuntime) void {
-    }
+    pub fn destroy(_: PendingPropertyDescriptor, _: *core.JSRuntime) void {}
 };
 
 pub fn objectEnumerableOwnPropertiesCall(

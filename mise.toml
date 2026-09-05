@@ -16,7 +16,7 @@ description = "Keep the Debug quick-gate compiler alive for faster incremental e
 run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-0-4,10-14}" zig build quick-gate --watch -fincremental --summary new'
 
 # Resident incremental compiler for ANY build step. The engine-wide Debug
-# targets (test-exec ~90s, zjs-dev ~35s cold) are the ones worth keeping
+# targets (unified test ~60s, zjs-dev ~35s cold) are the ones worth keeping
 # resident; one-shot -fincremental does not help (state only persists in
 # watch mode). Example: mise run watch -- test-exec
 [tasks.watch]

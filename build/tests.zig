@@ -36,6 +36,18 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // `-Dtest-filter=<substring>` narrows the unified run to matching test
     // names (iteration aid: compile once, run the handful under repair).
     const test_filter = b.option([]const u8, "test-filter", "Only run unified tests whose name contains this substring");
+    // The unified binary compiles once and runs as N parallel shard processes
+    // (`--shard i/N`, round-robin over the test index): the run is the
+    // larger half of `zig build test` and it parallelises where the
+    // single-module compile cannot. A filtered run stays a single process so
+    // its output reads as one list.
+    const test_shards_option = b.option(usize, "test-shards", "Run the unified suite as this many parallel shard processes (default 8; 1 = unsharded)") orelse 8;
+    const test_shards: usize = if (test_filter != null or test_shards_option == 0) 1 else test_shards_option;
+    // Debug info is half of the unified compile (measured 2026-09-05: ~60 s
+    // with DWARF, ~30 s without). Opt-in only: a stripped binary still names
+    // the failing test and the error, but its stack traces are bare
+    // addresses, so it is for green-path iteration, not for diagnosing a red.
+    const test_strip = b.option(bool, "test-strip", "Build the unified test binary without debug info (faster compile, bare-address stack traces)") orelse false;
     const unified_tests = b.addTest(.{
         .name = "unified-tests",
         .root_module = b.createModule(.{
@@ -47,6 +59,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .filters = if (test_filter) |f| &.{f} else &.{},
     });
     forceLlvmBackendOnDebug(unified_tests);
+    unified_tests.root_module.strip = test_strip;
     unified_tests.test_runner = .{
         .path = b.path("tools/timing_test_runner.zig"),
         .mode = .simple,
@@ -66,10 +79,26 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // FNABI C/Zig round-trip (src/tests/abi_layout.zig) @cImports the
     // generated src/abi/fun_native_abi.h.
     unified_tests.root_module.addIncludePath(b.path("src"));
-    const run_unified_tests = b.addRunArtifact(unified_tests);
-    run_unified_tests.step.dependOn(&install_runtime_plugin_fixture.step);
-    run_unified_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
-    if (b.args) |args| run_unified_tests.addArgs(args);
+    const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
+    for (0..test_shards) |shard| {
+        const run_unified_tests = b.addRunArtifact(unified_tests);
+        run_unified_tests.step.dependOn(&install_runtime_plugin_fixture.step);
+        run_unified_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
+        if (test_shards != 1) {
+            run_unified_tests.addArgs(&.{ "--shard", b.fmt("{d}/{d}", .{ shard, test_shards }) });
+            run_unified_tests.setName(b.fmt("run test unified-tests shard {d}/{d}", .{ shard, test_shards }));
+            // A Run step that inherits stdio takes the build runner's global
+            // lock and the shards would queue up one after another. Capturing
+            // stderr makes the step an output-producing one instead: no lock,
+            // so the shards run concurrently; the captured output is shown
+            // only when the shard exits non-zero (`.check` mode would print
+            // every shard's stderr as a warning even on success). The
+            // unsharded run keeps inherited stdio so a filtered run streams.
+            _ = run_unified_tests.captureStdErr(.{});
+        }
+        if (b.args) |args| run_unified_tests.addArgs(args);
+        test_step.dependOn(&run_unified_tests.step);
+    }
 
     // TGC S0 safety net (docs/tracing-gc-s0-spec.md §L2): the same suite with
     // the collector at every safepoint (`ZJS_GC_STRESS=1`, cadence 64), every
@@ -78,15 +107,22 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // the old-owner edge audit (`ZJS_MINOR_AUDIT=fatal`: an unremembered
     // old-to-condemned edge panics). The `fatal` spellings are what make this
     // a gate rather than a log. Measured 55 s on 2026-09-03.
-    const run_gc_stress_tests = b.addRunArtifact(unified_tests);
-    run_gc_stress_tests.step.dependOn(&install_runtime_plugin_fixture.step);
-    run_gc_stress_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
-    run_gc_stress_tests.setEnvironmentVariable("ZJS_GC_STRESS", "1");
-    run_gc_stress_tests.setEnvironmentVariable("ZJS_GC_VERIFY_MINOR", "fatal");
-    run_gc_stress_tests.setEnvironmentVariable("ZJS_MINOR_AUDIT", "fatal");
-    if (b.args) |args| run_gc_stress_tests.addArgs(args);
     const gc_stress_step = b.step("test-gc-stress", "Run the unified suite under ZJS_GC_STRESS=1 ZJS_GC_VERIFY_MINOR=fatal ZJS_MINOR_AUDIT=fatal (~1 min; part of checkpoint-gate)");
-    gc_stress_step.dependOn(&run_gc_stress_tests.step);
+    for (0..test_shards) |shard| {
+        const run_gc_stress_tests = b.addRunArtifact(unified_tests);
+        run_gc_stress_tests.step.dependOn(&install_runtime_plugin_fixture.step);
+        run_gc_stress_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
+        run_gc_stress_tests.setEnvironmentVariable("ZJS_GC_STRESS", "1");
+        run_gc_stress_tests.setEnvironmentVariable("ZJS_GC_VERIFY_MINOR", "fatal");
+        run_gc_stress_tests.setEnvironmentVariable("ZJS_MINOR_AUDIT", "fatal");
+        if (test_shards != 1) {
+            run_gc_stress_tests.addArgs(&.{ "--shard", b.fmt("{d}/{d}", .{ shard, test_shards }) });
+            run_gc_stress_tests.setName(b.fmt("run test unified-tests (gc-stress) shard {d}/{d}", .{ shard, test_shards }));
+            _ = run_gc_stress_tests.captureStdErr(.{});
+        }
+        if (b.args) |args| run_gc_stress_tests.addArgs(args);
+        gc_stress_step.dependOn(&run_gc_stress_tests.step);
+    }
 
     // Stress tier: the long-running tests split out of the unified run so
     // checkpoint-gate and the per-change `zig build test` close-out keep
@@ -435,11 +471,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     };
     const check_step = b.step("check", "Semantic-analysis-only compile of the unified test root: reject a non-compiling edit without codegen, link, or running any test");
     check_step.dependOn(&check_unified.step);
-
-    // User-facing steps to expose
-    const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
-
-    test_step.dependOn(&run_unified_tests.step);
 
     return .{
         .test_step = test_step,

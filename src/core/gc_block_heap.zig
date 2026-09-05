@@ -300,8 +300,6 @@ pub const BlockCensus = struct {
     uninitialized_blocks: usize = 0,
 };
 
-
-
 pub fn canAllocCellSize(n: usize) bool {
     if (n == 0 or n >= space.large_min_bytes) return false;
     return space.classIndexForPayload(n) != null;

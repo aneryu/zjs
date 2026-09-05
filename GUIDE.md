@@ -327,9 +327,19 @@ running quick-gate after every edit buys little for its ~35s Debug compile
 (2026-08-29 re-audit). For several consecutive edits that need CLI smoke
 feedback, `mise run quick-watch` keeps the compiler resident; the generic
 `mise run watch -- <step>` does the same for any focused target (worth it
-for engine-wide targets like `test-exec`, whose cold compile is ~90s). Stop
+for engine-wide targets like `test-exec`, whose cold compile is ~60s). Stop
 the watcher before escalating to a broader gate. `quick-gate` intentionally
 does not compile the separate test262 runner.
+
+`zig build test` compiles the unified suite once and runs it as eight
+parallel shard processes (`tools/timing_test_runner.zig --shard i/N`,
+round-robin over the test index; `-Dtest-shards=N` changes the count, `1`
+restores the single process). Shard output is captured and replayed only for
+a shard that fails, so a green run prints just the step tree; a run with
+nothing changed is a cache hit and does not re-execute. `-Dtest-filter=<substring>`
+is always a single process with streamed output — use it to watch one test.
+Measured 2026-09-05 (build pool `0-4,10-14`): source change → green in ~75 s
+(compile ~60 s, run ~15 s), previously ~225 s.
 
 `build.zig` pins the Zig 0.16 build/test seed to `0` so the compile graph
 stays cacheable. CLI `--seed` is not required. Pass `-Dzjs_test_seed=<u32>`

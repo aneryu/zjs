@@ -78,7 +78,7 @@ must never import it.
 |---|---|---|
 | `zjs` / `zjs-profile` / `zjs-dev` | `src/cli/zjs.zig` → `engine.config_signature.attest("zjs CLI")` | |
 | `run-test262` / `run-test262-dev` | `src/cli/run_test262.zig` attests `"run-test262 / test-runner"` | |
-| unified `test` | `all_tests` attests `"unified-tests (src/all_tests.zig)"` | Follows `-Doptimize` |
+| unified `test` | `all_tests` attests `"unified-tests (src/all_tests.zig)"` | Follows `-Doptimize`; one compile, `-Dtest-shards` (default 8) parallel `--shard i/N` run processes with captured stderr |
 | scoped Class-B shells | `@import("zjs").config_signature.attest("test-X")` | Debug-pinned |
 | scoped Class-A shells | `@import("config_signature.zig").attest("test-X")` | Debug-pinned |
 | `test-runner` shell | attests the same string as `run_test262.zig` | Two attestations of one value are harmless |

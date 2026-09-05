@@ -896,16 +896,26 @@ test "sparse array literal length add range fast path collapses loop opcodes" {
     js.runtime.setOpcodeProfile(&profile);
     defer js.runtime.setOpcodeProfile(null);
 
+    // The opcode-shape assertions below do not depend on the trip count.
+    // Under ZJS_GC_STRESS every safepoint collects, and 50 000 trips made this
+    // the slowest test of the gc-stress run (46 s on its shard); a tenth of
+    // the count exercises the same path.
+    const iterations: usize = if (core.gc.stress_collect) 5_000 else 50_000;
+    const source = try std.fmt.allocPrint(std.testing.allocator,
+        \\let s = 0;
+        \\for (let i = 0; i < {d}; i++) {{ const a = [1, , 3]; s += a.length; }}
+        \\print(s);
+    , .{iterations});
+    defer std.testing.allocator.free(source);
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "{d}\n", .{iterations * 3});
+    defer std.testing.allocator.free(expected);
+
     var output_buffer: [32]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
-        \\let s = 0;
-        \\for (let i = 0; i < 50000; i++) { const a = [1, , 3]; s += a.length; }
-        \\print(s);
-    , &stream);
+    const result = try js.evalWithOutput(source, &stream);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("150000\n", stream.buffered());
+    try std.testing.expectEqualStrings(expected, stream.buffered());
     try std.testing.expect(profile.totalOpcodeCount() <= 20);
     try std.testing.expectEqual(@as(u64, 0), profile.count[op.array_from]);
     try std.testing.expectEqual(@as(u64, 0), profile.count[op.define_field]);

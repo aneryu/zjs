@@ -304,7 +304,6 @@ test "first named property allocates initial_prop_size slots" {
 }
 
 test "block Object accounting uses physical cell body capacity" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2117,7 +2116,6 @@ test "rope nodes keep the compact tree-only layout" {
     // ride in the padding the node already had.
     try std.testing.expectEqual(@as(usize, 56), @sizeOf(core.string.StringRope));
 }
-
 
 /// TGC S2-i: force a full collection before every allocation, the shape
 /// `-Dzjs_force_gc=true` gives production. Used to prove the tail-buffer
@@ -7187,7 +7185,6 @@ test "gc heap accounting verifier catches pinned header flag drift" {
 }
 
 test "gc invariant negative: block candidate index audit rejects bloom and exact-set drift" {
-
     var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
     defer heap.deinit();
     const cell = (try heap.allocCell(64)) orelse return error.TestUnexpectedResult;
@@ -7215,7 +7212,6 @@ test "gc invariant negative: block candidate index audit rejects bloom and exact
 }
 
 test "gc invariant negative: block heap rejects geometry free-chain and doomed-list corruption" {
-
     var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
     defer heap.deinit();
     const cell = (try heap.allocCell(64)) orelse return error.TestUnexpectedResult;
@@ -7275,7 +7271,6 @@ test "gc invariant negative: block heap rejects geometry free-chain and doomed-l
 }
 
 test "gc invariant negative: block cell publication audit rejects hidden allocations" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const obj = try core.Object.createPlainObject(rt, null);
@@ -7510,7 +7505,6 @@ test "trace shape summary: incremental writers track the Shape projection" {
 }
 
 test "trace shape summary: appends preserve the leased remembered bit" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
@@ -7566,7 +7560,6 @@ test "trace shape summary: appends preserve the leased remembered bit" {
 }
 
 test "gc invariant negative: representation audit rejects physical carrier and cell index drift" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const obj = try core.Object.createPlainObject(rt, null);
@@ -7626,7 +7619,6 @@ test "gc invariant negative: representation audit rejects physical carrier and c
 }
 
 test "representation audit cross-checks the remembered object cache and map" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
@@ -7769,7 +7761,6 @@ test "representation audit cross-checks the remembered cache on a non-object car
 }
 
 test "forget fuses the remembered map removal with its own cache bit" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
@@ -7936,7 +7927,6 @@ test "gc: a remembered detached generator shell is still a construction root" {
 }
 
 test "gc invariant negative: arena audit rejects an accounted free slab block" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     // Block-served Objects and strings do not touch the small-object slab. A
@@ -8027,7 +8017,6 @@ test "gc invariant negative: heap accounting audit rejects a pin without an entr
 }
 
 test "gc invariant negative: generation audit rejects census and stale remembered drift" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     _ = try core.Object.createPlainObject(rt, null);
@@ -8053,7 +8042,6 @@ test "gc invariant negative: generation audit rejects census and stale remembere
 }
 
 test "gc invariant negative: retirement audit rejects a marked young survivor" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const obj = try core.Object.createPlainObject(rt, null);
@@ -8984,7 +8972,6 @@ test "trace_stw survivor classes on a known graph" {
 }
 
 test "address registry tracks published objects and interior pointers" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -9090,7 +9077,6 @@ test "carrier protocols keep adjacent one-past roots multi-hit and diagnostics e
 }
 
 test "address registry page radix covers a multi-page allocation" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -9110,7 +9096,6 @@ test "address registry page radix covers a multi-page allocation" {
 }
 
 test "address registry lookup cost stays with page occupants not live N" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -9225,7 +9210,6 @@ test "size-class table pins the measured §4.2 allocation policy" {
 }
 
 test "size-class table matches measured publication histogram" {
-
     var harness = try helpers.TestEngine.init(std.testing.allocator);
     defer harness.deinit();
 
@@ -12645,8 +12629,7 @@ test "module publication retains indexed metadata and all strong value edges" {
     const export_name = try rt.internAtom("default");
     const attr_key = try rt.internAtom("type");
     const attr_value = try rt.internAtom("json");
-    defer {
-    }
+    defer {}
 
     const dependency = try publishEmptyModule(rt, &ctx.modules, dep_name);
 
@@ -12757,8 +12740,7 @@ test "module registry resolves local indirect star and ambiguous exports" {
     const other_name = try rt.internAtom("other");
     const local_a_name = try rt.internAtom("localA");
     const local_b_name = try rt.internAtom("localB");
-    defer {
-    }
+    defer {}
 
     var dep_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
     defer dep_a_pending.deinit(rt);
@@ -12820,8 +12802,7 @@ test "existing published module generation is not overwritten by pending definit
     const module_name = try rt.internAtom("fresh.mjs");
     const old_export_name = try rt.internAtom("old");
     const replacement_export_name = try rt.internAtom("replacement");
-    defer {
-    }
+    defer {}
 
     var first_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
     defer first_pending.deinit(rt);
@@ -12863,8 +12844,7 @@ test "indexed module resolution is pure across not-found ambiguous and cyclic gr
     const value_name = try rt.internAtom("value");
     const local_a_name = try rt.internAtom("local-a");
     const local_b_name = try rt.internAtom("local-b");
-    defer {
-    }
+    defer {}
 
     var dep_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
     defer dep_pending.deinit(rt);
@@ -12953,8 +12933,7 @@ test "module resolution follows local exports of ordinary imports" {
     const root_name = try rt.internAtom("root");
     const foo_name = try rt.internAtom("foo");
     const source_local_name = try rt.internAtom("source-local");
-    defer {
-    }
+    defer {}
 
     var source_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
     defer source_pending.deinit(rt);
@@ -13020,8 +12999,7 @@ test "module resolution normalizes namespace re-export bindings" {
     const foo_name = try rt.internAtom("foo");
     const default_name = try rt.internAtom("default");
     const star_atom = core.atom.predefinedId("*", .string).?;
-    defer {
-    }
+    defer {}
 
     const target = try publishEmptyModule(rt, &ctx.modules, target_name);
 
@@ -14624,7 +14602,6 @@ test "old-to-young edge survives a minor only because the barrier remembered it"
 }
 
 test "object remembered bit is consumed and rebuilt across consecutive minors" {
-
     const saved_audit = core.gc.minor_audit;
     core.gc.minor_audit = true;
     defer core.gc.minor_audit = saved_audit;
@@ -14672,7 +14649,6 @@ test "object remembered bit is consumed and rebuilt across consecutive minors" {
 }
 
 test "incremental retirement clears remembered cache before the next generation" {
-
     const saved_audit = core.gc.minor_audit;
     core.gc.minor_audit = true;
     defer core.gc.minor_audit = saved_audit;
@@ -14744,7 +14720,6 @@ test "incremental retirement clears remembered cache before the next generation"
 }
 
 test "non-object remembered owners use the byte-6 cache and re-arm across consecutive minors" {
-
     const saved_audit = core.gc.minor_audit;
     core.gc.minor_audit = true;
     defer core.gc.minor_audit = saved_audit;
@@ -14837,7 +14812,6 @@ test "the generational barrier ignores edges a minor would find anyway" {
 }
 
 test "the folded barrier gate skips exactly the two owner facts" {
-
     const saved_audit = core.gc.minor_audit;
     core.gc.minor_audit = true;
     defer core.gc.minor_audit = saved_audit;
@@ -15049,7 +15023,6 @@ test "segmented shared mark frontier grows without dropping work" {
 }
 
 test "mark frontier whitelist encodes the epoch exemption" {
-
     for (std.meta.tags(core.gc.GcKind)) |kind| {
         const expected = switch (kind) {
             .object,
@@ -15728,7 +15701,6 @@ test "independent runtimes collect without touching each other" {
 }
 
 test "a crossing a minor cannot answer is still answered by a major" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15967,7 +15939,6 @@ test "an old generation that keeps growing keeps triggering majors" {
 // young string cell is simply handed to the next allocation, so the array ends
 // up naming another string's bytes rather than freed memory.
 test "a dense buffer adopted by an aged array is remembered for the next minor" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -16036,6 +16007,14 @@ test "regexp capture strings survive a minor taken inside the match-array fill" 
     rt.setGCThreshold(rt.memory.allocated_bytes + 128 * 1024);
     defer rt.setGCThreshold(threshold_before);
 
+    // 6000 trips are what it takes to cross the threshold set above often
+    // enough to catch the crossing inside the fill; under ZJS_GC_STRESS the
+    // minors come at every safepoint regardless, and the full count made this
+    // the slowest test of the gc-stress run (34 s on its shard).
+    _ = try engine_instance.evalWithOptions(
+        if (core.gc.stress_collect) "var trips = 600;" else "var trips = 6000;",
+        .{ .filename = "<repl>" },
+    );
     const result = try engine_instance.evalWithOptions(
         \\(function () {
         \\  var letters = "abcdefghijk";
@@ -16048,7 +16027,7 @@ test "regexp capture strings survive a minor taken inside the match-array fill" 
         \\  var input = parts.join("-");
         \\  var re = /([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)-([a-z]+)/;
         \\  var bad = 0;
-        \\  for (var i = 0; i < 6000; i++) {
+        \\  for (var i = 0; i < trips; i++) {
         \\    var m = re.exec(input);
         \\    if (m[0] !== input) bad++;
         \\    for (var c = 0; c < parts.length; c++) {
@@ -16062,7 +16041,6 @@ test "regexp capture strings survive a minor taken inside the match-array fill" 
 }
 
 test "a minor does not move the major's threshold" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -16092,7 +16070,6 @@ test "a minor does not move the major's threshold" {
 }
 
 test "minor detailed stats decompose the outer STW envelope" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -16134,7 +16111,6 @@ test "minor detailed stats decompose the outer STW envelope" {
 }
 
 test "cell resolution stops at the block header and at unallocated cells" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -16156,7 +16132,6 @@ test "cell resolution stops at the block header and at unallocated cells" {
 }
 
 test "carrier exact handles reject stale block-cell generations" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const old = try core.Object.create(rt, core.class.ids.object, null);
@@ -16244,7 +16219,6 @@ test "carrier generation authorities reject wrap in both extent and block scheme
 }
 
 test "a minor that keeps reclaiming nothing stops being offered" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -17605,7 +17579,6 @@ test "TGC S4-b: an external property buffer survives with its owner and dies one
 }
 
 test "TGC S4-b: an aged owner remembers a property buffer minted after its promotion" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -17690,7 +17663,6 @@ test "TGC S4-b: a mapped-arguments var-ref table is an array storage cell" {
 }
 
 test "TGC S4-b: storage over the block-cell ceiling takes the extent route and is swept" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -17764,9 +17736,9 @@ test "TGC S4-c: every a-class payload is a cell that dies one major after its ow
     var global_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.global_object, null);
     var regexp_slot: ?*core.Object = try core.Object.create(rt, regexp_class, null);
     var roots = core.runtime.rootObjects(.{
-        &ordinary_slot,   &arguments_slot, &object_data_slot, &bound_slot,
-        &proxy_slot,      &var_ref_slot,   &promise_slot,     &stack_slot,
-        &global_slot,     &regexp_slot,
+        &ordinary_slot, &arguments_slot, &object_data_slot, &bound_slot,
+        &proxy_slot,    &var_ref_slot,   &promise_slot,     &stack_slot,
+        &global_slot,   &regexp_slot,
     });
     roots.activate(rt);
     defer roots.deactivate(rt);
@@ -17845,7 +17817,6 @@ test "TGC S4-c: a bytecode function's rare/aux record is a payload cell" {
 }
 
 test "TGC S4-c: an aged promise remembers a reaction cell minted after its promotion" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -17946,7 +17917,6 @@ test "TGC S4-c: bound arguments, disposable resources and arguments var-refs cro
 }
 
 test "TGC S4-c: a payload slice over the block-cell ceiling takes the extent route" {
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 

@@ -961,7 +961,6 @@ pub const TraceHeader = extern struct {
             std.debug.assert(self.metaConst().flags.kind != .object);
         self.next_non_object = next;
     }
-
 };
 
 /// Byte size of the prefix reserved ahead of every flat `String` and
@@ -3899,6 +3898,22 @@ pub const Registry = struct {
 
     pub fn containsHeader(self: *const Registry, header: *const GCObjectHeader) bool {
         if (self.lists.sweep_current == header) return true;
+        // A block cell is answered from its block, in O(1). The `.all`
+        // iterator's block phase yields exactly the cells whose alloc bit and
+        // `heap_accounted` stamp are both set (`nextInBlock`), and no other
+        // phase -- the non-block lists, the morgue buckets, the extent table
+        // -- can hold a classed-block address, so the bitmap is the whole
+        // authority for it. Enumerating the heap to find one cell made this
+        // an O(n) walk per query, and the whole-heap audits that ask it once
+        // per object (`verifyObjectPropertyStorageLayouts`, every Debug
+        // collection) paid O(n^2): 52 s of a 90 s unified test run.
+        const addr = @intFromPtr(header);
+        if (self.block_heap.blockOf(@ptrFromInt(addr))) |block| {
+            const index = block.cellIndexInterior(addr) orelse return false;
+            if (!block.cellAllocated(index)) return false;
+            if (block.cellBase(index) + metadata_prefix_size != addr) return false;
+            return header.metaConst().alloc_info.heap_accounted;
+        }
         if (self.nonblock_objects) |authority| {
             for (authority.doomed.items) |candidate| if (candidate == header) return true;
         }

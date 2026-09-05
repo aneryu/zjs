@@ -165,10 +165,31 @@ pub fn statsSnapshot(self: *const Registry, rt: anytype) Stats {
 /// and allocation-layout marker. This is deliberately a whole-heap audit,
 /// never a property-access branch: construction/free, Shape capacity, and
 /// block-cell sizing meet here without taxing the paths they protect.
+/// Condemned-by-this-cycle test that is valid for every population: the
+/// doomed bit for a block cell, the mark-epoch stamp for everything else.
+fn ownerCondemned(header: *const GCObjectHeader) bool {
+    if (isBlockCellHeader(header)) {
+        const block = BlockHeapMod.Block.fromCellTrusted(@intFromPtr(header) - metadata_prefix_size);
+        const index = block.cellIndexInterior(@intFromPtr(header)) orelse return false;
+        return block.isDoomed(index);
+    }
+    return headerCondemned(header);
+}
+
 pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: anytype) InvariantError!void {
     var iterator = self.objectIterator(.all);
     while (iterator.next()) |header| {
         if (header.metaConst().flags.kind != .object) continue;
+        // A corpse condemned by the cycle this audit closes is still
+        // published (the destruction slices run later), but its storage may
+        // already be gone: a dead array's element EXTENT is returned by the
+        // synchronous `sweepExtents` at finish, ahead of the owner's own
+        // bitmap reclaim. Only a live owner owes the invariant. Block cells
+        // are condemned in the doomed bitmap without a header stamp (S4-d),
+        // so the test is the bitmap for them and the stamp for the rest.
+        // (pdfjs under ZJS_GC_ARENA_AUDIT tripped this on a 6035-element
+        // array, deterministically in one code layout, 2026-09-05.)
+        if (ownerCondemned(header)) continue;
         const owner = object.Object.fromHeaderConst(header);
         const slots2 = owner.hasSlots2Layout();
         const storage = owner.prop_values;
@@ -220,7 +241,18 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: anytype) In
             if (owner.arrayArm().*.capacity != 0) {
                 const cell_header: *const GCObjectHeader =
                     @ptrCast(@alignCast(owner.arrayArm().*.values));
-                if (!self.containsHeader(cell_header)) return error.DanglingArrayStorageCell;
+                if (!self.containsHeader(cell_header)) {
+                    // Name the owner: the audit fires long after the write
+                    // that caused it, and the class is the first clue to
+                    // which adoption path forgot its barrier.
+                    // The cell may be unmapped memory by now: name it, do not
+                    // read it.
+                    std.debug.print(
+                        "gc: PROPERTY STORAGE AUDIT: array owner class={d} fast_array={} capacity={d} young={} cell=0x{x}\n",
+                        .{ owner.class_id, owner.flags.fast_array, owner.arrayArm().*.capacity, header.metaConst().flags.young, @intFromPtr(cell_header) },
+                    );
+                    return error.DanglingArrayStorageCell;
+                }
                 if (cell_header.metaConst().flags.kind != .array_storage)
                     return error.InvalidArrayStorageKind;
             }
@@ -247,7 +279,6 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: anytype) In
                 return error.ObjectCellSizeClassMismatch;
         }
     }
-
 }
 
 pub fn recordFailure(self: *Registry, err: CollectionError) void {
@@ -783,4 +814,3 @@ pub fn liveCountKind(self: *const Registry, kind: GcKind) usize {
     }
     return count;
 }
-
